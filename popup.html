@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>OCR Overlay</title>
+  <style>
+    body {
+      background-color: #1e1e1e;
+      color: #fff;
+      font-family: 'Segoe UI', sans-serif;
+      padding: 16px;
+      width: 300px;
+    }
+
+    button {
+      background-color: #282c34;
+      color: #61dafb;
+      border: 1px solid #61dafb;
+      padding: 10px 16px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 14px;
+      margin: 6px 0;
+      width: 100%;
+      transition: background 0.3s ease;
+    }
+
+    button:hover {
+      background-color: #3a3f4b;
+    }
+
+    #log {
+      background-color: #121212;
+      border: 1px solid #333;
+      padding: 8px;
+      margin-top: 10px;
+      height: 180px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <button id="toggleOCR">▶️ Start OCR</button>
+  <button id="toggleOverlay">👁 Show UI Overlay</button>
+  <div id="log"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
