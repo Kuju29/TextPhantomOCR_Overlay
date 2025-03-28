@@ -1,23 +1,47 @@
+import uuid, threading, time, re, logging, base64, tempfile, os, subprocess, queue
+temp_dir = tempfile.mkdtemp()
+os.chdir(temp_dir)
+subprocess.run(["pytest", "--maxfail=1", "--disable-warnings", "-q"])
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import os, re, base64, time, logging, threading
 from seleniumbase import Driver
 from PIL import Image
 from io import BytesIO
 
+log_queue = queue.Queue()
+
+class QueueHandler(logging.Handler):
+    def __init__(self, log_queue):
+        super().__init__()
+        self.log_queue = log_queue
+
+    def emit(self, record):
+        msg = self.format(record)
+        self.log_queue.put(msg)
+
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+queue_handler = QueueHandler(log_queue)
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+queue_handler.setFormatter(formatter)
+logger.addHandler(queue_handler)
 app = Flask(__name__)
 CORS(app)
 
 driver_lock = threading.Lock()
 global_driver = None
-global_first_image = True
+global_first_image = True 
+
+jobs = {}
+last_request_time = time.time()
 
 def init_driver():
-    global global_driver
+    global global_driver, global_first_image
     global_driver = Driver(uc=True, headless=True)
     global_driver.get("https://lens.google.com/")
     global_driver.wait_for_element_visible("div.f6GA0", timeout=10)
+    global_first_image = True
 
 def convert_image_to_base64(image_bytes):
     return base64.b64encode(image_bytes).decode('utf-8')
@@ -31,7 +55,7 @@ def click_upload_button(sb_driver):
         
         upload_button_selector = "div.nDcEnd"
         sb_driver.wait_for_element_visible(upload_button_selector, timeout=5)
-        if sb_driver.is_element_visible(upload_button_selector):
+        if (sb_driver.is_element_visible(upload_button_selector)):
             sb_driver.click(upload_button_selector)
             sb_driver.wait_for_element_visible("div.f6GA0", timeout=5)
             return True
@@ -214,10 +238,64 @@ def merge_annotations_by_center_line(annotations, margin_x=10, margin_y=10):
             })
     return merged_results
 
+def process_post_boxes(job_id, boxes, image_width, image_height):
+    try:
+        text_annotations = []
+        full_text = ""
+        for box in boxes:
+            abs_top = parse_calc_value(box["top_str"], image_height)
+            abs_left = parse_calc_value(box["left_str"], image_width)
+            abs_width = parse_calc_value(box["width_str"], image_width)
+            abs_height = parse_calc_value(box["height_str"], image_height)
+            vertices = [
+                {"x": int(abs_left), "y": int(abs_top)},
+                {"x": int(abs_left + abs_width), "y": int(abs_top)},
+                {"x": int(abs_left + abs_width), "y": int(abs_top + abs_height)},
+                {"x": int(abs_left), "y": int(abs_top + abs_height)}
+            ]
+            rotate = 0.0
+            m_rotate = re.search(r'rotate\(([-\d.]+)deg\)', box["raw_style"])
+            if m_rotate:
+                rotate = float(m_rotate.group(1))
+            text_annotations.append({
+                "description": box["text"],
+                "boundingPoly": {"vertices": vertices},
+                "rotate": rotate,
+                "style": box["raw_style"]
+            })
+            full_text += box["text"] + " "
+        
+        merged_annotations = merge_annotations_by_center_line(text_annotations)
+        result = {
+            "textAnnotations": merged_annotations,
+            "rawTextAnnotations": text_annotations,
+            "fullTextAnnotation": {
+                "text": full_text.strip()
+            }
+        }
+        jobs[job_id] = {"status": "done", "result": result}
+    except Exception as e:
+        jobs[job_id] = {"status": "error", "error": str(e)}
+
+def monitor_driver():
+    global last_request_time, global_driver, global_first_image
+    while True:
+        time.sleep(5)
+        if global_driver is not None and time.time() - last_request_time > 60:
+            logging.info("ไม่มีงานเป็นเวลา 60 วินาที ปิดเบราว์เซอร์...")
+            try:
+                global_driver.quit()
+            except Exception as e:
+                logging.error("Error quitting driver: " + str(e))
+            global_driver = None
+            global_first_image = True
+
+threading.Thread(target=monitor_driver, daemon=True).start()
 
 @app.route('/ocr', methods=['POST'])
 def ocr_endpoint():
-    global global_first_image
+    global global_driver, global_first_image, last_request_time
+    last_request_time = time.time()
     if 'image' not in request.files:
         return jsonify({"error": "ไม่มีไฟล์ image ใน request"}), 400
     
@@ -232,14 +310,14 @@ def ocr_endpoint():
         base64_image = convert_image_to_base64(image_bytes)
         
         with driver_lock:
+            if global_driver is None:
+                logging.info("เปิดเบราว์เซอร์ใหม่...")
+                init_driver()
             sb_driver = global_driver
-            if global_first_image:
-                logging.info("🌐 เปิด Google Lens ครั้งแรก...")
-                sb_driver.get("https://lens.google.com/")
-                sb_driver.wait_for_element_visible("div.f6GA0", timeout=5)
-                global_first_image = False
-            else:
+            
+            if not global_first_image:
                 if not click_upload_button(sb_driver):
+                    logging.info("โหลดหน้า Google Lens ใหม่...")
                     sb_driver.get("https://lens.google.com/")
                     sb_driver.wait_for_element_visible("div.f6GA0", timeout=5)
             
@@ -252,52 +330,36 @@ def ocr_endpoint():
                 return jsonify({"error": "ไม่พบผล OCR"}), 500
             
             boxes = extract_boxes_and_text(sb_driver, include_without_line_index=False)
-        
-        text_annotations = []
-        full_text = ""
-        
-        for box in boxes:
-            abs_top = parse_calc_value(box["top_str"], image_height)
-            abs_left = parse_calc_value(box["left_str"], image_width)
-            abs_width = parse_calc_value(box["width_str"], image_width)
-            abs_height = parse_calc_value(box["height_str"], image_height)
             
-            vertices = [
-                {"x": int(abs_left), "y": int(abs_top)},
-                {"x": int(abs_left + abs_width), "y": int(abs_top)},
-                {"x": int(abs_left + abs_width), "y": int(abs_top + abs_height)},
-                {"x": int(abs_left), "y": int(abs_top + abs_height)}
-            ]
-            
-            rotate = 0.0
-            m_rotate = re.search(r'rotate\(([-\d.]+)deg\)', box["raw_style"])
-            if m_rotate:
-                rotate = float(m_rotate.group(1))
-            
-            text_annotations.append({
-                "description": box["text"],
-                "boundingPoly": {"vertices": vertices},
-                "rotate": rotate,
-                "style": box["raw_style"]
-            })
-            full_text += box["text"] + " "
+            if global_first_image:
+                global_first_image = False
         
-        merged_annotations = merge_annotations_by_center_line(text_annotations)
+        job_id = str(uuid.uuid4())
+        threading.Thread(target=process_post_boxes, args=(job_id, boxes, image_width, image_height), daemon=True).start()
         
-        response = {
-            "textAnnotations": merged_annotations,
-            "rawTextAnnotations": text_annotations,
-            "fullTextAnnotation": {
-                "text": full_text.strip()
-            }
-        }
+        return jsonify({"job_id": job_id, "status": "processing"})
             
     except Exception as e:
         logging.error(f"❌ Error during OCR processing: {e}")
         return jsonify({"error": str(e)}), 500
-    
-    return jsonify(response)
+
+@app.route('/ocr/result/<job_id>', methods=['GET'])
+def get_result(job_id):
+    if job_id in jobs:
+        return jsonify(jobs[job_id])
+    else:
+        return jsonify({"status": "pending"}), 202
+
+@app.route('/shutdown', methods=['POST'])
+def shutdown():
+    shutdown_server = request.environ.get('werkzeug.server.shutdown')
+    if shutdown_server is None:
+        logging.error("Server shutdown function not available.")
+        return jsonify({"error": "Server shutdown not available in production."}), 500
+    shutdown_server()
+    return jsonify({"message": "Server shutting down..."}), 200
 
 if __name__ == '__main__':
     init_driver()
-    app.run(host='0.0.0.0', port=5000)
+    from waitress import serve
+    serve(app, host='0.0.0.0', port=5000)
