@@ -1,22 +1,3 @@
-import subprocess
-import sys
-
-def install_and_import(module_name, package_name=None):
-    if package_name is None:
-        package_name = module_name
-    try:
-        __import__(module_name)
-    except ImportError:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
-        __import__(module_name)
-
-install_and_import("sklearn", "scikit-learn")
-install_and_import("flask")
-install_and_import("flask_cors", "flask-cors")
-install_and_import("seleniumbase")
-install_and_import("PIL", "Pillow")
-install_and_import("json5")
-
 import uuid, threading, time, re, logging, base64, tempfile, os, subprocess, queue, requests, json5
 from sklearn.cluster import DBSCAN
 from flask import Flask, request, jsonify
