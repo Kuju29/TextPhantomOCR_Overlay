@@ -1,11 +1,4 @@
 import uuid, threading, time, re, logging, base64, tempfile, os, subprocess, queue, requests, json5
-from sklearn.cluster import DBSCAN
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-from seleniumbase import Driver
-from PIL import Image
-from io import BytesIO
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 temp_dir = tempfile.mkdtemp()
 os.chdir(temp_dir)
@@ -14,6 +7,14 @@ subprocess.run(
     stdout=subprocess.DEVNULL,
     stderr=subprocess.DEVNULL
 )
+
+from sklearn.cluster import DBSCAN
+from flask import Flask, request, jsonify
+from flask_cors import CORS
+from seleniumbase import Driver
+from PIL import Image
+from io import BytesIO
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 log_queue = queue.Queue()
 
