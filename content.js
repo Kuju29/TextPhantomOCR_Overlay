@@ -221,6 +221,7 @@
         container.style.display = "inline-block";
         container.style.width = imgElement.clientWidth + "px";
         container.style.height = imgElement.clientHeight + "px";
+        container.style.fontSize = "initial";
         imgElement.parentNode.insertBefore(container, imgElement);
         container.appendChild(imgElement);
         imgElement.style.display = "block";
