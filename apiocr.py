@@ -10,7 +10,6 @@ subprocess.run(
 
 from PIL import Image
 from io import BytesIO
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from seleniumbase import Driver
@@ -24,7 +23,7 @@ class QueueHandler(logging.Handler):
     def emit(self, record):
         msg = self.format(record)
         self.log_queue.put(msg)
-        
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -41,6 +40,7 @@ global_driver = None
 global_first_image = True 
 cached_cookies_dict = None
 jobs = {}
+task_queue = queue.Queue()
 last_request_time = time.time()
 
 def init_driver():
@@ -251,29 +251,22 @@ def process_ocr_sync(mode, sb_driver, image_width, image_height, image_bytes=Non
         if image_bytes is None:
             raise Exception("image_bytes จำเป็นสำหรับ fast mode")
         global cached_cookies_dict
-
         if cached_cookies_dict is None:
             cached_cookies_dict = {
                 cookie["name"]: cookie["value"]
                 for cookie in sb_driver.get_cookies()
             }
-            
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
             "Referer": "https://lens.google.com/"
         }
-
         with httpx.Client(cookies=cached_cookies_dict, headers=headers, follow_redirects=False) as client:
             files = {"encoded_image": ("file.jpg", image_bytes, "image/jpeg")}
-
             response = client.post("https://lens.google.com/v3/upload", files=files)
-            
             if response.status_code not in (303, 302):
                 cached_cookies_dict = None
                 raise Exception(f"❌ Unexpected status code: {response.status_code}")
-
             redirect_url = response.headers.get("location")
-            
         sb_driver.get(redirect_url)
         sb_driver.wait_for_element_visible("div.lv6PAb", timeout=5)
         boxes = extract_boxes_and_text(sb_driver, include_without_line_index=False, mode="fast")
@@ -350,8 +343,8 @@ def monitor_driver():
     global last_request_time, global_driver, global_first_image
     while True:
         time.sleep(5)
-        if global_driver is not None and time.time() - last_request_time > 60:
-            logging.info("ไม่มีงานเป็นเวลา 60 วินาที ปิดเบราว์เซอร์...")
+        if global_driver is not None and time.time() - last_request_time > 40:
+            logging.info("ไม่มีงานเป็นเวลา 40 วินาที ปิดเบราว์เซอร์...")
             try:
                 global_driver.quit()
             except Exception as e:
@@ -359,72 +352,76 @@ def monitor_driver():
             global_driver = None
             global_first_image = True
 
+def ocr_worker():
+    global jobs, global_driver, global_first_image, last_request_time
+    while True:
+        task = task_queue.get()
+        job_id = task["job_id"]
+        mode = task["mode"]
+        image_bytes = task["image_bytes"]
+        image_width = task["image_width"]
+        image_height = task["image_height"]
+        base64_image = task.get("base64_image")
+        try:
+            with driver_lock:
+                last_request_time = time.time()
+                if global_driver is None:
+                    logging.info("เปิดเบราว์เซอร์ใหม่...")
+                    init_driver()
+                sb_driver = global_driver
+                
+                if mode != "fast":
+                    if not global_first_image:
+                        if not click_upload_button(sb_driver):
+                            logging.info("โหลดหน้า Google Lens ใหม่...")
+                            sb_driver.get("https://lens.google.com/")
+                    drag_and_drop_image(sb_driver, base64_image)
+                
+                if mode == "fast":
+                    result = process_ocr_sync(mode, sb_driver, image_width, image_height, image_bytes)
+                else:
+                    result = process_ocr_sync(mode, sb_driver, image_width, image_height)
+                if global_first_image:
+                    global_first_image = False
+            jobs[job_id] = {"status": "done", "result": result}
+        except Exception as e:
+            logging.error(f"❌ Error processing job {job_id}: {e}")
+            jobs[job_id] = {"status": "error", "error": str(e)}
+        finally:
+            task_queue.task_done()
+
+threading.Thread(target=ocr_worker, daemon=True).start()
 threading.Thread(target=monitor_driver, daemon=True).start()
 
 @app.route('/ocr', methods=['POST'])
 def ocr_endpoint():
-    global global_driver, global_first_image, last_request_time
+    global last_request_time
     last_request_time = time.time()
     if 'image' not in request.files:
         return jsonify({"error": "ไม่มีไฟล์ image ใน request"}), 400
-
-    mode = request.form.get("mode", "")
+    mode = request.form.get("mode", "fast")
     image_file = request.files['image']
     image_bytes = image_file.read()
-
     try:
         with Image.open(BytesIO(image_bytes)) as image:
             image_width, image_height = image.size
             image.load()
         base64_image = convert_image_to_base64(image_bytes)
-
-        with driver_lock:
-            try:
-                if global_driver is None:
-                    logging.info("เปิดเบราว์เซอร์ใหม่...")
-                    init_driver()
-                sb_driver = global_driver
-                if mode != "fast" and not global_first_image:
-                    if not click_upload_button(sb_driver):
-                        logging.info("โหลดหน้า Google Lens ใหม่...")
-                        sb_driver.get("https://lens.google.com/")
-
-                if mode != "fast":
-                    drag_and_drop_image(sb_driver, base64_image)
-                    
-                with ThreadPoolExecutor(max_workers=1) as executor:
-                    if mode == "fast":
-                        future = executor.submit(process_ocr_sync, mode, sb_driver, image_width, image_height, image_bytes)
-                    else:
-                        future = executor.submit(process_ocr_sync, mode, sb_driver, image_width, image_height)
-                    try:
-                        result = future.result(timeout=1)
-                        job_id = str(uuid.uuid4())
-                        jobs[job_id] = {"status": "done", "result": result}
-                        if global_first_image:
-                            global_first_image = False
-                        return jsonify({"job_id": job_id, "status": "done", "result": result})
-                    except TimeoutError:
-                        job_id = str(uuid.uuid4())
-                        def wait_future_and_update():
-                            try:
-                                res = future.result()
-                                jobs[job_id] = {"status": "done", "result": res}
-                            except Exception as e:
-                                jobs[job_id] = {"status": "error", "error": str(e)}
-                        threading.Thread(target=wait_future_and_update, daemon=True).start()
-                        if global_first_image:
-                            global_first_image = False
-                        return jsonify({"job_id": job_id, "status": "processing"})
-            except Exception as e:
-                if "invalid session id" in str(e):
-                    logging.info("Session หมดอายุ รีสตาร์ท driver ใหม่...")
-                    init_driver()
-                    sb_driver = global_driver
-                else:
-                    raise e
+        job_id = str(uuid.uuid4())
+        jobs[job_id] = {"status": "processing"}
+        
+        task = {
+            "job_id": job_id,
+            "mode": mode,
+            "image_bytes": image_bytes,
+            "image_width": image_width,
+            "image_height": image_height,
+            "base64_image": base64_image 
+        }
+        task_queue.put(task)
+        return jsonify({"job_id": job_id, "status": "processing"})
     except Exception as e:
-        logging.error(f"❌ Error during OCR processing: {e}")
+        logging.error(f"❌ Error during OCR submission: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/ocr/result/<job_id>', methods=['GET'])
