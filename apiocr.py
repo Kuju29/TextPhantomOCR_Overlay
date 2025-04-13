@@ -247,10 +247,10 @@ def merge_annotations_by_center_line(annotations, margin_x=10, margin_y=15):
     return merged_results
 
 def process_ocr_sync(mode, sb_driver, image_width, image_height, image_bytes=None):
+    global cached_cookies_dict
     if mode == "fast":
         if image_bytes is None:
             raise Exception("image_bytes จำเป็นสำหรับ fast mode")
-        global cached_cookies_dict
         if cached_cookies_dict is None:
             cached_cookies_dict = {
                 cookie["name"]: cookie["value"]
@@ -340,20 +340,22 @@ def process_ocr_sync(mode, sb_driver, image_width, image_height, image_bytes=Non
     return result
 
 def monitor_driver():
-    global last_request_time, global_driver, global_first_image
+    global last_request_time, global_driver, global_first_image, cached_cookies_dict
     while True:
         time.sleep(5)
-        if global_driver is not None and time.time() - last_request_time > 40:
-            logging.info("ไม่มีงานเป็นเวลา 40 วินาที ปิดเบราว์เซอร์...")
+        if global_driver is not None and time.time() - last_request_time > 30:
+            logging.info("ไม่มีงานเป็นเวลา 30 วินาที ปิดเบราว์เซอร์...")
             try:
+                cached_cookies_dict = None
                 global_driver.quit()
             except Exception as e:
                 logging.error("Error quitting driver: " + str(e))
             global_driver = None
+            cached_cookies_dict = None
             global_first_image = True
 
 def ocr_worker():
-    global jobs, global_driver, global_first_image, last_request_time
+    global jobs, global_driver, global_first_image, last_request_time, cached_cookies_dict
     while True:
         task = task_queue.get()
         job_id = task["job_id"]
@@ -385,6 +387,7 @@ def ocr_worker():
                     global_first_image = False
             jobs[job_id] = {"status": "done", "result": result}
         except Exception as e:
+            cached_cookies_dict = None
             logging.error(f"❌ Error processing job {job_id}: {e}")
             jobs[job_id] = {"status": "error", "error": str(e)}
         finally:
