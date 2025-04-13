@@ -2,11 +2,11 @@ import uuid, threading, time, re, logging, base64, tempfile, os, subprocess, que
 
 temp_dir = tempfile.mkdtemp()
 os.chdir(temp_dir)
-subprocess.run(
-    ["pytest", "--maxfail=1", "--disable-warnings", "-q"],
-    stdout=subprocess.DEVNULL,
-    stderr=subprocess.DEVNULL
-)
+# subprocess.run(
+#     ["pytest", "--maxfail=1", "--disable-warnings", "-q"],
+#     stdout=subprocess.DEVNULL,
+#     stderr=subprocess.DEVNULL
+# )
 
 from PIL import Image
 from io import BytesIO
