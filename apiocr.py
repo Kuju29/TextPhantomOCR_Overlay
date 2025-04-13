@@ -1,13 +1,7 @@
 import uuid, threading, time, re, logging, base64, tempfile, os, subprocess, queue, httpx, shutil
 
 base_temp = tempfile.gettempdir()
-ocr_temp_dir = os.path.join(base_temp, "ocr_temp")
-
-if os.path.exists(ocr_temp_dir):
-    shutil.rmtree(ocr_temp_dir)
-    
-os.makedirs(ocr_temp_dir)
-os.chdir(ocr_temp_dir)
+os.chdir(base_temp)
 
 # subprocess.run(
 #     ["pytest", "--maxfail=1", "--disable-warnings", "-q"],
