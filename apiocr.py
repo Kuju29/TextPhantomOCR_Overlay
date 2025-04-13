@@ -1,7 +1,14 @@
-import uuid, threading, time, re, logging, base64, tempfile, os, subprocess, queue, httpx
+import uuid, threading, time, re, logging, base64, tempfile, os, subprocess, queue, httpx, shutil
 
-temp_dir = tempfile.mkdtemp()
-os.chdir(temp_dir)
+base_temp = tempfile.gettempdir()
+ocr_temp_dir = os.path.join(base_temp, "ocr_temp")
+
+if os.path.exists(ocr_temp_dir):
+    shutil.rmtree(ocr_temp_dir)
+    
+os.makedirs(ocr_temp_dir)
+os.chdir(ocr_temp_dir)
+
 # subprocess.run(
 #     ["pytest", "--maxfail=1", "--disable-warnings", "-q"],
 #     stdout=subprocess.DEVNULL,
@@ -343,10 +350,9 @@ def monitor_driver():
     global last_request_time, global_driver, global_first_image, cached_cookies_dict
     while True:
         time.sleep(5)
-        if global_driver is not None and time.time() - last_request_time > 30:
-            logging.info("ไม่มีงานเป็นเวลา 30 วินาที ปิดเบราว์เซอร์...")
+        if global_driver is not None and time.time() - last_request_time > 60:
+            logging.info("ไม่มีงานเป็นเวลา 60 วินาที ปิดเบราว์เซอร์...")
             try:
-                cached_cookies_dict = None
                 global_driver.quit()
             except Exception as e:
                 logging.error("Error quitting driver: " + str(e))
