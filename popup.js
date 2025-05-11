@@ -42,13 +42,6 @@ function sendCommandWithStateUpdate(command) {
   });
 }
 
-document.getElementById("toggleOCR").addEventListener("click", () => {
-  isRunning = !isRunning;
-  const command = isRunning ? "start" : "stop";
-  document.getElementById("toggleOCR").textContent = isRunning ? "⏹ Stop OCR" : "▶️ Start OCR";
-  sendCommandWithStateUpdate(command);
-});
-
 document.getElementById("toggleOverlay").addEventListener("click", () => {
     isOverlayVisible = !isOverlayVisible;
     const command = isOverlayVisible ? "showUIOverlay" : "hideUIOverlay";
@@ -68,8 +61,67 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
-document.addEventListener("DOMContentLoaded", () => {
-    checkOverlayStatus();
-    checkOCRStatus(); 
+function loadSettings(cb) {
+  chrome.storage.sync.get({ mode: 'google_images', language: 'th' }, cb);
+}
+function saveSettings(settings) {
+  chrome.storage.sync.set(settings);
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  const modeSelect = document.getElementById('modeSelect');
+  const langContainer = document.getElementById('langContainer');
+  const langSelect = document.getElementById('langSelect');
+  const toggleBtn = document.getElementById('toggleOCR');
+
+  chrome.storage.sync.get(
+    { mode: 'google_images', language: 'th' },
+    ({ mode, language }) => {
+      modeSelect.value = mode;
+      langSelect.value = language;
+      langContainer.style.display = mode === 'google_images' ? 'block' : 'none';
+      toggleBtn.textContent = '▶️ Start OCR';
+    }
+  );
+
+  modeSelect.addEventListener('change', () => {
+    const m = modeSelect.value;
+    chrome.storage.sync.set({ mode: m });
+    langContainer.style.display = m === 'google_images' ? 'block' : 'none';
   });
+
+  langSelect.addEventListener('change', () => {
+    chrome.storage.sync.set({ language: langSelect.value });
+  });
+
+  let isRunning = false;
+  toggleBtn.addEventListener('click', () => {
+    chrome.storage.sync.get(
+      { mode: 'google_images', language: 'th' },
+      ({ mode, language }) => {
+        isRunning = !isRunning;
+        const cmd = isRunning ? 'start' : 'stop';
+        chrome.tabs.query(
+          { active: true, currentWindow: true },
+          (tabs) => {
+            chrome.tabs.sendMessage(
+              tabs[0].id,
+              { command: cmd, mode, language },
+              (resp) => {
+                isRunning = resp.running;
+                toggleBtn.textContent = isRunning
+                  ? '⏹ Stop OCR'
+                  : '▶️ Start OCR';
+              }
+            );
+          }
+        );
+      }
+    );
+  });
+
+  checkOverlayStatus();
+  checkOCRStatus();
+});
+
   
