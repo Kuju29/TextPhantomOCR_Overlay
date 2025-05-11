@@ -1,6 +1,8 @@
 (function () {
     let shouldStop = false;
     let isRunning = false;
+    let mode = 'google_images';
+    let language = 'th';
 
     function log(msg) {
         console.log(msg);
@@ -50,6 +52,8 @@
         } else if (message.command === "getOCRStatus") {
             sendResponse({ running: isRunning });
         }
+        if (message.mode) mode = message.mode;
+        if (message.language) language = message.language;
     });
 
     function createPersistentOverlayUI() {
@@ -130,6 +134,8 @@
     async function sendImageToOCR(file) {
         const formData = new FormData();
         formData.append("image", file);
+        formData.append('mode', mode);
+        formData.append('language', language);
         try {
             const response = await fetch("http://127.0.0.1:5000/ocr", {
                 method: "POST",
@@ -305,34 +311,38 @@
         }
         try {
             const blob = await fetchImageBlobViaBackground(src);
-            if (shouldStop) return;
-            if (!blob) {
+            if (shouldStop || !blob) {
                 log(`❌ Failed to fetch blob: ${src}`);
                 return;
             }
             const file = new File([blob], "image.jpg", { type: blob.type });
             const ocrJob = await sendImageToOCR(file);
-            if (shouldStop) return;
-            if (!ocrJob || !ocrJob.job_id) {
+            if (shouldStop || !ocrJob?.job_id) {
                 log(`⚠️ OCR API did not return job_id for: ${src}`);
                 return;
             }
             log(`Job started: ${ocrJob.job_id} for image ${src}`);
+            
             const ocrResult = await pollOCRResult(ocrJob.job_id);
-            if (shouldStop) return;
-            if (!ocrResult || !ocrResult.textAnnotations) {
+            if (shouldStop || !ocrResult) {
                 log(`⚠️ No OCR result for: ${src}`);
                 return;
             }
-            const newDataURL = await updateImageRemoveText(img, ocrResult.textAnnotations, blob);
-            if (shouldStop) return;
-            img.src = newDataURL;
-            overlayTextOnImage(img, ocrResult);
-            log(`✅ Processed: ${src}`);
+
+            if (mode === 'lens') {
+                const cleanData = await updateImageRemoveText(img, ocrResult.textAnnotations, blob);
+                img.src = cleanData;
+                overlayTextOnImage(img, ocrResult);
+                log(`✅ Processed (Lens): ${src}`);
+            } else if (mode === 'google_images') {
+                img.src = ocrResult;
+                log(`✅ Processed (Images): ${src}`);
+            }
+
         } catch (err) {
             log(`❌ Error processing ${src}: ${err}`);
         }
-    }
+    }   
 
     function processImages() {
         removeLazyScriptsAndForceSrc();
