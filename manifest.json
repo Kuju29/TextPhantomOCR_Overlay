@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TextPhantom - OCR Overlay",
-  "version": "1.0.0",
+  "version": "11.5.25",
   "description": "🧠 A Chrome extension that performs OCR on images and overlays translated text in real-time — perfect for manga, webtoons, and image-based content.",
   "icons": {
     "16": "icons/icon16.png",
