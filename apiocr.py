@@ -1,19 +1,14 @@
-import uuid, threading, time, re, logging, base64, tempfile, os, subprocess, queue, httpx, shutil
+import uuid, threading, time, re, logging, base64, tempfile, os, queue, httpx
 
 base_temp = tempfile.gettempdir()
 os.chdir(base_temp)
-
-# subprocess.run(
-#     ["pytest", "--maxfail=1", "--disable-warnings", "-q"],
-#     stdout=subprocess.DEVNULL,
-#     stderr=subprocess.DEVNULL
-# )
 
 from PIL import Image
 from io import BytesIO
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from seleniumbase import Driver
+from selenium.webdriver.common.by import By
 
 log_queue = queue.Queue()
 
@@ -37,6 +32,8 @@ app = Flask(__name__)
 CORS(app)
 
 driver_lock = threading.Lock()
+prev_mode = None
+prev_lang = None
 global_driver = None
 global_first_image = True 
 cached_cookies_dict = None
@@ -45,32 +42,13 @@ task_queue = queue.Queue()
 last_request_time = time.time()
 
 def init_driver():
-    global global_driver, global_first_image
+    global global_driver, global_first_image, prev_mode, prev_lang
     global_driver = Driver(uc=True, headless=True)
-    global_driver.get("https://lens.google.com/")
+    if prev_mode == "lens":
+        global_driver.get("https://lens.google.com/")
+    elif prev_mode == "google_images":
+        global_driver.get(f"https://translate.google.com/?sl=auto&tl={prev_lang}&op=images")
     global_first_image = True
-
-def convert_image_to_base64(image_bytes):
-    return base64.b64encode(image_bytes).decode('utf-8')
-
-def click_upload_button(sb_driver):
-    try:
-        collapse_button_selector = "button.XWrYL"
-        sb_driver.wait_for_element_visible(collapse_button_selector, timeout=5)
-        if sb_driver.is_element_visible(collapse_button_selector):
-            sb_driver.click(collapse_button_selector)
-        upload_button_selector = "div.nDcEnd"
-        sb_driver.wait_for_element_visible(upload_button_selector, timeout=5)
-        if sb_driver.is_element_visible(upload_button_selector):
-            sb_driver.click(upload_button_selector)
-            sb_driver.wait_for_element_visible("div.f6GA0", timeout=5)
-            return True
-        else:
-            logging.warning("⚠️ ไม่พบปุ่ม 'Search by image' ต้องเปิด Google Lens ใหม่")
-            return False
-    except Exception as e:
-        logging.error(f"❌ เกิดข้อผิดพลาดขณะกดปุ่ม 'Search by image': {e}")
-        return False
 
 def drag_and_drop_image(sb_driver, base64_image):
     try:
@@ -111,11 +89,9 @@ def parse_calc_value(calc_str, dimension):
     else:
         return 0
 
-def extract_boxes_and_text(sb_driver, include_without_line_index=False, mode="default"):
-    if mode == "fast":
-        logging.info("🔄 ดึงข้อมูล OCR (ข้อความและตำแหน่ง) แบบ fast...")
-    else:
-        logging.info("🔄 ดึงข้อมูล OCR (ข้อความและตำแหน่ง) แบบเดิม...")
+def extract_boxes_and_text(sb_driver, include_without_line_index=False):
+    logging.info("🔄 ดึงข้อมูล OCR (ข้อความและตำแหน่ง)")
+
     try:
         sb_driver.wait_for_element_visible("div.lv6PAb", timeout=5)
     except Exception:
@@ -247,66 +223,28 @@ def merge_annotations_by_center_line(annotations, margin_x=10, margin_y=15):
             })
     return merged_results
 
-def process_ocr_sync(mode, sb_driver, image_width, image_height, image_bytes=None):
+def process_ocr_lens(sb_driver, image_width, image_height, image_bytes=None):
     global cached_cookies_dict
-    if mode == "fast":
-        if image_bytes is None:
-            raise Exception("image_bytes จำเป็นสำหรับ fast mode")
-        if cached_cookies_dict is None:
-            cached_cookies_dict = {
-                cookie["name"]: cookie["value"]
-                for cookie in sb_driver.get_cookies()
-            }
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
-            "Referer": "https://lens.google.com/"
+    if image_bytes is None:
+        raise Exception("image_bytes จำเป็นสำหรับ lens mode")
+    if cached_cookies_dict is None:
+        cached_cookies_dict = {
+            cookie["name"]: cookie["value"]
+            for cookie in sb_driver.get_cookies()
         }
-        with httpx.Client(cookies=cached_cookies_dict, headers=headers, follow_redirects=False) as client:
-            files = {"encoded_image": ("file.jpg", image_bytes, "image/jpeg")}
-            response = client.post("https://lens.google.com/v3/upload", files=files)
-            if response.status_code not in (303, 302):
-                cached_cookies_dict = None
-                raise Exception(f"❌ Unexpected status code: {response.status_code}")
-            redirect_url = response.headers.get("location")
-        sb_driver.get(redirect_url)
-        sb_driver.wait_for_element_visible("div.lv6PAb", timeout=5)
-        boxes = extract_boxes_and_text(sb_driver, include_without_line_index=False, mode="fast")
-        text_annotations = []
-        full_text = ""
-        for box in boxes:
-            abs_top = parse_calc_value(box["top_str"], image_height)
-            abs_left = parse_calc_value(box["left_str"], image_width)
-            abs_width = parse_calc_value(box["width_str"], image_width)
-            abs_height = parse_calc_value(box["height_str"], image_height)
-            vertices = [
-                {"x": int(abs_left), "y": int(abs_top)},
-                {"x": int(abs_left + abs_width), "y": int(abs_top)},
-                {"x": int(abs_left + abs_width), "y": int(abs_top + abs_height)},
-                {"x": int(abs_left), "y": int(abs_top + abs_height)}
-            ]
-            rotate = 0.0
-            m_rotate = re.search(r'rotate\(([-\d.]+)deg\)', box["raw_style"])
-            if m_rotate:
-                rotate = float(m_rotate.group(1))
-            text_annotations.append({
-                "description": box["text"],
-                "boundingPoly": {"vertices": vertices},
-                "rotate": rotate,
-                "style": box["raw_style"]
-            })
-            full_text += box["text"] + " "
-        merged_annotations = merge_annotations_by_center_line(text_annotations)
-        result = {
-            "textAnnotations": merged_annotations,
-            "rawTextAnnotations": text_annotations,
-            "fullTextAnnotation": {"text": full_text.strip()}
-        }
-        return result
-
-    try:
-        sb_driver.wait_for_element_visible("div.lv6PAb", timeout=5)
-    except Exception as e:
-        raise Exception("ไม่พบผล OCR ในเวลาที่กำหนด")
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36",
+        "Referer": "https://lens.google.com/"
+    }
+    with httpx.Client(cookies=cached_cookies_dict, headers=headers, follow_redirects=False) as client:
+        files = {"encoded_image": ("file.jpg", image_bytes, "image/jpeg")}
+        response = client.post("https://lens.google.com/v3/upload", files=files)
+        if response.status_code not in (303, 302):
+            cached_cookies_dict = None
+            raise Exception(f"❌ Unexpected status code: {response.status_code}")
+        redirect_url = response.headers.get("location")
+    sb_driver.get(redirect_url)
+    sb_driver.wait_for_element_visible("div.lv6PAb", timeout=5)
     boxes = extract_boxes_and_text(sb_driver, include_without_line_index=False)
     text_annotations = []
     full_text = ""
@@ -340,6 +278,115 @@ def process_ocr_sync(mode, sb_driver, image_width, image_height, image_bytes=Non
     }
     return result
 
+# ocr translate   
+def drag_and_drop_file(sb_driver, file_input_selector, base64_image):
+    try:
+        sb_driver.execute_script("""
+            var fileInput = document.querySelector(arguments[0]);
+            var base64Image = arguments[1];
+            var byteCharacters = atob(base64Image);
+            var byteNumbers = new Array(byteCharacters.length);
+            for (var i = 0; i < byteCharacters.length; i++) {
+                byteNumbers[i] = byteCharacters.charCodeAt(i);
+            }
+            var byteArray = new Uint8Array(byteNumbers);
+            var file = new File([byteArray], 'file.jpg', { type: 'image/jpeg' });
+            var dataTransfer = new DataTransfer();
+            dataTransfer.items.add(file);
+            fileInput.files = dataTransfer.files;
+            fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+        """, file_input_selector, base64_image)
+        logging.info("Translator: Simulated drag and drop of the image")
+    except Exception as e:
+        logging.error(f"Translator: Error during drag and drop: {e}")
+        
+def clear_image(sb_driver):
+    try:
+        clear_button_selector = 'button.VfPpkd-Bz112c-LgbsSe.yHy1rc.eT1oJ.mN1ivc.B0czFe'
+        sb_driver.find_element(By.CSS_SELECTOR, clear_button_selector)
+        sb_driver.execute_script(f"document.querySelector('{clear_button_selector}').click();")
+    except Exception as e:
+        logging.error(f"Translator: Error clearing image: {e}")
+
+def download_blob_image(driver_translate, blob_url):
+    try:
+        return driver_translate.execute_async_script("""
+            var url = arguments[0], callback = arguments[arguments.length - 1];
+            fetch(url).then(response => response.blob())
+                .then(blob => {
+                    const reader = new FileReader();
+                    reader.onloadend = function () {
+                        const base64 = reader.result.split(',')[1];
+                        callback(base64);
+                    };
+                    reader.onerror = function () {
+                        callback(null);
+                    };
+                    reader.readAsDataURL(blob);
+                }).catch(() => callback(null));
+        """, blob_url)
+    except Exception as e:
+        logging.error(f"Translator: Error downloading Blob image from {blob_url}: {e}")
+        return None
+        
+def process_ocr_translate(sb_driver, image_bytes=None, base64_image=None):
+    b64: str
+    if base64_image is not None:
+        b64 = base64_image
+        if isinstance(b64, (bytes, bytearray)):
+            try:
+                b64 = b64.decode('utf-8')
+            except Exception:
+                logging.error(f"Translator: Cannot decode base64_image bytes")
+                return None
+    elif image_bytes:
+        try:
+            b64 = base64.b64encode(image_bytes).decode('utf-8')
+        except Exception as e:
+            logging.error(f"Translator: Failed to encode image_bytes → base64: {e}")
+            return None
+    else:
+        logging.error("Translator: No image data provided to process_ocr_translate")
+        return None
+
+    try:
+        logging.debug(f"Translator: Uploading image (type={type(b64)})")
+        drag_and_drop_file(
+            sb_driver,
+            'input[type="file"][accept="image/jpeg, image/png, image/webp, .jpeg, .jpg, .png, .webp"]',
+            b64
+        )
+    except Exception as e:
+        logging.error(f"Translator: Error during drag and drop: {e}")
+        clear_image(sb_driver)
+        return None
+
+    try:
+        sb_driver.wait_for_element_visible(".CMhTbb.tyW0pd img", timeout=10)
+        translated_img = sb_driver.find_element(By.CSS_SELECTOR, ".CMhTbb.tyW0pd img")
+        blob_url = translated_img.get_attribute("src")
+        logging.info(f"Translator: Retrieved blob URL → {blob_url}")
+    except Exception as e:
+        logging.error(f"Translator: Translated image not found: {e}")
+        clear_image(sb_driver)
+        return None
+
+    try:
+        base64_translated = download_blob_image(sb_driver, blob_url)
+        if not base64_translated:
+            raise RuntimeError("Empty base64 from blob")
+        result_data_url = f"data:image/jpeg;base64,{base64_translated}"
+        logging.info("Translator: Translation succeeded")
+        return result_data_url
+    except Exception as e:
+        logging.error(f"Translator: Error downloading translated blob: {e}")
+        return None
+    finally:
+        try:
+            clear_image(sb_driver)
+        except:
+            pass
+
 def monitor_driver():
     global last_request_time, global_driver, global_first_image, cached_cookies_dict
     while True:
@@ -355,15 +402,17 @@ def monitor_driver():
             global_first_image = True
 
 def ocr_worker():
-    global jobs, global_driver, global_first_image, last_request_time, cached_cookies_dict
+    global jobs, global_driver, global_first_image, last_request_time, cached_cookies_dict, prev_mode, prev_lang
     while True:
         task = task_queue.get()
         job_id = task["job_id"]
-        mode = task["mode"]
+        mode = task['mode']
+        lang = task['language']
         image_bytes = task["image_bytes"]
         image_width = task["image_width"]
         image_height = task["image_height"]
         base64_image = task.get("base64_image")
+        prev_mode, prev_lang = mode, lang
         try:
             with driver_lock:
                 last_request_time = time.time()
@@ -371,18 +420,11 @@ def ocr_worker():
                     logging.info("เปิดเบราว์เซอร์ใหม่...")
                     init_driver()
                 sb_driver = global_driver
-                
-                if mode != "fast":
-                    if not global_first_image:
-                        if not click_upload_button(sb_driver):
-                            logging.info("โหลดหน้า Google Lens ใหม่...")
-                            sb_driver.get("https://lens.google.com/")
-                    drag_and_drop_image(sb_driver, base64_image)
-                
-                if mode == "fast":
-                    result = process_ocr_sync(mode, sb_driver, image_width, image_height, image_bytes)
-                else:
-                    result = process_ocr_sync(mode, sb_driver, image_width, image_height)
+                if prev_mode == "lens":
+                    result = process_ocr_lens(sb_driver, image_width, image_height, image_bytes)
+                elif prev_mode == "google_images":
+                    result = process_ocr_translate(sb_driver, image_bytes, base64_image)
+                    
                 if global_first_image:
                     global_first_image = False
             jobs[job_id] = {"status": "done", "result": result}
@@ -402,20 +444,22 @@ def ocr_endpoint():
     last_request_time = time.time()
     if 'image' not in request.files:
         return jsonify({"error": "ไม่มีไฟล์ image ใน request"}), 400
-    mode = request.form.get("mode", "fast")
+    mode = request.form.get("mode", "google_images")
+    language = request.form.get('language', 'th')
     image_file = request.files['image']
     image_bytes = image_file.read()
     try:
         with Image.open(BytesIO(image_bytes)) as image:
             image_width, image_height = image.size
             image.load()
-        base64_image = convert_image_to_base64(image_bytes)
+        base64_image = base64.b64encode(image_bytes).decode('utf-8')
         job_id = str(uuid.uuid4())
         jobs[job_id] = {"status": "processing"}
         
         task = {
             "job_id": job_id,
             "mode": mode,
+            "language": language,
             "image_bytes": image_bytes,
             "image_width": image_width,
             "image_height": image_height,
@@ -444,6 +488,5 @@ def shutdown():
     return jsonify({"message": "Server shutting down..."}), 200
 
 if __name__ == '__main__':
-    init_driver()
     from waitress import serve
     serve(app, host='0.0.0.0', port=5000)
