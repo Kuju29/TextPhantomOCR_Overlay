@@ -7,7 +7,7 @@
 ## 🖼️ DEMO / UI PREVIEW
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/aba29265-f1f2-4b32-9965-bb2bd5801df2" width="40%" alt="UI Preview" />
+  <img src="https://github.com/user-attachments/assets/d24aa1ba-1b3a-4f12-9d20-b3368f41b902" width="40%" alt="UI Preview" />
   <br><br>
   <img src="https://github.com/user-attachments/assets/998e8a9e-ae27-4911-9e59-aef28245f60c" width="70%" alt="Example 1" />
   <br><br>
