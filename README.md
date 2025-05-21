@@ -1,6 +1,5 @@
 ## 📥 HOW TO INSTALL  
-👉 Watch this video for installation instructions:  
-📺 [YOUTUBE VIDEO](https://www.youtube.com/watch?v=WQ7p7zsz_kc)
+📺 [https://www.youtube.com/watch?v=WQ7p7zsz_kc](https://www.youtube.com/watch?v=WQ7p7zsz_kc)
 
 ---
 
