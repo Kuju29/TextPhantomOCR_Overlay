@@ -432,7 +432,7 @@
                 shouldStop = false;
                 isRunning = true;
                 log("OCR started from UI overlay.");
-                processImages();ฟ
+                processImages();
                 const startButton = document.getElementById("ocr-start-btn");
                 if(startButton){
                     startButton.textContent = "⏹ Stop OCR";
