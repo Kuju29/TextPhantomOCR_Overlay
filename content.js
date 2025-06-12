@@ -4,6 +4,21 @@
     let mode = 'google_images';
     let language = 'th';
 
+    chrome.storage.sync.get(
+      { mode: 'google_images', language: 'th' },
+      ({ mode: m, language: lang }) => {
+        mode = m;
+        language = lang;
+      }
+    );
+    
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area === 'sync') {
+        if (changes.mode)       mode = changes.mode.newValue;
+        if (changes.language)   language = changes.language.newValue;
+      }
+    });
+
     function log(msg) {
         console.log(msg);
         try {
@@ -24,9 +39,13 @@
     document.head.appendChild(style);
 
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+        if (message.mode)     mode = message.mode;
+        if (message.language) language = message.language;
+    
         if (message.command === "start") {
             shouldStop = false;
             isRunning = true;
+            log("OCR started");
             log("OCR started");
             processImages();
             updateOverlayButton(true);
@@ -84,7 +103,16 @@
             isRunning = !isRunning;
             const command = isRunning ? "start" : "stop";
             updateOverlayButton(isRunning);
-            window.postMessage({ type: "FROM_UI", command: command }, "*");
+
+            chrome.storage.sync.get(
+              { mode: 'google_images', language: 'th' },
+              ({ mode, language }) => {
+                window.postMessage(
+                  { type: "FROM_UI", command, mode, language },
+                  "*"
+                );
+              }
+            );
         };
 
         updateOverlayButton(isRunning);
@@ -397,11 +425,14 @@
     window.addEventListener("message", (event) => {
         if (event.source !== window) return;
         if (event.data.type === "FROM_UI") {
+            if (event.data.mode)     mode = event.data.mode;
+            if (event.data.language) language = event.data.language;
+
             if (event.data.command === "start") {
                 shouldStop = false;
                 isRunning = true;
                 log("OCR started from UI overlay.");
-                processImages();
+                processImages();ฟ
                 const startButton = document.getElementById("ocr-start-btn");
                 if(startButton){
                     startButton.textContent = "⏹ Stop OCR";
