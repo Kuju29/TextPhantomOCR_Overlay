@@ -6,7 +6,7 @@ You can install **TextPhantomOCR Overlay** in two ways:
 
 ### ✅ Method 1: Install Directly from GitHub
 
-1. Download the extension source code from the [GitHub Releases page](https://github.com/Kuju29/TextPhantomOCR_Overlay/releases/tag/v1.0.0).
+1. Download the extension source code from the [GitHub Releases page](https://github.com/Kuju29/TextPhantomOCR_Overlay/archive/refs/heads/main.zip).
 2. Unzip the downloaded file.
 3. Open Chrome and go to: `chrome://extensions/`
 4. Enable **Developer mode** (top right toggle switch).
