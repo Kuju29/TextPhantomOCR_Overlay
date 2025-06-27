@@ -14,7 +14,7 @@ You can install **TextPhantomOCR Overlay** in two ways:
 6. The extension should now appear in your browser.
 
 > **Important:**  
-> To enable the OCR functionality, you must also download the required `.exe` file from the [same GitHub release page](https://github.com/Kuju29/TextPhantomOCR_Overlay/releases/tag/v1.0.0). Follow any instructions provided there to set it up.
+> Download the required `.exe` file from the [GitHub release page](https://github.com/Kuju29/TextPhantomOCR_Overlay/releases/tag/v1.0.0) to enable OCR processing.
 
 🎥 **Watch a video tutorial:** [YouTube Installation Guide](https://www.youtube.com/watch?v=WQ7p7zsz_kc)
 
