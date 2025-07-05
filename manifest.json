@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TextPhantom - OCR Overlay",
-  "version": "5.07.25",
+  "version": "2025.07.05",
   "description": "🧠 Instantly translate text from images right inside your browser! Perfect for manga, webtoons, and any image-based content.",
   "icons": {
     "16": "icons/icon16.png",
