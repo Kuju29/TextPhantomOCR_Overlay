@@ -26,14 +26,16 @@ You can install **TextPhantomOCR Overlay** in two ways:
   [➡️ TextPhantomOCR Overlay on Chrome Web Store](https://chromewebstore.google.com/detail/cjbaepobgmickhgebgagklfcfacbbpem?utm_source=item-share-cb)
 
 > **Note:**  
-> Even if you install via the Chrome Web Store, you still need to download the required `.exe` file from the [GitHub release page](https://github.com/Kuju29/TextPhantomOCR_Overlay/releases/tag/v1.0.0) to enable OCR processing.
+> Even if you install via the Chrome Web Store, you still need to download the required `.exe` file from the [GitHub release page](https://github.com/Kuju29/TextPhantomOCR_Overlay/releases) to enable OCR processing.
 
 ---
 
 ## 🖼️ DEMO / UI PREVIEW
 
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/d24aa1ba-1b3a-4f12-9d20-b3368f41b902" width="40%" alt="UI Preview" />
+  <img src="https://github.com/user-attachments/assets/52135c1a-ba52-46e7-9174-9fdd1cc6b26d" width="40%" alt="UI Preview" />
+  <br><br>
+  <img src="https://github.com/user-attachments/assets/6f7beaad-2f92-48bc-a8ef-776a0886a8eb" width="40%" alt="UI Preview" />
   <br><br>
   <img src="https://github.com/user-attachments/assets/998e8a9e-ae27-4911-9e59-aef28245f60c" width="100%" alt="Example 1" />
   <br><br>
