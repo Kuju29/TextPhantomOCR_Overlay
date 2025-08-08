@@ -1,3 +1,4 @@
+V1.0.0: [https://github.com/Kuju29/TextPhantomOCR_Overlay/tree/695ab85730e4916102423d1eaf3da023a60fbbaa](https://github.com/Kuju29/TextPhantomOCR_Overlay/tree/695ab85730e4916102423d1eaf3da023a60fbbaa)
 ## 🚀 Installation Guide
 
 You can install **TextPhantomOCR Overlay** in two ways:
@@ -22,7 +23,7 @@ You can install **TextPhantomOCR Overlay** in two ways:
 
 ### ✅ Method 2: Install from Chrome Web Store
 
-- Install directly from the Chrome Web Store:  
+- Install directly from the Chrome Web Store v1.0.0:  
   [➡️ TextPhantomOCR Overlay on Chrome Web Store](https://chromewebstore.google.com/detail/cjbaepobgmickhgebgagklfcfacbbpem?utm_source=item-share-cb)
 
 > **Note:**  
