@@ -1,31 +1,30 @@
 {
   "manifest_version": 3,
   "name": "TextPhantom - OCR Overlay",
-  "version": "2025.07.05",
-  "description": "🧠 Instantly translate text from images right inside your browser! Perfect for manga, webtoons, and any image-based content.",
-  "icons": {
-    "16": "icons/icon16.png",
-    "48": "icons/icon48.png",
-    "128": "icons/icon128.png"
-  },
+  "version": "2025.08.08",
+  "description": "🧠 Right-click any image → translate images",
   "permissions": [
-    "activeTab",
-    "storage"
+    "contextMenus",
+    "storage",
+    "activeTab"
   ],
   "host_permissions": [
-    "*://*/*"
+    "<all_urls>"
   ],
+  "background": { "service_worker": "background-service.js", "type": "module" },
   "action": {
-    "default_popup": "popup.html",
-    "default_title": "OCR Overlay"
-  },
-  "background": {
-    "service_worker": "background.js"
+    "default_popup": "popup/popup.html",
+    "default_icon": { "48": "icons/48.png" }
   },
   "content_scripts": [
     {
-      "matches": ["*://*/*"],
-      "js": ["content.js"]
+      "matches": ["<all_urls>"],
+      "js": ["content-service.js"],
+      "run_at": "document_idle"
     }
-  ]
+  ],
+  "icons": {
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  }
 }
