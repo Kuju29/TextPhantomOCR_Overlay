@@ -1,8 +1,24 @@
+## 📦 Versions
+
+### [v2.0.1](https://github.com/Kuju29/TextPhantomOCR_Overlay/tree/v2.0.1)
+🚀 **Easiest to use yet** – This version focuses on simplicity and user-friendliness, though it may contain bugs as much of the code was AI-generated. I can’t fully refine it like v1.0.1, but I’ll keep improving it until it can handle all possible errors.  
+
+If you prefer not to start the API via the `.exe` file, you can run it yourself:  
+1. Download the **`gcr-backend`** folder.  
+2. Host it on your own server.  
+3. Create a `.env` file and add:
+*(Leave it blank for basic browser support.)*  
+4. For best results, implement your own cookie storage service and put its URL here.
+
+### [v1.0.1](https://github.com/Kuju29/TextPhantomOCR_Overlay/tree/v1.0.1)
+⚖️ **Stable and simple**, but slightly harder to use compared to v2.0.1.
+
+---
+
 ## 🚀 Installation Guide
 
 You can install **TextPhantomOCR Overlay** in two ways:
 
----
 
 ### ✅ Method 1: Install Directly from GitHub
 
@@ -18,7 +34,6 @@ You can install **TextPhantomOCR Overlay** in two ways:
 
 🎥 **Watch a video tutorial:** [YouTube Installation Guide](https://www.youtube.com/watch?v=WQ7p7zsz_kc)
 
----
 
 ### ✅ Method 2: Install from Chrome Web Store
 
