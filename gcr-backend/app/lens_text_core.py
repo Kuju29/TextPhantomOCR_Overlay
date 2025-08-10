@@ -1,3 +1,4 @@
+
 import os, time, asyncio, base64, re, threading, hashlib, logging, shutil
 from io import BytesIO
 from typing import Any, Dict, List, Union
@@ -5,87 +6,15 @@ from urllib.parse import urlparse
 
 import httpx
 from PIL import Image
-from seleniumbase import Driver
-from selenium.common.exceptions import WebDriverException
 
-import platform as _platform
-from pathlib import Path as _Path
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options as ChromeOptions
+from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 CHROME_BINARY_PATH = os.getenv("CHROME_BINARY_PATH", "").strip() 
-
-def _possible_chrome_paths() -> list:
-    paths = []
-    if CHROME_BINARY_PATH:
-        paths.append(CHROME_BINARY_PATH)
-
-    here = _Path(__file__).resolve().parent
-    rels = [
-        "chrome-linux64/chrome",
-        "chrome-linux/chrome",
-        "chromium-linux64/chrome",
-        "chrome-win64/chrome.exe",
-        "chrome-win/chrome.exe",
-        "Chromium/chrome.exe",
-        "chrome-mac/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
-        "chrome-mac/Google Chrome.app/Contents/MacOS/Google Chrome",
-        "Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
-        "Google Chrome.app/Contents/MacOS/Google Chrome",
-    ]
-    for r in rels:
-        p = here / r
-        paths.append(str(p))
-
-    sysname = _platform.system().lower()
-    if "windows" in sysname:
-        userp = os.environ.get("LOCALAPPDATA", "")
-        progf = os.environ.get("PROGRAMFILES", r"C:\Program Files")
-        progx = os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
-        candidates = [
-            rf"{progf}\Google\Chrome\Application\chrome.exe",
-            rf"{progx}\Google\Chrome\Application\chrome.exe",
-            rf"{userp}\Google\Chrome\Application\chrome.exe",
-            rf"{progf}\Chromium\Application\chrome.exe",
-            rf"{progx}\Chromium\Application\chrome.exe",
-        ]
-        # WSL mounts
-        candidates += [
-            "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe",
-            "/mnt/c/Program Files (x86)/Google/Chrome/Application/chrome.exe",
-        ]
-        paths += candidates
-    elif "darwin" in sysname or "mac" in sysname:
-        candidates = [
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            "/Applications/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
-            str(_Path.home() / "Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
-        ]
-        paths += candidates
-    else:
-        # Linux
-        candidates = [
-            "/usr/bin/google-chrome",
-            "/usr/bin/google-chrome-stable",
-            "/usr/bin/chromium-browser",
-            "/usr/bin/chromium",
-            "/snap/bin/chromium",
-            "/app/bin/chrome",
-            "/opt/google/chrome/chrome",
-            "/usr/local/bin/google-chrome",
-            "/usr/local/bin/chromium",
-        ]
-        paths += candidates
-
-    try:
-        paths += list(_COMMON_CHROME_PATHS)
-    except Exception:
-        pass
-
-    seen = set()
-    uniq = []
-    for p in paths:
-        if p and p not in seen:
-            seen.add(p); uniq.append(p)
-    return uniq
 
 LOGGER = logging.getLogger("lens_text_core")
 if not LOGGER.handlers:
@@ -137,25 +66,47 @@ def _find_chrome_binary() -> str:
         "Chrome binary not found; set CHROME_BINARY env var or install Chrome/Chromium"
     )
 
+def _build_chrome(cookie_dict: Dict[str, str] | None = None):
+    bin_loc = _find_chrome_binary()
+    drv_path = os.getenv("CHROMEDRIVER", "/usr/bin/chromedriver")
+    opts = ChromeOptions()
+    opts.binary_location = bin_loc
+    for flag in CHROME_EXTRA_ARGS:
+        try:
+            opts.add_argument(flag)
+        except Exception:
+            pass
+    service = ChromeService(executable_path=drv_path)
+    drv = webdriver.Chrome(service=service, options=opts)
+    
+    drv.execute_cdp_cmd("Network.enable", {})
+    if cookie_dict:
+        for name, val in cookie_dict.items():
+            try:
+                drv.execute_cdp_cmd("Network.setCookie", {
+                    "name": name, "value": val,
+                    "domain": ".google.com", "path": "/", "secure": True
+                })
+            except Exception:
+                pass
+    return drv
+
 _cached_cookie, _cached_cookie_ts, _cookie_lock = None, 0.0, threading.Lock()
 _global_driver, _driver_last_use, _driver_lock  = None, 0.0, threading.Lock()
 
 def _grab_cookies_with_browser() -> Dict[str, Any]:
-    drv = Driver(uc=True, headless=True, incognito=True,
-                 binary_location=str(_find_chrome_binary()))
+    drv = _build_chrome()
     try:
         drv.get("https://lens.google.com/")
         jar = {
             c["name"]: c["value"]
             for c in drv.get_cookies()
-            if c["domain"].endswith(".google.com")
+            if c.get("domain","").endswith(".google.com") or c.get("domain","").endswith("google.com")
         }
         return {"cookies": jar, "_source": "browser"}
     finally:
-        try:
-            drv.quit()
-        except Exception:
-            pass
+        try: drv.quit()
+        except Exception: pass
 
 async def _cookie_header() -> str:
     global _cached_cookie, _cached_cookie_ts
@@ -208,57 +159,23 @@ def _sap_header(cookie_hdr: str) -> Dict[str, str]:
         "Authorization": f"SAPISIDHASH {ts}_{sig}",
     }
 
-
-def _create_driver(cookie_dict: Dict[str, str]) -> Driver:
-    LOGGER.info("▶️  starting headless Chrome")
-    drv = None
-
-    for cand in _possible_chrome_paths():
-        try:
-            if cand and os.path.exists(cand):
-                LOGGER.info("Trying Chrome at: %s", cand)
-                drv = Driver(uc=True, headless=True, incognito=True, binary_location=str(cand))
-                break
-        except Exception as e:
-            try:
-                drv.quit()
-            except Exception:
-                pass
-            drv = None
-
-    if drv is None:
-        try:
-            drv = Driver(uc=True, headless=True, incognito=True)
-        except Exception as e:
-            last_err = e
-            raise
-
+def _is_alive(drv) -> bool:
     try:
-        for flag in CHROME_EXTRA_ARGS:
-            drv.driver.options.add_argument(flag)
+        _ = drv.title
+        return True
     except Exception:
-        LOGGER.debug("could not append extra chrome args")
+        return False
 
-    drv.execute_cdp_cmd("Network.enable", {})
-    for name, val in cookie_dict.items():
-        drv.execute_cdp_cmd("Network.setCookie", {
-            "name": name, "value": val,
-            "domain": ".google.com", "path": "/", "secure": True
-        })
-    return drv
-
-def _is_alive(drv: Driver) -> bool:
-    try: _ = drv.title; return True
-    except Exception:   return False
-
-def _ensure_driver(cookie_dict: Dict[str, str]) -> Driver:
+def _ensure_driver(cookie_dict: Dict[str, str]):
     global _global_driver, _driver_last_use
     with _driver_lock:
         if _global_driver is None or not _is_alive(_global_driver):
             try:
-                if _global_driver: _global_driver.quit()
-            except Exception: pass
-            _global_driver = _create_driver(cookie_dict)
+                if _global_driver:
+                    _global_driver.quit()
+            except Exception:
+                pass
+            _global_driver = _build_chrome(cookie_dict)
         _driver_last_use = time.time()
         return _global_driver
 
@@ -272,7 +189,17 @@ def _driver_reaper():
             except Exception: pass
             _global_driver = None
 
-threading.Thread(target=_driver_reaper, daemon=True).start()
+_reaper_started = False
+def _ensure_reaper_started():
+    global _reaper_started
+    if _reaper_started:
+        return
+    try:
+        threading.Thread(target=_driver_reaper, daemon=True).start()
+        _reaper_started = True
+        LOGGER.debug("text driver reaper started")
+    except Exception as e:
+        LOGGER.warning("could not start text driver reaper: %s", e)
 
 def _parse_calc_value(calc: str, dim: float) -> float:
     m = re.search(r"calc\(([\d.]+)%\s*([+-])\s*([\d.]+)px\)", calc)
@@ -281,12 +208,9 @@ def _parse_calc_value(calc: str, dim: float) -> float:
     base = dim * pct / 100.0
     return base - off if op == "-" else base + off
 
-def _extract_boxes(drv: Driver, w: int, h: int) -> List[Dict[str, Any]]:
-    drv.wait_for_element_visible("div.lv6PAb", timeout=10)
-    nodes = drv.find_elements(
-        "xpath",
-        "//div[contains(@class,'lv6PAb') and @aria-label]"
-    )
+def _extract_boxes(drv, w: int, h: int) -> List[Dict[str, Any]]:
+    WebDriverWait(drv, 10).until(EC.visibility_of_element_located((By.CSS_SELECTOR, "div.lv6PAb")))
+    nodes = drv.find_elements(By.XPATH, "//div[contains(@class,'lv6PAb') and @aria-label]")
 
     out: List[Dict[str,Any]] = []
     for n in nodes:
@@ -379,6 +303,7 @@ def _merge_by_center_line(anns: List[Dict[str,Any]], m_x: int=10, m_y: int=15) -
     return merged
 
 async def translate_lens_text(src: Union[str, bytes, BytesIO]) -> Dict[str,Any]:
+    _ensure_reaper_started()
     if isinstance(src, (bytes,bytearray)):           img_bytes = bytes(src)
     elif isinstance(src, BytesIO):                   img_bytes = src.getvalue()
     elif isinstance(src, str):
@@ -402,7 +327,8 @@ async def translate_lens_text(src: Union[str, bytes, BytesIO]) -> Dict[str,Any]:
                     raise RuntimeError(f"fetch image ERROR {type(e).__name__}")
     else: raise TypeError("unsupported src type")
 
-    with Image.open(BytesIO(img_bytes)) as im:
+    from io import BytesIO as _B
+    with Image.open(_B(img_bytes)) as im:
         w, h = im.size
 
     ck = await _cookie_header()
@@ -417,8 +343,10 @@ async def translate_lens_text(src: Union[str, bytes, BytesIO]) -> Dict[str,Any]:
     loc = up.headers.get("location") or ""
     if not loc: raise RuntimeError("no redirect location")
 
-    cookie_dict = {k: v for k, v in (p.split("=", 1) for p in ck.split("; "))}
-    drv = _ensure_driver(cookie_dict)
+    cookie_dict = {k: v for k, v in (p.split("=", 1) for p in ck.split("; ") if "=" in p)}
+
+    loop = asyncio.get_running_loop()
+    drv = await loop.run_in_executor(None, lambda: _ensure_driver(cookie_dict))
 
     def _blocking() -> List[Dict[str, Any]]:
         nonlocal drv
@@ -426,7 +354,7 @@ async def translate_lens_text(src: Union[str, bytes, BytesIO]) -> Dict[str,Any]:
             try:
                 try:
                     drv.get(loc)
-                except WebDriverException:
+                except:
                     try:
                         drv.quit()
                     except Exception:
@@ -437,7 +365,6 @@ async def translate_lens_text(src: Union[str, bytes, BytesIO]) -> Dict[str,Any]:
             finally:
                 pass
 
-    loop = asyncio.get_running_loop()
     raw = await loop.run_in_executor(None, _blocking)
 
     merged  = _merge_by_center_line(raw)
@@ -451,11 +378,10 @@ async def translate_lens_text(src: Union[str, bytes, BytesIO]) -> Dict[str,Any]:
     }
 
 async def prewarm_driver():
-    """Warm up a Chrome session early to reduce cold-start latency."""
     try:
         cookie_hdr = await _cookie_header()
         cookie_dict = {k: v for k, v in (p.split("=", 1) for p in cookie_hdr.split("; ") if "=" in p)}
-        _ensure_driver(cookie_dict)
-        LOGGER.info("prewarm_driver: driver is ready")
+        _ = cookie_dict
+        LOGGER.info("prewarm_driver: cookies ready")
     except Exception as e:
         LOGGER.warning("prewarm_driver failed: %s", e)
