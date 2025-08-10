@@ -8,7 +8,7 @@ from pydantic import BaseModel, HttpUrl, root_validator, ValidationError
 from fastapi.encoders import jsonable_encoder
 
 from app.lens_images_core import translate_lens
-from app.lens_text_core   import translate_lens_text, prewarm_driver
+from app.lens_text_core   import translate_lens_text
 
 PORT              = int(os.getenv("PORT", 8080))
 MAX_WORKERS       = int(os.getenv("MAX_WORKERS", 8))
@@ -23,6 +23,25 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 log = logging.getLogger("ocr_ws")
+
+ENABLE_BACKGROUND_WORKERS = os.getenv("ENABLE_BACKGROUND_WORKERS", "0").strip().lower() in ("1","true","yes","on")
+
+workers_started: bool = False
+_workers_lock = asyncio.Lock()
+
+async def ensure_workers_started():
+    global workers_started
+    if workers_started:
+        return
+    async with _workers_lock:
+        if workers_started:
+            return
+        for _ in range(MAX_WORKERS_IMAGES):
+            asyncio.create_task(worker("lens_images", jobq_img))
+        for _ in range(MAX_WORKERS_TEXT):
+            asyncio.create_task(worker("lens_text", jobq_text))
+        workers_started = True
+        log.info("workers started on-demand")
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"])
@@ -95,6 +114,7 @@ async def health():
 
 @app.post("/translate")
 async def translate(job: Job):
+    await ensure_workers_started()
     if job.mode not in ("lens_images", "lens_text"):
         raise HTTPException(400, "unsupported mode")
     jid = uuid.uuid4().hex
@@ -118,6 +138,7 @@ async def poll(jid: str):
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
+    await ensure_workers_started()
     try:
         while True:
             raw = await ws.receive_json()
@@ -131,7 +152,7 @@ async def ws_endpoint(ws: WebSocket):
                     jid = msg.id or uuid.uuid4().hex
                     pending_ws[jid] = ws
                     await ws.send_json(jsonable_encoder({"type": "ack", "id": jid}))
-                    # ใส่คิวตามโหมด
+                    
                     if msg.payload.mode == "lens_images":
                         await jobq_img.put((jid, msg.payload))
                     elif msg.payload.mode == "lens_text":
@@ -210,12 +231,13 @@ async def cleanup():
 
 @app.on_event("startup")
 async def startup():
-    for _ in range(MAX_WORKERS_IMAGES):
-        asyncio.create_task(worker("lens_images", jobq_img))
-    for _ in range(MAX_WORKERS_TEXT):
-        asyncio.create_task(worker("lens_text", jobq_text))
-    if os.getenv("PREWARM_DRIVER", "0") == "1":
-        asyncio.create_task(prewarm_driver())
+    if ENABLE_BACKGROUND_WORKERS:
+        for _ in range(MAX_WORKERS_IMAGES):
+            asyncio.create_task(worker("lens_images", jobq_img))
+        for _ in range(MAX_WORKERS_TEXT):
+            asyncio.create_task(worker("lens_text", jobq_text))
     asyncio.create_task(cleanup())
-    log.info("startup OK – %d image workers, %d text workers, TTL=%ds",
-             MAX_WORKERS_IMAGES, MAX_WORKERS_TEXT, RESULTS_TTL)
+    log.info(
+        "startup OK – %d image workers, %d text workers, TTL=%ds (workers_enabled=%s)",
+        MAX_WORKERS_IMAGES, MAX_WORKERS_TEXT, RESULTS_TTL, ENABLE_BACKGROUND_WORKERS
+    )
