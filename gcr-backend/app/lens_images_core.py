@@ -1,8 +1,11 @@
+
 import os, json, time, hashlib, httpx, base64, re, asyncio, threading, shutil, logging
 from typing import Dict, Any
 from urllib.parse import urlparse
 
-from seleniumbase import Driver
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options as ChromeOptions
+from selenium.webdriver.chrome.service import Service as ChromeService
 
 LOGGER = logging.getLogger("lens_images_core")
 if not LOGGER.handlers:
@@ -43,11 +46,21 @@ def _find_chrome_binary() -> str | None:
         pass
     return None
 
-CHROME_EXTRA_ARGS = os.getenv(
-    "CHROME_EXTRA_ARGS",
-    "--disable-gpu --no-sandbox --disable-dev-shm-usage "
-    "--window-size=1920,1080 --headless=new",
-).split()
+def _build_chrome() -> webdriver.Chrome:
+    bin_loc = _find_chrome_binary() or "/usr/bin/chromium"
+    drv_path = os.getenv("CHROMEDRIVER", "/usr/bin/chromedriver")
+    opts = ChromeOptions()
+    opts.binary_location = bin_loc
+    
+    extra = os.getenv(
+        "CHROME_EXTRA_ARGS",
+        "--disable-gpu --no-sandbox --disable-dev-shm-usage --window-size=1920,1080 --headless=new",
+    ).split()
+    for a in extra:
+        if a:
+            opts.add_argument(a)
+    service = ChromeService(executable_path=drv_path)
+    return webdriver.Chrome(service=service, options=opts)
 
 _cached_cookie_obj: Dict[str, Any] | None = None
 _cached_cookie_fetched_at: float = 0.0
@@ -60,25 +73,12 @@ _driver_lock = threading.Lock()
 _global_driver = None
 _driver_last_use = 0.0
 
-def _create_driver_for_cookies() -> Driver:
-    bin_loc = _find_chrome_binary()
-    LOGGER.info("▶️  starting headless Chrome for cookies (binary=%s)", bin_loc or "system default")
-    drv = Driver(uc=True, headless=True, incognito=True, binary_location=bin_loc) if bin_loc else Driver(uc=True, headless=True, incognito=True)
-    try:
-        for flag in CHROME_EXTRA_ARGS:
-            try:
-                drv.driver.options.add_argument(flag)
-            except Exception:
-                pass
-    except Exception:
-        pass
-    return drv
-
-def _ensure_cookie_driver() -> Driver:
+def _ensure_cookie_driver():
     global _global_driver, _driver_last_use
     with _driver_lock:
         if _global_driver is None:
-            _global_driver = _create_driver_for_cookies()
+            LOGGER.info("▶️  starting headless Chrome for cookies")
+            _global_driver = _build_chrome()
         _driver_last_use = time.time()
         return _global_driver
 
@@ -104,16 +104,34 @@ def _driver_reaper_loop():
         except Exception:
             pass
 
-threading.Thread(target=_driver_reaper_loop, daemon=True).start()
+_reaper_started = False
+def _ensure_reaper_started():
+    global _reaper_started
+    if _reaper_started:
+        return
+    try:
+        threading.Thread(target=_driver_reaper_loop, daemon=True).start()
+        _reaper_started = True
+        LOGGER.debug("cookie driver reaper started")
+    except Exception as e:
+        LOGGER.warning("could not start cookie driver reaper: %s", e)
+
 def _grab_cookies_with_browser() -> Dict[str, Any]:
     drv = _ensure_cookie_driver()
     with _driver_lock:
         drv.get("https://lens.google.com/")
-        jar = {c["name"]: c["value"] for c in drv.get_cookies() if c["domain"].endswith(".google.com")}
+        jar = {}
+        for c in drv.get_cookies():
+            dom = c.get("domain") or ""
+            if dom.endswith(".google.com") or dom.endswith("google.com"):
+                jar[c["name"]] = c["value"]
     return {"cookies": jar, "_source": "browser"}
+
 async def _cookie_header() -> str:
     global _cached_cookie_obj, _cached_cookie_fetched_at
     now = time.time()
+
+    _ensure_reaper_started()
 
     def extract_obj(obj):
         if isinstance(obj, dict):
