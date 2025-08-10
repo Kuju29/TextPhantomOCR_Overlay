@@ -1,49 +1,46 @@
-## 📦 Versions
+# ✨ TextPhantomOCR Overlay
 
-### [v2.0.1](https://github.com/Kuju29/TextPhantomOCR_Overlay/tree/v2.0.1)
-🚀 **Easiest to use yet** – This version focuses on simplicity and user-friendliness, though it may contain bugs as much of the code was AI-generated. I can’t fully refine it like v1.0.1, but I’ll keep improving it until it can handle all possible errors.  
+## 📥 Download & Install Options
 
-If you prefer not to start the API via the `.exe` file, you can run it yourself:  
-1. Download the **`gcr-backend`** folder.  
-2. Host it on your own server.  
-3. Create a `.env` file and add:
-*(Leave it blank for basic browser support.)*  
-4. For best results, implement your own cookie storage service and put its URL here.
+| Version  | Extension Download | API Download | Note |
+|----------|-------------------|--------------|------|
+| **[v2.0.1](https://github.com/Kuju29/TextPhantomOCR_Overlay/tree/v2.0.1)** | [![Install Extension](https://img.shields.io/badge/Download%20ZIP%20from-Source%20Code-yellow?logo=github)](https://github.com/Kuju29/TextPhantomOCR_Overlay/archive/refs/tags/v2.0.1.zip) | [![Download API](https://img.shields.io/badge/Download-API%20v2.0.1-blue?logo=github)](https://github.com/Kuju29/TextPhantomOCR_Overlay/releases/tag/v2.0.1) | Manual install only |
+| **[v1.0.1](https://github.com/Kuju29/TextPhantomOCR_Overlay/tree/v1.0.1)** | [![Install Extension](https://img.shields.io/badge/Download%20ZIP%20from-Source%20Code-yellow?logo=github)](https://github.com/Kuju29/TextPhantomOCR_Overlay/archive/refs/tags/v1.0.1.zip) | [![Download API](https://img.shields.io/badge/Download-API%20v1.0.1-blue?logo=github)](https://github.com/Kuju29/TextPhantomOCR_Overlay/releases/tag/v1.0.1) | Manual install |
+| [Chrome Web Store](https://chromewebstore.google.com/detail/cjbaepobgmickhgebgagklfcfacbbpem?utm_source=item-share-cb) | [![Install Extension](https://img.shields.io/badge/Install%20from-Chrome%20Web%20Store-blue?logo=googlechrome)](https://chromewebstore.google.com/detail/cjbaepobgmickhgebgagklfcfacbbpem?utm_source=item-share-cb) | [![Download API](https://img.shields.io/badge/Download-API%20v1.0.1-blue?logo=github)](https://github.com/Kuju29/TextPhantomOCR_Overlay/releases/tag/v1.0.1) | Easiest option, but still requires API |
 
-### [v1.0.1](https://github.com/Kuju29/TextPhantomOCR_Overlay/tree/v1.0.1)
-⚖️ **Stable and simple**, but slightly harder to use compared to v2.0.1.
+## 🧩 1. Extension Installation
 
----
+### **Option – Chrome Web Store (API v1.0.1 required)**
+1. Install from [Chrome Web Store](https://chromewebstore.google.com/detail/cjbaepobgmickhgebgagklfcfacbbpem?utm_source=item-share-cb).  
 
-## 🚀 Installation Guide
+### **Option – Manual Install**
+1. Download and extract the **Source Code** for your version.  
+2. Open Chrome → Go to `chrome://extensions/`.  
+3. Enable **Developer Mode** (top right).  
+4. Click **Load unpacked**.  
+5. Select the extracted folder.  
 
-You can install **TextPhantomOCR Overlay** in two ways:
+## 🚀 2. Start the API
 
+1. Download the `.exe` **matching your extension version** from the table above.  
+2. Run the API program.  
+3. Click **Start API**.  
 
-### ✅ Method 1: Install Directly from GitHub
+## 🖱️ 3. Getting Started with the Extension
 
-1. Download the extension source code from the [GitHub TextPhantomOCR_Overlay page](https://github.com/Kuju29/TextPhantomOCR_Overlay/archive/refs/heads/main.zip).
-2. Unzip the downloaded file.
-3. Open Chrome and go to: `chrome://extensions/`
-4. Enable **Developer mode** (top right toggle switch).
-5. Click **Load unpacked** and select the unzipped extension folder.
-6. The extension should now appear in your browser.
+- **For v1.0.1 (Chrome Web Store or manual install)**  
+  - Navigate to the page you want to translate.  
+  - Open the extension **UI** and click **Start**.  
 
-> **Important:**  
-> Download the required `.exe` file from the [GitHub release page](https://github.com/Kuju29/TextPhantomOCR_Overlay/releases/tag/v1.0.0) to enable OCR processing.
+- **For v2.0.1 (Manual install)**  
+  - Navigate to the page you want to translate.  
+  - **Right-click** anywhere → choose **🔍 Translate...** from the context menu.   
 
-🎥 **Watch a video tutorial:** [YouTube Installation Guide](https://www.youtube.com/watch?v=WQ7p7zsz_kc)
+## 🌐 Using a Custom API (v2.0.1)
 
-
-### ✅ Method 2: Install from Chrome Web Store
-
-- Install directly from the Chrome Web Store:  
-  [➡️ TextPhantomOCR Overlay on Chrome Web Store](https://chromewebstore.google.com/detail/cjbaepobgmickhgebgagklfcfacbbpem?utm_source=item-share-cb)
-
-> **Note:**  
-> Even if you install via the Chrome Web Store, you still need to download the required `.exe` file from the [GitHub release page](https://github.com/Kuju29/TextPhantomOCR_Overlay/releases) to enable OCR processing.
-
----
+You can bypass the `.exe` API and run it online via **gcr-backend**:
+- Configure the extension to use your own API endpoint in the settings.
+- This allows using the extension without running the local `.exe` program.
 
 ## 🖼️ DEMO / UI PREVIEW
 
