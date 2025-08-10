@@ -18,6 +18,9 @@ function startConnectivityLoop() { /* disabled: no background polling */ }
 
 const HEALTH_TIMEOUT_MS = 1500;
 const HEALTH_TTL_MS     = 5000; 
+const PREFLIGHT_TIMEOUT_MS = 4000;
+const WS_OPEN_TIMEOUT_MS   = 10000;
+const WS_RETRIES           = 2;
 let   MAX_CONCURRENCY   = 10;
 
 let ws           = null;
@@ -133,7 +136,7 @@ function withTimeout(promise, ms, label = "op") {
 
 let wsPromise = null;
 
-async function preflightWs(base, timeoutMs = 350) {
+async function preflightWs(base, timeoutMs = PREFLIGHT_TIMEOUT_MS) {
   const tryOnce = async (url, method="GET") => {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -149,7 +152,7 @@ async function preflightWs(base, timeoutMs = 350) {
   
   const ok1 = await tryOnce(base.replace(/\/$/, "") + "/health", "GET");
   if (ok1) return true;
-  const ok2 = await tryOnce(base, "HEAD");
+  const ok2 = await tryOnce(base.replace(/\/$/, "") + "/health", "HEAD");
   return ok2;
 }
 
@@ -158,7 +161,7 @@ async function connectWebSocketOnce() {
   const base  = await getApiBase();
   const wsUrl = toWs(base);
   if (!wsUrl) { setWsStatus("idle"); return false; }
-  const reachable = await preflightWs(base, 350);
+  const reachable = await preflightWs(base, PREFLIGHT_TIMEOUT_MS);
   if (!reachable) { setWsStatus("offline"); evWarn("ws.preflight.fail", { base }); return false; }
 
   if (ws &&
@@ -175,8 +178,8 @@ async function connectWebSocketOnce() {
   }
 
   wsPromise = (async () => {
-    const TIMEOUT_MS = 2500;
-    const RETRIES = 1;
+    const TIMEOUT_MS = WS_OPEN_TIMEOUT_MS;
+    const RETRIES = WS_RETRIES;
     let lastErr = null;
 
     for (let attempt = 0; attempt <= RETRIES; attempt++) {
@@ -285,10 +288,15 @@ async function processJob(payload, tabId) {
   if (payload?.metadata?.image_id) {
     pendingByImage.set(payload.metadata.image_id, { imgUrl: payload.src, tabId, metadata: payload.metadata });
   }
-  if (!wsReady || !ws || ws.readyState !== WebSocket.OPEN) {
+  
+if (!wsReady || !ws || ws.readyState !== WebSocket.OPEN) {
+  const connected = await connectWebSocketOnce();
+  if (!connected) {
     const jobId = crypto.randomUUID();
-    return failJobImmediately(tabId, jobId, payload?.src || null, "Server is offline. Please try again later.");
+    return failJobImmediately(tabId, jobId, payload?.src || null, "Server is offline or waking up. Please try again in a moment.");
   }
+}
+
   const jobId = crypto.randomUUID();
   pendingByJob.set(jobId, { imgUrl: payload.src, tabId, metadata: payload.metadata, startedAt: Date.now(), batchId: currentBatchId });
   try {
