@@ -118,7 +118,6 @@
     };
   }
 
-  // ===== NEW: image discovery improvements =====
   function getBestImgUrl(img) {
     return (
       img.currentSrc ||
