@@ -36,11 +36,21 @@
   - Navigate to the page you want to translate.  
   - **Right-click** anywhere → choose **🔍 Translate...** from the context menu.   
 
-## 🌐 Using a Custom API (v2.0.1)
+## 🌐 Using the API on Hugging Face (v2.0.1)
 
-You can bypass the `.exe` API and run it online via **gcr-backend**:
-- Configure the extension to use your own API endpoint in the settings.
-- This allows using the extension without running the local `.exe` program.
+If you don’t want to use the `.exe` for API online, you can try the temporary API with these steps:
+
+1. Go to: [https://huggingface.co/spaces/plan291037/api-ocr-test](https://huggingface.co/spaces/plan291037/api-ocr-test)
+2. Click the **three dots** in the top-right and select **Duplicate this Space**.
+3. The build will start automatically — wait until you see **Running**.
+4. Click the **three dots** again and choose **Embed this Space**.
+5. Copy the link and use it in your API extension.
+
+**Notes:**
+
+* If unused, the Space will shut down automatically within 48 hours.
+* To stop it manually, go to **Settings** and click the small **Pause Space** link.
+* This API works only in **images** mode.
 
 ## 🖼️ DEMO / UI PREVIEW
 
