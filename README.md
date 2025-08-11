@@ -40,7 +40,7 @@
 
 If you don’t want to use the `.exe` for API online, you can try the temporary API with these steps:
 
-1. Go to: [https://huggingface.co/spaces/plan291037/api-ocr-test](https://huggingface.co/spaces/plan291037/api-ocr-test)
+1. Go to: [https://huggingface.co/spaces/plan291037/api-ocr-test/tree/main](https://huggingface.co/spaces/plan291037/api-ocr-test/tree/main)
 2. Click the **three dots** in the top-right and select **Duplicate this Space**.
 3. The build will start automatically — wait until you see **Running**.
 4. Click the **three dots** again and choose **Embed this Space**.
