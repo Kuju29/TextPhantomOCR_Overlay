@@ -1,5 +1,5 @@
 
-import os, time, asyncio, base64, re, threading, hashlib, logging, shutil
+import os, time, asyncio, base64, re, threading, hashlib, logging
 from io import BytesIO
 from typing import Any, Dict, List, Union
 from urllib.parse import urlparse
@@ -7,12 +7,7 @@ from urllib.parse import urlparse
 import httpx
 from PIL import Image
 
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options as ChromeOptions
-from selenium.webdriver.chrome.service import Service as ChromeService
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+from seleniumbase import Driver
 
 CHROME_BINARY_PATH = os.getenv("CHROME_BINARY_PATH", "").strip() 
 
@@ -32,58 +27,24 @@ CHROME_EXTRA_ARGS = os.getenv(
     "--window-size=1920,1080 --headless=new",
 ).split()
 
-_CACHE_TTL    = 300  
-_IDLE_TIMEOUT = int(os.getenv("CHROME_IDLE_SECONDS", "60"))
+_CACHE_TTL    = 600  
 _BROWSER_TTL  = 900  
-
-_COMMON_CHROME_PATHS = [
-    # Linux
-    "/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser",
-    "/snap/bin/chromium",
-    "/opt/google/chrome/google-chrome",
-    # macOS
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    "/Applications/Chromium.app/Contents/MacOS/Chromium",
-    # Windows
-    r"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-    r"C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-]
-
-def _find_chrome_binary() -> str:
-    if (env := os.getenv("CHROME_BINARY")):
-        return env
-
-    for cmd in ("google-chrome", "chromium-browser", "chromium", "chrome"):
-        path = shutil.which(cmd)
-        if path:
-            return path
-
-    for path in _COMMON_CHROME_PATHS:
-        if os.path.exists(path):
-            return path
-
-    raise RuntimeError(
-        "Chrome binary not found; set CHROME_BINARY env var or install Chrome/Chromium"
-    )
+_IDLE_TIMEOUT = int(os.getenv("CHROME_IDLE_SECONDS", "5"))
 
 def _build_chrome(cookie_dict: Dict[str, str] | None = None):
-    bin_loc = _find_chrome_binary()
-    drv_path = os.getenv("CHROMEDRIVER", "/usr/bin/chromedriver")
-    opts = ChromeOptions()
-    opts.binary_location = bin_loc
-    for flag in CHROME_EXTRA_ARGS:
-        try:
-            opts.add_argument(flag)
-        except Exception:
-            pass
-    service = ChromeService(executable_path=drv_path)
-    drv = webdriver.Chrome(service=service, options=opts)
+    drv = Driver(
+        browser="chrome",
+        uc=True, 
+        headless=True, 
+        incognito=True
+    )
     
-    drv.execute_cdp_cmd("Network.enable", {})
+    drv.get("https://google.com/favicon.ico")
+
     if cookie_dict:
         for name, val in cookie_dict.items():
             try:
-                drv.execute_cdp_cmd("Network.setCookie", {
+                drv.add_cookie({
                     "name": name, "value": val,
                     "domain": ".google.com", "path": "/", "secure": True
                 })
@@ -209,8 +170,8 @@ def _parse_calc_value(calc: str, dim: float) -> float:
     return base - off if op == "-" else base + off
 
 def _extract_boxes(drv, w: int, h: int) -> List[Dict[str, Any]]:
-    WebDriverWait(drv, 10).until(EC.visibility_of_element_located((By.CSS_SELECTOR, "div.lv6PAb")))
-    nodes = drv.find_elements(By.XPATH, "//div[contains(@class,'lv6PAb') and @aria-label]")
+    drv.wait_for_element_visible("div.lv6PAb", timeout=10)
+    nodes = drv.find_elements("xpath", "//div[contains(@class, 'lv6PAb') and @aria-label]")
 
     out: List[Dict[str,Any]] = []
     for n in nodes:
