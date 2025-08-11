@@ -36,7 +36,7 @@
   - Navigate to the page you want to translate.  
   - **Right-click** anywhere → choose **🔍 Translate...** from the context menu.   
 
-## 🌐 Using the API on Hugging Face (v2.0.1)
+## 🌐 Using the API on Hugging Face (Online API v2.0.1 required)
 
 If you don’t want to use the `.exe` for API online, you can try the temporary API with these steps:
 
