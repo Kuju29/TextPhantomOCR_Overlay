@@ -1,11 +1,11 @@
-
-import os, json, time, hashlib, httpx, base64, re, asyncio, threading, shutil, logging
+import os, json, time, hashlib, httpx, base64, re, asyncio, threading, shutil, logging, atexit, tempfile, uuid
 from typing import Dict, Any
 from urllib.parse import urlparse
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options as ChromeOptions
 from selenium.webdriver.chrome.service import Service as ChromeService
+from selenium.common.exceptions import SessionNotCreatedException
 
 LOGGER = logging.getLogger("lens_images_core")
 if not LOGGER.handlers:
@@ -17,41 +17,38 @@ if not LOGGER.handlers:
 COOKIE_JSON_URL = os.getenv("COOKIE_JSON_URL", "")
 UA = "Mozilla/5.0 (Lens OCR Images)"
 
-_COMMON_CHROME_PATHS = [
-    # Linux
-    "/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser",
-    "/snap/bin/chromium",
-    "/opt/google/chrome/google-chrome",
-    # macOS
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    "/Applications/Chromium.app/Contents/MacOS/Chromium",
-    # Windows
-    r"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-    r"C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
-]
+_PROFILE_DIRS = []
 
-def _find_chrome_binary() -> str | None:
-    env = os.getenv("CHROME_BINARY")
-    if env and shutil.which(env):
-        return env
-    for p in _COMMON_CHROME_PATHS:
-        if os.path.isfile(p) and os.access(p, os.X_OK):
-            return p
-    try:
-        import subprocess, shlex
-        out = subprocess.check_output(shlex.split("which google-chrome"), stderr=subprocess.DEVNULL).decode().strip()
-        if out:
-            return out
-    except Exception:
-        pass
-    return None
+_cached_cookie_obj: Dict[str, Any] | None = None
+_cached_cookie_fetched_at: float = 0.0
+_cookie_lock = threading.Lock()
+_driver_lock = threading.Lock()
+_global_driver = None
+_driver_last_use = 0.0
+
+_CACHE_TTL = 600
+_BROWSER_TTL = 900
+_IDLE_TIMEOUT = int(os.getenv("CHROME_IDLE_SECONDS", "5"))
+
+def _mk_profile_dir() -> str:
+    base = os.getenv("CHROME_PROFILE_BASE", tempfile.gettempdir())
+    p = os.path.join(base, f"chrome-profile-{os.getpid()}-{threading.get_ident()}-{uuid.uuid4().hex}")
+    os.makedirs(p, exist_ok=True)
+    _PROFILE_DIRS.append(p)
+    return p
+
+def _cleanup_profiles():
+    for p in _PROFILE_DIRS:
+        try:
+            shutil.rmtree(p, ignore_errors=True)
+        except Exception:
+            pass
+
+atexit.register(_cleanup_profiles)
 
 def _build_chrome() -> webdriver.Chrome:
-    bin_loc = _find_chrome_binary() or "/usr/bin/chromium"
-    drv_path = os.getenv("CHROMEDRIVER", "/usr/bin/chromedriver")
     opts = ChromeOptions()
-    opts.binary_location = bin_loc
-    
+
     extra = os.getenv(
         "CHROME_EXTRA_ARGS",
         "--disable-gpu --no-sandbox --disable-dev-shm-usage --window-size=1920,1080 --headless=new",
@@ -59,19 +56,22 @@ def _build_chrome() -> webdriver.Chrome:
     for a in extra:
         if a:
             opts.add_argument(a)
-    service = ChromeService(executable_path=drv_path)
-    return webdriver.Chrome(service=service, options=opts)
 
-_cached_cookie_obj: Dict[str, Any] | None = None
-_cached_cookie_fetched_at: float = 0.0
-_CACHE_TTL = 300
-_BROWSER_TTL = 900
-_cookie_lock = threading.Lock()
+    profile_dir = _mk_profile_dir()
+    opts.add_argument(f"--user-data-dir={profile_dir}")
+    opts.add_argument("--profile-directory=Default")
 
-_IDLE_TIMEOUT = int(os.getenv("CHROME_IDLE_SECONDS", "60"))
-_driver_lock = threading.Lock()
-_global_driver = None
-_driver_last_use = 0.0
+    drv_path = os.getenv("CHROMEDRIVER")
+    try:
+        if drv_path and os.path.exists(drv_path):
+            return webdriver.Chrome(service=ChromeService(executable_path=drv_path), options=opts)
+        return webdriver.Chrome(options=opts)
+    except SessionNotCreatedException as e:
+        LOGGER.warning("SessionNotCreated: %s; retry with a fresh profile dir", e)
+        profile_dir2 = _mk_profile_dir()
+        opts.arguments = [a for a in opts.arguments if not a.startswith("--user-data-dir=")]
+        opts.add_argument(f"--user-data-dir={profile_dir2}")
+        return webdriver.Chrome(options=opts)
 
 def _ensure_cookie_driver():
     global _global_driver, _driver_last_use
