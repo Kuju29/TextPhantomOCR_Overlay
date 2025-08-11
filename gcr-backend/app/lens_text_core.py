@@ -29,7 +29,7 @@ CHROME_EXTRA_ARGS = os.getenv(
 
 _CACHE_TTL    = 600  
 _BROWSER_TTL  = 900  
-_IDLE_TIMEOUT = int(os.getenv("CHROME_IDLE_SECONDS", "5"))
+_IDLE_TIMEOUT = int(os.getenv("CHROME_IDLE_SECONDS", "60"))
 
 def _build_chrome(cookie_dict: Dict[str, str] | None = None):
     drv = Driver(
