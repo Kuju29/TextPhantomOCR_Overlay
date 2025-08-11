@@ -1,4 +1,4 @@
-# ✨ TextPhantomOCR Overlay
+# ✨ TextPhantomOCR Overlay [![Installation Guide](https://img.shields.io/badge/YouTube-Installation-red?logo=youtube)](https://www.youtube.com/watch?v=WQ7p7zsz_kc) [![Online API Guide](https://img.shields.io/badge/YouTube-Online%20API-blue?logo=youtube)](https://www.youtube.com/watch?v=NMHwaI8mn4c)
 
 ## 📥 Download & Install Options
 
