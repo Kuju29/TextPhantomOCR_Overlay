@@ -28,7 +28,7 @@ _driver_last_use = 0.0
 
 _CACHE_TTL = 600
 _BROWSER_TTL = 900
-_IDLE_TIMEOUT = int(os.getenv("CHROME_IDLE_SECONDS", "60"))
+_IDLE_TIMEOUT = int(os.getenv("CHROME_IDLE_SECONDS", "10"))
 
 def _mk_profile_dir() -> str:
     base = os.getenv("CHROME_PROFILE_BASE", tempfile.gettempdir())
