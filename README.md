@@ -7,11 +7,11 @@
 |----------|-------------------|--------------|------|
 | **[v2.0.1](https://github.com/Kuju29/TextPhantomOCR_Overlay/tree/v2.0.1)** | [![Install Extension](https://img.shields.io/badge/Download%20ZIP%20from-Source%20Code-yellow?logo=github)](https://github.com/Kuju29/TextPhantomOCR_Overlay/archive/refs/tags/v2.0.1.zip) | [![Download API](https://img.shields.io/badge/Download-API%20v2.0.1-blue?logo=github)](https://github.com/Kuju29/TextPhantomOCR_Overlay/releases/tag/v2.0.1) | Manual install only |
 | **[v1.0.1](https://github.com/Kuju29/TextPhantomOCR_Overlay/tree/v1.0.1)** | [![Install Extension](https://img.shields.io/badge/Download%20ZIP%20from-Source%20Code-yellow?logo=github)](https://github.com/Kuju29/TextPhantomOCR_Overlay/archive/refs/tags/v1.0.1.zip) | [![Download API](https://img.shields.io/badge/Download-API%20v1.0.1-blue?logo=github)](https://github.com/Kuju29/TextPhantomOCR_Overlay/releases/tag/v1.0.1) | Manual install |
-| [Chrome Web Store](https://chromewebstore.google.com/detail/cjbaepobgmickhgebgagklfcfacbbpem?utm_source=item-share-cb) | [![Install Extension](https://img.shields.io/badge/Install%20from-Chrome%20Web%20Store-blue?logo=googlechrome)](https://chromewebstore.google.com/detail/cjbaepobgmickhgebgagklfcfacbbpem?utm_source=item-share-cb) | [![Download API](https://img.shields.io/badge/Download-API%20v1.0.1-blue?logo=github)](https://github.com/Kuju29/TextPhantomOCR_Overlay/releases/tag/v1.0.1) | Easiest option, but still requires API |
+| [Chrome Web Store](https://chromewebstore.google.com/detail/cjbaepobgmickhgebgagklfcfacbbpem?utm_source=item-share-cb) | [![Install Extension](https://img.shields.io/badge/Install%20from-Chrome%20Web%20Store-blue?logo=googlechrome)](https://chromewebstore.google.com/detail/cjbaepobgmickhgebgagklfcfacbbpem?utm_source=item-share-cb) | [![Download API](https://img.shields.io/badge/Download-API%20v2.0.1-blue?logo=github)](https://github.com/Kuju29/TextPhantomOCR_Overlay/releases/tag/v2.0.1) | Easiest option, but still requires API |
 
 ## 🧩 1. Extension Installation
 
-### **Option – Chrome Web Store (API v1.0.1 required)**
+### **Option – Chrome Web Store (API v2.0.1 required)**
 1. Install from [Chrome Web Store](https://chromewebstore.google.com/detail/cjbaepobgmickhgebgagklfcfacbbpem?utm_source=item-share-cb).  
 
 ### **Option – Manual Install**
@@ -37,7 +37,7 @@
   - Navigate to the page you want to translate.  
   - **Right-click** anywhere → choose **🔍 Translate...** from the context menu.   
 
-## 🌐 Using the API on Hugging Face (Online API v2.0.1 required)
+## 🌐 Using the API on Hugging Face (Run API for v2.0.1)
 
 If you don’t want to use the `.exe` for API online, you can try the temporary API with these steps:
 
