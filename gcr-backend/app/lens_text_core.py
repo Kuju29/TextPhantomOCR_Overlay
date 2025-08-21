@@ -29,7 +29,7 @@ CHROME_EXTRA_ARGS = os.getenv(
 
 _CACHE_TTL    = 600  
 _BROWSER_TTL  = 900  
-_IDLE_TIMEOUT = int(os.getenv("CHROME_IDLE_SECONDS", "60"))
+_IDLE_TIMEOUT = int(os.getenv("CHROME_IDLE_SECONDS", "10"))
 
 def _build_chrome(cookie_dict: Dict[str, str] | None = None):
     drv = Driver(
@@ -54,6 +54,7 @@ def _build_chrome(cookie_dict: Dict[str, str] | None = None):
 
 _cached_cookie, _cached_cookie_ts, _cookie_lock = None, 0.0, threading.Lock()
 _global_driver, _driver_last_use, _driver_lock  = None, 0.0, threading.Lock()
+_inflight = 0
 
 def _grab_cookies_with_browser() -> Dict[str, Any]:
     drv = _build_chrome()
@@ -140,16 +141,35 @@ def _ensure_driver(cookie_dict: Dict[str, str]):
         _driver_last_use = time.time()
         return _global_driver
 
+from contextlib import contextmanager
+
+@contextmanager
+def driver_busy():
+    global _inflight, _driver_last_use
+    with _driver_lock:
+        _inflight += 1
+        _driver_last_use = time.time()
+    try:
+        yield
+    finally:
+        with _driver_lock:
+            _driver_last_use = time.time()
+            _inflight -= 1
+
 def _driver_reaper():
-    global _global_driver
+    global _global_driver, _driver_last_use, _inflight
     while True:
         time.sleep(1)
-        if _global_driver and (time.time() - _driver_last_use) > _IDLE_TIMEOUT:
-            LOGGER.info("♻️  quitting idle driver")
-            try: _global_driver.quit()
-            except Exception: pass
-            _global_driver = None
-
+        with _driver_lock:
+            if _global_driver:
+                idle_for = time.time() - _driver_last_use
+                if _inflight == 0 and idle_for > _IDLE_TIMEOUT:
+                    LOGGER.info("♻️  quitting idle driver")
+                    try:
+                        _global_driver.quit()
+                    except Exception:
+                        pass
+                    _global_driver = None
 _reaper_started = False
 def _ensure_reaper_started():
     global _reaper_started
@@ -307,25 +327,27 @@ async def translate_lens_text(src: Union[str, bytes, BytesIO]) -> Dict[str,Any]:
     cookie_dict = {k: v for k, v in (p.split("=", 1) for p in ck.split("; ") if "=" in p)}
 
     loop = asyncio.get_running_loop()
-    drv = await loop.run_in_executor(None, lambda: _ensure_driver(cookie_dict))
+    with driver_busy():
 
-    def _blocking() -> List[Dict[str, Any]]:
-        nonlocal drv
-        with _driver_lock:
-            try:
+        drv = await loop.run_in_executor(None, lambda: _ensure_driver(cookie_dict))
+    
+        def _blocking() -> List[Dict[str, Any]]:
+            nonlocal drv
+            with _driver_lock:
                 try:
-                    drv.get(loc)
-                except:
                     try:
-                        drv.quit()
-                    except Exception:
-                        pass
-                    drv = _ensure_driver(cookie_dict)
-                    drv.get(loc)
-                return _extract_boxes(drv, w, h)
-            finally:
-                pass
-
+                        drv.get(loc)
+                    except:
+                        try:
+                            drv.quit()
+                        except Exception:
+                            pass
+                        drv = _ensure_driver(cookie_dict)
+                        drv.get(loc)
+                    return _extract_boxes(drv, w, h)
+                finally:
+                    pass
+    
     raw = await loop.run_in_executor(None, _blocking)
 
     merged  = _merge_by_center_line(raw)
