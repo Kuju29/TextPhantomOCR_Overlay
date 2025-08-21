@@ -16,11 +16,13 @@ let connectTimer = null;
 
 function startConnectivityLoop() { /* disabled: no background polling */ }
 
-const HEALTH_TIMEOUT_MS = 1500;
+const HEALTH_TIMEOUT_MS = 5000;
 const HEALTH_TTL_MS     = 5000; 
-const PREFLIGHT_TIMEOUT_MS = 4000;
-const WS_OPEN_TIMEOUT_MS   = 10000;
-const WS_RETRIES           = 2;
+const PREFLIGHT_TIMEOUT_MS = 10000;
+const WS_OPEN_TIMEOUT_MS   = 20000;
+const WS_RETRIES           = 6;
+const MAX_FIRST_TRY_RETRIES = 2;
+const FIRST_TRY_GAP_MS      = 3000;   
 let   MAX_CONCURRENCY   = 10;
 
 let ws           = null;
@@ -215,7 +217,10 @@ async function connectWebSocketOnce() {
         lastErr = e;
         try { if (ws) ws.close(); } catch (e2) {}
         ws = null; wsReady = false; setWsStatus("idle");
-        if (attempt < RETRIES) await new Promise(r => setTimeout(r, 120));
+        const base = 500;
+        const jitter = Math.floor(Math.random() * 300);
+        const waitMs = Math.min(5000, base * Math.pow(2, attempt)) + jitter;
+        if (attempt < RETRIES) await new Promise(r => setTimeout(r, waitMs));
       }
     }
     throw lastErr || new Error("ws-failed");
@@ -288,21 +293,37 @@ async function processJob(payload, tabId) {
   if (payload?.metadata?.image_id) {
     pendingByImage.set(payload.metadata.image_id, { imgUrl: payload.src, tabId, metadata: payload.metadata });
   }
-  
-if (!wsReady || !ws || ws.readyState !== WebSocket.OPEN) {
-  const connected = await connectWebSocketOnce();
-  if (!connected) {
-    const jobId = crypto.randomUUID();
-    return failJobImmediately(tabId, jobId, payload?.src || null, "Server is offline or waking up. Please try again in a moment.");
-  }
-}
 
-  const jobId = crypto.randomUUID();
-  pendingByJob.set(jobId, { imgUrl: payload.src, tabId, metadata: payload.metadata, startedAt: Date.now(), batchId: currentBatchId });
-  try {
-    ev("job.send", { id: jobId }); ws.send(JSON.stringify({ type: "job", id: jobId, payload }));
-  } catch (e) {
-    handleJobError(jobId, "Send failed: " + (e?.message || e));
+
+  for (let attempt = 0; attempt <= MAX_FIRST_TRY_RETRIES; attempt++) {
+    if (!wsReady || !ws || ws.readyState !== WebSocket.OPEN) {
+      const connected = await connectWebSocketOnce();
+      if (!connected) {
+        if (attempt < MAX_FIRST_TRY_RETRIES) {
+          await new Promise(r => setTimeout(r, FIRST_TRY_GAP_MS));
+          continue;
+        } else {
+          const jobId = crypto.randomUUID();
+          return failJobImmediately(tabId, jobId, payload?.src || null, "Server is offline or waking up. Please try again in a moment.");
+        }
+      }
+    }
+
+    const jobId = crypto.randomUUID();
+    pendingByJob.set(jobId, { imgUrl: payload.src, tabId, metadata: payload.metadata, startedAt: Date.now(), batchId: currentBatchId });
+    try {
+      ev("job.send", { id: jobId });
+      ws.send(JSON.stringify({ type: "job", id: jobId, payload }));
+      return;
+    } catch (e) {
+      handleJobError(jobId, "Send failed: " + (e?.message || e));
+      if (attempt < MAX_FIRST_TRY_RETRIES) {
+        await new Promise(r => setTimeout(r, FIRST_TRY_GAP_MS));
+        continue;
+      } else {
+        return;
+      }
+    }
   }
 }
 
