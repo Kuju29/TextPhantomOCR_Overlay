@@ -30,6 +30,43 @@ let wsReady      = false;
 let wsStatus     = "idle";
 let currentBase  = null;
 
+let HAS_DONE_FIRST_REST = false;
+
+async function submitJobViaRest(base, payload) {
+  const url = base.replace(/\/+$/, "") + "/translate";
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    cache: "no-store",
+    redirect: "follow",
+    body: JSON.stringify(payload)
+  });
+  if (!res.ok) throw new Error("REST submit failed: HTTP " + res.status);
+  const data = await res.json();
+  if (!data?.id) throw new Error("REST submit failed: no id");
+  return data.id;
+}
+
+async function pollJobViaRest(base, jid, { timeoutMs = 180000, intervalMs = 800 } = {}) {
+  const start = Date.now();
+  const url = base.replace(/\/+$/, "") + "/translate/" + encodeURIComponent(jid);
+  while (true) {
+    if (Date.now() - start > timeoutMs) throw new Error("REST poll timeout");
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) throw new Error("REST poll failed: HTTP " + res.status);
+    const data = await res.json();
+    const st = data?.status;
+    if (st === "done") {
+      handleResult(jid, data.result);
+      return;
+    } else if (st === "error") {
+      throw new Error(data?.result || "Unknown error");
+    }
+    await new Promise(r => setTimeout(r, intervalMs));
+  }
+}
+
+
 let currentBatchId = null;
 let blockSendsBecauseWsEnded = false;
 
@@ -293,6 +330,24 @@ async function processJob(payload, tabId) {
   if (payload?.metadata?.image_id) {
     pendingByImage.set(payload.metadata.image_id, { imgUrl: payload.src, tabId, metadata: payload.metadata });
   }
+
+  if (!HAS_DONE_FIRST_REST) {
+    try {
+      const base = await getApiBase();
+      preflightWs(base).catch(() => {});
+      connectWebSocketOnce().catch(() => {});
+
+      const jid = await submitJobViaRest(base, payload);
+      pendingByJob.set(jid, { imgUrl: payload.src, tabId, metadata: payload.metadata, startedAt: Date.now(), batchId: currentBatchId });
+      await pollJobViaRest(base, jid);
+      HAS_DONE_FIRST_REST = true;
+    } catch (e) {
+      const jid = crypto.randomUUID();
+      handleJobError(jid, e?.message || String(e));
+    }
+    return;
+  }
+
 
 
   for (let attempt = 0; attempt <= MAX_FIRST_TRY_RETRIES; attempt++) {
