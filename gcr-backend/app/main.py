@@ -7,8 +7,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, HttpUrl, root_validator, ValidationError
 from fastapi.encoders import jsonable_encoder
 
-from app.lens_images_core import translate_lens
-from app.lens_text_core   import translate_lens_text
+from app.lens_images_core import translate_lens, _cookie_header as img_cookie_header
+from app.lens_text_core   import translate_lens_text, prewarm_driver as text_prewarm
 
 PORT              = int(os.getenv("PORT", 8080))
 MAX_WORKERS       = int(os.getenv("MAX_WORKERS", 8))
@@ -228,6 +228,15 @@ async def cleanup():
         cutoff = datetime.utcnow() - timedelta(seconds=RESULTS_TTL)
         for jid in [k for k,v in results.items() if v.get("_created_at") < cutoff]:
             results.pop(jid, None)
+            
+async def keep_warm_loop():
+    while True:
+        try:
+            await img_cookie_header()
+            await text_prewarm()
+        except Exception as e:
+            log.warning("keep_warm skipped: %s", e)
+        await asyncio.sleep(600) 
 
 @app.on_event("startup")
 async def startup():
@@ -237,6 +246,7 @@ async def startup():
         for _ in range(MAX_WORKERS_TEXT):
             asyncio.create_task(worker("lens_text", jobq_text))
     asyncio.create_task(cleanup())
+    asyncio.create_task(keep_warm_loop())
     log.info(
         "startup OK – %d image workers, %d text workers, TTL=%ds (workers_enabled=%s)",
         MAX_WORKERS_IMAGES, MAX_WORKERS_TEXT, RESULTS_TTL, ENABLE_BACKGROUND_WORKERS
