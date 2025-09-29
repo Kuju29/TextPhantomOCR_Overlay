@@ -24,7 +24,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("ocr_ws")
 
-ENABLE_BACKGROUND_WORKERS = os.getenv("ENABLE_BACKGROUND_WORKERS", "0").strip().lower() in ("1","true","yes","on")
+ENABLE_BACKGROUND_WORKERS = os.getenv("ENABLE_BACKGROUND_WORKERS", "1").strip().lower() in ("1","true","yes","on")
 
 workers_started: bool = False
 _workers_lock = asyncio.Lock()
