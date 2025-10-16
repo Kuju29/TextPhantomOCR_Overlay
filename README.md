@@ -1,3 +1,5 @@
+*Note: The Text mode is currently broken because SeleniumBase doesn’t support Headless=True (running the browser in the background). I’m looking for a new solution and will add it along with AI translation.*
+
 # ✨ TextPhantomOCR Overlay 
 [![Installation](https://img.shields.io/badge/-Installation-red.svg?logo=youtube&labelColor=555555&style=for-the-badge)](https://www.youtube.com/watch?v=WQ7p7zsz_kc "Installation Guide") [![Run API Online](https://img.shields.io/badge/-Run_API_Online-blue.svg?logo=youtube&labelColor=555555&style=for-the-badge)](https://www.youtube.com/watch?v=NMHwaI8mn4c "Run API Online")
 
