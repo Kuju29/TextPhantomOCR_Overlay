@@ -1,3 +1,4 @@
 {
-  DEFAULTS_API: ""
+  "defaultApiUrl": "https://plan291037-api-ocr-test.hf.space",
+  "resetApiUrl": "http://localhost:8080"
 }
