@@ -842,8 +842,10 @@ async def ai_resolve(payload: Dict[str, Any]):
     if models and requested_model.lower() in ('', 'auto') and resolved_model not in models:
         resolved_model = models[0]
 
+    defaults = core._remote_defaults()
+
     prompt_default = (getattr(core, 'ai_prompt_user_default',
-                      lambda _l: '')(lang) or '').strip()
+                      lambda _l, _d=None: '')(lang, defaults) or '').strip()
 
     return {
         'ok': True,
@@ -858,12 +860,14 @@ async def ai_resolve(payload: Dict[str, Any]):
 @app.get('/ai/prompt/default')
 async def ai_prompt_default(lang: str = 'en'):
     l = _normalize_lang(lang)
+    defaults = core._remote_defaults()
+    styles = core.ai_lang_style_map(defaults)
     return {
         'ok': True,
         'lang': l,
-        'prompt_editable_default': (getattr(core, 'ai_prompt_user_default', lambda _l: '')(l) or '').strip(),
-        'lang_style': (getattr(core, 'AI_LANG_STYLE', {}) or {}).get(l) or (getattr(core, 'AI_LANG_STYLE', {}) or {}).get('default') or '',
-        'system_base': (getattr(core, 'AI_PROMPT_SYSTEM_BASE', '') or '').strip(),
+        'prompt_editable_default': (getattr(core, 'ai_prompt_user_default', lambda _l, _d=None: '')(l, defaults) or '').strip(),
+        'lang_style': styles.get(l) or styles.get('default') or '',
+        'system_base': core.ai_prompt_system_base(defaults).strip(),
         'contract': core._active_ai_contract(),
         'data_template': core._active_ai_data_template(),
     }
