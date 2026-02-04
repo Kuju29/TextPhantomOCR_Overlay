@@ -36,7 +36,45 @@
 
 ## 🖱️ 3. Getting Started with the Extension
   - Navigate to the page you want to translate.  
-  - **Right-click** anywhere → choose **🔍 Translate...** from the context menu.   
+  - **Right-click** anywhere → choose **🔍 Translate...** from the context menu.
+
+## 🤖 Free AI Option (Hugging Face – Google Gemma)
+
+TextPhantom can use **Google Gemma** models via Hugging Face.  
+This option is **free to start** (you use your own Hugging Face API key).
+
+
+#### Step 1: Enable Access to Gemma Model
+
+Google Gemma models require accepting a license before use.
+
+1. Log in to Hugging Face  
+   https://huggingface.co/login
+
+2. Open the model page  
+   https://huggingface.co/google/gemma-3-27b-it
+
+3. Click **“Agree and access”** (or **“Request access”**)
+
+4. Wait for approval (usually a few minutes)
+
+> You only need to do this **once per account**.
+
+
+#### Step 2: Create a Hugging Face API Key
+
+This API key will be used by TextPhantom to call the AI model.
+
+1. Go to  
+   https://huggingface.co/settings/tokens
+
+2. Click **New token**
+
+3. Set:
+   - **Name**: `textphantom-ai`
+   - **Role**: `Read`
+
+4. Create the token and **copy it**
 
 ## 🖼️ DEMO / UI PREVIEW
 
