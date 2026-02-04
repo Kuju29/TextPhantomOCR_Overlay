@@ -75,6 +75,12 @@ This API key will be used by TextPhantom to call the AI model.
    - **Role**: `Read`
 
 4. Create the token and **copy it**
+5. Required Token Permissions
+When creating your Hugging Face API key, make sure the following permissions are enabled:
+
+- ✅ **Read access to contents of all public gated repos you can access**  
+  Required to use gated models such as **Google Gemma**.
+
 
 ## 🖼️ DEMO / UI PREVIEW
 
