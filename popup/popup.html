@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>TextPhantom OCR</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div class="card">
+      <h2>TextPhantom OCR</h2>
+
+      <div class="field">
+        <label for="mode">Mode</label>
+        <select id="mode" aria-label="Mode"></select>
+      </div>
+
+      <div class="field" id="lang-wrap">
+        <label for="lang">Language</label>
+        <select id="lang" aria-label="Language"></select>
+      </div>
+
+      <div class="field" id="sources-wrap" style="display: none">
+        <label for="sources">Sources</label>
+        <select id="sources" aria-label="Sources"></select>
+      </div>
+
+      <div class="field" id="ai-key-wrap">
+        <label for="ai-key">AI Key (optional)</label>
+        <input
+          type="password"
+          id="ai-key"
+          placeholder="Paste your AI_API_KEY (Gemini/OpenRouter/HF/Groq/etc.)"
+        />
+        <div class="hint">
+          If empty, the extension will use translated overlay (no AI).
+        </div>
+      </div>
+
+      <div class="field" id="ai-model-wrap" style="display: none">
+        <label for="ai-model">AI Model (optional)</label>
+        <select id="ai-model" aria-label="AI Model"></select>
+      </div>
+
+      <div class="field" id="ai-prompt-wrap" style="display: none">
+        <label for="ai-prompt" class="label-row">
+          <span>AI Prompt (optional)</span>
+          <button
+            type="button"
+            id="ai-prompt-reset"
+            class="icon-btn"
+            title="Reset prompt for this language"
+            aria-label="Reset prompt for this language"
+            style="
+              background: none;
+              border: none;
+              padding: 4px;
+              font-size: 16px;
+              line-height: 1;
+              cursor: pointer;
+            "
+          >
+            ⟲
+          </button>
+        </label>
+        <textarea
+          id="ai-prompt"
+          rows="4"
+          placeholder="Your translation style notes. Leave empty to use server defaults."
+        ></textarea>
+      </div>
+
+      <div class="field">
+        <label for="api-url">
+          Custom API URL
+          <span
+            id="api-status-emoji"
+            aria-live="polite"
+            title="Loading…"
+            style="margin-left: 6px"
+            >⏳</span
+          >
+        </label>
+        <div
+          style="
+            position: relative;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+          "
+        >
+          <input
+            type="text"
+            id="api-url"
+            placeholder="https://plan291037-api-ocr-test.hf.space"
+          />
+          <button
+            id="reset-api"
+            aria-label="Reset to local"
+            title="Reset to local API"
+            style="
+              background: none;
+              border: none;
+              padding: 4px;
+              font-size: 16px;
+              line-height: 1;
+              cursor: pointer;
+            "
+          >
+            ⟲
+          </button>
+        </div>
+      </div>
+
+      <div class="note">Right-click an image to translate.</div>
+    </div>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>
