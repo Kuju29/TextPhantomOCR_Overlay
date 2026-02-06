@@ -1,5 +1,7 @@
 *Note: หลายเว็บยังไม่รองรับ และ prompt ai ผมยังทำไม่ค่อยดี อัพให้ใช้กันไปก่อนผมจะได้เห็นปัญหาและแก้ไขไปด้วยครับ ทดสอบจากผู้ใช้จริงมันง่ายกว่าทดสอบเองครับ 555 ตอนนี้มีแค่ตัวเลือก Ai ที่ต้องเสียเงินเองนะส่วนอื่นฟรีหมดครับโผมมมม* 
 
+![Desktop2026 02 06-08 11 52 01-ezgif com-video-to-gif-converter](https://github.com/user-attachments/assets/43cc9a1e-eb79-46f0-b4a1-08ca9bcd49f5)
+
 # ✨ TextPhantomOCR Overlay 
 [![Installation](https://img.shields.io/badge/-Installation-red.svg?logo=youtube&labelColor=555555&style=for-the-badge)](https://www.youtube.com/watch?v=WQ7p7zsz_kc "Installation Guide") [![Run API Online](https://img.shields.io/badge/-Run_API_Online-blue.svg?logo=youtube&labelColor=555555&style=for-the-badge)](https://www.youtube.com/watch?v=NMHwaI8mn4c "Run API Online")
 
