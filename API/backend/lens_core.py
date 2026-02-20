@@ -187,115 +187,71 @@ AI_MODEL_ALIASES = {
     }
 }
 
-AI_PROMPT_SYSTEM_BASE = ""
+AI_PROMPT_SYSTEM_BASE = (
+    "You are a professional manga translator and dialogue localizer.\n"
+    "Rewrite each paragraph as natural dialogue in the target language while preserving meaning, tone, intent, and character voice.\n"
+    "Keep lines concise for speech bubbles. Do not add new information. Do not omit meaning. Do not explain.\n"
+    "Preserve emphasis (… ! ?). Avoid excessive punctuation.\n"
+    "If the input is already in the target language, improve it (dialogue polish) without changing meaning."
+)
 
-AI_LANG_STYLE = {"default": ""}
+AI_LANG_STYLE = {
+    "th": (
+        "Target language: Thai\\n"
+        "Write Thai manga dialogue that reads like a high-quality Thai scanlation: natural, concise, and in-character.\\n"
+        "Keep lines short for speech bubbles; avoid stiff, literal phrasing.\\n"
+        "Default: omit pronouns and omit gendered polite sentence-final particles unless the source line clearly requires them.\\n"
+        "Never use the word 'ฉัน'. Prefer omitting the subject.\\n"
+        "Never use a male-coded second-person pronoun. When addressing someone by name, do not add a second-person pronoun after the name; prefer NAME + clause.\\n"
+        "If a second-person reference is unavoidable, use a neutral/casual form appropriate to tone, but keep it gender-neutral and consistent with the line.\\n"
+        "Use particles/interjections sparingly to match tone; do not overuse.\\n"
+        "Keep names/terms consistent; transliterate when appropriate.\\n"
+        "Output only the translated text."
+    ),
+    "en": (
+        "Target language: English\n"
+        "Write natural English manga dialogue: concise, conversational, with contractions where natural.\n"
+        "Localize tone and character voice; keep emotion and emphasis.\n"
+        "Keep proper nouns consistent; do not over-explain."
+    ),
+    "ja": (
+        "Target language: Japanese\n"
+        "Write natural Japanese manga dialogue: concise, spoken.\n"
+        "Choose 丁寧語/タメ口 to match context; keep emotion and emphasis.\n"
+        "Keep proper nouns consistent; keep SFX natural in Japanese."
+    ),
+    "default": (
+        "Write natural manga dialogue in the target language: concise, spoken, faithful to meaning and tone."
+    ),
+}
 
-AI_PROMPT_USER_BY_LANG = {"default": ""}
-
-TP_REMOTE_DEFAULTS_URL = (
-    os.environ.get("TP_REMOTE_DEFAULTS_URL")
-    or "https://raw.githubusercontent.com/Kuju29/TextPhantomOCR_Overlay/refs/heads/main/defaults_api.json"
-).strip()
-TP_REMOTE_DEFAULTS_TIMEOUT_SEC = float(os.environ.get("TP_REMOTE_DEFAULTS_TIMEOUT_SEC", "2"))
-
-
-def _remote_defaults() -> dict:
-    url = TP_REMOTE_DEFAULTS_URL
-    if not url:
-        raise RuntimeError("TP_REMOTE_DEFAULTS_URL is required")
-
-    if url.startswith("file://"):
-        with open(url[len("file://"):], "r", encoding="utf-8") as f:
-            raw = f.read()
-    else:
-        with httpx.Client(timeout=TP_REMOTE_DEFAULTS_TIMEOUT_SEC) as client:
-            r = client.get(
-                url,
-                headers={"accept": "application/json"},
-                follow_redirects=True,
-            )
-            r.raise_for_status()
-            raw = r.text
-
-    data = json.loads((raw or "").strip() or "{}")
-    if not isinstance(data, dict) or not data:
-        raise RuntimeError("Remote defaults is empty")
-    return data
-
-
-def _remote_first_str(data: dict, *keys: str) -> str:
-    if not data:
-        return ""
-    for k in keys:
-        v = data.get(k)
-        if isinstance(v, str) and v.strip():
-            return v.strip()
-    return ""
-
-
-def _remote_first_map(data: dict, *keys: str) -> dict:
-    if not data:
-        return {}
-    for k in keys:
-        v = data.get(k)
-        if isinstance(v, dict) and v:
-            return v
-    return {}
-
-
-def ai_prompt_system_base(data: dict | None = None) -> str:
-    d = data if isinstance(data, dict) else _remote_defaults()
-    v = _remote_first_str(
-        d,
-        "AI_PROMPT_SYSTEM_BASE",
-        "aiPromptSystemBase",
-        "promptSystemBase",
-        "systemBase",
-    )
-    if not v:
-        raise RuntimeError("Missing AI_PROMPT_SYSTEM_BASE in remote defaults")
-    return v
-
-
-def ai_lang_style_map(data: dict | None = None) -> dict[str, str]:
-    d = data if isinstance(data, dict) else _remote_defaults()
-    remote = _remote_first_map(d, "AI_LANG_STYLE", "aiLangStyle", "langStyle")
-    if not remote:
-        raise RuntimeError("Missing AI_LANG_STYLE in remote defaults")
-    out: dict[str, str] = {}
-    for k, v in remote.items():
-        if not isinstance(k, str) or not isinstance(v, str):
-            continue
-        kk = _normalize_lang(k)
-        if not kk:
-            continue
-        out[kk] = v.strip()
-    out.setdefault("default", "")
-    return out
-
-
-def ai_prompt_user_by_lang_map(data: dict | None = None) -> dict[str, str]:
-    d = data if isinstance(data, dict) else _remote_defaults()
-    remote = _remote_first_map(
-        d,
-        "AI_PROMPT_USER_BY_LANG",
-        "aiPromptUserByLang",
-        "promptUserByLang",
-    )
-    if not remote:
-        raise RuntimeError("Missing AI_PROMPT_USER_BY_LANG in remote defaults")
-    out: dict[str, str] = {}
-    for k, v in remote.items():
-        if not isinstance(k, str) or not isinstance(v, str):
-            continue
-        kk = _normalize_lang(k)
-        if not kk:
-            continue
-        out[kk] = v.strip()
-    out.setdefault("default", "")
-    return out
-
+AI_PROMPT_USER_BY_LANG = {
+    "th": """
+เป้าหมายภาษา: ไทย
+แปลข้อความ OCR ในมังงะเป็นภาษาไทยธรรมชาติแบบบทสนทนา
+คงน้ำเสียง/อารมณ์ให้เหมาะกับบริบท
+สั้น กระชับ อ่านลื่น ห้ามใส่คำอธิบายหรือบรรยายเพิ่ม
+คงชื่อเฉพาะ/ศัพท์เฉพาะให้สม่ำเสมอ และส่งออกเป็นข้อความไทยเท่านั้น
+""".strip(),
+    "en": """Style preferences:
+- Keep English dialogue concise and conversational.
+- Keep lines short for speech bubbles.
+- Keep names and recurring terms consistent.
+- Keep SFX short; avoid very long repeated characters.
+""".strip(),
+    "ja": """Style preferences:
+- Keep Japanese dialogue concise and natural for manga.
+- Keep lines short for speech bubbles.
+- Keep names and recurring terms consistent.
+- Keep SFX short; avoid very long repeated characters.
+""".strip(),
+    "default": """Style preferences:
+- Keep dialogue concise, spoken, and faithful to tone.
+- Keep lines short for speech bubbles.
+- Keep names and recurring terms consistent.
+- Keep SFX short; avoid very long repeated characters.
+""".strip(),
+}
 
 AI_PROMPT_RESPONSE_CONTRACT_JSON = (
     "Return ONLY valid JSON (no markdown, no extra text).\n"
@@ -333,10 +289,9 @@ _FONT_PAIR_CACHE = {}
 _TP_HTML_EPS_PX = 0.0
 ZWSP = "\u200b"
 
-def ai_prompt_user_default(lang: str, data: dict | None = None) -> str:
+def ai_prompt_user_default(lang: str, model: str = "auto") -> str:
     l = _normalize_lang(lang)
-    m = ai_prompt_user_by_lang_map(data)
-    return (m.get(l) or m.get("default") or "").strip()
+    return (AI_PROMPT_USER_BY_LANG.get(l) or AI_PROMPT_USER_BY_LANG.get("default") or "").strip()
 
 def _active_ai_contract() -> str:
     return AI_PROMPT_RESPONSE_CONTRACT_JSON if DO_AI_JSON else AI_PROMPT_RESPONSE_CONTRACT_TEXT
@@ -443,22 +398,22 @@ def _save_ai_cache(path: str, cache: dict):
         json.dump(cache, f, ensure_ascii=False)
     os.replace(tmp, path)
 
-def _build_ai_prompt_packet(target_lang: str, original_text_full: str, defaults: dict | None = None):
+def _build_ai_prompt_packet(target_lang: str, original_text_full: str):
     lang = _normalize_lang(target_lang)
-    d = defaults if isinstance(defaults, dict) else _remote_defaults()
-    input_json = json.dumps({"target_lang": lang, "originalTextFull": original_text_full}, ensure_ascii=False)
+    input_json = json.dumps(
+        {"target_lang": lang, "originalTextFull": original_text_full}, ensure_ascii=False)
     output_schema = json.dumps({"aiTextFull": "..."}, ensure_ascii=False)
     data_template = _active_ai_data_template()
     if DO_AI_JSON:
-        data_text = data_template.format(input_json=input_json, output_schema=output_schema)
+        data_text = data_template.format(
+            input_json=input_json, output_schema=output_schema)
     else:
         data_text = data_template.format(input_json=input_json)
 
-    styles = ai_lang_style_map(d)
-    style = styles.get(lang) or styles.get("default") or ""
-    editable = (ai_prompt_user_default(lang, d) or "").strip()
+    style = AI_LANG_STYLE.get(lang) or AI_LANG_STYLE.get("default") or ""
+    editable = (ai_prompt_user_default(lang) or "").strip()
 
-    system_parts = [ai_prompt_system_base(d)]
+    system_parts = [AI_PROMPT_SYSTEM_BASE]
     if style:
         system_parts.append(style)
     system_parts.append(_active_ai_contract())
@@ -469,7 +424,6 @@ def _build_ai_prompt_packet(target_lang: str, original_text_full: str, defaults:
         user_parts.append(editable)
     user_parts.append(data_text)
     return system_text, user_parts
-
 
 def _gemini_generate_json(api_key: str, model: str, system_text: str, user_parts: list[str]):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
@@ -501,7 +455,6 @@ def _gemini_generate_json(api_key: str, model: str, system_text: str, user_parts
     if not txt:
         raise Exception("Gemini returned empty text")
     return txt
-
 
 def _read_first_env(*names: str) -> str:
     for n in names:
@@ -562,29 +515,10 @@ def _resolve_ai_config():
 
 def _openai_compat_generate_json(api_key: str, base_url: str, model: str, system_text: str, user_parts: list[str]):
     url = (base_url.rstrip("/") + "/chat/completions")
-
-    def _user_only_prompt_for_model(m: str) -> bool:
-        ml = (m or "").strip().lower()
-        if not ml:
-            return False
-        if "gemma-3" in ml or "gemma-2" in ml:
-            return True
-        if "gemma" in ml and ("-it" in ml or "instruct" in ml):
-            return True
-        return False
-
-    def _build_messages(m: str):
-        parts = [p.strip() for p in (user_parts or []) if isinstance(p, str) and p.strip()]
-        sys = (system_text or "").strip()
-        if _user_only_prompt_for_model(m):
-            combined = "\n\n".join([x for x in ([sys] + parts) if x])
-            return [{"role": "user", "content": combined}]
-        msgs = [{"role": "system", "content": system_text}]
-        for p in parts:
-            msgs.append({"role": "user", "content": p})
-        return msgs
-
-    messages = _build_messages(model)
+    messages = [{"role": "system", "content": system_text}]
+    for p in user_parts:
+        if (p or "").strip():
+            messages.append({"role": "user", "content": p})
     payload = {
         "model": model,
         "messages": messages,
@@ -616,7 +550,6 @@ def _openai_compat_generate_json(api_key: str, base_url: str, model: str, system
                     fallback = _pick_hf_fallback_model(models)
                     if fallback and fallback != model:
                         payload["model"] = fallback
-                        payload["messages"] = _build_messages(fallback)
                         used_model = fallback
                         r2 = client.post(url, json=payload, headers=headers)
                         try:
@@ -1566,20 +1499,15 @@ def ai_translate_original_text(original_text_full: str, target_lang: str):
     if not api_key:
         raise Exception("AI_API_KEY is required for AI translation")
 
-    defaults = _remote_defaults()
     lang = _normalize_lang(target_lang)
-    styles = ai_lang_style_map(defaults)
-    edit_map = ai_prompt_user_by_lang_map(defaults)
-    sys_base = ai_prompt_system_base(defaults)
-
     prompt_sig = _sha1(
         json.dumps(
             {
-                "sys": sys_base,
-                "edit": edit_map,
+                "sys": AI_PROMPT_SYSTEM_BASE,
+                "edit": AI_PROMPT_USER_BY_LANG,
                 "contract": _active_ai_contract(),
                 "data": _active_ai_data_template(),
-                "style": styles.get(lang) or styles.get("default") or "",
+                "style": AI_LANG_STYLE.get(lang) or AI_LANG_STYLE.get("default") or "",
             },
             ensure_ascii=False,
         )
@@ -1591,7 +1519,8 @@ def ai_translate_original_text(original_text_full: str, target_lang: str):
         cache = _load_ai_cache(AI_CACHE_PATH)
         cache_key = _sha1(
             json.dumps(
-                {"provider": provider, "m": model, "u": base_url, "l": lang, "p": prompt_sig, "t": original_text_full},
+                {"provider": provider, "m": model, "u": base_url,
+                    "l": lang, "p": prompt_sig, "t": original_text_full},
                 ensure_ascii=False,
             )
         )
@@ -1600,9 +1529,9 @@ def ai_translate_original_text(original_text_full: str, target_lang: str):
             if lang == "th" and cached:
                 t = str(cached.get("aiTextFull") or "")
                 if t:
-                    t2 = re.sub(r"(?:(?<=^)|(?<=[\s\"'“”‘’()\[\]{}<>]))นาย(?=(?:\s|$))", "", t)
-                    t2 = re.sub(r"[ 	]{2,}", " ", t2)
-                    t2 = re.sub(r"^[ 	]+", "", t2, flags=re.MULTILINE)
+                    t2 = re.sub(r"(?:(?<=^)|(?<=[\s\"'“”‘’()\[\]{}<>]))\u0e19\u0e32\u0e22(?=(?:\s|$))", "", t)
+                    t2 = re.sub(r"[ \t]{2,}", " ", t2)
+                    t2 = re.sub(r"^[ \t]+", "", t2, flags=re.MULTILINE)
                     if t2 != t:
                         cached = dict(cached)
                         cached["aiTextFull"] = t2
@@ -1610,7 +1539,7 @@ def ai_translate_original_text(original_text_full: str, target_lang: str):
                         _save_ai_cache(AI_CACHE_PATH, cache)
             return cached
 
-    system_text, user_parts = _build_ai_prompt_packet(lang, original_text_full, defaults)
+    system_text, user_parts = _build_ai_prompt_packet(lang, original_text_full)
 
     started = time.time()
     used_model = model
@@ -1619,14 +1548,16 @@ def ai_translate_original_text(original_text_full: str, target_lang: str):
     elif provider == "anthropic":
         raw = _anthropic_generate_json(api_key, model, system_text, user_parts)
     else:
-        raw, used_model = _openai_compat_generate_json(api_key, base_url, model, system_text, user_parts)
+        raw, used_model = _openai_compat_generate_json(
+            api_key, base_url, model, system_text, user_parts)
 
-    ai_text_full = _parse_ai_textfull_only(raw) if DO_AI_JSON else _parse_ai_textfull_text_only(raw)
+    ai_text_full = _parse_ai_textfull_only(
+        raw) if DO_AI_JSON else _parse_ai_textfull_text_only(raw)
 
     if lang == "th" and ai_text_full:
-        ai_text_full = re.sub(r"(?:(?<=^)|(?<=[\s\"'“”‘’()\[\]{}<>]))นาย(?=(?:\s|$))", "", ai_text_full)
-        ai_text_full = re.sub(r"[ 	]{2,}", " ", ai_text_full)
-        ai_text_full = re.sub(r"^[ 	]+", "", ai_text_full, flags=re.MULTILINE)
+        ai_text_full = re.sub(r"(?:(?<=^)|(?<=[\s\"'“”‘’()\[\]{}<>]))\u0e19\u0e32\u0e22(?=(?:\s|$))", "", ai_text_full)
+        ai_text_full = re.sub(r"[ \t]{2,}", " ", ai_text_full)
+        ai_text_full = re.sub(r"^[ \t]+", "", ai_text_full, flags=re.MULTILINE)
 
     result = {
         "aiTextFull": ai_text_full,
