@@ -3,11 +3,12 @@ import asyncio, base64, copy, hashlib, io, json, os, re, tempfile, time, uuid, h
 from backend import lens_core as core
 
 from collections import OrderedDict
-from threading import Lock
+from threading import Lock, Semaphore
 
 from dataclasses import dataclass
+from http import HTTPStatus
 from typing import Any, Dict, List, Optional
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 SERVER_MAX_WORKERS = int(os.environ.get('SERVER_MAX_WORKERS', '15'))
@@ -30,6 +31,15 @@ _jobs: Dict[str, Dict[str, Any]] = {}
 _job_queue: asyncio.Queue = asyncio.Queue()
 _result_cache_lock = Lock()
 _ai_cache_lock = Lock()
+
+HF_AI_MAX_CONCURRENCY = max(1, int(os.environ.get('HF_AI_MAX_CONCURRENCY', '1')))
+HF_AI_MIN_INTERVAL_SEC = max(0.0, float(os.environ.get('HF_AI_MIN_INTERVAL_SEC', '5')))
+HF_AI_MAX_RETRIES = max(1, int(os.environ.get('HF_AI_MAX_RETRIES', '6')))
+HF_AI_RETRY_BASE_SEC = max(0.2, float(os.environ.get('HF_AI_RETRY_BASE_SEC', '2')))
+_hf_ai_sem = Semaphore(HF_AI_MAX_CONCURRENCY)
+_hf_ai_lock = Lock()
+_hf_ai_last_ts = 0.0
+_tp_marker_re = re.compile(r'<<TP_P\d+>>')
 
 def _dbg(tag: str, data=None) -> None:
     if not TP_DEBUG:
@@ -189,11 +199,18 @@ def _bytes_to_datauri(blob: bytes, mime: str) -> str:
     b64 = base64.b64encode(blob).decode('ascii')
     return f"data:{mime};base64,{b64}"
 
-def _download_bytes(url: str) -> tuple[bytes, str]:
+def _download_bytes(url: str, referer: str = '') -> tuple[bytes, str]:
     u = (url or '').strip()
     if not u:
         return b'', ''
-    with httpx.Client(timeout=HTTP_TIMEOUT_SEC, follow_redirects=True) as client:
+    headers = {
+        'user-agent': 'Mozilla/5.0 (TextPhantomOCR; +https://huggingface.co/spaces)',
+    }
+    ref = (referer or '').strip()
+    if ref:
+        headers['referer'] = ref
+
+    with httpx.Client(timeout=HTTP_TIMEOUT_SEC, follow_redirects=True, headers=headers) as client:
         r = client.get(u)
         r.raise_for_status()
         ct = (r.headers.get('content-type') or '').split(';')[0].strip()
@@ -207,6 +224,56 @@ def _resolve_provider_defaults(provider: str) -> dict:
 
 def _resolve_model(provider: str, model: str) -> str:
     return core._resolve_model(provider, model)
+
+def _has_meaningful_text(s: str) -> bool:
+    t = _tp_marker_re.sub('', str(s or ''))
+    return bool(t.strip())
+
+def _is_hf_provider(provider: str, base_url: str) -> bool:
+    p = (provider or '').strip().lower()
+    b = (base_url or '').strip().lower()
+    return p == 'huggingface' or 'router.huggingface.co' in b
+
+def _is_hf_rate_limited_error(msg: str) -> bool:
+    t = (msg or '').lower()
+    if 'rate limit' in t or 'ratelimit' in t or 'too many requests' in t:
+        return True
+    if 'http 429' in t or ' 429' in t:
+        return True
+    if 'http 503' in t or ' 503' in t or 'overloaded' in t or 'temporarily' in t:
+        return True
+    return False
+
+def _hf_throttle_before_call() -> None:
+    if HF_AI_MIN_INTERVAL_SEC <= 0:
+        return
+    global _hf_ai_last_ts
+    with _hf_ai_lock:
+        now = _now()
+        dt = now - float(_hf_ai_last_ts or 0.0)
+        wait = HF_AI_MIN_INTERVAL_SEC - dt
+        if wait > 0:
+            time.sleep(wait)
+        _hf_ai_last_ts = _now()
+
+def _openai_compat_generate_with_hf_backoff(api_key: str, base_url: str, model: str, system_text: str, user_parts: List[str]):
+    last_err: Optional[Exception] = None
+    for attempt in range(int(HF_AI_MAX_RETRIES)):
+        try:
+            with _hf_ai_sem:
+                _hf_throttle_before_call()
+                return core._openai_compat_generate_json(api_key, base_url, model, system_text, user_parts)
+        except Exception as e:
+            last_err = e
+            if not _is_hf_rate_limited_error(str(e)):
+                raise
+            delay = min(15.0, max(float(HF_AI_MIN_INTERVAL_SEC), float(HF_AI_RETRY_BASE_SEC) * (2 ** min(attempt, 4))))
+            _dbg('ai.hf.backoff', {'attempt': attempt + 1, 'delay_sec': round(delay, 2), 'err': str(e)[:240]})
+            time.sleep(delay)
+            continue
+    if last_err is not None:
+        raise last_err
+    raise Exception('hf_backoff_failed')
 
 def _normalize_lang(lang: str) -> str:
     return core._normalize_lang(lang)
@@ -245,39 +312,47 @@ def _build_ai_prompt_packet_custom(target_lang: str, original_text_full: str, pr
     lang = _normalize_lang(target_lang)
     style_prompt = (prompt_editable or "").strip()
     if not style_prompt:
-        style_prompt = (getattr(core, "ai_prompt_user_default",
-                        lambda _l: "")(lang) or "").strip()
+        style_prompt = (
+            getattr(core, "ai_prompt_user_default", lambda _l, _m=None: "")(lang)
+            or ""
+        ).strip()
 
-    input_json = json.dumps(
-        {"target_lang": lang, "stylePrompt": style_prompt,
-            "originalTextFull": str(original_text_full or "")},
-        ensure_ascii=False,
-    )
+    base = (getattr(core, "AI_PROMPT_SYSTEM_BASE", "") or "").strip()
+    style = (
+        (getattr(core, "AI_LANG_STYLE", {}) or {}).get(lang)
+        or (getattr(core, "AI_LANG_STYLE", {}) or {}).get("default")
+        or ""
+    ).strip()
 
-    system_parts: List[str] = [
-        "SYSTEM: You translate manga dialogue.",
-        "Task: Translate originalTextFull into target_lang. Apply stylePrompt.",
-        "Markers: Keep every paragraph marker like <<TP_P0>> unchanged and in order. Do not remove or add markers.",
-        "Output: Return ONLY JSON (no markdown, no extra text).",
-        "OUTPUT_JSON schema: {\"aiTextFull\":\"...\"}",
-        "aiTextFull must include all the same markers, each followed by that paragraph's translated text.",
-        "Keep text concise for speech bubbles. Avoid long repeated characters (max 12).",
+    contract_parts: List[str] = [
+        "Follow the user's StylePrompt as hard constraints (unless it would break marker rules).",
+        "Output ONLY the translated text (no JSON, no markdown, no extra commentary).",
+        "Markers: Keep every paragraph marker like <<TP_P0>> unchanged and in order. Do not remove, rename, or add markers.",
+        "For each marker, output the marker followed by that paragraph's translated text.",
     ]
     if is_retry:
-        system_parts.append(
-            "Retry: Your previous output may have been truncated. You MUST output ALL markers from the first to the last marker in the input."
+        contract_parts.append(
+            "Retry: You MUST output ALL markers from the first to the last marker in the input."
         )
-    system_text = "\n".join([p for p in system_parts if p])
 
-    user_text = (
-        "INPUT_JSON (json):\n```json\n"
-        + input_json
-        + "\n```\n\nOUTPUT_JSON (json):\n```json\n{\"aiTextFull\":\"...\"}\n```"
-    )
+    system_text = "\n\n".join([p for p in [base, style, "\n".join(contract_parts)] if p])
 
-    return system_text, [user_text]
+    user_parts: List[str] = []
+    if style_prompt:
+        user_parts.append("StylePrompt:\n" + style_prompt)
+    user_parts.append("Input:\n" + str(original_text_full or ""))
+    return system_text, user_parts
 
 def ai_translate_text(original_text_full: str, target_lang: str, ai: AiConfig, is_retry: bool = False) -> dict:
+    if not _has_meaningful_text(original_text_full):
+        return {
+            'aiTextFull': '',
+            'meta': {
+                'skipped': True,
+                'skipped_reason': 'no_text',
+            },
+        }
+
     api_key = (ai.api_key or '').strip()
     if not api_key:
         raise Exception('AI api_key is required')
@@ -296,26 +371,25 @@ def ai_translate_text(original_text_full: str, target_lang: str, ai: AiConfig, i
 
     if provider not in ('gemini', 'anthropic'):
         if not base_url:
-            base_url = (_resolve_provider_defaults('openai') or {}).get(
-                'base_url') or 'https://api.openai.com/v1'
+            base_url = (_resolve_provider_defaults('openai') or {}).get('base_url') or 'https://api.openai.com/v1'
 
     system_text, user_parts = _build_ai_prompt_packet_custom(
-        target_lang, original_text_full, ai.prompt_editable, is_retry=is_retry)
+        target_lang, original_text_full, ai.prompt_editable, is_retry=is_retry
+    )
 
     started = _now()
     used_model = model
     if provider == 'gemini':
-        raw = core._gemini_generate_json(
-            api_key, model, system_text, user_parts)
+        raw = core._gemini_generate_json(api_key, model, system_text, user_parts)
     elif provider == 'anthropic':
-        raw = core._anthropic_generate_json(
-            api_key, model, system_text, user_parts)
+        raw = core._anthropic_generate_json(api_key, model, system_text, user_parts)
     else:
-        raw, used_model = core._openai_compat_generate_json(
-            api_key, base_url, model, system_text, user_parts)
+        if _is_hf_provider(provider, base_url):
+            raw, used_model = _openai_compat_generate_with_hf_backoff(api_key, base_url, model, system_text, user_parts)
+        else:
+            raw, used_model = core._openai_compat_generate_json(api_key, base_url, model, system_text, user_parts)
 
-    ai_text_full = core._parse_ai_textfull_only(
-        raw) if core.DO_AI_JSON else core._parse_ai_textfull_text_only(raw)
+    ai_text_full = core._parse_ai_textfull_only(raw) if core.DO_AI_JSON else core._parse_ai_textfull_text_only(raw)
 
     ai_text_full = _sanitize_marked_text(ai_text_full)
 
@@ -489,73 +563,82 @@ def process_image_path(image_path: str, lang: str, mode: str, ai_cfg: Optional[A
         src_paras = _tree_to_paragraph_texts(original_tree or {})
         src_text = _apply_para_markers(src_paras) if src_paras else str(
             out.get('originalTextFull') or '')
-        ai = ai_translate_text(src_text, target_lang, ai_cfg)
-        if src_paras and _needs_ai_retry(str(ai.get('aiTextFull') or ''), len(src_paras)):
-            _dbg('ai.retry', {
-                'expected_paras': len(src_paras),
-                'found_markers': len(_extract_marker_indices(str(ai.get('aiTextFull') or ''))),
-            })
-            retry_paras = [_clamp_runaway_repeats(p) for p in src_paras]
-            retry_text = _apply_para_markers(retry_paras) or src_text
-            ai = ai_translate_text(
-                retry_text, target_lang, ai_cfg, is_retry=True)
-
-        template_tree = _pick_ai_template_tree()
-        _dbg('ai.template.pick', {
-            'score_original': _tree_score(original_tree),
-            'score_translated': _tree_score(translated_tree),
-            'picked': 'original' if template_tree is original_tree else ('translated' if template_tree is translated_tree else 'none'),
-        })
-        if not isinstance(template_tree, dict):
-            template_tree = original_tree if isinstance(original_tree, dict) else (
-                translated_tree if isinstance(translated_tree, dict) else {})
-        patched = core.patch(
-            {'Ai': {'aiTextFull': str(
-                ai.get('aiTextFull') or ''), 'aiTree': template_tree}},
-            W,
-            H,
-            thai_font or '',
-            latin_font or '',
-            lang=target_lang,
-        )
-        ai_tree = (patched.get('Ai') or {}).get('aiTree') or {}
-        _dbg('ai.patched', {
-            'ai_text_len': len(str(ai.get('aiTextFull') or '')),
-            'stats_ai': _tree_stats(ai_tree),
-            'stats_original': _tree_stats(original_tree or {}),
-            'stats_translated': _tree_stats(translated_tree or {}),
-            'mode': mode_id,
-            'lang': target_lang,
-        })
-
-        shared_para_sizes = core._compute_shared_para_sizes(
-            [original_tree or {}, translated_tree or {}, ai_tree or {}],
-            thai_font or '',
-            latin_font or '',
-            W,
-            H,
-        )
-        core._apply_para_font_size(original_tree or {}, shared_para_sizes)
-        core._apply_para_font_size(translated_tree or {}, shared_para_sizes)
-        core._apply_para_font_size(ai_tree or {}, shared_para_sizes)
-        core._rebuild_ai_spans_after_font_resize(
-            ai_tree or {}, W, H, thai_font or '', latin_font or '', lang=target_lang)
-
-        out['AiTextFull'] = str(ai.get('aiTextFull') or '')
-        out['Ai'] = {
-            'aiTextFull': str(ai.get('aiTextFull') or ''),
-            'aiTree': ai_tree,
-            'meta': ai.get('meta') or {},
-        }
-        if getattr(core, 'DO_AI_HTML', True):
-            core.fit_tree_font_sizes_for_tp_html(
-                ai_tree, thai_font or '', latin_font or '', W, H)
-            out['Ai']['aihtml'] = core.ai_tree_to_tp_html(ai_tree, W, H)
-            out['Ai']['aihtmlMeta'] = {
-                'baseW': int(W),
-                'baseH': int(H),
-                'format': 'tp',
+        if not _has_meaningful_text(src_text):
+            out['AiTextFull'] = ''
+            out['Ai'] = {
+                'meta': {
+                    'skipped': True,
+                    'skipped_reason': 'no_text',
+                }
             }
+        else:
+            ai = ai_translate_text(src_text, target_lang, ai_cfg)
+            if src_paras and _needs_ai_retry(str(ai.get('aiTextFull') or ''), len(src_paras)):
+                _dbg('ai.retry', {
+                    'expected_paras': len(src_paras),
+                    'found_markers': len(_extract_marker_indices(str(ai.get('aiTextFull') or ''))),
+                })
+                retry_paras = [_clamp_runaway_repeats(p) for p in src_paras]
+                retry_text = _apply_para_markers(retry_paras) or src_text
+                ai = ai_translate_text(
+                    retry_text, target_lang, ai_cfg, is_retry=True)
+
+            template_tree = _pick_ai_template_tree()
+            _dbg('ai.template.pick', {
+                'score_original': _tree_score(original_tree),
+                'score_translated': _tree_score(translated_tree),
+                'picked': 'original' if template_tree is original_tree else ('translated' if template_tree is translated_tree else 'none'),
+            })
+            if not isinstance(template_tree, dict):
+                template_tree = original_tree if isinstance(original_tree, dict) else (
+                    translated_tree if isinstance(translated_tree, dict) else {})
+            patched = core.patch(
+                {'Ai': {'aiTextFull': str(
+                    ai.get('aiTextFull') or ''), 'aiTree': template_tree}},
+                W,
+                H,
+                thai_font or '',
+                latin_font or '',
+                lang=target_lang,
+            )
+            ai_tree = (patched.get('Ai') or {}).get('aiTree') or {}
+            _dbg('ai.patched', {
+                'ai_text_len': len(str(ai.get('aiTextFull') or '')),
+                'stats_ai': _tree_stats(ai_tree),
+                'stats_original': _tree_stats(original_tree or {}),
+                'stats_translated': _tree_stats(translated_tree or {}),
+                'mode': mode_id,
+                'lang': target_lang,
+            })
+
+            shared_para_sizes = core._compute_shared_para_sizes(
+                [original_tree or {}, translated_tree or {}, ai_tree or {}],
+                thai_font or '',
+                latin_font or '',
+                W,
+                H,
+            )
+            core._apply_para_font_size(original_tree or {}, shared_para_sizes)
+            core._apply_para_font_size(translated_tree or {}, shared_para_sizes)
+            core._apply_para_font_size(ai_tree or {}, shared_para_sizes)
+            core._rebuild_ai_spans_after_font_resize(
+                ai_tree or {}, W, H, thai_font or '', latin_font or '', lang=target_lang)
+
+            out['AiTextFull'] = str(ai.get('aiTextFull') or '')
+            out['Ai'] = {
+                'aiTextFull': str(ai.get('aiTextFull') or ''),
+                'aiTree': ai_tree,
+                'meta': ai.get('meta') or {},
+            }
+            if getattr(core, 'DO_AI_HTML', True):
+                core.fit_tree_font_sizes_for_tp_html(
+                    ai_tree, thai_font or '', latin_font or '', W, H)
+                out['Ai']['aihtml'] = core.ai_tree_to_tp_html(ai_tree, W, H)
+                out['Ai']['aihtmlMeta'] = {
+                    'baseW': int(W),
+                    'baseH': int(H),
+                    'format': 'tp',
+                }
 
     if getattr(core, 'DO_ORIGINAL', True) and getattr(core, 'DO_ORIGINAL_HTML', True) and isinstance(original_tree, dict):
         core.fit_tree_font_sizes_for_tp_html(
@@ -594,6 +677,22 @@ app.add_middleware(
     allow_headers=['*'],
 )
 
+@app.middleware("http")
+async def _tp_access_log(request: Request, call_next):
+    resp = await call_next(request)
+    try:
+        path = request.url.path
+        if path.startswith("/translate"):
+            client = request.client
+            host = client.host if client else "-"
+            port = client.port if client else 0
+            ver = request.scope.get("http_version") or "1.1"
+            phrase = HTTPStatus(resp.status_code).phrase
+            print(f'INFO:     {host}:{port} - "{request.method} {path} HTTP/{ver}" {resp.status_code} {phrase}')
+    except Exception:
+        pass
+    return resp
+
 async def _cleanup_jobs_loop():
     while True:
         await asyncio.sleep(60)
@@ -620,6 +719,9 @@ def _process_payload(payload: dict) -> dict:
     mode = (payload.get('mode') or 'lens_images')
     lang = (payload.get('lang') or 'en')
 
+    context = payload.get('context') if isinstance(payload.get('context'), dict) else {}
+    page_url = str((context or {}).get('page_url') or '').strip()
+
     src = (payload.get('src') or '').strip()
     img_bytes = b''
     mime = ''
@@ -629,7 +731,7 @@ def _process_payload(payload: dict) -> dict:
     elif src.startswith('data:'):
         img_bytes, mime = _datauri_to_bytes(src)
     else:
-        img_bytes, mime = _download_bytes(src)
+        img_bytes, mime = _download_bytes(src, page_url)
 
     t_img = time.perf_counter()
 
@@ -655,7 +757,8 @@ def _process_payload(payload: dict) -> dict:
     img_hash = _sha256_hex(img_bytes)
     cache_key = ''
     if mode == 'lens_text' and img_hash:
-        cache_key = _build_cache_key(img_hash, lang, mode, source, ai_cfg)
+        cache_source = 'ai' if source == 'ai' else 'text'
+        cache_key = _build_cache_key(img_hash, lang, mode, cache_source, ai_cfg)
         cached = None
         if source == 'ai':
             cached = _lru_get(_ai_result_cache, _ai_cache_lock, cache_key)
@@ -730,6 +833,14 @@ async def meta():
 @app.post('/translate')
 async def translate(payload: Dict[str, Any]):
     jid = str(uuid.uuid4())
+    _dbg('rest.enqueue', {
+        'id': jid,
+        'mode': str(payload.get('mode') or ''),
+        'lang': str(payload.get('lang') or ''),
+        'source': str(payload.get('source') or ''),
+        'has_datauri': bool(payload.get('imageDataUri')),
+        'has_src': bool(payload.get('src')),
+    })
     _jobs[jid] = {'status': 'queued', 'ts': _now()}
     await _job_queue.put((jid, payload))
     return {'id': jid}
@@ -799,9 +910,12 @@ async def ai_resolve(payload: Dict[str, Any]):
     if provider == 'huggingface' and not models:
         models = [
             'google/gemma-3-27b-it:featherless-a',
+            'google/gemma-3-27b-it',
+            'google/gemma-2-2b-it',
+            'google/gemma-2-9b-it',
         ]
 
-    if not models:
+    if provider != 'huggingface' and not models:
         fallback_models: List[str] = []
         preset_model = str(preset.get('model') or '').strip()
         if preset_model:
@@ -839,13 +953,11 @@ async def ai_resolve(payload: Dict[str, Any]):
             key=str.lower,
         )
 
-    if models and requested_model.lower() in ('', 'auto') and resolved_model not in models:
+    if models and resolved_model not in models:
         resolved_model = models[0]
 
-    defaults = core._remote_defaults()
-
     prompt_default = (getattr(core, 'ai_prompt_user_default',
-                      lambda _l, _d=None: '')(lang, defaults) or '').strip()
+                      lambda _l: '')(lang) or '').strip()
 
     return {
         'ok': True,
@@ -860,16 +972,25 @@ async def ai_resolve(payload: Dict[str, Any]):
 @app.get('/ai/prompt/default')
 async def ai_prompt_default(lang: str = 'en'):
     l = _normalize_lang(lang)
-    defaults = core._remote_defaults()
-    styles = core.ai_lang_style_map(defaults)
+    base = (getattr(core, 'AI_PROMPT_SYSTEM_BASE', '') or '').strip()
+    style = (getattr(core, 'AI_LANG_STYLE', {}) or {}).get(l) or (getattr(core, 'AI_LANG_STYLE', {}) or {}).get('default') or ''
+    style = (style or '').strip()
+    contract = "\n".join([
+        'Return ONLY valid JSON (no markdown, no extra text).',
+        'Output JSON MUST have exactly one key: "aiTextFull".',
+        'Schema example: {"aiTextFull":"..."}',
+        'Markers: Keep every paragraph marker like <<TP_P0>> unchanged and in order. Do not remove or add markers.',
+        "aiTextFull must include all markers, each followed by that paragraph's translated text.",
+    ])
+    system_text = "\n\n".join([p for p in [base, style, contract] if p])
     return {
         'ok': True,
         'lang': l,
-        'prompt_editable_default': (getattr(core, 'ai_prompt_user_default', lambda _l, _d=None: '')(l, defaults) or '').strip(),
-        'lang_style': styles.get(l) or styles.get('default') or '',
-        'system_base': core.ai_prompt_system_base(defaults).strip(),
-        'contract': core._active_ai_contract(),
-        'data_template': core._active_ai_data_template(),
+        'prompt_editable_default': (getattr(core, 'ai_prompt_user_default', lambda _l: '')(l) or '').strip(),
+        'lang_style': style,
+        'system_base': base,
+        'contract': contract,
+        'system_text': system_text,
     }
 
 @app.websocket('/ws')
@@ -884,6 +1005,14 @@ async def ws_endpoint(ws: WebSocket):
                 continue
             jid = str(data.get('id') or '')
             payload = data.get('payload') or {}
+            _dbg('ws.job', {
+                'id': jid,
+                'mode': str(payload.get('mode') or ''),
+                'lang': str(payload.get('lang') or ''),
+                'source': str(payload.get('source') or ''),
+                'has_datauri': bool(payload.get('imageDataUri')),
+                'has_src': bool(payload.get('src')),
+            })
             try:
                 result = await asyncio.to_thread(_process_payload, payload)
                 try:
