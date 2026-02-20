@@ -35,6 +35,54 @@
     ? window.createLogger("content_bootstrap")
     : console;
 
+  const KEEPALIVE_PORT_NAME = "TP_KEEPALIVE";
+  const KEEPALIVE_PING_MS = 20_000;
+  let keepAlivePort = null;
+  let keepAliveTimer = null;
+  let keepAliveStopAt = 0;
+
+  function stopKeepAlive() {
+    keepAliveStopAt = 0;
+    if (keepAliveTimer) {
+      clearInterval(keepAliveTimer);
+      keepAliveTimer = null;
+    }
+    if (keepAlivePort) {
+      try {
+        keepAlivePort.disconnect();
+      } catch {}
+      keepAlivePort = null;
+    }
+  }
+
+  function startKeepAlive(ms) {
+    const dur = Number(ms) > 0 ? Number(ms) : 10 * 60 * 1000;
+    keepAliveStopAt = Math.max(keepAliveStopAt || 0, Date.now() + dur);
+    if (!keepAlivePort) {
+      try {
+        keepAlivePort = chrome.runtime.connect({ name: KEEPALIVE_PORT_NAME });
+        keepAlivePort.onDisconnect.addListener(() => stopKeepAlive());
+      } catch {
+        stopKeepAlive();
+        return;
+      }
+    }
+    const ping = () => {
+      if (!keepAlivePort) return;
+      if (keepAliveStopAt && Date.now() >= keepAliveStopAt) {
+        stopKeepAlive();
+        return;
+      }
+      try {
+        keepAlivePort.postMessage({ type: "TP_KEEPALIVE", ts: Date.now() });
+      } catch {
+        stopKeepAlive();
+      }
+    };
+    ping();
+    if (!keepAliveTimer) keepAliveTimer = setInterval(ping, KEEPALIVE_PING_MS);
+  }
+
   const __tpVer = (() => {
     try {
       return (chrome?.runtime?.getManifest?.() || {}).version || "";
@@ -61,6 +109,37 @@
       () => void chrome.runtime.lastError,
     );
   } catch {}
+
+  function setupLocationChangeNotifier() {
+    if (!__tpIsTop) return;
+    if (globalThis.__tpLocationNotifyInstalled) return;
+    globalThis.__tpLocationNotifyInstalled = true;
+    let lastHref = location.href;
+    const send = () => {
+      const href = location.href;
+      if (href === lastHref) return;
+      lastHref = href;
+      chrome.runtime.sendMessage(
+        { type: "TP_LOCATION_CHANGED", href, top: true, ver: __tpVer },
+        () => void chrome.runtime.lastError,
+      );
+    };
+    const wrap = (name) => {
+      const orig = history[name];
+      if (typeof orig !== "function") return;
+      history[name] = function (...args) {
+        const r = orig.apply(this, args);
+        Promise.resolve().then(send);
+        return r;
+      };
+    };
+    wrap("pushState");
+    wrap("replaceState");
+    addEventListener("popstate", send, { passive: true });
+    addEventListener("hashchange", send, { passive: true });
+  }
+
+  setupLocationChangeNotifier();
 
   try {
     console.info("[TextPhantom][content] loaded", {
@@ -203,6 +282,12 @@
   }
 
   function getBestImgUrl(img) {
+    const tp =
+      img?.dataset?.tpOriginal ||
+      (typeof img?.getAttribute === "function"
+        ? img.getAttribute("data-tp-original")
+        : "");
+    if (tp && /^https?:/i.test(tp)) return tp;
     return (
       img.currentSrc ||
       img.src ||
@@ -232,16 +317,40 @@
   }
 
   let __tp_lastRightClick = { img: null, ts: 0, urls: [] };
+  const __tp_recentImgByUrl = new Map();
+  function rememberImgUrls(img, urls) {
+    const ts = Date.now();
+    for (const u of urls || []) {
+      const k = _normUrl(u);
+      if (!k) continue;
+      __tp_recentImgByUrl.set(k, { img, ts });
+    }
+    if (__tp_recentImgByUrl.size > 200) {
+      const cutoff = ts - 5 * 60 * 1000;
+      for (const [k, v] of __tp_recentImgByUrl.entries()) {
+        if (!v?.img || !v.img.isConnected || (v.ts || 0) < cutoff)
+          __tp_recentImgByUrl.delete(k);
+      }
+      while (__tp_recentImgByUrl.size > 220)
+        __tp_recentImgByUrl.delete(__tp_recentImgByUrl.keys().next().value);
+    }
+  }
   document.addEventListener(
     "contextmenu",
     (e) => {
       const img = e?.target?.closest ? e.target.closest("img") : null;
       if (!img) return;
+      const urls = [img.currentSrc, img.src, getBestImgUrl(img)]
+        .filter(Boolean)
+        .map(_normUrl)
+        .filter(Boolean);
+      if (urls[0] && img?.dataset) img.dataset.tpOriginal = urls[0];
       __tp_lastRightClick = {
         img,
         ts: Date.now(),
-        urls: [img.currentSrc, img.src].filter(Boolean).map(_normUrl),
+        urls,
       };
+      rememberImgUrls(img, urls);
     },
     true,
   );
@@ -264,15 +373,15 @@
       if (byData) return byData;
     }
 
+    if (o) {
+      const rec = __tp_recentImgByUrl.get(o);
+      if (rec?.img && rec.img.isConnected) return rec.img;
+    }
+
     const now = Date.now();
     if (__tp_lastRightClick.img && now - __tp_lastRightClick.ts < 8000) {
       const urls = __tp_lastRightClick.urls || [];
-      if (
-        !o ||
-        urls.includes(o) ||
-        urls.some((u) => u && o && (u.includes(o) || o.includes(u)))
-      )
-        return __tp_lastRightClick.img;
+      if (!o || urls.includes(o)) return __tp_lastRightClick.img;
     }
 
     const imgs = Array.from(document.images || []);
@@ -280,15 +389,6 @@
       const a = _normUrl(img.currentSrc);
       const b = _normUrl(img.src);
       if (o && (a === o || b === o)) return img;
-    }
-    for (const img of imgs) {
-      const a = _normUrl(img.currentSrc);
-      const b = _normUrl(img.src);
-      if (
-        o &&
-        (a.includes(o) || b.includes(o) || o.includes(a) || o.includes(b))
-      )
-        return img;
     }
     return null;
   }
@@ -310,17 +410,90 @@
     });
   }
   function collectImagesForScan(mode, lang, sourceTag) {
-    return Array.from(document.images)
-      .map((img) => ({
-        original_image_url: getBestImgUrl(img),
-        position: buildPositionFromElement(img),
-      }))
-      .filter((x) => isHttpish(x.original_image_url))
-      .map((base) => buildPayload(base, mode, lang, sourceTag));
+    const seen = new Set();
+    const imgs = Array.from(document.images || []);
+    const out = [];
+    for (const img of imgs) {
+      const r = typeof img.getBoundingClientRect === "function" ? img.getBoundingClientRect() : null;
+      const w = Math.max(Number(r?.width) || 0, Number(img.naturalWidth) || 0);
+      const h = Math.max(Number(r?.height) || 0, Number(img.naturalHeight) || 0);
+      if (w && h) {
+        if (Math.min(w, h) < 120) continue;
+        if (w * h < 60000) continue;
+      }
+      const src = _normUrl(getBestImgUrl(img));
+      if (!isHttpish(src) || seen.has(src)) continue;
+      seen.add(src);
+      out.push(
+        buildPayload(
+          { original_image_url: src, position: buildPositionFromElement(img) },
+          mode,
+          lang,
+          sourceTag,
+        ),
+      );
+    }
+    return out.filter(Boolean);
   }
 
   const OVERLAY_STYLE_ID = "textphantom_overlay_css";
   const overlayStateByImg = new WeakMap();
+
+  const sendBg = (msg) =>
+    new Promise((resolve) => {
+      try {
+        chrome.runtime.sendMessage(msg, (r) => resolve(r || null));
+      } catch (_e) {
+        resolve(null);
+      }
+    });
+
+  const mdCacheGet = (keys, includeNewImg = false, lang = "", mode = "") =>
+    sendBg({ type: "TP_MD_CACHE_GET", keys, includeNewImg: !!includeNewImg, lang, mode });
+
+  const mdCacheGetNewImg = async (key, lang, mode) => {
+    const resp = await mdCacheGet([key], true, lang, mode);
+    const rec = resp?.items?.[key] || null;
+    return (
+      rec?.newImg ||
+      extractNewImageSrc(rec?.result || null) ||
+      extractNewImageSrc(rec || null) ||
+      null
+    );
+  };
+
+  const mdApplyCachedNewImg = (originalUrl, key, isTextMode, imgElement, lang, mode) => {
+    mdCacheGetNewImg(key, lang, mode).then((newSrc) => {
+      if (!newSrc) return;
+      if (isTextMode) {
+        const mdKey = mdKeyFromUrl(originalUrl);
+        if (!mdKey) return;
+        const existing = mdHtmlOverlaysByKey.get(mdKey) || null;
+        const rec =
+          existing ||
+          (() => {
+            const rect = imgElement.getBoundingClientRect();
+            const r = upsertMangaDexHtmlOverlay(
+              mdKey,
+              imgElement,
+              Math.max(1, rect.width),
+              Math.max(1, rect.height),
+              "badge",
+            );
+            r.scope.textContent = "";
+            return r;
+          })();
+        rec.isTextMode = true;
+        updateCleanLayer(rec, imgElement, newSrc);
+        mdScheduleUpdate();
+        return;
+      }
+      replaceImageInDOM(originalUrl, newSrc).then((applied) => {
+        if (!applied)
+          mdRememberPending(originalUrl, { needNewImg: true, needMode: "replace", needLang: lang, needCacheMode: mode });
+      });
+    });
+  };
 
   function ensureOverlayStyle(cssText) {
     if (!cssText) cssText = "";
@@ -476,9 +649,7 @@
     };
   }
 
-  function renderAiOnlyPending(imgElement, state, label) {
-    if (!state) return;
-    state.scope.textContent = "";
+  function createOverlayBadge(label) {
     const badge = document.createElement("div");
     badge.textContent = label || "AI…";
     badge.style.position = "absolute";
@@ -493,6 +664,13 @@
     badge.style.lineHeight = "1.2";
     badge.style.textShadow =
       "0 0 2px rgba(255,255,255,.90),0 1px 1px rgba(0,0,0,.25)";
+    return badge;
+  }
+
+  function renderAiOnlyPending(imgElement, state, label) {
+    if (!state) return;
+    state.scope.textContent = "";
+    const badge = createOverlayBadge(label || "AI…");
     state.scope.appendChild(badge);
 
     const update = () => {
@@ -532,7 +710,70 @@
     state.ro.observe(imgElement);
   }
 
-  function applyHtmlOverlay(imgElement, result, source, isTextMode) {
+function extractNewImageSrc(result) {
+  return (
+    result?.imageDataUri ||
+    result?.image ||
+    result?.imageUrl ||
+    result?.image_url ||
+    result?.imageURL ||
+    null
+  );
+}
+
+function ensureCleanLayer(rec) {
+  if (rec?.cleanImg && rec.cleanImg.isConnected) return rec.cleanImg;
+  if (!rec?.host) return null;
+  const img = document.createElement("img");
+  img.className = "tp-ol-clean-img";
+  img.decoding = "sync";
+  img.loading = "eager";
+  img.style.position = "absolute";
+  img.style.left = "0px";
+  img.style.top = "0px";
+  img.style.width = "100%";
+  img.style.height = "100%";
+  img.style.pointerEvents = "none";
+  img.style.maxWidth = "none";
+  img.style.maxHeight = "none";
+  img.style.objectFit = "contain";
+  img.style.objectPosition = "center center";
+  img.style.display = "none";
+  if (rec.host.firstChild) rec.host.insertBefore(img, rec.host.firstChild);
+  else rec.host.appendChild(img);
+  rec.cleanImg = img;
+  return img;
+}
+
+function syncCleanLayerFit(cleanImg, imgElement) {
+  try {
+    const cs = getComputedStyle(imgElement);
+    if (cs?.objectFit) cleanImg.style.objectFit = cs.objectFit;
+    if (cs?.objectPosition) cleanImg.style.objectPosition = cs.objectPosition;
+  } catch {}
+}
+
+function updateCleanLayer(rec, imgElement, newSrc) {
+  if (!rec?.host || !imgElement) return;
+  const layer = ensureCleanLayer(rec);
+  if (!layer) return;
+  if (!newSrc) {
+    layer.style.display = "none";
+    return;
+  }
+  syncCleanLayerFit(layer, imgElement);
+  if (layer.src !== newSrc) layer.src = newSrc;
+  layer.style.display = "block";
+}
+
+
+  function applyHtmlOverlay(
+    imgElement,
+    result,
+    source,
+    isTextMode,
+    original = "",
+  ) {
     const aiHtml = result?.Ai?.aihtml || result?.ai?.aihtml || "";
     const translatedHtml =
       result?.translated?.translatedhtml || result?.translatedhtml || "";
@@ -542,36 +783,15 @@
     const req =
       String(source || "")
         .trim()
-        .toLowerCase() || "translated";
-    let chosen = "";
-    if (req === "ai") {
-      chosen = aiHtml ? "ai" : "";
-    } else if (req === "original") {
-      chosen = originalHtml
-        ? "original"
-        : translatedHtml
-          ? "translated"
-          : aiHtml
-            ? "ai"
-            : "";
-    } else {
-      chosen = translatedHtml
-        ? "translated"
-        : originalHtml
-          ? "original"
-          : aiHtml
-            ? "ai"
-            : "";
-    }
+        .toLowerCase();
 
+    const chosen = req === "ai" || req === "original" ? req : "translated";
     const html =
       chosen === "ai"
         ? aiHtml
-        : chosen === "translated"
-          ? translatedHtml
-          : chosen === "original"
-            ? originalHtml
-            : "";
+        : chosen === "original"
+          ? originalHtml
+          : translatedHtml;
 
     const cssParts = [String(result?.htmlCss || "")];
     if (chosen === "ai")
@@ -598,6 +818,8 @@
       imgElement.height ||
       1;
 
+    const newImgSrc = isTextMode ? extractNewImageSrc(result) : null;
+
     log.debug("OVERLAY_HTML", {
       source: req,
       chosen,
@@ -614,22 +836,17 @@
     if (mdKey) {
       if (isTextMode && req === "ai" && !aiHtml) {
         const rec = upsertMangaDexHtmlOverlay(mdKey, imgElement, baseW, baseH, "badge");
+        updateCleanLayer(rec, imgElement, newImgSrc);
         rec.scope.textContent = "";
-        const badge = document.createElement("div");
-        badge.textContent = "AI…";
-        badge.style.position = "absolute";
-        badge.style.left = "6px";
-        badge.style.top = "6px";
-        badge.style.padding = "4px 6px";
-        badge.style.borderRadius = "6px";
-        badge.style.background = "rgba(255,255,255,.75)";
-        badge.style.color = "rgba(20,20,20,.95)";
-        badge.style.fontFamily = "var(--tp-font,system-ui)";
-        badge.style.fontSize = "12px";
-        badge.style.lineHeight = "1.2";
-        badge.style.textShadow =
-          "0 0 2px rgba(255,255,255,.90),0 1px 1px rgba(0,0,0,.25)";
-        rec.scope.appendChild(badge);
+        const aiMeta = (result && result.Ai && result.Ai.meta) || {};
+      const reason = String(aiMeta.skipped_reason || aiMeta.reason || "").trim();
+      const badgeText =
+        reason === "no_text"
+          ? "No text"
+          : reason === "rate_limited"
+            ? "Rate limit"
+            : "AI…";
+      rec.scope.appendChild(createOverlayBadge(badgeText));
         scheduleMangaDexOverlayUpdate();
         if (!imgElement.complete) {
           imgElement.addEventListener("load", scheduleMangaDexOverlayUpdate, {
@@ -642,11 +859,26 @@
       }
 
       if (!html) {
+        if (isTextMode && newImgSrc) {
+          const rec = upsertMangaDexHtmlOverlay(mdKey, imgElement, baseW, baseH, "badge");
+          updateCleanLayer(rec, imgElement, newImgSrc);
+          rec.scope.textContent = "";
+          scheduleMangaDexOverlayUpdate();
+          if (!imgElement.complete) {
+            imgElement.addEventListener("load", scheduleMangaDexOverlayUpdate, {
+              once: true,
+              passive: true,
+            });
+          }
+          setTimeout(scheduleMangaDexOverlayUpdate, 50);
+          return;
+        }
         hideMangaDexHtmlOverlay(mdKey);
         return;
       }
 
       const rec = upsertMangaDexHtmlOverlay(mdKey, imgElement, baseW, baseH, "html");
+      updateCleanLayer(rec, imgElement, newImgSrc);
       rec.scope.textContent = "";
       const tmp = document.createElement("div");
       tmp.innerHTML = html;
@@ -662,57 +894,58 @@
       return;
     }
 
-    const state = ensureImageContainer(imgElement);
-    if (!state) return;
+    const key = _normUrl(original) || _normUrl(getBestImgUrl(imgElement));
+    if (!key) return;
 
     if (isTextMode && req === "ai" && !aiHtml) {
-      renderAiOnlyPending(imgElement, state, "AI…");
+      const rec = upsertHtmlOverlay(key, imgElement, baseW, baseH, "badge");
+      updateCleanLayer(rec, imgElement, newImgSrc);
+      rec.scope.textContent = "";
+      rec.scope.appendChild(createOverlayBadge("AI…"));
+      scheduleHtmlOverlayUpdate();
+      if (!imgElement.complete) {
+        imgElement.addEventListener("load", scheduleHtmlOverlayUpdate, {
+          once: true,
+          passive: true,
+        });
+      }
+      setTimeout(scheduleHtmlOverlayUpdate, 50);
       return;
     }
-    if (!html) return;
 
-    state.scope.textContent = "";
+    if (!html) {
+      if (isTextMode && newImgSrc) {
+        const rec = upsertHtmlOverlay(key, imgElement, baseW, baseH, "badge");
+        updateCleanLayer(rec, imgElement, newImgSrc);
+        rec.scope.textContent = "";
+        scheduleHtmlOverlayUpdate();
+        if (!imgElement.complete) {
+          imgElement.addEventListener("load", scheduleHtmlOverlayUpdate, {
+            once: true,
+            passive: true,
+          });
+        }
+        setTimeout(scheduleHtmlOverlayUpdate, 50);
+        return;
+      }
+      hideHtmlOverlay(key);
+      return;
+    }
+
+    const rec = upsertHtmlOverlay(key, imgElement, baseW, baseH, "html");
+    updateCleanLayer(rec, imgElement, newImgSrc);
+    rec.scope.textContent = "";
     const tmp = document.createElement("div");
     tmp.innerHTML = html;
-    while (tmp.firstChild) state.scope.appendChild(tmp.firstChild);
-
-    const update = () => {
-      const { cw, ch, nw, nh, sx, sy, offX, offY, transform, transformOrigin } =
-        computeScale(imgElement, baseW, baseH);
-
-      state.host.style.width = `${cw}px`;
-      state.host.style.height = `${ch}px`;
-      state.scope.style.width = `${nw}px`;
-      state.scope.style.height = `${nh}px`;
-      state.scope.style.transform = `translate(${offX}px, ${offY}px) scale(${sx}, ${sy})`;
-      state.scope.style.transformOrigin = "0 0";
-
-      if (transform && transform !== "none") {
-        state.host.style.transform = transform;
-        state.host.style.transformOrigin = transformOrigin || "0 0";
-      } else {
-        state.host.style.transform = "";
-        state.host.style.transformOrigin = "";
-      }
-    };
-
-    update();
-
+    while (tmp.firstChild) rec.scope.appendChild(tmp.firstChild);
+    scheduleHtmlOverlayUpdate();
     if (!imgElement.complete) {
-      imgElement.addEventListener("load", update, {
+      imgElement.addEventListener("load", scheduleHtmlOverlayUpdate, {
         once: true,
         passive: true,
       });
     }
-    setTimeout(update, 50);
-    setTimeout(update, 500);
-    if (state.ro) {
-      try {
-        state.ro.disconnect();
-      } catch {}
-    }
-    state.ro = new ResizeObserver(() => update());
-    state.ro.observe(imgElement);
+    setTimeout(scheduleHtmlOverlayUpdate, 50);
   }
 
   function buildPayload(
@@ -883,33 +1116,24 @@ const mdPendingByOriginal = new Map();
   }
 
   async function hydrateMangaDexFromCache() {
-    if (!isMangaDexHost() || !__tpIsTop) return;
+    if (!isMangaDexHost() || !__tpIsTop) return null;
 
     const info = await fetchMangaDexChapterUrls();
     const urls = info?.urls;
-    if (!Array.isArray(urls) || !urls.length) return;
+    if (!Array.isArray(urls) || !urls.length) return null;
 
     const pairs = urls
       .map((u) => ({ url: u, key: mdKeyFromUrl(u) }))
       .filter((p) => !!p.key);
     const keys = Array.from(new Set(pairs.map((p) => p.key))).slice(0, 600);
-    if (!keys.length) return;
-
-    const resp = await new Promise((resolve) => {
-      try {
-        chrome.runtime.sendMessage(
-          { type: "TP_MD_CACHE_GET", keys },
-          (r) => resolve(r || null),
-        );
-      } catch {
-        resolve(null);
-      }
-    });
-
-    const items = resp?.items || null;
-    if (!items) return;
+    if (!keys.length) return null;
 
     const st = await getSettings();
+
+    const resp = await mdCacheGet(keys, false, st.lang, st.mode);
+
+    const items = resp?.items || null;
+    if (!items) return null;
     const isText = String(st.mode || "lens_text") === "lens_text";
     const source = isText ? String(st.sources || "translated") : "translated";
 
@@ -917,21 +1141,34 @@ const mdPendingByOriginal = new Map();
       const rec = items[p.key];
       if (!rec) continue;
 
-      if (rec.newImg) {
-        const applied = await replaceImageInDOM(p.url, rec.newImg);
-        if (!applied) mdRememberPending(p.url, { newSrc: rec.newImg });
-      }
-
       if (rec.result) {
         const img = findTargetImage(p.url);
-        if (img) applyHtmlOverlay(img, rec.result, source, isText);
-        else {
+        if (img) applyHtmlOverlay(img, rec.result, source, isText, p.url);
+        else
           mdRememberPending(p.url, {
             overlay: { result: rec.result, source, isTextMode: isText },
           });
-        }
+      }
+
+      const hasNewImg =
+        Boolean(rec?.hasNewImg) ||
+        Boolean(rec?.newImg) ||
+        Boolean(extractNewImageSrc(rec?.result || null));
+
+      if (hasNewImg) {
+        const img = findTargetImage(p.url);
+        if (img) mdApplyCachedNewImg(p.url, p.key, isText, img, st.lang, st.mode);
+        else
+          mdRememberPending(p.url, {
+            needNewImg: true,
+            needMode: isText ? "clean" : "replace",
+            needLang: st.lang,
+            needCacheMode: st.mode,
+          });
       }
     }
+
+    return { pairs, items };
   }
 
   function isProbableMangaDexPageImage(img) {
@@ -947,17 +1184,37 @@ const mdPendingByOriginal = new Map();
   }
 
   function getMangaDexPageImagesInDOM() {
-    const imgs = Array.from(document.images || []).filter(isProbableMangaDexPageImage);
-    imgs.sort((a, b) => {
-      const ra = a.getBoundingClientRect();
-      const rb = b.getBoundingClientRect();
-      if (ra.top !== rb.top) return ra.top - rb.top;
-      return ra.left - rb.left;
-    });
-    return imgs;
+    const root = document;
+    const nodes = Array.from(root.querySelectorAll(".md--page img"));
+    const imgs = nodes.length ? nodes : Array.from(document.images || []);
+    return imgs.filter(isProbableMangaDexPageImage);
   }
 
   function inferMangaDexPageIndexForImg(img) {
+    const alt = String(img?.getAttribute?.("alt") || img?.getAttribute?.("aria-label") || "");
+    const m0 = alt.match(/^\s*(\d+)\s*[-_]/);
+    if (m0) return Math.max(0, Number(m0[1]) - 1);
+    const m1 = alt.match(/(?:^|\D)(\d+)\s*\/\s*(\d+)/);
+    if (m1) return Math.max(0, Number(m1[1]) - 1);
+    const m2 = alt.match(/page\s*(\d+)/i);
+    if (m2) return Math.max(0, Number(m2[1]) - 1);
+
+    const tpPage =
+      img?.dataset?.tpMdPage ||
+      (typeof img?.getAttribute === "function"
+        ? img.getAttribute("data-tp-md-page")
+        : "");
+    if (tpPage && /^\d+$/.test(String(tpPage)))
+      return Math.max(0, Number(tpPage) - 1);
+
+    const key = String(img?.dataset?.tpOriginalKey || "");
+    const km = key.match(/\/(\d+)\s*[-_]/);
+    if (km) return Math.max(0, Number(km[1]) - 1);
+
+    const cur = String(img?.dataset?.tpOriginal || "");
+    const cm = cur.match(/\/(\d+)\s*[-_]/);
+    if (cm) return Math.max(0, Number(cm[1]) - 1);
+
     const direct =
       img?.getAttribute?.("data-page") ||
       img?.dataset?.page ||
@@ -968,19 +1225,13 @@ const mdPendingByOriginal = new Map();
     const near = img?.closest?.("[data-page]")?.getAttribute?.("data-page") || "";
     if (near && /^\d+$/.test(String(near))) return Math.max(0, Number(near) - 1);
 
-    const alt = String(img?.getAttribute?.("alt") || img?.getAttribute?.("aria-label") || "");
-    const m1 = alt.match(/(?:^|\D)(\d+)\s*\/\s*(\d+)/);
-    if (m1) return Math.max(0, Number(m1[1]) - 1);
-    const m2 = alt.match(/page\s*(\d+)/i);
-    if (m2) return Math.max(0, Number(m2[1]) - 1);
-
     return null;
   }
 
   function mdApplyOriginalToImg(img, idx, urls) {
     if (!img || !Array.isArray(urls) || idx == null) return;
     if (idx < 0 || idx >= urls.length) return;
-        const url = _normUrl(urls[idx]);
+    const url = _normUrl(urls[idx]);
     if (!url) return;
     const key = mdKeyFromUrl(url) || url;
     if (img.dataset.tpOriginalKey !== key) img.dataset.tpOriginalKey = key;
@@ -989,11 +1240,39 @@ const mdPendingByOriginal = new Map();
     const pending = mdTakePending(key);
     if (pending) {
       if (pending.newSrc) replaceImageInDOM(url, pending.newSrc).catch(() => {});
+      if (pending.cleanSrc) {
+        const existing = mdHtmlOverlaysByKey.get(key) || null;
+        const rec =
+          existing ||
+          (() => {
+            const rect = img.getBoundingClientRect();
+            const r = upsertMangaDexHtmlOverlay(
+              key,
+              img,
+              Math.max(1, rect.width),
+              Math.max(1, rect.height),
+              "badge",
+            );
+            r.scope.textContent = "";
+            return r;
+          })();
+        rec.isTextMode = true;
+        updateCleanLayer(rec, img, pending.cleanSrc);
+        mdScheduleUpdate();
+      }
       if (pending.overlay) {
         try {
-          applyHtmlOverlay(img, pending.overlay.result, pending.overlay.source, pending.overlay.isTextMode);
+          applyHtmlOverlay(
+            img,
+            pending.overlay.result,
+            pending.overlay.source,
+            pending.overlay.isTextMode,
+            url,
+          );
         } catch {}
       }
+      if (pending.needNewImg)
+        mdApplyCachedNewImg(url, key, pending.needMode === "clean", img, pending.needLang, pending.needCacheMode);
     }
   }
 
@@ -1006,42 +1285,9 @@ const mdPendingByOriginal = new Map();
     const imgs = getMangaDexPageImagesInDOM();
     if (!imgs.length) return;
 
-    const explicit = new Map();
-    imgs.forEach((img, pos) => {
+    imgs.forEach((img) => {
       const idx = inferMangaDexPageIndexForImg(img);
-      if (idx != null) explicit.set(img, idx);
-    });
-
-    let offset = null;
-    if (explicit.size) {
-      const counts = new Map();
-      imgs.forEach((img, pos) => {
-        const idx = explicit.get(img);
-        if (idx == null) return;
-        const d = idx - pos;
-        counts.set(d, (counts.get(d) || 0) + 1);
-      });
-      let best = null;
-      let bestC = 0;
-      for (const [d, c] of counts.entries()) {
-        if (c > bestC) {
-          bestC = c;
-          best = d;
-        }
-      }
-      if (best != null) offset = best;
-    } else if (imgs.length === 1) {
-      offset = getMangaDexPageIndexFromUrl() || 0;
-    }
-
-    imgs.forEach((img, pos) => {
-      const idx = explicit.get(img);
-      if (idx != null) mdApplyOriginalToImg(img, idx, urls);
-    });
-
-    imgs.forEach((img, pos) => {
-      if (explicit.has(img)) return;
-      const idx = (offset != null ? pos + offset : pos);
+      if (idx == null) return;
       mdApplyOriginalToImg(img, idx, urls);
     });
   }
@@ -1129,7 +1375,6 @@ const mdPendingByOriginal = new Map();
 
   if (isMangaDexHost() && __tpIsTop) {
     scheduleMangaDexMapping();
-    hydrateMangaDexFromCache().catch(() => {});
     try {
       const mo = new MutationObserver(() => scheduleMangaDexMapping());
       mo.observe(document.documentElement, {
@@ -1178,6 +1423,145 @@ const mdPendingByOriginal = new Map();
   const mdOverlaysByKey = new Map();
   const mdHtmlOverlaysByKey = new Map();
   let mdOverlayRaf = 0;
+
+  const htmlOverlaysByKey = new Map();
+  let htmlOverlayRaf = 0;
+
+  function updateHtmlOverlays() {
+    if (!htmlOverlaysByKey.size) return;
+    for (const [key, rec] of htmlOverlaysByKey.entries()) {
+      const host = rec?.host;
+      const scope = rec?.scope;
+      if (!host || !scope) {
+        htmlOverlaysByKey.delete(key);
+        continue;
+      }
+
+      const prevImg = rec.img;
+      let img = prevImg;
+      if (!img || !img.isConnected) img = findTargetImage(key);
+      if (!img) {
+        host.style.display = "none";
+        rec.img = null;
+        continue;
+      }
+
+      if (img !== prevImg) {
+        if (img?.dataset) img.dataset.tpOriginal = key;
+        if (rec.ro) {
+          try {
+            rec.ro.disconnect();
+          } catch {}
+        }
+        rec.ro = new ResizeObserver(() => scheduleHtmlOverlayUpdate());
+        rec.ro.observe(img);
+      }
+
+      const r = img.getBoundingClientRect();
+      if (r.width < 2 || r.height < 2) {
+        host.style.display = "none";
+        rec.img = img;
+        continue;
+      }
+
+      rec.img = img;
+      host.style.display = "block";
+      host.style.setProperty("left", `${r.left + window.scrollX}px`, "important");
+      host.style.setProperty("top", `${r.top + window.scrollY}px`, "important");
+      host.style.setProperty("width", `${r.width}px`, "important");
+      host.style.setProperty("height", `${r.height}px`, "important");
+
+      if (rec.kind === "badge") {
+        scope.style.width = `${r.width}px`;
+        scope.style.height = `${r.height}px`;
+        scope.style.transform = "";
+        scope.style.transformOrigin = "0 0";
+        host.style.transform = "";
+        host.style.transformOrigin = "";
+        continue;
+      }
+
+      const { nw, nh, sx, sy, offX, offY } = computeScale(
+        img,
+        rec.baseW,
+        rec.baseH,
+        true,
+      );
+
+      scope.style.width = `${nw}px`;
+      scope.style.height = `${nh}px`;
+      scope.style.transform = `translate(${offX}px, ${offY}px) scale(${sx}, ${sy})`;
+      scope.style.transformOrigin = "0 0";
+      host.style.transform = "";
+      host.style.transformOrigin = "";
+    }
+  }
+
+  function scheduleHtmlOverlayUpdate() {
+    if (htmlOverlayRaf) return;
+    htmlOverlayRaf = requestAnimationFrame(() => {
+      htmlOverlayRaf = 0;
+      updateHtmlOverlays();
+    });
+  }
+
+  function ensureHtmlOverlayListeners() {
+    if (window.__tpHtmlOverlayListeners) return;
+    window.__tpHtmlOverlayListeners = true;
+    window.addEventListener("scroll", scheduleHtmlOverlayUpdate, {
+      passive: true,
+      capture: true,
+    });
+    window.addEventListener("resize", scheduleHtmlOverlayUpdate, {
+      passive: true,
+    });
+    try {
+      const mo = new MutationObserver(() => scheduleHtmlOverlayUpdate());
+      mo.observe(document.documentElement, { subtree: true, childList: true });
+    } catch {}
+  }
+
+  function upsertHtmlOverlay(key, img, baseW, baseH, kind) {
+    let rec = htmlOverlaysByKey.get(key);
+    if (!rec) {
+      const host = document.createElement("div");
+      host.className = "tp-ol-root";
+      host.style.position = "absolute";
+      host.style.left = "0px";
+      host.style.top = "0px";
+      host.style.zIndex = 2147483647;
+      host.style.pointerEvents = "none";
+      host.style.display = "none";
+      const scope = document.createElement("div");
+      scope.className = "tp-ol-scope";
+      scope.style.position = "relative";
+      host.appendChild(scope);
+      document.documentElement.appendChild(host);
+      rec = { host, scope, img: null, baseW: 1, baseH: 1, kind: "html", ro: null };
+      htmlOverlaysByKey.set(key, rec);
+      ensureHtmlOverlayListeners();
+    }
+
+    rec.img = img;
+    rec.baseW = Number.isFinite(baseW) && baseW > 0 ? baseW : 1;
+    rec.baseH = Number.isFinite(baseH) && baseH > 0 ? baseH : 1;
+    rec.kind = kind || "html";
+    if (img?.dataset && !img.dataset.tpOriginal) img.dataset.tpOriginal = key;
+    if (rec.ro) {
+      try {
+        rec.ro.disconnect();
+      } catch {}
+    }
+    rec.ro = new ResizeObserver(() => scheduleHtmlOverlayUpdate());
+    rec.ro.observe(img);
+    return rec;
+  }
+
+  function hideHtmlOverlay(key) {
+    const rec = htmlOverlaysByKey.get(key);
+    if (rec?.cleanImg) rec.cleanImg.style.display = "none";
+    if (rec?.host) rec.host.style.display = "none";
+  }
 
   function findMangaDexImgByKey(key) {
     if (!key) return null;
@@ -1328,6 +1712,7 @@ const mdPendingByOriginal = new Map();
 
   function hideMangaDexHtmlOverlay(mdKey) {
     const rec = mdHtmlOverlaysByKey.get(mdKey);
+    if (rec?.cleanImg) rec.cleanImg.style.display = "none";
     if (rec?.host) rec.host.style.display = "none";
   }
 
@@ -1488,6 +1873,16 @@ const mdPendingByOriginal = new Map();
         sendResp({ ok: true });
         return;
       }
+      if (msg?.type === "TP_KEEPALIVE_START") {
+        startKeepAlive(msg?.ms);
+        sendResp({ ok: true });
+        return;
+      }
+      if (msg?.type === "TP_KEEPALIVE_STOP") {
+        stopKeepAlive();
+        sendResp({ ok: true });
+        return;
+      }
       if (msg?.type === "TP_TOAST") {
         showToast(msg?.text || msg?.message || "", msg?.ms || 1600);
         sendResp({ ok: true });
@@ -1518,20 +1913,52 @@ const mdPendingByOriginal = new Map();
           showToast("TextPhantom: loading MangaDex pages…", 2600);
           scheduleMangaDexMapping();
           await ensureMangaDexDomMapping();
-          const md = await fetchMangaDexChapterUrls();
-          const urls = md?.urls || [];
-          if (urls.length) {
-            infos = urls.map((src) =>
-              buildPayload(
-                { original_image_url: src, position: null },
+          const hyd = await hydrateMangaDexFromCache().catch(() => null);
+          const mdCacheItems = hyd?.items || null;
+          const wantsHtml = String(mode || "").includes("text");
+          const isCachedUrl = (src) => {
+            if (!mdCacheItems) return false;
+            const k = mdKeyFromUrl(String(src || ""));
+            if (!k) return false;
+            const rec = mdCacheItems[k];
+            if (!rec) return false;
+            return wantsHtml ? Boolean(rec.result) : Boolean(rec.hasNewImg);
+          };
+          const seen = new Set();
+          const domInfos = getMangaDexPageImagesInDOM()
+            .map((img) => {
+              const src = _normUrl(getBestImgUrl(img));
+              if (!isHttpish(src) || seen.has(src) || isCachedUrl(src)) return null;
+              seen.add(src);
+              return buildPayload(
+                { original_image_url: src, position: buildPositionFromElement(img) },
                 mode,
                 lang,
                 "page_scan",
-                "collected_mangadex_api",
-              ),
-            );
+                "collected_mangadex_dom",
+              );
+            })
+            .filter(Boolean);
+
+          if (domInfos.length) {
+            infos = domInfos;
           } else {
-            infos = collectImagesForScan(mode, lang, "page_scan");
+            const md = await fetchMangaDexChapterUrls();
+            const urls = md?.urls || [];
+            const uncachedUrls = Array.isArray(urls)
+              ? urls.filter((u) => isHttpish(u) && !isCachedUrl(u))
+              : [];
+            infos = uncachedUrls.length
+              ? uncachedUrls.map((src) =>
+                  buildPayload(
+                    { original_image_url: src, position: null },
+                    mode,
+                    lang,
+                    "page_scan",
+                    "collected_mangadex_api",
+                  ),
+                )
+              : [];
           }
         } else {
           infos = collectImagesForScan(mode, lang, "page_scan");
@@ -1566,12 +1993,9 @@ const mdPendingByOriginal = new Map();
         const message = msg.message;
         const isNoOverlay = /no overlay data/i.test(String(message || ""));
         setTimeout(() => {
-          if (isNoOverlay) {
-            log.warn("overlay.noData", { original: truncate(original) });
-            return;
-          }
+          if (isNoOverlay) log.warn("overlay.noData", { original: truncate(original) });
           if (shouldShowReplaceError(original)) {
-            markImageError(original, message);
+            markImageError(original, isNoOverlay ? "No text detected" : message);
           } else {
             log.debug("IMAGE_ERROR skipped (image replaced)", {
               original: truncate(original),
@@ -1584,15 +2008,29 @@ const mdPendingByOriginal = new Map();
 
       if (msg.type === "OVERLAY_HTML") {
         try {
-          const settings = await getSettings();
-          const isText = settings.mode === "lens_text";
+          const mode = typeof msg?.mode === "string" ? msg.mode : "";
+          if (!mode) {
+            log.warn("OVERLAY_HTML missing mode", {
+              original: truncate(msg.original),
+            });
+            sendResp({ ok: true, ignored: true });
+            return;
+          }
+          const isText = mode === "lens_text";
           const source = isText
-            ? settings.sources || "translated"
+            ? String(msg?.source || "").trim().toLowerCase()
             : "translated";
+          if (isText && !source) {
+            log.warn("OVERLAY_HTML missing source", {
+              original: truncate(msg.original),
+            });
+            sendResp({ ok: true, ignored: true });
+            return;
+          }
           const img = findTargetImage(msg.original);
 
           if (img) {
-            applyHtmlOverlay(img, msg.result, source, isText);
+            applyHtmlOverlay(img, msg.result, source, isText, msg.original);
             log.info("OVERLAY_HTML applied", {
               original: truncate(msg.original),
             });
