@@ -1,22 +1,22 @@
-import asyncio, base64, copy, hashlib, io, json, os, re, tempfile, time, uuid, httpx
+import asyncio, base64, copy, hashlib, io, json, os, re, tempfile, time, uuid, httpx, logging
 
 from backend import lens_core as core
-
+from http import HTTPStatus
 from collections import OrderedDict
 from threading import Lock, Semaphore
-
 from dataclasses import dataclass
-from http import HTTPStatus
 from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 SERVER_MAX_WORKERS = int(os.environ.get('SERVER_MAX_WORKERS', '15'))
 JOB_TTL_SEC = int(os.environ.get('JOB_TTL_SEC', '3600'))
-HTTP_TIMEOUT_SEC = float(os.environ.get('HTTP_TIMEOUT_SEC', str(getattr(core, 'AI_TIMEOUT_SEC', 120))))
+HTTP_TIMEOUT_SEC = float(os.environ.get(
+    'HTTP_TIMEOUT_SEC', str(getattr(core, 'AI_TIMEOUT_SEC', 120))))
 SUPPORTED_MODES = {"lens_images", "lens_text"}
 BUILD_ID = os.environ.get('TP_BUILD_ID', 'v9-backendfix-20260129')
-TP_DEBUG = str(os.environ.get('TP_DEBUG', '')).strip().lower() in ('1', 'true', 'yes', 'on')
+TP_DEBUG = str(os.environ.get('TP_DEBUG', '')).strip(
+).lower() in ('1', 'true', 'yes', 'on')
 
 TP_PARA_MARKER_PREFIX = '<<TP_P'
 TP_PARA_MARKER_SUFFIX = '>>'
@@ -32,14 +32,27 @@ _job_queue: asyncio.Queue = asyncio.Queue()
 _result_cache_lock = Lock()
 _ai_cache_lock = Lock()
 
-HF_AI_MAX_CONCURRENCY = max(1, int(os.environ.get('HF_AI_MAX_CONCURRENCY', '1')))
-HF_AI_MIN_INTERVAL_SEC = max(0.0, float(os.environ.get('HF_AI_MIN_INTERVAL_SEC', '5')))
+HF_AI_MAX_CONCURRENCY = max(
+    1, int(os.environ.get('HF_AI_MAX_CONCURRENCY', '1')))
+HF_AI_MIN_INTERVAL_SEC = max(0.0, float(
+    os.environ.get('HF_AI_MIN_INTERVAL_SEC', '5')))
 HF_AI_MAX_RETRIES = max(1, int(os.environ.get('HF_AI_MAX_RETRIES', '6')))
-HF_AI_RETRY_BASE_SEC = max(0.2, float(os.environ.get('HF_AI_RETRY_BASE_SEC', '2')))
+HF_AI_RETRY_BASE_SEC = max(0.2, float(
+    os.environ.get('HF_AI_RETRY_BASE_SEC', '2')))
 _hf_ai_sem = Semaphore(HF_AI_MAX_CONCURRENCY)
 _hf_ai_lock = Lock()
 _hf_ai_last_ts = 0.0
 _tp_marker_re = re.compile(r'<<TP_P\d+>>')
+
+TP_ACCESS_LOG_MODE = (os.environ.get('TP_ACCESS_LOG_MODE', 'custom') or 'custom').strip().lower()
+if TP_ACCESS_LOG_MODE in ('custom', 'tp', 'plain'):
+    try:
+        _uv = logging.getLogger('uvicorn.access')
+        _uv.disabled = True
+        _uv.propagate = False
+        _uv.setLevel(logging.CRITICAL)
+    except Exception:
+        pass
 
 def _dbg(tag: str, data=None) -> None:
     if not TP_DEBUG:
@@ -133,7 +146,7 @@ def _needs_ai_retry(ai_text_full: str, expected_paras: int) -> bool:
     idx = _extract_marker_indices(ai_text_full)
     if len(idx) >= expected_paras:
         return False
-    
+
     if (TP_PARA_MARKER_PREFIX in (ai_text_full or '')) and (TP_PARA_MARKER_SUFFIX not in (ai_text_full or '')):
         return True
     return True
@@ -170,7 +183,8 @@ def _ai_prompt_sig(s: str) -> str:
     return hashlib.sha256(t.encode('utf-8')).hexdigest()[:12]
 
 def _build_cache_key(img_hash: str, lang: str, mode: str, source: str, ai_cfg: Optional["AiConfig"]) -> str:
-    parts = [img_hash, _normalize_lang(lang), (mode or '').strip(), (source or '').strip()]
+    parts = [img_hash, _normalize_lang(
+        lang), (mode or '').strip(), (source or '').strip()]
     if ai_cfg and (source or '').strip().lower() == 'ai':
         parts.extend([
             (ai_cfg.provider or '').strip(),
@@ -179,7 +193,6 @@ def _build_cache_key(img_hash: str, lang: str, mode: str, source: str, ai_cfg: O
             _ai_prompt_sig(ai_cfg.prompt_editable),
         ])
     return '|'.join([p for p in parts if p is not None])
-
 
 def _b64_to_bytes(b64: str) -> bytes:
     pad = '=' * ((4 - (len(b64) % 4)) % 4)
@@ -267,8 +280,10 @@ def _openai_compat_generate_with_hf_backoff(api_key: str, base_url: str, model: 
             last_err = e
             if not _is_hf_rate_limited_error(str(e)):
                 raise
-            delay = min(15.0, max(float(HF_AI_MIN_INTERVAL_SEC), float(HF_AI_RETRY_BASE_SEC) * (2 ** min(attempt, 4))))
-            _dbg('ai.hf.backoff', {'attempt': attempt + 1, 'delay_sec': round(delay, 2), 'err': str(e)[:240]})
+            delay = min(15.0, max(float(HF_AI_MIN_INTERVAL_SEC), float(
+                HF_AI_RETRY_BASE_SEC) * (2 ** min(attempt, 4))))
+            _dbg('ai.hf.backoff', {
+                 'attempt': attempt + 1, 'delay_sec': round(delay, 2), 'err': str(e)[:240]})
             time.sleep(delay)
             continue
     if last_err is not None:
@@ -293,7 +308,31 @@ def _sanitize_marked_text(marked_text: str) -> str:
     t = str(marked_text or "")
     if not t:
         return ""
-    indices = _extract_marker_indices(t)
+    t = t.replace("\r\n", "\n").replace("\r", "\n")
+    t = re.sub(r"<<TP_P(?!\d+>>)[^\s>]*>?", "", t)
+    t = re.sub(r"(?m)^\s*(<<TP_P\d+>>)\s*(\S)", r"\1\n\2", t)
+
+    lines = t.split("\n")
+    out0: List[str] = []
+    for line in lines:
+        if "<<TP_P" not in line:
+            out0.append(line)
+            continue
+        m = re.match(r"^\s*(<<TP_P\d+>>)\s*$", line)
+        if m:
+            out0.append(m.group(1))
+            continue
+        m2 = re.match(r"^\s*(<<TP_P\d+>>)\s*(.*)$", line)
+        if m2:
+            out0.append(m2.group(1))
+            rest = (m2.group(2) or "").strip()
+            if rest:
+                out0.append(rest)
+            continue
+        out0.append(re.sub(r"<<TP_P\d+>>", "", line))
+    t = "\n".join(out0)
+
+    indices = sorted(_extract_marker_indices(t))
     if not indices:
         return _collapse_ws(t)
     out_lines: List[str] = []
@@ -308,12 +347,33 @@ def _sanitize_marked_text(marked_text: str) -> str:
         out_lines.append("")
     return "\n".join(out_lines).strip("\n")
 
+
+def _has_complete_marker_sequence(ai_text_full: str, expected_paras: int) -> bool:
+    if expected_paras <= 0:
+        return True
+    t = str(ai_text_full or "")
+    need = list(range(int(expected_paras)))
+    idx = sorted(_extract_marker_indices(t))
+    if len(idx) < len(need):
+        return False
+    if idx[:len(need)] != need:
+        return False
+    last = -1
+    for i in need:
+        m = f"<<TP_P{i}>>"
+        p = t.find(m)
+        if p < 0 or p <= last:
+            return False
+        last = p
+    return True
+
 def _build_ai_prompt_packet_custom(target_lang: str, original_text_full: str, prompt_editable: str, is_retry: bool = False) -> tuple[str, List[str]]:
     lang = _normalize_lang(target_lang)
     style_prompt = (prompt_editable or "").strip()
     if not style_prompt:
         style_prompt = (
-            getattr(core, "ai_prompt_user_default", lambda _l, _m=None: "")(lang)
+            getattr(core, "ai_prompt_user_default",
+                    lambda _l, _m=None: "")(lang)
             or ""
         ).strip()
 
@@ -335,7 +395,8 @@ def _build_ai_prompt_packet_custom(target_lang: str, original_text_full: str, pr
             "Retry: You MUST output ALL markers from the first to the last marker in the input."
         )
 
-    system_text = "\n\n".join([p for p in [base, style, "\n".join(contract_parts)] if p])
+    system_text = "\n\n".join(
+        [p for p in [base, style, "\n".join(contract_parts)] if p])
 
     user_parts: List[str] = []
     if style_prompt:
@@ -371,7 +432,8 @@ def ai_translate_text(original_text_full: str, target_lang: str, ai: AiConfig, i
 
     if provider not in ('gemini', 'anthropic'):
         if not base_url:
-            base_url = (_resolve_provider_defaults('openai') or {}).get('base_url') or 'https://api.openai.com/v1'
+            base_url = (_resolve_provider_defaults('openai') or {}).get(
+                'base_url') or 'https://api.openai.com/v1'
 
     system_text, user_parts = _build_ai_prompt_packet_custom(
         target_lang, original_text_full, ai.prompt_editable, is_retry=is_retry
@@ -380,16 +442,21 @@ def ai_translate_text(original_text_full: str, target_lang: str, ai: AiConfig, i
     started = _now()
     used_model = model
     if provider == 'gemini':
-        raw = core._gemini_generate_json(api_key, model, system_text, user_parts)
+        raw = core._gemini_generate_json(
+            api_key, model, system_text, user_parts)
     elif provider == 'anthropic':
-        raw = core._anthropic_generate_json(api_key, model, system_text, user_parts)
+        raw = core._anthropic_generate_json(
+            api_key, model, system_text, user_parts)
     else:
         if _is_hf_provider(provider, base_url):
-            raw, used_model = _openai_compat_generate_with_hf_backoff(api_key, base_url, model, system_text, user_parts)
+            raw, used_model = _openai_compat_generate_with_hf_backoff(
+                api_key, base_url, model, system_text, user_parts)
         else:
-            raw, used_model = core._openai_compat_generate_json(api_key, base_url, model, system_text, user_parts)
+            raw, used_model = core._openai_compat_generate_json(
+                api_key, base_url, model, system_text, user_parts)
 
-    ai_text_full = core._parse_ai_textfull_only(raw) if core.DO_AI_JSON else core._parse_ai_textfull_text_only(raw)
+    ai_text_full = core._parse_ai_textfull_only(
+        raw) if core.DO_AI_JSON else core._parse_ai_textfull_text_only(raw)
 
     ai_text_full = _sanitize_marked_text(ai_text_full)
 
@@ -583,6 +650,52 @@ def process_image_path(image_path: str, lang: str, mode: str, ai_cfg: Optional[A
                 ai = ai_translate_text(
                     retry_text, target_lang, ai_cfg, is_retry=True)
 
+            ai_text_full = str(ai.get('aiTextFull') or '')
+            meta0 = ai.get('meta') or {}
+            if src_paras:
+                expected = len(src_paras)
+                if not _has_complete_marker_sequence(ai_text_full, expected):
+                    fallback_paras = _tree_to_paragraph_texts(translated_tree or {})
+                    if len(fallback_paras) < expected:
+                        fallback_paras = (fallback_paras + src_paras)[:expected]
+                    else:
+                        fallback_paras = fallback_paras[:expected]
+
+                    found = sorted(_extract_marker_indices(ai_text_full))
+                    seg_map: Dict[int, str] = {}
+                    for idx in found:
+                        if idx < 0 or idx >= expected:
+                            continue
+                        marker = f"<<TP_P{idx}>>"
+                        m = re.search(rf"{re.escape(marker)}\s*([\s\S]*?)(?=<<TP_P\d+>>|\Z)", ai_text_full)
+                        seg = _collapse_ws(m.group(1) if m else '')
+                        if seg and idx not in seg_map:
+                            seg_map[idx] = seg
+
+                    missing = 0
+                    out_lines: List[str] = []
+                    for i in range(expected):
+                        seg = seg_map.get(i) or _collapse_ws(fallback_paras[i] if i < len(fallback_paras) else '')
+                        if not seg_map.get(i):
+                            missing += 1
+                        out_lines.append(f"<<TP_P{i}>>")
+                        out_lines.append(seg)
+                        out_lines.append('')
+                    ai_text_full = "\n".join(out_lines).strip("\n")
+                    _dbg('ai.marker.repaired', {
+                        'expected_paras': expected,
+                        'found_markers': len(seg_map),
+                        'missing': missing,
+                    })
+
+                    meta0 = {
+                        **meta0,
+                        'marker_repaired': True,
+                        'marker_expected': expected,
+                        'marker_found': len(seg_map),
+                        'marker_missing': missing,
+                    }
+
             template_tree = _pick_ai_template_tree()
             _dbg('ai.template.pick', {
                 'score_original': _tree_score(original_tree),
@@ -594,7 +707,7 @@ def process_image_path(image_path: str, lang: str, mode: str, ai_cfg: Optional[A
                     translated_tree if isinstance(translated_tree, dict) else {})
             patched = core.patch(
                 {'Ai': {'aiTextFull': str(
-                    ai.get('aiTextFull') or ''), 'aiTree': template_tree}},
+                    ai_text_full or ''), 'aiTree': template_tree}},
                 W,
                 H,
                 thai_font or '',
@@ -603,7 +716,7 @@ def process_image_path(image_path: str, lang: str, mode: str, ai_cfg: Optional[A
             )
             ai_tree = (patched.get('Ai') or {}).get('aiTree') or {}
             _dbg('ai.patched', {
-                'ai_text_len': len(str(ai.get('aiTextFull') or '')),
+                'ai_text_len': len(ai_text_full),
                 'stats_ai': _tree_stats(ai_tree),
                 'stats_original': _tree_stats(original_tree or {}),
                 'stats_translated': _tree_stats(translated_tree or {}),
@@ -619,16 +732,17 @@ def process_image_path(image_path: str, lang: str, mode: str, ai_cfg: Optional[A
                 H,
             )
             core._apply_para_font_size(original_tree or {}, shared_para_sizes)
-            core._apply_para_font_size(translated_tree or {}, shared_para_sizes)
+            core._apply_para_font_size(
+                translated_tree or {}, shared_para_sizes)
             core._apply_para_font_size(ai_tree or {}, shared_para_sizes)
             core._rebuild_ai_spans_after_font_resize(
                 ai_tree or {}, W, H, thai_font or '', latin_font or '', lang=target_lang)
 
-            out['AiTextFull'] = str(ai.get('aiTextFull') or '')
+            out['AiTextFull'] = ai_text_full
             out['Ai'] = {
-                'aiTextFull': str(ai.get('aiTextFull') or ''),
+                'aiTextFull': ai_text_full,
                 'aiTree': ai_tree,
-                'meta': ai.get('meta') or {},
+                'meta': meta0,
             }
             if getattr(core, 'DO_AI_HTML', True):
                 core.fit_tree_font_sizes_for_tp_html(
@@ -680,15 +794,17 @@ app.add_middleware(
 @app.middleware("http")
 async def _tp_access_log(request: Request, call_next):
     resp = await call_next(request)
+    if TP_ACCESS_LOG_MODE in ('uvicorn', 'off', 'none'):
+        return resp
     try:
         path = request.url.path
-        if path.startswith("/translate"):
+        if request.method == 'GET' and path.startswith("/translate/"):
             client = request.client
             host = client.host if client else "-"
             port = client.port if client else 0
             ver = request.scope.get("http_version") or "1.1"
             phrase = HTTPStatus(resp.status_code).phrase
-            print(f'INFO:     {host}:{port} - "{request.method} {path} HTTP/{ver}" {resp.status_code} {phrase}')
+            print(f'{host}:{port} - "{request.method} {path} HTTP/{ver}" {resp.status_code} {phrase}', flush=True)
     except Exception:
         pass
     return resp
@@ -719,7 +835,8 @@ def _process_payload(payload: dict) -> dict:
     mode = (payload.get('mode') or 'lens_images')
     lang = (payload.get('lang') or 'en')
 
-    context = payload.get('context') if isinstance(payload.get('context'), dict) else {}
+    context = payload.get('context') if isinstance(
+        payload.get('context'), dict) else {}
     page_url = str((context or {}).get('page_url') or '').strip()
 
     src = (payload.get('src') or '').strip()
@@ -758,7 +875,8 @@ def _process_payload(payload: dict) -> dict:
     cache_key = ''
     if mode == 'lens_text' and img_hash:
         cache_source = 'ai' if source == 'ai' else 'text'
-        cache_key = _build_cache_key(img_hash, lang, mode, cache_source, ai_cfg)
+        cache_key = _build_cache_key(
+            img_hash, lang, mode, cache_source, ai_cfg)
         cached = None
         if source == 'ai':
             cached = _lru_get(_ai_result_cache, _ai_cache_lock, cache_key)
@@ -787,9 +905,11 @@ def _process_payload(payload: dict) -> dict:
         }
         if cache_key and isinstance(out, dict):
             if source == 'ai':
-                _lru_set(_ai_result_cache, _ai_cache_lock, cache_key, out, TP_AI_RESULT_CACHE_MAX)
+                _lru_set(_ai_result_cache, _ai_cache_lock,
+                         cache_key, out, TP_AI_RESULT_CACHE_MAX)
             else:
-                _lru_set(_result_cache, _result_cache_lock, cache_key, out, TP_RESULT_CACHE_MAX)
+                _lru_set(_result_cache, _result_cache_lock,
+                         cache_key, out, TP_RESULT_CACHE_MAX)
         return out
     finally:
         try:
@@ -973,7 +1093,8 @@ async def ai_resolve(payload: Dict[str, Any]):
 async def ai_prompt_default(lang: str = 'en'):
     l = _normalize_lang(lang)
     base = (getattr(core, 'AI_PROMPT_SYSTEM_BASE', '') or '').strip()
-    style = (getattr(core, 'AI_LANG_STYLE', {}) or {}).get(l) or (getattr(core, 'AI_LANG_STYLE', {}) or {}).get('default') or ''
+    style = (getattr(core, 'AI_LANG_STYLE', {}) or {}).get(l) or (
+        getattr(core, 'AI_LANG_STYLE', {}) or {}).get('default') or ''
     style = (style or '').strip()
     contract = "\n".join([
         'Return ONLY valid JSON (no markdown, no extra text).',
