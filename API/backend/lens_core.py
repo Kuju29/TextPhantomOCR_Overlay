@@ -1529,7 +1529,8 @@ def ai_translate_original_text(original_text_full: str, target_lang: str):
             if lang == "th" and cached:
                 t = str(cached.get("aiTextFull") or "")
                 if t:
-                    t2 = re.sub(r"(?:(?<=^)|(?<=[\s\"'“”‘’()\[\]{}<>]))\u0e19\u0e32\u0e22(?=(?:\s|$))", "", t)
+                    t2 = re.sub(
+                        r"(?:(?<=^)|(?<=[\s\"'“”‘’()\[\]{}<>]))\u0e19\u0e32\u0e22(?=(?:\s|$))", "", t)
                     t2 = re.sub(r"[ \t]{2,}", " ", t2)
                     t2 = re.sub(r"^[ \t]+", "", t2, flags=re.MULTILINE)
                     if t2 != t:
@@ -1555,7 +1556,8 @@ def ai_translate_original_text(original_text_full: str, target_lang: str):
         raw) if DO_AI_JSON else _parse_ai_textfull_text_only(raw)
 
     if lang == "th" and ai_text_full:
-        ai_text_full = re.sub(r"(?:(?<=^)|(?<=[\s\"'“”‘’()\[\]{}<>]))\u0e19\u0e32\u0e22(?=(?:\s|$))", "", ai_text_full)
+        ai_text_full = re.sub(
+            r"(?:(?<=^)|(?<=[\s\"'“”‘’()\[\]{}<>]))\u0e19\u0e32\u0e22(?=(?:\s|$))", "", ai_text_full)
         ai_text_full = re.sub(r"[ \t]{2,}", " ", ai_text_full)
         ai_text_full = re.sub(r"^[ \t]+", "", ai_text_full, flags=re.MULTILINE)
 
@@ -1658,7 +1660,6 @@ def _get_float_field(msg_fields, field_num):
         if f == field_num and w == 5:
             return b2f(v)
     return None
-
 
 def _get_points_from_geom(geom_bytes):
     pts = []
@@ -1848,7 +1849,7 @@ def decode_tree(paragraphs_b64, full_text, side, img_w, img_h, want_raw=True):
 
             angle_deg_raw = math.degrees(math.atan2(dy, dx))
             angle_deg = _normalize_angle_deg(angle_deg_raw)
-            
+
             angle_deg_css = angle_deg
 
             height_px = height_norm * img_h
@@ -2476,7 +2477,7 @@ def ai_tree_to_tp_html(tree: dict, base_w: int, base_h: int) -> str:
             item_idx = int(_tp_num(it.get("item_index")) or ii)
 
             fs_raw = _tp_num(it.get("font_size_px"))
-            
+
             fs = int(round(fs_raw)) if fs_raw and fs_raw > 0 else max(
                 10, int(round(h0 * 0.85)))
             fs = max(6, min(fs, max(6, int(math.floor(h0 * 0.95)))))
@@ -2834,7 +2835,7 @@ def _line_metrics_px(text: str, thai_path: str, latin_path: str, size: int):
 def _item_avail_w_px(item: dict, W: int, H: int) -> float:
     b = item.get("box") or {}
     w_box = float(b.get("width") or 0.0) * float(W)
-    
+
     L = 0.0
     p1 = item.get("baseline_p1") or {}
     p2 = item.get("baseline_p2") or {}
@@ -2888,7 +2889,7 @@ def _compute_fit_size_px_for_item(item: dict, thai_path: str, latin_path: str, W
         if (tw2 <= avail_w * 0.999) and (th2 <= avail_h * 0.999):
             break
         size -= 1
-        
+
     if size <= 12 and avail_h >= 24:
         tw0, th0, _ = m
         if tw0 > (avail_w * 1.2):
@@ -2937,7 +2938,7 @@ def fit_tree_font_sizes_for_tp_html(tree: dict, thai_path: str, latin_path: str,
 
         if not fits:
             continue
-        
+
         fits.sort()
         p["para_font_size_px"] = int(fits[len(fits) // 2])
 
