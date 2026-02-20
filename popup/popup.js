@@ -1,5 +1,6 @@
 import { normalizeUrl } from "../shared/url.js";
 import { ensureApiDefaults } from "../shared/api_defaults.js";
+import { AI_PROMPT_MAX_CHARS, makePromptKey, migratePromptMap, normalizeAiModel, normalizePrompt } from "../shared/prompt.js";
 
 const MODES = [
   { id: "lens_images", name: "Google Lens (image)", needLang: true },
@@ -47,10 +48,16 @@ const aiModelWrap = document.getElementById("ai-model-wrap");
 const aiModelSel = document.getElementById("ai-model");
 const aiPromptWrap = document.getElementById("ai-prompt-wrap");
 const aiPromptInput = document.getElementById("ai-prompt");
+const aiPromptCountEl = document.getElementById("ai-prompt-count");
 const aiPromptResetBtn = document.getElementById("ai-prompt-reset");
 const apiInput = document.getElementById("api-url");
 const emojiEl = document.getElementById("api-status-emoji");
 const resetBtn = document.getElementById("reset-api");
+
+const runStatusTextEl = document.getElementById("run-status-text");
+const runProgressEl = document.querySelector(".run-progress");
+const runProgressBarEl = document.getElementById("run-progress-bar");
+const runStatusSubEl = document.getElementById("run-status-sub");
 
 aiPromptResetBtn?.addEventListener("click", async () => {
   await resetPromptForLang(langSel.value);
@@ -86,6 +93,25 @@ const inFlight = {
   controller: null,
 };
 
+function updatePromptCount(text = null) {
+  if (!aiPromptCountEl) return;
+  const s = typeof text === "string" ? text : String(aiPromptInput?.value || "");
+  aiPromptCountEl.textContent = `${s.length}/${AI_PROMPT_MAX_CHARS}`;
+}
+
+function buildUrl(path, params = null) {
+  const base = normalizeUrl(apiInput?.value);
+  if (!base) return "";
+  const u = new URL(`${base}${path}`);
+  if (params && typeof params === "object") {
+    for (const [k, v] of Object.entries(params)) {
+      const vv = String(v ?? "").trim();
+      if (vv) u.searchParams.set(k, vv);
+    }
+  }
+  return u.toString();
+}
+
 function setEmojiStatus(type, detail) {
   if (!emojiEl) return;
   if (type === "loading") {
@@ -99,6 +125,45 @@ function setEmojiStatus(type, detail) {
     emojiEl.title = detail || "Offline / Not reachable";
   }
 }
+
+function renderBatchStatus(b) {
+  if (!runStatusTextEl || !runProgressEl || !runProgressBarEl) return;
+  const batch = b && typeof b === "object" ? b : null;
+  const stats = batch && batch.stats && typeof batch.stats === "object" ? batch.stats : null;
+  const total = Number(stats?.total) || 0;
+  const finished = Number(stats?.finished) || 0;
+  const msg = typeof batch?.message === "string" && batch.message ? batch.message : "Idle";
+  runStatusTextEl.textContent = msg;
+  const pct = total ? Math.max(0, Math.min(100, Math.round((finished / total) * 100))) : 0;
+  runProgressBarEl.style.width = pct + "%";
+  runProgressEl.setAttribute("aria-valuenow", String(pct));
+  if (runStatusSubEl) {
+    if (total) {
+      const pass = Number(batch?.pass) || 1;
+      const stage = typeof batch?.stage === "string" ? batch.stage : "";
+      const extra = stage ? `• ${stage}` : "";
+      runStatusSubEl.textContent = `pass ${pass} • ${finished}/${total} ${extra}`.trim();
+    } else {
+      runStatusSubEl.textContent = "";
+    }
+  }
+}
+
+function initRunStatus() {
+  try {
+    chrome.runtime.sendMessage({ type: "GET_BATCH_STATUS" }, (resp) => {
+      renderBatchStatus(resp?.batch);
+    });
+  } catch {}
+
+  try {
+    chrome.runtime.onMessage.addListener((msg) => {
+      if (!msg || typeof msg !== "object") return;
+      if (msg.type === "BATCH_STATUS_UPDATE") renderBatchStatus(msg.batch);
+    });
+  } catch {}
+}
+
 
 const warmedApi = new Set();
 async function warmupApi(base) {
@@ -257,13 +322,13 @@ function populateModes() {
 
 function toggleUi() {
   const modeId = modeSel.value || "lens_text";
-  const needLang = MODES.find((m) => m.id === modeId)?.needLang ?? true;
-  langWrap.style.display = needLang ? "" : "none";
-
   const isText = modeId === "lens_text";
   sourcesWrap.style.display = isText ? "" : "none";
 
   const source = (sourcesSel.value || "").trim() || "translated";
+  const needLang = MODES.find((m) => m.id === modeId)?.needLang ?? true;
+  const showLang = needLang && !(isText && source === "original");
+  langWrap.style.display = showLang ? "" : "none";
   const showAi = isText && source === "ai";
 
   const hasEnv = Boolean(metaCache?.has_env_ai_key);
@@ -392,7 +457,7 @@ async function refreshAiMeta({ forcePrompt = false } = {}) {
     if (seq !== aiMetaSeq) return;
 
     if (!data || !data.ok) {
-      setModelOptions([], { keepValue: currentModel });
+      setModelOptions([], { keepValue: currentModel, strict: false });
       toggleUi();
       return;
     }
@@ -432,11 +497,14 @@ async function refreshAiMeta({ forcePrompt = false } = {}) {
       nextModel = "auto";
     }
 
-    if ((aiModelSel.value || "").trim() !== nextModel)
-      aiModelSel.value = nextModel;
-    desiredAiModel = nextModel;
+    if ((aiModelSel.value || "").trim() !== nextModel) aiModelSel.value = nextModel;
 
-    await chrome.storage.local.set({ aiKey, aiModel: nextModel });
+    if (nextModel !== currentModel) {
+      desiredAiModel = nextModel;
+      await chrome.storage.local.set({ aiKey, aiModel: nextModel });
+    } else {
+      await chrome.storage.local.set({ aiKey });
+    }
 
     if (forcePrompt) await applyPromptForLang(lang, { forceFetch: true });
 
@@ -451,66 +519,73 @@ function canUseAiUi() {
   return source === "ai";
 }
 
-async function fetchDefaultPromptForLang(lang) {
-  const base = normalizeUrl(apiInput.value);
-  if (!base) return "";
-  const seq = ++promptSeq;
-  try {
-    const data = await fetchJson(
-      `${base}${AI_PROMPT_DEFAULT_PATH}?lang=${encodeURIComponent(lang)}`,
-      null,
-      PROMPT_TIMEOUT_MS,
-    );
-    if (seq !== promptSeq) return "";
-    return String(data?.prompt_editable_default || "").trim();
-  } catch {
-    return "";
-  }
-}
-
-async function applyPromptForLang(lang, { forceFetch = false } = {}) {
-  if (!canUseAiUi()) return;
-  const key = (lang || "en").trim() || "en";
-  if (aiPromptDirtyByLang[key]) return;
-  if (Object.prototype.hasOwnProperty.call(aiPromptByLangState, key)) {
-    aiPromptInput.value = String(aiPromptByLangState[key] || "");
-    return;
-  }
-  if (
-    !forceFetch &&
-    Object.prototype.hasOwnProperty.call(aiPromptDefaultsByLang, key)
-  ) {
-    aiPromptInput.value = String(aiPromptDefaultsByLang[key] || "");
-    return;
-  }
-  const prompt = await fetchDefaultPromptForLang(key);
-  if (prompt) {
-    aiPromptDefaultsByLang[key] = prompt;
-    aiPromptInput.value = prompt;
-  } else {
-    aiPromptDefaultsByLang[key] = "";
-    aiPromptInput.value = "";
-  }
+async function fetchDefaultPromptForLang(lang, model = 'auto') {
+  const l = (lang || 'en').trim() || 'en';
+  const m2 = normalizeAiModel(model);
+  const url = buildUrl(AI_PROMPT_DEFAULT_PATH, { lang: l, model: m2 });
+  if (!url) return '';
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), PROMPT_TIMEOUT_MS);
+  const resp = await fetch(url, { signal: ctrl.signal }).catch(() => null);
+  clearTimeout(timer);
+  const data = resp ? await resp.json().catch(() => null) : null;
+  const p2 = data && data.ok ? String(data.prompt_editable_default || '').trim() : '';
+  return normalizePrompt(p2);
 }
 
 async function resetPromptForLang(lang) {
   if (!canUseAiUi()) return;
-  const key = (lang || "en").trim() || "en";
-  delete aiPromptByLangState[key];
+  const l = (lang || desiredLang || langSel.value || 'en').trim() || 'en';
+  const model = normalizeAiModel(desiredAiModel);
+  const key = makePromptKey(l, model);
+  const seq = ++promptSeq;
+
+  const cached = String(aiPromptDefaultsByLang[key] || '').trim();
+  const def = cached ? normalizePrompt(cached) : await fetchDefaultPromptForLang(l, model);
+  if (seq !== promptSeq) return;
+
+  aiPromptDefaultsByLang[key] = def;
+  aiPromptByLangState[key] = def;
   aiPromptDirtyByLang[key] = false;
+
+  aiPromptInput.value = def;
+  updatePromptCount(def);
   await chrome.storage.local.set({ aiPromptByLang: aiPromptByLangState });
-  const prompt = await fetchDefaultPromptForLang(key);
-  aiPromptDefaultsByLang[key] = prompt;
-  aiPromptInput.value = prompt;
-  scheduleSaveAi();
+  chrome.runtime.sendMessage({ type: 'AI_SETTINGS_CHANGED' });
 }
 
-async function flushPromptForLang(lang) {
-  const key = (lang || "en").trim() || "en";
+async function applyPromptForLang(lang, { forceFetch = false } = {}) {
+  if (!canUseAiUi()) return;
+  const l = (lang || desiredLang || langSel.value || 'en').trim() || 'en';
+  const model = normalizeAiModel(desiredAiModel);
+  const key = makePromptKey(l, model);
+  if (aiPromptDirtyByLang[key]) return;
+  if (Object.prototype.hasOwnProperty.call(aiPromptByLangState, key) && !forceFetch) {
+    const saved = String(aiPromptByLangState[key] || '');
+    aiPromptInput.value = saved;
+    updatePromptCount(saved);
+    return;
+  }
+  if (Object.prototype.hasOwnProperty.call(aiPromptDefaultsByLang, key) && !forceFetch) {
+    const def = String(aiPromptDefaultsByLang[key] || '');
+    aiPromptInput.value = def;
+    updatePromptCount(def);
+    return;
+  }
+  const def = await fetchDefaultPromptForLang(l, model);
+  aiPromptDefaultsByLang[key] = def;
+  aiPromptInput.value = def;
+  updatePromptCount(def);
+}
+
+async function flushPromptForLang(lang, model = null) {
+  if (!canUseAiUi()) return;
+  const l = (lang || desiredLang || langSel.value || 'en').trim() || 'en';
+  const m2 = normalizeAiModel(model || desiredAiModel);
+  const key = makePromptKey(l, m2);
   if (!aiPromptDirtyByLang[key]) return;
-  const prompt = String(aiPromptInput.value || "").trim();
-  if (prompt) aiPromptByLangState[key] = prompt;
-  else delete aiPromptByLangState[key];
+  const prompt = normalizePrompt(String(aiPromptInput.value || ''));
+  aiPromptByLangState[key] = prompt;
   aiPromptDirtyByLang[key] = false;
   await chrome.storage.local.set({ aiPromptByLang: aiPromptByLangState });
 }
@@ -548,8 +623,7 @@ function scheduleSaveAi() {
     const modeId = modeSel.value || "lens_text";
     if (modeId !== "lens_text") {
       const aiKey = (aiKeyInput.value || "").trim();
-      const aiModel =
-        (aiModelSel.value || "").trim() || desiredAiModel || "auto";
+      const aiModel = normalizeAiModel((aiModelSel.value || "").trim() || desiredAiModel || "auto");
       desiredAiModel = aiModel;
       await chrome.storage.local.set({ aiKey, aiModel });
       chrome.runtime.sendMessage({ type: "AI_SETTINGS_CHANGED" });
@@ -559,14 +633,14 @@ function scheduleSaveAi() {
     const source = (sourcesSel.value || "").trim() || "translated";
     const lang = desiredLang || langSel.value || "en";
     const aiKey = (aiKeyInput.value || "").trim();
-    const aiModel = (aiModelSel.value || "").trim() || desiredAiModel || "auto";
+    const aiModel = normalizeAiModel((aiModelSel.value || "").trim() || desiredAiModel || "auto");
     desiredAiModel = aiModel;
 
-    if (aiPromptDirtyByLang[lang]) {
-      const prompt = String(aiPromptInput.value || "").trim();
-      if (prompt) aiPromptByLangState[lang] = prompt;
-      else delete aiPromptByLangState[lang];
-      aiPromptDirtyByLang[lang] = false;
+    const key = makePromptKey(lang, aiModel);
+    if (aiPromptDirtyByLang[key]) {
+      const prompt = normalizePrompt(String(aiPromptInput.value || ""));
+      aiPromptByLangState[key] = prompt;
+      aiPromptDirtyByLang[key] = false;
     }
 
     await chrome.storage.local.set({
@@ -653,16 +727,19 @@ async function loadSettings() {
     stored.aiPromptByLang && typeof stored.aiPromptByLang === "object"
       ? stored.aiPromptByLang
       : {};
-  const prompt = Object.prototype.hasOwnProperty.call(
-    aiPromptByLangState,
-    desiredLang,
-  )
-    ? String(aiPromptByLangState[desiredLang] || "")
+  const mig = migratePromptMap(aiPromptByLangState);
+  aiPromptByLangState = mig.map;
+  if (mig.changed) await chrome.storage.local.set({ aiPromptByLang: aiPromptByLangState });
+
+  const key = makePromptKey(desiredLang, desiredAiModel);
+  const prompt = Object.prototype.hasOwnProperty.call(aiPromptByLangState, key)
+    ? String(aiPromptByLangState[key] || "")
     : "";
 
   aiKeyInput.value = aiKey;
   setModelOptions([], { keepValue: desiredAiModel });
   aiPromptInput.value = prompt;
+  updatePromptCount(prompt);
 
   toggleUi();
 
@@ -718,17 +795,17 @@ window.addEventListener("pagehide", () => {
 
     const modeId = modeSel.value || "lens_text";
     const aiKey = (aiKeyInput.value || "").trim();
-    const aiModel = (aiModelSel.value || "").trim() || desiredAiModel || "auto";
+    const aiModel = normalizeAiModel((aiModelSel.value || "").trim() || desiredAiModel || "auto");
     desiredAiModel = aiModel;
 
     if (modeId === "lens_text") {
       const lang = desiredLang || langSel.value || "en";
-      const needSave = pendingAiSave || Boolean(aiPromptDirtyByLang[lang]);
-      if (aiPromptDirtyByLang[lang]) {
-        const prompt = String(aiPromptInput.value || "").trim();
-        if (prompt) aiPromptByLangState[lang] = prompt;
-        else delete aiPromptByLangState[lang];
-        aiPromptDirtyByLang[lang] = false;
+      const key = makePromptKey(lang, aiModel);
+      const needSave = pendingAiSave || Boolean(aiPromptDirtyByLang[key]);
+      if (aiPromptDirtyByLang[key]) {
+        const prompt = normalizePrompt(String(aiPromptInput.value || ""));
+        aiPromptByLangState[key] = prompt;
+        aiPromptDirtyByLang[key] = false;
       }
       if (needSave)
         chrome.storage.local.set({
@@ -768,7 +845,7 @@ modeSel.addEventListener("change", async () => {
 langSel.addEventListener("change", async () => {
   const prevLang = desiredLang;
   desiredLang = langSel.value || desiredLang;
-  if (canUseAiUi()) await flushPromptForLang(prevLang);
+  if (canUseAiUi()) await flushPromptForLang(prevLang, desiredAiModel);
   await chrome.storage.local.set({ lang: desiredLang });
   modelDirty = false;
   await applyPromptForLang(desiredLang, { forceFetch: false });
@@ -777,7 +854,7 @@ langSel.addEventListener("change", async () => {
 });
 
 sourcesSel.addEventListener("change", async () => {
-  if (canUseAiUi()) await flushPromptForLang(desiredLang);
+  if (canUseAiUi()) await flushPromptForLang(desiredLang, desiredAiModel);
   modelDirty = false;
   const ok = await ensureAiAvailableOrFallback();
   desiredSources = sourcesSel.value || desiredSources;
@@ -801,32 +878,29 @@ aiKeyInput.addEventListener("blur", () => {
   scheduleResolveAiMeta({ immediate: true });
 });
 
-aiModelSel.addEventListener("change", () => {
+aiModelSel.addEventListener("change", async () => {
+  const prevModel = desiredAiModel;
+  desiredAiModel = normalizeAiModel(aiModelSel.value || prevModel);
+  if (canUseAiUi()) await flushPromptForLang(desiredLang, prevModel);
   modelDirty = true;
+  await applyPromptForLang(desiredLang, { forceFetch: false });
   scheduleSaveAi();
 });
 
 aiPromptInput.addEventListener("input", () => {
-  aiPromptDirtyByLang[desiredLang] = true;
+  const key = makePromptKey(desiredLang, desiredAiModel);
+  aiPromptDirtyByLang[key] = true;
+  updatePromptCount();
   scheduleSaveAi();
 });
 aiPromptInput.addEventListener("blur", async () => {
-  aiPromptDirtyByLang[desiredLang] = true;
-  await flushPromptForLang(desiredLang);
+  const key = makePromptKey(desiredLang, desiredAiModel);
+  aiPromptDirtyByLang[key] = true;
+  updatePromptCount();
+  await flushPromptForLang(desiredLang, desiredAiModel);
   scheduleSaveAi();
 });
 
-aiPromptResetBtn?.addEventListener("click", async () => {
-  if (!canUseAiUi()) return;
-  const lang = (desiredLang || langSel.value || "en").trim() || "en";
-  delete aiPromptByLangState[lang];
-  aiPromptDirtyByLang[lang] = false;
-  await chrome.storage.local.set({ aiPromptByLang: aiPromptByLangState });
-  const def = await fetchDefaultPromptForLang(lang);
-  aiPromptDefaultsByLang[lang] = def;
-  aiPromptInput.value = def;
-  scheduleSaveAi();
-});
 
 resetBtn.addEventListener("click", () => {
   ensureApiDefaults({ force: true }).then((d) => {
@@ -845,3 +919,4 @@ resetBtn.addEventListener("click", () => {
 });
 
 loadSettings();
+initRunStatus();
