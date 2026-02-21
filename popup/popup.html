@@ -44,13 +44,13 @@
 
       <div class="field" id="ai-prompt-wrap" style="display: none">
         <label for="ai-prompt" class="label-row">
-          <span>AI Prompt (optional)</span>
+          <span>AI Style (optional)</span>
           <button
             type="button"
             id="ai-prompt-reset"
             class="icon-btn"
-            title="Reset prompt for this language"
-            aria-label="Reset prompt for this language"
+            title="Reset style for this language"
+            aria-label="Reset style for this language"
             style="
               background: none;
               border: none;
@@ -66,7 +66,7 @@
         <textarea
           id="ai-prompt"
           rows="4"
-          placeholder="Your translation style notes. Leave empty to use server defaults."
+          placeholder="Your translation style notes. Leave empty to use language defaults."
         ></textarea>
         <div id="ai-prompt-count" class="prompt-count" aria-live="polite"></div>
       </div>
@@ -115,9 +115,21 @@
 
       <div class="field" id="run-status-wrap">
         <label for="run-status-text">Run Status</label>
-        <div id="run-status-text" class="run-status" aria-live="polite">Idle</div>
-        <div class="run-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-          <div id="run-progress-bar" class="run-progress-bar" style="width: 0%"></div>
+        <div id="run-status-text" class="run-status" aria-live="polite">
+          Idle
+        </div>
+        <div
+          class="run-progress"
+          role="progressbar"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuenow="0"
+        >
+          <div
+            id="run-progress-bar"
+            class="run-progress-bar"
+            style="width: 0%"
+          ></div>
         </div>
         <div id="run-status-sub" class="hint"></div>
       </div>
