@@ -32,8 +32,7 @@ const WARMUP_PATH = "/warmup";
 const WARMUP_TIMEOUT_MS = 2500;
 const WARMUP_TTL_MS = 20 * 60 * 1000;
 
-const SOFT_MAX_CONCURRENCY_DEFAULT = 3;
-const SOFT_MAX_CONCURRENCY_AI = 1;
+const SOFT_MAX_CONCURRENCY_DEFAULT = 15;
 
 let MAX_CONCURRENCY = 10;
 let softMaxConcurrency = SOFT_MAX_CONCURRENCY_DEFAULT;
@@ -71,8 +70,17 @@ function effectiveMaxConcurrency() {
       ? Number(softMaxConcurrency)
       : SOFT_MAX_CONCURRENCY_DEFAULT;
   const n = Number(MAX_CONCURRENCY) || 0;
-  if (forceSoftMaxConcurrency) return soft;
+  if (forceSoftMaxConcurrency) {
+    if (n > 0 && n < soft) return n;
+    return soft;
+  }
   return n;
+}
+
+function aiSoftMaxConcurrencyFromKey(key) {
+  const k = String(key || "").trim();
+  if (k.startsWith("hf_")) return 3;
+  return 10;
 }
 
 function statusTextFor(code, fallback = "") {
@@ -394,7 +402,7 @@ function batchFinalizeIfComplete(b) {
           }
           if (cls?.permanent) skip = true;
         }
-        if (!skip) await processJob(nextPayload, b.tabId, b.frameId || 0);
+        if (!skip) enqueue(nextPayload, b.tabId, b.frameId || 0);
       }
     });
     return;
@@ -474,9 +482,15 @@ function cancelTabWork(tabId, reason = "navigation") {
   for (const [jid, ctx] of Array.from(pendingByJob.entries())) {
     if ((ctx?.tabId || 0) !== tabId) continue;
 
-    const batchId = String(ctx?.batchId || ctx?.metadata?.batch_id || "").trim();
-    const imageKey = String(ctx?.imageKey || ctx?.metadata?.image_id || "").trim();
-    const batch = batchId ? ensureBatch(batchId, tabId, ctx?.frameId || 0) : null;
+    const batchId = String(
+      ctx?.batchId || ctx?.metadata?.batch_id || "",
+    ).trim();
+    const imageKey = String(
+      ctx?.imageKey || ctx?.metadata?.image_id || "",
+    ).trim();
+    const batch = batchId
+      ? ensureBatch(batchId, tabId, ctx?.frameId || 0)
+      : null;
 
     pendingByJob.delete(jid);
     if (ctx?.metadata?.image_id) pendingByImage.delete(ctx.metadata.image_id);
@@ -498,7 +512,6 @@ function cancelTabWork(tabId, reason = "navigation") {
     batchStopKeepAlive(b);
   }
 }
-
 
 const MD_CACHE_TTL_MS = 15 * 60 * 1000;
 const mdCacheByKey = new Map();
@@ -695,14 +708,21 @@ async function pollJobViaRest(
     );
     if (isStale && !ctx0?.keepCacheOnStale) {
       pendingByJob.delete(jid);
-      if (ctx0?.metadata?.image_id) pendingByImage.delete(ctx0.metadata.image_id);
+      if (ctx0?.metadata?.image_id)
+        pendingByImage.delete(ctx0.metadata.image_id);
       ev("job.done", {
         id: jid,
         dt: fmtMs(Date.now() - (ctx0?.startedAt || Date.now())),
       });
-      const batchId = String(ctx0?.batchId || ctx0?.metadata?.batch_id || "").trim();
-      const imageKey = String(ctx0?.imageKey || ctx0?.metadata?.image_id || "").trim();
-      const batch = batchId ? ensureBatch(batchId, ctx0.tabId || 0, ctx0.frameId || 0) : null;
+      const batchId = String(
+        ctx0?.batchId || ctx0?.metadata?.batch_id || "",
+      ).trim();
+      const imageKey = String(
+        ctx0?.imageKey || ctx0?.metadata?.image_id || "",
+      ).trim();
+      const batch = batchId
+        ? ensureBatch(batchId, ctx0.tabId || 0, ctx0.frameId || 0)
+        : null;
       if (batch && imageKey) {
         batchMark(batchId, imageKey, { status: "aborted" });
         batchUpdateToast(batch, "ยกเลิก", true);
@@ -1456,7 +1476,10 @@ async function processJob(payload, tabId, frameId = 0) {
   const curSession = getTabSessionId(tabId);
   if (originSession && curSession && originSession !== curSession && !isMd) {
     if (batch && imageKey) {
-      batchMark(batchId, imageKey, { status: "aborted", lastError: "navigation" });
+      batchMark(batchId, imageKey, {
+        status: "aborted",
+        lastError: "navigation",
+      });
       batchUpdateToast(batch, "ยกเลิก");
       batchFinalizeIfComplete(batch);
       batchStopKeepAlive(batch);
@@ -1706,8 +1729,16 @@ async function processJob(payload, tabId, frameId = 0) {
   }
 }
 
-const enqueue = (payload, tabId, frameId = 0) =>
-  addTask(() => processJob(payload, tabId, frameId));
+const enqueue = (payload, tabId, frameId = 0) => {
+  const expected = String(
+    payload?.context?.tp_tab_session || payload?.metadata?.tp_tab_session || "",
+  ).trim();
+  addTask(() => {
+    const cur = getTabSessionId(tabId);
+    if (expected && (!cur || expected !== cur)) return;
+    return processJob(payload, tabId, frameId);
+  });
+};
 
 function recreateMenus() {
   chrome.contextMenus.removeAll(() => {
@@ -1793,7 +1824,9 @@ chrome.contextMenus.onClicked.addListener(async (menuInfo, tab) => {
   ev("menu.click", { id: menuInfo.menuItemId });
   try {
     if (tab?.id) await ensureContentScript(tab.id);
-    const tabSessionId = tab?.id ? ensureTabSession(tab.id, tab?.url || "") : "";
+    const tabSessionId = tab?.id
+      ? ensureTabSession(tab.id, tab?.url || "")
+      : "";
     const { mode, lang, sources, aiKey, aiModel, aiPrompt } =
       await getSettings();
     const source =
@@ -1808,7 +1841,7 @@ chrome.contextMenus.onClicked.addListener(async (menuInfo, tab) => {
         : null;
     forceSoftMaxConcurrency = mode === "lens_text" && source === "ai";
     softMaxConcurrency = forceSoftMaxConcurrency
-      ? SOFT_MAX_CONCURRENCY_AI
+      ? aiSoftMaxConcurrencyFromKey(aiKey)
       : SOFT_MAX_CONCURRENCY_DEFAULT;
     ev("batch.concurrency", {
       soft: softMaxConcurrency,
@@ -1853,6 +1886,13 @@ chrome.contextMenus.onClicked.addListener(async (menuInfo, tab) => {
     }
 
     if (menuInfo.menuItemId === "img_one" && originalUrl) {
+      try {
+        await sendToTab(
+          tab.id,
+          { type: "TP_KEEPALIVE_START", ms: 10 * 60 * 1000 },
+          frameId,
+        );
+      } catch {}
       const metadata = {
         image_id: crypto.randomUUID(),
         batch_id: currentBatchId,
@@ -2008,29 +2048,28 @@ chrome.contextMenus.onClicked.addListener(async (menuInfo, tab) => {
 chrome.runtime.onConnect.addListener((port) => {
   if (!port || port.name !== KEEPALIVE_PORT_NAME) return;
   keepAlivePorts.add(port);
+  const tabId = port.sender?.tab?.id;
+  const frameId = port.sender?.frameId;
   try {
     port.onMessage.addListener(() => void 0);
-    port.onDisconnect.addListener(() => keepAlivePorts.delete(port));
+    port.onDisconnect.addListener(() => {
+      keepAlivePorts.delete(port);
+      if (!Number.isFinite(tabId)) return;
+      if (Number.isFinite(frameId) && frameId !== 0) return;
+      bumpTabSession(tabId, "");
+      cancelTabWork(tabId, "page_unloaded");
+    });
   } catch {
     keepAlivePorts.delete(port);
   }
 });
-
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (!Number.isFinite(tabId)) return;
   if (changeInfo.status !== "loading") return;
   const href = changeInfo.url || tab?.url || "";
 
-  if (isMangaDexPageUrl(href)) {
-    const prevHref = getTabSession(tabId)?.href || "";
-    if (prevHref && isSameMangaDexChapter(prevHref, href)) {
-      ensureTabSession(tabId, href);
-      return;
-    }
-    bumpTabSession(tabId, href);
-    return;
-  }
+  if (isMangaDexPageUrl(href)) return;
 
   bumpTabSession(tabId, href);
   cancelTabWork(tabId, "navigation");
