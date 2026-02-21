@@ -369,23 +369,18 @@ def _has_complete_marker_sequence(ai_text_full: str, expected_paras: int) -> boo
 
 def _build_ai_prompt_packet_custom(target_lang: str, original_text_full: str, prompt_editable: str, is_retry: bool = False) -> tuple[str, List[str]]:
     lang = _normalize_lang(target_lang)
-    style_prompt = (prompt_editable or "").strip()
-    if not style_prompt:
-        style_prompt = (
-            getattr(core, "ai_prompt_user_default",
-                    lambda _l, _m=None: "")(lang)
+
+    base = (getattr(core, "AI_PROMPT_SYSTEM_BASE", "") or "").strip()
+
+    style = (prompt_editable or "").strip()
+    if not style:
+        style = (
+            (getattr(core, "AI_LANG_STYLE", {}) or {}).get(lang)
+            or (getattr(core, "AI_LANG_STYLE", {}) or {}).get("default")
             or ""
         ).strip()
 
-    base = (getattr(core, "AI_PROMPT_SYSTEM_BASE", "") or "").strip()
-    style = (
-        (getattr(core, "AI_LANG_STYLE", {}) or {}).get(lang)
-        or (getattr(core, "AI_LANG_STYLE", {}) or {}).get("default")
-        or ""
-    ).strip()
-
     contract_parts: List[str] = [
-        "Follow the user's StylePrompt as hard constraints (unless it would break marker rules).",
         "Output ONLY the translated text (no JSON, no markdown, no extra commentary).",
         "Markers: Keep every paragraph marker like <<TP_P0>> unchanged and in order. Do not remove, rename, or add markers.",
         "For each marker, output the marker followed by that paragraph's translated text.",
@@ -396,12 +391,10 @@ def _build_ai_prompt_packet_custom(target_lang: str, original_text_full: str, pr
         )
 
     system_text = "\n\n".join(
-        [p for p in [base, style, "\n".join(contract_parts)] if p])
+        [p for p in [base, style, "\n".join(contract_parts)] if p]
+    )
 
-    user_parts: List[str] = []
-    if style_prompt:
-        user_parts.append("StylePrompt:\n" + style_prompt)
-    user_parts.append("Input:\n" + str(original_text_full or ""))
+    user_parts: List[str] = ["Input:\n" + str(original_text_full or "")]
     return system_text, user_parts
 
 def ai_translate_text(original_text_full: str, target_lang: str, ai: AiConfig, is_retry: bool = False) -> dict:
@@ -977,6 +970,7 @@ async def ai_resolve(payload: Dict[str, Any]):
     api_key = str(payload.get('api_key') or '').strip() or (
         os.getenv('AI_API_KEY') or '').strip()
     lang = _normalize_lang(str(payload.get('lang') or 'en'))
+    style_default = ((getattr(core, 'AI_LANG_STYLE', {}) or {}).get(lang) or (getattr(core, 'AI_LANG_STYLE', {}) or {}).get('default') or '').strip()
     if not api_key:
         return {
             'ok': False,
@@ -985,7 +979,7 @@ async def ai_resolve(payload: Dict[str, Any]):
             'default_model': '',
             'models': [],
             'lang': lang,
-            'prompt_editable_default': (getattr(core, 'ai_prompt_user_default', lambda _l: '')(lang) or '').strip(),
+            'prompt_editable_default': style_default,
         }
 
     provider = core._canonical_provider(str(payload.get('provider') or 'auto'))
@@ -1076,8 +1070,7 @@ async def ai_resolve(payload: Dict[str, Any]):
     if models and resolved_model not in models:
         resolved_model = models[0]
 
-    prompt_default = (getattr(core, 'ai_prompt_user_default',
-                      lambda _l: '')(lang) or '').strip()
+    prompt_default = style_default
 
     return {
         'ok': True,
@@ -1107,7 +1100,7 @@ async def ai_prompt_default(lang: str = 'en'):
     return {
         'ok': True,
         'lang': l,
-        'prompt_editable_default': (getattr(core, 'ai_prompt_user_default', lambda _l: '')(l) or '').strip(),
+        'prompt_editable_default': style,
         'lang_style': style,
         'system_base': base,
         'contract': contract,
