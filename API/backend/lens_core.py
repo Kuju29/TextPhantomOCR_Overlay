@@ -225,33 +225,6 @@ AI_LANG_STYLE = {
     ),
 }
 
-AI_PROMPT_USER_BY_LANG = {
-    "th": """
-เป้าหมายภาษา: ไทย
-แปลข้อความ OCR ในมังงะเป็นภาษาไทยธรรมชาติแบบบทสนทนา
-คงน้ำเสียง/อารมณ์ให้เหมาะกับบริบท
-สั้น กระชับ อ่านลื่น ห้ามใส่คำอธิบายหรือบรรยายเพิ่ม
-คงชื่อเฉพาะ/ศัพท์เฉพาะให้สม่ำเสมอ และส่งออกเป็นข้อความไทยเท่านั้น
-""".strip(),
-    "en": """Style preferences:
-- Keep English dialogue concise and conversational.
-- Keep lines short for speech bubbles.
-- Keep names and recurring terms consistent.
-- Keep SFX short; avoid very long repeated characters.
-""".strip(),
-    "ja": """Style preferences:
-- Keep Japanese dialogue concise and natural for manga.
-- Keep lines short for speech bubbles.
-- Keep names and recurring terms consistent.
-- Keep SFX short; avoid very long repeated characters.
-""".strip(),
-    "default": """Style preferences:
-- Keep dialogue concise, spoken, and faithful to tone.
-- Keep lines short for speech bubbles.
-- Keep names and recurring terms consistent.
-- Keep SFX short; avoid very long repeated characters.
-""".strip(),
-}
 
 AI_PROMPT_RESPONSE_CONTRACT_JSON = (
     "Return ONLY valid JSON (no markdown, no extra text).\n"
@@ -289,9 +262,6 @@ _FONT_PAIR_CACHE = {}
 _TP_HTML_EPS_PX = 0.0
 ZWSP = "\u200b"
 
-def ai_prompt_user_default(lang: str, model: str = "auto") -> str:
-    l = _normalize_lang(lang)
-    return (AI_PROMPT_USER_BY_LANG.get(l) or AI_PROMPT_USER_BY_LANG.get("default") or "").strip()
 
 def _active_ai_contract() -> str:
     return AI_PROMPT_RESPONSE_CONTRACT_JSON if DO_AI_JSON else AI_PROMPT_RESPONSE_CONTRACT_TEXT
@@ -411,7 +381,6 @@ def _build_ai_prompt_packet(target_lang: str, original_text_full: str):
         data_text = data_template.format(input_json=input_json)
 
     style = AI_LANG_STYLE.get(lang) or AI_LANG_STYLE.get("default") or ""
-    editable = (ai_prompt_user_default(lang) or "").strip()
 
     system_parts = [AI_PROMPT_SYSTEM_BASE]
     if style:
@@ -420,8 +389,6 @@ def _build_ai_prompt_packet(target_lang: str, original_text_full: str):
     system_text = "\n\n".join([p for p in system_parts if p])
 
     user_parts = []
-    if editable:
-        user_parts.append(editable)
     user_parts.append(data_text)
     return system_text, user_parts
 
@@ -1504,7 +1471,6 @@ def ai_translate_original_text(original_text_full: str, target_lang: str):
         json.dumps(
             {
                 "sys": AI_PROMPT_SYSTEM_BASE,
-                "edit": AI_PROMPT_USER_BY_LANG,
                 "contract": _active_ai_contract(),
                 "data": _active_ai_data_template(),
                 "style": AI_LANG_STYLE.get(lang) or AI_LANG_STYLE.get("default") or "",
