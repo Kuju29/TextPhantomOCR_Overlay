@@ -836,8 +836,8 @@
       rec.scope.textContent = "";
       const tmp = document.createElement("div");
       tmp.innerHTML = String(html || "")
-      .replace(/<<TP_P\d+>>/g, "")
-      .replace(/<<TP_P/g, "");
+        .replace(/<<TP_P\d+>>/g, "")
+        .replace(/<<TP_P/g, "");
       while (tmp.firstChild) rec.scope.appendChild(tmp.firstChild);
       scheduleMangaDexOverlayUpdate();
       if (!imgElement.complete) {
@@ -1659,6 +1659,10 @@
         host.style.transformOrigin = "";
       }
     }
+  }
+
+  function mdScheduleUpdate() {
+    scheduleMangaDexOverlayUpdate();
   }
 
   function scheduleMangaDexOverlayUpdate() {
