@@ -1431,6 +1431,13 @@
         continue;
       }
 
+      const curKey = _normUrl(getBestImgUrl(img));
+      if (curKey && curKey !== key) {
+        host.style.display = "none";
+        rec.img = null;
+        continue;
+      }
+
       if (img !== prevImg) {
         if (img?.dataset) img.dataset.tpOriginal = key;
         if (rec.ro) {
@@ -1442,7 +1449,14 @@
         rec.ro.observe(img);
       }
 
-      const r = img.getBoundingClientRect();
+      const parent = ensureOverlayHostMountedNearImage(rec, img);
+      if (!parent) {
+        host.style.display = "none";
+        rec.img = img;
+        continue;
+      }
+
+      const { r, left, top } = getOverlayBoxFromParent(img, parent);
       if (r.width < 2 || r.height < 2) {
         host.style.display = "none";
         rec.img = img;
@@ -1451,12 +1465,8 @@
 
       rec.img = img;
       host.style.display = "block";
-      host.style.setProperty(
-        "left",
-        `${r.left + window.scrollX}px`,
-        "important",
-      );
-      host.style.setProperty("top", `${r.top + window.scrollY}px`, "important");
+      host.style.setProperty("left", `${left}px`, "important");
+      host.style.setProperty("top", `${top}px`, "important");
       host.style.setProperty("width", `${r.width}px`, "important");
       host.style.setProperty("height", `${r.height}px`, "important");
 
@@ -1494,6 +1504,45 @@
     });
   }
 
+  function ensureOverlayHostMountedNearImage(rec, img) {
+    const host = rec?.host;
+    if (!host || !img?.isConnected) return null;
+    const parent = img.parentElement;
+    if (!parent) return null;
+
+    if (host.parentElement !== parent || host.nextSibling !== img) {
+      try {
+        if (host.parentElement) host.parentElement.removeChild(host);
+      } catch {}
+      try {
+        parent.insertBefore(host, img);
+      } catch {
+        try {
+          parent.appendChild(host);
+        } catch {}
+      }
+    }
+
+    try {
+      if (getComputedStyle(parent).position === "static") {
+        parent.style.position = "relative";
+      }
+    } catch {}
+
+    return host.parentElement === parent ? parent : null;
+  }
+
+  function getOverlayBoxFromParent(img, parent) {
+    const r = img.getBoundingClientRect();
+    if (!parent) return { r, left: 0, top: 0 };
+    const pr = parent.getBoundingClientRect();
+    return {
+      r,
+      left: r.left - pr.left + (parent.scrollLeft || 0),
+      top: r.top - pr.top + (parent.scrollTop || 0),
+    };
+  }
+
   function ensureHtmlOverlayListeners() {
     if (window.__tpHtmlOverlayListeners) return;
     window.__tpHtmlOverlayListeners = true;
@@ -1506,7 +1555,12 @@
     });
     try {
       const mo = new MutationObserver(() => scheduleHtmlOverlayUpdate());
-      mo.observe(document.documentElement, { subtree: true, childList: true });
+      mo.observe(document.documentElement, {
+        subtree: true,
+        childList: true,
+        attributes: true,
+        attributeFilter: ["src", "srcset", "data-src", "data-srcset", "style", "class"],
+      });
     } catch {}
   }
 
@@ -1525,7 +1579,6 @@
       scope.className = "tp-ol-scope";
       scope.style.position = "relative";
       host.appendChild(scope);
-      document.documentElement.appendChild(host);
       rec = {
         host,
         scope,
@@ -1539,6 +1592,7 @@
       ensureHtmlOverlayListeners();
     }
 
+    if (img) ensureOverlayHostMountedNearImage(rec, img);
     rec.img = img;
     rec.baseW = Number.isFinite(baseW) && baseW > 0 ? baseW : 1;
     rec.baseH = Number.isFinite(baseH) && baseH > 0 ? baseH : 1;
@@ -1615,7 +1669,21 @@
         continue;
       }
 
-      const r = img.getBoundingClientRect();
+      const curKey = mdKeyFromUrl(getBestImgUrl(img));
+      if (curKey && curKey !== key) {
+        host.style.display = "none";
+        rec.img = null;
+        continue;
+      }
+
+      const parent = ensureOverlayHostMountedNearImage(rec, img);
+      if (!parent) {
+        host.style.display = "none";
+        rec.img = img;
+        continue;
+      }
+
+      const { r, left, top } = getOverlayBoxFromParent(img, parent);
       if (r.width < 2 || r.height < 2) {
         host.style.display = "none";
         rec.img = img;
@@ -1624,12 +1692,8 @@
 
       rec.img = img;
       host.style.display = "block";
-      host.style.setProperty(
-        "left",
-        `${r.left + window.scrollX}px`,
-        "important",
-      );
-      host.style.setProperty("top", `${r.top + window.scrollY}px`, "important");
+      host.style.setProperty("left", `${left}px`, "important");
+      host.style.setProperty("top", `${top}px`, "important");
       host.style.setProperty("width", `${r.width}px`, "important");
       host.style.setProperty("height", `${r.height}px`, "important");
 
@@ -1682,6 +1746,15 @@
     window.addEventListener("resize", scheduleMangaDexOverlayUpdate, {
       passive: true,
     });
+    try {
+      const mo = new MutationObserver(() => scheduleMangaDexOverlayUpdate());
+      mo.observe(document.documentElement, {
+        subtree: true,
+        childList: true,
+        attributes: true,
+        attributeFilter: ["src", "srcset", "data-src", "data-srcset", "style", "class"],
+      });
+    } catch {}
   }
 
   function mdGetKeyForImg(img) {
@@ -1702,12 +1775,12 @@
       const scope = document.createElement("div");
       scope.className = "tp-ol-scope";
       host.appendChild(scope);
-      document.documentElement.appendChild(host);
       rec = { host, scope, img: null, baseW: 1, baseH: 1, kind: "html" };
       mdHtmlOverlaysByKey.set(mdKey, rec);
       ensureMangaDexOverlayListeners();
     }
 
+    if (img) ensureOverlayHostMountedNearImage(rec, img);
     rec.img = img;
     rec.baseW = Number.isFinite(baseW) && baseW > 0 ? baseW : 1;
     rec.baseH = Number.isFinite(baseH) && baseH > 0 ? baseH : 1;
