@@ -119,11 +119,225 @@ UI_LANGUAGES = [
     {"code": "ja", "name": "Japanese"},
     {"code": "ko", "name": "Korean"},
     {"code": "zh-CN", "name": "Chinese (Simplified)"},
+    {"code": "zh-TW", "name": "Chinese (Traditional)"},
     {"code": "vi", "name": "Vietnamese"},
+    {"code": "id", "name": "Indonesian"},
+    {"code": "ms", "name": "Malay"},
+    {"code": "tl", "name": "Tagalog"},
+    {"code": "fil", "name": "Filipino"},
+    {"code": "hi", "name": "Hindi"},
+    {"code": "bn", "name": "Bengali"},
+    {"code": "ur", "name": "Urdu"},
+    {"code": "ta", "name": "Tamil"},
+    {"code": "te", "name": "Telugu"},
+    {"code": "ml", "name": "Malayalam"},
+    {"code": "mr", "name": "Marathi"},
+    {"code": "gu", "name": "Gujarati"},
+    {"code": "kn", "name": "Kannada"},
+    {"code": "pa", "name": "Punjabi"},
+    {"code": "ne", "name": "Nepali"},
+    {"code": "si", "name": "Sinhala"},
+    {"code": "my", "name": "Myanmar (Burmese)"},
+    {"code": "km", "name": "Khmer"},
+    {"code": "lo", "name": "Lao"},
+    {"code": "jv", "name": "Javanese"},
+    {"code": "su", "name": "Sundanese"},
     {"code": "es", "name": "Spanish"},
-    {"code": "de", "name": "German"},
     {"code": "fr", "name": "French"},
+    {"code": "de", "name": "German"},
+    {"code": "it", "name": "Italian"},
+    {"code": "pt", "name": "Portuguese"},
+    {"code": "nl", "name": "Dutch"},
+    {"code": "pl", "name": "Polish"},
+    {"code": "ro", "name": "Romanian"},
+    {"code": "ru", "name": "Russian"},
+    {"code": "uk", "name": "Ukrainian"},
+    {"code": "cs", "name": "Czech"},
+    {"code": "sk", "name": "Slovak"},
+    {"code": "sl", "name": "Slovenian"},
+    {"code": "hr", "name": "Croatian"},
+    {"code": "sr", "name": "Serbian"},
+    {"code": "bs", "name": "Bosnian"},
+    {"code": "bg", "name": "Bulgarian"},
+    {"code": "mk", "name": "Macedonian"},
+    {"code": "el", "name": "Greek"},
+    {"code": "tr", "name": "Turkish"},
+    {"code": "hu", "name": "Hungarian"},
+    {"code": "fi", "name": "Finnish"},
+    {"code": "sv", "name": "Swedish"},
+    {"code": "da", "name": "Danish"},
+    {"code": "no", "name": "Norwegian"},
+    {"code": "et", "name": "Estonian"},
+    {"code": "lv", "name": "Latvian"},
+    {"code": "lt", "name": "Lithuanian"},
+    {"code": "is", "name": "Icelandic"},
+    {"code": "ga", "name": "Irish"},
+    {"code": "cy", "name": "Welsh"},
+    {"code": "mt", "name": "Maltese"},
+    {"code": "sq", "name": "Albanian"},
+    {"code": "hy", "name": "Armenian"},
+    {"code": "ka", "name": "Georgian"},
+    {"code": "az", "name": "Azerbaijani"},
+    {"code": "kk", "name": "Kazakh"},
+    {"code": "ky", "name": "Kyrgyz"},
+    {"code": "tg", "name": "Tajik"},
+    {"code": "uz", "name": "Uzbek"},
+    {"code": "tk", "name": "Turkmen"},
+    {"code": "mn", "name": "Mongolian"},
+    {"code": "ar", "name": "Arabic"},
+    {"code": "fa", "name": "Persian"},
+    {"code": "iw", "name": "Hebrew"},
+    {"code": "ps", "name": "Pashto"},
+    {"code": "ug", "name": "Uyghur"},
+    {"code": "ku", "name": "Kurdish (Kurmanji)"},
+    {"code": "sw", "name": "Swahili"},
+    {"code": "am", "name": "Amharic"},
+    {"code": "ha", "name": "Hausa"},
+    {"code": "ig", "name": "Igbo"},
+    {"code": "yo", "name": "Yoruba"},
+    {"code": "zu", "name": "Zulu"},
+    {"code": "xh", "name": "Xhosa"},
+    {"code": "so", "name": "Somali"},
+    {"code": "rw", "name": "Kinyarwanda"},
+    {"code": "mg", "name": "Malagasy"},
+    {"code": "af", "name": "Afrikaans"},
+    {"code": "ca", "name": "Catalan"},
+    {"code": "eu", "name": "Basque"},
+    {"code": "gl", "name": "Galician"},
+    {"code": "eo", "name": "Esperanto"},
+    {"code": "be", "name": "Belarusian"},
+    {"code": "ceb", "name": "Cebuano"},
+    {"code": "co", "name": "Corsican"},
+    {"code": "fy", "name": "Frisian"},
+    {"code": "haw", "name": "Hawaiian"},
+    {"code": "hmn", "name": "Hmong"},
+    {"code": "ht", "name": "Haitian Creole"},
+    {"code": "lb", "name": "Luxembourgish"},
+    {"code": "la", "name": "Latin"},
+    {"code": "mi", "name": "Maori"},
+    {"code": "or", "name": "Odia (Oriya)"},
+    {"code": "gd", "name": "Scots Gaelic"},
+    {"code": "sm", "name": "Samoan"},
+    {"code": "sn", "name": "Shona"},
+    {"code": "st", "name": "Sesotho"},
+    {"code": "sd", "name": "Sindhi"},
+    {"code": "tt", "name": "Tatar"},
+    {"code": "yi", "name": "Yiddish"},
+    {"code": "ny", "name": "Chichewa"}
 ]
+
+UI_LANGUAGE_CODE_MAP = {
+    "en": "en",
+    "th": "th",
+    "ja": "ja",
+    "ko": "ko",
+    "zh-cn": "zh-CN",
+    "zh-tw": "zh-TW",
+    "vi": "vi",
+    "id": "id",
+    "ms": "ms",
+    "tl": "tl",
+    "fil": "fil",
+    "hi": "hi",
+    "bn": "bn",
+    "ur": "ur",
+    "ta": "ta",
+    "te": "te",
+    "ml": "ml",
+    "mr": "mr",
+    "gu": "gu",
+    "kn": "kn",
+    "pa": "pa",
+    "ne": "ne",
+    "si": "si",
+    "my": "my",
+    "km": "km",
+    "lo": "lo",
+    "jv": "jv",
+    "su": "su",
+    "es": "es",
+    "fr": "fr",
+    "de": "de",
+    "it": "it",
+    "pt": "pt",
+    "nl": "nl",
+    "pl": "pl",
+    "ro": "ro",
+    "ru": "ru",
+    "uk": "uk",
+    "cs": "cs",
+    "sk": "sk",
+    "sl": "sl",
+    "hr": "hr",
+    "sr": "sr",
+    "bs": "bs",
+    "bg": "bg",
+    "mk": "mk",
+    "el": "el",
+    "tr": "tr",
+    "hu": "hu",
+    "fi": "fi",
+    "sv": "sv",
+    "da": "da",
+    "no": "no",
+    "et": "et",
+    "lv": "lv",
+    "lt": "lt",
+    "is": "is",
+    "ga": "ga",
+    "cy": "cy",
+    "mt": "mt",
+    "sq": "sq",
+    "hy": "hy",
+    "ka": "ka",
+    "az": "az",
+    "kk": "kk",
+    "ky": "ky",
+    "tg": "tg",
+    "uz": "uz",
+    "tk": "tk",
+    "mn": "mn",
+    "ar": "ar",
+    "fa": "fa",
+    "iw": "iw",
+    "ps": "ps",
+    "ug": "ug",
+    "ku": "ku",
+    "sw": "sw",
+    "am": "am",
+    "ha": "ha",
+    "ig": "ig",
+    "yo": "yo",
+    "zu": "zu",
+    "xh": "xh",
+    "so": "so",
+    "rw": "rw",
+    "mg": "mg",
+    "af": "af",
+    "ca": "ca",
+    "eu": "eu",
+    "gl": "gl",
+    "eo": "eo",
+    "be": "be",
+    "ceb": "ceb",
+    "co": "co",
+    "fy": "fy",
+    "haw": "haw",
+    "hmn": "hmn",
+    "ht": "ht",
+    "lb": "lb",
+    "la": "la",
+    "mi": "mi",
+    "or": "or",
+    "gd": "gd",
+    "sm": "sm",
+    "sn": "sn",
+    "st": "st",
+    "sd": "sd",
+    "tt": "tt",
+    "yi": "yi",
+    "ny": "ny"
+}
 
 AI_PROVIDER_DEFAULTS = {
     "gemini": {
@@ -220,6 +434,13 @@ AI_LANG_STYLE = {
         "Choose 丁寧語/タメ口 to match context; keep emotion and emphasis.\n"
         "Keep proper nouns consistent; keep SFX natural in Japanese."
     ),
+    "id": (
+        "Target language: Indonesian\n"
+        "Write natural Indonesian manga dialogue: concise, conversational, and easy to read in speech bubbles.\n"
+        "Keep tone, emotion, and character voice intact; avoid stiff literal phrasing.\n"
+        "Use everyday Indonesian unless the source clearly needs a formal register.\n"
+        "Keep names and recurring terms consistent; avoid over-explaining."
+    ),
     "default": (
         "Write natural manga dialogue in the target language: concise, spoken, faithful to meaning and tone."
     ),
@@ -284,14 +505,31 @@ def _resolve_model(provider: str, model: str) -> str:
 
 def _normalize_lang(lang: str) -> str:
     t = (lang or "").strip().lower()
-    if t in ("jp", "jpn", "japanese"):
-        return "ja"
-    if t in ("thai",):
-        return "th"
-    if t in ("eng", "english"):
-        return "en"
-    if t.startswith("zh"):
-        return t
+    alias_map = {
+        "jp": "ja",
+        "jpn": "ja",
+        "japanese": "ja",
+        "thai": "th",
+        "eng": "en",
+        "english": "en",
+        "indonesian": "id",
+        "bahasa indonesia": "id",
+        "bahasa_indonesia": "id",
+        "indo": "id",
+        "he": "iw",
+        "hebrew": "iw",
+        "tagalog": "tl",
+        "filipino": "fil",
+        "burmese": "my",
+    }
+    if t in alias_map:
+        t = alias_map[t]
+    if t in UI_LANGUAGE_CODE_MAP:
+        return UI_LANGUAGE_CODE_MAP[t]
+    if t in ("zh", "zh-hans", "zh_cn", "zh-cn", "zh_hans"):
+        return "zh-CN"
+    if t in ("zh-hant", "zh_tw", "zh-tw", "zh_hant"):
+        return "zh-TW"
     if len(t) >= 2:
         return t[:2]
     return t
@@ -2798,6 +3036,194 @@ def _line_metrics_px(text: str, thai_path: str, latin_path: str, size: int):
     baseline_to_center = -((min_t + max_b) / 2.0)
     return width, total_h, baseline_to_center
 
+def _angle_diff_deg(a: float, b: float) -> float:
+    d = float(a) - float(b)
+    while d <= -180.0:
+        d += 360.0
+    while d > 180.0:
+        d -= 360.0
+    return d
+
+
+def _token_center_px(t: dict, W: int, H: int) -> tuple[float, float]:
+    b = t.get("box") or {}
+    c = b.get("center") or {}
+    if ("x" in c) and ("y" in c):
+        return float(c.get("x") or 0.0) * float(W), float(c.get("y") or 0.0) * float(H)
+    left = float(b.get("left") or 0.0) * float(W)
+    top = float(b.get("top") or 0.0) * float(H)
+    width = float(b.get("width") or 0.0) * float(W)
+    height = float(b.get("height") or 0.0) * float(H)
+    return left + (width / 2.0), top + (height / 2.0)
+
+
+def _token_tangent_normal_px(t: dict, W: int, H: int):
+    p1 = t.get("baseline_p1") or {}
+    p2 = t.get("baseline_p2") or {}
+    if ("x" in p1 and "y" in p1 and "x" in p2 and "y" in p2):
+        x1 = float(p1.get("x") or 0.0) * float(W)
+        y1 = float(p1.get("y") or 0.0) * float(H)
+        x2 = float(p2.get("x") or 0.0) * float(W)
+        y2 = float(p2.get("y") or 0.0) * float(H)
+        dx = x2 - x1
+        dy = y2 - y1
+        L = float(math.hypot(dx, dy))
+        if L > 1e-6:
+            ux = dx / L
+            uy = dy / L
+            return ux, uy, -uy, ux
+    angle_deg = float((t.get("box") or {}).get("rotation_deg") or 0.0)
+    rad = math.radians(angle_deg)
+    ux = math.cos(rad)
+    uy = math.sin(rad)
+    return ux, uy, -uy, ux
+
+
+def _build_curve_context(tokens: list, W: int, H: int) -> dict:
+    para_items = {}
+    for t in tokens or []:
+        pi = t.get("para_index")
+        ii = t.get("item_index")
+        if pi is None or ii is None:
+            continue
+        key = (int(pi), int(ii))
+        if key in para_items:
+            continue
+        cx, cy = _token_center_px(t, W, H)
+        ux, uy, nx, ny = _token_tangent_normal_px(t, W, H)
+        b = t.get("box") or {}
+        para_items[key] = {
+            "cx": float(cx),
+            "cy": float(cy),
+            "ux": float(ux),
+            "uy": float(uy),
+            "nx": float(nx),
+            "ny": float(ny),
+            "w": max(1.0, float(b.get("width") or 0.0) * float(W)),
+            "h": max(1.0, float(b.get("height") or 0.0) * float(H)),
+            "angle": float(b.get("rotation_deg") or 0.0),
+        }
+
+    grouped = {}
+    for (pi, ii), data in para_items.items():
+        grouped.setdefault(int(pi), []).append((int(ii), data))
+
+    out = {}
+    for pi, entries in grouped.items():
+        entries.sort(key=lambda it: it[0])
+        n = len(entries)
+        for idx, (ii, cur) in enumerate(entries):
+            prev_data = entries[idx - 1][1] if idx > 0 else None
+            next_data = entries[idx + 1][1] if (idx + 1) < n else None
+            curve_px = 0.0
+            if prev_data and next_data:
+                ax = prev_data["cx"]
+                ay = prev_data["cy"]
+                bx = next_data["cx"]
+                by = next_data["cy"]
+                vx = bx - ax
+                vy = by - ay
+                chord = float(math.hypot(vx, vy))
+                if chord > 1e-6:
+                    wx = cur["cx"] - ax
+                    wy = cur["cy"] - ay
+                    signed = ((vx * wy) - (vy * wx)) / chord
+                    turn1 = math.degrees(math.atan2(cur["cy"] - ay, cur["cx"] - ax))
+                    turn2 = math.degrees(math.atan2(by - cur["cy"], bx - cur["cx"]))
+                    bend_deg = _angle_diff_deg(turn2, turn1)
+                    bend_sign = 1.0 if bend_deg >= 0.0 else -1.0
+                    if signed != 0.0 and bend_deg != 0.0 and (1.0 if signed >= 0.0 else -1.0) != bend_sign:
+                        signed = -signed
+                    chord_span = max(cur["w"], chord * 0.5)
+                    angle_mag = abs(float(bend_deg))
+                    angle_bonus = min(cur["h"] * 0.32, chord_span * 0.1, angle_mag * 0.18)
+                    curve_px = signed + (bend_sign * angle_bonus)
+            elif prev_data or next_data:
+                near = prev_data or next_data
+                ref_angle = math.degrees(math.atan2(cur["cy"] - near["cy"], cur["cx"] - near["cx"]))
+                bend_deg = _angle_diff_deg(cur["angle"], ref_angle)
+                if abs(bend_deg) >= 8.0:
+                    sign = 1.0 if bend_deg >= 0.0 else -1.0
+                    curve_px = sign * min(cur["h"] * 0.2, cur["w"] * 0.06, abs(bend_deg) * 0.2)
+            if curve_px:
+                limit = min(cur["h"] * 0.72, cur["w"] * 0.18, 42.0)
+                if abs(curve_px) < max(2.0, cur["h"] * 0.12):
+                    curve_px = 0.0
+                else:
+                    curve_px = max(-limit, min(limit, curve_px))
+            out[(pi, ii)] = float(curve_px)
+    return out
+
+
+def _estimate_curve_px(token: dict, curve_map: dict, avail_w: float, avail_h: float, font_size: int, text_w: float, text_h: float) -> float:
+    pi = token.get("para_index")
+    ii = token.get("item_index")
+    curve_px = 0.0
+    if pi is not None and ii is not None:
+        curve_px = float(curve_map.get((int(pi), int(ii))) or 0.0)
+
+    if not curve_px:
+        b = token.get("box") or {}
+        cx = float((b.get("center") or {}).get("x") or (float(b.get("left") or 0.0) + (float(b.get("width") or 0.0) / 2.0)))
+        cy = float((b.get("center") or {}).get("y") or (float(b.get("top") or 0.0) + (float(b.get("height") or 0.0) / 2.0)))
+        p1 = token.get("baseline_p1") or {}
+        p2 = token.get("baseline_p2") or {}
+        if ("x" in p1 and "y" in p1 and "x" in p2 and "y" in p2):
+            mx = (float(p1.get("x") or 0.0) + float(p2.get("x") or 0.0)) / 2.0
+            my = (float(p1.get("y") or 0.0) + float(p2.get("y") or 0.0)) / 2.0
+            ux, uy, nx, ny = _token_tangent_normal_px(token, 1, 1)
+            off = ((cx - mx) * nx) + ((cy - my) * ny)
+            curve_px = float(off) * min(avail_w, avail_h)
+
+    if not curve_px:
+        return 0.0
+
+    cap_h = max(text_h * 0.55, avail_h * 0.3)
+    cap = min(max(4.0, cap_h), max(4.0, avail_h * 0.82), max(4.0, avail_w * 0.18), max(4.0, font_size * 0.95))
+    curve_px = max(-cap, min(cap, curve_px))
+    if abs(curve_px) < 2.0:
+        return 0.0
+    return float(curve_px)
+
+
+def _curve_height_extra_px(curve_px: float) -> float:
+    return abs(float(curve_px)) * 0.9
+
+
+def _warp_canvas_arc(canvas: Image.Image, curve_px: float) -> Image.Image:
+    curve = float(curve_px or 0.0)
+    if abs(curve) < 1.0:
+        return canvas
+    arr = np.array(canvas, dtype=np.uint8)
+    if arr.ndim != 3 or arr.shape[2] != 4:
+        return canvas
+    h, w, _ = arr.shape
+    if h <= 0 or w <= 1:
+        return canvas
+    pad = int(math.ceil(abs(curve))) + 4
+    out = np.zeros((h + (pad * 2), w, 4), dtype=np.uint8)
+    denom = float(max(1, w - 1))
+    for x in range(w):
+        xn = (2.0 * float(x) / denom) - 1.0
+        bow = 1.0 - (xn * xn)
+        shift = int(round(curve * bow))
+        y0 = pad + shift
+        y1 = y0 + h
+        if y0 < 0:
+            src_top = -y0
+            y0 = 0
+        else:
+            src_top = 0
+        if y1 > out.shape[0]:
+            src_bottom = h - (y1 - out.shape[0])
+            y1 = out.shape[0]
+        else:
+            src_bottom = h
+        if y1 <= y0 or src_bottom <= src_top:
+            continue
+        out[y0:y1, x, :] = arr[src_top:src_bottom, x, :]
+    return Image.fromarray(out, mode="RGBA")
+
 def _item_avail_w_px(item: dict, W: int, H: int) -> float:
     b = item.get("box") or {}
     w_box = float(b.get("width") or 0.0) * float(W)
@@ -3439,6 +3865,7 @@ def draw_overlay(img, tokens, out_path, thai_path, latin_path, level_outlines=No
     base_rgb = img.convert("RGB")
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
+    curve_map = _build_curve_context(tokens or [], base.size[0], base.size[1])
 
     for ol in (level_outlines or []):
         q = ol.get("quad")
@@ -3580,7 +4007,8 @@ def draw_overlay(img, tokens, out_path, thai_path, latin_path, level_outlines=No
         except Exception:
             tw2, th2 = d2.textsize(text, font=font)
 
-        side = int(max(tw2, th2, avail_h, avail_w) * 2.2 + 40)
+        curve_px = _estimate_curve_px(t, curve_map, avail_w, avail_h, final_size, tw2, th2)
+        side = int(max(tw2, th2 + _curve_height_extra_px(curve_px), avail_h, avail_w) * 2.35 + 40)
         side = min(side, int(max(W, H) * 4))
         if side < 128:
             side = 128
@@ -3669,6 +4097,9 @@ def draw_overlay(img, tokens, out_path, thai_path, latin_path, level_outlines=No
 
             _draw_text_baseline_fallback(
                 dc, origin, text, thai_path, latin_path, final_size, fill)
+            if curve_px:
+                canvas = _warp_canvas_arc(canvas, curve_px)
+                origin = (canvas.size[0] // 2, canvas.size[1] // 2)
             rotated = canvas.rotate(-angle_deg, resample=Image.BICUBIC,
                                     expand=False, center=origin)
             paste_x = int(round(bx - origin[0]))
@@ -3677,6 +4108,9 @@ def draw_overlay(img, tokens, out_path, thai_path, latin_path, level_outlines=No
         else:
             _draw_text_centered_fallback(
                 dc, origin, text, thai_path, latin_path, final_size, fill)
+            if curve_px:
+                canvas = _warp_canvas_arc(canvas, curve_px)
+                origin = (canvas.size[0] // 2, canvas.size[1] // 2)
             rotated = canvas.rotate(-angle_deg, resample=Image.BICUBIC,
                                     expand=False, center=origin)
             paste_x = int(round(box_cx - origin[0]))
