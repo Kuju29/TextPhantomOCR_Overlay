@@ -1496,11 +1496,14 @@ async function processJob(payload, tabId, frameId = 0) {
   const base = await getApiBase();
   const preferRest = shouldPreferRest(base, payload?.mode, payload?.source);
 
-  const isAi =
-    payload?.mode === "lens_text" &&
-    String(payload?.source || "").toLowerCase() === "ai";
-  if (isAi && !payload?.imageDataUri) {
-    const src = String(payload?.src || "").trim();
+  const src = String(payload?.src || "").trim();
+  const shouldPrefetchDataUri =
+    !payload?.imageDataUri &&
+    Boolean(src) &&
+    (/^(?:https?:|blob:|data:|file:|chrome-extension:)/i.test(src) ||
+      (payload?.mode === "lens_text" &&
+        String(payload?.source || "").toLowerCase() === "ai"));
+  if (shouldPrefetchDataUri) {
     const key = normImgSrc(src);
     pruneMdDataUriCache();
     const cached = key ? mdDataUriCache.get(key) : null;
@@ -1510,9 +1513,11 @@ async function processJob(payload, tabId, frameId = 0) {
     ) {
       payload.imageDataUri = cached.du;
       ev("image.datauri.cache.hit", { size: payload.imageDataUri.length });
-    } else if (src && /^https?:/i.test(src)) {
+    } else {
       try {
-        const du = await fetchImageDataUriFromUrl(src, pageUrl || "");
+        const du = src.startsWith("data:")
+          ? src
+          : await fetchImageDataUriFromUrl(src, pageUrl || "");
         if (du) {
           payload.imageDataUri = du;
           if (key) mdDataUriCache.set(key, { du, ts: Date.now() });
@@ -1885,7 +1890,7 @@ chrome.contextMenus.onClicked.addListener(async (menuInfo, tab) => {
       }
     }
 
-    if (menuInfo.menuItemId === "img_one" && originalUrl) {
+    if (menuInfo.menuItemId === "img_one" && tab?.id) {
       try {
         await sendToTab(
           tab.id,
@@ -1893,45 +1898,83 @@ chrome.contextMenus.onClicked.addListener(async (menuInfo, tab) => {
           frameId,
         );
       } catch {}
-      const metadata = {
-        image_id: crypto.randomUUID(),
-        batch_id: currentBatchId,
-        original_image_url: originalUrl || null,
-        position: null,
-        ocr_image: null,
-        extra: null,
-        pipeline: [
-          { stage: "context_menu_single", at: new Date().toISOString() },
-        ],
-        timestamp: new Date().toISOString(),
-      };
-      const payload = {
+
+      let payload = null;
+      const wantsContextPayload =
+        !originalUrl || /^(?:blob:|data:|file:|chrome-extension:)/i.test(String(originalUrl || ""));
+      if (wantsContextPayload) {
+        try {
+          const resp = await requestFromTab(
+            tab.id,
+            { type: "GET_CONTEXT_IMAGE_PAYLOAD" },
+            frameId,
+          );
+          if (resp?.ok && resp?.payload) payload = resp.payload;
+        } catch (e) {
+          evWarn("context.payload.fail", { err: e?.message || String(e) });
+        }
+      }
+
+      const metadata0 =
+        payload?.metadata && typeof payload.metadata === "object"
+          ? payload.metadata
+          : {};
+      const pipeline0 = Array.isArray(metadata0.pipeline) ? metadata0.pipeline : [];
+      const imageId = String(metadata0.image_id || "").trim() || crypto.randomUUID();
+      const sourceUrl = payload?.src || originalUrl || null;
+
+      payload = {
+        ...(payload && typeof payload === "object" ? payload : {}),
         mode,
         lang,
         type: "image",
-        src: originalUrl || null,
+        src: sourceUrl,
+        imageDataUri:
+          typeof payload?.imageDataUri === "string" && payload.imageDataUri
+            ? payload.imageDataUri
+            : null,
         menu: "img_one",
         source,
         ai: aiPayload,
         context: {
+          ...(payload?.context && typeof payload.context === "object"
+            ? payload.context
+            : {}),
           page_url: tab?.url || null,
           timestamp: new Date().toISOString(),
           tp_tab_session: tabSessionId,
         },
-        metadata,
+        metadata: {
+          ...metadata0,
+          image_id: imageId,
+          batch_id: currentBatchId,
+          original_image_url: sourceUrl,
+          position: metadata0.position || null,
+          ocr_image: null,
+          extra: null,
+          pipeline: pipeline0.concat({
+            stage: "context_menu_single",
+            at: new Date().toISOString(),
+          }),
+          timestamp: new Date().toISOString(),
+        },
       };
-      if (String(originalUrl || "").startsWith("blob:")) {
+
+      if (
+        !payload.imageDataUri &&
+        String(sourceUrl || "").startsWith("blob:")
+      ) {
         try {
-          const du = await fetchImageDataUriFromUrl(
-            originalUrl,
-            tab?.url || null,
-          );
+          const du = await fetchImageDataUriFromUrl(sourceUrl, tab?.url || null);
           if (du) payload.imageDataUri = du;
           ev("image.datauri.ok", { size: du ? du.length : 0 });
         } catch (e) {
           evWarn("image.datauri.fail", { err: e?.message || String(e) });
         }
       }
+
+      if (!payload.src && !payload.imageDataUri) return;
+
       const b = ensureBatch(currentBatchId, tab.id, frameId);
       b.total1 = 1;
       const k = imageKeyFromPayload(payload);
@@ -1988,6 +2031,12 @@ chrome.contextMenus.onClicked.addListener(async (menuInfo, tab) => {
             lang,
             type: "image",
             src: src || null,
+            imageDataUri:
+              typeof meta?.imageDataUri === "string" && meta.imageDataUri
+                ? meta.imageDataUri
+                : typeof m.imageDataUri === "string" && m.imageDataUri
+                  ? m.imageDataUri
+                  : null,
             menu: "img_all",
             source,
             ai: aiPayload,
@@ -2011,12 +2060,12 @@ chrome.contextMenus.onClicked.addListener(async (menuInfo, tab) => {
             },
           };
         })
-        .filter((p) => !!p.src);
+        .filter((p) => !!(p.src || p.imageDataUri));
 
       const seen = new Set();
       const uniq = [];
       for (const pl of payloads) {
-        const k = normImgSrc(pl.src);
+        const k = imageKeyFromPayload(pl);
         if (!k || seen.has(k)) continue;
         seen.add(k);
         uniq.push(pl);
