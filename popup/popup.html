@@ -71,6 +71,24 @@
         <div id="ai-prompt-count" class="prompt-count" aria-live="polite"></div>
       </div>
 
+
+      <div class="field">
+        <label>Local Viewer</label>
+        <div class="file-actions">
+          <button type="button" id="open-local-images" class="action-btn">
+            Open image(s)
+          </button>
+          <button type="button" id="open-local-folder" class="action-btn secondary">
+            Open folder
+          </button>
+        </div>
+        <div class="hint">
+          Open local manga pages in a reader tab, then right-click an image to translate.
+        </div>
+        <input id="local-images-input" type="file" accept="image/*" multiple hidden />
+        <input id="local-folder-input" type="file" accept="image/*" multiple webkitdirectory hidden />
+      </div>
+
       <div class="field">
         <label for="api-url">
           Custom API URL

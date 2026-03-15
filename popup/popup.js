@@ -1,6 +1,7 @@
 import { normalizeUrl } from "../shared/url.js";
 import { ensureApiDefaults } from "../shared/api_defaults.js";
 import { AI_PROMPT_MAX_CHARS, makePromptKey, migratePromptMap, normalizeAiModel, normalizePrompt } from "../shared/prompt.js";
+import { filterImageFiles, saveLocalSession, sortLocalPages, toLocalPageRecord } from "../shared/local_gallery.js";
 
 const MODES = [
   { id: "lens_images", name: "Google Lens (image)", needLang: true },
@@ -13,10 +14,111 @@ const FALLBACK_LANGS = [
   { code: "ja", name: "Japanese" },
   { code: "ko", name: "Korean" },
   { code: "zh-CN", name: "Chinese (Simplified)" },
+  { code: "zh-TW", name: "Chinese (Traditional)" },
   { code: "vi", name: "Vietnamese" },
+  { code: "id", name: "Indonesian" },
+  { code: "ms", name: "Malay" },
+  { code: "tl", name: "Tagalog" },
+  { code: "fil", name: "Filipino" },
+  { code: "hi", name: "Hindi" },
+  { code: "bn", name: "Bengali" },
+  { code: "ur", name: "Urdu" },
+  { code: "ta", name: "Tamil" },
+  { code: "te", name: "Telugu" },
+  { code: "ml", name: "Malayalam" },
+  { code: "mr", name: "Marathi" },
+  { code: "gu", name: "Gujarati" },
+  { code: "kn", name: "Kannada" },
+  { code: "pa", name: "Punjabi" },
+  { code: "ne", name: "Nepali" },
+  { code: "si", name: "Sinhala" },
+  { code: "my", name: "Myanmar (Burmese)" },
+  { code: "km", name: "Khmer" },
+  { code: "lo", name: "Lao" },
+  { code: "jv", name: "Javanese" },
+  { code: "su", name: "Sundanese" },
   { code: "es", name: "Spanish" },
-  { code: "de", name: "German" },
   { code: "fr", name: "French" },
+  { code: "de", name: "German" },
+  { code: "it", name: "Italian" },
+  { code: "pt", name: "Portuguese" },
+  { code: "nl", name: "Dutch" },
+  { code: "pl", name: "Polish" },
+  { code: "ro", name: "Romanian" },
+  { code: "ru", name: "Russian" },
+  { code: "uk", name: "Ukrainian" },
+  { code: "cs", name: "Czech" },
+  { code: "sk", name: "Slovak" },
+  { code: "sl", name: "Slovenian" },
+  { code: "hr", name: "Croatian" },
+  { code: "sr", name: "Serbian" },
+  { code: "bs", name: "Bosnian" },
+  { code: "bg", name: "Bulgarian" },
+  { code: "mk", name: "Macedonian" },
+  { code: "el", name: "Greek" },
+  { code: "tr", name: "Turkish" },
+  { code: "hu", name: "Hungarian" },
+  { code: "fi", name: "Finnish" },
+  { code: "sv", name: "Swedish" },
+  { code: "da", name: "Danish" },
+  { code: "no", name: "Norwegian" },
+  { code: "et", name: "Estonian" },
+  { code: "lv", name: "Latvian" },
+  { code: "lt", name: "Lithuanian" },
+  { code: "is", name: "Icelandic" },
+  { code: "ga", name: "Irish" },
+  { code: "cy", name: "Welsh" },
+  { code: "mt", name: "Maltese" },
+  { code: "sq", name: "Albanian" },
+  { code: "hy", name: "Armenian" },
+  { code: "ka", name: "Georgian" },
+  { code: "az", name: "Azerbaijani" },
+  { code: "kk", name: "Kazakh" },
+  { code: "ky", name: "Kyrgyz" },
+  { code: "tg", name: "Tajik" },
+  { code: "uz", name: "Uzbek" },
+  { code: "tk", name: "Turkmen" },
+  { code: "mn", name: "Mongolian" },
+  { code: "ar", name: "Arabic" },
+  { code: "fa", name: "Persian" },
+  { code: "iw", name: "Hebrew" },
+  { code: "ps", name: "Pashto" },
+  { code: "ug", name: "Uyghur" },
+  { code: "ku", name: "Kurdish (Kurmanji)" },
+  { code: "sw", name: "Swahili" },
+  { code: "am", name: "Amharic" },
+  { code: "ha", name: "Hausa" },
+  { code: "ig", name: "Igbo" },
+  { code: "yo", name: "Yoruba" },
+  { code: "zu", name: "Zulu" },
+  { code: "xh", name: "Xhosa" },
+  { code: "so", name: "Somali" },
+  { code: "rw", name: "Kinyarwanda" },
+  { code: "mg", name: "Malagasy" },
+  { code: "af", name: "Afrikaans" },
+  { code: "ca", name: "Catalan" },
+  { code: "eu", name: "Basque" },
+  { code: "gl", name: "Galician" },
+  { code: "eo", name: "Esperanto" },
+  { code: "be", name: "Belarusian" },
+  { code: "ceb", name: "Cebuano" },
+  { code: "co", name: "Corsican" },
+  { code: "fy", name: "Frisian" },
+  { code: "haw", name: "Hawaiian" },
+  { code: "hmn", name: "Hmong" },
+  { code: "ht", name: "Haitian Creole" },
+  { code: "lb", name: "Luxembourgish" },
+  { code: "la", name: "Latin" },
+  { code: "mi", name: "Maori" },
+  { code: "or", name: "Odia (Oriya)" },
+  { code: "gd", name: "Scots Gaelic" },
+  { code: "sm", name: "Samoan" },
+  { code: "sn", name: "Shona" },
+  { code: "st", name: "Sesotho" },
+  { code: "sd", name: "Sindhi" },
+  { code: "tt", name: "Tatar" },
+  { code: "yi", name: "Yiddish" },
+  { code: "ny", name: "Chichewa" }
 ];
 
 const FALLBACK_SOURCES = [
@@ -53,6 +155,10 @@ const aiPromptResetBtn = document.getElementById("ai-prompt-reset");
 const apiInput = document.getElementById("api-url");
 const emojiEl = document.getElementById("api-status-emoji");
 const resetBtn = document.getElementById("reset-api");
+const openLocalImagesBtn = document.getElementById("open-local-images");
+const openLocalFolderBtn = document.getElementById("open-local-folder");
+const localImagesInput = document.getElementById("local-images-input");
+const localFolderInput = document.getElementById("local-folder-input");
 
 const runStatusTextEl = document.getElementById("run-status-text");
 const runProgressEl = document.querySelector(".run-progress");
@@ -669,6 +775,33 @@ function scheduleResolveAiMeta({ immediate = false } = {}) {
   aiResolveDebounce = setTimeout(run, 350);
 }
 
+
+function resetFileInput(input) {
+  if (input) input.value = "";
+}
+
+async function openLocalViewerFromFiles(fileList, sourceLabel) {
+  const images = filterImageFiles(fileList);
+  if (!images.length) return;
+  const session = await saveLocalSession({
+    id: crypto.randomUUID(),
+    createdAt: Date.now(),
+    title: sourceLabel,
+    pages: sortLocalPages(images.map((file, index) => toLocalPageRecord(file, index))),
+  });
+  const url = chrome.runtime.getURL(
+    `viewer/viewer.html?sid=${encodeURIComponent(session.id)}`,
+  );
+  await chrome.tabs.create({ url });
+  window.close();
+}
+
+async function handleLocalPickerChange(input, sourceLabel) {
+  const files = [...(input?.files || [])];
+  resetFileInput(input);
+  await openLocalViewerFromFiles(files, sourceLabel);
+}
+
 function handleWsStatus(status) {
   if (lastApiOk) return;
   if (status === "connected") setEmojiStatus("ok", "WS connected");
@@ -901,6 +1034,25 @@ aiPromptInput.addEventListener("blur", async () => {
   scheduleSaveAi();
 });
 
+
+
+openLocalImagesBtn?.addEventListener("click", () => {
+  resetFileInput(localImagesInput);
+  localImagesInput?.click();
+});
+
+openLocalFolderBtn?.addEventListener("click", () => {
+  resetFileInput(localFolderInput);
+  localFolderInput?.click();
+});
+
+localImagesInput?.addEventListener("change", async () => {
+  await handleLocalPickerChange(localImagesInput, "images");
+});
+
+localFolderInput?.addEventListener("change", async () => {
+  await handleLocalPickerChange(localFolderInput, "folder");
+});
 
 resetBtn.addEventListener("click", () => {
   ensureApiDefaults({ force: true }).then((d) => {

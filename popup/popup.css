@@ -240,3 +240,37 @@ label span#api-status-emoji {
   width: 0%;
   transition: width var(--transition);
 }
+
+
+.file-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.action-btn {
+  appearance: none;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: var(--radius-sm);
+  background: var(--input-bg);
+  color: inherit;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border var(--transition), box-shadow var(--transition), background var(--transition);
+}
+
+.action-btn.secondary {
+  font-weight: 500;
+}
+
+.action-btn:hover {
+  border-color: rgba(0, 0, 0, 0.2);
+}
+
+.action-btn:focus {
+  outline: none;
+  border-color: var(--focus);
+  box-shadow: 0 0 0 3px rgba(92, 159, 255, 0.35);
+}
