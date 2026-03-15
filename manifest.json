@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TextPhantom - OCR Overlay",
-  "version": "2026.02.22",
+  "version": "2026.03.15",
   "description": "🧠 Right-click any image → translate images",
   "permissions": [
     "contextMenus",
