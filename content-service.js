@@ -401,6 +401,91 @@
   function isHttpish(u) {
     return typeof u === "string" && /^https?:/i.test(u);
   }
+
+  function isInlineableImageUrl(u) {
+    return typeof u === "string" && /^(?:data:|blob:|file:|chrome-extension:)/i.test(u);
+  }
+
+  async function blobToDataUri(blob) {
+    return await new Promise((resolve) => {
+      try {
+        const reader = new FileReader();
+        reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
+        reader.onerror = () => resolve("");
+        reader.readAsDataURL(blob);
+      } catch {
+        resolve("");
+      }
+    });
+  }
+
+  async function getImageDataUriFromElement(img) {
+    const src = _normUrl(getBestImgUrl(img));
+    if (!src) return "";
+    if (src.startsWith("data:")) return src;
+
+    try {
+      const w = Number(img?.naturalWidth) || Number(img?.width) || 0;
+      const h = Number(img?.naturalHeight) || Number(img?.height) || 0;
+      if (w > 0 && h > 0) {
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext("2d", { willReadFrequently: false });
+        if (ctx) {
+          ctx.drawImage(img, 0, 0, w, h);
+          const du = canvas.toDataURL("image/png");
+          if (du && du.startsWith("data:image/")) return du;
+        }
+      }
+    } catch {}
+
+    try {
+      const res = await fetch(src, { cache: "force-cache" });
+      const blob = await res.blob();
+      const du = await blobToDataUri(blob);
+      if (du) return du;
+    } catch {}
+
+    return "";
+  }
+
+  async function buildPayloadFromImage(
+    img,
+    mode,
+    lang,
+    menuSource = "page_scan",
+    customStage,
+    includeDataUri = false,
+  ) {
+    const src = _normUrl(getBestImgUrl(img));
+    const imageDataUri = includeDataUri && isInlineableImageUrl(src)
+      ? await getImageDataUriFromElement(img)
+      : "";
+    if (!src && !imageDataUri) return null;
+    return buildPayload(
+      {
+        original_image_url: src || null,
+        position: buildPositionFromElement(img),
+        imageDataUri: imageDataUri || null,
+      },
+      mode,
+      lang,
+      menuSource,
+      customStage,
+    );
+  }
+
+  function emitViewerEvent(type, detail) {
+    try {
+      window.dispatchEvent(
+        new CustomEvent(type, {
+          detail: detail && typeof detail === "object" ? detail : {},
+        }),
+      );
+    } catch {}
+  }
+
   function normalizeLazyImages() {
     document.querySelectorAll("img").forEach((img) => {
       const candSet =
@@ -415,7 +500,7 @@
       img.decoding = "sync";
     });
   }
-  function collectImagesForScan(mode, lang, sourceTag) {
+  async function collectImagesForScan(mode, lang, sourceTag) {
     const seen = new Set();
     const imgs = Array.from(document.images || []);
     const out = [];
@@ -433,17 +518,11 @@
         if (Math.min(w, h) < 120) continue;
         if (w * h < 60000) continue;
       }
-      const src = _normUrl(getBestImgUrl(img));
-      if (!isHttpish(src) || seen.has(src)) continue;
-      seen.add(src);
-      out.push(
-        buildPayload(
-          { original_image_url: src, position: buildPositionFromElement(img) },
-          mode,
-          lang,
-          sourceTag,
-        ),
-      );
+      const payload = await buildPayloadFromImage(img, mode, lang, sourceTag);
+      const key = _normUrl(payload?.src) || String(payload?.metadata?.image_id || "");
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push(payload);
     }
     return out.filter(Boolean);
   }
@@ -904,10 +983,16 @@
       });
     }
     setTimeout(scheduleHtmlOverlayUpdate, 50);
+    emitViewerEvent("textphantom:overlay-updated", {
+      original,
+      result,
+      mode: isTextMode ? "lens_text" : "lens_images",
+      source: req,
+    });
   }
 
   function buildPayload(
-    { original_image_url, position },
+    { original_image_url, position, imageDataUri },
     mode,
     lang,
     menuSource = "page_scan",
@@ -922,6 +1007,7 @@
       lang,
       type: "image",
       src: original_image_url || null,
+      imageDataUri: imageDataUri || null,
       menu: menuSource,
       context: {
         page_url: location.href,
@@ -938,6 +1024,7 @@
     };
     log.info("Built payload", {
       src: truncate(original_image_url),
+      hasData: Boolean(imageDataUri),
       menu: menuSource,
       mode,
       lang,
@@ -1946,6 +2033,11 @@
     img.removeAttribute("loading");
     img.decoding = "sync";
     img.loading = "eager";
+    emitViewerEvent("textphantom:image-updated", {
+      original,
+      newSrc: nextSrc,
+      rawNewSrc: newSrc,
+    });
     log.info("REPLACE_IMAGE done", {
       before: truncate(before),
       original: truncate(original),
@@ -2054,7 +2146,7 @@
 
           infos = all.filter(Boolean);
         } else {
-          infos = collectImagesForScan(mode, lang, "page_scan");
+          infos = await collectImagesForScan(mode, lang, "page_scan");
         }
 
         log.info("GET_IMAGES", {
@@ -2063,6 +2155,25 @@
           href: location.href,
         });
         sendResp(infos);
+        return;
+      }
+
+      if (msg.type === "GET_CONTEXT_IMAGE_PAYLOAD") {
+        const img =
+          __tp_lastRightClick.img && __tp_lastRightClick.img.isConnected
+            ? __tp_lastRightClick.img
+            : null;
+        const payload = img
+          ? await buildPayloadFromImage(
+              img,
+              mode,
+              lang,
+              "img_one",
+              "context_menu_single",
+              true,
+            )
+          : null;
+        sendResp({ ok: Boolean(payload), payload });
         return;
       }
 
