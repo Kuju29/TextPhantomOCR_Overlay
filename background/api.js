@@ -7,8 +7,8 @@
  */
 
 import { normalizeUrl } from "../shared/url.js";
-import { getStorage } from "../shared/storage.js";
 import { API_PATHS } from "../shared/constants.js";
+import { resolveApiBase } from "../shared/api-defaults.js";
 import { createLogger } from "../shared/logger.js";
 
 const log = createLogger("SW.api");
@@ -54,11 +54,9 @@ export async function warmupApi(base) {
  * @returns {Promise<string>}
  */
 export async function getApiBase() {
-  const { customApiUrl = "", apiUrlDefault = "" } = await getStorage({
-    customApiUrl: "",
-    apiUrlDefault: "",
-  });
-  const base = normalizeUrl(customApiUrl) || normalizeUrl(apiUrlDefault) || "";
+  // Resolve defaults on the real request path. A Manifest V3 service worker may
+  // be started by a request before the startup prefetch in index.js completes.
+  const base = normalizeUrl(await resolveApiBase()) || "";
   log.debug("getApiBase", base);
   warmupApi(base);
   return base;
