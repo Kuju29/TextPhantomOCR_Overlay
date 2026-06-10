@@ -79,6 +79,13 @@ let aiDebounce = null;
 let aiResolveDebounce = null;
 const warmedApi = new Set();
 
+function isRemoteDefaultApiUrl(url) {
+  const normalized = normalizeUrl(url);
+  const remoteDefault = normalizeUrl(state.apiDefaults?.defaultApiUrl || "");
+  const remoteReset = normalizeUrl(state.apiDefaults?.resetApiUrl || "");
+  return Boolean(normalized && (normalized === remoteDefault || normalized === remoteReset));
+}
+
 // --- Small helpers ---------------------------------------------------------
 const toggleUi = () => toggleUiDom({ hasEnvKey: Boolean(state.metaCache?.has_env_ai_key) });
 
@@ -339,7 +346,24 @@ function scheduleSaveApi(raw) {
   apiDebounce = setTimeout(async () => {
     state.pendingApiSave = false;
     const normalized = normalizeUrl(raw);
-    if (!normalized) return;
+
+    // Empty field, or the same value as the remote default/reset URL, means
+    // "use REMOTE_DEFAULTS_URL". Do not store that value as customApiUrl,
+    // otherwise future remote changes are hidden by the copied custom value.
+    if (!normalized || isRemoteDefaultApiUrl(normalized)) {
+      const effective = normalized || normalizeUrl(state.apiDefaults?.defaultApiUrl || "");
+      await setStorage({ customApiUrl: "" });
+      state.lastSavedApiUrl = "";
+      state.userInteractedApi = false;
+      broadcast({ type: "API_URL_CHANGED" });
+      if (effective) {
+        setEmojiStatus("loading", "Checking API...");
+        checkHealth(effective);
+        refreshAiMeta();
+      }
+      return;
+    }
+
     if (normalized === state.lastSavedApiUrl) {
       checkHealth(normalized);
       return;
@@ -488,11 +512,24 @@ async function loadSettings() {
   if (normalizeUrl(els.apiUrl.value)) checkHealth(els.apiUrl.value);
 
   // Fill in a default API URL from the remote config if none is set.
+  // Also repair older installs where Reset copied the remote URL into
+  // customApiUrl; that copied value would otherwise block future remote changes.
   ensureApiDefaults()
-    .then((d) => {
+    .then(async (d) => {
       state.apiDefaults = d || state.apiDefaults;
-      if (storedCustom) return;
-      const def = state.apiDefaults.defaultApiUrl || "";
+      const def = normalizeUrl(state.apiDefaults.defaultApiUrl || "");
+      const storedCustomNorm = normalizeUrl(storedCustom);
+
+      if (storedCustomNorm && isRemoteDefaultApiUrl(storedCustomNorm)) {
+        await setStorage({ customApiUrl: "" });
+        state.lastSavedApiUrl = "";
+        state.userInteractedApi = false;
+        els.apiUrl.value = def || storedCustomNorm;
+        checkHealth(els.apiUrl.value);
+        return;
+      }
+
+      if (storedCustomNorm) return;
       if (def && !normalizeUrl(els.apiUrl.value)) {
         els.apiUrl.value = def;
         checkHealth(def);
@@ -719,18 +756,30 @@ els.localImagesInput?.addEventListener("change", () => handleLocalPickerChange(e
 els.localFolderInput?.addEventListener("change", () => handleLocalPickerChange(els.localFolderInput, "folder"));
 
 els.resetApi.addEventListener("click", () => {
+  setEmojiStatus("loading", "Fetching remote default...");
   ensureApiDefaults({ force: true }).then((d) => {
-    state.apiDefaults = d;
+    state.apiDefaults = d || state.apiDefaults;
     const def = state.apiDefaults.resetApiUrl || state.apiDefaults.defaultApiUrl || "";
-    els.apiUrl.value = def;
     const normalized = normalizeUrl(def);
-    setStorage({ customApiUrl: normalized });
-    state.lastSavedApiUrl = normalized;
-    state.userInteractedApi = Boolean(normalized);
-    setEmojiStatus("loading", "Reset to default");
+    els.apiUrl.value = normalized;
+
+    // Reset means "go back to the remote-managed default", not
+    // "copy the current remote value into customApiUrl". Keeping customApiUrl
+    // empty allows later REMOTE_DEFAULTS_URL changes to take effect.
+    setStorage({ customApiUrl: "" });
+    state.lastSavedApiUrl = "";
+    state.userInteractedApi = false;
+
     broadcast({ type: "API_URL_CHANGED" });
-    checkHealth(normalized);
+    if (normalized) {
+      setEmojiStatus("loading", "Reset to remote default");
+      checkHealth(normalized);
+    } else {
+      setEmojiStatus("error", "Remote default unavailable");
+    }
     els.apiUrl.focus();
+  }).catch(() => {
+    setEmojiStatus("error", "Could not fetch remote default");
   });
 });
 
@@ -739,7 +788,8 @@ window.addEventListener("pagehide", () => {
   try {
     if (state.pendingApiSave) {
       const normalized = normalizeUrl(els.apiUrl.value);
-      if (normalized) setStorage({ customApiUrl: normalized });
+      if (!normalized || isRemoteDefaultApiUrl(normalized)) setStorage({ customApiUrl: "" });
+      else setStorage({ customApiUrl: normalized });
     }
     const aiKey = (els.aiKey.value || "").trim();
     const aiModel = normalizeAiModel((els.aiModel.value || "").trim() || state.desiredAiModel || "auto");
