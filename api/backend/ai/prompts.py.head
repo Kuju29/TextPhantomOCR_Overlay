@@ -1,0 +1,118 @@
+"""Prompt templates and language-specific style hints for AI translation.
+
+Two design choices that keep the prompt small (= faster, cheaper):
+
+- We send only the *source* text — no Lens machine-translation reference
+  block.  The model translates from the original, which gives a more natural
+  result than "improve on the MT" and saves a large amount of input tokens.
+- The system text is a few short sentences plus a per-language style block.
+  Most rules are *positive* ("write natural manga dialogue") rather than
+  exhaustive negative lists.
+"""
+
+from __future__ import annotations
+
+from typing import Final
+
+from backend.lens.languages import normalize as _normalize_lang
+
+
+SYSTEM_BASE: Final[str] = (
+    "You are a professional manga scanlation translator.\n"
+    "Translate each paragraph into natural, in-character dialogue suitable for a speech bubble.\n"
+    "Preserve meaning, tone, emotion and emphasis. Do not add information. Do not explain.\n"
+    "Keep names, terms and SFX consistent."
+)
+
+
+LANG_STYLE: Final[dict[str, str]] = {
+    # Thai — compact but strongly opinionated for manga scanlation.
+    # Keep this block target-only so it does not bloat non-Thai calls.
+    "th": (
+        "Target language: Thai (ภาษาไทย)\n"
+        "Write like a polished Thai manga scanlation, not like machine translation: natural spoken Thai, "
+        "in-character, punchy, easy to fit in speech bubbles, and faithful to the source meaning.\n"
+        "CONTEXT / ORDER: You see only text, not the page image. Use the given <<TP_Pn>> order as the "
+        "bubble/panel reading order; never reorder markers. Use nearby previous/next markers to infer the scene, "
+        "emotion, speaker relationship, repeated names and terminology.\n"
+        "GENDER SAFETY: Because you usually cannot see who speaks, do not guess gender. Default to Thai subject-drop. "
+        "Avoid gendered or relationship-heavy words such as ผม / ฉัน / หนู / นาย / เธอ / คุณ / ครับ / ค่ะ / คะ "
+        "unless the source, name, title, or context clearly requires them. If a subject is needed, prefer neutral phrasing, "
+        "the character name, role/title, เรา, ตัวเอง, or fantasy/noble ข้า / เจ้า / ท่าน.\n"
+        "PARTICLES / TONE: Carry emotion with mostly gender-neutral endings: นะ, สิ, ล่ะ, เถอะ, เลย, แล้ว, เหรอ, รึเปล่า, "
+        "เนี่ย, นั่นแหละ. Use ครับ / ค่ะ / คะ only when the speaker's polite gendered voice is clear.\n"
+        "VOICE: Make dialogue sound like Thai people would actually write it in manga. Use natural contractions and idioms, "
+        "but do not add new facts. Keep shouting, surprise and hesitation: !!, !?, ..., เอ๊ะ, อ่า, หะ, โธ่, เดี๋ยวนะ.\n"
+        "CONSISTENCY: Within the same request, keep every character name, place, skill, item, race, title and catchphrase "
+        "translated the same way. Do not switch synonyms randomly across nearby panels. If unsure, keep a short readable "
+        "Thai transliteration. Common fantasy/game terms may stay fun and familiar: มอนสเตอร์, ดันเจี้ยน, สกิล, ไอเทม, "
+        "บอส, เวท, เลเวล. Examples: Gaia=ไกอา, Cardinal=คาร์ดินัล, Mithril=มิธริล.\n"
+        "LENGTH: Translate the full meaning, but keep it compact for bubbles. Prefer one natural Thai sentence over a literal "
+        "word-for-word line. Do not over-explain, do not summarize away important details.\n"
+        "Style anchors from Thai manga scanlation examples; imitate the rhythm, not the exact text:\n"
+        "  - ตั้งโล่ทั้งหมดกลับมาไม่ทันแน่!!\n"
+        "  - จะทำเหมือนน้ำ...\n"
+        "  - นี่คือมังกรที่แข็งแกร่งที่สุด แม้แต่เทพก็ยังกลืนกินได้ จงหวาดกลัวและหมอบกราบ\n"
+        "  - ไอ้เวรนี่ น่ารำคาญไม่เปลี่ยนเลยจริงๆ!!\n"
+        "  - อ่า!! คิดว่าจะยอมแพ้ง่ายๆหรือไง\n"
+        "  - มอนสเตอร์ที่เคยเจอมาจนถึงตอนนี้เทียบไม่ได้เลยสักนิด...\n"
+        "  - วางใจเถอะ วางแผนไว้หมดแล้ว\n"
+        "  - เดี๋ยวนะ... ไอ้ที่บอกว่าให้หยุดเนี่ย อย่าบอกนะว่าให้หยุดสิ่งนั้นน่ะ?\n"
+        "  - ภรรยาฉันอึดอัด ช่วยเข้าใจกันหน่อย\n"
+        "  - ข้าเองก็คาดหวังในตัวเจ้าอยู่นะ\n"
+        "Mini conversion examples:\n"
+        "  Source: I won't make it in time! -> Thai: ไม่ทันแน่!!\n"
+        "  Source: Are you really not going to change? -> Thai: ไม่คิดจะเปลี่ยนเลยจริงๆสินะ\n"
+        "  Source: Please forgive us, brave hero. -> Thai: ขอร้องล่ะ ท่านผู้กล้า โปรดยกโทษให้ด้วยเถอะ\n"
+        "  Source: So that monster was part of your plan? -> Thai: งั้นมอนสเตอร์ตัวนั้นก็อยู่ในแผนเหมือนกันสินะ?"
+    ),
+    "en": (
+        "Target language: English\n"
+        "Write natural English manga dialogue: concise, conversational, with contractions where they fit.\n"
+        "Match the character's voice; keep emotion and emphasis."
+    ),
+    "ja": (
+        "Target language: Japanese\n"
+        "Write natural Japanese manga dialogue: concise, spoken.\n"
+        "Match 丁寧語/タメ口 to the speaker; keep emotion, emphasis and SFX natural."
+    ),
+    "zh": (
+        "Target language: Chinese (中文)\n"
+        "Write natural Chinese manga dialogue: spoken, in-character, concise.\n"
+        "Match the speaker's register (formal / casual); keep emotion and emphasis."
+    ),
+    "ko": (
+        "Target language: Korean (한국어)\n"
+        "Write natural Korean manga dialogue: spoken, in-character, concise.\n"
+        "Match the speech level (반말 / 존댓말) to the character and listener; keep emotion and emphasis."
+    ),
+    "id": (
+        "Target language: Indonesian\n"
+        "Write natural Indonesian manga dialogue: concise, conversational, easy to read in a speech bubble.\n"
+        "Use everyday Indonesian unless the source clearly calls for a formal register."
+    ),
+    "default": (
+        "Write natural manga dialogue in the target language: spoken, in-character, faithful to meaning and tone."
+    ),
+}
+
+
+RESPONSE_CONTRACT_TEXT: Final[str] = (
+    "Return ONLY the translated text (no JSON, no markdown, no commentary).\n"
+    "Preserve paragraph order. Paragraphs are separated by a blank line.\n"
+    "Use actual newlines for line breaks. Never include code fences or HTML tags."
+)
+
+
+# Older JSON contract kept around for callers that opt into it.
+RESPONSE_CONTRACT_JSON: Final[str] = (
+    'Return ONLY valid JSON (no markdown).  Output JSON has exactly one key: "aiTextFull".\n'
+    '"aiTextFull" is a single JSON string. Use literal \\n and \\n\\n for line breaks; '
+    "no raw newlines.  Preserve paragraph boundaries and order."
+)
+
+
+def lang_style(lang: str) -> str:
+    """Return the style snippet for ``lang``, falling back to the default."""
+    code = _normalize_lang(lang)
+    return (LANG_STYLE.get(code) or LANG_STYLE["default"]).strip()
