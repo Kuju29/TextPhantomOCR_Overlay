@@ -7,6 +7,8 @@
  */
 
 import { getStorage, setStorage } from "../shared/storage.js";
+import { ensureApiDefaults } from "../shared/api-defaults.js";
+import { normalizeUrl } from "../shared/url.js";
 import { FALLBACK_LANGS, API_PATHS } from "../shared/constants.js";
 import {
   AI_PROMPT_MAX_CHARS,
@@ -32,6 +34,7 @@ const els = {
 const state = {
   promptByLang: {},
   apiUrl: "",
+  apiDefaults: { defaultApiUrl: "", resetApiUrl: "", fetchedAt: 0 },
 };
 
 function setStatus(msg, kind = "") {
@@ -115,7 +118,10 @@ async function init() {
     "lang",
     "aiModel",
     "customApiUrl",
+    "apiUrlDefault",
+    "apiUrlReset",
   ]);
+  state.apiDefaults = await ensureApiDefaults();
 
   const migration = migratePromptMap(
     stored.aiPromptByLang && typeof stored.aiPromptByLang === "object"
@@ -131,7 +137,17 @@ async function init() {
     els.lang.value = "en";
   }
   els.model.value = normalizeAiModel(stored.aiModel);
-  els.api.value = String(stored.customApiUrl || "");
+  const customApi = normalizeUrl(stored.customApiUrl || "");
+  const defaultApi = normalizeUrl(state.apiDefaults.defaultApiUrl || stored.apiUrlDefault || "");
+  const resetApi = normalizeUrl(state.apiDefaults.resetApiUrl || stored.apiUrlReset || "");
+  // Repair old Reset behavior: if customApiUrl equals the remote default/reset,
+  // clear it so future REMOTE_DEFAULTS_URL changes remain effective.
+  if (customApi && (customApi === defaultApi || customApi === resetApi)) {
+    await setStorage({ customApiUrl: "" });
+    els.api.value = defaultApi || resetApi || "";
+  } else {
+    els.api.value = customApi || defaultApi || resetApi || "";
+  }
   state.apiUrl = els.api.value;
 
   loadCurrent();
@@ -149,7 +165,21 @@ els.model.addEventListener("input", updateCount);
 els.model.addEventListener("change", loadCurrent);
 els.text.addEventListener("input", updateCount);
 els.api.addEventListener("change", async () => {
-  await setStorage({ customApiUrl: String(els.api.value || "").trim() });
+  const normalized = normalizeUrl(els.api.value || "");
+  const defaultApi = normalizeUrl(state.apiDefaults.defaultApiUrl || "");
+  const resetApi = normalizeUrl(state.apiDefaults.resetApiUrl || "");
+
+  // Empty or same as remote default/reset means keep using REMOTE_DEFAULTS_URL.
+  if (!normalized || normalized === defaultApi || normalized === resetApi) {
+    await setStorage({ customApiUrl: "" });
+    els.api.value = defaultApi || resetApi || "";
+    state.apiUrl = els.api.value;
+    return;
+  }
+
+  await setStorage({ customApiUrl: normalized });
+  els.api.value = normalized;
+  state.apiUrl = normalized;
 });
 els.save.addEventListener("click", save);
 els.loadDefault.addEventListener("click", loadBuiltinDefault);
