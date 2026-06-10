@@ -13,7 +13,7 @@ import { getStorage, setStorage } from "./storage.js";
 const REMOTE_DEFAULTS_URL =
   "https://raw.githubusercontent.com/Kuju29/TextPhantomOCR_Overlay/refs/heads/main/defaults_api.json";
 
-const FETCH_TIMEOUT_MS = 2000;
+const FETCH_TIMEOUT_MS = 8000;
 const TTL_MS = 12 * 60 * 60 * 1000;
 
 const coerceUrl = (v) => (typeof v === "string" ? normalizeUrl(v) : "");
@@ -111,4 +111,22 @@ export async function ensureApiDefaults({ force = false } = {}) {
     apiDefaultsFetchedAt: next.fetchedAt,
   });
   return next;
+}
+
+/**
+ * Resolve the effective API base from storage + remote defaults.
+ *
+ * By default, a user-entered custom URL is treated as an explicit override,
+ * while the remote default is the primary source for users who have not set
+ * one. Set `preferRemote` to true only if the remote default must override
+ * even an existing custom URL.
+ * @param {{force?: boolean, preferRemote?: boolean}} [opts]
+ * @returns {Promise<string>}
+ */
+export async function resolveApiBase({ force = false, preferRemote = false } = {}) {
+  const stored = await getStorage({ customApiUrl: "" });
+  const custom = coerceUrl(stored.customApiUrl);
+  const defaults = await ensureApiDefaults({ force });
+  const remote = coerceUrl(defaults.defaultApiUrl);
+  return preferRemote ? remote || custom || "" : custom || remote || "";
 }
