@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>TextPhantom OCR</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div class="card">
+      <header class="app-head">
+        <h2>TextPhantom OCR</h2>
+        <span id="api-status-emoji" class="api-dot" aria-live="polite" title="Loading…">⏳</span>
+      </header>
+
+      <!-- ============ 1. TRANSLATE ============ -->
+      <section class="group">
+        <div class="group-title">Translate</div>
+
+        <div class="field">
+          <label for="mode">Mode</label>
+          <select id="mode" aria-label="Mode"></select>
+        </div>
+
+        <div class="field" id="lang-wrap">
+          <label for="lang">Language</label>
+          <select id="lang" aria-label="Language"></select>
+        </div>
+
+        <div class="field" id="sources-wrap" style="display: none">
+          <label for="sources">Source</label>
+          <select id="sources" aria-label="Source"></select>
+        </div>
+
+        <div class="note">Right-click any image on a page to translate it.</div>
+      </section>
+
+      <!-- ============ 2. AI ENGINE ============ -->
+      <section class="group" id="ai-group" style="display: none">
+        <div class="group-title">AI engine</div>
+
+        <div class="field" id="ai-provider-wrap">
+          <label for="ai-provider">Provider</label>
+          <select id="ai-provider" aria-label="AI provider">
+            <option value="auto">Auto (detect from key)</option>
+            <optgroup label="Cloud (needs API key)">
+              <option value="gemini">Google Gemini</option>
+              <option value="openai">OpenAI</option>
+              <option value="openrouter">OpenRouter</option>
+              <option value="anthropic">Anthropic</option>
+              <option value="groq">Groq</option>
+              <option value="deepseek">DeepSeek</option>
+              <option value="together">Together</option>
+              <option value="huggingface">HuggingFace</option>
+              <option value="featherless">Featherless</option>
+            </optgroup>
+            <optgroup label="Local (runs on your PC — no key)">
+              <option value="ollama">Ollama</option>
+              <option value="lmstudio">LM Studio</option>
+              <option value="localai">LocalAI</option>
+              <option value="jan">Jan</option>
+              <option value="textgen">text-generation-webui</option>
+              <option value="koboldcpp">KoboldCpp</option>
+              <option value="vllm">vLLM</option>
+              <option value="llamafile">llamafile</option>
+              <option value="gpt4all">GPT4All</option>
+            </optgroup>
+          </select>
+        </div>
+
+        <!-- Local endpoint: shown only for local providers -->
+        <div class="field" id="ai-endpoint-wrap" style="display: none">
+          <label for="ai-base-url">Local server URL</label>
+          <input
+            type="text"
+            id="ai-base-url"
+            placeholder="http://localhost:11434/v1"
+          />
+          <div class="hint">Your local AI server's OpenAI-compatible endpoint. No API key needed.</div>
+        </div>
+
+        <!-- API key: shown only for cloud providers -->
+        <div class="field" id="ai-key-wrap">
+          <label for="ai-key">API key</label>
+          <input
+            type="password"
+            id="ai-key"
+            placeholder="Paste your API key"
+          />
+          <div class="hint">Leave empty to use the non-AI translated overlay.</div>
+        </div>
+
+        <div class="field" id="ai-model-wrap" style="display: none">
+          <label for="ai-model">Model</label>
+          <select id="ai-model" aria-label="AI Model"></select>
+        </div>
+
+        <div class="field" id="ai-prompt-wrap" style="display: none">
+          <label for="ai-prompt" class="label-row">
+            <span>Extra style notes (optional)</span>
+            <button
+              type="button"
+              id="ai-prompt-reset"
+              class="icon-btn"
+              title="Clear your extra notes (use built-in style)"
+              aria-label="Clear your extra notes"
+            >⟲</button>
+          </label>
+          <textarea
+            id="ai-prompt"
+            rows="4"
+            placeholder="Add your own notes (e.g. term preferences, tone). These are ADDED on top of the built-in style for this language — leave empty to use the built-in style as-is."
+          ></textarea>
+          <div id="ai-prompt-count" class="prompt-count" aria-live="polite"></div>
+        </div>
+
+        <div class="field" id="ai-glossary-wrap" style="display: none">
+          <label class="label-row">
+            <span>Translation memory</span>
+            <button type="button" id="ai-glossary-clear" class="icon-btn" title="Clear memory" aria-label="Clear translation memory">🗑</button>
+          </label>

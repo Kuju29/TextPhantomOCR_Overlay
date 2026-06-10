@@ -1,0 +1,681 @@
+/**
+ * Job orchestration: enqueue → submit → handle result/error → finalise batch.
+ *
+ * This is the heart of the service worker. It ties together the transport, the
+ * batch tracker, the registry and the content-script messaging layer.
+ *
+ * Result delivery: a job's result carries either a replacement image
+ * (`imageDataUri`) and/or an HTML overlay (`Ai.aihtml` / `translatedhtml` /
+ * `originalhtml`). For `lens_text` mode the overlay is preferred; other modes
+ * swap the `<img>` source directly.
+ */
+
+import { createLogger } from "../shared/logger.js";
+import { getApiBase } from "./api.js";
+import {
+  ensureBatch,
+  batchMark,
+  batchUpdateToast,
+  batchStopKeepAlive,
+  batchPassStats,
+} from "./batches.js";
+import { classifyJobError, fetchImageDataUriFromUrl } from "./images.js";
+import { addTask } from "./job-queue.js";
+import { imageKeyFromPayload, normImgSrc } from "./job-keys.js";
+import { pendingByJob, pendingByImage, findContext, removeJob } from "./job-registry.js";
+import {
+  getCachedDataUri,
+  setCachedDataUri,
+  isMangaDexPageUrl,
+  mdKeyFromUrl,
+  mdCacheKey,
+  getCachedResult,
+  setCachedResult,
+  stripImageFields,
+} from "./mangadex.js";
+import { bumpTabSession, getTabSessionId } from "./tab-sessions.js";
+import {
+  sendToTab,
+  requestFromTabEnsured,
+} from "./tabs-messaging.js";
+import {
+  connectWebSocket,
+  isWsReady,
+  isWsBlocked,
+  sendWsJob,
+  submitJobViaRest,
+  pollJobViaRest,
+  shouldPreferRest,
+} from "./transport.js";
+
+const log = createLogger("SW.jobs");
+
+const MAX_FIRST_TRY_RETRIES = 2;
+const FIRST_TRY_GAP_MS = 3000;
+const BATCH_RETRY_GAP_MS = 1800;
+
+// --- Settings epoch --------------------------------------------------------
+// Bumped whenever mode/lang/sources change; a result whose epoch no longer
+// matches is dropped (the user changed what they wanted mid-flight).
+let settingsEpoch = 0;
+export const bumpSettingsEpoch = () => {
+  settingsEpoch = (settingsEpoch + 1) >>> 0;
+};
+
+// --- Current batch id ------------------------------------------------------
+let currentBatchId = null;
+export const setCurrentBatchId = (id) => {
+  currentBatchId = id;
+};
+export const getCurrentBatchId = () => currentBatchId;
+
+// --- Failure helpers -------------------------------------------------------
+
+/** Tell a tab an image failed (used when there is no job context to clean up). */
+function failJobImmediately(tabId, imgUrl, message, frameId = 0) {
+  if (tabId) {
+    sendToTab(tabId, { type: "IMAGE_ERROR", original: imgUrl, message }, frameId);
+  }
+}
+
+/** Fail every in-flight job (e.g. the WebSocket ended mid-batch). */
+export function failAllPending(message) {
+  for (const jobId of Array.from(pendingByJob.keys())) {
+    const ctx = pendingByJob.get(jobId);
+    const batchId = String(ctx?.batchId || ctx?.metadata?.batch_id || "").trim();
+    const imageKey = String(ctx?.imageKey || ctx?.metadata?.image_id || "").trim();
+    const batch = batchId ? ensureBatch(batchId, ctx?.tabId || 0, ctx?.frameId || 0) : null;
+
+    failJobImmediately(ctx?.tabId, ctx?.imgUrl || null, message, ctx?.frameId || 0);
+    removeJob(jobId, ctx?.metadata?.image_id);
+
+    if (batch && imageKey) {
+      batchMark(batchId, imageKey, { status: "aborted", lastError: message });
+      batchUpdateToast(batch, "ยกเลิก");
+      finalizeBatch(batch);
+    }
+  }
+  pendingByImage.clear();
+}
+
+/** A job's REST poll detected a stale tab session — abort it cleanly. */
+export function handleStaleJob(jobId) {
+  const ctx = pendingByJob.get(jobId);
+  if (!ctx) return;
+  removeJob(jobId, ctx?.metadata?.image_id);
+  const batchId = String(ctx?.batchId || ctx?.metadata?.batch_id || "").trim();
+  const imageKey = String(ctx?.imageKey || ctx?.metadata?.image_id || "").trim();
+  const batch = batchId ? ensureBatch(batchId, ctx.tabId || 0, ctx.frameId || 0) : null;
+  if (batch && imageKey) {
+    batchMark(batchId, imageKey, { status: "aborted" });
+    batchUpdateToast(batch, "ยกเลิก", true);
+    finalizeBatch(batch);
+  }
+}
+
+/** Handle a job error: notify the tab (unless stale) and update the batch. */
+export function handleJobError(jobId, errMsg = "Unknown error") {
+  const cls = classifyJobError(errMsg);
+  const ctx = pendingByJob.get(jobId);
+  const curSession = ctx?.tabId ? getTabSessionId(ctx.tabId) : "";
+  const isStale = Boolean(ctx?.sessionId && curSession && ctx.sessionId !== curSession);
+
+  const batchId = String(ctx?.batchId || ctx?.metadata?.batch_id || "").trim();
+  const imageKey = String(ctx?.imageKey || ctx?.metadata?.image_id || "").trim();
+  const batch = batchId ? ensureBatch(batchId, ctx?.tabId || 0, ctx?.frameId || 0) : null;
+
+  if (ctx?.tabId && !isStale) {
+    sendToTab(
+      ctx.tabId,
+      { type: "IMAGE_ERROR", original: ctx.imgUrl, message: errMsg },
+      ctx.frameId || 0,
+    );
+  }
+
+  removeJob(jobId, ctx?.metadata?.image_id);
+
+  if (batch && imageKey) {
+    batchMark(batchId, imageKey, {
+      status: "error",
+      lastError: errMsg,
+      permanent: !!cls.permanent,
+    });
+    batchUpdateToast(batch, cls.permanent ? "ผิดพลาด (ถาวร)" : "ผิดพลาด");
+    finalizeBatch(batch);
+  }
+}
+
+// --- Result handling -------------------------------------------------------
+
+/** Extract the replacement-image URL from a result, if any. */
+function extractNewImage(result) {
+  return (
+    result?.imageDataUri ||
+    result?.imageDataURI ||
+    result?.image ||
+    result?.imageUrl ||
+    result?.image_url ||
+    result?.imageURL ||
+    null
+  );
+}
+
+/** Extract the (any) HTML overlay markup from a result. */
+function extractHtml(result) {
+  return {
+    aiHtml: result?.Ai?.aihtml || result?.ai?.aihtml || null,
+    translatedHtml: result?.translated?.translatedhtml || result?.translatedhtml || null,
+    originalHtml: result?.original?.originalhtml || result?.originalhtml || null,
+  };
+}
+
+/**
+ * Handle a finished job: cache it (MangaDex), then inject the result into the
+ * tab as an image replacement and/or HTML overlay.
+ */
+/**
+ * Accumulate the per-image glossary pairs the API returned into a small,
+ * de-duplicated translation memory in storage (cap 120 entries). The popup
+ * sends this back as `ai.glossary` on later requests so terminology stays
+ * consistent across a multi-page batch.
+ */
+async function accumulateGlossary(result) {
+  try {
+    const pairs = result?.Ai?.glossary || result?.ai?.glossary || null;
+    if (!Array.isArray(pairs) || !pairs.length) return;
+    const store = await chrome.storage.local.get("aiGlossary");
+    const existing = Array.isArray(store.aiGlossary) ? store.aiGlossary : [];
+    const bySrc = new Map();
+    for (const e of existing) {
+      if (e && e.src) bySrc.set(String(e.src), { src: String(e.src), tgt: String(e.tgt || "") });
+    }
+    for (const e of pairs) {
+      if (e && e.src && e.tgt) bySrc.set(String(e.src), { src: String(e.src), tgt: String(e.tgt) });
+    }
+    // keep the most recent 120 (Map preserves insertion order; latest wins).
+    const merged = [...bySrc.values()].slice(-120);
+    await chrome.storage.local.set({ aiGlossary: merged });
+  } catch {
+    /* glossary accumulation is best-effort */
+  }
+}
+
+export async function handleResult(jobId, result) {
+  const ctx = findContext(jobId, result?.metadata?.image_id);
+  if (!ctx) {
+    log.warn("result for unknown job", { id: jobId });
+    return;
+  }
+
+  const { imgUrl, tabId } = ctx;
+  const frameId = ctx.frameId || 0;
+  const mode = ctx.mode || ctx.metadata?.mode || null;
+
+  const batchId = String(ctx.batchId || ctx.metadata?.batch_id || "").trim();
+  const imageKey = String(
+    ctx.imageKey || ctx.metadata?.image_id || result?.metadata?.image_id || "",
+  ).trim();
+  const batch = batchId ? ensureBatch(batchId, tabId, frameId) : null;
+
+  const newImg = extractNewImage(result);
+  const { aiHtml, translatedHtml, originalHtml } = extractHtml(result);
+  void accumulateGlossary(result);
+  const hasHtml = Boolean(aiHtml || translatedHtml || originalHtml);
+
+  // MangaDex: cache the result so re-visiting the chapter renders instantly.
+  const cacheKey = mdCacheKey(mdKeyFromUrl(imgUrl), ctx.lang || ctx.metadata?.lang, mode);
+  if (cacheKey && (newImg || hasHtml)) {
+    setCachedResult(cacheKey, {
+      newImg: newImg || null,
+      result: hasHtml ? stripImageFields(result) : null,
+    });
+  }
+
+  // Drop the result if the tab navigated away or the user changed settings.
+  const curSession = getTabSessionId(tabId);
+  const settingsStale =
+    typeof ctx.settingsEpoch === "number" && ctx.settingsEpoch !== settingsEpoch;
+  const isStale =
+    Boolean(ctx.sessionId && curSession && ctx.sessionId !== curSession) || settingsStale;
+
+  if (isStale) {
+    removeJob(jobId, result?.metadata?.image_id);
+    if (batch && imageKey) {
+      if (ctx.keepCacheOnStale) {
+        batchMark(batchId, imageKey, { status: "done", cachedOnly: true });
+        batchUpdateToast(batch, "บันทึกแล้ว", true);
+      } else {
+        batchMark(batchId, imageKey, { status: "aborted" });
+        batchUpdateToast(batch, "ยกเลิก", true);
+      }
+      finalizeBatch(batch);
+    }
+    return;
+  }
+
+  if (batch && imageKey) {
+    batchMark(batchId, imageKey, { status: "inserting" });
+    batchUpdateToast(batch, "แทรกกลับ");
+  }
+
+  // Apply to the page: image swap for non-text modes, overlay for text modes.
+  let replaceOk = null;
+  if (newImg && mode !== "lens_text") {
+    replaceOk = await requestFromTabEnsured(
+      tabId,
+      { type: "REPLACE_IMAGE", original: imgUrl, newSrc: newImg },
+      frameId,
+    );
+  }
+
+  let overlayOk = null;
+  if (hasHtml) {
+    overlayOk = await requestFromTabEnsured(
+      tabId,
+      { type: "OVERLAY_HTML", original: imgUrl, result, mode: mode || "", source: ctx.source || "" },
+      frameId,
+    );
+  }
+
+  let ok = true;
+  let errMsg = "";
+  if (!hasHtml && !(newImg && mode !== "lens_text")) {
+    if (!newImg) {
+      // Nothing usable came back.
+      await requestFromTabEnsured(
+        tabId,
+        { type: "IMAGE_ERROR", original: imgUrl, message: "API returned no overlay data" },
+        frameId,
+      );
+      ok = false;
+      errMsg = "API returned no overlay data";
+    }
+  }
+  if (newImg && mode !== "lens_text" && !replaceOk?.ok) {
+    ok = false;
+    errMsg = "DOM replace failed";
+  }
+  if (hasHtml && !overlayOk?.ok) {
+    ok = false;
+    errMsg = "Overlay insert failed";
+  }
+
+  removeJob(jobId, result?.metadata?.image_id);
+
+  if (batch && imageKey) {
+    if (ok) {
+      batchMark(batchId, imageKey, { status: "done" });
+      batchUpdateToast(batch, "เสร็จ 1 ภาพ");
+    } else {
+      const cls = classifyJobError(errMsg);
+      batchMark(batchId, imageKey, {
+        status: "error",
+        lastError: errMsg || "Unknown error",
+        permanent: !!cls.permanent,
+      });
+      batchUpdateToast(batch, cls.permanent ? "ผิดพลาด (ถาวร)" : "ผิดพลาด");
+    }
+    finalizeBatch(batch);
+  }
+}
+
+// --- Batch finalisation / retry -------------------------------------------
+
+/**
+ * When every image in a pass has finished:
+ * - pass 1: schedule a single retry pass for transiently-failed images.
+ * - pass 2: announce completion and stop the tab keep-alive.
+ */
+export function finalizeBatch(b) {
+  if (!b) return;
+  const s = batchPassStats(b);
+  if (!s.total || s.finished < s.total) return;
+
+  if (b.pass === 1) {
+    if (b.retryScheduled) return;
+
+    const failed = [];
+    let permanentErrors = 0;
+    for (const [k, it] of b.items.entries()) {
+      if (it?.attempt !== 1 || it.status !== "error") continue;
+      if (it.permanent) permanentErrors++;
+      else failed.push(k);
+    }
+
+    if (!failed.length) {
+      batchUpdateToast(
+        b,
+        permanentErrors ? `เสร็จสิ้น (ผิดพลาดถาวร ${permanentErrors})` : "เสร็จสิ้น",
+        true,
+      );
+      batchStopKeepAlive(b);
+      return;
+    }
+
+    // Schedule pass 2 for the transiently-failed images.
+    b.retryScheduled = true;
+    b.pass = 2;
+    b.total2 = failed.length;
+    for (const k of failed) {
+      const it = b.items.get(k);
+      if (!it) continue;
+      b.items.set(k, {
+        ...it,
+        payload: withPipelineStage(it.payload, "retry_failed_once"),
+        attempt: 2,
+        status: "queued",
+      });
+    }
+    batchUpdateToast(b, `พักก่อน แล้วลองแก้ไขอีกครั้ง ${failed.length} ภาพ`, true);
+    addTask(() => runRetryPass(b));
+    return;
+  }
+
+  // pass 2
+  const s2 = batchPassStats(b);
+  batchUpdateToast(b, s2.error > 0 ? `เสร็จสิ้น (ยังผิดพลาด ${s2.error})` : "เสร็จสิ้น", true);
+  batchStopKeepAlive(b);
+}
+
+/** Append a pipeline stage marker to a payload's metadata. */
+function withPipelineStage(payload, stage) {
+  const meta = payload?.metadata && typeof payload.metadata === "object" ? payload.metadata : {};
+  const pipeline = Array.isArray(meta.pipeline) ? meta.pipeline : [];
+  return {
+    ...payload,
+    metadata: {
+      ...meta,
+      pipeline: pipeline.concat({ stage, at: new Date().toISOString() }),
+      timestamp: new Date().toISOString(),
+    },
+  };
+}
+
+/** Re-run the failed images of a batch (pass 2), re-attaching data URIs. */
+async function runRetryPass(b) {
+  await new Promise((r) => setTimeout(r, BATCH_RETRY_GAP_MS));
+
+  const payloads = [];
+  for (const it of b.items.values()) {
+    if (it?.attempt === 2 && it.status === "queued" && it.payload) payloads.push(it.payload);
+  }
+  batchUpdateToast(b, "เริ่มรอบแก้ไข", true);
+
+  for (const pl of payloads) {
+    let next = pl;
+    let skip = false;
+    try {
+      const src = String(pl?.src || "").trim();
+      if (src && /^https?:/i.test(src) && !pl?.imageDataUri) {
+        const pageUrl = pl?.context?.page_url || "";
+        const key = normImgSrc(src);
+        const du = getCachedDataUri(key) || (await fetchImageDataUriFromUrl(src, pageUrl));
+        if (du) {
+          next = withPipelineStage({ ...pl, imageDataUri: du }, "retry_attach_datauri");
+          setCachedDataUri(key, du);
+          const k = imageKeyFromPayload(next);
+          if (k && b.items.has(k)) b.items.set(k, { ...b.items.get(k), payload: next });
+        }
+      }
+    } catch (e) {
+      const msg = String(e?.message || e);
+      const cls = classifyJobError(msg);
+      const k = imageKeyFromPayload(pl);
+      if (k && b.items.has(k)) {
+        const it = b.items.get(k);
+        b.items.set(k, {
+          ...it,
+          lastError: msg,
+          status: cls.permanent ? "error" : it.status,
+          permanent: cls.permanent,
+        });
+        if (cls.permanent) {
+          batchUpdateToast(b, "ผิดพลาด (ถาวร)");
+          finalizeBatch(b);
+        }
+      }
+      if (cls.permanent) skip = true;
+    }
+    if (!skip) enqueue(next, b.tabId, b.frameId || 0);
+  }
+}
+
+// --- Job processing --------------------------------------------------------
+
+/** Should this payload have its image pre-downloaded as a data URI? */
+function shouldPrefetchDataUri(payload) {
+  if (payload?.imageDataUri) return false;
+  const src = String(payload?.src || "").trim();
+  if (!src) return false;
+  if (/^(?:https?:|blob:|data:|file:|chrome-extension:)/i.test(src)) return true;
+  // AI text mode always wants the bytes available server-side.
+  return (
+    payload?.mode === "lens_text" &&
+    String(payload?.source || "").toLowerCase() === "ai"
+  );
+}
+
+/**
+ * Process one job payload end to end: optional data-URI prefetch, then submit
+ * via REST (default) or WebSocket.
+ */
+export async function processJob(payload, tabId, frameId = 0) {
+  if (!payload || typeof payload !== "object") return;
+
+  if (!payload.metadata || typeof payload.metadata !== "object") payload.metadata = {};
+  const batchId = String(payload.metadata.batch_id || currentBatchId || "").trim();
+  if (batchId) payload.metadata.batch_id = batchId;
+  const imageKey = imageKeyFromPayload(payload);
+  const batch = batchId ? ensureBatch(batchId, tabId, frameId) : null;
+
+  const pageUrl = payload?.context?.page_url || "";
+  const isMd = isMangaDexPageUrl(pageUrl);
+
+  // Drop the job if it was queued under a now-stale tab session (non-MangaDex).
+  const originSession = String(
+    payload?.context?.tp_tab_session || payload?.metadata?.tp_tab_session || "",
+  ).trim();
+  const curSession = getTabSessionId(tabId);
+  if (originSession && curSession && originSession !== curSession && !isMd) {
+    if (batch && imageKey) {
+      batchMark(batchId, imageKey, { status: "aborted", lastError: "navigation" });
+      batchUpdateToast(batch, "ยกเลิก");
+      finalizeBatch(batch);
+      batchStopKeepAlive(batch);
+    }
+    return;
+  }
+
+  if (batch && imageKey) {
+    const it = batch.items.get(imageKey);
+    if (it) batch.items.set(imageKey, { ...it, status: "processing" });
+    batchUpdateToast(batch, "ประมวลผล");
+  }
+
+  const base = await getApiBase();
+  const preferRest = shouldPreferRest(base, payload?.mode, payload?.source);
+
+  // --- Data-URI prefetch ---------------------------------------------------
+  if (shouldPrefetchDataUri(payload)) {
+    const src = String(payload.src || "").trim();
+    const key = normImgSrc(src);
+    const cached = getCachedDataUri(key);
+    if (cached) {
+      payload.imageDataUri = cached;
+    } else {
+      try {
+        const du = src.startsWith("data:")
+          ? src
+          : await fetchImageDataUriFromUrl(src, pageUrl || "");
+        if (du) {
+          payload.imageDataUri = du;
+          if (key) setCachedDataUri(key, du);
+          const meta = payload.metadata;
+          meta.pipeline = (Array.isArray(meta.pipeline) ? meta.pipeline : []).concat({
+            stage: "prefetch_datauri",
+            at: new Date().toISOString(),
+          });
+          meta.timestamp = new Date().toISOString();
+          if (batch && imageKey) batchMark(batchId, imageKey, { payload });
+        }
+      } catch (e) {
+        const msg = e?.message || String(e);
+        const cls = classifyJobError(msg);
+        log.warn("datauri prefetch failed", { err: msg, permanent: cls.permanent });
+        if (cls.permanent) {
+          if (payload?.metadata?.image_id) pendingByImage.delete(payload.metadata.image_id);
+          if (batch && imageKey) {
+            batchMark(batchId, imageKey, { status: "error", lastError: msg, permanent: true });
+            batchUpdateToast(batch, "ผิดพลาด (ถาวร)");
+            finalizeBatch(batch);
+          }
+          failJobImmediately(tabId, payload?.src || null, msg, frameId);
+          return;
+        }
+      }
+    }
+  }
+
+  // --- WebSocket "blocked" guard ------------------------------------------
+  if (isWsBlocked() && !preferRest) {
+    const msg = "Connection closed. Please run the menu again.";
+    if (batch && imageKey) {
+      batchMark(batchId, imageKey, { status: "aborted", lastError: msg });
+      batchUpdateToast(batch, "ยกเลิก");
+      finalizeBatch(batch);
+    }
+    failJobImmediately(tabId, payload?.src || null, msg, frameId);
+    return;
+  }
+
+  const sessionId = getTabSessionId(tabId) || bumpTabSession(tabId, pageUrl);
+
+  /** Build the context record stored in the registry for this job. */
+  const makeContext = (extra = {}) => ({
+    imgUrl: payload.src,
+    tabId,
+    frameId,
+    mode: payload?.mode || null,
+    lang: payload?.lang || null,
+    source: payload?.source || null,
+    metadata: payload.metadata,
+    batchId,
+    imageKey,
+    pageUrl,
+    sessionId: originSession || sessionId,
+    keepCacheOnStale: isMd,
+    settingsEpoch,
+    ...extra,
+  });
+
+  if (payload?.metadata?.image_id) {
+    pendingByImage.set(payload.metadata.image_id, makeContext());
+  }
+
+  // --- REST path -----------------------------------------------------------
+  if (preferRest) {
+    await submitAndPollRest(base, payload, makeContext, { tabId, frameId, batch, batchId, imageKey });
+    return;
+  }
+
+  // --- WebSocket path ------------------------------------------------------
+  for (let attempt = 0; attempt <= MAX_FIRST_TRY_RETRIES; attempt++) {
+    if (!isWsReady()) {
+      const connected = await connectWebSocket();
+      if (!connected) {
+        if (attempt < MAX_FIRST_TRY_RETRIES) {
+          await new Promise((r) => setTimeout(r, FIRST_TRY_GAP_MS));
+          continue;
+        }
+        // WS unavailable — fall back to REST for this job.
+        await submitAndPollRest(base, payload, makeContext, {
+          tabId,
+          frameId,
+          batch,
+          batchId,
+          imageKey,
+        });
+        return;
+      }
+    }
+
+    const jobId = crypto.randomUUID();
+    pendingByJob.set(jobId, makeContext({ startedAt: Date.now() }));
+    try {
+      sendWsJob(jobId, payload);
+      return;
+    } catch (e) {
+      handleJobError(jobId, "Send failed: " + (e?.message || e));
+      if (attempt < MAX_FIRST_TRY_RETRIES) {
+        await new Promise((r) => setTimeout(r, FIRST_TRY_GAP_MS));
+        continue;
+      }
+      return;
+    }
+  }
+}
+
+/** Submit a job over REST and poll it to completion (shared by both paths). */
+async function submitAndPollRest(base, payload, makeContext, { tabId, frameId, batch, batchId, imageKey }) {
+  let jobId = "";
+  try {
+    jobId = await submitJobViaRest(base, payload);
+    pendingByJob.set(jobId, makeContext({ startedAt: Date.now() }));
+    await pollJobViaRest(base, jobId);
+  } catch (e) {
+    const msg = e?.message || String(e);
+    if (jobId) {
+      handleJobError(jobId, msg);
+      return;
+    }
+    if (payload?.metadata?.image_id) pendingByImage.delete(payload.metadata.image_id);
+    if (batch && imageKey) {
+      const cls = classifyJobError(msg);
+      batchMark(batchId, imageKey, { status: "error", lastError: msg, permanent: !!cls.permanent });
+      batchUpdateToast(batch, cls.permanent ? "ผิดพลาด (ถาวร)" : "ผิดพลาด");
+      finalizeBatch(batch);
+    }
+    failJobImmediately(tabId, payload?.src || null, msg, frameId);
+  }
+}
+
+/**
+ * Queue a payload for processing, skipping it if the tab session it was minted
+ * under is already stale.
+ */
+export function enqueue(payload, tabId, frameId = 0) {
+  const expected = String(
+    payload?.context?.tp_tab_session || payload?.metadata?.tp_tab_session || "",
+  ).trim();
+  addTask(() => {
+    const cur = getTabSessionId(tabId);
+    if (expected && (!cur || expected !== cur)) return;
+    return processJob(payload, tabId, frameId);
+  });
+}
+
+/** Cancel every in-flight job for a tab (called on navigation / tab close). */
+export function cancelTabWork(tabId, reason = "navigation") {
+  if (!Number.isFinite(tabId)) return;
+  const msg = String(reason || "navigation");
+
+  for (const [jobId, ctx] of Array.from(pendingByJob.entries())) {
+    if ((ctx?.tabId || 0) !== tabId) continue;
+    const batchId = String(ctx?.batchId || ctx?.metadata?.batch_id || "").trim();
+    const imageKey = String(ctx?.imageKey || ctx?.metadata?.image_id || "").trim();
+    const batch = batchId ? ensureBatch(batchId, tabId, ctx?.frameId || 0) : null;
+
+    removeJob(jobId, ctx?.metadata?.image_id);
+
+    if (batch && imageKey) {
+      batchMark(batchId, imageKey, { status: "aborted", lastError: msg });
+      batchUpdateToast(batch, "ยกเลิก");
+      finalizeBatch(batch);
+      batchStopKeepAlive(batch);
+    }
+  }
+
+  for (const [imageId, rec] of Array.from(pendingByImage.entries())) {
+    if ((rec?.tabId || 0) === tabId) pendingByImage.delete(imageId);
+  }
+}

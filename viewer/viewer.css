@@ -1,0 +1,356 @@
+:root {
+  color-scheme: dark;
+  --bg: #0b1020;
+  --panel: rgba(11, 17, 31, 0.92);
+  --panel-2: rgba(18, 27, 47, 0.92);
+  --line: rgba(255, 255, 255, 0.08);
+  --line-2: rgba(255, 255, 255, 0.16);
+  --text: #edf2ff;
+  --muted: #8ea0c1;
+  --accent: #7aa2ff;
+  --accent-2: rgba(122, 162, 255, 0.16);
+  --danger: #ff8a8a;
+  --ok: #6ed3a5;
+  --radius: 16px;
+  --radius-sm: 12px;
+  --reader-width: 980px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  background: radial-gradient(circle at top, #162241, var(--bg) 56%);
+  color: var(--text);
+  font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+body {
+  min-height: 100vh;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+.app-shell {
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+.sidebar {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  backdrop-filter: blur(12px);
+}
+
+.sidebar-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.eyebrow {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+.sidebar-head h1,
+.reader-head h2 {
+  margin: 0;
+  font-size: 24px;
+}
+
+.sidebar-meta,
+.selection-summary,
+.sidebar-note,
+.status,
+.page-meta,
+.zoom-indicator,
+.page-actions {
+  color: var(--muted);
+}
+
+.toolbar.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.toolbar-row.dual,
+.toolbar-row.triple {
+  display: grid;
+  gap: 10px;
+}
+
+.toolbar-row.dual {
+  grid-template-columns: 1fr 1fr;
+}
+
+.toolbar-row.triple {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.zoom-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  gap: 10px;
+  align-items: center;
+}
+
+#zoom-range {
+  width: 100%;
+}
+
+.btn {
+  appearance: none;
+  border: 1px solid var(--line-2);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+}
+
+.btn:hover {
+  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.btn.primary {
+  background: var(--accent-2);
+  border-color: rgba(122, 162, 255, 0.36);
+}
+
+.btn.danger {
+  color: var(--danger);
+}
+
+.sidebar-note {
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.status {
+  font-size: 13px;
+  line-height: 1.45;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.page-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.page-list-item {
+  display: grid;
+  grid-template-columns: 18px auto 1fr auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid transparent;
+  cursor: grab;
+}
+
+.page-list-item:hover,
+.page-list-item.active,
+.page-list-item.drag-over {
+  border-color: rgba(122, 162, 255, 0.32);
+  background: rgba(122, 162, 255, 0.08);
+}
+
+.drag-handle {
+  font-size: 16px;
+  color: var(--muted);
+  user-select: none;
+}
+
+.page-list-item input,
+.page-strip input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
+.page-name {
+  font-size: 13px;
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.page-meta {
+  font-size: 11px;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 68px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  border: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.badge.ok {
+  color: var(--ok);
+  border-color: rgba(110, 211, 165, 0.24);
+  background: rgba(110, 211, 165, 0.1);
+}
+
+.reader-shell {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px;
+}
+
+.reader-head {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: var(--radius);
+  background: rgba(8, 13, 26, 0.82);
+  border: 1px solid var(--line);
+  backdrop-filter: blur(10px);
+}
+
+.reader-head-main {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.zoom-indicator {
+  font-size: 13px;
+}
+
+.reader {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.page-strip {
+  width: min(100%, var(--reader-width));
+  margin: 0 auto;
+  padding: 0;
+}
+
+.page-strip.active .page-strip-head {
+  border-color: rgba(122, 162, 255, 0.34);
+}
+
+.page-strip-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 2px 10px 4px;
+  border-bottom: 1px solid transparent;
+}
+
+.page-strip-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.page-strip-title strong {
+  font-size: 14px;
+}
+
+.page-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.page-actions .btn {
+  padding: 7px 10px;
+  font-size: 12px;
+}
+
+.page-frame {
+  position: relative;
+  width: 100%;
+  overflow: visible;
+  background: transparent;
+  border: 0;
+}
+
+.page-frame img {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin: 0 auto;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.empty-state {
+  width: min(100%, 720px);
+  margin: 48px auto 0;
+  padding: 48px 24px;
+  text-align: center;
+  color: var(--muted);
+  border: 1px dashed var(--line-2);
+  border-radius: var(--radius);
+}
+
+@media (max-width: 1120px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    position: static;
+    height: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .page-strip {
+    width: 100%;
+  }
+}

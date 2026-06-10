@@ -1,0 +1,177 @@
+/**
+ * The content script's `chrome.runtime.onMessage` router.
+ *
+ * Handles control messages (ping / keep-alive / toast) and the four real
+ * commands from the service worker:
+ * - GET_IMAGES                       → list translate-worthy images
+ * - GET_CONTEXT_IMAGE_PAYLOAD        → payload for the right-clicked image
+ * - REPLACE_IMAGE                    → swap an image's source
+ * - OVERLAY_HTML                     → apply an HTML overlay
+ * plus RESOLVE_AND_REPLACE_MANGADEX_BLOB and IMAGE_ERROR.
+ */
+
+(function () {
+  const TP = window.__TP;
+  if (!TP || TP.bail) return;
+
+  /** Collect images for a GET_IMAGES request (with the MangaDex fast path). */
+  async function collectImages(mode, lang) {
+    TP.removeLazyScriptsAndForceSrc();
+    TP.normalizeLazyImages();
+
+    if (!TP.isMangaDexHost()) {
+      return TP.collectImagesForScan(mode, lang, "page_scan");
+    }
+
+    // MangaDex: prefer the chapter's at-home URL list, skip already-cached pages.
+    TP.showToast("TextPhantom: loading MangaDex pages…", 2600);
+    TP.scheduleMangaDexMapping();
+    await TP.ensureMangaDexDomMapping();
+    const hydrated = await TP.hydrateMangaDexFromCache().catch(() => null);
+    const cacheItems = hydrated?.items || null;
+    const wantsHtml = String(mode || "").includes("text");
+
+    const isCached = (src) => {
+      if (!cacheItems) return false;
+      const rec = cacheItems[TP.mdKeyFromUrl(String(src || ""))];
+      if (!rec) return false;
+      return wantsHtml ? Boolean(rec.result) : Boolean(rec.hasNewImg);
+    };
+
+    const seen = new Set();
+    const out = [];
+
+    // Positions of any page images currently in the DOM (for nicer metadata).
+    const posBySrc = new Map();
+    TP.getMangaDexPageImagesInDOM().forEach((img) => {
+      const src = TP.normUrl(TP.getBestImgUrl(img));
+      if (TP.isHttpish(src) && !isCached(src) && !posBySrc.has(src)) {
+        posBySrc.set(src, TP.buildPositionFromElement(img));
+      }
+    });
+
+    const urls = (await TP.fetchMangaDexChapterUrls())?.urls || [];
+    for (const src of urls) {
+      const u = TP.normUrl(src);
+      if (!TP.isHttpish(u) || isCached(u) || seen.has(u)) continue;
+      seen.add(u);
+      out.push(
+        TP.buildPayload(
+          { original_image_url: u, position: posBySrc.get(u) || null },
+          mode,
+          lang,
+          "page_scan",
+          "collected_mangadex_api",
+        ),
+      );
+    }
+    for (const [src, pos] of posBySrc.entries()) {
+      if (!TP.isHttpish(src) || isCached(src) || seen.has(src)) continue;
+      seen.add(src);
+      out.push(
+        TP.buildPayload(
+          { original_image_url: src, position: pos || null },
+          mode,
+          lang,
+          "page_scan",
+          "collected_mangadex_dom",
+        ),
+      );
+    }
+    return out.filter(Boolean);
+  }
+
+  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    (async () => {
+      const type = String(msg?.type || "");
+
+      // --- Control messages (no settings needed) --------------------------
+      if (type === "TP_PING") return sendResponse({ ok: true });
+      if (type === "TP_KEEPALIVE_START") {
+        TP.keepAlive.start(msg?.ms);
+        return sendResponse({ ok: true });
+      }
+      if (type === "TP_KEEPALIVE_STOP") {
+        TP.keepAlive.stop();
+        return sendResponse({ ok: true });
+      }
+      if (type === "TP_TOAST") {
+        TP.showToast(msg?.text || msg?.message || "", msg?.ms || 1600);
+        return sendResponse({ ok: true });
+      }
+      if (type === "WS_STATUS_UPDATE" || type === "API_STATUS_UPDATE") {
+        return sendResponse({ ok: true });
+      }
+
+      const { mode, lang } = await TP.getSettings();
+
+      // --- GET_IMAGES -----------------------------------------------------
+      if (type === "GET_IMAGES") {
+        const infos = await collectImages(mode, lang);
+        TP.log.info("GET_IMAGES", { returned: infos.length, host: location.host });
+        return sendResponse(infos);
+      }
+
+      // --- GET_CONTEXT_IMAGE_PAYLOAD --------------------------------------
+      if (type === "GET_CONTEXT_IMAGE_PAYLOAD") {
+        const lrc = TP.getLastRightClick();
+        const img = lrc.img && lrc.img.isConnected ? lrc.img : null;
+        const payload = img
+          ? await TP.buildPayloadFromImage(img, mode, lang, "img_one", "context_menu_single", true)
+          : null;
+        return sendResponse({ ok: Boolean(payload), payload });
+      }
+
+      // --- REPLACE_IMAGE --------------------------------------------------
+      if (type === "REPLACE_IMAGE") {
+        const applied = await TP.replaceImageInDOM(msg.original, msg.newSrc);
+        if (!applied && TP.isMangaDexHost()) TP.mdRememberPending(msg.original, { newSrc: msg.newSrc });
+        return sendResponse({ ok: true, applied: !!applied });
+      }
+
+      // --- RESOLVE_AND_REPLACE_MANGADEX_BLOB ------------------------------
+      if (type === "RESOLVE_AND_REPLACE_MANGADEX_BLOB") {
+        const resolved = await TP.resolveMangaDexOriginalForBlob(msg.blobUrl);
+        return sendResponse({ resolved });
+      }
+
+      // --- IMAGE_ERROR ----------------------------------------------------
+      if (type === "IMAGE_ERROR") {
+        const isNoOverlay = /no overlay data/i.test(String(msg.message || ""));
+        // Defer slightly: a late-arriving REPLACE_IMAGE may make this moot.
+        setTimeout(() => {
+          if (TP.shouldShowReplaceError(msg.original)) {
+            TP.markImageError(msg.original, isNoOverlay ? "No text detected" : msg.message);
+          }
+        }, 1200);
+        return sendResponse({ ok: true });
+      }
+
+      // --- OVERLAY_HTML ---------------------------------------------------
+      if (type === "OVERLAY_HTML") {
+        const ovMode = typeof msg?.mode === "string" ? msg.mode : "";
+        if (!ovMode) return sendResponse({ ok: true, ignored: true });
+        const isText = ovMode === "lens_text";
+        const source = isText ? String(msg?.source || "").trim().toLowerCase() : "translated";
+        if (isText && !source) return sendResponse({ ok: true, ignored: true });
+
+        const img = TP.findTargetImage(msg.original);
+        if (img) {
+          try {
+            TP.applyHtmlOverlay(img, msg.result, source, isText, msg.original);
+          } catch (e) {
+            TP.log.warn("OVERLAY_HTML failed", e?.message || String(e));
+          }
+        } else if (TP.isMangaDexHost()) {
+          TP.mdRememberPending(msg.original, {
+            overlay: { result: msg.result, source, isTextMode: isText },
+          });
+        }
+        return sendResponse({ ok: true });
+      }
+
+      sendResponse({ ok: true, ignored: true });
+    })();
+    return true; // keep the message channel open for the async response
+  });
+})();

@@ -1,0 +1,38 @@
+{
+  "manifest_version": 3,
+  "name": "แปลข้อความในภาพมังงะ มังฮวา | TextPhantom",
+  "version": "2026.6.10",
+  "description": "🧠 Right-click any image → translate images",
+  "permissions": ["contextMenus", "storage", "activeTab"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background/index.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": { "48": "icons/48.png" }
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": [
+        "content/namespace.js",
+        "content/keepalive.js",
+        "content/dom-utils.js",
+        "content/image-finder.js",
+        "content/payload.js",
+        "content/overlay.js",
+        "content/mangadex.js",
+        "content/messaging.js",
+        "content/index.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ],
+  "icons": {
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  }
+}
