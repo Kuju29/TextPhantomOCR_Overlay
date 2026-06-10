@@ -1,6 +1,6 @@
 [![GitHub Sponsors](https://img.shields.io/badge/Sponsor-GitHub-pink?logo=githubsponsors)](https://github.com/sponsors/Kuju29)
 
-*Note: ผมทำอีกโปรเจคอยู่ เดี๋ยวกลับมาอัพเดตแก้ปัญหาที่มีอยู่ครับ มันต้องไปแก้ตั้งแต่การแกะโครงสร้างเวลา ai แปลเลยต้องรอให้ว่างจริงๆ อัพเดตรอบต่อไปจะใช้ claude ai โค๊ดขยะน่าจะน้อยลงและเป็นมิตรกับระบบมากขึ้น* 
+*Note: เวอร์ชั่น 4.0.0 ยังไม่ได้ทดสอบทั้งหมดนะครับ ถ้าเจอบัคก็แจ้งใน youtube หรือใน github ก็ได้ครับ* 
 
 ![Desktop2026 02 06-08 11 52 01-ezgif com-video-to-gif-converter](https://github.com/user-attachments/assets/43cc9a1e-eb79-46f0-b4a1-08ca9bcd49f5)
 
