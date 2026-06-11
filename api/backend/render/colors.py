@@ -58,6 +58,29 @@ def pick_bw_text_color(bg_rgb: RGB) -> RGBA:
     return TEXT_COLOR_DARK
 
 
+def region_is_dark(base_rgb: Image.Image, rect: Rect) -> bool:
+    """True when the area inside ``rect`` reads as a DARK background.
+
+    Used to flip overlay text from the default near-black-with-white-halo to
+    white-with-dark-halo on dark panels.  Sampling happens on the *erased*
+    image (original text already removed), so the median is the real
+    bubble/panel colour, not the glyphs.  The crop is shrunk to ≤ 24×24 first
+    — a median over ~500 pixels is plenty and keeps this O(1) per paragraph.
+    """
+    W, H = base_rgb.size
+    l, t, r, b = rect
+    l, r = max(0, min(W, int(l))), max(0, min(W, int(r)))
+    t, b = max(0, min(H, int(t))), max(0, min(H, int(b)))
+    if r - l < 2 or b - t < 2:
+        return False
+    region = base_rgb.crop((l, t, r, b)).convert("RGB")
+    region.thumbnail((24, 24))
+    med = median_rgba(list(region.getdata()))
+    if not med:
+        return False
+    return pick_bw_text_color(med[:3]) == TEXT_COLOR_LIGHT
+
+
 def sample_bg_color(base_rgb: Image.Image, rect: Rect, margin_px: int) -> RGB:
     """Median colour of a thin frame just *outside* ``rect``."""
     W, H = base_rgb.size
