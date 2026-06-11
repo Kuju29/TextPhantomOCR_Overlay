@@ -124,12 +124,19 @@ def font_size_minimum_for_image(img_w: int, img_h: int) -> int:
     """Readability floor for the AI fit pass.
 
     manga-image-translator uses ``(img.shape[0] + img.shape[1]) / 200`` as its
-    minimum font size when no explicit fixed size is given.  We use the same
-    heuristic: it scales with image resolution while never going so small that
-    a high-DPI scan becomes unreadable.  The minimum is 8px so tiny thumbnails
-    still produce legible spans.
+    minimum font size when no explicit fixed size is given.  That heuristic
+    assumes a page-shaped image; on a long manhwa/webtoon STRIP (e.g.
+    800 x 12000 px) the height term explodes the floor to 60+ px and every AI
+    paragraph renders huge.  Glyph size should follow the *reading* dimension
+    (the width), so the longer side's contribution is capped at 2x the shorter
+    side — identical to the original behaviour for normal page shapes, sane
+    for strips.  The minimum is 8px so tiny thumbnails still produce legible
+    spans.
     """
-    side_sum = max(0, int(img_w)) + max(0, int(img_h))
+    w = max(0, int(img_w))
+    h = max(0, int(img_h))
+    short, long_ = (w, h) if w <= h else (h, w)
+    side_sum = short + min(long_, 2 * short)
     return max(8, int(round(side_sum / 200.0)))
 
 
