@@ -35,6 +35,7 @@ from backend.ai.providers import is_local_provider
 from backend.lens.tree import decode_tree, flatten_spans, paragraph_texts, tree_stats
 from backend.log import dbg, event
 from backend.render.bubble import attach_bubble_bounds, detect_bubble_bounds_combined
+from backend.render.colors import region_is_dark
 from backend.render.erase import erase_text_with_boxes
 from backend.render.groups import group_paragraphs_into_bubbles
 from backend.render.build_ai_tree import build_ai_tree
@@ -105,6 +106,51 @@ def _pick_template_tree(original_tree: dict | None, translated_tree: dict | None
     return translated_tree or original_tree or {}
 
 
+# --- Text-colour annotation -------------------------------------------------
+
+def _para_rect_px(para: dict) -> tuple[int, int, int, int] | None:
+    """Paragraph rect in pixels — ``bounds_px`` or the union of item bounds."""
+    bp = para.get("bounds_px")
+    if isinstance(bp, (list, tuple)) and len(bp) == 4:
+        x1, y1, x2, y2 = (int(round(float(v))) for v in bp)
+        return x1, y1, x2, y2
+    xs1: list[float] = []
+    ys1: list[float] = []
+    xs2: list[float] = []
+    ys2: list[float] = []
+    for it in para.get("items") or []:
+        ib = it.get("bounds_px")
+        if isinstance(ib, (list, tuple)) and len(ib) == 4:
+            xs1.append(float(ib[0]))
+            ys1.append(float(ib[1]))
+            xs2.append(float(ib[2]))
+            ys2.append(float(ib[3]))
+    if not xs1:
+        return None
+    return int(min(xs1)), int(min(ys1)), int(max(xs2)), int(max(ys2))
+
+
+def _annotate_text_light(tree: dict | None, base_img: Image.Image | None) -> None:
+    """Flag paragraphs sitting on a DARK background with ``text_light``.
+
+    The renderer turns the flag into the ``tp-on-dark`` wrapper (white text +
+    dark halo) so overlays stay readable on black/dark panels.  Sampling uses
+    the erased image, where the original glyphs are already gone.
+    """
+    if not isinstance(tree, dict) or base_img is None:
+        return
+    for para in tree.get("paragraphs") or []:
+        if not isinstance(para, dict):
+            continue
+        rect = _para_rect_px(para)
+        if rect is None:
+            continue
+        try:
+            para["text_light"] = region_is_dark(base_img, rect)
+        except Exception:
+            para["text_light"] = False
+
+
 # --- AI layer --------------------------------------------------------------
 
 def _run_ai_layer(
@@ -118,6 +164,7 @@ def _run_ai_layer(
     thai_font: str,
     latin_font: str,
     *,
+    base_img: Image.Image | None = None,
     capture_request: bool = False,
 ) -> dict | None:
     """Translate with AI, patch into a tree, and write the ``Ai`` result.
@@ -265,6 +312,10 @@ def _run_ai_layer(
             glossary_pairs.append({"src": src_s, "tgt": tgt_s})
     out["Ai"]["glossary"] = glossary_pairs
 
+    # Flag dark-background paragraphs BEFORE rendering so the overlay flips
+    # to white text + dark halo where the panel behind the bubble is dark.
+    _annotate_text_light(ai_tree, base_img)
+
     # AI HTML overlay — ``target_lang`` drives the deterministic reading
     # direction (see backend.render.region.resolve_text_direction).
     out["Ai"]["aihtml"] = render_tree_overlay(ai_tree, W, H, target_lang=target_lang)
@@ -392,6 +443,11 @@ def process_image(
         group_paragraphs_into_bubbles(translated_tree, W, H)
         dbg("groups.original", {"bubble_groups": len(original_tree.get("bubble_groups") or [])})
         dbg("groups.translated", {"bubble_groups": len(translated_tree.get("bubble_groups") or [])})
+
+        # Per-paragraph background luminance → text colour flag, sampled on
+        # the erased image (original glyphs removed). Cheap: ≤24x24 median.
+        _annotate_text_light(original_tree, base_img)
+        _annotate_text_light(translated_tree, base_img)
     finally:
         _CPU_GATE.release()
 
@@ -409,6 +465,7 @@ def process_image(
         _t = time.perf_counter()
         _run_ai_layer(
             out, original_tree, translated_tree, ai_cfg, target_lang, W, H, thai_font, latin_font,
+            base_img=base_img,
             capture_request=capture_ai_request,
         )
         stages["ai_ms"] = round((time.perf_counter() - _t) * 1000, 1)
