@@ -9,12 +9,21 @@ important outcomes only (for example a translation job finishing or failing).
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from backend.config import settings
 
 _MAX_PAYLOAD_CHARS = 2000
 _EVENT_MODES = {"summary", "custom", "tp", "plain"}
+
+# Thailand is UTC+7 year-round (no DST).
+_TH_TZ = timezone(timedelta(hours=7))
+
+
+def _ts() -> str:
+    """Current time in Thailand, e.g. ``[2026-06-11 01:41:11]``."""
+    return datetime.now(_TH_TZ).strftime("[%Y-%m-%d %H:%M:%S]")
 
 
 def _json(data: Any) -> str:
@@ -38,9 +47,9 @@ def event(tag: str, data: Any | None = None, *, ok: bool = True) -> None:
     level = "ok" if ok else "err"
     try:
         if data is None:
-            print(f"[TextPhantom][{level}] {tag}", flush=True)
+            print(f"{_ts()} [TextPhantom][{level}] {tag}", flush=True)
         else:
-            print(f"[TextPhantom][{level}] {tag} {_json(data)}", flush=True)
+            print(f"{_ts()} [TextPhantom][{level}] {tag} {_json(data)}", flush=True)
     except Exception:
         # Logging must never break request handling.
         pass
@@ -52,12 +61,12 @@ def dbg(tag: str, data: Any | None = None) -> None:
         return
     try:
         if data is None:
-            print(f"[TextPhantom][dbg] {tag}", flush=True)
+            print(f"{_ts()} [TextPhantom][dbg] {tag}", flush=True)
             return
-        print(f"[TextPhantom][dbg] {tag} {_json(data)}", flush=True)
+        print(f"{_ts()} [TextPhantom][dbg] {tag} {_json(data)}", flush=True)
     except Exception:
         # Last-resort: don't let logging break a request.
         try:
-            print(f"[TextPhantom][dbg] {tag} {data!r}", flush=True)
+            print(f"{_ts()} [TextPhantom][dbg] {tag} {data!r}", flush=True)
         except Exception:
             pass
