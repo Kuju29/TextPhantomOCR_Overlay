@@ -409,8 +409,10 @@ def process_image(
     out["htmlMeta"] = {"baseW": int(W), "baseH": int(H), "format": "tp"}
 
     # --- Image data URI (already erased above) -----------------------------
+    # compress_level=1: PNG encode at default level 6 costs hundreds of ms on
+    # a full manga page; level 1 is ~5x faster for a modestly larger payload.
     buf = io.BytesIO()
-    base_img.save(buf, format="PNG")
+    base_img.save(buf, format="PNG", compress_level=1)
     out["imageDataUri"] = bytes_to_data_uri(buf.getvalue(), "image/png")
 
     return out
@@ -469,7 +471,7 @@ def process_payload(payload: dict) -> dict[str, Any]:
     img_hash = sha256_hex(img_bytes)
     cache_key = ""
     cache_used = False
-    if mode == "lens_text" and img_hash:
+    if img_hash:
         cache_source = "ai" if source == "ai" else "text"
         cache_key = cache_mod.build_cache_key(img_hash, lang, mode, cache_source, ai_cfg)
         cache = cache_mod.ai_result_cache if source == "ai" else cache_mod.result_cache
@@ -500,6 +502,19 @@ def process_payload(payload: dict) -> dict[str, Any]:
         if cache_used and cache_key:
             cache = cache_mod.ai_result_cache if source == "ai" else cache_mod.result_cache
             cache.set(cache_key, out)
+            # An AI result is a superset of the original/translated result:
+            # cross-fill the text cache so switching AI -> translate/original
+            # on the same image is an instant cache hit.
+            if mode == "lens_text" and source == "ai" and out.get("original"):
+                text_key = cache_mod.build_cache_key(img_hash, lang, mode, "text", None)
+                if not cache_mod.result_cache.get(text_key):
+                    text_out = {
+                        k: v for k, v in out.items()
+                        if k not in ("Ai", "AiTextFull", "perf")
+                    }
+                    text_out["AiTextFull"] = ""
+                    text_out["Ai"] = {}
+                    cache_mod.result_cache.set(text_key, text_out)
         return out
     finally:
         try:
