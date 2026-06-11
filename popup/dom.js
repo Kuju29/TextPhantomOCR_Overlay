@@ -134,6 +134,11 @@ export function toggleUi({ hasEnvKey }) {
   const isText = (els.mode.value || "lens_text") === "lens_text";
   els.sourcesWrap.style.display = isText ? "" : "none";
 
+  // Display (overlay font size) only applies to text overlays — Google Lens
+  // (image) mode returns a baked image, so the section is hidden there.
+  const displayWrap = document.getElementById("display-wrap");
+  if (displayWrap) displayWrap.style.display = isText ? "" : "none";
+
   const source = (els.sources.value || "").trim() || "translated";
   const showLang = !(isText && source === "original");
   els.langWrap.style.display = showLang ? "" : "none";
