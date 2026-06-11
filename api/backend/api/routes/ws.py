@@ -23,7 +23,13 @@ router = APIRouter()
 async def ws_endpoint(ws: WebSocket) -> None:
     """Handle a translation WebSocket connection until the client disconnects."""
     await ws.accept()
-    await ws.send_text(json.dumps({"type": "ack"}))
+    try:
+        await ws.send_text(json.dumps({"type": "ack"}))
+    except Exception:
+        # Client vanished between accept() and the ack (network blip, page
+        # closed). Nothing to serve — return quietly instead of letting the
+        # disconnect explode into a full ASGI traceback in the logs.
+        return
 
     job_queue: JobQueue = ws.app.state.job_queue
 
