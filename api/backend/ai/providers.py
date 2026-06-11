@@ -14,8 +14,16 @@ import time
 
 import httpx
 
-from backend.ai import config as ai_config
+from backend.ai import config as ai_config  # noqa: F401 - kept for callers
 from backend.ai.config import PROVIDER_ALIASES, PROVIDER_DEFAULTS, MODEL_ALIASES, LOCAL_PROVIDERS
+
+# Listing models is a quick GET and must never wait the full *generation*
+# timeout (TIMEOUT_SEC = 120 s). That hurt badly when a user picked a local
+# provider (LM Studio / Ollama on THEIR machine): the server-side /ai/resolve
+# hung for 120 s per call trying to reach an unreachable localhost/LAN URL,
+# and the client retried every 2 minutes forever.
+LIST_TIMEOUT_SEC: float = 10.0
+LOCAL_LIST_TIMEOUT_SEC: float = 3.0
 
 # Cache for hf_router_models: sha1(key|base_url) -> {"ts": float, "models": [...]}.
 _HF_MODELS_CACHE: dict[str, dict] = {}
@@ -134,7 +142,7 @@ def hf_router_models(api_key: str, base_url: str) -> list[str]:
 
     url = base_url.rstrip("/") + "/models"
     try:
-        with httpx.Client(timeout=ai_config.TIMEOUT_SEC) as client:
+        with httpx.Client(timeout=LIST_TIMEOUT_SEC) as client:
             r = client.get(url, headers={"Authorization": f"Bearer {api_key}"})
             r.raise_for_status()
             data = r.json()
@@ -167,7 +175,9 @@ def pick_hf_fallback_model(models: list[str]) -> str:
     return models[0]
 
 
-def openai_compat_models(api_key: str, base_url: str) -> list[str]:
+def openai_compat_models(
+    api_key: str, base_url: str, timeout_sec: float = LIST_TIMEOUT_SEC
+) -> list[str]:
     """Enumerate models from any OpenAI-compatible ``/models`` endpoint.
 
     Returns an empty list on any error — callers fall back to static defaults.
@@ -176,7 +186,7 @@ def openai_compat_models(api_key: str, base_url: str) -> list[str]:
         return []
     url = base_url.rstrip("/") + "/models"
     try:
-        with httpx.Client(timeout=ai_config.TIMEOUT_SEC) as client:
+        with httpx.Client(timeout=timeout_sec) as client:
             r = client.get(url, headers={"Authorization": f"Bearer {api_key}"})
             r.raise_for_status()
             data = r.json()
@@ -196,7 +206,7 @@ def gemini_models(api_key: str) -> list[str]:
         return []
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
     try:
-        with httpx.Client(timeout=ai_config.TIMEOUT_SEC) as client:
+        with httpx.Client(timeout=LIST_TIMEOUT_SEC) as client:
             r = client.get(url)
             r.raise_for_status()
             data = r.json()
