@@ -10,6 +10,7 @@ Two-step flow:
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import threading
@@ -20,9 +21,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 
 import httpx
 
-from backend.config import settings
 from backend.lens import cookie
-from backend.log import dbg
 
 _UPLOAD_URL = "https://lens.google.com/v3/upload"
 _REQUEST_HEADERS = {
@@ -30,57 +29,34 @@ _REQUEST_HEADERS = {
     "Referer": "https://lens.google.com/",
 }
 
-# --- Shared HTTP client (connection pooling) --------------------------------
-# Creating a fresh httpx.Client per request costs a new TCP + TLS handshake
-# (several hundred ms) on EVERY job.  One pooled client reuses connections.
-# Cookies are passed per-request (not on the client) so a cookie refresh
-# never requires rebuilding the client.
-_client_lock = threading.Lock()
-_client: httpx.Client | None = None
-
-
-def _shared_client() -> httpx.Client:
-    global _client
-    with _client_lock:
-        if _client is None or _client.is_closed:
-            _client = httpx.Client(
-                headers=_REQUEST_HEADERS,
-                follow_redirects=False,
-                timeout=60,
-                limits=httpx.Limits(
-                    max_connections=20, max_keepalive_connections=10, keepalive_expiry=30.0
-                ),
-            )
-        return _client
-
-
-# --- Lens response cache -----------------------------------------------------
-# Keyed by (sha256(image), lang).  All three sources (original / translated /
-# ai) and both modes need the same Lens JSON for a given image+lang, so
-# switching modes must NOT redo the Google roundtrip (~1-2 s).
+# --- Lens response cache (in-process, TTL LRU) -------------------------------
+# Keyed by (sha256(image), lang). Switching source (original / translated /
+# AI) re-sends the SAME image+lang, so the ~2 s Google roundtrip (measured
+# lens_ms) can be skipped entirely on repeats. This wraps fetch_lens_data
+# only — the HTTP requests themselves are untouched.
 _LENS_CACHE_MAX = 48
-_LENS_CACHE_TTL = 600.0  # seconds
+_LENS_CACHE_TTL_SEC = 600.0
 _lens_cache: OrderedDict[str, tuple[float, dict[str, Any]]] = OrderedDict()
 _lens_cache_lock = threading.Lock()
 
 
 def _lens_cache_get(key: str) -> dict[str, Any] | None:
-    now = time.time()
     with _lens_cache_lock:
         hit = _lens_cache.get(key)
         if not hit:
             return None
         ts, data = hit
-        if now - ts > _LENS_CACHE_TTL:
+        if time.time() - ts > _LENS_CACHE_TTL_SEC:
             _lens_cache.pop(key, None)
             return None
         _lens_cache.move_to_end(key)
-        return data
+        # Deep-copy out so callers can never mutate the cached response.
+        return copy.deepcopy(data)
 
 
 def _lens_cache_set(key: str, data: dict[str, Any]) -> None:
     with _lens_cache_lock:
-        _lens_cache[key] = (time.time(), data)
+        _lens_cache[key] = (time.time(), copy.deepcopy(data))
         _lens_cache.move_to_end(key)
         while len(_lens_cache) > _LENS_CACHE_MAX:
             _lens_cache.popitem(last=False)
@@ -100,33 +76,12 @@ def _to_translated_url(redirect_url: str, lang: str) -> str:
     return "https://lens.google.com/translatedimage?" + urlencode(params)
 
 
-def _fetch_once(img_bytes: bytes, lang: str, ck: dict) -> dict[str, Any]:
-    """One upload + result-fetch roundtrip against Lens."""
-    c = _shared_client()
-    r = c.post(
-        _UPLOAD_URL,
-        files={"encoded_image": ("file.jpg", img_bytes, "image/jpeg")},
-        cookies=ck,
-    )
-    if r.status_code not in (302, 303):
-        raise RuntimeError(f"Lens upload failed: {r.status_code}\n{r.text}")
-    redirect = r.headers["location"]
-
-    translated_url = _to_translated_url(redirect, lang)
-    body = c.get(translated_url, cookies=ck, follow_redirects=True).text
-
-    # Strip the XSSI-protection prefix Google prepends to JSON responses.
-    if body.startswith(")]}'"):
-        body = body[5:]
-    return json.loads(body)
-
-
 def fetch_lens_data(image_path: str, lang: str, firebase_url: str | None = None) -> dict[str, Any]:
     """Upload ``image_path`` to Lens and return the parsed translation JSON.
 
-    Results are cached in-process by (image hash, lang) so re-requesting the
-    same image — e.g. when the user flips between original / translated / AI
-    modes — skips the Google roundtrip entirely.
+    Repeats of the same image+lang within the cache TTL are served from the
+    in-process cache (no Google roundtrip). The network code below is the
+    original per-request httpx flow, unchanged.
     """
     with open(image_path, "rb") as f:
         img_bytes = f.read()
@@ -134,19 +89,24 @@ def fetch_lens_data(image_path: str, lang: str, firebase_url: str | None = None)
     cache_key = hashlib.sha256(img_bytes).hexdigest() + "|" + (lang or "")
     cached = _lens_cache_get(cache_key)
     if cached is not None:
-        dbg("lens.cache.hit", {"lang": lang})
         return cached
 
     ck = cookie.get(firebase_url)
-    try:
-        data = _fetch_once(img_bytes, lang, ck)
-    except KeyError:
-        # Redirect URL missing vsrid/gsessionid — usually a stale/invalid
-        # cookie. Refresh the cookie once and retry instead of failing the job.
-        dbg("lens.retry", {"reason": "missing redirect params"})
-        ck = cookie.get(firebase_url, force_refresh=True)
-        data = _fetch_once(img_bytes, lang, ck)
 
+    with httpx.Client(cookies=ck, headers=_REQUEST_HEADERS, follow_redirects=False, timeout=60) as c:
+        r = c.post(_UPLOAD_URL, files={"encoded_image": ("file.jpg", img_bytes, "image/jpeg")})
+        if r.status_code not in (302, 303):
+            raise RuntimeError(f"Lens upload failed: {r.status_code}\n{r.text}")
+        redirect = r.headers["location"]
+
+    translated_url = _to_translated_url(redirect, lang)
+    with httpx.Client(cookies=ck, headers=_REQUEST_HEADERS, timeout=60) as c:
+        body = c.get(translated_url).text
+
+    # Strip the XSSI-protection prefix Google prepends to JSON responses.
+    if body.startswith(")]}'"):
+        body = body[5:]
+    data = json.loads(body)
     if isinstance(data, dict):
         _lens_cache_set(cache_key, data)
     return data
