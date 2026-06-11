@@ -116,6 +116,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     case "TP_CONTENT_READY":
       if (msg?.top && Number.isFinite(sender?.tab?.id)) {
         ensureTabSession(sender.tab.id, msg?.href);
+        // Pre-warm the API while the user is still reading the page, so a
+        // right-click translate moments later skips the cold-start cost.
+        // warmupApi() inside getApiBase() is throttled (once / 20 min per
+        // service-worker), so a large install base stays gentle on the server.
+        getApiBase().catch(() => {});
       }
       sendResponse({ ok: true });
       return true;
