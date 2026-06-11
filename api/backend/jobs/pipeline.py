@@ -18,6 +18,7 @@ from __future__ import annotations
 import io
 import os
 import tempfile
+import threading
 import time
 from typing import Any
 
@@ -51,6 +52,13 @@ from backend.utils.images import (
 )
 
 SUPPORTED_MODES = {"lens_images", "lens_text"}
+
+# CPU gate: workers may all wait on the Lens network call in parallel (cheap),
+# but only this many jobs may run the CPU-heavy stages (erase / bubble detect /
+# render / PNG) at once. Without the gate, a 14-image burst inflated those
+# stage times 3-10x from GIL contention; with too few workers, the Lens waits
+# serialized instead. I/O parallel + CPU gated gets both right.
+_CPU_GATE = threading.Semaphore(max(1, settings.cpu_concurrency))
 
 
 # --- Template-tree selection ----------------------------------------------
@@ -358,28 +366,34 @@ def process_image(
     # source-vertical → target-horizontal case (Japanese → Thai) where a
     # text-only AABB is far too narrow.
     _t = time.perf_counter()
-    if original_span_tokens:
-        base_img = erase_text_with_boxes(img, original_span_tokens)
-    else:
-        base_img = img
-    stages["erase_ms"] = round((time.perf_counter() - _t) * 1000, 1)
+    _CPU_GATE.acquire()
+    stages["gate_wait_ms"] = round((time.perf_counter() - _t) * 1000, 1)
+    try:
+        _t = time.perf_counter()
+        if original_span_tokens:
+            base_img = erase_text_with_boxes(img, original_span_tokens)
+        else:
+            base_img = img
+        stages["erase_ms"] = round((time.perf_counter() - _t) * 1000, 1)
 
-    _t = time.perf_counter()
-    bubble_map = detect_bubble_bounds_combined(
-        base_img, original_tree.get("paragraphs") or [], W, H
-    )
-    stages["bubble_ms"] = round((time.perf_counter() - _t) * 1000, 1)
-    attach_bubble_bounds(original_tree, bubble_map)
-    attach_bubble_bounds(translated_tree, bubble_map)
-    dbg("bubble.detected", {"paragraphs": len(bubble_map), "hits": sum(1 for v in bubble_map.values() if v)})
+        _t = time.perf_counter()
+        bubble_map = detect_bubble_bounds_combined(
+            base_img, original_tree.get("paragraphs") or [], W, H
+        )
+        stages["bubble_ms"] = round((time.perf_counter() - _t) * 1000, 1)
+        attach_bubble_bounds(original_tree, bubble_map)
+        attach_bubble_bounds(translated_tree, bubble_map)
+        dbg("bubble.detected", {"paragraphs": len(bubble_map), "hits": sum(1 for v in bubble_map.values() if v)})
 
-    # Group paragraphs into bubble_groups for all trees so every downstream
-    # consumer (renderer, patcher, debug export) sees the same structure.
-    # This runs once here; the renderer reads tree["bubble_groups"] directly.
-    group_paragraphs_into_bubbles(original_tree, W, H)
-    group_paragraphs_into_bubbles(translated_tree, W, H)
-    dbg("groups.original", {"bubble_groups": len(original_tree.get("bubble_groups") or [])})
-    dbg("groups.translated", {"bubble_groups": len(translated_tree.get("bubble_groups") or [])})
+        # Group paragraphs into bubble_groups for all trees so every downstream
+        # consumer (renderer, patcher, debug export) sees the same structure.
+        # This runs once here; the renderer reads tree["bubble_groups"] directly.
+        group_paragraphs_into_bubbles(original_tree, W, H)
+        group_paragraphs_into_bubbles(translated_tree, W, H)
+        dbg("groups.original", {"bubble_groups": len(original_tree.get("bubble_groups") or [])})
+        dbg("groups.translated", {"bubble_groups": len(translated_tree.get("bubble_groups") or [])})
+    finally:
+        _CPU_GATE.release()
 
     # --- optional AI layer -------------------------------------------------
     # ``patch`` deep-copies the chosen template tree, so the bubble bounds
@@ -413,24 +427,32 @@ def process_image(
     # ``font_size_px`` on each item using the closed-form heuristic; the
     # renderer falls back to the same heuristic if a size is missing.
     _t = time.perf_counter()
-    fit_tree_font_sizes(original_tree, thai_font, latin_font, W, H)
-    out["original"]["originalhtml"] = render_tree_overlay(original_tree, W, H)
+    _CPU_GATE.acquire()
+    stages["gate_wait_ms"] = stages.get("gate_wait_ms", 0.0) + round(
+        (time.perf_counter() - _t) * 1000, 1
+    )
+    try:
+        _t = time.perf_counter()
+        fit_tree_font_sizes(original_tree, thai_font, latin_font, W, H)
+        out["original"]["originalhtml"] = render_tree_overlay(original_tree, W, H)
 
-    fit_tree_font_sizes(translated_tree, thai_font, latin_font, W, H)
-    out["translated"]["translatedhtml"] = render_tree_overlay(translated_tree, W, H)
+        fit_tree_font_sizes(translated_tree, thai_font, latin_font, W, H)
+        out["translated"]["translatedhtml"] = render_tree_overlay(translated_tree, W, H)
 
-    out["htmlCss"] = overlay_css()
-    out["htmlMeta"] = {"baseW": int(W), "baseH": int(H), "format": "tp"}
-    stages["render_ms"] = round((time.perf_counter() - _t) * 1000, 1)
+        out["htmlCss"] = overlay_css()
+        out["htmlMeta"] = {"baseW": int(W), "baseH": int(H), "format": "tp"}
+        stages["render_ms"] = round((time.perf_counter() - _t) * 1000, 1)
 
-    # --- Image data URI (already erased above) -----------------------------
-    _t = time.perf_counter()
-    buf = io.BytesIO()
-    # compress_level=1: measured png_ms was 0.4-3.8 s at the default level 6;
-    # level 1 encodes ~5x faster, image quality is identical (PNG is lossless).
-    base_img.save(buf, format="PNG", compress_level=1)
-    out["imageDataUri"] = bytes_to_data_uri(buf.getvalue(), "image/png")
-    stages["png_ms"] = round((time.perf_counter() - _t) * 1000, 1)
+        # --- Image data URI (already erased above) -------------------------
+        _t = time.perf_counter()
+        buf = io.BytesIO()
+        # compress_level=1: measured png_ms was 0.4-3.8 s at the default
+        # level 6; level 1 encodes ~5x faster, quality identical (lossless).
+        base_img.save(buf, format="PNG", compress_level=1)
+        out["imageDataUri"] = bytes_to_data_uri(buf.getvalue(), "image/png")
+        stages["png_ms"] = round((time.perf_counter() - _t) * 1000, 1)
+    finally:
+        _CPU_GATE.release()
 
     return out
 
