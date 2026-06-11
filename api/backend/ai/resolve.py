@@ -130,8 +130,16 @@ def _enumerate_models(provider: str, api_key: str, base_url: str, requested_mode
     else:  # openai-compatible (incl. local Ollama / LM Studio / LocalAI)
         # Local servers accept any/no bearer; send a placeholder so the
         # /models enumeration still works without a real key.
+        # Local providers get a very short timeout: when the backend runs in
+        # the cloud, the user's localhost/LAN URL is unreachable from here and
+        # must fail fast instead of hanging the resolve call.
         key_for_list = api_key or ("local" if is_local_provider(provider) else "")
-        models = openai_compat_models(key_for_list, base_url)
+        local = is_local_provider(provider)
+        from backend.ai.providers import LIST_TIMEOUT_SEC, LOCAL_LIST_TIMEOUT_SEC
+        models = openai_compat_models(
+            key_for_list, base_url,
+            timeout_sec=LOCAL_LIST_TIMEOUT_SEC if local else LIST_TIMEOUT_SEC,
+        )
         if not models:
             preset_model = PROVIDER_DEFAULTS.get(provider, {}).get("model", "")
             models = [preset_model] if preset_model else []
