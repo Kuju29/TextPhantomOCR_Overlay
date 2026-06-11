@@ -4,200 +4,226 @@
     <meta charset="utf-8" />
     <title>TextPhantom OCR</title>
     <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <link rel="stylesheet" href="../shared/theme.css" />
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
-    <div class="card">
+    <div class="app">
+      <!-- ============ HEADER ============ -->
       <header class="app-head">
-        <h2>TextPhantom OCR</h2>
+        <div class="brand">
+          <img class="brand-icon" src="../icons/48.png" alt="" />
+          <div class="brand-text">
+            <h1>TextPhantom</h1>
+            <span class="brand-sub">Manga image translator</span>
+          </div>
+        </div>
         <span id="api-status-emoji" class="api-dot" aria-live="polite" title="Loading…">⏳</span>
       </header>
 
-      <!-- ============ 1. TRANSLATE ============ -->
-      <section class="group">
-        <div class="group-title">Translate</div>
+      <!-- ============ TABS ============ -->
+      <nav class="tabs" role="tablist" aria-label="Sections">
+        <button type="button" class="tab" id="tab-translate" data-tab="translate" role="tab" aria-controls="panel-translate" aria-selected="true">Translate</button>
+        <button type="button" class="tab" id="tab-ai" data-tab="ai" role="tab" aria-controls="panel-ai" aria-selected="false">AI</button>
+        <button type="button" class="tab" id="tab-tools" data-tab="tools" role="tab" aria-controls="panel-tools" aria-selected="false">Tools</button>
+      </nav>
 
-        <div class="field">
-          <label for="mode">Mode</label>
-          <select id="mode" aria-label="Mode"></select>
-        </div>
-
-        <div class="field" id="lang-wrap">
-          <label for="lang">Language</label>
-          <select id="lang" aria-label="Language"></select>
-        </div>
-
-        <div class="field" id="sources-wrap" style="display: none">
-          <label for="sources">Source</label>
-          <select id="sources" aria-label="Source"></select>
-        </div>
-
-        <div class="note">Right-click any image on a page to translate it.</div>
-      </section>
-
-      <!-- ============ 2. AI ENGINE ============ -->
-      <section class="group" id="ai-group" style="display: none">
-        <div class="group-title">AI engine</div>
-
-        <div class="field" id="ai-provider-wrap">
-          <label for="ai-provider">Provider</label>
-          <select id="ai-provider" aria-label="AI provider">
-            <option value="auto">Auto (detect from key)</option>
-            <optgroup label="Cloud (needs API key)">
-              <option value="gemini">Google Gemini</option>
-              <option value="openai">OpenAI</option>
-              <option value="openrouter">OpenRouter</option>
-              <option value="anthropic">Anthropic</option>
-              <option value="groq">Groq</option>
-              <option value="deepseek">DeepSeek</option>
-              <option value="together">Together</option>
-              <option value="huggingface">HuggingFace</option>
-              <option value="featherless">Featherless</option>
-            </optgroup>
-            <optgroup label="Local (runs on your PC — no key)">
-              <option value="ollama">Ollama</option>
-              <option value="lmstudio">LM Studio</option>
-              <option value="localai">LocalAI</option>
-              <option value="jan">Jan</option>
-              <option value="textgen">text-generation-webui</option>
-              <option value="koboldcpp">KoboldCpp</option>
-              <option value="vllm">vLLM</option>
-              <option value="llamafile">llamafile</option>
-              <option value="gpt4all">GPT4All</option>
-            </optgroup>
-          </select>
-        </div>
-
-        <!-- Local endpoint: shown only for local providers -->
-        <div class="field" id="ai-endpoint-wrap" style="display: none">
-          <label for="ai-base-url">Local server URL</label>
-          <input
-            type="text"
-            id="ai-base-url"
-            placeholder="http://localhost:11434/v1"
-          />
-          <div class="hint">Your local AI server's OpenAI-compatible endpoint. No API key needed.</div>
-        </div>
-
-        <!-- API key: shown only for cloud providers -->
-        <div class="field" id="ai-key-wrap">
-          <label for="ai-key">API key</label>
-          <input
-            type="password"
-            id="ai-key"
-            placeholder="Paste your API key"
-          />
-          <div class="hint">Leave empty to use the non-AI translated overlay.</div>
-        </div>
-
-        <div class="field" id="ai-model-wrap" style="display: none">
-          <label for="ai-model">Model</label>
-          <select id="ai-model" aria-label="AI Model"></select>
-        </div>
-
-        <div class="field" id="ai-prompt-wrap" style="display: none">
-          <label for="ai-prompt" class="label-row">
-            <span>AI Style (optional)</span>
-            <span class="label-actions">
-              <button
-                type="button"
-                id="ai-prompt-studio"
-                class="icon-btn"
-                title="Open full-page editor (Prompt Studio)"
-                aria-label="Open full-page prompt editor"
-              >🗗</button>
-              <button
-                type="button"
-                id="ai-prompt-expand"
-                class="icon-btn"
-                title="Expand editor"
-                aria-label="Expand the style editor"
-                aria-pressed="false"
-              >⤢</button>
-              <button
-                type="button"
-                id="ai-prompt-reset"
-                class="icon-btn"
-                title="Reset style for this language"
-                aria-label="Reset style for this language"
-              >⟲</button>
-            </span>
-          </label>
-          <textarea
-            id="ai-prompt"
-            rows="8"
-            placeholder="Your translation style notes (terms, tone, pronouns…). Drag the bottom edge to resize, or use the ⤢ button to expand. Leave empty to use language defaults."
-          ></textarea>
-          <div id="ai-prompt-count" class="prompt-count" aria-live="polite"></div>
-        </div>
-
-        <div class="field" id="ai-glossary-wrap" style="display: none">
-          <label class="label-row">
-            <span>Translation memory</span>
-            <button type="button" id="ai-glossary-clear" class="icon-btn" title="Clear memory" aria-label="Clear translation memory">🗑</button>
-          </label>
-          <div id="ai-glossary-count" class="hint">0 terms remembered</div>
-          <div class="hint">Keeps names/terms consistent across pages you translate in a row.</div>
-        </div>
-      </section>
-
-      <!-- ============ 3. LOCAL VIEWER ============ -->
-      <section class="group">
-        <div class="group-title">Local viewer</div>
-        <div class="field">
-          <div class="file-actions">
-            <button type="button" id="open-local-images" class="action-btn">Open image(s)</button>
-            <button type="button" id="open-local-folder" class="action-btn secondary">Open folder</button>
+      <div class="panels">
+        <!-- ============ 1. TRANSLATE ============ -->
+        <section class="panel" id="panel-translate" role="tabpanel" aria-labelledby="tab-translate">
+          <div class="field">
+            <label for="mode">Mode</label>
+            <select id="mode" aria-label="Mode"></select>
           </div>
-          <div class="hint">
-            Opens your manga pages in a reader tab. Right-click a page to translate, then download the image (text baked in) or HTML.
-          </div>
-          <input id="local-images-input" type="file" accept="image/*" multiple hidden />
-          <input id="local-folder-input" type="file" accept="image/*" multiple webkitdirectory hidden />
-        </div>
-      </section>
 
-      <!-- ============ 4. DISPLAY ============ -->
-      <section class="group">
-        <div class="group-title">Display</div>
-        <div class="field" id="font-scale-wrap">
-          <label class="label-row">
-            <span>Overlay font size</span>
-            <span id="font-scale-value" class="font-scale-value" aria-live="polite">100%</span>
-          </label>
-          <div class="font-scale-row">
-            <button type="button" id="font-scale-down" class="action-btn secondary" aria-label="Decrease overlay font size" title="Smaller (−10%)">−</button>
-            <input type="range" id="font-scale-range" min="50" max="200" step="5" value="100" aria-label="Overlay font size scale" />
-            <button type="button" id="font-scale-up" class="action-btn secondary" aria-label="Increase overlay font size" title="Larger (+10%)">+</button>
-            <button type="button" id="font-scale-reset" class="icon-btn" title="Reset to 100%" aria-label="Reset font size">⟲</button>
+          <div class="field" id="lang-wrap">
+            <label for="lang">Language</label>
+            <select id="lang" aria-label="Language"></select>
           </div>
-          <div class="hint">Scales every translated line across all overlays at once.</div>
-        </div>
-      </section>
 
-      <!-- ============ 5. ADVANCED ============ -->
-      <details class="group advanced">
-        <summary class="group-title">Advanced</summary>
-        <div class="field">
-          <label for="api-url">Custom API URL</label>
-          <div class="inline-row">
-            <input type="text" id="api-url" placeholder="https://plan291037-api-ocr-test.hf.space" />
-            <button id="reset-api" class="icon-btn" aria-label="Reset to local" title="Reset to local API">⟲</button>
+          <div class="field" id="sources-wrap" style="display: none">
+            <label for="sources">Source</label>
+            <select id="sources" aria-label="Source"></select>
           </div>
-        </div>
-      </details>
 
-      <!-- ============ RUN STATUS ============ -->
-      <div class="field" id="run-status-wrap">
-        <label for="run-status-text">Status</label>
-        <div id="run-status-text" class="run-status" aria-live="polite">Idle</div>
+          <div class="note">💡 Right-click any image on a page to translate it.</div>
+
+          <!-- Display applies to text overlays only — hidden in Google Lens
+               (image) mode, where the translation is baked into the image. -->
+          <div id="display-wrap" class="display-wrap">
+          <div class="divider" role="separator"></div>
+          <div class="section-title">Display</div>
+
+          <div class="field" id="font-scale-wrap">
+            <label class="label-row">
+              <span>Overlay font size</span>
+              <span id="font-scale-value" class="font-scale-value" aria-live="polite">100%</span>
+            </label>
+            <div class="font-scale-row">
+              <button type="button" id="font-scale-down" class="action-btn secondary" aria-label="Decrease overlay font size" title="Smaller (−10%)">−</button>
+              <input type="range" id="font-scale-range" min="50" max="200" step="5" value="100" aria-label="Overlay font size scale" />
+              <button type="button" id="font-scale-up" class="action-btn secondary" aria-label="Increase overlay font size" title="Larger (+10%)">+</button>
+              <button type="button" id="font-scale-reset" class="icon-btn" title="Reset to 100%" aria-label="Reset font size">⟲</button>
+            </div>
+            <div class="hint">Scales every translated line across all overlays at once.</div>
+          </div>
+          </div>
+        </section>
+
+        <!-- ============ 2. AI ENGINE ============ -->
+        <section class="panel" id="panel-ai" role="tabpanel" aria-labelledby="tab-ai">
+          <div id="ai-empty-note" class="empty-note">
+            <span class="empty-note-icon">🤖</span>
+            <p>AI engine is used when <strong>Source</strong> is set to <strong>AI</strong> in the Translate tab.</p>
+          </div>
+
+          <section id="ai-group" class="ai-group" style="display: none">
+            <div class="field" id="ai-provider-wrap">
+              <label for="ai-provider">Provider</label>
+              <select id="ai-provider" aria-label="AI provider">
+                <option value="auto">Auto (detect from key)</option>
+                <optgroup label="Cloud (needs API key)">
+                  <option value="gemini">Google Gemini</option>
+                  <option value="openai">OpenAI</option>
+                  <option value="openrouter">OpenRouter</option>
+                  <option value="anthropic">Anthropic</option>
+                  <option value="groq">Groq</option>
+                  <option value="deepseek">DeepSeek</option>
+                  <option value="together">Together</option>
+                  <option value="huggingface">HuggingFace</option>
+                  <option value="featherless">Featherless</option>
+                </optgroup>
+                <optgroup label="Local (runs on your PC — no key)">
+                  <option value="ollama">Ollama</option>
+                  <option value="lmstudio">LM Studio</option>
+                  <option value="localai">LocalAI</option>
+                  <option value="jan">Jan</option>
+                  <option value="textgen">text-generation-webui</option>
+                  <option value="koboldcpp">KoboldCpp</option>
+                  <option value="vllm">vLLM</option>
+                  <option value="llamafile">llamafile</option>
+                  <option value="gpt4all">GPT4All</option>
+                </optgroup>
+              </select>
+            </div>
+
+            <!-- Local endpoint: shown only for local providers -->
+            <div class="field" id="ai-endpoint-wrap" style="display: none">
+              <label for="ai-base-url">Local server URL</label>
+              <input
+                type="text"
+                id="ai-base-url"
+                placeholder="http://localhost:11434/v1"
+              />
+              <div class="hint">Your local AI server's OpenAI-compatible endpoint. No API key needed.</div>
+            </div>
+
+            <!-- API key: shown only for cloud providers -->
+            <div class="field" id="ai-key-wrap">
+              <label for="ai-key">API key</label>
+              <input
+                type="password"
+                id="ai-key"
+                placeholder="Paste your API key"
+              />
+              <div class="hint">Leave empty to use the non-AI translated overlay.</div>
+            </div>
+
+            <div class="field" id="ai-model-wrap" style="display: none">
+              <label for="ai-model">Model</label>
+              <select id="ai-model" aria-label="AI Model"></select>
+            </div>
+
+            <div class="field" id="ai-prompt-wrap" style="display: none">
+              <label for="ai-prompt" class="label-row">
+                <span>AI Style (optional)</span>
+                <span class="label-actions">
+                  <button
+                    type="button"
+                    id="ai-prompt-studio"
+                    class="icon-btn"
+                    title="Open full-page editor (Prompt Studio)"
+                    aria-label="Open full-page prompt editor"
+                  >🗗</button>
+                  <button
+                    type="button"
+                    id="ai-prompt-expand"
+                    class="icon-btn"
+                    title="Expand editor"
+                    aria-label="Expand the style editor"
+                    aria-pressed="false"
+                  >⤢</button>
+                  <button
+                    type="button"
+                    id="ai-prompt-reset"
+                    class="icon-btn"
+                    title="Reset style for this language"
+                    aria-label="Reset style for this language"
+                  >⟲</button>
+                </span>
+              </label>
+              <textarea
+                id="ai-prompt"
+                rows="8"
+                placeholder="Your translation style notes (terms, tone, pronouns…). Drag the bottom edge to resize, or use the ⤢ button to expand. Leave empty to use language defaults."
+              ></textarea>
+              <div id="ai-prompt-count" class="prompt-count" aria-live="polite"></div>
+            </div>
+
+            <div class="field" id="ai-glossary-wrap" style="display: none">
+              <label class="label-row">
+                <span>Translation memory</span>
+                <button type="button" id="ai-glossary-clear" class="icon-btn" title="Clear memory" aria-label="Clear translation memory">🗑</button>
+              </label>
+              <div id="ai-glossary-count" class="hint">0 terms remembered</div>
+              <div class="hint">Keeps names/terms consistent across pages you translate in a row.</div>
+            </div>
+          </section>
+        </section>
+
+        <!-- ============ 3. TOOLS ============ -->
+        <section class="panel" id="panel-tools" role="tabpanel" aria-labelledby="tab-tools">
+          <div class="section-title">Local viewer</div>
+          <div class="field">
+            <div class="file-actions">
+              <button type="button" id="open-local-images" class="action-btn primary">Open image(s)</button>
+              <button type="button" id="open-local-folder" class="action-btn secondary">Open folder</button>
+            </div>
+            <div class="hint">
+              Opens your manga pages in a reader tab. Right-click a page to translate, then download the image (text baked in) or HTML.
+            </div>
+            <input id="local-images-input" type="file" accept="image/*" multiple hidden />
+            <input id="local-folder-input" type="file" accept="image/*" multiple webkitdirectory hidden />
+          </div>
+
+          <div class="divider" role="separator"></div>
+          <div class="section-title">Advanced</div>
+
+          <div class="field">
+            <label for="api-url">Custom API URL</label>
+            <div class="inline-row">
+              <input type="text" id="api-url" placeholder="https://plan291037-api-ocr-test.hf.space" />
+              <button id="reset-api" class="icon-btn" aria-label="Reset to default" title="Reset to default API">⟲</button>
+            </div>
+            <div class="hint">Leave empty to use the managed default server.</div>
+          </div>
+        </section>
+      </div>
+
+      <!-- ============ RUN STATUS (always visible) ============ -->
+      <footer class="status-bar" id="run-status-wrap">
+        <div class="status-line">
+          <span class="status-label">Status</span>
+          <span id="run-status-text" class="run-status" aria-live="polite">Idle</span>
+        </div>
         <div class="run-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
           <div id="run-progress-bar" class="run-progress-bar" style="width: 0%"></div>
         </div>
         <div id="run-status-sub" class="hint"></div>
-      </div>
+      </footer>
     </div>
 
+    <script src="tabs.js"></script>
     <script type="module" src="popup.js"></script>
   </body>
 </html>
