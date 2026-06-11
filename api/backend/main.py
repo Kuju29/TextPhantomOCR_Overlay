@@ -8,6 +8,7 @@ together.  Run with::
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -18,6 +19,34 @@ from backend.api.routes import ai, health, meta, translate, ws
 from backend.config import settings
 from backend.jobs.pipeline import process_payload
 from backend.jobs.queue import JobQueue
+from backend.lens import cookie as lens_cookie
+from backend.log import event
+from backend.warmup import warmup as run_warmup
+
+
+async def _warm_at_boot() -> None:
+    """Prime the Lens cookie + fonts right after boot (not on first request)."""
+    try:
+        result = await asyncio.to_thread(run_warmup, settings.warmup_lang)
+        event("warmup.boot", {"lang": result.get("lang"), "cookie_ok": result.get("cookie_ok")})
+    except Exception as e:  # noqa: BLE001 - warmup must never block startup
+        event("warmup.boot", {"error": str(e)[:200]}, ok=False)
+
+
+async def _cookie_refresh_loop() -> None:
+    """Keep the Lens cookie fresh in the background.
+
+    ``cookie.get`` refreshes lazily when its TTL expires, which makes the
+    unlucky request that hits the stale window pay for the Firebase fetch.
+    Polling it once a minute is free while the cookie is fresh (a dict-cache
+    hit) and moves the refresh cost off the request path.
+    """
+    while True:
+        await asyncio.sleep(60)
+        try:
+            await asyncio.to_thread(lens_cookie.get, settings.firebase_url)
+        except Exception:
+            pass  # transient Firebase errors — next tick retries
 
 
 @asynccontextmanager
@@ -28,6 +57,8 @@ async def lifespan(app: FastAPI):
     queue.start()
     app.state.job_queue = queue
     print(f"[TextPhantom][api] starting build={settings.build_id} workers={settings.max_workers}", flush=True)
+    asyncio.create_task(_warm_at_boot())
+    asyncio.create_task(_cookie_refresh_loop())
     yield
 
 
