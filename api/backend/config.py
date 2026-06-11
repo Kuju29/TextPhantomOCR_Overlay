@@ -40,7 +40,11 @@ def _env_bool(name: str, default: bool = False) -> bool:
 @dataclass(frozen=True)
 class Settings:
     # Server-side worker pool & limits ---------------------------------------
-    max_workers: int = field(default_factory=lambda: _env_int("SERVER_MAX_WORKERS", 15))
+    # 6 (was 15): the pipeline is CPU-bound (erase / bubble detect / PNG) and
+    # all workers share one Python process, so 15 concurrent jobs just fight
+    # for the GIL — measured stage times inflated 3-10x under a 14-image
+    # burst. 6 keeps the Lens uploads overlapped without starving the CPU.
+    max_workers: int = field(default_factory=lambda: _env_int("SERVER_MAX_WORKERS", 6))
     job_ttl_sec: int = field(default_factory=lambda: _env_int("JOB_TTL_SEC", 3600))
     http_timeout_sec: float = field(default_factory=lambda: _env_float("HTTP_TIMEOUT_SEC", 120.0))
     # Multi-user safety: bound the pending queue + per-job wall-clock timeout so
