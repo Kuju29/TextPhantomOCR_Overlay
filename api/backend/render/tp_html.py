@@ -137,13 +137,25 @@ def overlay_css() -> str:
         "font-weight:600;"
         "font-style:normal;"
         "letter-spacing:0;"
-        "color:rgba(15,15,15,.98);"
-        "text-shadow:"
+        # Ink + halo go through CSS variables so a paragraph sitting on a DARK
+        # panel can flip to white-text-dark-halo via the .tp-on-dark wrapper
+        # (custom properties inherit through the static wrapper div).
+        "color:var(--tp-ink,rgba(15,15,15,.98));"
+        "text-shadow:var(--tp-halo,"
         "0 0 2px rgba(255,255,255,.95),"
         "0 0 2px rgba(255,255,255,.95),"
         "0 0 3px rgba(255,255,255,.85),"
-        "0 1px 1px rgba(0,0,0,.35);"
+        "0 1px 1px rgba(0,0,0,.35));"
         "text-rendering:geometricPrecision;"
+        "}"
+        # Dark-background variant: white text with a dark halo. Applied per
+        # paragraph by the renderer when the sampled background is dark.
+        ".tp-on-dark{"
+        "--tp-ink:rgba(248,248,248,.98);"
+        "--tp-halo:0 0 2px rgba(0,0,0,.95),"
+        "0 0 2px rgba(0,0,0,.95),"
+        "0 0 3px rgba(0,0,0,.85),"
+        "0 1px 1px rgba(255,255,255,.25);"
         "}"
         # Vertical CJK variant — top-to-bottom columns reading right-to-left.
         # ``writing-mode: vertical-rl`` rotates the block-flow axis so text
@@ -831,6 +843,17 @@ def render_tree_overlay(
     parts: list[str] = ['<div class="tp-draw-root"><div class="tp-draw-scope">']
     has_any = False
 
+    def _wrap_on_dark(chunk: str, para: dict) -> str:
+        """Wrap a rendered chunk so dark-background paragraphs flip colour.
+
+        The wrapper is position:static, so the absolutely-positioned
+        ``.tp-line`` children keep ``.tp-draw-scope`` as their containing
+        block — only the inherited CSS variables change.
+        """
+        if chunk and para.get("text_light"):
+            return '<div class="tp-on-dark">' + chunk + "</div>"
+        return chunk
+
     if is_ai_layer:
         # AI layer: two rendering paths based on canvas geometry.
         #
@@ -908,7 +931,7 @@ def render_tree_overlay(
                         item, item_text, para, img_w, img_h
                     )
                     if chunk:
-                        parts.append(chunk)
+                        parts.append(_wrap_on_dark(chunk, para))
                         has_any = True
             else:
                 # Single-block path: word-wrap inside the bubble canvas.
@@ -917,7 +940,7 @@ def render_tree_overlay(
                     override_fs=shared_ai_fs.get(id(para)),
                 )
                 if chunk:
-                    parts.append(chunk)
+                    parts.append(_wrap_on_dark(chunk, para))
                     has_any = True
 
         parts.append("</div></div>")
@@ -1002,7 +1025,7 @@ def render_tree_overlay(
                 continue
             chunk = _render_item_horizontal(item, text, para, img_w, img_h, override_fs=shared_fs)
             if chunk:
-                parts.append(chunk)
+                parts.append(_wrap_on_dark(chunk, para))
                 has_any = True
 
     parts.append("</div></div>")
