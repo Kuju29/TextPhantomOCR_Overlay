@@ -426,7 +426,9 @@ def process_image(
     # --- Image data URI (already erased above) -----------------------------
     _t = time.perf_counter()
     buf = io.BytesIO()
-    base_img.save(buf, format="PNG")
+    # compress_level=1: measured png_ms was 0.4-3.8 s at the default level 6;
+    # level 1 encodes ~5x faster, image quality is identical (PNG is lossless).
+    base_img.save(buf, format="PNG", compress_level=1)
     out["imageDataUri"] = bytes_to_data_uri(buf.getvalue(), "image/png")
     stages["png_ms"] = round((time.perf_counter() - _t) * 1000, 1)
 
