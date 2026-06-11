@@ -32,7 +32,7 @@ from backend.lens import client as lens_client
 from backend.lens.languages import normalize as normalize_lang
 from backend.ai.providers import is_local_provider
 from backend.lens.tree import decode_tree, flatten_spans, paragraph_texts, tree_stats
-from backend.log import dbg
+from backend.log import dbg, event
 from backend.render.bubble import attach_bubble_bounds, detect_bubble_bounds_combined
 from backend.render.erase import erase_text_with_boxes
 from backend.render.groups import group_paragraphs_into_bubbles
@@ -286,9 +286,15 @@ def process_image(
     mode_id = mode if mode in SUPPORTED_MODES else "lens_images"
     target_lang = normalize_lang(lang)
 
+    # Per-stage wall-clock timings (ms), surfaced via the translate.perf log
+    # line so slow jobs can be diagnosed from the logs alone.
+    stages: dict[str, float] = {}
+    _t = time.perf_counter()
+
     data = lens_data if isinstance(lens_data, dict) else lens_client.fetch_lens_data(
         image_path, target_lang, settings.firebase_url
     )
+    stages["lens_ms"] = round((time.perf_counter() - _t) * 1000, 1)
     if not isinstance(data, dict):
         data = {}
 
@@ -310,6 +316,7 @@ def process_image(
         "original": {},
         "translated": {},
         "Ai": {},
+        "perfStages": stages,
     }
 
     # --- lens_images: just hand back the image -----------------------------
@@ -350,14 +357,18 @@ def process_image(
     # render the translation in the *bubble* shape — vital for the
     # source-vertical → target-horizontal case (Japanese → Thai) where a
     # text-only AABB is far too narrow.
+    _t = time.perf_counter()
     if original_span_tokens:
         base_img = erase_text_with_boxes(img, original_span_tokens)
     else:
         base_img = img
+    stages["erase_ms"] = round((time.perf_counter() - _t) * 1000, 1)
 
+    _t = time.perf_counter()
     bubble_map = detect_bubble_bounds_combined(
         base_img, original_tree.get("paragraphs") or [], W, H
     )
+    stages["bubble_ms"] = round((time.perf_counter() - _t) * 1000, 1)
     attach_bubble_bounds(original_tree, bubble_map)
     attach_bubble_bounds(translated_tree, bubble_map)
     dbg("bubble.detected", {"paragraphs": len(bubble_map), "hits": sum(1 for v in bubble_map.values() if v)})
@@ -381,10 +392,12 @@ def process_image(
                for h in ("localhost", "127.0.0.1", "0.0.0.0"))
     )
     if ai_cfg and ((ai_cfg.api_key or "").strip() or _ai_is_local):
+        _t = time.perf_counter()
         _run_ai_layer(
             out, original_tree, translated_tree, ai_cfg, target_lang, W, H, thai_font, latin_font,
             capture_request=capture_ai_request,
         )
+        stages["ai_ms"] = round((time.perf_counter() - _t) * 1000, 1)
 
     # Re-group the AI tree after patching (AI text may change para boundaries).
     ai_tree = (out.get("Ai") or {}).get("aiTree")
@@ -399,6 +412,7 @@ def process_image(
     # ``fit_tree_font_sizes`` here only walks the tree to attach a starting
     # ``font_size_px`` on each item using the closed-form heuristic; the
     # renderer falls back to the same heuristic if a size is missing.
+    _t = time.perf_counter()
     fit_tree_font_sizes(original_tree, thai_font, latin_font, W, H)
     out["original"]["originalhtml"] = render_tree_overlay(original_tree, W, H)
 
@@ -407,13 +421,14 @@ def process_image(
 
     out["htmlCss"] = overlay_css()
     out["htmlMeta"] = {"baseW": int(W), "baseH": int(H), "format": "tp"}
+    stages["render_ms"] = round((time.perf_counter() - _t) * 1000, 1)
 
     # --- Image data URI (already erased above) -----------------------------
-    # compress_level=1: PNG encode at default level 6 costs hundreds of ms on
-    # a full manga page; level 1 is ~5x faster for a modestly larger payload.
+    _t = time.perf_counter()
     buf = io.BytesIO()
-    base_img.save(buf, format="PNG", compress_level=1)
+    base_img.save(buf, format="PNG")
     out["imageDataUri"] = bytes_to_data_uri(buf.getvalue(), "image/png")
+    stages["png_ms"] = round((time.perf_counter() - _t) * 1000, 1)
 
     return out
 
@@ -471,7 +486,7 @@ def process_payload(payload: dict) -> dict[str, Any]:
     img_hash = sha256_hex(img_bytes)
     cache_key = ""
     cache_used = False
-    if img_hash:
+    if mode == "lens_text" and img_hash:
         cache_source = "ai" if source == "ai" else "text"
         cache_key = cache_mod.build_cache_key(img_hash, lang, mode, cache_source, ai_cfg)
         cache = cache_mod.ai_result_cache if source == "ai" else cache_mod.result_cache
@@ -493,28 +508,20 @@ def process_payload(payload: dict) -> dict[str, Any]:
     t_tmp = time.perf_counter()
     try:
         out = process_image(tmp_path, lang, mode, ai_cfg)
+        stages = out.pop("perfStages", {}) or {}
         out["perf"] = {
             "cache": "miss" if cache_used else "off",
             "total_ms": round((time.perf_counter() - t_start) * 1000, 1),
             "img_ms": round((t_img - t_start) * 1000, 1),
             "tmp_ms": round((t_tmp - t_img) * 1000, 1),
+            **stages,
         }
+        # One compact perf line per processed job (cache hits don't get here),
+        # so slow stages are visible straight from the production logs.
+        event("translate.perf", {"mode": mode, "lang": lang, "source": source, **out["perf"]})
         if cache_used and cache_key:
             cache = cache_mod.ai_result_cache if source == "ai" else cache_mod.result_cache
             cache.set(cache_key, out)
-            # An AI result is a superset of the original/translated result:
-            # cross-fill the text cache so switching AI -> translate/original
-            # on the same image is an instant cache hit.
-            if mode == "lens_text" and source == "ai" and out.get("original"):
-                text_key = cache_mod.build_cache_key(img_hash, lang, mode, "text", None)
-                if not cache_mod.result_cache.get(text_key):
-                    text_out = {
-                        k: v for k, v in out.items()
-                        if k not in ("Ai", "AiTextFull", "perf")
-                    }
-                    text_out["AiTextFull"] = ""
-                    text_out["Ai"] = {}
-                    cache_mod.result_cache.set(text_key, text_out)
         return out
     finally:
         try:
