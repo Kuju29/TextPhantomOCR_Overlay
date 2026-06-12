@@ -623,18 +623,20 @@ def _is_furigana_paragraph(
     ("俺の前で" → "In front of me.") and renders them in nearly the same
     spot — the user sees the same English phrase stacked twice.
 
-    A paragraph is treated as furigana when:
+    A paragraph is treated as furigana when (ALL thresholds are RELATIVE to
+    the candidate's own size — absolute pixel gates broke on cover pages
+    whose huge stylised lettering carries equally huge furigana):
 
     1. its items are vertical-source (axis-aligned ≈ ±90°);
-    2. its AABB is narrow (width ≤ 35 px) — furigana glyphs are smaller
-       than the kanji they annotate;
-    3. another *vertical* paragraph lives immediately to its **left**
+    2. another *vertical* paragraph lives immediately to its **left**
        (the kanji column) at least **2.5×** wider — a tighter ratio than
        1.5× so an ordinary multi-column dialogue bubble (e.g. pi=19
        コピーする next to pi=20 あいて相手か… at 1.78×) is not mistaken
        for a furigana annotation;
-    4. the two paragraphs vertically overlap by at least half of this
-       paragraph's height.
+    3. the two paragraphs vertically overlap by at least half of this
+       paragraph's height;
+    4. the horizontal gap to that column is within ~0.8× of the candidate's
+       own width (furigana hugs the column it annotates, at every scale).
 
     Furigana paragraphs are skipped by :func:`build_ai_tree` so the AI
     tree carries only the main translation, removing the duplicate.
@@ -645,7 +647,7 @@ def _is_furigana_paragraph(
     if my is None:
         return False
     mx1, my1, mw, mh = my
-    if mw > 35.0:
+    if mw <= 0:
         return False
     mx2 = mx1 + mw
     my2 = my1 + mh
@@ -667,8 +669,9 @@ def _is_furigana_paragraph(
         if v_overlap < 0.5 * mh:
             continue
         # Furigana sits to the RIGHT of the main column: mx1 ≈ ox2.
+        # Scale-relative: allow slight overlap (-0.15w) up to a 0.8w gap.
         gap = mx1 - ox2
-        if -3.0 <= gap <= 15.0:
+        if -0.15 * mw <= gap <= 0.8 * mw:
             return True
     return False
 
