@@ -240,56 +240,230 @@ def _para_axis(para: dict) -> str:
     return paragraph_reading_axis(para.get("items") or [])
 
 
-def _should_merge(a: dict, b: dict, img_h: int) -> bool:
+def _trusted_blob_key(para: dict) -> tuple[float, ...] | None:
+    """``_bubble_key`` but only when the blob actually covers the text.
+
+    Bubble detection sometimes returns a degenerate blob (smaller than the
+    paragraph's own text bounds, or barely touching them).  Such a blob is
+    NOT evidence of bubble membership and must not veto a merge — verified
+    against the debug-jp2th example set, where a degenerate blob on one
+    column of 「俺の前で / 君のその才能は」 wrongly split the sentence.
+    The blob is trusted only when it covers ≥ 50 % of the paragraph bounds.
+    """
+    key = _bubble_key(para)
+    if key is None:
+        return None
+    bb = para.get("bubble_bounds_px")
+    bp = _para_xyxy(para)
+    if bp is None:
+        return None
+    bx1, by1, bx2, by2 = (float(v) for v in bb)
+    px1, py1, px2, py2 = bp
+    ix = max(0.0, min(bx2, px2) - max(bx1, px1))
+    iy = max(0.0, min(by2, py2) - max(by1, py1))
+    area_p = max(1.0, (px2 - px1) * (py2 - py1))
+    if (ix * iy) / area_p < 0.5:
+        return None
+    return key
+
+
+def _is_strict_vertical(para: dict) -> bool:
+    """True when a paragraph is *unambiguously* a vertical CJK column set.
+
+    Merging exists for exactly one reason: Lens splits ONE vertical sentence
+    into per-column paragraphs.  Everything else must keep the Lens paragraph
+    as-is (the user's layout spec treats ``paragraphs`` as the source of
+    truth).  So a merge candidate must be:
+
+    1. majority-vertical by item rotation (``paragraph_reading_axis``), AND
+    2. CJK-dominant text — multi-column splitting is a CJK typesetting
+       phenomenon; a Thai/Latin paragraph never needs column re-joining, AND
+    3. not just rotation noise: a single-item paragraph only counts when its
+       pixel bounds are clearly portrait (height > 2x width).  This blocks the
+       axis-vote tie (n_v >= n_h) from sweeping a lone horizontal word whose
+       angle Lens misreported into the vertical merge path.
+    """
+    if _para_axis(para) != "v":
+        return False
+    if not _is_cjk_dominant(_para_full_text(para)):
+        return False
+    items = [it for it in (para.get("items") or []) if str(it.get("text") or "").strip()]
+    if len(items) >= 2:
+        return True
+    return bool(items) and _is_portrait_item(items[0])
+
+
+def _ink_barrier_between(
+    base_img: Any,
+    ra: tuple[float, float, float, float],
+    rb: tuple[float, float, float, float],
+) -> bool:
+    """True when a drawn line (bubble wall) separates two column rects.
+
+    Vertical sources have no reliable Lens paragraph grouping, so geometry
+    alone must decide which columns belong together — and two DIFFERENT
+    bubbles drawn close to each other can pass every distance gate.  The
+    erased image gives direct evidence: between columns of ONE sentence the
+    strip is clean bubble interior, while between two bubbles the wall(s)
+    cross it.  A barrier = some pixel column in the gap strip that is dark
+    for >= 60 % of the shared vertical span (validated on the debug set:
+    real walls score ~0.68, in-bubble strips <= 0.35).
+    """
+    if base_img is None:
+        return False
+    try:
+        left = min(ra[2], rb[2])
+        right = max(ra[0], rb[0])
+        if right - left < 2:
+            return False  # boxes overlap in x — no strip to inspect
+        y1 = max(ra[1], rb[1])
+        y2 = min(ra[3], rb[3])
+        if y2 - y1 < 8:
+            return False
+        crop = base_img.convert("L").crop((int(left), int(y1), int(right), int(y2)))
+        w, h = crop.size
+        if w < 1 or h < 8:
+            return False
+        px = list(crop.getdata())
+        for x in range(w):
+            col = px[x::w]
+            if sum(1 for v in col if v < 96) >= 0.6 * len(col):
+                return True
+        return False
+    except Exception:
+        return False  # image evidence is optional — never break grouping
+
+
+def _should_merge(
+    a: dict, b: dict, img_h: int, base_img: Any = None, tb_authority: bool = False
+) -> bool:
     """True when paragraphs a and b belong to one bubble/reading unit.
 
-    HYBRID grouping rule:
-    * Only VERTICAL paragraphs are ever merged.  Horizontal text keeps the
-      accurate 1-paragraph = 1-group default (Lens already groups horizontal
-      lines well), and tilted / decorative labels are never auto-merged.
-    * Never merge across reading axes (a horizontal and a vertical paragraph
-      stay separate).
-    This targets only the case where OCR splits one vertical multi-column
-    sentence into several paragraphs, without disturbing horizontal behaviour.
+    Grouping rules (user layout spec §5 / §7 / §14 — Lens ``paragraphs`` are
+    the authoritative groups; merging exists ONLY to re-join the columns of
+    one vertical sentence):
 
-    Geometry gate (no per-image constants):
-    1. Both paragraphs read vertically (same axis == "v").
-    2. Their boxes are adjacent across the reading axis (inter-column gap
-       <= k x glyph height) and overlap along the axis.  k is looser when
-       both share one OpenCV bubble blob.
-    Every threshold scales with glyph size, so it is resolution-independent.
+    * HORIZONTAL paragraphs never merge.  ``_is_strict_vertical`` also keeps
+      rotation-noise / tie-vote paragraphs out of the merge path, so h→h
+      groups can no longer be absorbed into a neighbour.
+    * OpenCV bubble evidence is binding in BOTH directions:
+        - different detected bubbles  → NEVER merge (it used to merely
+          tighten the distance gate — adjacent bubbles in one panel were
+          still being glued together);
+        - same detected bubble        → merge generously.
+    * Without shared-blob evidence the geometry must look like columns of
+      ONE sentence: large overlap along the column axis (≥ 55 %), a narrow
+      inter-column gap (≤ 1.3 glyph), and a similar glyph size (≤ 1.5x).
+      Real neighbouring bubbles fail at least one of these.
+    Every threshold scales with glyph size — resolution-independent.
     """
-    ax, bx = _para_axis(a), _para_axis(b)
-    # Hybrid: merge vertical-with-vertical only; horizontal/tilted untouched.
-    if ax != "v" or bx != "v":
+    if not _is_strict_vertical(a) or not _is_strict_vertical(b):
         return False
     ra, rb = _para_xyxy(a), _para_xyxy(b)
     if ra is None or rb is None:
         return False
-    glyph = max(_para_font_px(a, img_h), _para_font_px(b, img_h), 1.0)
-    same_blob = (
-        _bubble_key(a) is not None and _bubble_key(a) == _bubble_key(b)
-    )
-    k = 3.5 if same_blob else 2.0
+
+    # MODEL-AUTHORITY MODE: when the trained text-block detector ran for this
+    # image, it is the ONLY decision maker for vertical grouping — merge iff
+    # both columns belong to the same detected block. No geometric rule may
+    # override it (mixed decision paths made debugging impossible: you could
+    # never tell WHICH rule produced a bad group).
+    if tb_authority:
+        ta, tb = a.get("_tb_block"), b.get("_tb_block")
+        return ta is not None and ta == tb
+
+    ka, kb = _trusted_blob_key(a), _trusted_blob_key(b)
+    if ka is not None and kb is not None and ka != kb:
+        return False  # OpenCV says these are different bubbles — binding.
+    same_blob = ka is not None and ka == kb
+
+    fa, fb = _para_font_px(a, img_h), _para_font_px(b, img_h)
+    glyph = max(fa, fb, 1.0)
+    if min(fa, fb) > 0:
+        ratio = max(fa, fb) / max(1.0, min(fa, fb))
+        if ratio > (1.8 if same_blob else 1.5):
+            return False  # different glyph scale = different speech units
+
     ax1, ay1, ax2, ay2 = ra
     bx1, by1, bx2, by2 = rb
-    if ax == "v":
-        gap = max(0.0, max(ax1, bx1) - min(ax2, bx2))
-        overlap = max(0.0, min(ay2, by2) - max(ay1, by1))
-        denom = min(ay2 - ay1, by2 - by1)
-    else:
-        gap = max(0.0, max(ay1, by1) - min(ay2, by2))
-        overlap = max(0.0, min(ax2, bx2) - max(ax1, bx1))
-        denom = min(ax2 - ax1, bx2 - bx1)
+    gap = max(0.0, max(ax1, bx1) - min(ax2, bx2))
+    overlap = max(0.0, min(ay2, by2) - max(ay1, by1))
+    denom = min(ay2 - ay1, by2 - by1)
     overlap_ratio = overlap / denom if denom > 0 else 0.0
-    return gap <= k * glyph and overlap_ratio >= 0.15
+
+    if same_blob:
+        return gap <= 3.5 * glyph and overlap_ratio >= 0.30
+    if not (gap <= 1.3 * glyph and overlap_ratio >= 0.55):
+        return False
+    # Final veto from the image itself: a bubble wall in the gap strip means
+    # these columns belong to two different bubbles, however close they sit.
+    return not _ink_barrier_between(base_img, ra, rb)
 
 
-def _merge_paragraphs(ordered: list[dict], img_w: int, img_h: int) -> list[list[dict]]:
+def _split_vertical_run_at_gap_jumps(
+    run: list[dict], img_h: int
+) -> list[list[dict]]:
+    """Split one vertical run (= one detected text region) into TEXT SETS.
+
+    One bubble/box often carries more than one utterance, and Lens cannot
+    mark vertical sets the way it marks horizontal paragraphs.  Two
+    typesetting signals mark a set boundary (both validated on the debug
+    set):
+
+    1. COLUMN-GAP JUMP — columns of one sentence sit at near-constant pitch
+       (measured 0.14-0.55 glyph apart); a new set starts at >= ~1.5 glyph.
+       Threshold: gap > 1.2 glyph.
+    2. TOP-EDGE JUMP — columns of one sentence are top-aligned almost
+       perfectly (measured deviation <= 0.21 glyph), while a new utterance
+       often starts visibly lower/higher (e.g. the offset second set in a
+       round bubble).  The jump is measured against the run's own MEDIAN
+       top-delta, so uniformly staircased cover layouts (constant drift)
+       are not falsely split.  Threshold: |delta - median| > 0.8 glyph.
+
+    ``run`` must already be in reading order (columns right-to-left).
+    """
+    if len(run) < 2:
+        return [run]
+    rects = [_para_xyxy(p) for p in run]
+    if any(r is None for r in rects):
+        return [run]
+    glyph = max(max((_para_font_px(p, img_h) for p in run), default=0.0), 1.0)
+
+    deltas = [rects[i][1] - rects[i - 1][1] for i in range(1, len(run))]
+    sorted_d = sorted(deltas)
+    median_delta = sorted_d[len(sorted_d) // 2] if len(sorted_d) >= 2 else 0.0
+
+    out: list[list[dict]] = []
+    cur: list[dict] = [run[0]]
+    for i in range(1, len(run)):
+        prev, now = rects[i - 1], rects[i]
+        # prev is the column to the RIGHT (reading order); gap = horizontal
+        # whitespace between it and the next column to the left.
+        gap = max(0.0, prev[0] - now[2])
+        top_jump = abs(deltas[i - 1] - median_delta)
+        if gap > 1.2 * glyph or top_jump > 0.8 * glyph:
+            out.append(cur)
+            cur = [run[i]]
+        else:
+            cur.append(run[i])
+    out.append(cur)
+    return out
+
+
+def _merge_paragraphs(
+    ordered: list[dict],
+    img_w: int,
+    img_h: int,
+    base_img: Any = None,
+    tb_authority: bool = False,
+) -> list[list[dict]]:
     """Cluster paragraphs into bubble runs via union-find on _should_merge.
 
     Each run is sorted into reading order (vertical -> columns right-to-left
     then top-to-bottom; horizontal -> lines top-to-bottom then left-to-right).
+    ``tb_authority=True`` means the trained text-block model decides all
+    vertical grouping (runs == its blocks, no gap-splitting); otherwise the
+    geometric fallback rules apply, including the gap-jump set splitter.
     """
     n = len(ordered)
     parent = list(range(n))
@@ -307,7 +481,7 @@ def _merge_paragraphs(ordered: list[dict], img_w: int, img_h: int) -> list[list[
 
     for i in range(n):
         for j in range(i + 1, n):
-            if _should_merge(ordered[i], ordered[j], img_h):
+            if _should_merge(ordered[i], ordered[j], img_h, base_img, tb_authority):
                 union(i, j)
 
     clusters: dict[int, list[dict]] = {}
@@ -326,7 +500,16 @@ def _merge_paragraphs(ordered: list[dict], img_w: int, img_h: int) -> list[list[
                 return (-c[0], c[1])
             return (c[1], c[0])
 
-        runs.append(sorted(members, key=_key))
+        ordered_members = sorted(members, key=_key)
+        if axis == "v" and len(ordered_members) > 1:
+            # Two-level contract: the model (or geometric merge) decides the
+            # REGION a column belongs to; this splitter then divides each
+            # region into TEXT SETS. The detector's blocks are bubble/region
+            # granularity — a region holding two utterances must still split,
+            # under model authority as well.
+            runs.extend(_split_vertical_run_at_gap_jumps(ordered_members, img_h))
+        else:
+            runs.append(ordered_members)
 
     runs.sort(key=lambda r: (
         (_para_centroid(r[0], img_w, img_h) or (0.0, 0.0))[1],
@@ -349,10 +532,16 @@ def group_paragraphs_into_bubbles(
     tree: dict[str, Any],
     img_w: int,
     img_h: int,
+    base_img: Any = None,
+    tb_authority: bool = False,
 ) -> list[dict[str, Any]]:
     """Compute tree["bubble_groups"] in-place and return it.
 
     Safe to call multiple times. Skips paragraphs with no display text.
+    ``tb_authority=True`` = the trained text-block model is the sole decision
+    maker for vertical grouping (paragraphs carry ``_tb_block`` annotations).
+    ``base_img`` (optional, PIL image — ideally the ERASED page) enables the
+    ink-barrier veto used by the geometric fallback.
     """
     paragraphs: list[dict] = tree.get("paragraphs") or []
 
@@ -362,7 +551,9 @@ def group_paragraphs_into_bubbles(
     )
 
     # Merge paragraphs into bubble runs (one run = one bubble = one unit).
-    runs: list[list[dict]] = _merge_paragraphs(ordered, img_w, img_h)
+    runs: list[list[dict]] = _merge_paragraphs(
+        ordered, img_w, img_h, base_img, tb_authority
+    )
 
     bubble_groups: list[dict[str, Any]] = []
 
