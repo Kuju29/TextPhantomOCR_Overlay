@@ -301,19 +301,17 @@
     return null;
   }
 
-  /** Stamp an image with its resolved at-home URL/key and flush pending applies. */
-  function mdApplyOriginalToImg(img, idx, urls) {
-    if (!img || !Array.isArray(urls) || idx == null || idx < 0 || idx >= urls.length) return;
-    const url = TP.normUrl(urls[idx]);
-    if (!url) return;
-    const key = mdKeyFromUrl(url) || url;
-
-    if (img.dataset.tpOriginalKey !== key) img.dataset.tpOriginalKey = key;
-    if (TP.normUrl(img.dataset.tpOriginal) !== url) img.dataset.tpOriginal = url;
-    img.dataset.tpMdPage = String(idx + 1);
-
+  /**
+   * Flush any result that arrived BEFORE this image existed / was mapped.
+   * Called from both mapping paths (site adapter + legacy index inference) —
+   * whichever stamps an image must also deliver its parked results, or a
+   * batch run in page-by-page reading mode never renders anything.
+   */
+  function mdFlushPendingFor(img, key, url) {
+    if (!img || !key) return;
     const pending = mdTakePending(key);
     if (!pending) return;
+    TP.log.info("md pending flushed", { key });
     if (pending.newSrc) TP.replaceImageInDOM(url, pending.newSrc).catch(() => {});
     if (pending.cleanSrc) {
       const rec =
@@ -346,12 +344,45 @@
     }
   }
 
+  /** Stamp an image with its resolved at-home URL/key and flush pending applies. */
+  function mdApplyOriginalToImg(img, idx, urls) {
+    if (!img || !Array.isArray(urls) || idx == null || idx < 0 || idx >= urls.length) return;
+    const url = TP.normUrl(urls[idx]);
+    if (!url) return;
+    const key = mdKeyFromUrl(url) || url;
+
+    if (img.dataset.tpOriginalKey !== key) img.dataset.tpOriginalKey = key;
+    if (TP.normUrl(img.dataset.tpOriginal) !== url) img.dataset.tpOriginal = url;
+    img.dataset.tpMdPage = String(idx + 1);
+
+    mdFlushPendingFor(img, key, url);
+  }
+
   /** Map every MangaDex page image in the DOM to its chapter index. */
   async function ensureMangaDexDomMapping() {
     if (!isMangaDexHost()) return;
+
+    // Site adapter first: exact alt-to-filename mapping (the reader sets
+    // img.alt to the at-home filename). The legacy index inference below
+    // stays as a fallback for any image the adapter could not match.
+    if (typeof TP.mdSiteMapDom === "function") {
+      try {
+        await TP.mdSiteMapDom();
+      } catch {
+        /* fall through to legacy inference */
+      }
+    }
+
     const urls = (await fetchMangaDexChapterUrls())?.urls || [];
-    if (!urls.length) return;
     for (const img of getMangaDexPageImagesInDOM()) {
+      const key = String(img.dataset.tpOriginalKey || "");
+      if (key) {
+        // Mapped (by the adapter or earlier) — still flush parked results so
+        // a page that appears AFTER its translation arrived gets rendered.
+        mdFlushPendingFor(img, key, TP.normUrl(img.dataset.tpOriginal || ""));
+        continue;
+      }
+      if (!urls.length) continue;
       const idx = inferMangaDexPageIndexForImg(img);
       if (idx != null) mdApplyOriginalToImg(img, idx, urls);
     }
@@ -406,6 +437,18 @@
   const mdOverlaysByKey = new Map();
   const mdHtmlOverlaysByKey = new Map();
   let mdOverlayRaf = 0;
+
+  // Overlay font scale (the popup's Display slider). overlay.js owns the
+  // setting and forwards every change here, because MangaDex overlays live in
+  // their own map — without this hook the slider has no effect on MangaDex.
+  let mdFontScale = 1;
+  function mdApplyFontScaleAll(scale) {
+    const s = Number(scale);
+    if (Number.isFinite(s) && s > 0) mdFontScale = s;
+    for (const rec of mdHtmlOverlaysByKey.values()) {
+      rec?.scope?.style?.setProperty("--tp-font-scale", String(mdFontScale));
+    }
+  }
 
   const findMangaDexImgByKey = (key) =>
     key
@@ -557,6 +600,9 @@
       host.style.display = "none";
       const scope = document.createElement("div");
       scope.className = "tp-ol-scope";
+      // Seed the font-scale variable so a new overlay respects the slider
+      // immediately (every .tp-line reads calc(var(--tp-font-scale,1) * Npx)).
+      scope.style.setProperty("--tp-font-scale", String(mdFontScale));
       host.appendChild(scope);
       rec = { host, scope, img: null, baseW: 1, baseH: 1, kind: "html" };
       mdHtmlOverlaysByKey.set(mdKey, rec);
@@ -696,5 +742,6 @@
     hideMangaDexHtmlOverlay,
     scheduleMangaDexOverlayUpdate,
     replaceMangaDexImageWithOverlay,
+    mdApplyFontScaleAll,
   });
 })();
