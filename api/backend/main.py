@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 
 from backend.api.middleware import access_log_middleware, configure_uvicorn_access_log
 from backend.api.routes import ai, health, meta, translate, ws
@@ -63,6 +64,12 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="TextPhantom OCR API", version="2.0", lifespan=lifespan)
+
+
+@app.get("/", include_in_schema=False)
+async def root() -> RedirectResponse:
+    """Open the interactive API docs when the Space root URL is visited."""
+    return RedirectResponse(url="/docs")
 
 app.add_middleware(
     CORSMiddleware,
