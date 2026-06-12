@@ -36,6 +36,11 @@ from backend.lens.tree import decode_tree, flatten_spans, paragraph_texts, tree_
 from backend.log import dbg, event
 from backend.render.bubble import attach_bubble_bounds, detect_bubble_bounds_combined
 from backend.render.colors import region_is_dark
+from backend.render.textblocks import (
+    annotate_paragraph_blocks,
+    available as textblocks_available,
+    detect_text_blocks,
+)
 from backend.render.erase import erase_text_with_boxes
 from backend.render.groups import group_paragraphs_into_bubbles
 from backend.render.build_ai_tree import build_ai_tree
@@ -60,6 +65,25 @@ SUPPORTED_MODES = {"lens_images", "lens_text"}
 # stage times 3-10x from GIL contention; with too few workers, the Lens waits
 # serialized instead. I/O parallel + CPU gated gets both right.
 _CPU_GATE = threading.Semaphore(max(1, settings.cpu_concurrency))
+
+# Warn LOUDLY (once per process) when the text-block model could not be used:
+# vertical grouping then runs on the geometric fallback, and anyone debugging
+# a grouping issue must know which decision path produced the result.
+_tb_fallback_warned = False
+
+
+def _warn_textblocks_fallback() -> None:
+    global _tb_fallback_warned
+    if not _tb_fallback_warned:
+        _tb_fallback_warned = True
+        event(
+            "textblocks.unavailable",
+            {
+                "hint": "vertical grouping is on the GEOMETRIC FALLBACK — "
+                "check onnxruntime install / model download (TP_TEXTBLOCK_MODEL)",
+            },
+            ok=False,
+        )
 
 
 # --- Template-tree selection ----------------------------------------------
@@ -420,6 +444,26 @@ def process_image(
     _CPU_GATE.acquire()
     stages["gate_wait_ms"] = round((time.perf_counter() - _t) * 1000, 1)
     try:
+        # Text-block detection runs on the ORIGINAL image (text present).
+        # When the model is loaded it is the SOLE grouping authority for
+        # vertical text; the geometric rules run only as a loudly-flagged
+        # fallback so debugging always knows which path made the decision.
+        _t = time.perf_counter()
+        text_blocks = detect_text_blocks(img)
+        tb_authority = textblocks_available()
+        if tb_authority:
+            annotate_paragraph_blocks(original_tree, text_blocks)
+            annotate_paragraph_blocks(translated_tree, text_blocks)
+            # Observability: expose what the model saw. Debug dumps of the
+            # trees then show the detected regions next to each paragraph's
+            # _tb_block assignment, so grouping decisions can be audited.
+            original_tree["text_blocks_px"] = [list(b) for b in text_blocks]
+            translated_tree["text_blocks_px"] = [list(b) for b in text_blocks]
+        else:
+            _warn_textblocks_fallback()
+        stages["blocks_ms"] = round((time.perf_counter() - _t) * 1000, 1)
+        stages["blocks"] = len(text_blocks)
+
         _t = time.perf_counter()
         if original_span_tokens:
             base_img = erase_text_with_boxes(img, original_span_tokens)
@@ -439,8 +483,15 @@ def process_image(
         # Group paragraphs into bubble_groups for all trees so every downstream
         # consumer (renderer, patcher, debug export) sees the same structure.
         # This runs once here; the renderer reads tree["bubble_groups"] directly.
-        group_paragraphs_into_bubbles(original_tree, W, H)
-        group_paragraphs_into_bubbles(translated_tree, W, H)
+        # base_img (erased) enables the ink-barrier veto used by the
+        # geometric fallback; under model authority the detected text blocks
+        # alone decide vertical grouping.
+        group_paragraphs_into_bubbles(
+            original_tree, W, H, base_img=base_img, tb_authority=tb_authority
+        )
+        group_paragraphs_into_bubbles(
+            translated_tree, W, H, base_img=base_img, tb_authority=tb_authority
+        )
         dbg("groups.original", {"bubble_groups": len(original_tree.get("bubble_groups") or [])})
         dbg("groups.translated", {"bubble_groups": len(translated_tree.get("bubble_groups") or [])})
 
