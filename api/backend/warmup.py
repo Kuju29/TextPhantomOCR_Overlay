@@ -26,6 +26,14 @@ def warmup(lang: str = "th") -> dict[str, Any]:
     except Exception:
         cookie_ok = False
 
+    # Text-block detector model (optional) — download once, best-effort.
+    try:
+        from backend.render.textblocks import ensure_model
+
+        ensure_model()
+    except Exception:
+        pass
+
     thai_font, latin_font = resolve_font_pair(code)
     # Prime the font-pair cache at the sizes the renderer uses most.
     font_pair(thai_font or "", latin_font or "", 22)
