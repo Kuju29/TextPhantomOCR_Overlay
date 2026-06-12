@@ -25,6 +25,16 @@
 
     // MangaDex: prefer the chapter's at-home URL list, skip already-cached pages.
     TP.showToast("TextPhantom: loading MangaDex pages…", 2600);
+
+    // Dedicated site adapter (content/site-mangadex.js): exact alt-filename
+    // mapping + image bytes fetched via the site's own API in the page
+    // context. Falls through to the legacy path if the adapter is missing
+    // or returns nothing.
+    if (typeof TP.mdSiteCollect === "function") {
+      const viaAdapter = await TP.mdSiteCollect(mode, lang).catch(() => null);
+      if (Array.isArray(viaAdapter) && viaAdapter.length) return viaAdapter;
+    }
+
     TP.scheduleMangaDexMapping();
     await TP.ensureMangaDexDomMapping();
     const hydrated = await TP.hydrateMangaDexFromCache().catch(() => null);
@@ -156,6 +166,11 @@
         if (isText && !source) return sendResponse({ ok: true, ignored: true });
 
         const img = TP.findTargetImage(msg.original);
+        TP.log.info("OVERLAY_HTML", {
+          key: TP.mdKeyFromUrl ? TP.mdKeyFromUrl(msg.original) : "",
+          found: Boolean(img),
+          source,
+        });
         if (img) {
           try {
             TP.applyHtmlOverlay(img, msg.result, source, isText, msg.original);
@@ -166,6 +181,9 @@
           TP.mdRememberPending(msg.original, {
             overlay: { result: msg.result, source, isTextMode: isText },
           });
+          // Nudge the mapper: if the page <img> appears later, the pending
+          // overlay above is flushed by ensureMangaDexDomMapping.
+          TP.scheduleMangaDexMapping?.();
         }
         return sendResponse({ ok: true });
       }
