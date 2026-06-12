@@ -77,6 +77,23 @@ class Settings:
     )
     firebase_cookie_ttl_sec: int = field(default_factory=lambda: _env_int("FIREBASE_COOKIE_TTL_SEC", 900))
 
+    # Manga text-block detector (Kiuyha/Manga-Bubble-YOLO, Apache-2.0) -------
+    # Groups vertical CJK columns into text SETS the way a trained model sees
+    # them. Optional: when the model file / onnxruntime is absent, grouping
+    # falls back to pure geometry. Set TP_TEXTBLOCK_MODEL="" to disable.
+    textblock_model_path: str = field(
+        default_factory=lambda: _env_str("TP_TEXTBLOCK_MODEL", "models/manga-bubble-yolo.onnx")
+    )
+    # Repo files live under onnx/: yolo26s.onnx (small, most accurate —
+    # default) and yolo26n.onnx (nano, ~3x faster on CPU if blocks_ms is too
+    # high for your hardware).
+    textblock_model_url: str = field(
+        default_factory=lambda: _env_str(
+            "TP_TEXTBLOCK_MODEL_URL",
+            "https://huggingface.co/Kiuyha/Manga-Bubble-YOLO/resolve/main/onnx/yolo26s.onnx",
+        )
+    )
+
     # Warmup -----------------------------------------------------------------
     warmup_lang: str = field(default_factory=lambda: _env_str("TP_WARMUP_LANG", "th") or "th")
 
