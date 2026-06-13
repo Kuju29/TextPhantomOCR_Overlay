@@ -15,6 +15,7 @@ Two modes:
 
 from __future__ import annotations
 
+import concurrent.futures
 import io
 import os
 import tempfile
@@ -379,18 +380,53 @@ def process_image(
     # Per-stage wall-clock timings (ms), surfaced via the translate.perf log
     # line so slow jobs can be diagnosed from the logs alone.
     stages: dict[str, float] = {}
-    _t = time.perf_counter()
-
-    data = lens_data if isinstance(lens_data, dict) else lens_client.fetch_lens_data(
-        image_path, target_lang, settings.firebase_url
-    )
-    stages["lens_ms"] = round((time.perf_counter() - _t) * 1000, 1)
-    if not isinstance(data, dict):
-        data = {}
 
     img = Image.open(image_path).convert("RGB")
     W, H = img.size
     thai_font, latin_font = resolve_font_pair(target_lang)
+
+    # =========================================================
+    # Phase 1 — Lens fetch || ONNX detection (both need only the
+    # image; neither depends on the other's result).
+    #
+    # Typical savings: ONNX ~1.3 s overlaps with Lens ~2 s → the
+    # two finish together at ~2 s instead of sequentially at ~3.3 s.
+    # Both Lens (httpx I/O) and ONNX (onnxruntime C-ext) release the
+    # GIL, so the threads run truly in parallel on CPython.
+    # =========================================================
+    _tb_timings: dict = {}
+    if isinstance(lens_data, dict):
+        # Lens result pre-supplied (CLI replay) — run ONNX alone.
+        data: dict = lens_data
+        _t = time.perf_counter()
+        text_blocks = detect_text_blocks(img, timings=_tb_timings)
+        stages["lens_ms"] = 0.0
+        stages["blocks_ms"] = round((time.perf_counter() - _t) * 1000, 1)
+    else:
+        _t_p1 = time.perf_counter()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as _p1:
+            _f_lens = _p1.submit(
+                lens_client.fetch_lens_data, image_path, target_lang, settings.firebase_url
+            )
+            _f_onnx = _p1.submit(detect_text_blocks, img, _tb_timings)
+            # .result() re-raises exceptions from the worker thread.
+            # Wait for Lens first (usually the slower leg).
+            _raw = _f_lens.result()
+            _t_lens_done = time.perf_counter()
+            text_blocks = _f_onnx.result()
+            _t_onnx_done = time.perf_counter()
+        # Report wall-clock from phase start so log shows true parallel time.
+        stages["lens_ms"] = round((_t_lens_done - _t_p1) * 1000, 1)
+        stages["blocks_ms"] = round((_t_onnx_done - _t_p1) * 1000, 1)
+        data = _raw if isinstance(_raw, dict) else {}
+
+    if not isinstance(data, dict):
+        data = {}
+    stages["blocks"] = len(text_blocks)
+    # Split: in batches most of blocks_ms is WAITING for the shared model
+    # lock (other jobs' inference), not this job's own inference.
+    stages["blocks_lock_ms"] = float(_tb_timings.get("lock_ms", 0.0))
+    stages["blocks_infer_ms"] = float(_tb_timings.get("infer_ms", 0.0))
 
     image_url = data.get("imageUrl")
     out: dict[str, Any] = {
@@ -440,22 +476,13 @@ def process_image(
 
     original_span_tokens = flatten_spans(original_tree)
 
-    # --- Erase + bubble detect (BEFORE AI / render) ------------------------
-    # Order matters: the bubble detector needs an inpainted image to find
-    # the real bubble outline (not just the text-AABB), and the AI patch
-    # needs the bubble bounds attached to the template tree so it can
-    # render the translation in the *bubble* shape — vital for the
-    # source-vertical → target-horizontal case (Japanese → Thai) where a
-    # text-only AABB is far too narrow.
-    # Text-block detection runs on the ORIGINAL image (text present), and
+    # ONNX already done in Phase 1 — annotate trees now.
+    # Text-block detection ran on the ORIGINAL image (text present), and
     # OUTSIDE the CPU gate: inference is serialised by the detector's own
     # lock, so holding a gate slot here would only starve other jobs' erase /
     # bubble / png work (measured: gate_wait_ms ballooned to 8 s in batches).
     # When the model is loaded it is the SOLE grouping authority for vertical
     # text; the geometric rules run only as a loudly-flagged fallback.
-    _t = time.perf_counter()
-    _tb_timings: dict = {}
-    text_blocks = detect_text_blocks(img, timings=_tb_timings)
     tb_authority = textblocks_available()
     if tb_authority:
         annotate_paragraph_blocks(original_tree, text_blocks)
@@ -467,13 +494,14 @@ def process_image(
         translated_tree["text_blocks_px"] = [list(b) for b in text_blocks]
     else:
         _warn_textblocks_fallback()
-    stages["blocks_ms"] = round((time.perf_counter() - _t) * 1000, 1)
-    stages["blocks"] = len(text_blocks)
-    # Split: in batches most of blocks_ms is WAITING for the shared model
-    # lock (other jobs' inference), not this job's own inference.
-    stages["blocks_lock_ms"] = float(_tb_timings.get("lock_ms", 0.0))
-    stages["blocks_infer_ms"] = float(_tb_timings.get("infer_ms", 0.0))
 
+    # --- Erase + bubble detect (BEFORE AI / render) ------------------------
+    # Order matters: the bubble detector needs an inpainted image to find
+    # the real bubble outline (not just the text-AABB), and the AI patch
+    # needs the bubble bounds attached to the template tree so it can
+    # render the translation in the *bubble* shape — vital for the
+    # source-vertical → target-horizontal case (Japanese → Thai) where a
+    # text-only AABB is far too narrow.
     _t = time.perf_counter()
     _CPU_GATE.acquire()
     stages["gate_wait_ms"] = round((time.perf_counter() - _t) * 1000, 1)
@@ -516,32 +544,43 @@ def process_image(
     finally:
         _CPU_GATE.release()
 
-    # --- optional AI layer -------------------------------------------------
-    # ``patch`` deep-copies the chosen template tree, so the bubble bounds
-    # AND bubble_groups we just computed propagate into the AI tree automatically.
-    # Run the AI layer when we have a key OR when the target is a local,
-    # self-hosted provider (Ollama / LM Studio / vLLM / …) which needs no key.
+    # =========================================================
+    # Phase 2 — AI call || HTML render + PNG encode (independent)
+    #
+    # After erase/bubble/groups the two remaining slow steps have
+    # no dependency on each other:
+    #   • AI needs Lens text + ONNX groups (already done above).
+    #   • Render+PNG needs the erased image + Lens trees (also done).
+    # Running them concurrently saves ~max(render+png=1.5 s, ai=2 s)
+    # instead of ai(2 s) + render+png(1.5 s) = 3.5 s. Wall-clock
+    # collapses to ~2 s — a 1.5 s saving on every ai job.
+    #
+    # Thread safety: AI writes out["Ai"] / out["AiTextFull"].
+    # Render writes out["original"]["originalhtml"] etc. and
+    # out["imageDataUri"].  These are disjoint keys; CPython's GIL
+    # makes individual dict __setitem__ atomic, so no lock is needed.
+    # =========================================================
     _ai_is_local = bool(ai_cfg) and (
         is_local_provider(ai_cfg.provider)
         or any(h in (ai_cfg.base_url or "").lower()
                for h in ("localhost", "127.0.0.1", "0.0.0.0"))
     )
-    if ai_cfg and ((ai_cfg.api_key or "").strip() or _ai_is_local):
-        _t = time.perf_counter()
-        _run_ai_layer(
+    _run_ai = bool(ai_cfg and ((ai_cfg.api_key or "").strip() or _ai_is_local))
+
+    # Submit AI to a background thread so it overlaps with render+PNG below.
+    _f_ai: concurrent.futures.Future | None = None
+    _ai_executor: concurrent.futures.ThreadPoolExecutor | None = None
+    _t_ai_submit = time.perf_counter()
+    if _run_ai:
+        _ai_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        _f_ai = _ai_executor.submit(
+            _run_ai_layer,
             out, original_tree, translated_tree, ai_cfg, target_lang, W, H, thai_font, latin_font,
             base_img=base_img,
             capture_request=capture_ai_request,
         )
-        stages["ai_ms"] = round((time.perf_counter() - _t) * 1000, 1)
 
-    # Re-group the AI tree after patching (AI text may change para boundaries).
-    ai_tree = (out.get("Ai") or {}).get("aiTree")
-    if isinstance(ai_tree, dict):
-        group_paragraphs_into_bubbles(ai_tree, W, H)
-        dbg("groups.ai", {"bubble_groups": len(ai_tree.get("bubble_groups") or [])})
-
-    # --- HTML overlays --------------------------------------------------
+    # HTML render + PNG encode in the main thread while AI runs above.
     # One renderer, one CSS payload, three layers. ``render_tree_overlay``
     # emits one ``<div class="tp-line">`` per Lens item — the browser handles
     # text rendering with whatever Thai/CJK font is installed, no Pillow.
@@ -575,6 +614,20 @@ def process_image(
         stages["png_ms"] = round((time.perf_counter() - _t) * 1000, 1)
     finally:
         _CPU_GATE.release()
+
+    # Wait for AI (will be instant if render+PNG took longer than AI).
+    if _f_ai is not None:
+        try:
+            _f_ai.result()  # re-raises any exception from the AI thread
+        finally:
+            _ai_executor.shutdown(wait=False)  # type: ignore[union-attr]
+        stages["ai_ms"] = round((time.perf_counter() - _t_ai_submit) * 1000, 1)
+
+    # Re-group the AI tree after patching (AI text may change para boundaries).
+    ai_tree = (out.get("Ai") or {}).get("aiTree")
+    if isinstance(ai_tree, dict):
+        group_paragraphs_into_bubbles(ai_tree, W, H)
+        dbg("groups.ai", {"bubble_groups": len(ai_tree.get("bubble_groups") or [])})
 
     return out
 
