@@ -188,6 +188,32 @@
         return sendResponse({ ok: true });
       }
 
+      // --- TP_FETCH_IMAGE (CDN 403 fallback) ---------------------------------
+      // SW fetch fails with 403 on hotlink-protected CDNs because its Origin
+      // is chrome-extension://... . Content scripts run in the page origin so
+      // the CDN sees the correct Referer + cookies and allows the request.
+      if (type === "TP_FETCH_IMAGE") {
+        try {
+          const url = String(msg?.url || "").trim();
+          if (!url) return sendResponse({ ok: false, error: "no url" });
+          const res = await fetch(url, { credentials: "include", redirect: "follow" });
+          if (!res.ok) return sendResponse({ ok: false, error: `HTTP ${res.status}` });
+          const mime =
+            String(res.headers.get("content-type") || "").split(";")[0].trim() || "image/jpeg";
+          const ab = await res.arrayBuffer();
+          const bytes = new Uint8Array(ab);
+          if (bytes.length < 64) return sendResponse({ ok: false, error: "response too small" });
+          // base64-encode in 32 KB chunks to avoid call-stack overflow
+          let bin = "";
+          const CHUNK = 0x8000;
+          for (let i = 0; i < bytes.length; i += CHUNK)
+            bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+          return sendResponse({ ok: true, dataUri: `data:${mime};base64,${btoa(bin)}` });
+        } catch (e) {
+          return sendResponse({ ok: false, error: e?.message || String(e) });
+        }
+      }
+
       sendResponse({ ok: true, ignored: true });
     })();
     return true; // keep the message channel open for the async response
