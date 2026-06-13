@@ -229,6 +229,10 @@ def _run_ai_layer(
             group_para_indices.append([i])
             merged_src_paras.append(t)
 
+    # Clamp runaway character runs in the SOURCE from the very first attempt
+    # (SFX like ヒヤァァァ… are the usual trigger that sends the model into a
+    # repetition loop). Previously this only happened on the retry pass.
+    merged_src_paras = [markers.clamp_runaway_repeats(p) for p in merged_src_paras]
     src_text = markers.apply(merged_src_paras)
     n_src = len(merged_src_paras)
 
@@ -260,7 +264,10 @@ def _run_ai_layer(
             capture_request=capture_request,
         )
 
-    ai_text_full = str(result.get("aiTextFull") or "")
+    # OUTPUT clamp — deterministic, always on. A repetition runaway in the
+    # model's answer (thousands of repeated chars/clusters) can strike at any
+    # time; collapsing it here guarantees it never reaches parsing/rendering.
+    ai_text_full = markers.clamp_output_repeats(str(result.get("aiTextFull") or ""))
     meta = dict(result.get("meta") or {})
 
     # When the request was captured for debugging, keep BOTH attempts so we
