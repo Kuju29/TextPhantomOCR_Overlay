@@ -19,7 +19,7 @@ import {
   batchStopKeepAlive,
   batchPassStats,
 } from "./batches.js";
-import { classifyJobError, fetchImageDataUriFromUrl } from "./images.js";
+import { classifyJobError, fetchImageDataUriFromUrl, fetchImageDataUriFromTab } from "./images.js";
 import { addTask } from "./job-queue.js";
 import { imageKeyFromPayload, normImgSrc } from "./job-keys.js";
 import { pendingByJob, pendingByImage, findContext, removeJob } from "./job-registry.js";
@@ -503,11 +503,18 @@ export async function processJob(payload, tabId, frameId = 0) {
     if (cached) {
       payload.imageDataUri = cached;
     } else {
+      const tPrefetch = Date.now();
       try {
         const du = src.startsWith("data:")
           ? src
           : await fetchImageDataUriFromUrl(src, pageUrl || "");
         if (du) {
+          // "Waiting to start" diagnostics: how long downloading the image
+          // took BEFORE the job could even be submitted to the server.
+          log.info("datauri prefetch ok", {
+            ms: Date.now() - tPrefetch,
+            kb: Math.round(du.length / 1024),
+          });
           payload.imageDataUri = du;
           if (key) setCachedDataUri(key, du);
           const meta = payload.metadata;
@@ -519,18 +526,46 @@ export async function processJob(payload, tabId, frameId = 0) {
           if (batch && imageKey) batchMark(batchId, imageKey, { payload });
         }
       } catch (e) {
-        const msg = e?.message || String(e);
-        const cls = classifyJobError(msg);
-        log.warn("datauri prefetch failed", { err: msg, permanent: cls.permanent });
-        if (cls.permanent) {
-          if (payload?.metadata?.image_id) pendingByImage.delete(payload.metadata.image_id);
-          if (batch && imageKey) {
-            batchMark(batchId, imageKey, { status: "error", lastError: msg, permanent: true });
-            batchUpdateToast(batch, "ผิดพลาด (ถาวร)");
-            finalizeBatch(batch);
+        let errMsg = e?.message || String(e);
+        // CDN hotlink protection (Origin: chrome-extension://) → retry via the
+        // content script which runs in the page origin and has the right cookies.
+        if (/\bHTTP 403\b/i.test(errMsg) && tabId) {
+          try {
+            const du = await fetchImageDataUriFromTab(tabId, src, frameId || 0);
+            if (du) {
+              log.info("datauri prefetch ok (tab fallback)", {
+                ms: Date.now() - tPrefetch,
+                kb: Math.round(du.length / 1024),
+              });
+              payload.imageDataUri = du;
+              if (key) setCachedDataUri(key, du);
+              const meta = payload.metadata;
+              meta.pipeline = (Array.isArray(meta.pipeline) ? meta.pipeline : []).concat({
+                stage: "prefetch_datauri_tab",
+                at: new Date().toISOString(),
+              });
+              meta.timestamp = new Date().toISOString();
+              if (batch && imageKey) batchMark(batchId, imageKey, { payload });
+              errMsg = null; // success — skip failure handling below
+            }
+          } catch (e2) {
+            errMsg = e2?.message || String(e2);
+            log.warn("datauri prefetch tab fallback failed", { err: errMsg });
           }
-          failJobImmediately(tabId, payload?.src || null, msg, frameId);
-          return;
+        }
+        if (errMsg) {
+          const cls = classifyJobError(errMsg);
+          log.warn("datauri prefetch failed", { err: errMsg, permanent: cls.permanent });
+          if (cls.permanent) {
+            if (payload?.metadata?.image_id) pendingByImage.delete(payload.metadata.image_id);
+            if (batch && imageKey) {
+              batchMark(batchId, imageKey, { status: "error", lastError: errMsg, permanent: true });
+              batchUpdateToast(batch, "ผิดพลาด (ถาวร)");
+              finalizeBatch(batch);
+            }
+            failJobImmediately(tabId, payload?.src || null, errMsg, frameId);
+            return;
+          }
         }
       }
     }
