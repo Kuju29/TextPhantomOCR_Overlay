@@ -239,3 +239,35 @@ def clamp_runaway_repeats(s: str, max_repeat: int = 12) -> str:
         return ""
     pat = re.compile(r"(.)\1{" + str(max_repeat) + r",}")
     return pat.sub(lambda m: m.group(1) * max_repeat, s)
+
+
+def clamp_output_repeats(
+    s: str, max_char_repeat: int = 12, max_cluster_repeat: int = 4
+) -> str:
+    """Deterministic guard against LLM repetition runaways in the OUTPUT.
+
+    Manga SFX in the source (ヒヤァァァ…, ハハハハ…) randomly push models into
+    emitting thousands of repeated characters or repeated short clusters
+    until the token budget is exhausted.  This cannot be predicted, so every
+    AI response passes through this clamp before parsing/rendering:
+
+    * runs of ONE character longer than ``max_char_repeat`` collapse to
+      ``max_char_repeat`` (the stylistic "ฮิยาาาาาาาาาาาา" survives);
+    * a short CLUSTER (2-16 chars) repeated more than ``max_cluster_repeat``
+      times collapses to ``max_cluster_repeat`` reps ("ฮ่าฮ่าฮ่า…" stays
+      readable).  A 16-char phrase repeated 5+ times back-to-back is never
+      legitimate dialogue.  Iterates until stable so nested runaways fully
+      collapse.
+
+    Markers like ``<<TP_P3>>`` are unaffected: consecutive markers differ in
+    their digits, so they never form an identical repeated cluster.
+    """
+    if not s:
+        return ""
+    s = clamp_runaway_repeats(s, max_char_repeat)
+    pat = re.compile(r"(.{2,16}?)\1{" + str(max_cluster_repeat) + r",}", re.DOTALL)
+    prev = None
+    while prev != s:
+        prev = s
+        s = pat.sub(lambda m: m.group(1) * max_cluster_repeat, s)
+    return s
