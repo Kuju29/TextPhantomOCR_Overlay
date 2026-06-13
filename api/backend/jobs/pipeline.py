@@ -447,30 +447,32 @@ def process_image(
     # render the translation in the *bubble* shape — vital for the
     # source-vertical → target-horizontal case (Japanese → Thai) where a
     # text-only AABB is far too narrow.
+    # Text-block detection runs on the ORIGINAL image (text present), and
+    # OUTSIDE the CPU gate: inference is serialised by the detector's own
+    # lock, so holding a gate slot here would only starve other jobs' erase /
+    # bubble / png work (measured: gate_wait_ms ballooned to 8 s in batches).
+    # When the model is loaded it is the SOLE grouping authority for vertical
+    # text; the geometric rules run only as a loudly-flagged fallback.
+    _t = time.perf_counter()
+    text_blocks = detect_text_blocks(img)
+    tb_authority = textblocks_available()
+    if tb_authority:
+        annotate_paragraph_blocks(original_tree, text_blocks)
+        annotate_paragraph_blocks(translated_tree, text_blocks)
+        # Observability: expose what the model saw. Debug dumps of the
+        # trees then show the detected regions next to each paragraph's
+        # _tb_block assignment, so grouping decisions can be audited.
+        original_tree["text_blocks_px"] = [list(b) for b in text_blocks]
+        translated_tree["text_blocks_px"] = [list(b) for b in text_blocks]
+    else:
+        _warn_textblocks_fallback()
+    stages["blocks_ms"] = round((time.perf_counter() - _t) * 1000, 1)
+    stages["blocks"] = len(text_blocks)
+
     _t = time.perf_counter()
     _CPU_GATE.acquire()
     stages["gate_wait_ms"] = round((time.perf_counter() - _t) * 1000, 1)
     try:
-        # Text-block detection runs on the ORIGINAL image (text present).
-        # When the model is loaded it is the SOLE grouping authority for
-        # vertical text; the geometric rules run only as a loudly-flagged
-        # fallback so debugging always knows which path made the decision.
-        _t = time.perf_counter()
-        text_blocks = detect_text_blocks(img)
-        tb_authority = textblocks_available()
-        if tb_authority:
-            annotate_paragraph_blocks(original_tree, text_blocks)
-            annotate_paragraph_blocks(translated_tree, text_blocks)
-            # Observability: expose what the model saw. Debug dumps of the
-            # trees then show the detected regions next to each paragraph's
-            # _tb_block assignment, so grouping decisions can be audited.
-            original_tree["text_blocks_px"] = [list(b) for b in text_blocks]
-            translated_tree["text_blocks_px"] = [list(b) for b in text_blocks]
-        else:
-            _warn_textblocks_fallback()
-        stages["blocks_ms"] = round((time.perf_counter() - _t) * 1000, 1)
-        stages["blocks"] = len(text_blocks)
-
         _t = time.perf_counter()
         if original_span_tokens:
             base_img = erase_text_with_boxes(img, original_span_tokens)
