@@ -3,6 +3,8 @@
  * classification (which errors are worth retrying vs. permanent failures).
  */
 
+import { requestFromTabEnsured } from "./tabs-messaging.js";
+
 /** Base64-encode a Uint8Array in 32 KB chunks (avoids call-stack limits). */
 export function bytesToBase64(bytes) {
   let binary = "";
@@ -59,6 +61,28 @@ export async function fetchImageDataUriFromUrl(url, pageUrl) {
   if (blob.size < 64) throw new Error("Image too small");
   if (blob.size > 25 * 1024 * 1024) throw new Error("Image too large");
   return blobToDataUri(blob, mime || blob.type);
+}
+
+/**
+ * Fetch an image via the content script (page context), bypassing CDN
+ * hotlink protection that blocks Service Worker origin.
+ * Used as a fallback when the direct SW fetch returns 403.
+ * @param {number} tabId
+ * @param {string} url
+ * @param {number} [frameId]
+ * @returns {Promise<string>} data URI
+ */
+export async function fetchImageDataUriFromTab(tabId, url, frameId = 0) {
+  if (!tabId) throw new Error("no tabId for tab fetch");
+  const resp = await requestFromTabEnsured(
+    tabId,
+    { type: "TP_FETCH_IMAGE", url },
+    frameId,
+  );
+  if (!resp?.ok) throw new Error(resp?.error || "tab fetch failed");
+  const du = String(resp.dataUri || "");
+  if (!du) throw new Error("tab fetch returned empty dataUri");
+  return du;
 }
 
 /**
