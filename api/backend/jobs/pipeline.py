@@ -454,7 +454,8 @@ def process_image(
     # When the model is loaded it is the SOLE grouping authority for vertical
     # text; the geometric rules run only as a loudly-flagged fallback.
     _t = time.perf_counter()
-    text_blocks = detect_text_blocks(img)
+    _tb_timings: dict = {}
+    text_blocks = detect_text_blocks(img, timings=_tb_timings)
     tb_authority = textblocks_available()
     if tb_authority:
         annotate_paragraph_blocks(original_tree, text_blocks)
@@ -468,6 +469,10 @@ def process_image(
         _warn_textblocks_fallback()
     stages["blocks_ms"] = round((time.perf_counter() - _t) * 1000, 1)
     stages["blocks"] = len(text_blocks)
+    # Split: in batches most of blocks_ms is WAITING for the shared model
+    # lock (other jobs' inference), not this job's own inference.
+    stages["blocks_lock_ms"] = float(_tb_timings.get("lock_ms", 0.0))
+    stages["blocks_infer_ms"] = float(_tb_timings.get("infer_ms", 0.0))
 
     _t = time.perf_counter()
     _CPU_GATE.acquire()
