@@ -96,11 +96,17 @@ class JobQueue:
         while True:
             job_id, payload = await self._queue.get()
             t0 = time.perf_counter()
+            # How long the job sat in the queue before a worker picked it up —
+            # part of the user's "waiting to start" latency that translate.perf
+            # (which starts here) can never see.
+            enqueue_ts = float((self._jobs.get(job_id) or {}).get("ts") or 0.0)
+            queue_wait_ms = round(max(0.0, time.time() - enqueue_ts) * 1000, 1) if enqueue_ts else 0.0
             summary = {
                 "job_id": job_id,
                 "mode": str(payload.get("mode") or ""),
                 "lang": str(payload.get("lang") or ""),
                 "source": str(payload.get("source") or ""),
+                "queue_wait_ms": queue_wait_ms,
             }
             try:
                 self._jobs[job_id] = {"status": "running", "ts": time.time()}
