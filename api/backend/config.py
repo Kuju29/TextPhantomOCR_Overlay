@@ -84,15 +84,22 @@ class Settings:
     textblock_model_path: str = field(
         default_factory=lambda: _env_str("TP_TEXTBLOCK_MODEL", "models/manga-bubble-yolo.onnx")
     )
-    # Repo files live under onnx/: yolo26n.onnx (nano — default: ~3x faster
-    # on CPU; the small model measured 1.6-5.1 s/page on HF Space CPU which
-    # dominated total latency) and yolo26s.onnx (small, slightly more
-    # accurate: mAP50 0.961 vs 0.947 — use it on faster hardware).
+    # Repo files live under onnx/: yolo26n.onnx (nano) and yolo26s.onnx
+    # (small, mAP50 0.961 vs 0.947).  Default is s; switch via env var.
     textblock_model_url: str = field(
         default_factory=lambda: _env_str(
             "TP_TEXTBLOCK_MODEL_URL",
-            "https://huggingface.co/Kiuyha/Manga-Bubble-YOLO/resolve/main/onnx/yolo26n.onnx",
+            "https://huggingface.co/Kiuyha/Manga-Bubble-YOLO/resolve/main/onnx/yolo26s.onnx",
         )
+    )
+    # How many parallel ONNX sessions to keep ready.  Each session runs
+    # inference independently, so pool_size=4 means 4 images can be
+    # inferred simultaneously instead of serialising on a single lock.
+    # In a 12-image batch each job's blocks_lock_ms drops from
+    # (N-1)×1.3 s → at most (pool_size-1)×1.3 s ≈ 3.9 s.
+    # Memory cost: pool_size × ~25 MB (s) / ~7 MB (n) — negligible.
+    textblock_pool_size: int = field(
+        default_factory=lambda: max(1, _env_int("TP_TEXTBLOCK_POOL_SIZE", 4))
     )
 
     # Warmup -----------------------------------------------------------------
