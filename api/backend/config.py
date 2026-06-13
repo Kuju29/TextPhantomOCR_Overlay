@@ -84,13 +84,14 @@ class Settings:
     textblock_model_path: str = field(
         default_factory=lambda: _env_str("TP_TEXTBLOCK_MODEL", "models/manga-bubble-yolo.onnx")
     )
-    # Repo files live under onnx/: yolo26s.onnx (small, most accurate —
-    # default) and yolo26n.onnx (nano, ~3x faster on CPU if blocks_ms is too
-    # high for your hardware).
+    # Repo files live under onnx/: yolo26n.onnx (nano — default: ~3x faster
+    # on CPU; the small model measured 1.6-5.1 s/page on HF Space CPU which
+    # dominated total latency) and yolo26s.onnx (small, slightly more
+    # accurate: mAP50 0.961 vs 0.947 — use it on faster hardware).
     textblock_model_url: str = field(
         default_factory=lambda: _env_str(
             "TP_TEXTBLOCK_MODEL_URL",
-            "https://huggingface.co/Kiuyha/Manga-Bubble-YOLO/resolve/main/onnx/yolo26s.onnx",
+            "https://huggingface.co/Kiuyha/Manga-Bubble-YOLO/resolve/main/onnx/yolo26n.onnx",
         )
     )
 
