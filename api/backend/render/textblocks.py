@@ -21,6 +21,7 @@ behaviour is byte-identical to the system without this module.
 from __future__ import annotations
 
 import os
+import queue as _queue_mod
 import threading
 import time
 from typing import Any
@@ -36,19 +37,31 @@ Box = tuple[float, float, float, float]
 _INPUT_SIZE = 1280
 _CONF_THRESH = 0.30
 
-_lock = threading.Lock()
-_session: Any = None
-_session_failed = False          # permanent: onnxruntime missing / corrupt model
-_next_download_retry = 0.0       # cooldown for auto-download attempts
+# ---------------------------------------------------------------------------
+# Session pool — multiple independent ONNX sessions so workers can run
+# inference in parallel instead of serialising on a single lock.
+#
+# With pool_size=4 and 12 concurrent workers, the maximum blocks_lock_ms
+# (time a job spends waiting for a free session) is bounded at
+# (pool_size−1) x ~1.3 s ≈ 3.9 s, instead of (12−1) x 1.3 s ≈ 14 s.
+#
+# Memory cost per session: ~25 MB (yolo26s) / ~7 MB (yolo26n) — negligible.
+# ---------------------------------------------------------------------------
+_pool: _queue_mod.Queue[Any] = _queue_mod.Queue()
+_pool_count = 0          # sessions successfully loaded
+_pool_ready = False      # init has been attempted (success or failure)
+_session_failed = False  # permanent: onnxruntime missing / corrupt model
+_next_download_retry = 0.0
 _DOWNLOAD_RETRY_SEC = 300.0
+_init_lock = threading.Lock()
 
 
 def model_path() -> str:
     return (settings.textblock_model_path or "").strip()
 
 
-def ensure_model() -> bool:
-    """Download the ONNX model when missing (called from warmup, best-effort)."""
+def _download_model() -> bool:
+    """Stream-download the ONNX weights (best-effort, never fatal)."""
     path = model_path()
     if not path:
         return False
@@ -71,60 +84,81 @@ def ensure_model() -> bool:
         os.replace(tmp, path)
         event("textblocks.model.downloaded", {"path": path, "size": os.path.getsize(path)})
         return True
-    except Exception as e:  # noqa: BLE001 - optional feature, never fatal
+    except Exception as e:  # noqa: BLE001
         event("textblocks.model.download_failed", {"error": str(e)[:200]}, ok=False)
         return False
 
 
-def _get_session() -> Any:
-    """Load the onnxruntime session, AUTO-DOWNLOADING the model when missing.
+def _init_pool() -> None:
+    """Load pool_size ONNX sessions into _pool. Called once, under _init_lock."""
+    global _pool_count, _pool_ready, _session_failed, _next_download_retry
 
-    The model is the primary grouping authority, so this is self-healing:
-    a missing file triggers an inline download (with a 5-minute retry
-    cooldown on failure) instead of silently disabling the feature. Only a
-    truly permanent problem (onnxruntime not installed, corrupt model file)
-    marks the session as failed for the process lifetime.
-    """
-    global _session, _session_failed, _next_download_retry
-    if _session is not None or _session_failed:
-        return _session
-    with _lock:
-        if _session is not None or _session_failed:
-            return _session
-        path = model_path()
-        if not path:
-            _session_failed = True  # explicitly disabled via TP_TEXTBLOCK_MODEL=""
-            return None
-        if not os.path.exists(path):
-            now = time.time()
-            if now < _next_download_retry:
-                return None
-            if not ensure_model():
-                _next_download_retry = now + _DOWNLOAD_RETRY_SEC
-                return None
-        try:
-            import onnxruntime as ort
+    path = model_path()
+    if not path:
+        _session_failed = True
+        _pool_ready = True
+        return
 
-            _session = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
-            event("textblocks.model.loaded", {"path": path})
-        except Exception as e:  # noqa: BLE001
-            _session_failed = True
-            event("textblocks.model.load_failed", {"error": str(e)[:200]}, ok=False)
-    return _session
+    if not (os.path.exists(path) and os.path.getsize(path) > 1_000_000):
+        now = time.time()
+        if now < _next_download_retry:
+            _pool_ready = True
+            return
+        if not _download_model():
+            _next_download_retry = now + _DOWNLOAD_RETRY_SEC
+            _pool_ready = True
+            return
+
+    try:
+        import onnxruntime as ort
+
+        n = max(1, settings.textblock_pool_size)
+        for _ in range(n):
+            sess = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+            _pool.put(sess)
+        _pool_count = n
+        event("textblocks.model.loaded", {"path": path, "sessions": n})
+    except Exception as e:  # noqa: BLE001
+        _session_failed = True
+        event("textblocks.model.load_failed", {"error": str(e)[:200]}, ok=False)
+    finally:
+        _pool_ready = True
+
+
+def _ensure_pool() -> None:
+    """Trigger pool initialisation on first use (idempotent)."""
+    if _pool_ready:
+        return
+    with _init_lock:
+        if not _pool_ready:
+            _init_pool()
+
+
+def ensure_model() -> bool:
+    """Download + load the session pool (called from warmup, best-effort)."""
+    _ensure_pool()
+    return _pool_count > 0
 
 
 def available() -> bool:
-    return _get_session() is not None
+    """True once the pool has at least one loaded session."""
+    _ensure_pool()
+    return not _session_failed and _pool_count > 0
 
 
-def detect_text_blocks(img: Image.Image) -> list[Box]:
+def detect_text_blocks(img: Image.Image, timings: dict | None = None) -> list[Box]:
     """Detect text-block boxes on a page. Returns [] when the model is off.
 
     Preprocess mirrors the model card: plain resize to 1280x1280, RGB,
     CHW, /255.  Output boxes are mapped back with the inverse scale.
+
+    ``timings`` (optional) is filled with ``lock_ms`` (time waiting for a
+    free session from the pool) and ``infer_ms`` (this job's own inference).
+    With pool_size=4, max wait ≈ (pool_size−1)xinfer_ms instead of
+    (workers−1)xinfer_ms.
     """
-    session = _get_session()
-    if session is None:
+    _ensure_pool()
+    if _session_failed or _pool_count == 0:
         return []
     try:
         t0 = time.perf_counter()
@@ -133,10 +167,22 @@ def detect_text_blocks(img: Image.Image) -> list[Box]:
         arr = np.asarray(rgb, dtype=np.float32) / 255.0
         arr = np.expand_dims(arr.transpose(2, 0, 1), 0)  # 1x3xHxW
 
-        # Serialise inference: one CPU session shared across worker threads.
-        with _lock:
+        # Grab a session from the pool (blocks until one is free).
+        t_wait = time.perf_counter()
+        try:
+            session = _pool.get(timeout=60.0)
+        except _queue_mod.Empty:
+            event("textblocks.pool_timeout", {}, ok=False)
+            return []
+        t_infer = time.perf_counter()
+        try:
             input_name = session.get_inputs()[0].name
             out = session.run(None, {input_name: arr})[0]
+        finally:
+            _pool.put(session)  # always return, even on exception
+        if timings is not None:
+            timings["lock_ms"] = round((t_infer - t_wait) * 1000, 1)
+            timings["infer_ms"] = round((time.perf_counter() - t_infer) * 1000, 1)
 
         det = np.asarray(out)
         det = det.reshape(-1, det.shape[-1])  # (300, 6)
