@@ -92,14 +92,20 @@ class Settings:
             "https://huggingface.co/Kiuyha/Manga-Bubble-YOLO/resolve/main/onnx/yolo26s.onnx",
         )
     )
-    # How many parallel ONNX sessions to keep ready.  Each session runs
-    # inference independently, so pool_size=4 means 4 images can be
-    # inferred simultaneously instead of serialising on a single lock.
-    # In a 12-image batch each job's blocks_lock_ms drops from
-    # (N-1)×1.3 s → at most (pool_size-1)×1.3 s ≈ 3.9 s.
-    # Memory cost: pool_size × ~25 MB (s) / ~7 MB (n) — negligible.
+    # How many parallel ONNX sessions to keep ready.
+    # IMPORTANT: each session spawns its own thread pool inside ONNX Runtime.
+    # On a 2-vCPU machine (HF Space free tier) pool_size=1 is optimal: the
+    # single session uses both cores and runs inference in ~1.3 s. With
+    # pool_size=4, four sessions compete for 2 cores and each slows to 5-17 s.
+    # Rule of thumb: pool_size = max(1, cpu_count // 2).
+    # Override with TP_TEXTBLOCK_POOL_SIZE; 0 = auto from os.cpu_count().
     textblock_pool_size: int = field(
-        default_factory=lambda: max(1, _env_int("TP_TEXTBLOCK_POOL_SIZE", 4))
+        default_factory=lambda: (
+            lambda raw, cpus: max(1, min(cpus // 2, 4)) if raw == 0 else max(1, raw)
+        )(
+            _env_int("TP_TEXTBLOCK_POOL_SIZE", 0),
+            __import__("os").cpu_count() or 2,
+        )
     )
 
     # Warmup -----------------------------------------------------------------
