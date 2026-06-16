@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "แปลข้อความในภาพมังงะ มังฮวา - TextPhantom",
-  "version": "2026.6.11",
+  "version": "2026.6.16",
   "description": "🧠 Right-click any image → translate images",
   "permissions": ["contextMenus", "storage", "activeTab"],
   "host_permissions": ["<all_urls>"],
@@ -23,6 +23,7 @@
         "content/image-finder.js",
         "content/payload.js",
         "content/overlay.js",
+        "content/site-mangadex.js",
         "content/mangadex.js",
         "content/messaging.js",
         "content/index.js"
