@@ -24,7 +24,7 @@ import {
   sendToTab,
   sendToastToTab,
 } from "./tabs-messaging.js";
-import { clearWsBlock, connectWebSocket, shouldPreferRest } from "./transport.js";
+import { clearWsBlock } from "./transport.js";
 
 const log = createLogger("SW.menu");
 
@@ -228,11 +228,8 @@ export async function onContextMenuClicked(menuInfo, tab) {
     setCurrentBatchId(batchId);
     clearWsBlock();
 
-    // Warm up the transport.
-    const base = await getApiBase();
-    if (!shouldPreferRest(base, mode, source)) {
-      await connectWebSocket().catch(() => false);
-    }
+    // Warm up the API; event WebSocket is opened after REST returns a job id.
+    await getApiBase().catch(() => "");
 
     const ctx = { mode, lang, source, aiPayload, tabSessionId, batchId };
     sendToastToTab(
