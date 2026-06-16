@@ -22,7 +22,7 @@ import {
 import { classifyJobError, fetchImageDataUriFromUrl, fetchImageDataUriFromTab } from "./images.js";
 import { addTask } from "./job-queue.js";
 import { imageKeyFromPayload, normImgSrc } from "./job-keys.js";
-import { pendingByJob, pendingByImage, findContext, removeJob } from "./job-registry.js";
+import { pendingByJob, pendingByImage, findContext, removeJob, rememberJob, restorePendingJobs } from "./job-registry.js";
 import {
   getCachedDataUri,
   setCachedDataUri,
@@ -45,6 +45,7 @@ import {
   sendWsJob,
   submitJobViaRest,
   pollJobViaRest,
+  subscribeJobEvents,
   shouldPreferRest,
 } from "./transport.js";
 
@@ -442,6 +443,36 @@ async function runRetryPass(b) {
 
 // --- Job processing --------------------------------------------------------
 
+// --- Job idempotency --------------------------------------------------------
+
+function stableString(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return "[" + value.map(stableString).join(",") + "]";
+  const keys = Object.keys(value).sort();
+  return "{" + keys.map((k) => JSON.stringify(k) + ":" + stableString(value[k])).join(",") + "}";
+}
+
+async function sha256Hex(text) {
+  const bytes = new TextEncoder().encode(String(text || ""));
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function idempotencyKeyForPayload(payload) {
+  const mode = String(payload?.mode || "");
+  const lang = String(payload?.lang || "");
+  const source = String(payload?.source || "");
+  const src = normImgSrc(payload?.src || "");
+  const dataUri = typeof payload?.imageDataUri === "string" ? payload.imageDataUri : "";
+  const dataFingerprint = dataUri
+    ? await sha256Hex(`${dataUri.length}:${dataUri.slice(0, 4096)}:${dataUri.slice(-4096)}`)
+    : "";
+  const ai = payload?.ai && typeof payload.ai === "object"
+    ? { model: payload.ai.model || "", provider: payload.ai.provider || "", prompt: payload.ai.prompt || "" }
+    : null;
+  return sha256Hex(stableString({ mode, lang, source, src, dataFingerprint, ai }));
+}
+
 /** Should this payload have its image pre-downloaded as a data URI? */
 function shouldPrefetchDataUri(payload) {
   if (payload?.imageDataUri) return false;
@@ -635,7 +666,7 @@ export async function processJob(payload, tabId, frameId = 0) {
     }
 
     const jobId = crypto.randomUUID();
-    pendingByJob.set(jobId, makeContext({ startedAt: Date.now() }));
+    rememberJob(jobId, makeContext({ startedAt: Date.now(), base }));
     try {
       sendWsJob(jobId, payload);
       return;
@@ -650,12 +681,22 @@ export async function processJob(payload, tabId, frameId = 0) {
   }
 }
 
-/** Submit a job over REST and poll it to completion (shared by both paths). */
+/** Submit a job over REST and long-poll it to completion. */
 async function submitAndPollRest(base, payload, makeContext, { tabId, frameId, batch, batchId, imageKey }) {
   let jobId = "";
   try {
-    jobId = await submitJobViaRest(base, payload);
-    pendingByJob.set(jobId, makeContext({ startedAt: Date.now() }));
+    const idempotencyKey = await idempotencyKeyForPayload(payload);
+    payload.idempotency_key = idempotencyKey;
+    const submitted = await submitJobViaRest(base, payload, { idempotencyKey });
+    jobId = String(submitted.id || "");
+    const ctx = makeContext({
+      startedAt: Date.now(),
+      base,
+      idempotencyKey,
+      serverHints: submitted,
+    });
+    rememberJob(jobId, ctx);
+    subscribeJobEvents(jobId).catch(() => {});
     await pollJobViaRest(base, jobId);
   } catch (e) {
     const msg = e?.message || String(e);
@@ -671,6 +712,18 @@ async function submitAndPollRest(base, payload, makeContext, { tabId, frameId, b
       finalizeBatch(batch);
     }
     failJobImmediately(tabId, payload?.src || null, msg, frameId);
+  }
+}
+
+/** Resume REST long-polls after a Manifest V3 service-worker restart. */
+export async function resumePendingRestJobs() {
+  const jobIds = await restorePendingJobs();
+  for (const jobId of jobIds) {
+    const ctx = pendingByJob.get(jobId);
+    const base = String(ctx?.base || "").trim();
+    if (!base) continue;
+    subscribeJobEvents(jobId).catch(() => {});
+    addTask(() => pollJobViaRest(base, jobId).catch((e) => handleJobError(jobId, e?.message || String(e))));
   }
 }
 
