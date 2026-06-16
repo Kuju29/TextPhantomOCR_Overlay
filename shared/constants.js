@@ -28,6 +28,9 @@ export const DEFAULT_MODE = "lens_text";
 export const DEFAULT_LANG = "en";
 export const DEFAULT_SOURCE = "translated";
 
+/** Safe default for multi-image batches. 0/unlimited overloads small Spaces. */
+export const DEFAULT_MAX_CONCURRENCY = 3;
+
 /** Port name used by the content-script keep-alive connection. */
 export const KEEPALIVE_PORT_NAME = "TP_KEEPALIVE";
 
