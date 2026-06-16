@@ -44,7 +44,7 @@ class Settings:
     # or override SERVER_MAX_WORKERS/TP_CPU_CONCURRENCY on larger machines.
     # I/O parallelism helps Lens waits, but CPU-heavy ONNX/render stages must
     # stay gated or batches inflate from ~1s to tens of seconds.
-    max_workers: int = field(default_factory=lambda: _env_int("SERVER_MAX_WORKERS", 4))
+    max_workers: int = field(default_factory=lambda: _env_int("SERVER_MAX_WORKERS", 8))
     cpu_concurrency: int = field(default_factory=lambda: max(1, _env_int("TP_CPU_CONCURRENCY", 2)))
     job_ttl_sec: int = field(default_factory=lambda: _env_int("JOB_TTL_SEC", 3600))
     http_timeout_sec: float = field(default_factory=lambda: _env_float("HTTP_TIMEOUT_SEC", 120.0))
