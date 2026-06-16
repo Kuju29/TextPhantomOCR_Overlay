@@ -9,7 +9,7 @@
  */
 
 import { getStorage, setStorage } from "./storage.js";
-import { DEFAULT_LANG, DEFAULT_MODE, DEFAULT_SOURCE } from "./constants.js";
+import { DEFAULT_LANG, DEFAULT_MODE, DEFAULT_SOURCE, DEFAULT_MAX_CONCURRENCY } from "./constants.js";
 import {
   makePromptKey,
   migratePromptMap,
@@ -108,7 +108,7 @@ export async function readFullSettings() {
     mode: typeof it.mode === "string" ? it.mode : "lens_images",
     lang,
     sources: typeof it.sources === "string" ? it.sources : DEFAULT_SOURCE,
-    maxConcurrency: Number(it.maxConcurrency) >= 0 ? Number(it.maxConcurrency) : 0,
+    maxConcurrency: Number(it.maxConcurrency) > 0 ? Number(it.maxConcurrency) : DEFAULT_MAX_CONCURRENCY,
     aiKey: typeof it.aiKey === "string" ? it.aiKey : "",
     aiModel,
     aiProvider: typeof it.aiProvider === "string" ? it.aiProvider : "auto",
