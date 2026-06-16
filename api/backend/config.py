@@ -40,24 +40,23 @@ def _env_bool(name: str, default: bool = False) -> bool:
 @dataclass(frozen=True)
 class Settings:
     # Server-side worker pool & limits ---------------------------------------
-    # 12 workers overlap the Lens network wait (the bulk of every job, ~2 s),
-    # while ``cpu_concurrency`` separately caps the CPU-heavy section
-    # (erase / bubble / render / PNG) so concurrent jobs don't pile up on the
-    # GIL — measured stage times inflated 3-10x when 14+ jobs ran CPU work
-    # at once. I/O parallel, CPU gated: best of both.
-    max_workers: int = field(default_factory=lambda: _env_int("SERVER_MAX_WORKERS", 12))
-    cpu_concurrency: int = field(default_factory=lambda: max(1, _env_int("TP_CPU_CONCURRENCY", 4)))
+    # Default to conservative per-container limits. Scale out with more replicas
+    # or override SERVER_MAX_WORKERS/TP_CPU_CONCURRENCY on larger machines.
+    # I/O parallelism helps Lens waits, but CPU-heavy ONNX/render stages must
+    # stay gated or batches inflate from ~1s to tens of seconds.
+    max_workers: int = field(default_factory=lambda: _env_int("SERVER_MAX_WORKERS", 4))
+    cpu_concurrency: int = field(default_factory=lambda: max(1, _env_int("TP_CPU_CONCURRENCY", 2)))
     job_ttl_sec: int = field(default_factory=lambda: _env_int("JOB_TTL_SEC", 3600))
     http_timeout_sec: float = field(default_factory=lambda: _env_float("HTTP_TIMEOUT_SEC", 120.0))
     # Multi-user safety: bound the pending queue + per-job wall-clock timeout so
     # a flood of requests can't exhaust memory or pin workers forever.
     max_queue_size: int = field(default_factory=lambda: _env_int("TP_MAX_QUEUE_SIZE", 200))
     max_jobs_tracked: int = field(default_factory=lambda: _env_int("TP_MAX_JOBS_TRACKED", 2000))
-    job_run_timeout_sec: float = field(default_factory=lambda: _env_float("TP_JOB_RUN_TIMEOUT_SEC", 180.0))
+    job_run_timeout_sec: float = field(default_factory=lambda: _env_float("TP_JOB_RUN_TIMEOUT_SEC", 90.0))
 
     # Result caches ----------------------------------------------------------
-    result_cache_max: int = field(default_factory=lambda: _env_int("TP_RESULT_CACHE_MAX", 24))
-    ai_result_cache_max: int = field(default_factory=lambda: _env_int("TP_AI_RESULT_CACHE_MAX", 16))
+    result_cache_max: int = field(default_factory=lambda: _env_int("TP_RESULT_CACHE_MAX", 128))
+    ai_result_cache_max: int = field(default_factory=lambda: _env_int("TP_AI_RESULT_CACHE_MAX", 32))
 
     # Hugging Face throttling ------------------------------------------------
     hf_max_concurrency: int = field(default_factory=lambda: max(1, _env_int("HF_AI_MAX_CONCURRENCY", 1)))
