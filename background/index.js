@@ -14,15 +14,15 @@ import { KEEPALIVE_PORT_NAME } from "../shared/constants.js";
 import { getApiBase, healthCache, warmupApi } from "./api.js";
 import { getLastBatchStatus } from "./batches.js";
 import { blobToDataUri } from "./images.js";
-import { setMaxConcurrency, describeLimits } from "./job-queue.js";
+import { setMaxConcurrency, describeLimits, applyServerConcurrencyHint } from "./job-queue.js";
 import { pendingByJob } from "./job-registry.js";
 import {
   bumpSettingsEpoch,
   cancelTabWork,
-  failAllPending,
   handleJobError,
   handleResult,
   handleStaleJob,
+  resumePendingRestJobs,
 } from "./jobs.js";
 import {
   isMangaDexPageUrl,
@@ -31,7 +31,7 @@ import {
   stripImageFields,
 } from "./mangadex.js";
 import { bumpTabSession, dropTabSession, ensureTabSession } from "./tab-sessions.js";
-import { closeWebSocket, connectWebSocket, getWsStatus, isWsReady, setHandlers } from "./transport.js";
+import { closeWebSocket, getWsStatus, isWsReady, setHandlers } from "./transport.js";
 import { onContextMenuClicked, recreateMenus } from "./context-menu.js";
 
 const log = createLogger("SW");
@@ -40,7 +40,8 @@ const log = createLogger("SW");
 setHandlers({
   onResult: handleResult,
   onError: handleJobError,
-  onWsEnded: failAllPending,
+  onStatus: (_jobId, msg) => applyServerConcurrencyHint(msg?.recommended_client_concurrency),
+  onWsEnded: () => {},
   onStale: handleStaleJob,
 });
 
@@ -106,7 +107,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     case "API_URL_CHANGED":
       closeWebSocket("api_url_changed");
       healthCache.ts = 0;
-      connectWebSocket().catch(() => {});
       getApiBase()
         .then((b) => warmupApi(b))
         .catch(() => {});
@@ -226,7 +226,8 @@ chrome.runtime.onInstalled.addListener(bootstrap);
 chrome.runtime.onStartup?.addListener(bootstrap);
 
 // Load the user's concurrency cap on every SW start.
-getStorage({ maxConcurrency: 0 }).then(({ maxConcurrency }) => {
+getStorage({ maxConcurrency: 3 }).then(({ maxConcurrency }) => {
   setMaxConcurrency(maxConcurrency);
   log.info("concurrency limits", describeLimits());
+  resumePendingRestJobs().catch((e) => log.warn("resume pending jobs failed", e?.message || String(e)));
 });
