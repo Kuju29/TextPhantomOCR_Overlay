@@ -521,6 +521,99 @@
     }
   }
 
+
+
+  // --- Batched DOM insertion ----------------------------------------------
+
+  function sleepFrame() {
+    return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+  }
+
+  async function applyImageErrorMessage(msg) {
+    const isNoOverlay = /no overlay data/i.test(String(msg?.message || ""));
+    setTimeout(() => {
+      if (TP.shouldShowReplaceError(msg?.original)) {
+        TP.markImageError(msg?.original, isNoOverlay ? "No text detected" : msg?.message);
+      }
+    }, 1200);
+    return { ok: true };
+  }
+
+  async function applyOverlayMessage(msg) {
+    const ovMode = typeof msg?.mode === "string" ? msg.mode : "";
+    if (!ovMode) return { ok: true, ignored: true };
+    const isText = ovMode === "lens_text";
+    const source = isText ? String(msg?.source || "").trim().toLowerCase() : "translated";
+    if (isText && !source) return { ok: true, ignored: true };
+
+    const img = TP.findTargetImage(msg.original);
+    TP.log.info("OVERLAY_HTML", {
+      key: TP.mdKeyFromUrl ? TP.mdKeyFromUrl(msg.original) : "",
+      found: Boolean(img),
+      source,
+    });
+    if (img) {
+      try {
+        applyHtmlOverlay(img, msg.result, source, isText, msg.original);
+        return { ok: true, applied: true };
+      } catch (e) {
+        TP.log.warn("OVERLAY_HTML failed", e?.message || String(e));
+        return { ok: false, applied: false, error: e?.message || String(e) };
+      }
+    }
+
+    if (TP.isMangaDexHost()) {
+      TP.mdRememberPending(msg.original, {
+        overlay: { result: msg.result, source, isTextMode: isText },
+      });
+      TP.scheduleMangaDexMapping?.();
+      return { ok: true, applied: false, pending: true };
+    }
+    return { ok: true, applied: false, notFound: true };
+  }
+
+  async function applyInsertMessage(message) {
+    const msg = message || {};
+    const type = String(msg.type || "");
+    if (type === "REPLACE_IMAGE") {
+      const applied = await replaceImageInDOM(msg.original, msg.newSrc);
+      if (!applied && TP.isMangaDexHost()) TP.mdRememberPending(msg.original, { newSrc: msg.newSrc });
+      return { ok: true, applied: !!applied };
+    }
+    if (type === "OVERLAY_HTML") return applyOverlayMessage(msg);
+    if (type === "IMAGE_ERROR") return applyImageErrorMessage(msg);
+    return { ok: true, ignored: true };
+  }
+
+  async function applyInsertBatch(items, options = {}) {
+    const list = Array.isArray(items) ? items : [];
+    const chunkSize = Math.max(1, Math.min(32, Number(options?.chunkSize) || 16));
+    const results = [];
+    for (let i = 0; i < list.length; i += chunkSize) {
+      if (i > 0) await sleepFrame();
+      const chunk = list.slice(i, i + chunkSize);
+      const settled = await Promise.all(
+        chunk.map(async (item) => {
+          const id = String(item?.id || "");
+          try {
+            const r = await applyInsertMessage(item?.message || item);
+            return { id, ...(r || { ok: true }) };
+          } catch (e) {
+            return { id, ok: false, error: e?.message || String(e) };
+          }
+        }),
+      );
+      results.push(...settled);
+      scheduleHtmlOverlayUpdate();
+      try {
+        TP.scheduleMangaDexOverlayUpdate?.();
+      } catch {
+        /* non-MangaDex */
+      }
+    }
+    return { ok: true, bulk: true, results };
+  }
+
   // --- In-DOM image replacement (non-text modes) ---------------------------
 
   /**
@@ -613,6 +706,8 @@
     getOverlayBoxFromParent,
     scheduleHtmlOverlayUpdate,
     applyHtmlOverlay,
+    applyInsertBatch,
+    applyInsertMessage,
     replaceImageInDOM,
     applyFontScaleToScope,        // MangaDex variant uses this on its scopes
     getCurrentFontScale: () => currentFontScale,
