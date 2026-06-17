@@ -38,6 +38,7 @@ import {
   sendToTab,
   requestFromTabEnsured,
 } from "./tabs-messaging.js";
+import { enqueueDomInsert } from "./insert-queue.js";
 import {
   connectWebSocket,
   isWsReady,
@@ -144,6 +145,21 @@ export function handleJobError(jobId, errMsg = "Unknown error") {
     batchUpdateToast(batch, cls.permanent ? "ผิดพลาด (ถาวร)" : "ผิดพลาด");
     finalizeBatch(batch);
   }
+}
+
+
+function isTextNoOverlaySkippable(mode, source, result) {
+  if (String(mode || "") !== "lens_text") return false;
+  const src = String(source || "").toLowerCase();
+  if (src === "ai") return false; // AI no-text gets its own badge/metadata.
+  const reason = String(
+    result?.meta?.skipped_reason ||
+      result?.metadata?.skipped_reason ||
+      result?.translated?.meta?.skipped_reason ||
+      result?.original?.meta?.skipped_reason ||
+      ""
+  ).toLowerCase();
+  return !reason || /no[_ -]?text|empty|no[_ -]?overlay|no[_ -]?paragraph/.test(reason);
 }
 
 // --- Result handling -------------------------------------------------------
@@ -262,7 +278,7 @@ export async function handleResult(jobId, result) {
   // Apply to the page: image swap for non-text modes, overlay for text modes.
   let replaceOk = null;
   if (newImg && mode !== "lens_text") {
-    replaceOk = await requestFromTabEnsured(
+    replaceOk = await enqueueDomInsert(
       tabId,
       { type: "REPLACE_IMAGE", original: imgUrl, newSrc: newImg },
       frameId,
@@ -271,7 +287,7 @@ export async function handleResult(jobId, result) {
 
   let overlayOk = null;
   if (hasHtml) {
-    overlayOk = await requestFromTabEnsured(
+    overlayOk = await enqueueDomInsert(
       tabId,
       { type: "OVERLAY_HTML", original: imgUrl, result, mode: mode || "", source: ctx.source || "" },
       frameId,
@@ -282,14 +298,20 @@ export async function handleResult(jobId, result) {
   let errMsg = "";
   if (!hasHtml && !(newImg && mode !== "lens_text")) {
     if (!newImg) {
-      // Nothing usable came back.
-      await requestFromTabEnsured(
-        tabId,
-        { type: "IMAGE_ERROR", original: imgUrl, message: "API returned no overlay data" },
-        frameId,
-      );
-      ok = false;
-      errMsg = "API returned no overlay data";
+      // Lens-direct text modes can legitimately return no overlay when Lens
+      // found no text.  Treat that as a skipped image, not a red error badge.
+      if (isTextNoOverlaySkippable(mode, ctx.source || result?.source || "", result)) {
+        ok = true;
+        errMsg = "No text detected";
+      } else {
+        await enqueueDomInsert(
+          tabId,
+          { type: "IMAGE_ERROR", original: imgUrl, message: "API returned no overlay data" },
+          frameId,
+        );
+        ok = false;
+        errMsg = "API returned no overlay data";
+      }
     }
   }
   if (newImg && mode !== "lens_text" && !replaceOk?.ok) {
@@ -305,8 +327,12 @@ export async function handleResult(jobId, result) {
 
   if (batch && imageKey) {
     if (ok) {
-      batchMark(batchId, imageKey, { status: "done" });
-      batchUpdateToast(batch, "เสร็จ 1 ภาพ");
+      const skipped = errMsg === "No text detected";
+      batchMark(batchId, imageKey, {
+        status: skipped ? "skipped" : "done",
+        lastError: skipped ? errMsg : "",
+      });
+      batchUpdateToast(batch, skipped ? "ข้าม: ไม่พบข้อความ" : "เสร็จ 1 ภาพ");
     } else {
       const cls = classifyJobError(errMsg);
       batchMark(batchId, imageKey, {
