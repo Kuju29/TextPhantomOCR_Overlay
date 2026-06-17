@@ -45,6 +45,7 @@ from backend.render.textblocks import (
 from backend.render.erase import erase_text_with_boxes
 from backend.render.groups import group_paragraphs_into_bubbles
 from backend.render.build_ai_tree import build_ai_tree
+from backend.render.region import LANGUAGE_DIRECTION
 from backend.render.patch import patch as patch_ai_tree
 from backend.render.tp_html import (
     fit_tree_font_sizes,
@@ -131,6 +132,112 @@ def _pick_template_tree(original_tree: dict | None, translated_tree: dict | None
     return translated_tree or original_tree or {}
 
 
+def _target_orientation_for_lang(target_lang: str) -> str:
+    """Return the renderer orientation wanted by *target_lang* (``h``/``v``).
+
+    This mirrors ``build_ai_tree``: CJK/``auto`` targets default to vertical;
+    Thai/Latin and unknown languages stay horizontal.
+    """
+    lang_norm = normalize_lang(target_lang)
+    preset = LANGUAGE_DIRECTION.get(lang_norm, "")
+    if preset in ("h", "hr"):
+        return "h"
+    if preset in ("v", "auto"):
+        return "v"
+    return "h"
+
+
+def _source_orientation_from_lens_tree(tree: dict | None) -> tuple[str, dict[str, Any]]:
+    """Classify Lens source layout as horizontal or vertical from item geometry.
+
+    The detector is intentionally cheap and uses only Lens geometry.  It does
+    not run ONNX.  Axis-aligned items within ~12 degrees of 0/90 vote; if
+    rotation is missing, a tall/narrow ``bounds_px`` item can vote vertical.
+    """
+    n_h = n_v = n_axis = n_items = 0
+    rot_samples: list[float] = []
+    if isinstance(tree, dict):
+        for para in tree.get("paragraphs") or []:
+            if not isinstance(para, dict):
+                continue
+            for it in para.get("items") or []:
+                if not isinstance(it, dict) or not str(it.get("text") or "").strip():
+                    continue
+                n_items += 1
+                box = it.get("box") or {}
+                try:
+                    rot = float(box.get("rotation_deg") or box.get("rotation_deg_css") or 0.0)
+                except Exception:
+                    rot = 0.0
+                rot_samples.append(rot)
+                residual = ((rot + 45.0) % 90.0) - 45.0
+                if abs(residual) <= 12.0:
+                    n_axis += 1
+                    r_mod = rot % 180.0
+                    if r_mod > 90.0:
+                        r_mod -= 180.0
+                    if abs(r_mod) > 45.0:
+                        n_v += 1
+                    else:
+                        n_h += 1
+                    continue
+                # Fallback for Lens payloads whose rotation is missing but
+                # bounds show a clear portrait text item.
+                bpx = it.get("bounds_px")
+                if isinstance(bpx, (list, tuple)) and len(bpx) == 4:
+                    try:
+                        w = float(bpx[2]) - float(bpx[0])
+                        h = float(bpx[3]) - float(bpx[1])
+                    except Exception:
+                        w = h = 0.0
+                    if w > 0 and h > 2.2 * w:
+                        n_axis += 1
+                        n_v += 1
+    orient = "v" if n_axis > 0 and n_v * 2 >= n_axis else "h"
+    return orient, {
+        "source_orientation": orient,
+        "source_axis_items": n_axis,
+        "source_vertical_items": n_v,
+        "source_horizontal_items": n_h,
+        "source_items": n_items,
+        "rotation_samples": [round(x, 1) for x in rot_samples[:12]],
+    }
+
+
+def _should_use_onnx_for_ai(
+    original_tree: dict | None,
+    translated_tree: dict | None,  # noqa: ARG001 - reserved for future geometry quality checks
+    target_lang: str,
+) -> tuple[bool, dict[str, Any]]:
+    """Decide whether ``lens_text.ai`` really needs the ONNX self-block path.
+
+    Policy:
+      * ``TP_AI_LAYOUT_MODE=fast``    -> never run ONNX; patch AI into Lens geometry.
+      * ``TP_AI_LAYOUT_MODE=quality`` -> always run ONNX.
+      * ``auto`` (default)            -> run ONNX only when source and target
+        reading orientations differ, e.g. vertical Japanese -> horizontal Thai
+        or horizontal English -> vertical Japanese.
+
+    Horizontal -> horizontal AI now stays on the fast Lens-template path.
+    """
+    mode = (getattr(settings, "ai_layout_mode", "auto") or "auto").strip().lower()
+    source_orientation, meta = _source_orientation_from_lens_tree(original_tree)
+    target_orientation = _target_orientation_for_lang(target_lang)
+    meta["target_orientation"] = target_orientation
+    meta["ai_layout_mode"] = mode
+    if mode in ("fast", "lens", "lens_template", "direct", "0", "off", "false", "no"):
+        meta["onnx_reason"] = "forced_fast"
+        return False, meta
+    if mode in ("quality", "onnx", "self", "self_blocks", "1", "true", "yes"):
+        meta["onnx_reason"] = "forced_quality"
+        return True, meta
+    if source_orientation != target_orientation:
+        meta["onnx_reason"] = "direction_change"
+        return True, meta
+    meta["onnx_reason"] = "same_orientation_fast"
+    return False, meta
+
+
 # --- Text-colour annotation -------------------------------------------------
 
 def _para_rect_px(para: dict) -> tuple[int, int, int, int] | None:
@@ -191,6 +298,8 @@ def _run_ai_layer(
     *,
     base_img: Image.Image | None = None,
     capture_request: bool = False,
+    use_lens_template: bool = False,
+    layout_meta: dict[str, Any] | None = None,
 ) -> dict | None:
     """Translate with AI, patch into a tree, and write the ``Ai`` result.
 
@@ -270,6 +379,11 @@ def _run_ai_layer(
     # time; collapsing it here guarantees it never reaches parsing/rendering.
     ai_text_full = markers.clamp_output_repeats(str(result.get("aiTextFull") or ""))
     meta = dict(result.get("meta") or {})
+    if isinstance(layout_meta, dict):
+        meta.update({f"layout_{k}": v for k, v in layout_meta.items() if k != "rotation_samples"})
+        if "rotation_samples" in layout_meta:
+            meta["layout_rotation_samples"] = layout_meta.get("rotation_samples")
+    meta["layout_path"] = "lens_template_fast" if use_lens_template else "self_blocks_onnx"
 
     # When the request was captured for debugging, keep BOTH attempts so we
     # can compare the truncated/dropped first attempt to the retry.
@@ -308,23 +422,45 @@ def _run_ai_layer(
             ai_group_texts += [""] * (n_src - len(ai_group_texts))
         ai_text_full_clean = "\n\n".join(ai_group_texts[:n_src])
 
-    # Build the AI tree fresh from bubble geometry + target language direction.
-    # Each bubble group becomes ONE paragraph in the AI tree with item boxes
-    # whose orientation matches the target language (horizontal for Thai/Latin,
-    # vertical for CJK).  This replaces the old approach of copying geometry
-    # from the Lens Translated tree (which kept source-language rotation).
-    ai_tree = build_ai_tree(
-        bubble_groups_og,
-        ai_group_texts,
-        original_tree or {},
-        target_lang,
-        W, H,
-    )
+    if use_lens_template:
+        # Fast same-orientation AI path: pour the AI wording into Lens's own
+        # geometry instead of constructing new blocks with ONNX/bubble detect.
+        # This is the right path for horizontal->horizontal and vertical->vertical
+        # text because Lens already returned suitable paragraph/item boxes.
+        template_tree = _pick_template_tree(original_tree, translated_tree)
+        # If group_para_indices is just a one-to-one paragraph map, patching
+        # without a group_map is cheaper and preserves Lens paragraphs exactly.
+        one_to_one = (
+            len(group_para_indices) == len((template_tree or {}).get("paragraphs") or [])
+            and all(len(xs) == 1 and xs[0] == i for i, xs in enumerate(group_para_indices))
+        )
+        patched = patch_ai_tree(
+            ai_text_full_clean,
+            template_tree,
+            W, H,
+            thai_font, latin_font,
+            target_lang,
+            group_map=None if one_to_one else group_para_indices,
+        )
+        ai_tree = patched.get("aiTree") or {}
+        ai_text_full_clean = str(patched.get("aiTextFull") or ai_text_full_clean)
+    else:
+        # Quality / direction-change AI path: build a fresh AI tree from bubble
+        # geometry + target language direction.  This is intentionally reserved
+        # for cases like vertical Japanese -> horizontal Thai where Lens boxes
+        # are too narrow for the new reading direction.
+        ai_tree = build_ai_tree(
+            bubble_groups_og,
+            ai_group_texts,
+            original_tree or {},
+            target_lang,
+            W, H,
+        )
 
-    # After building the AI tree, compute bubble_groups so the renderer can
-    # use the combined group text directly.
-    from backend.render.groups import group_paragraphs_into_bubbles as _grp
-    _grp(ai_tree, W, H)
+        # After building the AI tree, compute bubble_groups so the renderer can
+        # use the combined group text directly.
+        from backend.render.groups import group_paragraphs_into_bubbles as _grp
+        _grp(ai_tree, W, H)
 
     out["AiTextFull"] = ai_text_full_clean
     out["Ai"] = {"aiTextFull": ai_text_full_clean, "aiTree": ai_tree, "meta": meta}
@@ -383,14 +519,16 @@ def process_image(
     #   * lens_images                 -> Lens-direct image result
     #   * lens_text.original          -> Lens-direct OCR/layout overlay
     #   * lens_text.translated        -> Lens-direct translated layout overlay
-    #   * lens_text.ai                -> self-built AI block path
-    # Only the last one is allowed to run the ONNX text-block detector and
-    # bubble grouping. This keeps Hugging Face CPU fast for normal batch use.
-    needs_self_blocks = (mode_id == "lens_text" and source_id == "ai" and ai_cfg is not None)
+    #   * lens_text.ai                -> AUTO:
+    #       - same orientation        -> fast Lens-template AI, no ONNX
+    #       - direction changed       -> self-built block path with ONNX
+    wants_ai = (mode_id == "lens_text" and source_id == "ai" and ai_cfg is not None)
+    needs_self_blocks = False
+    ai_layout_meta: dict[str, Any] = {}
 
     # Per-stage wall-clock timings (ms), surfaced via the translate.perf log
     # line so slow jobs can be diagnosed from the logs alone.
-    stages: dict[str, Any] = {"pipeline_path": "self_blocks_ai" if needs_self_blocks else "lens_direct"}
+    stages: dict[str, Any] = {"pipeline_path": "lens_direct"}
 
     img = Image.open(image_path).convert("RGB")
     W, H = img.size
@@ -405,11 +543,10 @@ def process_image(
     # Both Lens (httpx I/O) and ONNX (onnxruntime C-ext) release the
     # GIL, so the threads run truly in parallel on CPython.
     # =========================================================
-    # ONNX text-block detection is only useful for lens_text.ai.
-    # Lens-direct modes use geometry returned by Lens and must never build
-    # blocks locally. Running ONNX for lens_images/original/translated was the
-    # reason HF CPU batches inflated to 5-12s per image.
-    _need_onnx = needs_self_blocks
+    # Do NOT run ONNX before Lens in AUTO mode.  We first inspect Lens geometry
+    # and only then decide whether lens_text.ai really needs self-built blocks.
+    # This prevents horizontal->horizontal AI jobs from paying the ONNX cost.
+    _need_onnx = False
     _tb_timings: dict = {}
     if isinstance(lens_data, dict):
         # Lens result pre-supplied (CLI replay) — run ONNX alone if needed.
@@ -471,7 +608,7 @@ def process_image(
         "translated": {},
         "Ai": {},
         "perfStages": stages,
-        "pipelinePath": "self_blocks_ai" if needs_self_blocks else "lens_direct",
+        "pipelinePath": "lens_direct",
     }
 
     # --- lens_images: just hand back the image -----------------------------
@@ -503,6 +640,27 @@ def process_image(
     dbg("tree.original", tree_stats(original_tree))
     dbg("tree.translated", tree_stats(translated_tree))
 
+    if wants_ai:
+        needs_self_blocks, ai_layout_meta = _should_use_onnx_for_ai(
+            original_tree, translated_tree, target_lang
+        )
+        stages.update(ai_layout_meta)
+        stages["pipeline_path"] = "self_blocks_ai" if needs_self_blocks else "lens_ai_fast"
+        out["pipelinePath"] = stages["pipeline_path"]
+        if needs_self_blocks:
+            _t = time.perf_counter()
+            text_blocks = detect_text_blocks(img, timings=_tb_timings)
+            stages["blocks_ms"] = round((time.perf_counter() - _t) * 1000, 1)
+            stages["blocks"] = len(text_blocks)
+            stages["blocks_lock_ms"] = float(_tb_timings.get("lock_ms", 0.0))
+            stages["blocks_infer_ms"] = float(_tb_timings.get("infer_ms", 0.0))
+        else:
+            text_blocks = []
+            stages["blocks_ms"] = 0.0
+            stages["blocks"] = 0
+            stages["blocks_lock_ms"] = 0.0
+            stages["blocks_infer_ms"] = 0.0
+
     original_span_tokens = flatten_spans(original_tree)
 
     # Fast Lens-direct text path.
@@ -526,14 +684,43 @@ def process_image(
             # current background image, not any locally detected blocks.
             _annotate_text_light(original_tree, base_img)
             _annotate_text_light(translated_tree, base_img)
+        finally:
+            _CPU_GATE.release()
 
+        # Optional fast AI path: translate text, then patch AI wording into
+        # Lens's own template geometry.  This avoids ONNX entirely for
+        # same-orientation jobs.
+        _ai_is_local = bool(ai_cfg) and (
+            is_local_provider(ai_cfg.provider)
+            or any(h in (ai_cfg.base_url or "").lower()
+                   for h in ("localhost", "127.0.0.1", "0.0.0.0"))
+        )
+        _run_ai = bool(wants_ai and ai_cfg and ((ai_cfg.api_key or "").strip() or _ai_is_local))
+        _f_ai: concurrent.futures.Future | None = None
+        _ai_executor: concurrent.futures.ThreadPoolExecutor | None = None
+        _t_ai_submit = time.perf_counter()
+        if _run_ai:
+            _ai_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            _f_ai = _ai_executor.submit(
+                _run_ai_layer,
+                out, original_tree, translated_tree, ai_cfg, target_lang, W, H, thai_font, latin_font,
+                base_img=base_img,
+                capture_request=capture_ai_request,
+                use_lens_template=True,
+                layout_meta=ai_layout_meta,
+            )
+
+        _t = time.perf_counter()
+        _CPU_GATE.acquire()
+        stages["gate_wait_ms"] = stages.get("gate_wait_ms", 0.0) + round((time.perf_counter() - _t) * 1000, 1)
+        try:
             _t = time.perf_counter()
             fit_tree_font_sizes(original_tree, thai_font, latin_font, W, H)
             out["original"]["originalhtml"] = render_tree_overlay(original_tree, W, H)
             fit_tree_font_sizes(translated_tree, thai_font, latin_font, W, H)
             out["translated"]["translatedhtml"] = render_tree_overlay(translated_tree, W, H)
             out["htmlCss"] = overlay_css()
-            out["htmlMeta"] = {"baseW": int(W), "baseH": int(H), "format": "tp", "path": "lens_direct"}
+            out["htmlMeta"] = {"baseW": int(W), "baseH": int(H), "format": "tp", "path": stages.get("pipeline_path", "lens_direct")}
             stages["render_ms"] = round((time.perf_counter() - _t) * 1000, 1)
 
             if settings.lens_direct_png:
@@ -546,7 +733,15 @@ def process_image(
                 stages["png_ms"] = 0.0
         finally:
             _CPU_GATE.release()
-        stages.setdefault("ai_ms", 0.0)
+
+        if _f_ai is not None:
+            try:
+                _f_ai.result()
+            finally:
+                _ai_executor.shutdown(wait=False)  # type: ignore[union-attr]
+            stages["ai_ms"] = round((time.perf_counter() - _t_ai_submit) * 1000, 1)
+        else:
+            stages.setdefault("ai_ms", 0.0)
         return out
 
     # ONNX already done in Phase 1 — annotate trees now.
@@ -651,6 +846,8 @@ def process_image(
             out, original_tree, translated_tree, ai_cfg, target_lang, W, H, thai_font, latin_font,
             base_img=base_img,
             capture_request=capture_ai_request,
+            use_lens_template=False,
+            layout_meta=ai_layout_meta,
         )
 
     # HTML render + PNG encode in the main thread while AI runs above.
