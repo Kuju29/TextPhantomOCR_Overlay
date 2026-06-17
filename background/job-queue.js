@@ -1,36 +1,34 @@
 /**
- * Concurrency-limited task queue for outgoing jobs.
+ * Outgoing job queue.
  *
- * Two limits interact:
- * - `userMaxConcurrency` — user's hard cap (0/invalid = safe default).
- * - `serverHintConcurrency` — temporary backpressure hint from the API.
- * - `softMaxConcurrency` — softer cap applied for AI jobs.
+ * v12 intentionally disables the old client-side processing cap. The extension
+ * now submits all discovered images as quickly as the browser/network allows;
+ * the backend split queues decide how many jobs actually run at once.
+ *
+ * A positive maxConcurrency value is kept only for future/manual debugging, but
+ * the shipped default is 0 = unlimited. Server backpressure hints are ignored
+ * in this build because SERVER_MAX_WORKERS/direct/AI lanes are authoritative.
  */
 
 import { DEFAULT_MAX_CONCURRENCY } from "../shared/constants.js";
 
 const SOFT_MAX_DEFAULT = 15;
-const SERVER_HINT_TTL_MS = 30000;
 
-let userMaxConcurrency = DEFAULT_MAX_CONCURRENCY;
-let serverHintConcurrency = DEFAULT_MAX_CONCURRENCY;
-let serverHintUntil = 0;
+let userMaxConcurrency = DEFAULT_MAX_CONCURRENCY; // 0 = unlimited
 let softMaxConcurrency = SOFT_MAX_DEFAULT;
 let forceSoftMax = false;
 
 let running = 0;
 const queue = [];
 
-function currentServerHint() {
-  if (Date.now() > serverHintUntil) return DEFAULT_MAX_CONCURRENCY;
-  return Math.max(1, Number(serverHintConcurrency) || DEFAULT_MAX_CONCURRENCY);
+function unlimited() {
+  return !Number.isFinite(Number(userMaxConcurrency)) || Number(userMaxConcurrency) <= 0;
 }
 
-/** Effective concurrency limit given the current mode. */
+/** Effective client-side submission/long-poll concurrency. */
 function effectiveMax() {
-  const hard = Math.max(1, Number(userMaxConcurrency) || DEFAULT_MAX_CONCURRENCY);
-  const server = currentServerHint();
-  let max = Math.min(hard, server);
+  if (unlimited()) return Number.POSITIVE_INFINITY;
+  let max = Math.max(1, Number(userMaxConcurrency));
   if (forceSoftMax) {
     const soft = Number(softMaxConcurrency) > 0 ? Number(softMaxConcurrency) : SOFT_MAX_DEFAULT;
     max = Math.min(max, soft);
@@ -38,9 +36,10 @@ function effectiveMax() {
   return Math.max(1, max);
 }
 
-/** Pump the queue while worker slots are free. */
+/** Pump the queue while slots are free. */
 function pump() {
-  while (queue.length && running < effectiveMax()) {
+  const max = effectiveMax();
+  while (queue.length && running < max) {
     running++;
     const task = queue.shift();
     Promise.resolve()
@@ -59,45 +58,38 @@ export function addTask(fn) {
   pump();
 }
 
-/** Set the user's hard concurrency cap (0/invalid = safe default). */
+/** Set client cap. 0/invalid = unlimited. */
 export function setMaxConcurrency(value) {
-  userMaxConcurrency = Number(value) > 0 ? Number(value) : DEFAULT_MAX_CONCURRENCY;
+  const n = Number(value);
+  userMaxConcurrency = Number.isFinite(n) && n > 0 ? n : 0;
   pump();
 }
 
-/** Temporary server-side backpressure hint; expires automatically. */
-export function applyServerConcurrencyHint(value) {
-  const hinted = Number(value);
-  if (!Number.isFinite(hinted) || hinted <= 0) return;
-  serverHintConcurrency = Math.max(1, hinted);
-  serverHintUntil = Date.now() + SERVER_HINT_TTL_MS;
-  pump();
+/** No-op in v12: server split queues own backpressure. */
+export function applyServerConcurrencyHint(_value) {
+  return;
 }
 
-/**
- * Configure the soft cap for the current batch.
- * @param {boolean} force - true for AI jobs
- * @param {number} [soft] - the soft cap value (defaults to {@link SOFT_MAX_DEFAULT})
- */
+/** Configure optional soft cap; ignored when maxConcurrency=0/unlimited. */
 export function setSoftConcurrency(force, soft = SOFT_MAX_DEFAULT) {
   forceSoftMax = !!force;
   softMaxConcurrency = forceSoftMax ? soft : SOFT_MAX_DEFAULT;
   pump();
 }
 
-/** Soft cap to use for an AI key — HF keys are throttled harder. */
+/** Soft cap to use for an AI key — retained for manual capped mode. */
 export function aiSoftMaxForKey(key) {
   return String(key || "").trim().startsWith("hf_") ? 2 : 4;
 }
 
-/** Snapshot of the current limits (for logging). */
+/** Snapshot of current limits (for logging/UI). */
 export function describeLimits() {
   return {
     max: userMaxConcurrency,
-    server: currentServerHint(),
+    server: 0,
     soft: softMaxConcurrency,
     forceSoft: forceSoftMax,
-    effective: effectiveMax(),
+    effective: unlimited() ? "unlimited" : effectiveMax(),
     running,
     queued: queue.length,
   };
