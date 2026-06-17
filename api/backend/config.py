@@ -44,24 +44,32 @@ class Settings:
     # or override SERVER_MAX_WORKERS/TP_CPU_CONCURRENCY on larger machines.
     # I/O parallelism helps Lens waits, but CPU-heavy ONNX/render stages must
     # stay gated or batches inflate from ~1s to tens of seconds.
-    max_workers: int = field(default_factory=lambda: _env_int("SERVER_MAX_WORKERS", 8))
+    max_workers: int = field(default_factory=lambda: _env_int("SERVER_MAX_WORKERS", 15))
     cpu_concurrency: int = field(default_factory=lambda: max(1, _env_int("TP_CPU_CONCURRENCY", 2)))
     job_ttl_sec: int = field(default_factory=lambda: _env_int("JOB_TTL_SEC", 3600))
     http_timeout_sec: float = field(default_factory=lambda: _env_float("HTTP_TIMEOUT_SEC", 120.0))
     # Multi-user safety: bound the pending queue + per-job wall-clock timeout so
     # a flood of requests can't exhaust memory or pin workers forever.
-    max_queue_size: int = field(default_factory=lambda: _env_int("TP_MAX_QUEUE_SIZE", 200))
-    max_jobs_tracked: int = field(default_factory=lambda: _env_int("TP_MAX_JOBS_TRACKED", 2000))
-    job_run_timeout_sec: float = field(default_factory=lambda: _env_float("TP_JOB_RUN_TIMEOUT_SEC", 90.0))
+    max_queue_size: int = field(default_factory=lambda: _env_int("TP_MAX_QUEUE_SIZE", 2000))
+    max_jobs_tracked: int = field(default_factory=lambda: _env_int("TP_MAX_JOBS_TRACKED", 5000))
+    job_run_timeout_sec: float = field(default_factory=lambda: _env_float("TP_JOB_RUN_TIMEOUT_SEC", 120.0))
+
+    # Split lane concurrency -------------------------------------------------
+    # SERVER_MAX_WORKERS is the total processing budget. Lens-direct jobs are
+    # network/I/O heavy and can use most workers; lens_text.ai is CPU/provider
+    # heavy and gets a smaller lane so it cannot block direct jobs. Set either
+    # env var to override the automatic split.
+    direct_max_concurrency: int = field(default_factory=lambda: max(0, _env_int("TP_DIRECT_MAX_CONCURRENCY", 0)))
+    ai_max_concurrency: int = field(default_factory=lambda: max(0, _env_int("TP_AI_MAX_CONCURRENCY", 0)))
 
     # Result caches ----------------------------------------------------------
-    result_cache_max: int = field(default_factory=lambda: _env_int("TP_RESULT_CACHE_MAX", 128))
-    ai_result_cache_max: int = field(default_factory=lambda: _env_int("TP_AI_RESULT_CACHE_MAX", 32))
+    result_cache_max: int = field(default_factory=lambda: _env_int("TP_RESULT_CACHE_MAX", 512))
+    ai_result_cache_max: int = field(default_factory=lambda: _env_int("TP_AI_RESULT_CACHE_MAX", 128))
 
     # Hugging Face throttling ------------------------------------------------
     hf_max_concurrency: int = field(default_factory=lambda: max(1, _env_int("HF_AI_MAX_CONCURRENCY", 1)))
-    hf_min_interval_sec: float = field(default_factory=lambda: max(0.0, _env_float("HF_AI_MIN_INTERVAL_SEC", 5.0)))
-    hf_max_retries: int = field(default_factory=lambda: max(1, _env_int("HF_AI_MAX_RETRIES", 6)))
+    hf_min_interval_sec: float = field(default_factory=lambda: max(0.0, _env_float("HF_AI_MIN_INTERVAL_SEC", 0.8)))
+    hf_max_retries: int = field(default_factory=lambda: max(1, _env_int("HF_AI_MAX_RETRIES", 3)))
     hf_retry_base_sec: float = field(default_factory=lambda: max(0.2, _env_float("HF_AI_RETRY_BASE_SEC", 2.0)))
 
     # AI key fall-back -------------------------------------------------------
@@ -96,19 +104,29 @@ class Settings:
     # On a 2-vCPU machine (HF Space free tier) pool_size=1 is optimal: the
     # single session uses both cores and runs inference in ~1.3 s. With
     # pool_size=4, four sessions compete for 2 cores and each slows to 5-17 s.
-    # Rule of thumb: pool_size = max(1, cpu_count // 2).
-    # Override with TP_TEXTBLOCK_POOL_SIZE; 0 = auto from os.cpu_count().
+    # Default is 1 because only lens_text.ai uses this model and HF CPU
+    # containers slow down badly when several ONNX sessions compete.
+    # Override with TP_TEXTBLOCK_POOL_SIZE on dedicated AI workers.
     textblock_pool_size: int = field(
-        default_factory=lambda: (
-            lambda raw, cpus: max(1, min(cpus // 2, 4)) if raw == 0 else max(1, raw)
-        )(
-            _env_int("TP_TEXTBLOCK_POOL_SIZE", 0),
-            __import__("os").cpu_count() or 2,
-        )
+        # Default to one session. Only lens_text.ai needs this model; direct Lens
+        # paths must not pay for a multi-session ONNX pool on small HF CPUs.
+        default_factory=lambda: max(1, _env_int("TP_TEXTBLOCK_POOL_SIZE", 1))
     )
+
+    # Lens-direct rendering --------------------------------------------------
+    # lens_images, lens_text.translated and lens_text.original are Lens-direct:
+    # they use Lens geometry/text and must not run the self block detector.
+    # Keeping erase/png enabled gives a clean background for text overlays; turn
+    # them off only when you want maximum speed and can tolerate overlaying text
+    # on the original image.
+    lens_direct_erase: bool = field(default_factory=lambda: _env_bool("TP_LENS_DIRECT_ERASE", True))
+    lens_direct_png: bool = field(default_factory=lambda: _env_bool("TP_LENS_DIRECT_PNG", True))
 
     # Warmup -----------------------------------------------------------------
     warmup_lang: str = field(default_factory=lambda: _env_str("TP_WARMUP_LANG", "th") or "th")
+    # Do not load ONNX at boot by default. It is lazy-loaded on the first
+    # lens_text.ai request. Set TP_TEXTBLOCK_WARMUP=1 for dedicated AI workers.
+    textblock_warmup: bool = field(default_factory=lambda: _env_bool("TP_TEXTBLOCK_WARMUP", False))
 
     # Logging / debug --------------------------------------------------------
     debug: bool = field(default_factory=lambda: _env_bool("TP_DEBUG", False))
@@ -123,7 +141,7 @@ class Settings:
     )
 
     # Build metadata ---------------------------------------------------------
-    build_id: str = field(default_factory=lambda: _env_str("TP_BUILD_ID", "v10-rewrite-20260514"))
+    build_id: str = field(default_factory=lambda: _env_str("TP_BUILD_ID", "v14-filtered-bulk-insert-20260617"))
 
 
 # Module-level singleton.  Import this from anywhere as ``from backend.config import settings``.
