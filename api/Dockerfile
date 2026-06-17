@@ -15,11 +15,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # The backend's auto-download (backend/render/textblocks.py) remains as a
 # fallback when TP_TEXTBLOCK_MODEL points somewhere else.
 RUN mkdir -p models \
-  && python -c "import urllib.request, os; urllib.request.urlretrieve('https://huggingface.co/Kiuyha/Manga-Bubble-YOLO/resolve/main/onnx/yolo26n.onnx', 'models/manga-bubble-yolo.onnx'); s = os.path.getsize('models/manga-bubble-yolo.onnx'); assert s > 1000000, s; print('text-block model baked into image:', s, 'bytes')"
+  && python -c "import urllib.request, os; urllib.request.urlretrieve('https://huggingface.co/Kiuyha/Manga-Bubble-YOLO/resolve/main/onnx/yolo26s.onnx', 'models/manga-bubble-yolo.onnx'); s = os.path.getsize('models/manga-bubble-yolo.onnx'); assert s > 1000000, s; print('text-block model baked into image:', s, 'bytes')"
 
 COPY backend ./backend
 
 ENV PORT=7860
 EXPOSE 7860
 
-CMD ["bash", "-lc", "uvicorn backend.main:app --host 0.0.0.0 --port ${PORT} --no-access-log --log-level warning"]
+CMD ["bash", "-lc", "uvicorn backend.main:app --host 0.0.0.0 --port ${PORT} --no-access-log --log-level warning --ws-ping-interval 45 --ws-ping-timeout 45"]
