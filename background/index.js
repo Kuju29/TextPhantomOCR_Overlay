@@ -226,7 +226,10 @@ chrome.runtime.onInstalled.addListener(bootstrap);
 chrome.runtime.onStartup?.addListener(bootstrap);
 
 // Load the user's concurrency cap on every SW start.
-getStorage({ maxConcurrency: 3 }).then(({ maxConcurrency }) => {
+getStorage({ maxConcurrency: 0 }).then(({ maxConcurrency }) => {
+  // v12 full-speed build: disable the extension-side cap on startup.
+  // The server split queues decide real processing concurrency.
+  if (Number(maxConcurrency) > 0) maxConcurrency = 0;
   setMaxConcurrency(maxConcurrency);
   log.info("concurrency limits", describeLimits());
   resumePendingRestJobs().catch((e) => log.warn("resume pending jobs failed", e?.message || String(e)));
