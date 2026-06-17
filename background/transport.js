@@ -26,6 +26,10 @@ const WS_OPEN_TIMEOUT_MS = 8000;
 const WS_RETRIES = 2;
 const LONG_POLL_WAIT_SEC = 25;
 const LONG_POLL_FETCH_TIMEOUT_MS = 32000;
+// v12 full-speed: long-poll is the reliable event path. Disable browser WS
+// subscriptions by default to avoid Hugging Face/proxy keepalive churn during
+// large unlimited batches. REST submit + long-poll still receives every result.
+const WS_EVENTS_ENABLED = false;
 
 // --- WebSocket state -------------------------------------------------------
 let ws = null;
@@ -180,6 +184,10 @@ function resubscribePendingJobs() {
  * @returns {Promise<boolean>} whether the socket is open
  */
 export async function connectWebSocket() {
+  if (!WS_EVENTS_ENABLED) {
+    setWsStatus("disabled");
+    return false;
+  }
   const base = await getApiBase();
   const wsUrl = toWebSocketUrl(base);
   if (!wsUrl) {
@@ -269,6 +277,7 @@ export async function connectWebSocket() {
 
 /** Subscribe a job to the event channel.  It is intentionally best-effort. */
 export async function subscribeJobEvents(jobId) {
+  if (!WS_EVENTS_ENABLED) return false;
   try {
     if (!isWsReady()) await connectWebSocket();
     return sendWsSubscribe(jobId);
