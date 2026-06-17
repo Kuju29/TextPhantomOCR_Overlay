@@ -51,6 +51,9 @@ export function ensureBatch(batchId, tabId, frameId) {
       pass: 1, // 1 = first pass, 2 = retry pass
       total1: 0,
       total2: 0,
+      skipped1: 0,
+      skipped2: 0,
+      scanStats: null,
       lastToastTs: 0,
       retryScheduled: false,
       items: new Map(), // imageKey -> { payload, attempt, status, lastError, permanent }
@@ -73,13 +76,14 @@ export function batchPassTotal(b) {
 export function batchPassStats(b) {
   const pass = b?.pass || 1;
   const total = batchPassTotal(b);
-  const counts = { queued: 0, processing: 0, inserting: 0, done: 0, error: 0, aborted: 0 };
+  const counts = { queued: 0, processing: 0, inserting: 0, done: 0, error: 0, aborted: 0, skipped: 0 };
   for (const it of b?.items?.values?.() || []) {
     if (!it || it.attempt !== pass) continue;
     if (it.status in counts) counts[it.status]++;
   }
-  const finished = counts.done + counts.error + counts.aborted;
-  return { pass, total, ...counts, finished };
+  const finished = counts.done + counts.error + counts.aborted + counts.skipped;
+  const scanSkipped = pass === 2 ? Number(b?.skipped2) || 0 : Number(b?.skipped1) || 0;
+  return { pass, total, scanSkipped, ...counts, finished };
 }
 
 /** Send a toast for a batch, throttled (unless `force`). */
@@ -103,6 +107,8 @@ export function batchUpdateToast(b, stage, force = false) {
     parts.push(`ประมวลผล ${s.processing + s.inserting}/${s.total}`);
   }
   if (s.done) parts.push(`แทรกกลับ ${s.done}/${s.total}`);
+  const skippedTotal = (Number(s.skipped) || 0) + (Number(s.scanSkipped) || 0);
+  if (skippedTotal) parts.push(`ข้าม ${skippedTotal}`);
   if (s.error) parts.push(`ผิดพลาด ${s.error}`);
   if (s.aborted) parts.push(`ยกเลิก ${s.aborted}`);
   const msg = `${head} ${parts.join(" | ")} ${stage ? `• ${stage}` : ""}`.trim();
