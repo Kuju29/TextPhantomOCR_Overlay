@@ -88,7 +88,12 @@
         ),
       );
     }
-    return out.filter(Boolean);
+    const items = out.filter(Boolean);
+    return {
+      ok: true,
+      items,
+      stats: { candidates: urls.length + posBySrc.size, accepted: items.length, skipped: 0, duplicates: 0, reasons: {} },
+    };
   }
 
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
@@ -112,14 +117,20 @@
       if (type === "WS_STATUS_UPDATE" || type === "API_STATUS_UPDATE") {
         return sendResponse({ ok: true });
       }
+      if (type === "TP_BULK_INSERT") {
+        const r = await TP.applyInsertBatch?.(msg?.items || [], { chunkSize: msg?.chunkSize });
+        return sendResponse(r || { ok: false, bulk: true, error: "bulk insert unavailable" });
+      }
 
       const { mode, lang } = await TP.getSettings();
 
       // --- GET_IMAGES -----------------------------------------------------
       if (type === "GET_IMAGES") {
-        const infos = await collectImages(mode, lang);
-        TP.log.info("GET_IMAGES", { returned: infos.length, host: location.host });
-        return sendResponse(infos);
+        const resp = await collectImages(mode, lang);
+        const items = Array.isArray(resp) ? resp : Array.isArray(resp?.items) ? resp.items : [];
+        const stats = Array.isArray(resp) ? null : resp?.stats || null;
+        TP.log.info("GET_IMAGES", { returned: items.length, skipped: stats?.skipped || 0, host: location.host });
+        return sendResponse({ ok: true, items, stats });
       }
 
       // --- GET_CONTEXT_IMAGE_PAYLOAD --------------------------------------
@@ -134,9 +145,8 @@
 
       // --- REPLACE_IMAGE --------------------------------------------------
       if (type === "REPLACE_IMAGE") {
-        const applied = await TP.replaceImageInDOM(msg.original, msg.newSrc);
-        if (!applied && TP.isMangaDexHost()) TP.mdRememberPending(msg.original, { newSrc: msg.newSrc });
-        return sendResponse({ ok: true, applied: !!applied });
+        const r = await TP.applyInsertMessage?.(msg);
+        return sendResponse(r || { ok: false, error: "replace unavailable" });
       }
 
       // --- RESOLVE_AND_REPLACE_MANGADEX_BLOB ------------------------------
@@ -147,45 +157,14 @@
 
       // --- IMAGE_ERROR ----------------------------------------------------
       if (type === "IMAGE_ERROR") {
-        const isNoOverlay = /no overlay data/i.test(String(msg.message || ""));
-        // Defer slightly: a late-arriving REPLACE_IMAGE may make this moot.
-        setTimeout(() => {
-          if (TP.shouldShowReplaceError(msg.original)) {
-            TP.markImageError(msg.original, isNoOverlay ? "No text detected" : msg.message);
-          }
-        }, 1200);
-        return sendResponse({ ok: true });
+        const r = await TP.applyInsertMessage?.(msg);
+        return sendResponse(r || { ok: true });
       }
 
       // --- OVERLAY_HTML ---------------------------------------------------
       if (type === "OVERLAY_HTML") {
-        const ovMode = typeof msg?.mode === "string" ? msg.mode : "";
-        if (!ovMode) return sendResponse({ ok: true, ignored: true });
-        const isText = ovMode === "lens_text";
-        const source = isText ? String(msg?.source || "").trim().toLowerCase() : "translated";
-        if (isText && !source) return sendResponse({ ok: true, ignored: true });
-
-        const img = TP.findTargetImage(msg.original);
-        TP.log.info("OVERLAY_HTML", {
-          key: TP.mdKeyFromUrl ? TP.mdKeyFromUrl(msg.original) : "",
-          found: Boolean(img),
-          source,
-        });
-        if (img) {
-          try {
-            TP.applyHtmlOverlay(img, msg.result, source, isText, msg.original);
-          } catch (e) {
-            TP.log.warn("OVERLAY_HTML failed", e?.message || String(e));
-          }
-        } else if (TP.isMangaDexHost()) {
-          TP.mdRememberPending(msg.original, {
-            overlay: { result: msg.result, source, isTextMode: isText },
-          });
-          // Nudge the mapper: if the page <img> appears later, the pending
-          // overlay above is flushed by ensureMangaDexDomMapping.
-          TP.scheduleMangaDexMapping?.();
-        }
-        return sendResponse({ ok: true });
+        const r = await TP.applyInsertMessage?.(msg);
+        return sendResponse(r || { ok: false, error: "overlay unavailable" });
       }
 
       // --- TP_FETCH_IMAGE (CDN 403 fallback) ---------------------------------
