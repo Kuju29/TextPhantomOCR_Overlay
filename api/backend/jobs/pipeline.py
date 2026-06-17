@@ -365,6 +365,7 @@ def process_image(
     mode: str,
     ai_cfg: AiConfig | None,
     *,
+    source: str = "translated",
     lens_data: dict[str, Any] | None = None,
     capture_ai_request: bool = False,
 ) -> dict[str, Any]:
@@ -375,11 +376,21 @@ def process_image(
     so the Lens round-trip isn't repeated on every run.
     """
     mode_id = mode if mode in SUPPORTED_MODES else "lens_images"
+    source_id = str(source or "translated").strip().lower() or "translated"
     target_lang = normalize_lang(lang)
+
+    # IMPORTANT pipeline contract:
+    #   * lens_images                 -> Lens-direct image result
+    #   * lens_text.original          -> Lens-direct OCR/layout overlay
+    #   * lens_text.translated        -> Lens-direct translated layout overlay
+    #   * lens_text.ai                -> self-built AI block path
+    # Only the last one is allowed to run the ONNX text-block detector and
+    # bubble grouping. This keeps Hugging Face CPU fast for normal batch use.
+    needs_self_blocks = (mode_id == "lens_text" and source_id == "ai" and ai_cfg is not None)
 
     # Per-stage wall-clock timings (ms), surfaced via the translate.perf log
     # line so slow jobs can be diagnosed from the logs alone.
-    stages: dict[str, float] = {}
+    stages: dict[str, Any] = {"pipeline_path": "self_blocks_ai" if needs_self_blocks else "lens_direct"}
 
     img = Image.open(image_path).convert("RGB")
     W, H = img.size
@@ -394,30 +405,47 @@ def process_image(
     # Both Lens (httpx I/O) and ONNX (onnxruntime C-ext) release the
     # GIL, so the threads run truly in parallel on CPython.
     # =========================================================
+    # ONNX text-block detection is only useful for lens_text.ai.
+    # Lens-direct modes use geometry returned by Lens and must never build
+    # blocks locally. Running ONNX for lens_images/original/translated was the
+    # reason HF CPU batches inflated to 5-12s per image.
+    _need_onnx = needs_self_blocks
     _tb_timings: dict = {}
     if isinstance(lens_data, dict):
-        # Lens result pre-supplied (CLI replay) — run ONNX alone.
+        # Lens result pre-supplied (CLI replay) — run ONNX alone if needed.
         data: dict = lens_data
-        _t = time.perf_counter()
-        text_blocks = detect_text_blocks(img, timings=_tb_timings)
-        stages["lens_ms"] = 0.0
-        stages["blocks_ms"] = round((time.perf_counter() - _t) * 1000, 1)
+        if _need_onnx:
+            _t = time.perf_counter()
+            text_blocks = detect_text_blocks(img, timings=_tb_timings)
+            stages["lens_ms"] = 0.0
+            stages["blocks_ms"] = round((time.perf_counter() - _t) * 1000, 1)
+        else:
+            text_blocks = []
+            stages["lens_ms"] = 0.0
+            stages["blocks_ms"] = 0.0
     else:
         _t_p1 = time.perf_counter()
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as _p1:
-            _f_lens = _p1.submit(
-                lens_client.fetch_lens_data, image_path, target_lang, settings.firebase_url
-            )
-            _f_onnx = _p1.submit(detect_text_blocks, img, _tb_timings)
-            # .result() re-raises exceptions from the worker thread.
-            # Wait for Lens first (usually the slower leg).
-            _raw = _f_lens.result()
-            _t_lens_done = time.perf_counter()
-            text_blocks = _f_onnx.result()
-            _t_onnx_done = time.perf_counter()
-        # Report wall-clock from phase start so log shows true parallel time.
-        stages["lens_ms"] = round((_t_lens_done - _t_p1) * 1000, 1)
-        stages["blocks_ms"] = round((_t_onnx_done - _t_p1) * 1000, 1)
+        if _need_onnx:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as _p1:
+                _f_lens = _p1.submit(
+                    lens_client.fetch_lens_data, image_path, target_lang, settings.firebase_url
+                )
+                _f_onnx = _p1.submit(detect_text_blocks, img, _tb_timings)
+                # .result() re-raises exceptions from the worker thread.
+                # Wait for Lens first (usually the slower leg).
+                _raw = _f_lens.result()
+                _t_lens_done = time.perf_counter()
+                text_blocks = _f_onnx.result()
+                _t_onnx_done = time.perf_counter()
+            # Report wall-clock from phase start so log shows true parallel time.
+            stages["lens_ms"] = round((_t_lens_done - _t_p1) * 1000, 1)
+            stages["blocks_ms"] = round((_t_onnx_done - _t_p1) * 1000, 1)
+        else:
+            # lens_images: only Lens, no ONNX needed.
+            _raw = lens_client.fetch_lens_data(image_path, target_lang, settings.firebase_url)
+            stages["lens_ms"] = round((time.perf_counter() - _t_p1) * 1000, 1)
+            stages["blocks_ms"] = 0.0
+            text_blocks = []
         data = _raw if isinstance(_raw, dict) else {}
 
     if not isinstance(data, dict):
@@ -443,6 +471,7 @@ def process_image(
         "translated": {},
         "Ai": {},
         "perfStages": stages,
+        "pipelinePath": "self_blocks_ai" if needs_self_blocks else "lens_direct",
     }
 
     # --- lens_images: just hand back the image -----------------------------
@@ -475,6 +504,50 @@ def process_image(
     dbg("tree.translated", tree_stats(translated_tree))
 
     original_span_tokens = flatten_spans(original_tree)
+
+    # Fast Lens-direct text path.
+    # For original/translated we trust Lens paragraph/item geometry and only
+    # render that structure. No ONNX annotation, no bubble detector, no custom
+    # block grouping. Optionally erase Lens boxes and encode a clean background
+    # for the browser overlay.
+    if not needs_self_blocks:
+        base_img = img
+        _t = time.perf_counter()
+        _CPU_GATE.acquire()
+        stages["gate_wait_ms"] = round((time.perf_counter() - _t) * 1000, 1)
+        try:
+            _t = time.perf_counter()
+            if settings.lens_direct_erase and original_span_tokens:
+                base_img = erase_text_with_boxes(img, original_span_tokens)
+            stages["erase_ms"] = round((time.perf_counter() - _t) * 1000, 1)
+            stages["bubble_ms"] = 0.0
+
+            # Cheap text-light annotation only; it uses Lens boxes and the
+            # current background image, not any locally detected blocks.
+            _annotate_text_light(original_tree, base_img)
+            _annotate_text_light(translated_tree, base_img)
+
+            _t = time.perf_counter()
+            fit_tree_font_sizes(original_tree, thai_font, latin_font, W, H)
+            out["original"]["originalhtml"] = render_tree_overlay(original_tree, W, H)
+            fit_tree_font_sizes(translated_tree, thai_font, latin_font, W, H)
+            out["translated"]["translatedhtml"] = render_tree_overlay(translated_tree, W, H)
+            out["htmlCss"] = overlay_css()
+            out["htmlMeta"] = {"baseW": int(W), "baseH": int(H), "format": "tp", "path": "lens_direct"}
+            stages["render_ms"] = round((time.perf_counter() - _t) * 1000, 1)
+
+            if settings.lens_direct_png:
+                _t = time.perf_counter()
+                buf = io.BytesIO()
+                base_img.save(buf, format="PNG", compress_level=1)
+                out["imageDataUri"] = bytes_to_data_uri(buf.getvalue(), "image/png")
+                stages["png_ms"] = round((time.perf_counter() - _t) * 1000, 1)
+            else:
+                stages["png_ms"] = 0.0
+        finally:
+            _CPU_GATE.release()
+        stages.setdefault("ai_ms", 0.0)
+        return out
 
     # ONNX already done in Phase 1 — annotate trees now.
     # Text-block detection ran on the ORIGINAL image (text present), and
@@ -685,8 +758,11 @@ def process_payload(payload: dict) -> dict[str, Any]:
     img_hash = sha256_hex(img_bytes)
     cache_key = ""
     cache_used = False
-    if mode == "lens_text" and img_hash:
-        cache_source = "ai" if source == "ai" else "text"
+    if mode in ("lens_images", "lens_text") and img_hash:
+        # Cache direct Lens results too. This avoids repeating the Lens round-trip
+        # after extension retries/reconnects. AI still gets its separate cache
+        # because prompt/model/provider affect the result.
+        cache_source = "ai" if source == "ai" else source or "translated"
         cache_key = cache_mod.build_cache_key(img_hash, lang, mode, cache_source, ai_cfg)
         cache = cache_mod.ai_result_cache if source == "ai" else cache_mod.result_cache
         cached = cache.get(cache_key)
@@ -706,7 +782,7 @@ def process_payload(payload: dict) -> dict[str, Any]:
         tmp_path = f.name
     t_tmp = time.perf_counter()
     try:
-        out = process_image(tmp_path, lang, mode, ai_cfg)
+        out = process_image(tmp_path, lang, mode, ai_cfg, source=source)
         stages = out.pop("perfStages", {}) or {}
         out["perf"] = {
             "cache": "miss" if cache_used else "off",
