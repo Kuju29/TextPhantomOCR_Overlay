@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "แปลข้อความในภาพมังงะ มังฮวา - TextPhantom",
-  "version": "2026.6.16",
+  "version": "2026.6.17.4",
   "description": "🧠 Right-click any image → translate images",
   "permissions": ["contextMenus", "storage", "activeTab"],
   "host_permissions": ["<all_urls>"],
