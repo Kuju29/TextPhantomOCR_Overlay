@@ -122,6 +122,14 @@ class Settings:
     lens_direct_erase: bool = field(default_factory=lambda: _env_bool("TP_LENS_DIRECT_ERASE", True))
     lens_direct_png: bool = field(default_factory=lambda: _env_bool("TP_LENS_DIRECT_PNG", True))
 
+    # AI layout strategy ------------------------------------------------------
+    # auto    : run ONNX only when source/target text orientation changes.
+    # fast    : never run ONNX for lens_text.ai; patch AI into Lens geometry.
+    # quality : always run ONNX/self-block path for lens_text.ai.
+    ai_layout_mode: str = field(
+        default_factory=lambda: (_env_str("TP_AI_LAYOUT_MODE", "auto") or "auto").lower()
+    )
+
     # Warmup -----------------------------------------------------------------
     warmup_lang: str = field(default_factory=lambda: _env_str("TP_WARMUP_LANG", "th") or "th")
     # Do not load ONNX at boot by default. It is lazy-loaded on the first
@@ -141,7 +149,7 @@ class Settings:
     )
 
     # Build metadata ---------------------------------------------------------
-    build_id: str = field(default_factory=lambda: _env_str("TP_BUILD_ID", "v14-filtered-bulk-insert-20260617"))
+    build_id: str = field(default_factory=lambda: _env_str("TP_BUILD_ID", "v15-ai-fast-auto-20260617"))
 
 
 # Module-level singleton.  Import this from anywhere as ``from backend.config import settings``.
