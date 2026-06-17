@@ -57,7 +57,7 @@ async def lifespan(app: FastAPI):
     queue = JobQueue(process_payload)
     queue.start()
     app.state.job_queue = queue
-    print(f"[TextPhantom][api] starting build={settings.build_id} workers={settings.max_workers}", flush=True)
+    print(f"[TextPhantom][api] starting build={settings.build_id} workers={settings.max_workers} direct_workers={getattr(queue, '_direct_workers', '?')} ai_workers={getattr(queue, '_ai_workers', '?')}", flush=True)
     asyncio.create_task(_warm_at_boot())
     asyncio.create_task(_cookie_refresh_loop())
     yield
