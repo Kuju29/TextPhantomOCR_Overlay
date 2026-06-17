@@ -108,7 +108,7 @@ export async function readFullSettings() {
     mode: typeof it.mode === "string" ? it.mode : "lens_images",
     lang,
     sources: typeof it.sources === "string" ? it.sources : DEFAULT_SOURCE,
-    maxConcurrency: Number(it.maxConcurrency) > 0 ? Number(it.maxConcurrency) : DEFAULT_MAX_CONCURRENCY,
+    maxConcurrency: Number.isFinite(Number(it.maxConcurrency)) ? Number(it.maxConcurrency) : DEFAULT_MAX_CONCURRENCY,
     aiKey: typeof it.aiKey === "string" ? it.aiKey : "",
     aiModel,
     aiProvider: typeof it.aiProvider === "string" ? it.aiProvider : "auto",
