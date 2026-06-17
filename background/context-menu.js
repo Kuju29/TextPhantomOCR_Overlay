@@ -138,6 +138,28 @@ async function handleTranslateOne(menuInfo, tab, ctx) {
   enqueue(payload, tab.id, frameId);
 }
 
+
+function unpackImageScanResponse(resp) {
+  if (Array.isArray(resp)) return { items: resp, stats: null };
+  const items = Array.isArray(resp?.items) ? resp.items : [];
+  return { items, stats: resp?.stats || null };
+}
+
+function mergeScanStats(a, b) {
+  const out = { candidates: 0, accepted: 0, skipped: 0, duplicates: 0, reasons: {} };
+  for (const s of [a, b]) {
+    if (!s || typeof s !== "object") continue;
+    out.candidates += Number(s.candidates) || 0;
+    out.accepted += Number(s.accepted) || 0;
+    out.skipped += Number(s.skipped) || 0;
+    out.duplicates += Number(s.duplicates) || 0;
+    for (const [k, v] of Object.entries(s.reasons || {})) {
+      out.reasons[k] = (out.reasons[k] || 0) + (Number(v) || 0);
+    }
+  }
+  return out;
+}
+
 /** Handle a click on `img_all`. */
 async function handleTranslateAll(menuInfo, tab, ctx) {
   const { mode, lang, source, aiPayload, tabSessionId, batchId } = ctx;
@@ -148,11 +170,17 @@ async function handleTranslateAll(menuInfo, tab, ctx) {
   // Collect candidate images from the page (retry on the clicked frame).
   let images = [];
   let imagesFrameId = scanFrameId;
-  images = (await requestFromTab(tab.id, { type: "GET_IMAGES" }, scanFrameId)) || [];
+  let scanStats = null;
+  const primaryResp = await requestFromTab(tab.id, { type: "GET_IMAGES" }, scanFrameId);
+  const primary = unpackImageScanResponse(primaryResp);
+  images = primary.items;
+  scanStats = primary.stats;
   if (!images.length && menuInfo.frameId) {
-    const alt = await requestFromTab(tab.id, { type: "GET_IMAGES" }, menuInfo.frameId);
-    if (Array.isArray(alt) && alt.length) {
-      images = alt;
+    const altResp = await requestFromTab(tab.id, { type: "GET_IMAGES" }, menuInfo.frameId);
+    const alt = unpackImageScanResponse(altResp);
+    scanStats = mergeScanStats(scanStats, alt.stats);
+    if (alt.items.length) {
+      images = alt.items;
       imagesFrameId = menuInfo.frameId;
     }
   }
@@ -195,6 +223,8 @@ async function handleTranslateAll(menuInfo, tab, ctx) {
 
   const batch = ensureBatch(batchId, tab.id, imagesFrameId);
   batch.total1 = payloads.length;
+  batch.scanStats = scanStats || null;
+  batch.skipped1 = Number(scanStats?.skipped || 0) + Number(scanStats?.duplicates || 0);
   for (const pl of payloads) {
     const k = imageKeyFromPayload(pl);
     if (k && !batch.items.has(k)) {
