@@ -21,10 +21,18 @@ LANGUAGE_DIRECTION: Final[dict[str, str]] = {
     "fil": "h", "fr": "h", "de": "h", "es": "h", "pt": "h", "it": "h",
     "nl": "h", "pl": "h", "cs": "h", "hu": "h", "ro": "h", "ru": "h",
     "uk": "h", "tr": "h", "ko": "h",
-    "ar": "hr", "he": "hr",
+    # Right-to-left scripts. Persian (fa) and Urdu (ur) use Arabic script;
+    # Lens reports Hebrew as "iw" but "he" is accepted too; Yiddish (yi) is RTL.
+    "ar": "hr", "he": "hr", "iw": "hr", "fa": "hr", "ur": "hr",
+    "ps": "hr", "ckb": "hr", "ku": "hr", "sd": "hr", "ug": "hr", "yi": "hr",
     "ja": "auto", "zh": "auto", "zh-cn": "auto", "zh-tw": "auto",
     "zh-hans": "auto", "zh-hant": "auto",
 }
+
+# Target languages whose script reads right-to-left.
+RTL_LANGUAGES: Final[frozenset[str]] = frozenset(
+    code for code, d in LANGUAGE_DIRECTION.items() if d == "hr"
+)
 
 # CJK Unicode ranges - used to resolve "auto" and to classify text.
 _CJK_RANGES: Final[tuple[tuple[int, int], ...]] = (
@@ -89,7 +97,12 @@ def _normalise_lang(lang: str) -> str:
 
 
 def resolve_text_direction(target_lang: str, text: str = "") -> str:
-    """Return "h" or "v" for the target language - deterministic."""
+    """Return "h" or "v" for the target language - deterministic.
+
+    RTL languages ("hr") still flow horizontally; right-to-left ordering is a
+    separate concern handled by :func:`is_rtl` / the CSS ``direction`` property,
+    not by this axis selection.
+    """
     code = _normalise_lang(target_lang)
     preset = LANGUAGE_DIRECTION.get(code)
     if preset in ("h", "hr"):
@@ -97,6 +110,18 @@ def resolve_text_direction(target_lang: str, text: str = "") -> str:
     if preset == "v":
         return "v"
     return "v" if is_cjk_text(text) else "h"
+
+
+def is_rtl(target_lang: str) -> bool:
+    """True when ``target_lang`` is written right-to-left (Arabic/Hebrew/…).
+
+    Matches the full code first, then falls back to the primary subtag so a
+    regional variant like ``fa-IR`` / ``ar-EG`` is still recognised.
+    """
+    code = _normalise_lang(target_lang)
+    if code in RTL_LANGUAGES:
+        return True
+    return code.split("-", 1)[0] in RTL_LANGUAGES
 
 
 def classify_item_axis(item: dict, tilt_tol: float = 12.0) -> str:
