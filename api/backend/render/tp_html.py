@@ -34,8 +34,10 @@ from backend.lens.tree import iter_paragraphs
 from backend.render.region import (
     compute_region_geometry,
     fit_render_box,
+    is_rtl,
     resolve_text_direction,
 )
+from backend.render.text_utils import contains_rtl
 
 # Per-script average glyph width as a fraction of font-size — eyeballed
 # averages used by the horizontal font-size fit.
@@ -192,6 +194,15 @@ def overlay_css() -> str:
         "overflow-wrap:break-word;"
         "text-align:center;"
         "padding:.2em .1em;"
+        "}"
+        # Right-to-left variant — Arabic / Hebrew / Persian / Urdu targets.
+        # ``direction:rtl`` makes the browser apply the Unicode bidi algorithm
+        # so the glyphs (already shaped/joined by the font) order correctly;
+        # ``unicode-bidi:isolate`` keeps any embedded LTR run (numbers, latin
+        # brand names) from leaking out and reordering the whole line.
+        ".tp-line.rtl{"
+        "direction:rtl;"
+        "unicode-bidi:isolate;"
         "}"
     )
 
@@ -715,6 +726,8 @@ def _render_ai_region(
     style = ";".join(style_parts) + ";"
 
     cls = "tp-line vert" if direction == "v" else "tp-line bubble"
+    if direction != "v" and is_rtl(target_lang):
+        cls += " rtl"
     # For horizontal Thai output insert ZWSP at BudouX word boundaries so
     # the browser wraps on correct syllable/word edges rather than at
     # arbitrary Unicode code points (which causes "ไ ม่", "ปั ง", etc.).
@@ -801,6 +814,8 @@ def _render_ai_paragraph(
         f"line-height:calc(var(--tp-font-scale,1) * {lh}px);"
     )
     cls = "tp-line vert" if is_vert else "tp-line bubble"
+    if not is_vert and is_rtl(target_lang):
+        cls += " rtl"
     display_text = _insert_thai_word_breaks(text, target_lang) if not is_vert else text
     pi = int(para.get("para_index", 0))
     return (
@@ -1235,8 +1250,9 @@ def _render_item_horizontal(
         f"font-size:calc(var(--tp-font-scale,1) * {fs}px);"
         f"line-height:calc(var(--tp-font-scale,1) * {lh}px);"
     )
+    cls = "tp-line rtl" if contains_rtl(text) else "tp-line"
     return (
-        f'<div class="tp-line" data-pi="{pi}" data-ii="{ii}" '
+        f'<div class="{cls}" data-pi="{pi}" data-ii="{ii}" '
         f'data-fs="{fs}" '
         f'style="{style}">{_escape_text(text)}</div>'
     )
