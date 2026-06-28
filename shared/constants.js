@@ -34,6 +34,14 @@ export const DEFAULT_MAX_CONCURRENCY = 0;
 /** Port name used by the content-script keep-alive connection. */
 export const KEEPALIVE_PORT_NAME = "TP_KEEPALIVE";
 
+/**
+ * Popular languages pinned to the top of the language picker, in this exact
+ * order. Everything else is listed alphabetically by name after these.
+ * Codes are matched case-insensitively against each entry's `code`.
+ * @type {string[]}
+ */
+export const PINNED_LANG_CODES = ["en", "th", "ja", "ko", "zh-CN", "zh-TW"];
+
 /** Languages shown when the API's `/meta` is unreachable. */
 export const FALLBACK_LANGS = [
   { code: "en", name: "English" },
