@@ -67,6 +67,35 @@ export function setSelectOptions(sel, list, { valueKey = "id", labelKey = "name"
 }
 
 /**
+ * Order a language list for display: the pinned (popular) codes first, in the
+ * order given by `pinnedCodes`, then every remaining language alphabetically by
+ * name. Pure — returns a new array and never mutates the input.
+ * @param {Array<{code?:string, name?:string}>} list
+ * @param {string[]} [pinnedCodes]
+ * @returns {Array<{code?:string, name?:string}>}
+ */
+export function orderLanguages(list, pinnedCodes = []) {
+  const items = (Array.isArray(list) ? list : []).filter(Boolean);
+  const pinRank = new Map(
+    pinnedCodes.map((c, i) => [String(c).toLowerCase(), i]),
+  );
+  const rankOf = (it) => pinRank.get(String(it?.code ?? "").toLowerCase());
+  const pinned = items
+    .filter((it) => rankOf(it) !== undefined)
+    .sort((a, b) => rankOf(a) - rankOf(b));
+  const rest = items
+    .filter((it) => rankOf(it) === undefined)
+    .sort((a, b) =>
+      String(a?.name ?? a?.code ?? "").localeCompare(
+        String(b?.name ?? b?.code ?? ""),
+        undefined,
+        { sensitivity: "base" },
+      ),
+    );
+  return [...pinned, ...rest];
+}
+
+/**
  * Populate the AI-model `<select>` (always offers "auto" first).
  * @param {string[]} models
  * @param {{keepValue?:string, strict?:boolean}} opts
