@@ -29,8 +29,8 @@
 4. Click **Load unpacked**.  
 5. Select the extracted folder.  
 
-## 🌐 2. Using the API on Hugging Face (Run API for v3.0.0)
-1. Go to: [https://huggingface.co/spaces/plan291037/TextPhantom_OCR_API2/tree/main](https://huggingface.co/spaces/plan291037/TextPhantom_OCR_API2/tree/main)
+## 🌐 2. Using the API on Hugging Face 
+1. Go to: [https://huggingface.co/spaces/plan291037/TextPhantom-v4.0.0/tree/main](https://huggingface.co/spaces/plan291037/TextPhantom-v4.0.0/tree/main)
 2. Click the **three dots** in the top-right and select **Duplicate this Space**.
 3. The build will start automatically — wait until you see **Running**.
 4. Click the **three dots** again and choose **Embed this Space**.
