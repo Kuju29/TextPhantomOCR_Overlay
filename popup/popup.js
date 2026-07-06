@@ -8,6 +8,7 @@
  */
 
 import { normalizeUrl } from "../shared/url.js";
+import { resolveSeriesKey, refineSeriesKeyWithTitle } from "../shared/series.js";
 import { ensureApiDefaults } from "../shared/api-defaults.js";
 import { getStorage, setStorage } from "../shared/storage.js";
 import { broadcast, sendRuntimeMessage } from "../shared/messaging.js";
@@ -68,7 +69,8 @@ const state = {
   desiredSources: "translated",
   desiredAiModel: "auto",
   aiPromptByLang: {},
-  aiGlossary: [],
+  seriesKey: "default",
+  seriesMemory: { glossary: [], characters: [] },
   aiPromptDefaultsByLang: {},
   aiPromptDirtyByLang: {},
   pendingApiSave: false,
@@ -107,10 +109,46 @@ const LOCAL_ENDPOINTS = {
 function defaultEndpointFor(provider) {
   return LOCAL_ENDPOINTS[String(provider || "").trim().toLowerCase()] || "";
 }
-function renderGlossaryCount() {
-  if (!els.aiGlossaryCount) return;
-  const n = Array.isArray(state.aiGlossary) ? state.aiGlossary.length : 0;
-  els.aiGlossaryCount.textContent = `${n} term${n === 1 ? "" : "s"} remembered`;
+function renderSeriesMemory() {
+  if (!els.aiCharactersCount) return;
+  const mem = state.seriesMemory || {};
+  const chars = Array.isArray(mem.characters) ? mem.characters : [];
+  const terms = Array.isArray(mem.glossary) ? mem.glossary : [];
+  if (!chars.length && !terms.length) {
+    els.aiCharactersCount.textContent = `No memory for this series yet (${state.seriesKey})`;
+    return;
+  }
+  const names = chars.slice(-5).map((c) => c?.name).filter(Boolean).join(", ");
+  els.aiCharactersCount.textContent =
+    `${state.seriesKey} — ${chars.length} character${chars.length === 1 ? "" : "s"}` +
+    `${names ? ` (${names})` : ""}, ${terms.length} term${terms.length === 1 ? "" : "s"}`;
+}
+
+/** Resolve the active tab's series key + memory into state and render. */
+async function refreshSeriesMemory() {
+  try {
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    const tab = tabs?.[0];
+    // Must match the key logic used when jobs are created (context-menu.js):
+    // URL first, then refine bare host keys with the tab title.
+    state.seriesKey =
+      refineSeriesKeyWithTitle(await resolveSeriesKey(tab?.url || ""), tab?.title || "") ||
+      "default";
+  } catch {
+    state.seriesKey = "default";
+  }
+  try {
+    const store = await getStorage(["aiSeriesMemory"]);
+    const all = store.aiSeriesMemory && typeof store.aiSeriesMemory === "object" ? store.aiSeriesMemory : {};
+    const m = all[state.seriesKey] || {};
+    state.seriesMemory = {
+      glossary: Array.isArray(m.glossary) ? m.glossary : [],
+      characters: Array.isArray(m.characters) ? m.characters : [],
+    };
+  } catch {
+    state.seriesMemory = { glossary: [], characters: [] };
+  }
+  renderSeriesMemory();
 }
 
 /** True when the AI sub-UI is relevant (lens_text + source "ai"). */
@@ -461,7 +499,9 @@ async function loadSettings() {
     "aiModel",
     "aiProvider",
     "aiBaseUrl",
-    "aiGlossary",
+    "aiCharMemory",
+    "aiSendImage",
+    "aiPageImage",
     "aiPromptByLang",
     "fontScale",
   ]);
@@ -500,8 +540,13 @@ async function loadSettings() {
     els.aiBaseUrl.value = String(stored.aiBaseUrl || "");
     if (!els.aiBaseUrl.value) els.aiBaseUrl.value = defaultEndpointFor(els.aiProvider?.value || "auto");
   }
-  state.aiGlossary = Array.isArray(stored.aiGlossary) ? stored.aiGlossary : [];
-  renderGlossaryCount();
+  void refreshSeriesMemory();
+  if (els.aiCharMemory) els.aiCharMemory.checked = stored.aiCharMemory !== false;
+  if (els.aiPageImage) {
+    els.aiPageImage.checked =
+      stored.aiPageImage === "always" ||
+      (stored.aiPageImage == null && Boolean(stored.aiSendImage));
+  }
   setModelOptions([], { keepValue: state.desiredAiModel });
   const prompt = Object.prototype.hasOwnProperty.call(state.aiPromptByLang, promptKey)
     ? String(state.aiPromptByLang[promptKey] || "")
@@ -719,10 +764,26 @@ els.aiBaseUrl?.addEventListener("blur", async () => {
   scheduleResolveAiMeta({ immediate: true });
 });
 
-els.aiGlossaryClear?.addEventListener("click", async () => {
-  state.aiGlossary = [];
-  await setStorage({ aiGlossary: [] });
-  renderGlossaryCount();
+els.aiCharactersClear?.addEventListener("click", async () => {
+  // Clear only the ACTIVE series' memory (characters + terms).
+  try {
+    const store = await getStorage(["aiSeriesMemory"]);
+    const all = store.aiSeriesMemory && typeof store.aiSeriesMemory === "object" ? { ...store.aiSeriesMemory } : {};
+    delete all[state.seriesKey];
+    await setStorage({ aiSeriesMemory: all });
+  } catch {
+    /* best-effort */
+  }
+  state.seriesMemory = { glossary: [], characters: [] };
+  renderSeriesMemory();
+});
+
+els.aiPageImage?.addEventListener("change", async () => {
+  await setStorage({ aiPageImage: els.aiPageImage.checked ? "always" : "off" });
+});
+
+els.aiCharMemory?.addEventListener("change", async () => {
+  await setStorage({ aiCharMemory: Boolean(els.aiCharMemory.checked) });
 });
 
 els.aiModel.addEventListener("change", async () => {
@@ -815,9 +876,8 @@ window.addEventListener("pagehide", () => {
 
 chrome.storage?.onChanged?.addListener((changes, area) => {
   if (area !== "local") return;
-  if (changes.aiGlossary) {
-    state.aiGlossary = Array.isArray(changes.aiGlossary.newValue) ? changes.aiGlossary.newValue : [];
-    renderGlossaryCount();
+  if (changes.aiSeriesMemory) {
+    void refreshSeriesMemory();
   }
   // Prompt Studio (separate tab) edits the same aiPromptByLang map — keep the
   // popup's in-memory copy + textarea in sync when it changes elsewhere.

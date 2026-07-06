@@ -80,6 +80,10 @@ def build_cache_key(
                 (ai_cfg.model or "").strip(),
                 (ai_cfg.base_url or "").strip(),
                 _ai_prompt_signature(ai_cfg.prompt_editable),
+                # Vision / character-memory settings produce different results.
+                # send_image may be False / True / "always" / "auto".
+                f"img_{str(getattr(ai_cfg, 'send_image', False) or 'off').lower()}",
+                "memo" if getattr(ai_cfg, "char_memory", True) else "",
             ]
         )
     return "|".join(p for p in parts if p is not None)

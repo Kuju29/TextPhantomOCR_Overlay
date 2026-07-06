@@ -21,9 +21,12 @@ export const els = {
   aiProviderWrap: document.getElementById("ai-provider-wrap"),
   aiBaseUrl: document.getElementById("ai-base-url"),
   aiEndpointWrap: document.getElementById("ai-endpoint-wrap"),
-  aiGlossaryWrap: document.getElementById("ai-glossary-wrap"),
-  aiGlossaryCount: document.getElementById("ai-glossary-count"),
-  aiGlossaryClear: document.getElementById("ai-glossary-clear"),
+  aiCharactersWrap: document.getElementById("ai-characters-wrap"),
+  aiCharactersCount: document.getElementById("ai-characters-count"),
+  aiCharactersClear: document.getElementById("ai-characters-clear"),
+  aiCharMemory: document.getElementById("ai-char-memory"),
+  aiPageImageWrap: document.getElementById("ai-page-image-wrap"),
+  aiPageImage: document.getElementById("ai-page-image"),
   aiPromptWrap: document.getElementById("ai-prompt-wrap"),
   aiPrompt: document.getElementById("ai-prompt"),
   aiPromptCount: document.getElementById("ai-prompt-count"),
@@ -187,7 +190,8 @@ export function toggleUi({ hasEnvKey }) {
   const canConfigureAi = local || (els.aiKey.value || "").trim().length > 0 || hasEnvKey;
   els.aiModelWrap.style.display = showAi && canConfigureAi ? "" : "none";
   els.aiPromptWrap.style.display = showAi && canConfigureAi ? "" : "none";
-  if (els.aiGlossaryWrap) els.aiGlossaryWrap.style.display = showAi && canConfigureAi ? "" : "none";
+  if (els.aiCharactersWrap) els.aiCharactersWrap.style.display = showAi && canConfigureAi ? "" : "none";
+  if (els.aiPageImageWrap) els.aiPageImageWrap.style.display = showAi && canConfigureAi ? "" : "none";
 }
 
 /** Render the run-status panel from a batch-status broadcast. */

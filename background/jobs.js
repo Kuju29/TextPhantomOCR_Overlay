@@ -33,6 +33,8 @@ import {
   setCachedResult,
   stripImageFields,
 } from "./mangadex.js";
+import { accumulateSeriesMemory } from "./series-memory.js";
+import { resolveSeriesKey } from "../shared/series.js";
 import { bumpTabSession, getTabSessionId } from "./tab-sessions.js";
 import {
   sendToTab,
@@ -190,33 +192,6 @@ function extractHtml(result) {
  * Handle a finished job: cache it (MangaDex), then inject the result into the
  * tab as an image replacement and/or HTML overlay.
  */
-/**
- * Accumulate the per-image glossary pairs the API returned into a small,
- * de-duplicated translation memory in storage (cap 120 entries). The popup
- * sends this back as `ai.glossary` on later requests so terminology stays
- * consistent across a multi-page batch.
- */
-async function accumulateGlossary(result) {
-  try {
-    const pairs = result?.Ai?.glossary || result?.ai?.glossary || null;
-    if (!Array.isArray(pairs) || !pairs.length) return;
-    const store = await chrome.storage.local.get("aiGlossary");
-    const existing = Array.isArray(store.aiGlossary) ? store.aiGlossary : [];
-    const bySrc = new Map();
-    for (const e of existing) {
-      if (e && e.src) bySrc.set(String(e.src), { src: String(e.src), tgt: String(e.tgt || "") });
-    }
-    for (const e of pairs) {
-      if (e && e.src && e.tgt) bySrc.set(String(e.src), { src: String(e.src), tgt: String(e.tgt) });
-    }
-    // keep the most recent 120 (Map preserves insertion order; latest wins).
-    const merged = [...bySrc.values()].slice(-120);
-    await chrome.storage.local.set({ aiGlossary: merged });
-  } catch {
-    /* glossary accumulation is best-effort */
-  }
-}
-
 export async function handleResult(jobId, result) {
   const ctx = findContext(jobId, result?.metadata?.image_id);
   if (!ctx) {
@@ -236,7 +211,20 @@ export async function handleResult(jobId, result) {
 
   const newImg = extractNewImage(result);
   const { aiHtml, translatedHtml, originalHtml } = extractHtml(result);
-  void accumulateGlossary(result);
+  // Per-series AI memory: glossary + character sheet, keyed by the series key
+  // threaded through the payload (falls back to re-deriving it from the page
+  // URL for jobs restored from an older registry).
+  void (async () => {
+    try {
+      const key =
+        (ctx.seriesKey && String(ctx.seriesKey)) ||
+        (await resolveSeriesKey(ctx.pageUrl || "")) ||
+        "default";
+      await accumulateSeriesMemory(key, result);
+    } catch {
+      /* memory accumulation is best-effort */
+    }
+  })();
   const hasHtml = Boolean(aiHtml || translatedHtml || originalHtml);
 
   // MangaDex: cache the result so re-visiting the chapter renders instantly.
@@ -654,6 +642,9 @@ export async function processJob(payload, tabId, frameId = 0) {
     batchId,
     imageKey,
     pageUrl,
+    // Per-series AI-memory key, threaded from the context-menu click so the
+    // result accumulates under the SAME key the prompt-memory was read from.
+    seriesKey: String(payload?.context?.series_key || "").trim(),
     sessionId: originSession || sessionId,
     keepCacheOnStale: isMd,
     settingsEpoch,

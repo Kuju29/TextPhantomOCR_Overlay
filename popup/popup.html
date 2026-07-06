@@ -170,13 +170,25 @@
               <div id="ai-prompt-count" class="prompt-count" aria-live="polite"></div>
             </div>
 
-            <div class="field" id="ai-glossary-wrap" style="display: none">
+            <div class="field" id="ai-characters-wrap" style="display: none">
               <label class="label-row">
-                <span>Translation memory</span>
-                <button type="button" id="ai-glossary-clear" class="icon-btn" title="Clear memory" aria-label="Clear translation memory">🗑</button>
+                <span>Series memory</span>
+                <button type="button" id="ai-characters-clear" class="icon-btn" title="Clear this series' memory" aria-label="Clear this series' memory">🗑</button>
               </label>
-              <div id="ai-glossary-count" class="hint">0 terms remembered</div>
-              <div class="hint">Keeps names/terms consistent across pages you translate in a row.</div>
+              <label class="label-row" style="cursor: pointer">
+                <span>Remember characters</span>
+                <input type="checkbox" id="ai-char-memory" checked />
+              </label>
+              <div id="ai-characters-count" class="hint">No memory for this series yet</div>
+              <div class="hint">Terms + each character's gender &amp; speech style, kept per series (auto-detected from the page URL). A new series starts fresh automatically.</div>
+            </div>
+
+            <div class="field" id="ai-page-image-wrap" style="display: none">
+              <label class="label-row" style="cursor: pointer">
+                <span>Page image to AI</span>
+                <input type="checkbox" id="ai-page-image" />
+              </label>
+              <div class="hint">Lets the model see who is speaking (gender, mood, replies) for more natural dialogue. Uses more tokens per page; needs a vision-capable model.</div>
             </div>
           </section>
         </section>

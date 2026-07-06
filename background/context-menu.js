@@ -11,7 +11,9 @@
 
 import { createLogger } from "../shared/logger.js";
 import { readFullSettings } from "../shared/settings.js";
+import { resolveSeriesKey, refineSeriesKeyWithTitle } from "../shared/series.js";
 import { getApiBase } from "./api.js";
+import { getSeriesMemory } from "./series-memory.js";
 import { ensureBatch, batchUpdateToast } from "./batches.js";
 import { fetchImageDataUriFromUrl } from "./images.js";
 import { setSoftConcurrency, aiSoftMaxForKey, describeLimits } from "./job-queue.js";
@@ -46,18 +48,32 @@ export function recreateMenus() {
   });
 }
 
-/** Build the `ai` sub-object for a payload (null when not an AI text job). */
-function buildAiPayload(mode, source, settings) {
+/** Build the `ai` sub-object for a payload (null when not an AI text job).
+ *
+ * Memory (glossary + character sheet) is scoped PER SERIES via `seriesKey`
+ * (derived from the reader page URL), so a new series automatically starts
+ * with fresh memory.
+ */
+async function buildAiPayload(mode, source, settings, seriesKey) {
   if (mode !== "lens_text" || source !== "ai") return null;
+  const memory = await getSeriesMemory(seriesKey);
+  // Simple toggle: "always" sends the page image on every request; anything
+  // else stays cheap text-only.
+  const sendImage = String(settings.aiPageImage || "off") === "always" ? "always" : false;
   return {
     api_key: settings.aiKey || "",
     model: settings.aiModel || "auto",
     provider: settings.aiProvider || "auto",
     base_url: settings.aiBaseUrl || "auto",
     prompt: settings.aiPrompt || "",
-    // Short translation memory accumulated across this session's pages, so
-    // batch translations keep terminology consistent (see backend glossary).
-    glossary: Array.isArray(settings.aiGlossary) ? settings.aiGlossary : [],
+    // Per-series translation memory (terminology consistency).
+    glossary: memory.glossary,
+    // Per-series character sheet from <<TP_MEMO>> blocks — keeps each
+    // character's gender / pronouns / register right across pages.
+    characters: memory.characters,
+    // Character-memory toggle: off = smallest prompt, cheapest tokens.
+    char_memory: settings.aiCharMemory !== false,
+    send_image: sendImage,
   };
 }
 
@@ -80,7 +96,7 @@ function buildMetadata({ existing, imageId, batchId, sourceUrl, stage }) {
 
 /** Handle a click on `img_one`. */
 async function handleTranslateOne(menuInfo, tab, ctx) {
-  const { mode, lang, source, aiPayload, tabSessionId, batchId } = ctx;
+  const { mode, lang, source, aiPayload, tabSessionId, batchId, seriesKey } = ctx;
   const frameId = Number(menuInfo.frameId) || 0;
   let originalUrl = menuInfo.srcUrl;
 
@@ -112,6 +128,7 @@ async function handleTranslateOne(menuInfo, tab, ctx) {
     context: {
       ...(payload?.context && typeof payload.context === "object" ? payload.context : {}),
       page_url: tab?.url || null,
+      series_key: seriesKey || null,
       timestamp: new Date().toISOString(),
       tp_tab_session: tabSessionId,
     },
@@ -162,7 +179,7 @@ function mergeScanStats(a, b) {
 
 /** Handle a click on `img_all`. */
 async function handleTranslateAll(menuInfo, tab, ctx) {
-  const { mode, lang, source, aiPayload, tabSessionId, batchId } = ctx;
+  const { mode, lang, source, aiPayload, tabSessionId, batchId, seriesKey } = ctx;
   const scanFrameId = 0;
 
   await sendToTab(tab.id, { type: "TP_KEEPALIVE_START", ms: KEEPALIVE_MS }, scanFrameId);
@@ -204,6 +221,7 @@ async function handleTranslateAll(menuInfo, tab, ctx) {
         ai: aiPayload,
         context: {
           page_url: tab?.url || null,
+          series_key: seriesKey || null,
           timestamp: new Date().toISOString(),
           tp_tab_session: tabSessionId,
         },
@@ -247,7 +265,14 @@ export async function onContextMenuClicked(menuInfo, tab) {
     const settings = await readFullSettings();
     const { mode, lang } = settings;
     const source = mode === "lens_text" ? settings.sources || "translated" : "translated";
-    const aiPayload = buildAiPayload(mode, source, settings);
+    // URL first (with MangaDex chapter->manga resolution), then refine bare
+    // host keys with the tab title — generic support for sites whose URLs
+    // carry no series name.
+    const seriesKey = refineSeriesKeyWithTitle(
+      await resolveSeriesKey(tab?.url || ""),
+      tab?.title || "",
+    );
+    const aiPayload = await buildAiPayload(mode, source, settings, seriesKey);
 
     // AI jobs get a softer concurrency cap (the HF router is rate-limited).
     const isAi = mode === "lens_text" && source === "ai";
@@ -261,7 +286,7 @@ export async function onContextMenuClicked(menuInfo, tab) {
     // Warm up the API; event WebSocket is opened after REST returns a job id.
     await getApiBase().catch(() => "");
 
-    const ctx = { mode, lang, source, aiPayload, tabSessionId, batchId };
+    const ctx = { mode, lang, source, aiPayload, tabSessionId, batchId, seriesKey };
     sendToastToTab(
       tab.id,
       menuInfo.menuItemId === "img_all" ? 0 : Number(menuInfo.frameId) || 0,

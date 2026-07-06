@@ -1,0 +1,69 @@
+/* TextPhantom shared design tokens — modern dark.
+   Linked by popup / viewer / prompt BEFORE their page CSS, so every page
+   draws from the same palette. */
+
+:root {
+  color-scheme: dark;
+
+  /* Surfaces */
+  --tp-bg: #0a0d18;
+  --tp-surface: #121828;
+  --tp-surface-2: #1a2238;
+  --tp-line: rgba(255, 255, 255, 0.08);
+  --tp-line-2: rgba(255, 255, 255, 0.16);
+
+  /* Text */
+  --tp-text: #e9edfa;
+  --tp-muted: #8d97b3;
+
+  /* Accent (violet -> blue) */
+  --tp-accent: #7c5cff;
+  --tp-accent-2: #4da3ff;
+  --tp-accent-soft: #9aa8ff;
+  --tp-grad: linear-gradient(135deg, #7c5cff 0%, #4da3ff 100%);
+
+  /* Semantic */
+  --tp-ok: #5fd38a;
+  --tp-err: #ff7a7a;
+  --tp-warn: #ffb454;
+
+  /* Shape */
+  --tp-radius: 14px;
+  --tp-radius-sm: 9px;
+  --tp-focus: 0 0 0 3px color-mix(in srgb, var(--tp-accent) 35%, transparent);
+  --tp-transition: 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+
+  --tp-font: "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+/* Slim, theme-matched scrollbars on every page. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.24);
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Native dropdown lists render on the OS layer — keep them readable. */
+option {
+  color: var(--tp-text);
+  background: var(--tp-surface-2);
+}
+optgroup {
+  color: var(--tp-accent-soft);
+  background: var(--tp-surface);
+  font-weight: 700;
+}

@@ -49,6 +49,26 @@ def extract_indices(text: str) -> set[int]:
     return out
 
 
+MEMO_MARKER: Final[str] = "<<TP_MEMO>>"
+
+
+def split_memo(text: str) -> tuple[str, str]:
+    """Split off the optional trailing ``<<TP_MEMO>>`` character-notes block.
+
+    The prompt asks the model to append character observations (name, gender,
+    speech style) after the last paragraph, behind a ``<<TP_MEMO>>`` marker.
+    Returns ``(text_without_memo, memo_text)``; ``memo_text`` is ``""`` when
+    the block is absent.  Everything from the FIRST memo marker onward is
+    treated as memo so a stray duplicate can never leak into the render.
+    """
+    t = text or ""
+    if MEMO_MARKER not in t:
+        return t, ""
+    body, _, memo = t.partition(MEMO_MARKER)
+    memo = memo.replace(MEMO_MARKER, "\n").strip()
+    return body.rstrip(), memo
+
+
 def has_complete_sequence(ai_text_full: str, expected: int) -> bool:
     """True iff markers 0..expected-1 appear in order in ``ai_text_full``."""
     if expected <= 0:

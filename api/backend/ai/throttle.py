@@ -58,6 +58,8 @@ def generate_with_backoff(
     user_parts: list[str],
     *,
     allow_hf_fallback: bool = False,
+    image_b64: str = "",
+    image_mime: str = "image/jpeg",
 ) -> ChatResult:
     """Call the OpenAI-compatible client, retrying on HF rate-limit errors."""
     last_error: Exception | None = None
@@ -72,6 +74,8 @@ def generate_with_backoff(
                     system_text,
                     user_parts,
                     allow_hf_fallback=allow_hf_fallback,
+                    image_b64=image_b64,
+                    image_mime=image_mime,
                 )
         except Exception as e:  # noqa: BLE001 - we re-raise unless it's a throttle
             last_error = e

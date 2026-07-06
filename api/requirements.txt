@@ -5,3 +5,6 @@ numpy
 opencv-python-headless
 Pillow
 budoux
+# Manga text-block detector (Kiuyha/Manga-Bubble-YOLO, Apache-2.0).
+# Optional at runtime: if missing, grouping falls back to pure geometry.
+onnxruntime

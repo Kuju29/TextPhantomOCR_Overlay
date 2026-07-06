@@ -11,9 +11,37 @@ _ENDPOINT = "https://api.anthropic.com/v1/messages"
 _API_VERSION = "2023-06-01"
 
 
-def generate(api_key: str, model: str, system_text: str, user_parts: list[str]) -> ChatResult:
-    """Call Anthropic's Messages API and return the concatenated text reply."""
-    messages = [{"role": "user", "content": p} for p in user_parts if (p or "").strip()]
+def generate(
+    api_key: str,
+    model: str,
+    system_text: str,
+    user_parts: list[str],
+    *,
+    image_b64: str = "",
+    image_mime: str = "image/jpeg",
+) -> ChatResult:
+    """Call Anthropic's Messages API and return the concatenated text reply.
+
+    ``image_b64`` (optional) attaches the manga page as an image content block
+    so a vision-capable model can see the speakers.
+    """
+    if (image_b64 or "").strip():
+        content: list[dict] = [
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": image_mime or "image/jpeg",
+                    "data": image_b64,
+                },
+            }
+        ]
+        content.extend(
+            {"type": "text", "text": p} for p in user_parts if (p or "").strip()
+        )
+        messages = [{"role": "user", "content": content}]
+    else:
+        messages = [{"role": "user", "content": p} for p in user_parts if (p or "").strip()]
     payload = {
         "model": model,
         "max_tokens": ai_config.MAX_TOKENS,

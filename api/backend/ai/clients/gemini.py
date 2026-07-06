@@ -29,15 +29,29 @@ def _post_once(api_key: str, model: str, payload: dict) -> "httpx.Response":
         return client.post(url, json=payload)
 
 
-def generate(api_key: str, model: str, system_text: str, user_parts: list[str]) -> ChatResult:
+def generate(
+    api_key: str,
+    model: str,
+    system_text: str,
+    user_parts: list[str],
+    *,
+    image_b64: str = "",
+    image_mime: str = "image/jpeg",
+) -> ChatResult:
     """Call Gemini's ``generateContent`` and return the plain-text reply.
 
     Self-healing: if the requested model was retired by Google (404
     "no longer available"), retry once with the current default model.  This
     means a stale model name saved in the client (e.g. an old
     ``gemini-2.0-flash-lite``) recovers automatically instead of hard-failing.
+
+    ``image_b64`` (optional) attaches the manga page as inline image data so
+    a vision-capable model can see the speakers.
     """
-    parts = [{"text": p} for p in user_parts if (p or "").strip()]
+    parts: list[dict] = []
+    if (image_b64 or "").strip():
+        parts.append({"inline_data": {"mime_type": image_mime or "image/jpeg", "data": image_b64}})
+    parts.extend({"text": p} for p in user_parts if (p or "").strip())
     payload = {
         "systemInstruction": {"parts": [{"text": system_text}]},
         "contents": [{"role": "user", "parts": parts}],

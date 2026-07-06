@@ -1,12 +1,13 @@
+/* Tokens map onto the shared theme (../shared/theme.css). */
 :root {
-  --bg: #0f1420;
-  --panel: #161c2b;
-  --panel-2: #1c2435;
-  --border: rgba(255, 255, 255, 0.1);
-  --text: #e7ecf6;
-  --muted: #9aa6bd;
-  --accent: #5c9fff;
-  --accent-press: #3f7fe0;
+  --bg: var(--tp-bg);
+  --panel: var(--tp-surface);
+  --panel-2: var(--tp-surface-2);
+  --border: var(--tp-line);
+  --text: var(--tp-text);
+  --muted: var(--tp-muted);
+  --accent: var(--tp-accent);
+  --accent-press: color-mix(in srgb, var(--tp-accent) 85%, #000);
   --radius: 12px;
   --radius-sm: 8px;
 }
@@ -16,9 +17,11 @@
 html, body {
   margin: 0;
   height: 100%;
-  background: var(--bg);
+  background:
+    radial-gradient(120% 40% at 50% -5%, color-mix(in srgb, var(--tp-accent) 12%, transparent), transparent 70%),
+    var(--bg);
   color: var(--text);
-  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-family: var(--tp-font);
   font-size: 14px;
 }
 
@@ -30,7 +33,16 @@ html, body {
   border-bottom: 1px solid var(--border);
   background: var(--panel);
 }
-.ps-title h1 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: 0.3px; }
+.ps-title h1 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  background: var(--tp-grad);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
 .ps-sub { color: var(--muted); font-size: 12px; }
 .ps-status { color: var(--muted); font-size: 12px; min-height: 1em; }
 .ps-status.ok { color: #5fd38a; }
@@ -74,7 +86,7 @@ html, body {
 .ps-side input:focus,
 #ps-text:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(92, 159, 255, 0.28);
+  box-shadow: var(--tp-focus);
 }
 
 .ps-hint { color: var(--muted); font-size: 11px; line-height: 1.4; }
@@ -102,8 +114,8 @@ html, body {
   transition: background 0.15s, border-color 0.15s;
 }
 .ps-btn:hover { border-color: var(--accent); }
-.ps-btn.primary { background: var(--accent); border-color: var(--accent); color: #06101f; font-weight: 600; }
-.ps-btn.primary:hover { background: var(--accent-press); }
+.ps-btn.primary { background: var(--tp-grad); border-color: transparent; color: #fff; font-weight: 600; }
+.ps-btn.primary:hover { filter: brightness(1.1); }
 .ps-btn.ghost { background: transparent; }
 
 .ps-editor {

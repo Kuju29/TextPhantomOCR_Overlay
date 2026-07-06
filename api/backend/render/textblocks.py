@@ -113,11 +113,25 @@ def _init_pool() -> None:
         import onnxruntime as ort
 
         n = max(1, settings.textblock_pool_size)
+        # Divide CPU threads evenly across sessions so concurrent inference
+        # does not over-subscribe the machine.  On a 2-vCPU HF Space with
+        # n=1 this leaves 2 threads for the single session (the proven-fast
+        # path).  With n>1 each session gets floor(cpu_count/n) >= 1 thread.
+        cpu_count = os.cpu_count() or 2
+        threads_per_session = max(1, cpu_count // n)
+        opts = ort.SessionOptions()
+        opts.intra_op_num_threads = threads_per_session
+        opts.inter_op_num_threads = 1  # sequential graph operators; parallel handled above
         for _ in range(n):
-            sess = ort.InferenceSession(path, providers=["CPUExecutionProvider"])
+            sess = ort.InferenceSession(
+                path, sess_options=opts, providers=["CPUExecutionProvider"]
+            )
             _pool.put(sess)
         _pool_count = n
-        event("textblocks.model.loaded", {"path": path, "sessions": n})
+        event(
+            "textblocks.model.loaded",
+            {"path": path, "sessions": n, "threads_each": threads_per_session},
+        )
     except Exception as e:  # noqa: BLE001
         _session_failed = True
         event("textblocks.model.load_failed", {"error": str(e)[:200]}, ok=False)

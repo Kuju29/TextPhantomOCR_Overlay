@@ -47,6 +47,21 @@ class AiConfig:
     # Optional translation-memory: recent {"src","tgt"} pairs from earlier
     # pages in the same session, injected into the prompt for consistency.
     glossary: list = field(default_factory=list)
+    # Optional character sheet: {"name","gender","speech","note"} dicts the
+    # client accumulated from earlier pages (via <<TP_MEMO>> blocks), so the
+    # model knows each character's gender / pronouns / register.
+    characters: list = field(default_factory=list)
+    # Toggle for the character-memory feature (memo request + sheet injection).
+    # Off = smallest prompt/response, cheapest tokens.
+    char_memory: bool = True
+    # Vision: when the client opts in (send_image) the pipeline downscales the
+    # page and fills image_b64/image_mime so the model can SEE the speakers.
+    # Accepts True/"always" (every page) or "auto" (the pipeline attaches the
+    # image only on real dialogue pages — enough OCR bubbles — and only while
+    # the character sheet is still thin, so covers/title pages are skipped).
+    send_image: bool | str = False
+    image_b64: str = ""
+    image_mime: str = "image/jpeg"
 
 
 class AiResult(TypedDict):
@@ -124,9 +139,16 @@ def translate(
             if installed:
                 model = installed[0]
 
+    image_b64 = (getattr(ai, "image_b64", "") or "").strip()
+    image_mime = (getattr(ai, "image_mime", "") or "image/jpeg").strip()
+    char_memory = bool(getattr(ai, "char_memory", True))
+
     system_text = prompts.build_system_text(
         target_lang, ai.prompt_editable, is_retry=is_retry,
         glossary=getattr(ai, "glossary", None),
+        characters=getattr(ai, "characters", None) if char_memory else None,
+        has_image=bool(image_b64),
+        want_memo=char_memory,
     )
     user_parts = prompts.build_user_parts(original_text_full)
 
@@ -137,22 +159,34 @@ def translate(
 
     used_model = model
     if provider == "gemini":
-        result = gemini_client.generate(api_key, model, system_text, user_parts)
+        result = gemini_client.generate(
+            api_key, model, system_text, user_parts,
+            image_b64=image_b64, image_mime=image_mime,
+        )
     elif provider == "anthropic":
-        result = anthropic_client.generate(api_key, model, system_text, user_parts)
+        result = anthropic_client.generate(
+            api_key, model, system_text, user_parts,
+            image_b64=image_b64, image_mime=image_mime,
+        )
     elif is_hf_provider(provider, base_url):
         result = throttle.generate_with_backoff(
             api_key, base_url, model, system_text, user_parts,
             allow_hf_fallback=model_was_auto,
+            image_b64=image_b64, image_mime=image_mime,
         )
     else:
         result = openai_compat.generate(
             api_key, base_url, model, system_text, user_parts,
             allow_hf_fallback=False,
+            image_b64=image_b64, image_mime=image_mime,
         )
     used_model = result.used_model
 
-    ai_text_full = markers.sanitize(parsing.parse_text(result.text))
+    # Split off the optional <<TP_MEMO>> character-notes block BEFORE marker
+    # sanitisation so it can never leak into the rendered translation.
+    parsed_text, memo = markers.split_memo(parsing.parse_text(result.text))
+    ai_text_full = markers.sanitize(parsed_text)
+    characters = parsing.parse_character_memo(memo) if memo else []
 
     meta: dict[str, Any] = {
         "model": used_model,
@@ -160,6 +194,10 @@ def translate(
         "base_url": base_url,
         "target_lang": normalize_lang(target_lang),
     }
+    if characters:
+        meta["characters"] = characters
+    if image_b64:
+        meta["vision"] = True
     if capture_request:
         # Verbose debug payload for the CLI; not included on normal API runs
         # because some clients log meta verbatim.

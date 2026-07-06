@@ -4,32 +4,12 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import threading
 
 import httpx
 
 from backend.config import settings
 
 _DOWNLOAD_USER_AGENT = "Mozilla/5.0 (TextPhantomOCR; +https://huggingface.co/spaces)"
-
-# Shared pooled client: avoids a fresh TCP+TLS handshake per download.
-_client_lock = threading.Lock()
-_client: httpx.Client | None = None
-
-
-def _shared_client() -> httpx.Client:
-    global _client
-    with _client_lock:
-        if _client is None or _client.is_closed:
-            _client = httpx.Client(
-                timeout=settings.http_timeout_sec,
-                follow_redirects=True,
-                headers={"user-agent": _DOWNLOAD_USER_AGENT},
-                limits=httpx.Limits(
-                    max_connections=20, max_keepalive_connections=10, keepalive_expiry=30.0
-                ),
-            )
-        return _client
 
 
 def sha256_hex(blob: bytes) -> str:
@@ -74,12 +54,17 @@ def download(url: str, referer: str = "") -> tuple[bytes, str]:
     if not u:
         return b"", ""
 
-    headers: dict[str, str] = {}
+    headers = {"user-agent": _DOWNLOAD_USER_AGENT}
     ref = (referer or "").strip()
     if ref:
         headers["referer"] = ref
 
-    r = _shared_client().get(u, headers=headers or None)
-    r.raise_for_status()
-    content_type = (r.headers.get("content-type") or "").split(";")[0].strip()
-    return r.content, content_type
+    with httpx.Client(
+        timeout=settings.http_timeout_sec,
+        follow_redirects=True,
+        headers=headers,
+    ) as client:
+        r = client.get(u)
+        r.raise_for_status()
+        content_type = (r.headers.get("content-type") or "").split(";")[0].strip()
+        return r.content, content_type

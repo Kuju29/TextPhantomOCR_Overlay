@@ -26,13 +26,17 @@ def warmup(lang: str = "th") -> dict[str, Any]:
     except Exception:
         cookie_ok = False
 
-    # Text-block detector model (optional) — download once, best-effort.
-    try:
-        from backend.render.textblocks import ensure_model
+    # Text-block detector model (optional). Do NOT warm it by default because
+    # only lens_text.ai uses self-built blocks. Lens-direct modes
+    # (lens_images / lens_text.translated / lens_text.original) must start fast
+    # on Hugging Face CPU and should not pay ONNX boot/session cost.
+    if settings.textblock_warmup:
+        try:
+            from backend.render.textblocks import ensure_model
 
-        ensure_model()
-    except Exception:
-        pass
+            ensure_model()
+        except Exception:
+            pass
 
     thai_font, latin_font = resolve_font_pair(code)
     # Prime the font-pair cache at the sizes the renderer uses most.

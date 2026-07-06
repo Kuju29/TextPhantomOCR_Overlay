@@ -119,7 +119,11 @@ HF_FALLBACK_MODELS: Final[list[str]] = [
 
 
 # AI sampling defaults.
-TEMPERATURE: Final[float] = 0.2
+# 0.2 made every model pick the safest = most LITERAL wording, which read as
+# stiff machine translation no matter how good the style prompt was. Manga
+# dialogue is creative writing — 0.7 gives natural, punchy lines while the
+# <<TP_Pn>> marker protocol stays safe (contract + retry still enforce it).
+TEMPERATURE: Final[float] = 0.7
 # Manga pages can hit 20+ paragraphs and a Thai/CJK token is roughly a
 # character, so a generous output cap is needed — 1200 used to truncate
 # mid-paragraph and force the marker-repair fallback to fill the gaps with

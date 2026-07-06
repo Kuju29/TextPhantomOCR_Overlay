@@ -362,6 +362,10 @@
   async function ensureMangaDexDomMapping() {
     if (!isMangaDexHost()) return;
 
+    // SPA chapter switch? Clear the previous chapter's overlays/stamps first
+    // so nothing below re-attaches stale results to reused elements.
+    mdCheckChapterChange();
+
     // Site adapter first: exact alt-to-filename mapping (the reader sets
     // img.alt to the at-home filename). The legacy index inference below
     // stays as a fallback for any image the adapter could not match.
@@ -450,6 +454,73 @@
     }
   }
 
+  // --- Chapter-change cleanup ----------------------------------------------
+  // MangaDex is an SPA: switching chapters swaps blob srcs but often REUSES
+  // the same <img> elements and .md--page containers. Without cleanup the
+  // previous chapter's overlays keep tracking those reused elements (their
+  // stale data-tp-* keys still match) and render the old translation on top
+  // of the new chapter until the user presses F5.
+  let mdCurrentChapterId = getMangaDexChapterId();
+
+  function mdDestroyAllOverlays() {
+    for (const rec of mdOverlaysByKey.values()) {
+      try {
+        if (rec?.blobUrl?.startsWith("blob:")) URL.revokeObjectURL(rec.blobUrl);
+      } catch {
+        /* already revoked */
+      }
+      try {
+        rec?.el?.remove();
+      } catch {
+        /* detached */
+      }
+    }
+    mdOverlaysByKey.clear();
+    for (const rec of mdHtmlOverlaysByKey.values()) {
+      try {
+        rec?.host?.remove();
+      } catch {
+        /* detached */
+      }
+    }
+    mdHtmlOverlaysByKey.clear();
+  }
+
+  /** Drop stale data-tp-* stamps so reused <img>s get remapped cleanly. */
+  function mdClearImgStamps() {
+    for (const img of Array.from(document.images || [])) {
+      const ds = img?.dataset;
+      if (!ds) continue;
+      if (ds.tpOriginalKey || ds.tpOriginal || ds.tpMdPage) {
+        delete ds.tpOriginalKey;
+        delete ds.tpOriginal;
+        delete ds.tpMdPage;
+      }
+    }
+  }
+
+  /**
+   * Detect chapter navigation and wipe every per-chapter artifact: overlays,
+   * parked results, the URL-list cache and stale <img> stamps. Cached
+   * translations for the NEW chapter re-render via the delayed hydrate, so
+   * revisiting a translated chapter needs no F5.
+   * @returns {boolean} true when a chapter change was handled
+   */
+  function mdCheckChapterChange() {
+    const id = getMangaDexChapterId();
+    if (!id || id === mdCurrentChapterId) return false;
+    TP.log.info("md chapter changed", { from: mdCurrentChapterId, to: id });
+    mdCurrentChapterId = id;
+    mdCache = null;
+    mdPendingByOriginal.clear();
+    mdDestroyAllOverlays();
+    mdClearImgStamps();
+    setTimeout(() => {
+      hydrateMangaDexFromCache().catch(() => {});
+    }, 350);
+    return true;
+  }
+
   const findMangaDexImgByKey = (key) =>
     key
       ? Array.from(document.images || []).find(
@@ -472,6 +543,12 @@
         continue;
       }
       let img = rec.img;
+      if (img && img.isConnected) {
+        // The reader reuses <img> elements across chapters — if this one was
+        // re-stamped with a different key, it no longer belongs to us.
+        const dsKey = String(img.dataset.tpOriginalKey || "");
+        if (dsKey && dsKey !== key) img = null;
+      }
       if (!img || !img.isConnected) img = findMangaDexImgByKey(key);
       if (!img) {
         el.style.display = "none";
@@ -502,6 +579,12 @@
         continue;
       }
       let img = rec.img;
+      if (img && img.isConnected) {
+        // Same reuse guard as above: a re-stamped element belongs to another
+        // page/chapter now, never draw this overlay on top of it.
+        const dsKey = String(img.dataset.tpOriginalKey || "");
+        if (dsKey && dsKey !== key) img = null;
+      }
       if (!img || !img.isConnected) img = findMangaDexImgByKey(key);
       if (!img) {
         host.style.display = "none";
@@ -707,6 +790,9 @@
       });
       const onNav = () => {
         mdCache = null;
+        // Immediate cleanup on chapter switch — do not wait for the 60ms
+        // mapping debounce, or old overlays flash over the new chapter.
+        mdCheckChapterChange();
         scheduleMangaDexMapping();
       };
       window.addEventListener("popstate", onNav);
@@ -717,7 +803,7 @@
           const orig = history[name];
           history[name] = function (...args) {
             const r = orig.apply(this, args);
-            scheduleMangaDexMapping();
+            onNav();
             return r;
           };
         }

@@ -66,6 +66,9 @@ export async function readFullSettings() {
     "aiProvider",
     "aiBaseUrl",
     "aiGlossary",
+    "aiCharMemory",
+    "aiSendImage",
+    "aiPageImage",
     "aiPromptByLang",
     "aiPrompt",
   ]);
@@ -114,6 +117,13 @@ export async function readFullSettings() {
     aiProvider: typeof it.aiProvider === "string" ? it.aiProvider : "auto",
     aiBaseUrl: typeof it.aiBaseUrl === "string" ? it.aiBaseUrl : "",
     aiGlossary: Array.isArray(it.aiGlossary) ? it.aiGlossary : [],
+    aiCharMemory: it.aiCharMemory !== false, // default ON
+    // Page-image toggle: "always" (send every page) or "off" (text only).
+    // Default "off"; migrates the older boolean `aiSendImage`.
+    aiPageImage:
+      it.aiPageImage === "always" || (it.aiPageImage == null && it.aiSendImage)
+        ? "always"
+        : "off",
     aiPrompt,
   };
 }

@@ -19,11 +19,30 @@ from backend.ai.clients.base import ChatResult
 from backend.ai.providers import hf_router_models, pick_hf_fallback_model
 
 
-def _build_payload(model: str, system_text: str, user_parts: list[str]) -> dict:
-    messages = [{"role": "system", "content": system_text}]
-    messages.extend(
-        {"role": "user", "content": p} for p in user_parts if (p or "").strip()
-    )
+def _build_payload(
+    model: str,
+    system_text: str,
+    user_parts: list[str],
+    image_b64: str = "",
+    image_mime: str = "image/jpeg",
+) -> dict:
+    messages: list[dict] = [{"role": "system", "content": system_text}]
+    if (image_b64 or "").strip():
+        # Vision request: one user message with an image part + text parts
+        # (OpenAI-style content array; supported by OpenAI, OpenRouter, Groq,
+        # and most local servers with vision models).
+        content: list[dict] = [
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:{image_mime or 'image/jpeg'};base64,{image_b64}"},
+            }
+        ]
+        content.extend({"type": "text", "text": p} for p in user_parts if (p or "").strip())
+        messages.append({"role": "user", "content": content})
+    else:
+        messages.extend(
+            {"role": "user", "content": p} for p in user_parts if (p or "").strip()
+        )
     return {
         "model": model,
         "messages": messages,
@@ -60,6 +79,8 @@ def generate(
     user_parts: list[str],
     *,
     allow_hf_fallback: bool = False,
+    image_b64: str = "",
+    image_mime: str = "image/jpeg",
 ) -> ChatResult:
     """POST a chat completion request and return ``(text, used_model)``."""
     url = base_url.rstrip("/") + "/chat/completions"
@@ -67,7 +88,7 @@ def generate(
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    payload = _build_payload(model, system_text, user_parts)
+    payload = _build_payload(model, system_text, user_parts, image_b64, image_mime)
 
     with httpx.Client(timeout=ai_config.TIMEOUT_SEC) as client:
         r = client.post(url, json=payload, headers=headers)

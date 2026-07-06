@@ -285,6 +285,31 @@ def _annotate_text_light(tree: dict | None, base_img: Image.Image | None) -> Non
 
 # --- AI layer --------------------------------------------------------------
 
+_VISION_MAX_SIDE = 1024
+_VISION_JPEG_QUALITY = 72
+
+
+def _encode_vision_image(img: Image.Image) -> tuple[str, str]:
+    """Downscale + JPEG-encode the page for the vision prompt.
+
+    Returns ``(base64_data, mime)``.  Kept small (max side 1024, q72) so the
+    extra input tokens stay reasonable while faces / who-talks-to-whom remain
+    perfectly readable for the model.
+    """
+    import base64
+    import io
+
+    w, h = img.size
+    scale = _VISION_MAX_SIDE / float(max(w, h))
+    if scale < 1.0:
+        img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=_VISION_JPEG_QUALITY)
+    return base64.b64encode(buf.getvalue()).decode("ascii"), "image/jpeg"
+
+
 def _run_ai_layer(
     out: dict[str, Any],
     original_tree: dict | None,
@@ -297,6 +322,7 @@ def _run_ai_layer(
     latin_font: str,
     *,
     base_img: Image.Image | None = None,
+    vision_img: Image.Image | None = None,
     capture_request: bool = False,
     use_lens_template: bool = False,
     layout_meta: dict[str, Any] | None = None,
@@ -355,6 +381,28 @@ def _run_ai_layer(
     # This halves the prompt input and lets it translate freely, which
     # produced noticeably more natural Thai/JP/ZH/KO dialogue than the
     # previous "improve on the Lens MT" approach.
+
+    # Vision (opt-in): attach a downscaled page image so the model can SEE
+    # speaker gender / expressions / who talks to whom.  ``base_img`` may have
+    # its text erased for rendering, so prefer the untouched ``vision_img``.
+    #
+    # Modes: True/"always" = every page.  "auto" = only pages that look like
+    # real dialogue (enough OCR text units) while the character sheet is still
+    # thin — covers, title and credits pages have few text blocks and teach
+    # the model nothing, so they stay cheap text-only.
+    _send = getattr(ai_cfg, "send_image", False)
+    _send_mode = str(_send).strip().lower() if _send else ""
+    want_image = _send is True or _send_mode in ("always", "true", "1")
+    if _send_mode == "auto":
+        known_chars = len(getattr(ai_cfg, "characters", None) or [])
+        want_image = n_src >= 5 and known_chars < 4
+    if want_image and not getattr(ai_cfg, "image_b64", ""):
+        vimg = vision_img if vision_img is not None else base_img
+        if vimg is not None:
+            try:
+                ai_cfg.image_b64, ai_cfg.image_mime = _encode_vision_image(vimg)
+            except Exception:
+                pass  # vision is best-effort; translation continues text-only
 
     # First attempt; retry once (with runaway-repeat clamping) if markers drop.
     result = ai_translate(
@@ -479,6 +527,12 @@ def _run_ai_layer(
         if src_s and tgt_s and len(src_s) <= 24:
             glossary_pairs.append({"src": src_s, "tgt": tgt_s})
     out["Ai"]["glossary"] = glossary_pairs
+
+    # Character-sheet notes the model emitted for this page (<<TP_MEMO>>).
+    # The client merges these by name across pages and sends them back via
+    # ``ai.characters`` so gender / pronouns / register stay right series-wide.
+    chars = meta.get("characters")
+    out["Ai"]["characters"] = chars if isinstance(chars, list) else []
 
     # Flag dark-background paragraphs BEFORE rendering so the overlay flips
     # to white text + dark halo where the panel behind the bubble is dark.
@@ -705,6 +759,7 @@ def process_image(
                 _run_ai_layer,
                 out, original_tree, translated_tree, ai_cfg, target_lang, W, H, thai_font, latin_font,
                 base_img=base_img,
+                vision_img=img,
                 capture_request=capture_ai_request,
                 use_lens_template=True,
                 layout_meta=ai_layout_meta,
@@ -845,6 +900,7 @@ def process_image(
             _run_ai_layer,
             out, original_tree, translated_tree, ai_cfg, target_lang, W, H, thai_font, latin_font,
             base_img=base_img,
+            vision_img=img,
             capture_request=capture_ai_request,
             use_lens_template=False,
             layout_meta=ai_layout_meta,
@@ -934,6 +990,14 @@ def _build_ai_config(payload: dict, mode: str, source: str) -> AiConfig | None:
         base_url=str(ai.get("base_url") or "auto").strip() or "auto",
         prompt_editable=str(ai.get("prompt") or "").strip(),
         glossary=ai.get("glossary") if isinstance(ai.get("glossary"), list) else [],
+        characters=ai.get("characters") if isinstance(ai.get("characters"), list) else [],
+        char_memory=bool(ai.get("char_memory", True)),
+        # False / True / "always" / "auto" — keep the mode string intact.
+        send_image=(
+            ai.get("send_image").strip().lower()
+            if isinstance(ai.get("send_image"), str)
+            else bool(ai.get("send_image"))
+        ),
     )
 
 
