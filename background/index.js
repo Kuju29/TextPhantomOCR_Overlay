@@ -31,7 +31,7 @@ import {
   stripImageFields,
 } from "./mangadex.js";
 import { bumpTabSession, dropTabSession, ensureTabSession } from "./tab-sessions.js";
-import { closeWebSocket, getWsStatus, isWsReady, setHandlers } from "./transport.js";
+import { closeWebSocket, getWsStatus, isWsReady, setHandlers, cancelJobsViaRest } from "./transport.js";
 import { onContextMenuClicked, recreateMenus } from "./context-menu.js";
 
 const log = createLogger("SW");
@@ -146,9 +146,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     case "CANCEL_BATCH": {
       const bid = String(msg.batchId || "");
       if (bid) {
+        const jobIds = [];
         for (const [jid, rec] of Array.from(pendingByJob.entries())) {
-          if (rec?.batchId === bid) pendingByJob.delete(jid);
+          if (rec?.batchId === bid) {
+            jobIds.push(jid);
+            pendingByJob.delete(jid);
+          }
         }
+        // Tell the backend to drop these from its queue / rate gate so they
+        // stop consuming provider budget.
+        cancelJobsViaRest({ jobIds, batchId: bid });
       }
       sendResponse({ success: true });
       return true;

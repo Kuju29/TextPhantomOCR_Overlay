@@ -72,6 +72,22 @@ class Settings:
     hf_max_retries: int = field(default_factory=lambda: max(1, _env_int("HF_AI_MAX_RETRIES", 3)))
     hf_retry_base_sec: float = field(default_factory=lambda: max(0.2, _env_float("HF_AI_RETRY_BASE_SEC", 2.0)))
 
+    # AI rate gate (proactive per-provider pacing) ---------------------------
+    # Instead of firing every AI request at once (which trips a provider's
+    # requests-per-minute limit on pages with many images) the gate releases
+    # requests in paced batches sized to each provider's RPM. It is keyed by
+    # (provider, model, api_key) so every model/key you use gets its own budget,
+    # is fair across users sharing one key (round-robin per tab session), and
+    # never waits unbounded: a request that cannot get a slot within
+    # ``rate_max_wait_sec`` is skipped fast and, past ``rate_max_waiters`` queued
+    # per bucket, new requests are rejected immediately so the queue cannot bloat.
+    rate_gate_enabled: bool = field(default_factory=lambda: _env_bool("TP_RATE_GATE", True))
+    rate_max_wait_sec: float = field(default_factory=lambda: max(1.0, _env_float("TP_RATE_MAX_WAIT_SEC", 75.0)))
+    rate_max_waiters_per_bucket: int = field(default_factory=lambda: max(1, _env_int("TP_RATE_MAX_WAITERS", 40)))
+    # Fallback policy for providers not listed in RATE_POLICY_DEFAULTS.
+    rate_default_rpm: float = field(default_factory=lambda: max(0.0, _env_float("TP_RATE_RPM_DEFAULT", 30.0)))
+    rate_default_burst: int = field(default_factory=lambda: max(1, _env_int("TP_RATE_BURST_DEFAULT", 4)))
+
     # AI key fall-back -------------------------------------------------------
     ai_api_key: str = field(default_factory=lambda: _env_str("AI_API_KEY"))
 
@@ -153,6 +169,7 @@ class Settings:
 
 
 # Module-level singleton.  Import this from anywhere as ``from backend.config import settings``.
+# (rate-gate settings added above: rate_gate_enabled / rate_max_wait_sec / ...)
 settings: Final[Settings] = Settings()
 
 

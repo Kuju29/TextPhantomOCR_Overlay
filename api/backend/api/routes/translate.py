@@ -61,6 +61,27 @@ async def translate(
     return meta
 
 
+@router.post("/translate/cancel")
+async def translate_cancel(payload: dict[str, Any], request: Request) -> dict:
+    """Cancel queued / rate-gate-waiting jobs.
+
+    Body accepts any of: ``job_ids`` (list), ``batch_id`` (str),
+    ``tp_tab_session`` / ``session`` (str). Jobs already running finish; jobs
+    still queued or waiting for a provider slot are dropped so a closed tab
+    stops consuming provider budget.
+    """
+    raw_ids = payload.get("job_ids") or payload.get("ids") or []
+    if not isinstance(raw_ids, list):
+        raw_ids = [raw_ids]
+    result = await _job_queue(request).cancel(
+        job_ids=raw_ids,
+        batch_id=str(payload.get("batch_id") or ""),
+        session=str(payload.get("tp_tab_session") or payload.get("session") or ""),
+    )
+    dbg("rest.cancel", {**result, "batch_id": str(payload.get("batch_id") or "")})
+    return result
+
+
 @router.get("/translate/{job_id}")
 async def translate_status(
     job_id: str,

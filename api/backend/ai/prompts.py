@@ -1,13 +1,20 @@
 """Prompt templates and language-specific style hints for AI translation.
 
-Two design choices that keep the prompt small (= faster, cheaper):
+Design choices:
 
-- We send only the *source* text — no Lens machine-translation reference
-  block.  The model translates from the original, which gives a more natural
-  result than "improve on the MT" and saves a large amount of input tokens.
-- The system text is a few short sentences plus a per-language style block.
-  Most rules are *positive* ("write natural manga dialogue") rather than
-  exhaustive negative lists.
+- ONE editable prompt per language.  Everything about HOW to translate —
+  including the gender policy — lives in the language style block the user
+  can see and edit.  Only the mechanical marker contract and the image note
+  stay fixed.
+- Built to work on ANY model size.  Small models ignore long prose rules but
+  reliably imitate (a) short numbered rules with inline examples and (b) a
+  worked example at the end.  Big models benefit from the same structure.
+- We send only the *source* text — no Lens machine-translation reference.
+  The model translates from the original, which reads more natural and
+  saves input tokens.
+- Gender is EVIDENCE-based, never guessed: the accumulated CHARACTER SHEET
+  (cache) and explicit text evidence are proof; the page image alone is only
+  a hint, because manga art is ambiguous and models guess it wrong.
 """
 
 from __future__ import annotations
@@ -26,110 +33,70 @@ SYSTEM_BASE: Final[str] = (
 
 
 LANG_STYLE: Final[dict[str, str]] = {
-    # Thai — compact but strongly opinionated for manga scanlation.
-    # Keep this block target-only so it does not bloat non-Thai calls.
+    # Thai — a single editable prompt that must work on every model size:
+    # short numbered rules (priority order), one inline example per rule,
+    # and a worked example at the end that small models can imitate.
     "th": (
         "Target language: Thai (ภาษาไทย)\n"
-        "Write like a polished Thai manga scanlation, not like machine translation: natural spoken Thai, "
-        "in-character, punchy, easy to fit in speech bubbles, and faithful to the source meaning.\n"
-        "CONTEXT / ORDER: Use the given <<TP_Pn>> order as the "
-        "bubble/panel reading order; never reorder markers. Use nearby previous/next markers to infer the scene, "
-        "emotion, speaker relationship, repeated names and terminology.\n"
-        "PRONOUN-DROP (very important): Thai naturally omits subjects and objects — the listener knows who is meant from "
-        "context. Even when the source says I / you / he / she, DROP the pronoun. Do NOT use ผม / ฉัน / ข้า / หนู / นาย / "
-        "เธอ / คุณ / เจ้า unless the line is meaningless without it. When a reference is truly needed, use the character's "
-        "name, role or title (ท่านผู้กล้า, หัวหน้ากิลด์) instead of a pronoun. Example: 'I won't forgive you!' -> "
-        "ไม่ยกโทษให้แน่!! (no pronoun at all).\n"
-        "THIRD PERSON is DIFFERENT: Thai manga freely uses มัน (enemies, monsters, things, contempt), พวกมัน, "
-        "หมอนั่น, เจ้านั่น, ไอ้หมอนี่, ยัยนั่น — use them to carry attitude instead of dropping everything: "
-        "'He's coming!' (enemy) -> มันมาแล้ว!!, 'Don't underestimate him' -> อย่าดูถูกหมอนั่นเชียว. These describe the "
-        "person being TALKED ABOUT, not the speaker, so they are always safe even when the speaker's gender is "
-        "unknown.\n"
-        # NOTE: the gendered-speech rule (ครับ/ค่ะ) is NOT part of this
-        # user-editable style — build_system_text() appends it as a fixed
-        # block chosen by ``has_image`` (vision may use gendered words,
-        # text-only may not), so user prompt edits cannot break it.
-        "CONVERSATION FLOW: Treat consecutive markers as one conversation. For each line decide: is it a REPLY to the "
-        "previous line, the same speaker continuing, an inner thought, or narration — and translate it that way. A reply "
-        "must connect naturally to the previous line's Thai (รับคำ, สวนกลับ, เออออ, ปัดตก), not stand alone like a fresh "
-        "sentence.\n"
-        "SHORT REPLIES / INTERJECTIONS (very important): yes / no / huh / eh / well / right / I see are FUNCTION words — "
-        "translate what the word DOES in this exchange, never the dictionary word. A bare ใช่ / ไม่ fits only a direct "
-        "fact-question; most of the time Thai says something else:\n"
-        "  yes (casual agreement) -> อือ / เออ / อืม / ได้ / ใช่เลย ; yes (accepting an order/request) -> รับทราบ / ได้เลย / "
-        "ตามนั้น ; Yes? (answering a call) -> ห๊ะ? / หืม? / ว่าไง?\n"
-        "  no (refusing) -> ไม่เอา / ไม่มีทาง / ไม่หรอก / ไม่ล่ะ ; no (denying an assumption) -> เปล่า / เปล่านะ / เปล่าซะหน่อย ; "
-        "no way! -> ไม่จริงน่า! / เป็นไปไม่ได้!\n"
-        "  huh? / eh? -> ห๊ะ? / หา? / เอ๋? ; well... / um -> เอ่อ... / ก็... / อืม... ; I see / oh -> อ๋อ / งั้นเหรอ / อย่างนี้นี่เอง ; "
-        "right / yeah -> นั่นสิ / ก็จริง / นั่นแหละ\n"
-        "  Pick the ONE that fits the previous line and the speaker's mood — a wrong ใช่/ไม่ here reads as machine "
-        "translation instantly.\n"
-        "WORDPLAY / IDIOMS (very important): Never carry a source-language pun or idiom into Thai literally — a joke that "
-        "only works in English/Japanese must NOT become a weird word-for-word Thai line. First extract the intent (ขำ, แซว, "
-        "เหน็บ, มุกฝืด, เล่นเสียง), then write Thai that lands the same way: use a Thai pun if one comes naturally, "
-        "otherwise a plain punchy line with the same feeling. Idioms translate by meaning, not by words. Examples:\n"
-        "  Source: This quest is a piece of cake! -> Thai: เควสต์นี้ง่ายจะตาย! (idiom by meaning)\n"
-        "  Source: You're un-BEAR-able! (bear pun) -> Thai: เหลือทนจริงๆเลยนะเจ้าหมีเนี่ย!! (keep the bear + the annoyance, drop the untranslatable pun)\n"
-        "  Source: Long time no sea. (sea pun) -> Thai: ไม่เจอกันนานเลยนะ~ (no natural Thai pun -> plain natural line)\n"
-        "  Never leave a pun translated word-for-word so it reads as nonsense in Thai.\n"
-        "PARTICLES / TONE: Match the particle to the REGISTER and the EMOTION, not just politeness — a flat polite "
-        "line for an angry character reads as machine translation instantly. Soft/neutral: นะ, สิ, ล่ะ, เถอะ, เลย, "
-        "แล้ว, เหรอ, รึเปล่า, เนี่ย, นั่นแหละ. Rough/heated (fights, rivals, thugs, shouting, cursing — all "
-        "gender-neutral, USE them): วะ, ว่ะ, โว้ย, เว้ย, ...ซะที, ...ชะมัด, โคตร..., บ้าเอ๊ย, ให้ตายสิ, เวรเอ๊ย, ไอ้เวรนี่. "
-        "Keep each character's register (polite staff vs casual friends vs thugs vs inner thoughts) stable across "
-        "the page.\n"
-        "TERMINOLOGY (สถานที่ / ไอเทม / สกิล / ท่า / ฉายา) — decide per term which of Thai scanlators' two habits fits, "
-        "then NEVER mix styles for that term again:\n"
-        "  (a) ทับศัพท์ for established gaming/isekai loanwords every Thai manga reader already knows — do NOT translate "
-        "these into odd Thai: เควสต์, กิลด์, ปาร์ตี้, ดันเจี้ยน, สกิล, เลเวล, ไอเทม, บอส, มอนสเตอร์, สเตตัส, มานา, คลาส, "
-        "เมจ, ฮีลเลอร์, แทงค์, ดรอป, โซโล่. Keep Latin letters only for ranks/grades/stats: แรงค์ E, เกรด S, HP, MP. "
-        "Otherwise NO raw English words left in a bubble.\n"
-        "  (b) แปลเป็นไทยแนวแฟนตาซี for descriptive terms — words that SAY what the thing is must read as real Thai, not "
-        "a forced transliteration: magic stone -> หินเวทมนตร์, magic power -> พลังเวท, adventurer -> นักผจญภัย, "
-        "holy sword -> ดาบศักดิ์สิทธิ์, demon lord -> จอมมาร, hero -> ผู้กล้า, knight order -> อัศวิน, appraisal -> "
-        "ตรวจสอบ/ประเมิน.\n"
-        "  SKILL / TECHNIQUE NAMES (ท่า, เวท): if the source styles it as English/katakana, transliterate and keep it "
-        "flashy (Fireball -> ไฟร์บอล, Excalibur -> เอ็กซ์คาลิเบอร์); if the name is built from meaning (kanji-style), "
-        "translate into a COOL compact Thai name, not a literal gloss (火炎斬 -> ดาบเพลิงพิฆาต, ไม่ใช่ 'การฟันไฟเปลวเพลิง'). "
-        "A shouted move name must still sound shoutable in Thai.\n"
-        "  PLACES: Thai class word + name: เหมืองอาชิลล์, หอคอยบาเบล, เมืองออร์เซล, ป่าเอลเวน. If the place name is "
-        "meaningful, translating it is fine when it sounds natural: ป่าต้องห้าม, หุบเขามรณะ.\n"
-        "  ORGANIZATIONS: translate the class word, keep the proper part: สมาคมดันเจี้ยน (Dungeon Association), "
-        "กิลด์นักผจญภัย (Adventurer's Guild), อัศวินหลวง.\n"
-        "  TITLES / EPITHETS (ฉายา): translate for impact, not word-by-word: Sword Saint -> เทพดาบ/จอมดาบ, "
-        "The Strongest -> ผู้แข็งแกร่งที่สุด, Calamity -> ตัวหายนะ.\n"
-        "  Rule of thumb: would a Thai scanlation reader instantly recognize the transliteration? -> ทับศัพท์. Does the "
-        "word describe what the thing IS? -> translate. In doubt, prefer the shorter, more natural-sounding option and "
-        "keep it consistent for the whole request.\n"
-        "VOICE: Make dialogue sound like Thai people would actually write it in manga. Use natural contractions and idioms, "
-        "but do not add new facts. Keep shouting, surprise and hesitation: !!, !?, ..., เอ๊ะ, อ่า, หะ, โธ่, เดี๋ยวนะ.\n"
-        "CONSISTENCY: Within the same request, keep every character name, place, skill, item, race, title and catchphrase "
-        "translated the same way. Do not switch synonyms randomly across nearby panels. If unsure, keep a short readable "
-        "Thai transliteration. Examples: Gaia=ไกอา, Cardinal=คาร์ดินัล, Mithril=มิธริล.\n"
-        "LENGTH: Translate the full meaning, but keep it compact for bubbles. Prefer one natural Thai sentence over a literal "
-        "word-for-word line. Do not over-explain, do not summarize away important details.\n"
-        "FINAL POLISH: Before answering, reread your Thai lines in order as ONE conversation. Any line that sounds "
-        "like translated text instead of something a Thai character would actually say — rewrite it. How it SOUNDS "
-        "matters more than word-for-word fidelity, as long as the meaning survives.\n"
-        "Style anchors from Thai manga scanlation examples; imitate the rhythm, not the exact text:\n"
-        "  - ตั้งโล่ทั้งหมดกลับมาไม่ทันแน่!!\n"
-        "  - จะทำเหมือนน้ำ...\n"
-        "  - นี่คือมังกรที่แข็งแกร่งที่สุด แม้แต่เทพก็ยังกลืนกินได้ จงหวาดกลัวและหมอบกราบ\n"
-        "  - ไอ้เวรนี่ น่ารำคาญไม่เปลี่ยนเลยจริงๆ!!\n"
-        "  - อ่า!! คิดว่าจะยอมแพ้ง่ายๆหรือไง\n"
-        "  - มอนสเตอร์ที่เคยเจอมาจนถึงตอนนี้เทียบไม่ได้เลยสักนิด...\n"
-        "  - วางใจเถอะ วางแผนไว้หมดแล้ว\n"
-        "  - เดี๋ยวนะ... ไอ้ที่บอกว่าให้หยุดเนี่ย อย่าบอกนะว่าให้หยุดสิ่งนั้นน่ะ?\n"
-        "  - เท่านี้ก็สามารถรับงานแรงค์ B ได้ตั้งแต่เริ่มเลย!\n"
-        "  - ขอรับเควสต์ที่ดันเจี้ยนเหมืองอาชิลล์\n"
-        "  - ทางกิลด์ขอมอบบัตรแรงค์ D ให้นะ\n"
-        "Mini conversion examples (note: no pronouns, no ครับ/ค่ะ):\n"
-        "  Source: I won't make it in time! -> Thai: ไม่ทันแน่!!\n"
-        "  Source: Are you really not going to change? -> Thai: ไม่คิดจะเปลี่ยนเลยจริงๆสินะ\n"
-        "  Source: Please forgive us, brave hero. -> Thai: ขอร้องล่ะ ท่านผู้กล้า โปรดยกโทษให้ด้วยเถอะ\n"
-        "  Source: So that monster was part of your plan? -> Thai: งั้นมอนสเตอร์ตัวนั้นก็อยู่ในแผนเหมือนกันสินะ?\n"
-        "  Source: I'd like to take the quest at the Achille Mine dungeon. -> Thai: ขอรับเควสต์ที่ดันเจี้ยนเหมืองอาชิลล์\n"
-        "  Source (receptionist): Congratulations on defeating the boss again! -> Thai: ขอแสดงความยินดีกับการพิชิตบอสอีกครั้งนะ"
+        "Write like an experienced Thai scanlator: natural spoken Thai that fits speech bubbles — punchy, "
+        "in-character, faithful to the meaning, never word-for-word. Rules are numbered by priority; if two "
+        "conflict, the lower number wins.\n"
+        "1) TRANSLATE THE THOUGHT, NOT THE WORDS. Read all markers first — they are ONE page of ONE conversation. "
+        "A reply must connect to the previous line (รับคำ / สวนกลับ / เออออ / ปัดตก). If one sentence is split "
+        "across consecutive markers (bubble pairs ending with - or an unfinished clause), translate the WHOLE "
+        "thought first, then split it back across those same markers naturally.\n"
+        "   'Teach you what it means–' + 'to stand side by side!' -> สอนให้รู้ว่ามัน... + หมายถึงอะไรที่ได้ยืนเคียงข้างกัน!\n"
+        "2) DROP I/YOU, KEEP 'มัน'. Thai omits subjects: even when the source says I / you, drop the pronoun "
+        "(ผม ฉัน นาย เธอ คุณ) unless the line breaks without it — use a name or title instead (ท่านลอร์ด, "
+        "หัวหน้ากิลด์). Third person is the OPPOSITE: use มัน / พวกมัน (enemies, monsters, contempt), หมอนั่น, "
+        "เจ้านั่น, ไอ้หมอนี่, ยัยนั่น to carry attitude — they describe the person talked ABOUT, so they are "
+        "always safe.\n"
+        "   'I won't forgive you!' -> ไม่ยกโทษให้แน่!!  |  'He's coming!' (enemy) -> มันมาแล้ว!!\n"
+        "3) GENDER = EVIDENCE ONLY, NEUTRAL BY DEFAULT. Never guess a speaker's gender — not from the art either; "
+        "manga faces are ambiguous and a wrong ครับ/ค่ะ ruins the page. Use ครับ / ค่ะ / คะ / ผม / ดิฉัน ONLY when "
+        "BOTH: (a) that speaker's gender is proven — listed in the CHARACTER SHEET or explicit in the text — and "
+        "(b) the line's register truly needs polite speech (servant→master, staff→customer, formal strangers). "
+        "Everything else stays gender-neutral: ขอ... / โปรด... / เชิญ..., endings นะ / ด้วยนะ / ล่ะ / เถอะ. Most "
+        "manga lines are casual and need NO polite particle at all.\n"
+        "   'Yes, milord' (speaker unknown) -> รับทราบ / ได้เลยท่าน  |  (sheet says maid, female) -> ค่ะ ท่านลอร์ด\n"
+        "4) SHORT REPLIES ARE FUNCTION WORDS — translate what they DO, not the dictionary word. Bare ใช่ / ไม่ fits "
+        "only a direct fact-question.\n"
+        "   yes: อือ / เออ / ได้ / ใช่เลย (agree) · รับทราบ / ได้เลย / ตามนั้น (accept order) · ห๊ะ? / ว่าไง? (answering a call)\n"
+        "   no: ไม่เอา / ไม่มีทาง / ไม่หรอก (refuse) · เปล่า / เปล่าซะหน่อย (deny) · ไม่จริงน่า! / เป็นไปไม่ได้! (disbelief)\n"
+        "   huh?/eh? -> ห๊ะ? / หา? / เอ๋?  ·  well/um -> เอ่อ... / ก็...  ·  I see -> อ๋อ / งั้นเหรอ  ·  right -> นั่นสิ / ก็จริง\n"
+        "5) EMOTION MUST SURVIVE. Match particles to the register: soft นะ สิ ล่ะ เถอะ เลย เหรอ เนี่ย; heated "
+        "(gender-neutral — USE them in fights, shouting, cursing) วะ ว่ะ โว้ย เว้ย โคตร... บ้าเอ๊ย ให้ตายสิ เวรเอ๊ย "
+        "ไอ้เวรนี่. Keep !! !? ... เอ๊ะ อ่า หะ. A flat polite line on an angry face reads as machine translation.\n"
+        "   'You idiot!! Ever asked for anything reasonable?!' -> ไอ้บ้าเอ๊ย!! เคยขออะไรที่มันสมเหตุสมผลบ้างไหมวะเนี่ย!!\n"
+        "6) TERMS — pick ONE habit per term and never mix:\n"
+        "   (a) ทับศัพท์ loanwords Thai readers know: เควสต์ กิลด์ ปาร์ตี้ ดันเจี้ยน สกิล เลเวล ไอเทม บอส มอนสเตอร์ "
+        "สเตตัส มานา คลาส เมจ ฮีลเลอร์ แทงค์. Latin letters only for แรงค์ E / เกรด S / HP / MP — no other raw "
+        "English in a bubble.\n"
+        "   (b) descriptive words become real Thai: หินเวทมนตร์, พลังเวท, นักผจญภัย, ดาบศักดิ์สิทธิ์, จอมมาร, ผู้กล้า.\n"
+        "   Skills: English/katakana name -> ทับศัพท์เท่ๆ (Fireball -> ไฟร์บอล); meaning-built name -> คำไทยเท่กระชับ "
+        "(火炎斬 -> ดาบเพลิงพิฆาต, never การฟันไฟเปลวเพลิง) — a shouted move must sound shoutable. Places: คำบอกประเภท+ชื่อ "
+        "(เหมืองอาชิลล์, เมืองออร์เซล) or translate a meaningful name (ป่าต้องห้าม). Organizations: สมาคมดันเจี้ยน, "
+        "กิลด์นักผจญภัย. Epithets translate for impact: Sword Saint -> เทพดาบ.\n"
+        "7) KNOW WHAT KIND OF TEXT EACH MARKER IS — you only see OCR text, so infer from shape and content: a short "
+        "jagged line = shout (คำสั้นกระแทก + !!); a long calm line = normal dialogue; detached formal prose = "
+        "narration box (กลางๆ ไม่มีคำลงท้าย); trailing ... or self-questioning = inner thought (กันเอง ไม่มีคำสุภาพ); "
+        "onomatopoeia/SFX = translate the sound feel, SHORT (ドン -> ตูม!!), never explain it.\n"
+        "8) FIT THE BUBBLE, THEN POLISH. Full meaning, compact line — cutting words Thai readers infer is GOOD; "
+        "never cut plot facts. Before answering, reread all lines in order as one conversation and rewrite any line "
+        "that still sounds like a translation instead of something a Thai character would say.\n"
+        "WORKED EXAMPLE — imitate the approach (marker handling + tone), not the exact words:\n"
+        "Input:\n"
+        "<<TP_P0>> Jump down! Right now!!\n"
+        "<<TP_P1>> You idiot!! Have you ever asked for anything reasonable?!\n"
+        "<<TP_P2>> AAAGH hot hot HOT!!\n"
+        "<<TP_P3>> I knew it...\n"
+        "<<TP_P4>> Yes? Ah... understood. I will inform everyone at once.\n"
+        "Output:\n"
+        "<<TP_P0>> กระโดดลงไปเลย!!\n"
+        "<<TP_P1>> ไอ้บ้าเอ๊ย!! นี่เคยขออะไรที่มันสมเหตุสมผลบ้างไหมวะเนี่ย!!\n"
+        "<<TP_P2>> อ้ากก ร้อนโว้ยยย!!!\n"
+        "<<TP_P3>> ว่าแล้วเชียว...\n"
+        "<<TP_P4>> ห๊ะ? อ่า...รับทราบ เดี๋ยวจะรีบแจ้งทุกคนให้"
     ),
     "en": (
         "Target language: English\n"
@@ -162,54 +129,19 @@ LANG_STYLE: Final[dict[str, str]] = {
 }
 
 
+# Fixed block appended only when the page image is attached. Kept OUT of the
+# editable style so prompt edits cannot break the marker protocol, and kept
+# SHORT so it does not dilute the style rules on small models.
 IMAGE_HINT: Final[str] = (
-    "PAGE IMAGE: The manga page image is attached. It is CONTEXT — seeing the original text in the bubbles is "
-    "NOT a reason to translate more literally. Every style rule (wordplay, short replies, pronoun-drop, natural "
-    "punchy dialogue) applies at FULL strength in image mode; write the polished line, do not transcribe.\n"
-    "READING ORDER: Manga reads RIGHT to LEFT, top to bottom — panels and bubbles inside each panel. The "
-    "<<TP_Pn>> order comes from OCR and may NOT match the true reading order. Match each paragraph to its bubble "
-    "in the image, reconstruct the real conversation flow visually (who speaks first, who replies), and translate "
-    "each line so it fits that flow. BUT your OUTPUT must still keep every <<TP_Pn>> marker exactly in the given "
-    "order — reorder your understanding, never the markers.\n"
-    "SPEAKERS: identify each speaker's gender, age and appearance, who is talking to whom, facial expressions "
-    "and mood, and whether a line is a reply, a shout or an inner thought. Let this guide pronouns, particles "
-    "and tone. Do not describe the image; output only the translation."
-)
-
-
-# Thai gendered-speech rule — appended by build_system_text() as a FIXED
-# block (like the marker contract), never part of the user-editable style,
-# picked by ``has_image``. Rationale: from text alone the model cannot tell
-# WHICH character speaks a bubble, so guessing ครับ/ค่ะ is usually wrong —
-# gendered speech is banned outright for text-only requests. With the page
-# image attached the model can SEE the speaker, so gendered particles are
-# allowed (register rules still apply). Living outside the editable prompt
-# means user prompt edits cannot accidentally break this behaviour.
-TH_GENDER_RULE_TEXT_ONLY: Final[str] = (
-    "GENDERED SPEECH — FORBIDDEN (text-only request): You see only the text, so you CANNOT know which character "
-    "is speaking a given bubble or their gender. NEVER use gendered words: no ครับ / ค่ะ / คะ / นะคะ / ครับผม / ฮะ, "
-    "no ผม / ดิฉัน / หนู. Even if the CHARACTER SHEET lists genders, do NOT add gendered particles in this request — "
-    "you still cannot match bubbles to speakers. When the register is truly formal/service, stay polite the neutral "
-    "way: ขอ... / เชิญ... / โปรด..., softening endings นะ / ด้วยนะ / เลยนะ / ล่ะ / เถอะ — e.g. "
-    "ขอแสดงความยินดีกับการพิชิตบอสอีกครั้งนะ / ทางกิลด์ขอมอบบัตรแรงค์ D ให้นะ. A polite yes/reply is NOT automatically "
-    "ครับ/ค่ะ either — render it neutrally: 'Yes, milord' -> รับทราบ / ได้เลยท่าน, 'Yes' (to an order) -> รับทราบ / ตามนั้น. "
-    "Most manga dialogue is casual and needs no particle at all. This ban covers ONLY speaker-gender markers — "
-    "rough gender-neutral speech (มัน, พวกมัน, หมอนั่น, วะ, ว่ะ, โว้ย, เว้ย) and full emotion are still required "
-    "where the scene calls for them; do NOT flatten the dialogue."
-)
-
-TH_GENDER_RULE_WITH_IMAGE: Final[str] = (
-    "GENDERED PARTICLES — two SEPARATE decisions, in this order:\n"
-    "  (1) Does this line need a polite particle AT ALL? Only formal/service register does: receptionist to customer, "
-    "servant to master, subordinate to lord, polite strangers. Casual talk between friends / party members, family, "
-    "rivals, shouting, combat and inner thoughts take NO ครับ / ค่ะ — and that is MOST manga dialogue. When in doubt: "
-    "no particle.\n"
-    "  (2) Only if the register truly calls for one, pick ครับ vs ค่ะ/คะ from who is ACTUALLY speaking: match each "
-    "bubble to its character in the attached page image, confirm with the CHARACTER SHEET. Knowing a character's "
-    "gender is NOT a reason to add particles to casual lines. If the speaker is still unclear even with the image, "
-    "stay polite without gender: ขอ... / เชิญ... / โปรด..., endings นะ / ด้วยนะ / เลยนะ / ล่ะ. A polite yes/reply may be a "
-    "bare ครับ / ค่ะ on its own when the image clearly shows the speaker ('Yes, master' -> ค่ะ for a maid, ครับ for a "
-    "butler)."
+    "PAGE IMAGE: the page is attached as CONTEXT. Use it for who speaks to whom, expressions, mood and panel "
+    "flow — then still write the polished line the style rules demand. Seeing the source text in the bubbles is "
+    "NOT a reason to translate literally; never transcribe.\n"
+    "READING FLOW: infer the reading direction from the layout itself (Japanese manga usually flows "
+    "right-to-left, webtoons/manhwa left-to-right). The <<TP_Pn>> order comes from OCR and may not match what "
+    "you see — reconstruct the conversation visually, but OUTPUT every marker exactly in the given order; "
+    "reorder your understanding, never the markers.\n"
+    "GENDER CAUTION: manga art is ambiguous — treat the image as a HINT for gender, never proof. Gendered "
+    "speech still requires the CHARACTER SHEET or explicit text evidence (style rule 3)."
 )
 
 
@@ -217,9 +149,12 @@ CHARACTER_MEMO_INSTRUCTION: Final[str] = (
     "After the LAST paragraph, append one final block that starts with <<TP_MEMO>> on its own line. "
     "In it list each named character who speaks or is addressed on this page, ONE per line, format:\n"
     "Name | gender: male/female/unknown | speech: how they talk in the target language "
-    "(e.g. ข้า/เจ้า หยาบๆ, สุภาพ ค่ะ, ห้วนๆ) | note: role/relationship\n"
-    "Only include what the text (and image, if attached) actually reveals; do not guess. "
-    "Max 8 lines. If nothing is known, output <<TP_MEMO>> followed by the word none."
+    "(e.g. ข้า/เจ้า หยาบๆ, สุภาพ, ห้วนๆ) | note: role/relationship\n"
+    "gender: write male/female ONLY with explicit evidence — the text calls them he/she/หนุ่ม/สาว, a gendered "
+    "title (my lord, milady, お兄ちゃん), gendered self-speech in the SOURCE, or something truly unmistakable in "
+    "the attached image. Hair/face/clothes are NOT evidence. When unsure write unknown — a wrong guess poisons "
+    "every later page of this series. If this page proves an earlier sheet entry wrong, output the corrected "
+    "line. Max 8 lines. If nothing is known, output <<TP_MEMO>> followed by the word none."
 )
 
 
@@ -249,11 +184,17 @@ def build_glossary_block(glossary: list[dict] | None, limit: int = 40) -> str:
 
     ``glossary`` is a list of ``{"src": ..., "tgt": ...}`` pairs collected from
     the user's recent translations (across multiple images in one session).
-    Injecting them keeps terminology and names consistent from page to page —
-    the same role a human scanlator's term sheet plays.
+    Injecting them keeps NAMES and recurring TERMS consistent from page to
+    page — the same role a human scanlator's term sheet plays.
 
-    Only the most recent ``limit`` unique source terms are kept so the prompt
-    stays small.  Returns ``""`` when there is nothing usable.
+    Accuracy guards:
+    - very short sources (< 3 chars) are skipped: they are almost always
+      interjections/particles ("Ha", "え", "!?") whose best translation
+      depends on the scene — pinning them makes later pages stiff;
+    - only the most recent ``limit`` unique source terms are kept so the
+      prompt stays small.
+
+    Returns ``""`` when there is nothing usable.
     """
     if not glossary:
         return ""
@@ -266,6 +207,8 @@ def build_glossary_block(glossary: list[dict] | None, limit: int = 40) -> str:
         tgt = str(entry.get("tgt") or "").strip()
         if not src or not tgt or src in seen:
             continue
+        if len(src) < 3:  # interjection/particle — context beats memory
+            continue
         seen.add(src)
         lines.append(f"  - {src} → {tgt}")
         if len(lines) >= limit:
@@ -274,8 +217,9 @@ def build_glossary_block(glossary: list[dict] | None, limit: int = 40) -> str:
         return ""
     lines.reverse()  # restore chronological order for readability
     return (
-        "Translation memory (keep these consistent with earlier pages — "
-        "use the SAME target wording for the SAME source term):\n"
+        "TRANSLATION MEMORY (names, places, skills, items from earlier pages — use the SAME target wording "
+        "for the SAME source term). This binds recurring names/terms only; everyday words and interjections "
+        "are always free to follow the scene:\n"
         + "\n".join(lines)
     )
 
@@ -287,9 +231,10 @@ def build_character_block(
 
     ``characters`` is a list of ``{"name", "gender", "speech", "note"}`` dicts
     the client accumulated from earlier pages (via the ``<<TP_MEMO>>`` block).
-    This is what lets the model keep pronouns / particles / register right for
-    each character the way a human scanlator who has read earlier chapters
-    would.  Returns ``""`` when there is nothing usable.
+    The sheet is the AUTHORITY for gender: gendered speech is only allowed for
+    characters listed here with a known gender (style rule 3), which is what
+    lets long-running series get ครับ/ค่ะ right without guessing.
+    Returns ``""`` when there is nothing usable.
     """
     if not characters:
         return ""
@@ -308,23 +253,14 @@ def build_character_block(
         lines.append("  - " + " | ".join(bits))
     if not lines:
         return ""
-    if has_image:
-        tail = (
-            "\nUse it to keep each speaker's voice stable. The sheet only tells you WHICH form to use "
-            "(ครับ vs ค่ะ, ผม vs ฉัน) when the line's register ALREADY calls for polite/gendered speech — "
-            "it is NOT a reason to add ครับ/ค่ะ or pronouns to casual lines. Casual dialogue stays casual "
-            "and particle-free even for characters whose gender is listed here."
-        )
-    else:
-        tail = (
-            "\nUse it for names, personality, speech style and register consistency ONLY. This request has "
-            "no page image, so bubbles cannot be matched to speakers — do NOT use the listed genders to add "
-            "ครับ/ค่ะ or gendered pronouns; gendered speech stays disabled for text-only requests."
-        )
     return (
         "CHARACTER SHEET (accumulated from earlier pages of this series — treat as ground truth):\n"
         + "\n".join(lines)
-        + tail
+        + "\nThis sheet is the ONLY proof of a character's gender (plus explicit text evidence). Gendered speech "
+        "(ครับ/ค่ะ, ผม/ดิฉัน) is allowed only for speakers listed here with a known gender AND only when the "
+        "line's register calls for it. Anyone not listed — or listed as unknown — speaks gender-neutral. "
+        "Casual lines stay casual and particle-free either way; use the speech/note fields to keep each "
+        "character's voice stable."
     )
 
 
@@ -339,22 +275,15 @@ def build_system_text(
 ) -> str:
     """Build the system prompt that gets prepended to every AI call.
 
-    The contract section enforces the ``<<TP_Pn>>`` marker protocol used by
-    :mod:`backend.ai.markers`.  When ``is_retry`` is True we add an extra
-    line instructing the model to emit ALL markers.  ``glossary`` (optional)
-    is a list of recent ``{"src","tgt"}`` pairs injected as a translation
-    memory so multi-image batches stay consistent.
-
-    The model only ever sees the source text (no machine-translation
-    reference), which keeps input tokens small.
+    Composition (in order): SYSTEM_BASE, the single editable language style
+    (or the user's override), IMAGE_HINT when a page image is attached, the
+    character sheet, the translation memory, then the fixed marker contract.
+    The contract enforces the ``<<TP_Pn>>`` protocol used by
+    :mod:`backend.ai.markers`; when ``is_retry`` is True an extra line demands
+    ALL markers.  The model only ever sees the source text (no MT reference),
+    which keeps input tokens small.
     """
     style = (prompt_override or "").strip() or lang_style(lang)
-    # Thai gender rule is a FIXED block (applies even with a custom prompt):
-    # vision -> gendered particles allowed (register rules still apply),
-    # text-only -> strictly gender-neutral (speaker cannot be identified).
-    gender_block = ""
-    if _normalize_lang(lang) == "th":
-        gender_block = TH_GENDER_RULE_WITH_IMAGE if has_image else TH_GENDER_RULE_TEXT_ONLY
     contract: list[str] = [
         "Output ONLY the translated text (no JSON, no markdown, no extra commentary).",
         "Keep every paragraph marker like <<TP_P0>> exactly as it appears, in order.",
@@ -374,7 +303,6 @@ def build_system_text(
     parts = [
         SYSTEM_BASE.strip(),
         style,
-        gender_block,
         image_block,
         character_block,
         glossary_block,

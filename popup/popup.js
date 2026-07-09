@@ -287,7 +287,12 @@ async function refreshAiMeta() {
       (state.modelDirty ? (els.aiModel.value || "").trim() : (state.desiredAiModel || "").trim()) ||
       currentModel ||
       "auto";
-    setModelOptions(models, { keepValue: preferred, strict: true });
+    // When the user has explicitly pinned a model, never drop it just because
+    // the /ai/resolve model list happens to omit it (some providers don't
+    // enumerate every model). Keep it as a selectable option so it survives —
+    // otherwise the selection silently resets to "auto" on each refresh.
+    const userPinned = Boolean(preferred && preferred !== "auto");
+    setModelOptions(models, { keepValue: preferred, strict: !userPinned });
 
     const optionValues = [...els.aiModel.options].map((o) => o.value);
     let nextModel = (els.aiModel.value || "").trim() || "auto";
@@ -547,7 +552,12 @@ async function loadSettings() {
       stored.aiPageImage === "always" ||
       (stored.aiPageImage == null && Boolean(stored.aiSendImage));
   }
-  setModelOptions([], { keepValue: state.desiredAiModel });
+  // Keep the stored model selectable before the model list is fetched, so a
+  // pinned model isn't briefly shown as "auto" on popup open.
+  setModelOptions([], {
+    keepValue: state.desiredAiModel,
+    strict: !(state.desiredAiModel && state.desiredAiModel !== "auto"),
+  });
   const prompt = Object.prototype.hasOwnProperty.call(state.aiPromptByLang, promptKey)
     ? String(state.aiPromptByLang[promptKey] || "")
     : "";

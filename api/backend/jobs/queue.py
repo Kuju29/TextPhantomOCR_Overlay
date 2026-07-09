@@ -23,6 +23,8 @@ from typing import Any, Callable
 
 from backend.config import settings
 from backend.log import dbg, event
+from backend.ai.rategate import rate_gate, RateGateTimeout, RateGateRejected
+from backend.ai.providers import resolve_provider
 
 Job = dict[str, Any]
 
@@ -60,9 +62,13 @@ class JobQueue:
         if configured_ai > 0:
             ai_workers = max(1, configured_ai)
         else:
-            # AI lane uses ONNX/provider calls. Keep it small by default even
-            # when SERVER_MAX_WORKERS is large; direct jobs get the rest.
-            ai_workers = 1 if total < 6 else 2
+            # AI lane uses ONNX/provider calls. Heavy CPU is bounded separately
+            # by the pipeline's _CPU_GATE, and provider calls are paced by the
+            # rate gate, so a few AI worker coroutines are safe and let jobs for
+            # DIFFERENT provider/model/key buckets (or different users) progress
+            # in parallel instead of head-of-line blocking on one slow bucket.
+            # Raise TP_AI_MAX_CONCURRENCY for more cross-bucket parallelism.
+            ai_workers = max(2, min(4, total // 3))
 
         if configured_direct > 0:
             direct_workers = max(1, configured_direct)
@@ -126,12 +132,17 @@ class JobQueue:
 
         job_id = str(uuid.uuid4())
         kind = self._queue_kind(payload)
+        _ctx = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+        _meta = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
         rec: Job = {
             "id": job_id,
             "status": "queued",
             "queue_kind": kind,
             "ts": time.time(),
             "updated": time.time(),
+            # Kept for cancellation matching (cancel by batch or by tab session).
+            "batch_id": str(_meta.get("batch_id") or ""),
+            "session": str(_ctx.get("tp_tab_session") or ""),
         }
         if idem:
             rec["idempotency_key"] = idem
@@ -154,6 +165,79 @@ class JobQueue:
         if not rec:
             return {"id": job_id, "status": "error", "result": "job_not_found"}
         return self.public_record(job_id)
+
+    async def _await_ai_slot(self, job_id: str, payload: dict) -> bool:
+        """Acquire a rate-gate token for an AI job before it runs.
+
+        Returns ``True`` to proceed. Returns ``False`` when the job was skipped
+        (deadline elapsed / bucket saturated) after setting an error status.
+        Propagates :class:`asyncio.CancelledError` so the caller marks it
+        aborted. Never consumes a token unless it returns ``True``.
+        """
+        ai = payload.get("ai") if isinstance(payload.get("ai"), dict) else {}
+        api_key = str(ai.get("api_key") or "")
+        provider = resolve_provider(str(ai.get("provider") or "auto"), api_key)
+        model = str(ai.get("model") or "auto")
+        ctx = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+        session = str(ctx.get("tp_tab_session") or "")
+        try:
+            await rate_gate.acquire(
+                provider,
+                model,
+                api_key,
+                session=session,
+                job_id=job_id,
+                deadline_sec=settings.rate_max_wait_sec,
+                max_waiters=settings.rate_max_waiters_per_bucket,
+            )
+            return True
+        except (RateGateTimeout, RateGateRejected) as exc:
+            prev = dict(self._jobs.get(job_id) or {})
+            await self._set_job(
+                job_id,
+                {**prev, "status": "error", "result": f"rate limited: {exc}",
+                 "ts": time.time(), "queue_kind": self.AI},
+            )
+            event("translate.ratelimited", {"job_id": job_id, "provider": provider,
+                                            "error": str(exc)[:160]}, ok=False)
+            return False
+
+    async def cancel(self, *, job_ids: Any = None, batch_id: str = "", session: str = "") -> dict:
+        """Cancel queued / gate-waiting jobs by id, batch, or tab session.
+
+        Jobs still queued or blocked on the rate gate are dropped immediately so
+        a closed tab or cancelled batch stops consuming provider budget. Jobs
+        already running in the pipeline are left to finish (there are only a few
+        at a time and interrupting a native thread is unsafe).
+        """
+        ids = {str(j) for j in (job_ids or [])}
+        batch_id = str(batch_id or "")
+        session = str(session or "")
+        matched: list[str] = []
+        for jid, rec in list(self._jobs.items()):
+            st = str(rec.get("status") or "")
+            if st in ("done", "error", "aborted"):
+                continue
+            hit = (
+                jid in ids
+                or (batch_id and str(rec.get("batch_id") or "") == batch_id)
+                or (session and str(rec.get("session") or "") == session)
+            )
+            if not hit:
+                continue
+            matched.append(jid)
+            # Only queued / gate-waiting jobs (status "queued") are safe to flip
+            # to aborted; running jobs keep their status and finish normally.
+            if st == "queued":
+                await self._set_job(
+                    jid,
+                    {**rec, "status": "aborted", "result": "cancelled", "ts": time.time()},
+                )
+        # Release any of these that are parked waiting for a rate-gate token.
+        rate_gate.cancel_jobs(matched)
+        if matched:
+            dbg("jobs.cancel", {"count": len(matched), "batch_id": batch_id, "session": session})
+        return {"cancelled": len(matched)}
 
     async def wait(self, job_id: str, *, wait_sec: float = 0.0) -> Job:
         wait_sec = max(0.0, min(float(wait_sec or 0.0), 25.0))
@@ -302,6 +386,30 @@ class JobQueue:
         queue = self._queues[kind]
         while True:
             job_id, payload = await queue.get()
+
+            # Skip jobs cancelled while still queued (see cancel()).
+            if str((self._jobs.get(job_id) or {}).get("status") or "") == "aborted":
+                queue.task_done()
+                continue
+
+            # AI lane: wait for a provider rate-gate token before running. This
+            # is a cheap async wait (it does not pin the worker thread) and it
+            # keeps every provider under its requests-per-minute limit.
+            if kind == self.AI and rate_gate.enabled():
+                try:
+                    if not await self._await_ai_slot(job_id, payload):
+                        queue.task_done()
+                        continue
+                except asyncio.CancelledError:
+                    prev = dict(self._jobs.get(job_id) or {})
+                    await self._set_job(
+                        job_id,
+                        {**prev, "status": "aborted", "result": "cancelled",
+                         "ts": time.time(), "queue_kind": kind},
+                    )
+                    queue.task_done()
+                    continue
+
             t0 = time.perf_counter()
             enqueue_ts = float((self._jobs.get(job_id) or {}).get("ts") or 0.0)
             queue_wait_ms = round(max(0.0, time.time() - enqueue_ts) * 1000, 1) if enqueue_ts else 0.0

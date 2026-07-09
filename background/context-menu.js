@@ -32,19 +32,39 @@ const log = createLogger("SW.menu");
 
 const KEEPALIVE_MS = 10 * 60 * 1000;
 
+/** Swallow the (harmless) lastError from a duplicate contextMenus.create. */
+function ignoreMenuError() {
+  void chrome.runtime.lastError;
+}
+
+// Guard so overlapping bootstrap calls (onInstalled + onStartup can fire
+// close together) don't interleave two removeAll→create sequences, which
+// produced "Cannot create item with duplicate id img_one/img_all".
+let menusRebuilding = false;
+
 /** (Re)create the context-menu items. */
 export function recreateMenus() {
+  if (menusRebuilding) return;
+  menusRebuilding = true;
   chrome.contextMenus.removeAll(() => {
-    chrome.contextMenus.create({
-      id: "img_one",
-      title: "🔍 Translate this image",
-      contexts: ["image"],
-    });
-    chrome.contextMenus.create({
-      id: "img_all",
-      title: "🔍 Translate all images on page",
-      contexts: ["page", "selection"],
-    });
+    ignoreMenuError();
+    chrome.contextMenus.create(
+      {
+        id: "img_one",
+        title: "🔍 Translate this image",
+        contexts: ["image"],
+      },
+      ignoreMenuError,
+    );
+    chrome.contextMenus.create(
+      {
+        id: "img_all",
+        title: "🔍 Translate all images on page",
+        contexts: ["page", "selection"],
+      },
+      ignoreMenuError,
+    );
+    menusRebuilding = false;
   });
 }
 

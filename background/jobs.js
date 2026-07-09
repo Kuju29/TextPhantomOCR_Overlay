@@ -50,6 +50,7 @@ import {
   pollJobViaRest,
   subscribeJobEvents,
   shouldPreferRest,
+  cancelJobsViaRest,
 } from "./transport.js";
 
 const log = createLogger("SW.jobs");
@@ -763,6 +764,7 @@ export function enqueue(payload, tabId, frameId = 0) {
 export function cancelTabWork(tabId, reason = "navigation") {
   if (!Number.isFinite(tabId)) return;
   const msg = String(reason || "navigation");
+  const cancelledJobIds = [];
 
   for (const [jobId, ctx] of Array.from(pendingByJob.entries())) {
     if ((ctx?.tabId || 0) !== tabId) continue;
@@ -770,6 +772,7 @@ export function cancelTabWork(tabId, reason = "navigation") {
     const imageKey = String(ctx?.imageKey || ctx?.metadata?.image_id || "").trim();
     const batch = batchId ? ensureBatch(batchId, tabId, ctx?.frameId || 0) : null;
 
+    cancelledJobIds.push(jobId);
     removeJob(jobId, ctx?.metadata?.image_id);
 
     if (batch && imageKey) {
@@ -782,5 +785,11 @@ export function cancelTabWork(tabId, reason = "navigation") {
 
   for (const [imageId, rec] of Array.from(pendingByImage.entries())) {
     if ((rec?.tabId || 0) === tabId) pendingByImage.delete(imageId);
+  }
+
+  // Drop these jobs on the backend too (queue + rate gate) so a closed or
+  // navigated-away tab stops consuming provider budget.
+  if (cancelledJobIds.length) {
+    cancelJobsViaRest({ jobIds: cancelledJobIds, session: getTabSessionId(tabId) || "" });
   }
 }

@@ -327,6 +327,30 @@ export async function submitJobViaRest(base, payload, { idempotencyKey = "" } = 
   return data;
 }
 
+/** `POST /translate/cancel` — best-effort drop of queued / gate-waiting jobs.
+ *
+ * Fire-and-forget: cancellation is an optimisation (it frees provider budget
+ * for other work), so failures are swallowed rather than surfaced.
+ * @param {{ jobIds?: string[], batchId?: string, session?: string }} what
+ */
+export async function cancelJobsViaRest({ jobIds = [], batchId = "", session = "" } = {}) {
+  const ids = (Array.isArray(jobIds) ? jobIds : []).map(String).filter(Boolean);
+  if (!ids.length && !batchId && !session) return;
+  try {
+    const base = await getApiBase();
+    if (!base) return;
+    await fetch(base.replace(/\/+$/, "") + API_PATHS.TRANSLATE_CANCEL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      cache: "no-store",
+      keepalive: true, // let the request survive a tab/page teardown
+      body: JSON.stringify({ job_ids: ids, batch_id: batchId, tp_tab_session: session }),
+    });
+  } catch (e) {
+    log.debug?.("cancel post failed", e?.message || String(e));
+  }
+}
+
 function pollDelay(data, elapsedMs) {
   const hinted = Number(data?.poll_after_ms || 0);
   if (hinted > 0) return Math.max(300, Math.min(hinted, 3000));
@@ -350,14 +374,50 @@ async function fetchJobStatus(url) {
   }
 }
 
+// --- Long-poll connection slots ---------------------------------------------
+// Browsers allow only ~6 parallel HTTP/1.1 connections per host. One long-poll
+// per job means a big batch (200+ images) starves the pool: queued fetches hit
+// the 32s abort timer before ever reaching the network, and hundreds of jobs
+// die at once ("signal is aborted without reason") while the server is still
+// processing them fine. Gate concurrent long-polls instead — jobs without a
+// slot simply wait; the server queue is the source of truth.
+const POLL_SLOTS = 5;
+const POLL_RETRY_DELAY_MS = 1500;
+// Fail a job only when the server has not answered ANY of its polls for this
+// long (server down / network gone) — never just because the queue is long.
+const POLL_SILENCE_LIMIT_MS = 120000;
+
+let pollSlotsInUse = 0;
+const pollSlotWaiters = [];
+
+function acquirePollSlot() {
+  if (pollSlotsInUse < POLL_SLOTS) {
+    pollSlotsInUse++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => pollSlotWaiters.push(resolve));
+}
+
+function releasePollSlot() {
+  const next = pollSlotWaiters.shift();
+  if (next) next(); // hand the slot over without decrementing
+  else pollSlotsInUse = Math.max(0, pollSlotsInUse - 1);
+}
+
 /**
  * Long-poll `GET /translate/{id}?wait=25` until the job finishes, then dispatch
  * the result to the registered handlers. Bails out early if the job's tab
  * session went stale (the user navigated away).
+ *
+ * Robust for large batches: transient poll failures (fetch abort, network
+ * blip, proxy hiccup) retry instead of failing the job, and there is no fixed
+ * overall deadline — a job only fails when the server says so, the session
+ * goes stale, or the server stays silent for POLL_SILENCE_LIMIT_MS.
  */
-export async function pollJobViaRest(base, jobId, { timeoutMs = 180000 } = {}) {
+export async function pollJobViaRest(base, jobId, { timeoutMs = 0 } = {}) {
   const start = Date.now();
   const urlBase = base.replace(/\/+$/, "") + API_PATHS.TRANSLATE + "/" + encodeURIComponent(jobId);
+  let lastContact = Date.now();
 
   while (true) {
     const ctx = pendingByJob.get(jobId);
@@ -370,10 +430,31 @@ export async function pollJobViaRest(base, jobId, { timeoutMs = 180000 } = {}) {
       return;
     }
 
-    if (Date.now() - start > timeoutMs) throw new Error("REST poll timeout");
+    if (timeoutMs > 0 && Date.now() - start > timeoutMs) throw new Error("REST poll timeout");
+    if (Date.now() - lastContact > POLL_SILENCE_LIMIT_MS)
+      throw new Error("Server unreachable (no poll response for 120s)");
 
-    const url = `${urlBase}?wait=${LONG_POLL_WAIT_SEC}`;
-    const data = await fetchJobStatus(url);
+    // Adaptive wait: with only a few pending jobs, long-poll for low latency.
+    // With a big batch, a 25s hold per slot would starve rotation (a finished
+    // job might not be re-polled for minutes) — switch to instant polls so
+    // the 5 slots cycle through every pending job quickly.
+    const wait = pendingByJob.size > POLL_SLOTS * 3 ? 0 : LONG_POLL_WAIT_SEC;
+    const url = `${urlBase}?wait=${wait}`;
+    let data;
+    await acquirePollSlot();
+    try {
+      if (!pendingByJob.get(jobId)) return; // cancelled while waiting for a slot
+      data = await fetchJobStatus(url);
+    } catch (e) {
+      // Transient (abort / network / 5xx body read): the job is still alive
+      // server-side — back off briefly and poll again.
+      log.debug?.("poll retry", { jobId, err: e?.message || String(e) });
+      await new Promise((r) => setTimeout(r, POLL_RETRY_DELAY_MS + Math.random() * 1000));
+      continue;
+    } finally {
+      releasePollSlot();
+    }
+    lastContact = Date.now();
     if (!pendingByJob.get(jobId)) return;
 
     if (data?.recommended_client_concurrency) handlers.onStatus(jobId, data);

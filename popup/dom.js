@@ -115,7 +115,12 @@ export function setModelOptions(models, { keepValue = "", strict = true } = {}) 
     .map((m) => ({ id: m, name: m }));
 
   const canKeep = prev && [...new Set(list.map((m) => m.id))].includes(prev);
-  if (!strict && prev && prev !== "auto" && !canKeep) list.unshift({ id: prev, name: prev });
+  // A user-pinned model missing from the enumerated list is kept as its own
+  // option — AND must stay selected. Selecting by `canKeep` alone reverted
+  // the <select> to "auto", which popup.js then persisted, silently wiping
+  // the user's model choice ("model always resets to auto" bug).
+  const pinned = !strict && prev && prev !== "auto" && !canKeep;
+  if (pinned) list.unshift({ id: prev, name: prev });
 
   for (const it of [{ id: "auto", name: "auto" }, ...list]) {
     const opt = document.createElement("option");
@@ -123,7 +128,7 @@ export function setModelOptions(models, { keepValue = "", strict = true } = {}) 
     opt.textContent = it.name;
     els.aiModel.appendChild(opt);
   }
-  els.aiModel.value = canKeep ? prev : "auto";
+  els.aiModel.value = canKeep || pinned ? prev : "auto";
 }
 
 /** Update the API-status emoji indicator. */

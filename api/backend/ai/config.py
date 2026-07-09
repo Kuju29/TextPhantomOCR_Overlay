@@ -45,6 +45,30 @@ LOCAL_PROVIDERS: Final[frozenset[str]] = frozenset({
 })
 
 
+class RatePolicy(TypedDict):
+    rpm: float   # sustained requests-per-minute budget for this provider
+    burst: int   # how many requests may fire back-to-back before pacing kicks in
+
+
+# Per-provider rate-gate policy. Conservative defaults sized for the FREE tier
+# of each provider (leave headroom below the real published limit). The gate
+# reads these but every value is overridable per provider via the environment:
+#   TP_RATE_RPM_GEMINI=20   TP_RATE_BURST_GEMINI=6
+# Providers missing here fall back to Settings.rate_default_rpm / _burst.
+# Local providers and Hugging Face are NOT gated here (local = no limit;
+# Hugging Face keeps its dedicated throttle in ai/throttle.py).
+RATE_POLICY_DEFAULTS: Final[dict[str, RatePolicy]] = {
+    "gemini":      {"rpm": 12.0, "burst": 4},
+    "openai":      {"rpm": 60.0, "burst": 8},
+    "anthropic":   {"rpm": 50.0, "burst": 8},
+    "openrouter":  {"rpm": 60.0, "burst": 8},
+    "groq":        {"rpm": 30.0, "burst": 6},
+    "together":    {"rpm": 60.0, "burst": 8},
+    "deepseek":    {"rpm": 60.0, "burst": 8},
+    "featherless": {"rpm": 30.0, "burst": 6},
+}
+
+
 PROVIDER_ALIASES: Final[dict[str, str]] = {
     "hf": "huggingface",
     "huggingface_router": "huggingface",
@@ -116,6 +140,17 @@ HF_FALLBACK_MODELS: Final[list[str]] = [
     "google/gemma-2-2b-it",
     "google/gemma-2-9b-it",
 ]
+
+
+# Models whose name matches this pattern get the COMPACT prompt tier:
+# a short core-rule list + a full few-shot example instead of the long
+# detailed rule set. Small/fast models imitate examples far better than
+# they follow long instruction lists — and the compact prompt costs ~70%
+# fewer input tokens. Pattern-based so new model names work automatically;
+# edit the regex, never hardcode model lists elsewhere.
+SMALL_MODEL_PATTERN: Final[str] = (
+    r"flash|lite|mini|nano|tiny|small|haiku|gemma|phi-|qwen.{0,4}\b[0-9]b|(?:^|[^0-9])[1-9]b\b"
+)
 
 
 # AI sampling defaults.

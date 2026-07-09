@@ -6,6 +6,7 @@ export const API_PATHS = {
   META: "/meta",
   WARMUP: "/warmup",
   TRANSLATE: "/translate",
+  TRANSLATE_CANCEL: "/translate/cancel",
   AI_RESOLVE: "/ai/resolve",
   AI_PROMPT_DEFAULT: "/ai/prompt/default",
 };

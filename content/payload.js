@@ -109,8 +109,17 @@
   // These rules keep icons / avatars / tracking pixels / placeholders out of
   // bulk translation runs.  Skipped candidates are not errors: they were never
   // eligible translation jobs.
-  const SKIP_URL_RE = /(?:favicon|sprite|icon|logo|avatar|profile|emoji|badge|button|spinner|loader|placeholder|blank|pixel|tracking|analytics|ads?|doubleclick|googletag|gravatar)/i;
-  const SKIP_CLASS_RE = /(?:avatar|icon|logo|emoji|badge|button|spinner|loader|placeholder|ad-|ads|lazy-placeholder|profile|thumbnail)/i;
+  //
+  // IMPORTANT: both regexes are word/token-bounded and are tested ONLY
+  // against the URL (SKIP_URL_RE) or class/id/role (SKIP_CLASS_RE) — never
+  // against alt/title.  Manga page images carry the series title in alt text,
+  // and substring matching used to skip whole galleries (e.g. alt containing
+  // "Hegemonicon" matched `icon`, "Karada" matched `ads?`, and any URL with
+  // "download"/"uploads" matched `ad`).
+  const SKIP_URL_RE =
+    /\b(?:favicon|sprites?|icons?|logos?|avatars?|emojis?|badges?|buttons?|spinner|loaders?|placeholder|blank|pixel|tracking|analytics|ads?|adverts?|banners?|doubleclick|googletag|gravatar)\b/i;
+  const SKIP_CLASS_RE =
+    /(?:^|[\s_-])(?:avatars?|icons?|logos?|emojis?|badges?|buttons?|spinner|loaders?|placeholder|ads?|lazy-placeholder|profile|thumbnails?|thumb)(?:$|[\s_-])/i;
   const BAD_EXT_RE = /\.(?:svg|ico)(?:[?#].*)?$/i;
 
   function scanMinSizeForMode(mode) {
@@ -126,12 +135,11 @@
     if (!img || !img.isConnected) return "detached";
     const srcRaw = TP.getBestImgUrl(img) || img.currentSrc || img.src || "";
     const src = TP.normUrl(srcRaw);
-    const attrText = [
-      src,
-      img.alt || "",
-      img.title || "",
+    // class/id/role only — alt/title are page CONTENT (series titles, page
+    // numbers) and must never be matched against UI-asset keywords.
+    const classText = [
       img.id || "",
-      img.className || "",
+      String(img.className || ""),
       img.getAttribute?.("role") || "",
       img.getAttribute?.("aria-label") || "",
     ].join(" ");
@@ -139,7 +147,7 @@
     if (!src && !img.getAttribute?.("data-src") && !img.getAttribute?.("data-original")) return "no_src";
     if (src && /^(?:chrome-extension:|moz-extension:|about:|javascript:)/i.test(src)) return "internal_url";
     if (src && BAD_EXT_RE.test(src)) return "vector_icon";
-    if (SKIP_URL_RE.test(attrText) || SKIP_CLASS_RE.test(attrText)) return "ui_asset";
+    if ((src && SKIP_URL_RE.test(src)) || SKIP_CLASS_RE.test(classText)) return "ui_asset";
 
     const r = typeof img.getBoundingClientRect === "function" ? img.getBoundingClientRect() : null;
     const cssW = Math.max(0, Number(r?.width) || Number(img.width) || Number(img.clientWidth) || 0);
@@ -149,9 +157,20 @@
     const w = Math.max(cssW, natW);
     const h = Math.max(cssH, natH);
 
+    // Lazy-managed images (real URL parked in data-src) are page CONTENT the
+    // browser simply hasn't fetched yet.  The background fetches image bytes
+    // by URL itself, so "not loaded in the DOM" must not skip them — on
+    // long-strip readers only the ~4 images near the viewport are loaded at
+    // scan time and every other page used to be dropped here.
+    const lazyManaged = Boolean(
+      img.getAttribute?.("data-src") ||
+        img.getAttribute?.("data-original") ||
+        img.getAttribute?.("data-lazy-src"),
+    );
+
     // Explicitly hidden / collapsed DOM images are usually templates or lazy
     // sentinels.  If natural size is also missing, skip them.
-    if ((cssW <= 1 || cssH <= 1) && (!natW || !natH)) return "not_visible";
+    if ((cssW <= 1 || cssH <= 1) && (!natW || !natH) && !lazyManaged) return "not_visible";
 
     const { minSide, minArea } = scanMinSizeForMode(mode);
     if (w && h) {
@@ -160,8 +179,10 @@
     }
 
     // Common transparent placeholders often have a valid large CSS box but no
-    // loaded image bytes yet.  Do not send them as failed jobs.
-    if (!img.complete && !natW && !natH && !src.startsWith("data:")) return "not_loaded";
+    // loaded image bytes yet.  Do not send them as failed jobs — unless the
+    // image is lazy-managed (see above): then the URL is real and fetchable.
+    if (!img.complete && !natW && !natH && !src.startsWith("data:") && !lazyManaged)
+      return "not_loaded";
 
     return "";
   }
@@ -196,6 +217,12 @@
         continue;
       }
       seen.add(key);
+      // Bind the job to this node the same way a right-click does: lazy-load
+      // sites swap `src` back to a placeholder as the user scrolls, so by the
+      // time a batch result arrives URL-based lookup fails. `data-tp-original`
+      // lives on the element and survives any src churn, so findTargetImage()
+      // can always locate the right <img> for the overlay.
+      if (img?.dataset && !img.dataset.tpOriginal) img.dataset.tpOriginal = key;
       out.push(payload);
     }
     stats.accepted = out.length;
