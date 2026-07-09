@@ -1,6 +1,6 @@
 [![GitHub Sponsors](https://img.shields.io/badge/Sponsor-GitHub-pink?logo=githubsponsors)](https://github.com/sponsors/Kuju29)
 
-*Note: ถ้าไม่แก้แก้ไข prompt เอง ทุกครั้งที่ผมอัพเดตจะมีการอัพเดต prompt ใหม่ถ้าอันเดิมแปลไม่ดี ก็ให้ลองกดรี prompt เพื่อให้มันอัพเดตตามภาพครับ* 
+*Note: ถ้าใครไม่ได้ปรับปรุง prompt เองหรือมี prompt เป็นของตัวเอง มันจะมีการอัพเดต prompt ใหม่เสมอ ทุกครั้งที่ผมแก้โค๊ด ถ้าอันเดิมแปลไม่ดี ก็ให้ลองกดรี prompt เพื่อลองใช้อันใหม่ตามภาพครับ แต่แนะนำให้กดคัดลอก prompt เดิมไว้ด้วยเผื่อเปลี่ยนใจ* 
 <img width="466" height="113" alt="image" src="https://github.com/user-attachments/assets/c66431ce-8f44-466b-85bb-a5c75ac0389f" />
 
 
