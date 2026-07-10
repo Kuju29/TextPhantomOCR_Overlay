@@ -478,6 +478,72 @@ async function runRetryPass(b) {
 
 // --- Job processing --------------------------------------------------------
 
+// --- Ordered submission ------------------------------------------------------
+// Payloads are ENQUEUED in page order, but each job's prefetch/setup runs in
+// parallel and the REST submits raced each other over the network — so the
+// server queue (which is strictly FIFO into the worker/rate-gate lanes) could
+// receive page 2 last and process it last. These helpers make jobs WAIT their
+// turn to submit: prefetches still overlap fully, but POST /translate happens
+// in page order. A per-waiter timeout guarantees one slow image can only delay
+// the batch briefly, never deadlock it.
+const ORDER_WAIT_MAX_MS = 10000;
+/** batchId -> { counter, next, waiters: Map<seq, Array<fn>> } */
+const batchOrder = new Map();
+
+function getBatchOrder(batchId) {
+  let st = batchOrder.get(batchId);
+  if (!st) {
+    st = { counter: 0, next: 0, waiters: new Map() };
+    batchOrder.set(batchId, st);
+    // Bounded memory: drop the oldest finished batches.
+    while (batchOrder.size > 32) {
+      const oldest = batchOrder.keys().next().value;
+      if (oldest === undefined || oldest === batchId) break;
+      batchOrder.delete(oldest);
+    }
+  }
+  return st;
+}
+
+/** Claim the next submission slot for a batch ("" -> unordered, -1). */
+function nextSubmitSeq(batchId) {
+  if (!batchId) return -1;
+  return getBatchOrder(batchId).counter++;
+}
+
+/** Wait until it is `seq`'s turn to submit (or the grace timeout passes). */
+function awaitSubmitTurn(batchId, seq) {
+  if (!batchId || !(seq >= 0)) return Promise.resolve();
+  const st = getBatchOrder(batchId);
+  if (st.next >= seq) return Promise.resolve();
+  return new Promise((resolve) => {
+    let settled = false;
+    const fire = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    const list = st.waiters.get(seq) || [];
+    list.push(fire);
+    st.waiters.set(seq, list);
+    setTimeout(fire, ORDER_WAIT_MAX_MS);
+  });
+}
+
+/** Mark `seq` as submitted/abandoned and wake every unblocked waiter. */
+function releaseSubmitTurn(batchId, seq) {
+  if (!batchId || !(seq >= 0)) return;
+  const st = batchOrder.get(batchId);
+  if (!st) return;
+  if (seq + 1 > st.next) st.next = seq + 1;
+  for (const [s, fns] of Array.from(st.waiters.entries())) {
+    if (s <= st.next) {
+      st.waiters.delete(s);
+      for (const fn of fns) fn();
+    }
+  }
+}
+
 // --- Job idempotency --------------------------------------------------------
 
 function stableString(value) {
@@ -516,7 +582,20 @@ async function idempotencyKeyForPayload(payload) {
 // of downloading in the browser and uploading a data URI. Only the FIRST image
 // of such a domain pays the extra round-trip (it is retried with bytes in the
 // batch's pass 2).
-const dataUriDomains = new Set();
+//
+// Matching is by REGISTRABLE DOMAIN (last two labels), not the full hostname:
+// image CDNs rotate subdomains per request/server (xx1.cdn.example -> xx2...),
+// so exact-host memory would relearn the same lesson once per subdomain.
+//
+// Pre-seeded entries are CDNs KNOWN to reject datacenter IPs, so their images
+// must always carry browser-fetched bytes. Without the seed, any image whose
+// bytes the site adapter could not attach went URL-only -> failed on the
+// server -> retried in pass 2 -> finished LAST (users saw page 2 rendered
+// after page 20).
+const dataUriDomains = new Set([
+  "mangadex.network", // at-home image CDN — blocks non-residential IPs
+  "mangadex.org",     // uploads.mangadex.org covers/edge cases
+]);
 
 /** Hostname of a URL, or "" when unparseable. */
 function hostOf(u) {
@@ -527,10 +606,18 @@ function hostOf(u) {
   }
 }
 
+/** Registrable-ish domain key (last two labels) for domain memory. */
+function domainKeyOf(u) {
+  const host = hostOf(u);
+  if (!host) return "";
+  const labels = host.split(".").filter(Boolean);
+  return labels.length <= 2 ? host : labels.slice(-2).join(".");
+}
+
 /** Remember that this image's domain needs browser-side bytes. */
 export function markDomainNeedsDataUri(src) {
-  const host = hostOf(src);
-  if (host) dataUriDomains.add(host);
+  const key = domainKeyOf(src);
+  if (key) dataUriDomains.add(key);
 }
 
 /** Should this payload have its image pre-downloaded as a data URI? */
@@ -543,7 +630,7 @@ function shouldPrefetchDataUri(payload) {
   if (/^https?:/i.test(src)) {
     // URL-first: let the server download public images itself. Prefetch only
     // for domains that already proved to need browser cookies/session.
-    return dataUriDomains.has(hostOf(src));
+    return dataUriDomains.has(domainKeyOf(src));
   }
   // Unknown scheme: keep the old behaviour for AI (bytes wanted server-side).
   return (
@@ -563,9 +650,23 @@ function isUrlOnlyPayload(payload) {
 
 /**
  * Process one job payload end to end: optional data-URI prefetch, then submit
- * via REST (default) or WebSocket.
+ * via REST (default) or WebSocket. Thin wrapper that guarantees the batch's
+ * ordered-submission slot is ALWAYS released, whatever path the job takes.
  */
 export async function processJob(payload, tabId, frameId = 0) {
+  if (!payload || typeof payload !== "object") return;
+  const orderBatch = String(payload?.metadata?.batch_id || currentBatchId || "").trim();
+  const orderSeq = Number(payload.__tpSubmitSeq ?? -1);
+  try {
+    return await processJobInner(payload, tabId, frameId);
+  } finally {
+    // Idempotent: normally released right after the POST inside
+    // submitAndPollRest; this covers every early-return/error path.
+    releaseSubmitTurn(orderBatch, orderSeq);
+  }
+}
+
+async function processJobInner(payload, tabId, frameId = 0) {
   if (!payload || typeof payload !== "object") return;
 
   if (!payload.metadata || typeof payload.metadata !== "object") payload.metadata = {};
@@ -716,9 +817,18 @@ export async function processJob(payload, tabId, frameId = 0) {
     pendingByImage.set(payload.metadata.image_id, makeContext());
   }
 
+  // --- Ordered submission gate ---------------------------------------------
+  // Prefetch/setup above ran fully in parallel; from here the job waits for
+  // its page-order turn so the server queue receives the batch in order.
+  const orderSeq = Number(payload.__tpSubmitSeq ?? -1);
+  await awaitSubmitTurn(batchId, orderSeq);
+  const releaseTurn = () => releaseSubmitTurn(batchId, orderSeq);
+
   // --- REST path -----------------------------------------------------------
   if (preferRest) {
-    await submitAndPollRest(base, payload, makeContext, { tabId, frameId, batch, batchId, imageKey });
+    await submitAndPollRest(base, payload, makeContext, {
+      tabId, frameId, batch, batchId, imageKey, releaseTurn,
+    });
     return;
   }
 
@@ -747,6 +857,7 @@ export async function processJob(payload, tabId, frameId = 0) {
     rememberJob(jobId, makeContext({ startedAt: Date.now(), base }));
     try {
       sendWsJob(jobId, payload);
+      releaseTurn(); // submitted — let the next page in the batch go
       return;
     } catch (e) {
       handleJobError(jobId, "Send failed: " + (e?.message || e));
@@ -760,12 +871,18 @@ export async function processJob(payload, tabId, frameId = 0) {
 }
 
 /** Submit a job over REST and long-poll it to completion. */
-async function submitAndPollRest(base, payload, makeContext, { tabId, frameId, batch, batchId, imageKey }) {
+async function submitAndPollRest(
+  base, payload, makeContext,
+  { tabId, frameId, batch, batchId, imageKey, releaseTurn = () => {} },
+) {
   let jobId = "";
   try {
     const idempotencyKey = await idempotencyKeyForPayload(payload);
     payload.idempotency_key = idempotencyKey;
     const submitted = await submitJobViaRest(base, payload, { idempotencyKey });
+    // The server queue has this job now — release the batch's ordered slot
+    // BEFORE the (long) poll, so the next page submits immediately.
+    releaseTurn();
     jobId = String(submitted.id || "");
     const ctx = makeContext({
       startedAt: Date.now(),
@@ -777,6 +894,7 @@ async function submitAndPollRest(base, payload, makeContext, { tabId, frameId, b
     subscribeJobEvents(jobId).catch(() => {});
     await pollJobViaRest(base, jobId);
   } catch (e) {
+    releaseTurn(); // submit failed/interrupted — never block the batch
     const msg = e?.message || String(e);
     if (jobId) {
       handleJobError(jobId, msg);
@@ -813,9 +931,20 @@ export function enqueue(payload, tabId, frameId = 0) {
   const expected = String(
     payload?.context?.tp_tab_session || payload?.metadata?.tp_tab_session || "",
   ).trim();
+  // Number this payload within its batch (enqueue order == page order) so the
+  // ordered-submission gate can hand jobs to the server in page order. Pass-2
+  // retries keep their original seq — already released, so they never wait.
+  const orderBatch = String(payload?.metadata?.batch_id || currentBatchId || "").trim();
+  if (payload && typeof payload === "object" && payload.__tpSubmitSeq == null) {
+    payload.__tpSubmitSeq = nextSubmitSeq(orderBatch);
+  }
   addTask(() => {
     const cur = getTabSessionId(tabId);
-    if (expected && (!cur || expected !== cur)) return;
+    if (expected && (!cur || expected !== cur)) {
+      // Skipped without running processJob — free its ordered slot.
+      releaseSubmitTurn(orderBatch, Number(payload?.__tpSubmitSeq ?? -1));
+      return;
+    }
     return processJob(payload, tabId, frameId);
   });
 }
