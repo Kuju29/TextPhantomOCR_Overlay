@@ -13,6 +13,7 @@ import base64
 import copy
 import hashlib
 import json
+import os
 import threading
 import time
 from collections import OrderedDict
@@ -34,7 +35,9 @@ _REQUEST_HEADERS = {
 # AI) re-sends the SAME image+lang, so the ~2 s Google roundtrip (measured
 # lens_ms) can be skipped entirely on repeats. This wraps fetch_lens_data
 # only — the HTTP requests themselves are untouched.
-_LENS_CACHE_MAX = 48
+# Sized for translated->AI passes over large batches (100+ images); entries
+# are Lens JSON dicts, typically tens of KB each. Override via env if needed.
+_LENS_CACHE_MAX = max(8, int(os.environ.get("TP_LENS_CACHE_MAX", "256")))
 _LENS_CACHE_TTL_SEC = 600.0
 _lens_cache: OrderedDict[str, tuple[float, dict[str, Any]]] = OrderedDict()
 _lens_cache_lock = threading.Lock()
@@ -62,12 +65,29 @@ def _lens_cache_set(key: str, data: dict[str, Any]) -> None:
             _lens_cache.popitem(last=False)
 
 
+class LensSessionError(RuntimeError):
+    """The Lens redirect lacked session params (stale/rejected cookie)."""
+
+
 def _to_translated_url(redirect_url: str, lang: str) -> str:
-    """Rewrite a Lens result URL into its ``translatedimage`` equivalent."""
+    """Rewrite a Lens result URL into its ``translatedimage`` equivalent.
+
+    Raises :class:`LensSessionError` when the redirect does not carry the
+    ``vsrid``/``gsessionid`` params — the classic symptom of an expired or
+    rejected cookie (Lens bounced us to a consent/error page instead of a
+    result URL). Callers refresh the cookie and retry once.
+    """
     q = parse_qs(urlparse(redirect_url).query)
+    vsrid = (q.get("vsrid") or [""])[0]
+    gsessionid = (q.get("gsessionid") or [""])[0]
+    if not vsrid or not gsessionid:
+        raise LensSessionError(
+            f"Lens redirect missing session params (vsrid={bool(vsrid)}, "
+            f"gsessionid={bool(gsessionid)}) — cookie likely expired"
+        )
     params = {
-        "vsrid": q["vsrid"][0],
-        "gsessionid": q["gsessionid"][0],
+        "vsrid": vsrid,
+        "gsessionid": gsessionid,
         "sl": "auto",
         "tl": lang,
         "se": 1,
@@ -76,23 +96,22 @@ def _to_translated_url(redirect_url: str, lang: str) -> str:
     return "https://lens.google.com/translatedimage?" + urlencode(params)
 
 
-def fetch_lens_data(image_path: str, lang: str, firebase_url: str | None = None) -> dict[str, Any]:
-    """Upload ``image_path`` to Lens and return the parsed translation JSON.
+def _has_lens_text(data: dict[str, Any]) -> bool:
+    """Whether a Lens response actually carries OCR text/paragraphs.
 
-    Repeats of the same image+lang within the cache TTL are served from the
-    in-process cache (no Google roundtrip). The network code below is the
-    original per-request httpx flow, unchanged.
+    Empty responses are NOT cached: Lens occasionally returns a valid but
+    empty payload under load, and caching that made the image permanently
+    "no text" for the TTL window (the reported untranslated-images bug).
     """
-    with open(image_path, "rb") as f:
-        img_bytes = f.read()
+    return bool(
+        data.get("originalParagraphs")
+        or data.get("translatedParagraphs")
+        or str(data.get("originalTextFull") or "").strip()
+    )
 
-    cache_key = hashlib.sha256(img_bytes).hexdigest() + "|" + (lang or "")
-    cached = _lens_cache_get(cache_key)
-    if cached is not None:
-        return cached
 
-    ck = cookie.get(firebase_url)
-
+def _fetch_lens_once(img_bytes: bytes, lang: str, ck: dict) -> dict[str, Any]:
+    """One upload+fetch round trip against Lens with the given cookie jar."""
     with httpx.Client(cookies=ck, headers=_REQUEST_HEADERS, follow_redirects=False, timeout=60) as c:
         r = c.post(_UPLOAD_URL, files={"encoded_image": ("file.jpg", img_bytes, "image/jpeg")})
         if r.status_code not in (302, 303):
@@ -106,8 +125,36 @@ def fetch_lens_data(image_path: str, lang: str, firebase_url: str | None = None)
     # Strip the XSSI-protection prefix Google prepends to JSON responses.
     if body.startswith(")]}'"):
         body = body[5:]
-    data = json.loads(body)
-    if isinstance(data, dict):
+    return json.loads(body)
+
+
+def fetch_lens_data(image_path: str, lang: str, firebase_url: str | None = None) -> dict[str, Any]:
+    """Upload ``image_path`` to Lens and return the parsed translation JSON.
+
+    Repeats of the same image+lang within the cache TTL are served from the
+    in-process cache (no Google roundtrip). A stale-cookie redirect (missing
+    ``gsessionid``) triggers ONE forced cookie refresh + retry instead of
+    failing the job.
+    """
+    with open(image_path, "rb") as f:
+        img_bytes = f.read()
+
+    cache_key = hashlib.sha256(img_bytes).hexdigest() + "|" + (lang or "")
+    cached = _lens_cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    try:
+        data = _fetch_lens_once(img_bytes, lang, cookie.get(firebase_url))
+    except LensSessionError:
+        # Cookie went stale mid-flight — refresh it and retry once.
+        data = _fetch_lens_once(
+            img_bytes, lang, cookie.get(firebase_url, force_refresh=True)
+        )
+
+    # Cache only responses that carry text. Genuinely textless images are
+    # cheap to re-check; transient empty responses must never stick.
+    if isinstance(data, dict) and _has_lens_text(data):
         _lens_cache_set(cache_key, data)
     return data
 

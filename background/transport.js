@@ -404,17 +404,208 @@ function releasePollSlot() {
   else pollSlotsInUse = Math.max(0, pollSlotsInUse - 1);
 }
 
+// --- Batch polling -----------------------------------------------------------
+// One `POST /translate/poll` request tracks EVERY pending job at once instead
+// of one long-poll connection per job. This removes the per-job slot rotation
+// that delayed result delivery by tens of seconds on large batches. Older
+// servers without the endpoint fall back to the legacy per-job long-poll.
+
+const BATCH_POLL_MAX_IDS = 150;
+const BATCH_POLL_WAIT_SEC = 20;
+const BATCH_POLL_MAX_INLINE = 3;
+const BATCH_POLL_IDLE_DELAY_MS = 200;
+
+/** null = unknown (probe on first use), true/false once detected. */
+let batchPollSupported = null;
+/** jobId -> { base, resolve, reject } */
+const batchWaiters = new Map();
+let batchLoopRunning = false;
+
+async function fetchBatchPoll(base, ids) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), LONG_POLL_FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(base.replace(/\/+$/, "") + API_PATHS.TRANSLATE_POLL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      cache: "no-store",
+      signal: ctrl.signal,
+      body: JSON.stringify({
+        ids,
+        wait: BATCH_POLL_WAIT_SEC,
+        max_results: BATCH_POLL_MAX_INLINE,
+      }),
+    });
+    if (!res.ok) {
+      const body = await readLimitedText(res);
+      const err = new Error(`Batch poll failed: HTTP ${res.status}${body ? ` - ${body}` : ""}`);
+      err.status = res.status;
+      throw err;
+    }
+    return await res.json();
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+/** Resolve one waiter (idempotent) and drop it from the map. */
+function settleBatchWaiter(jobId, error = null) {
+  const w = batchWaiters.get(jobId);
+  if (!w) return;
+  batchWaiters.delete(jobId);
+  if (error) w.reject(error);
+  else w.resolve();
+}
+
+/** Drop waiters whose job is gone/stale; return live ids grouped by base. */
+function pruneBatchWaiters() {
+  const byBase = new Map();
+  for (const [jobId, w] of Array.from(batchWaiters.entries())) {
+    const ctx = pendingByJob.get(jobId);
+    if (!ctx) {
+      settleBatchWaiter(jobId); // cancelled or already delivered
+      continue;
+    }
+    const curSession = ctx.tabId ? getTabSessionId(ctx.tabId) : "";
+    if (ctx.sessionId && curSession && ctx.sessionId !== curSession && !ctx.keepCacheOnStale) {
+      handlers.onStale(jobId);
+      settleBatchWaiter(jobId);
+      continue;
+    }
+    const list = byBase.get(w.base) || [];
+    list.push(jobId);
+    byBase.set(w.base, list);
+  }
+  return byBase;
+}
+
+/** Handle one job record from a batch-poll response. */
+async function dispatchBatchRecord(base, rec) {
+  const jobId = String(rec?.id || "");
+  if (!jobId || !batchWaiters.has(jobId)) return false;
+  if (!pendingByJob.get(jobId)) {
+    settleBatchWaiter(jobId);
+    return false;
+  }
+  const status = String(rec?.status || "");
+
+  if (status === "done") {
+    let result = rec.result;
+    if (result == null && rec.result_ready) {
+      // Large result withheld from the batch response — fetch it directly
+      // (instant: the job is already finished server-side).
+      const url =
+        base.replace(/\/+$/, "") + API_PATHS.TRANSLATE + "/" + encodeURIComponent(jobId) + "?wait=0";
+      try {
+        const single = await fetchJobStatus(url);
+        result = single?.result;
+      } catch (e) {
+        log.debug?.("result fetch retry later", { jobId, err: e?.message || String(e) });
+        return false; // keep the waiter; next loop iteration retries
+      }
+    }
+    if (result == null) return false; // not actually ready yet
+    await handlers.onResult(jobId, result);
+    settleBatchWaiter(jobId);
+    return true;
+  }
+
+  if (status === "error" || status === "aborted") {
+    handlers.onError(
+      jobId,
+      String(rec?.result || rec?.error || (status === "aborted" ? "cancelled" : "Unknown error")),
+    );
+    settleBatchWaiter(jobId);
+    return true;
+  }
+
+  return false; // queued / running — keep waiting
+}
+
+async function runBatchPollLoop() {
+  if (batchLoopRunning) return;
+  batchLoopRunning = true;
+  let lastContact = Date.now();
+  try {
+    while (batchWaiters.size) {
+      const byBase = pruneBatchWaiters();
+      if (!byBase.size) break;
+
+      let sawTerminal = false;
+      for (const [base, ids] of byBase.entries()) {
+        let data;
+        try {
+          data = await fetchBatchPoll(base, ids.slice(0, BATCH_POLL_MAX_IDS));
+        } catch (e) {
+          if (e?.status === 404 || e?.status === 405) {
+            // Old server without /translate/poll — permanent per-job fallback.
+            log.info("batch poll unsupported; falling back to per-job long-poll");
+            switchBatchWaitersToLegacy();
+            return;
+          }
+          if (Date.now() - lastContact > POLL_SILENCE_LIMIT_MS) {
+            const err = new Error("Server unreachable (no poll response for 120s)");
+            for (const jobId of ids) settleBatchWaiter(jobId, err);
+            continue;
+          }
+          await new Promise((r) => setTimeout(r, POLL_RETRY_DELAY_MS + Math.random() * 1000));
+          continue;
+        }
+        lastContact = Date.now();
+        batchPollSupported = true;
+        for (const rec of Array.isArray(data?.jobs) ? data.jobs : []) {
+          try {
+            if (await dispatchBatchRecord(base, rec)) sawTerminal = true;
+          } catch (e) {
+            log.warn("batch dispatch failed", { id: rec?.id, err: e?.message || String(e) });
+          }
+        }
+      }
+      // The server long-poll already provides latency; a short breather keeps
+      // this from hot-looping if the server answers instantly.
+      if (!sawTerminal) await new Promise((r) => setTimeout(r, BATCH_POLL_IDLE_DELAY_MS));
+    }
+  } finally {
+    batchLoopRunning = false;
+    if (batchWaiters.size) void runBatchPollLoop();
+  }
+}
+
+/** Migrate every batch waiter onto the legacy per-job poll loop. */
+function switchBatchWaitersToLegacy() {
+  batchPollSupported = false;
+  for (const [jobId, w] of Array.from(batchWaiters.entries())) {
+    batchWaiters.delete(jobId);
+    pollJobViaRestLegacy(w.base, jobId).then(w.resolve, w.reject);
+  }
+}
+
 /**
- * Long-poll `GET /translate/{id}?wait=25` until the job finishes, then dispatch
- * the result to the registered handlers. Bails out early if the job's tab
- * session went stale (the user navigated away).
+ * Poll a job until it finishes and dispatch its result to the handlers.
+ *
+ * Fast path: register with the shared batch poller (one request covers all
+ * pending jobs). Falls back to the legacy per-job long-poll when the server
+ * does not expose `/translate/poll`.
+ */
+export function pollJobViaRest(base, jobId, opts = {}) {
+  if (batchPollSupported === false) return pollJobViaRestLegacy(base, jobId, opts);
+  return new Promise((resolve, reject) => {
+    batchWaiters.set(String(jobId), { base, resolve, reject });
+    void runBatchPollLoop();
+  });
+}
+
+/**
+ * Legacy path: long-poll `GET /translate/{id}?wait=25` until the job finishes,
+ * then dispatch the result to the registered handlers. Bails out early if the
+ * job's tab session went stale (the user navigated away).
  *
  * Robust for large batches: transient poll failures (fetch abort, network
  * blip, proxy hiccup) retry instead of failing the job, and there is no fixed
  * overall deadline — a job only fails when the server says so, the session
  * goes stale, or the server stays silent for POLL_SILENCE_LIMIT_MS.
  */
-export async function pollJobViaRest(base, jobId, { timeoutMs = 0 } = {}) {
+async function pollJobViaRestLegacy(base, jobId, { timeoutMs = 0 } = {}) {
   const start = Date.now();
   const urlBase = base.replace(/\/+$/, "") + API_PATHS.TRANSLATE + "/" + encodeURIComponent(jobId);
   let lastContact = Date.now();

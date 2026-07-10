@@ -17,6 +17,7 @@ from backend.ai.config import (
 )
 from backend.ai.providers import (
     canonical_provider,
+    filter_chat_models,
     is_local_provider,
     detect_provider_from_key,
     gemini_models,
@@ -39,6 +40,11 @@ class ResolveResult(TypedDict, total=False):
     models: list[str]
     prompt_editable_default: str
     lang: str
+    # Transparency: what the user actually asked for, and whether it was
+    # replaced (retired alias or missing from the provider's live list).
+    requested_model: str
+    model_remapped: bool
+    model_remap_reason: str
 
 
 def _dedupe_sorted(models: list[str]) -> list[str]:
@@ -87,15 +93,31 @@ def resolve(payload: dict[str, Any]) -> ResolveResult:
 
     preset = PROVIDER_DEFAULTS.get(provider, {})
     requested_model = str(payload.get("model") or "auto").strip() or "auto"
+    requested_is_auto = requested_model.lower() in ("", "auto")
     resolved_model = resolve_model(provider, requested_model)
     base_url = resolve_base_url(provider, str(payload.get("base_url") or "auto"))
 
+    # Track WHY a user's explicit choice changed, so the client can tell them
+    # instead of silently answering with a different model (e.g. a stored
+    # gemini-2.0-flash remapped to 2.5 after Google retired the 2.0 family).
+    remap_reason = ""
+    if not requested_is_auto and resolved_model != requested_model:
+        remap_reason = "retired_alias"
+
     models = _enumerate_models(provider, api_key, base_url, requested_model)
     if models and resolved_model not in models:
-        # If auto-resolution landed on a model the endpoint doesn't list,
-        # fall back to the first available one.
-        if requested_model.lower() in ("", "auto") or provider == "huggingface":
+        if requested_is_auto or provider == "huggingface":
+            # Auto-resolution landed on a model the endpoint doesn't list —
+            # fall back to the first available one.
             resolved_model = models[0]
+        else:
+            # DYNAMIC self-heal: the user's explicit model is not on the
+            # provider's LIVE list (retired/renamed after this build shipped).
+            # Prefer the preset default when available, else the first live
+            # model — and say so, instead of letting every call 404.
+            preset_model = str(preset.get("model", "") or "")
+            resolved_model = preset_model if preset_model in models else models[0]
+            remap_reason = remap_reason or "not_in_live_list"
 
     return ResolveResult(
         ok=True,
@@ -105,6 +127,9 @@ def resolve(payload: dict[str, Any]) -> ResolveResult:
         model=resolved_model,
         models=models,
         prompt_editable_default=style_default,
+        requested_model=requested_model,
+        model_remapped=bool(remap_reason),
+        model_remap_reason=remap_reason,
     )
 
 
@@ -140,6 +165,9 @@ def _enumerate_models(provider: str, api_key: str, base_url: str, requested_mode
             key_for_list, base_url,
             timeout_sec=LOCAL_LIST_TIMEOUT_SEC if local else LIST_TIMEOUT_SEC,
         )
+        # Cloud /models endpoints list speech/embedding/image/moderation models
+        # too — hide everything that cannot answer a translation prompt.
+        models = filter_chat_models(provider, models)
         if not models:
             preset_model = PROVIDER_DEFAULTS.get(provider, {}).get("model", "")
             models = [preset_model] if preset_model else []

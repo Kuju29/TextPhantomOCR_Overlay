@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import random
 import time
 
@@ -11,6 +12,40 @@ from backend.ai import config as ai_config
 from backend.ai.clients.base import ChatResult
 
 _ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+
+# Per-request "thinking" control, set from the extension UI (ai.thinking):
+#   default -> model thinks normally, nothing is sent          [DEFAULT]
+#   off     -> fastest: thinkingBudget 0 (2.5 flash family) or
+#              thinkingLevel "low" (gemini-3 previews; can't fully disable)
+# Measured impact of "off": ai_ms drops from 6-22 s to ~1.5-3 s per page, at
+# essentially unchanged translation quality — but the choice is the user's.
+# TP_GEMINI_THINKING sets the server-wide default when a request doesn't say;
+# TP_GEMINI_THINKING_BUDGET / TP_GEMINI_THINKING_LEVEL tune the "off" values.
+# Pro models are never touched (thinking can't be disabled there), and a 400
+# answer mentioning "thinking" drops the config and retries once, so unknown/
+# future models can never hard-fail because of this option.
+_THINKING_DEFAULT = (os.environ.get("TP_GEMINI_THINKING", "default") or "default").strip().lower()
+_THINKING_LEVEL = (os.environ.get("TP_GEMINI_THINKING_LEVEL", "low") or "low").strip().lower()
+try:
+    _THINKING_BUDGET = int(os.environ.get("TP_GEMINI_THINKING_BUDGET", "0"))
+except ValueError:
+    _THINKING_BUDGET = 0
+
+_THINKING_OFF_MODES = ("off", "fast", "none", "0", "false", "no")
+
+
+def _thinking_config_for(model: str, mode: str = "") -> dict | None:
+    mode = (mode or "").strip().lower() or _THINKING_DEFAULT
+    if mode not in _THINKING_OFF_MODES:
+        return None  # "default"/unknown -> leave the model's thinking alone
+    m = (model or "").lower()
+    if "pro" in m:
+        return None
+    if "gemini-3" in m or m.startswith("3-"):
+        return {"thinkingLevel": _THINKING_LEVEL}
+    if "2.5" in m or "flash-latest" in m:
+        return {"thinkingBudget": max(0, _THINKING_BUDGET)}
+    return None
 
 
 def _is_model_gone(resp: "httpx.Response") -> bool:
@@ -57,6 +92,7 @@ def generate(
     *,
     image_b64: str = "",
     image_mime: str = "image/jpeg",
+    thinking: str = "",
 ) -> ChatResult:
     """Call Gemini's ``generateContent`` and return the plain-text reply.
 
@@ -81,12 +117,28 @@ def generate(
             "responseMimeType": "text/plain",
         },
     }
+    thinking_cfg = _thinking_config_for(model, thinking)
+    if thinking_cfg is not None:
+        payload["generationConfig"]["thinkingConfig"] = thinking_cfg
 
     used = model
     r = _post_with_retry(api_key, model, payload)
+    # Safety net: a model that rejects thinkingConfig (naming variants, future
+    # API changes) answers 400 — drop the config and retry once.
+    if thinking_cfg is not None and r.status_code == 400 and "thinking" in (r.text or "").lower():
+        payload["generationConfig"].pop("thinkingConfig", None)
+        thinking_cfg = None
+        r = _post_with_retry(api_key, model, payload)
     if _is_model_gone(r):
         fallback = (ai_config.PROVIDER_DEFAULTS.get("gemini") or {}).get("model", "") or "gemini-2.5-flash"
         if fallback and fallback != model:
+            # Recompute the thinking config for the FALLBACK model — it may be
+            # a different family than the retired one the user had stored.
+            fb_thinking = _thinking_config_for(fallback, thinking)
+            if fb_thinking is not None:
+                payload["generationConfig"]["thinkingConfig"] = fb_thinking
+            else:
+                payload["generationConfig"].pop("thinkingConfig", None)
             r2 = _post_with_retry(api_key, fallback, payload)
             # Only adopt the fallback response if it actually succeeded.
             if r2.status_code < 400:

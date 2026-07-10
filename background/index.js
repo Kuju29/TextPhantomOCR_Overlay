@@ -132,6 +132,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: true });
       return true;
 
+    case "TP_MD_CHAPTER_CHANGED": {
+      // MangaDex SPA chapter switch (no page reload, so no keep-alive
+      // disconnect and no tabs.onUpdated "loading"). Cancel the previous
+      // chapter's in-flight work like a normal navigation would.
+      const tabId = sender?.tab?.id;
+      if (Number.isFinite(tabId)) cancelTabWork(tabId, "chapter_change");
+      sendResponse({ ok: true });
+      return true;
+    }
+
     case "TP_MD_CACHE_GET":
       sendResponse({ items: collectMdCacheItems(msg) });
       return true;

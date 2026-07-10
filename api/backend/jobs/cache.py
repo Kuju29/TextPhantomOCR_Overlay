@@ -84,6 +84,8 @@ def build_cache_key(
                 # send_image may be False / True / "always" / "auto".
                 f"img_{str(getattr(ai_cfg, 'send_image', False) or 'off').lower()}",
                 "memo" if getattr(ai_cfg, "char_memory", True) else "",
+                # Thinking mode changes the answer -> separate cache entries.
+                f"think_{str(getattr(ai_cfg, 'thinking', '') or 'default').lower()}",
             ]
         )
     return "|".join(p for p in parts if p is not None)

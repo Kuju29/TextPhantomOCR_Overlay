@@ -17,13 +17,18 @@ from backend.config import settings
 _cache: dict[str, object] = {"ts": 0.0, "url": "", "data": None}
 
 
-def get(firebase_url: str | None = None) -> dict:
-    """Return the Lens cookie dict, fetching it if the cache is cold/stale."""
+def get(firebase_url: str | None = None, *, force_refresh: bool = False) -> dict:
+    """Return the Lens cookie dict, fetching it if the cache is cold/stale.
+
+    ``force_refresh=True`` bypasses the cache — used when a Lens redirect came
+    back without a ``gsessionid`` (the usual symptom of an expired cookie).
+    """
     url = (firebase_url or settings.firebase_url or "").strip()
     now = time.time()
 
     if (
-        _cache.get("data")
+        not force_refresh
+        and _cache.get("data")
         and _cache.get("url") == url
         and (now - float(_cache.get("ts") or 0.0)) < settings.firebase_cookie_ttl_sec
     ):

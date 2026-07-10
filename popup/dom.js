@@ -16,6 +16,8 @@ export const els = {
   aiKey: document.getElementById("ai-key"),
   aiModelWrap: document.getElementById("ai-model-wrap"),
   aiModel: document.getElementById("ai-model"),
+  aiThinkingWrap: document.getElementById("ai-thinking-wrap"),
+  aiThinking: document.getElementById("ai-thinking"),
   aiGroup: document.getElementById("ai-group"),
   aiProvider: document.getElementById("ai-provider"),
   aiProviderWrap: document.getElementById("ai-provider-wrap"),
@@ -29,6 +31,8 @@ export const els = {
   aiPageImage: document.getElementById("ai-page-image"),
   aiPromptWrap: document.getElementById("ai-prompt-wrap"),
   aiPrompt: document.getElementById("ai-prompt"),
+  aiPromptBack: document.getElementById("ai-prompt-back"),
+  aiPromptForward: document.getElementById("ai-prompt-forward"),
   aiPromptCount: document.getElementById("ai-prompt-count"),
   aiPromptReset: document.getElementById("ai-prompt-reset"),
   aiPromptExpand: document.getElementById("ai-prompt-expand"),
@@ -194,6 +198,7 @@ export function toggleUi({ hasEnvKey }) {
   // provider is always usable; a cloud provider needs a key (or env key).
   const canConfigureAi = local || (els.aiKey.value || "").trim().length > 0 || hasEnvKey;
   els.aiModelWrap.style.display = showAi && canConfigureAi ? "" : "none";
+  if (els.aiThinkingWrap) els.aiThinkingWrap.style.display = showAi && canConfigureAi ? "" : "none";
   els.aiPromptWrap.style.display = showAi && canConfigureAi ? "" : "none";
   if (els.aiCharactersWrap) els.aiCharactersWrap.style.display = showAi && canConfigureAi ? "" : "none";
   if (els.aiPageImageWrap) els.aiPageImageWrap.style.display = showAi && canConfigureAi ? "" : "none";

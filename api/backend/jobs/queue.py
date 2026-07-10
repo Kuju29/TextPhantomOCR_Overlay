@@ -62,13 +62,13 @@ class JobQueue:
         if configured_ai > 0:
             ai_workers = max(1, configured_ai)
         else:
-            # AI lane uses ONNX/provider calls. Heavy CPU is bounded separately
-            # by the pipeline's _CPU_GATE, and provider calls are paced by the
-            # rate gate, so a few AI worker coroutines are safe and let jobs for
-            # DIFFERENT provider/model/key buckets (or different users) progress
-            # in parallel instead of head-of-line blocking on one slow bucket.
-            # Raise TP_AI_MAX_CONCURRENCY for more cross-bucket parallelism.
-            ai_workers = max(2, min(4, total // 3))
+            # AI lane workers spend almost all their time WAITING — on the rate
+            # gate (async, free) and on the provider HTTP call (network). Heavy
+            # CPU is bounded separately by the pipeline's _CPU_GATE and provider
+            # RPM by the rate gate, so a wider lane is safe and directly cuts
+            # the measured queue_wait_ms (which reached 90s+ with 4 workers on
+            # multi-image AI batches). Raise/lower via TP_AI_MAX_CONCURRENCY.
+            ai_workers = max(4, min(12, total // 2))
 
         if configured_direct > 0:
             direct_workers = max(1, configured_direct)
@@ -261,6 +261,33 @@ class JobQueue:
         except asyncio.TimeoutError:
             pass
         return self.get(job_id)
+
+    _TERMINAL = ("done", "error", "aborted")
+
+    async def wait_any(self, job_ids: list[str], *, wait_sec: float = 0.0) -> list[str]:
+        """Wait until at least one of ``job_ids`` is finished (or timeout).
+
+        Returns the ids that are already terminal (``done``/``error``/
+        ``aborted``) — unknown ids count as terminal so clients stop polling
+        them. This powers the batch long-poll endpoint: one request covers a
+        whole batch instead of one long-poll connection per job.
+        """
+        wait_sec = max(0.0, min(float(wait_sec or 0.0), 25.0))
+        deadline = time.monotonic() + wait_sec
+
+        def _finished() -> list[str]:
+            out: list[str] = []
+            for jid in job_ids:
+                rec = self._jobs.get(jid)
+                if rec is None or str(rec.get("status") or "") in self._TERMINAL:
+                    out.append(jid)
+            return out
+
+        while True:
+            fin = _finished()
+            if fin or time.monotonic() >= deadline:
+                return fin
+            await asyncio.sleep(0.25)
 
     def create_event_queue(self) -> asyncio.Queue[dict[str, Any]]:
         return asyncio.Queue(maxsize=200)

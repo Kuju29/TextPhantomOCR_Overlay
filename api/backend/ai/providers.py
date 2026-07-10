@@ -200,8 +200,50 @@ def openai_compat_models(
     return models
 
 
+# Model-name fragments that can never do text translation (or are retired but
+# still returned by Google's ListModels). Filtered out of the picker so the
+# dropdown only offers models that actually work for this job.
+_GEMINI_EXCLUDE_FRAGMENTS: tuple[str, ...] = (
+    "-tts",            # speech output
+    "-image",          # image generation
+    "computer-use",    # browser-agent models
+    "deep-research",   # long-running research agents (not chat translation)
+    "antigravity",     # IDE/agent preview line
+    "embedding",       # vectors, no text generation
+    "aqa",             # attributed QA
+    "-live-",          # realtime audio/video
+    "learnlm",         # education previews
+    # Retired families still present in ListModels after shutdown. Covers all
+    # variants (-001, -lite, -8b, ...) that the alias table can't list one by
+    # one. Calling any of them answers 404 "no longer available".
+    "gemini-1.0",
+    "gemini-1.5",
+    "gemini-2.0",
+)
+
+
+def _gemini_model_usable(model_id: str) -> bool:
+    """Translation-usable Gemini model: chat-capable, not retired, not a tool."""
+    m = (model_id or "").strip().lower()
+    if not m:
+        return False
+    if any(frag in m for frag in _GEMINI_EXCLUDE_FRAGMENTS):
+        return False
+    # Names our alias table marks as retired still show up in ListModels for a
+    # while after shutdown — hide them; picking one would silently remap anyway.
+    if m in (MODEL_ALIASES.get("gemini") or {}):
+        return False
+    return True
+
+
 def gemini_models(api_key: str) -> list[str]:
-    """Enumerate Gemini models that support ``generateContent``."""
+    """Enumerate Gemini models that support ``generateContent``.
+
+    Filters out retired names (per ``MODEL_ALIASES``) and non-translation
+    model families (TTS / image / computer-use / research / embeddings), so
+    the client's model picker only lists models that will actually answer a
+    translation prompt.
+    """
     if not api_key:
         return []
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
@@ -218,9 +260,54 @@ def gemini_models(api_key: str) -> list[str]:
             continue
         methods = m.get("supportedGenerationMethods") or []
         name = str(m.get("name") or "")
-        if "generateContent" in methods and name.startswith("models/"):
-            models.append(name.split("/", 1)[1])
+        if "generateContent" not in methods or not name.startswith("models/"):
+            continue
+        model_id = name.split("/", 1)[1]
+        if _gemini_model_usable(model_id):
+            models.append(model_id)
     return models
+
+
+# Non-chat fragments common across OpenAI-compatible providers: their /models
+# endpoints list EVERYTHING the account can reach (speech, embeddings, image
+# generation, moderation...), none of which can answer a translation prompt.
+_GENERIC_EXCLUDE_FRAGMENTS: tuple[str, ...] = (
+    "whisper",
+    "-tts",
+    "tts-",
+    "dall-e",
+    "moderation",
+    "embed",       # embedding / text-embedding / *-embed-*
+    "-audio",
+    "realtime",
+    "transcribe",
+    "speech",
+    "-image",      # image-generation variants (e.g. */gemini-2.5-flash-image)
+    "clip-",
+    "rerank",
+)
+
+
+def filter_chat_models(provider: str, models: list[str]) -> list[str]:
+    """Drop non-chat and retired entries from a provider's live model list.
+
+    Local servers (Ollama / LM Studio / ...) are never filtered — users name
+    their local models freely. If filtering would empty the list entirely,
+    the original list is returned (never hide everything on a bad heuristic).
+    """
+    prov = canonical_provider(provider or "")
+    if is_local_provider(prov):
+        return models
+    aliases = MODEL_ALIASES.get(prov) or {}
+    out: list[str] = []
+    for mid in models:
+        m = (mid or "").strip().lower()
+        if not m or m in aliases:
+            continue
+        if any(frag in m for frag in _GENERIC_EXCLUDE_FRAGMENTS):
+            continue
+        out.append(mid)
+    return out or models
 
 
 def is_hf_provider(provider: str, base_url: str) -> bool:

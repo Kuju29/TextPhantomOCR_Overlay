@@ -510,6 +510,17 @@
     const id = getMangaDexChapterId();
     if (!id || id === mdCurrentChapterId) return false;
     TP.log.info("md chapter changed", { from: mdCurrentChapterId, to: id });
+    // SPA navigation never reloads the page, so the SW's tab-level cancel
+    // (keep-alive disconnect / tabs.onUpdated) never fires for MangaDex.
+    // Tell it explicitly: the OLD chapter's queued jobs are dropped (client +
+    // server) so the new chapter isn't stuck waiting behind them. Jobs already
+    // running on the server finish and land in its result cache.
+    try {
+      const p = TP.sendBg({ type: "TP_MD_CHAPTER_CHANGED", from: mdCurrentChapterId, to: id });
+      p?.catch?.(() => {});
+    } catch {
+      /* best-effort */
+    }
     mdCurrentChapterId = id;
     mdCache = null;
     mdPendingByOriginal.clear();
@@ -521,10 +532,26 @@
     return true;
   }
 
+  /**
+   * True when an <img> can NOT belong to `key`. The reader sets img.alt to the
+   * exact at-home filename of the CURRENT page, and md keys end with that
+   * filename (`md:data/<hash>/<file>`). Reused elements from another chapter
+   * keep stale data-tp-* stamps and unmappable blob: srcs, but their alt is
+   * already updated — so an alt/filename mismatch reliably marks "not ours"
+   * and prevents a previous chapter's overlay from ghosting on top.
+   */
+  function mdImgConflictsWithKey(img, key) {
+    const file = String(key || "").split("/").pop();
+    const alt = String(img?.getAttribute?.("alt") || "").trim();
+    return Boolean(file && alt && alt !== file);
+  }
+
   const findMangaDexImgByKey = (key) =>
     key
       ? Array.from(document.images || []).find(
-          (img) => String(img.dataset.tpOriginalKey || "") === key,
+          (img) =>
+            String(img.dataset.tpOriginalKey || "") === key &&
+            !mdImgConflictsWithKey(img, key),
         ) || null
       : null;
 
@@ -545,9 +572,10 @@
       let img = rec.img;
       if (img && img.isConnected) {
         // The reader reuses <img> elements across chapters — if this one was
-        // re-stamped with a different key, it no longer belongs to us.
+        // re-stamped with a different key OR its alt (the current page's real
+        // filename) no longer matches our key, it no longer belongs to us.
         const dsKey = String(img.dataset.tpOriginalKey || "");
-        if (dsKey && dsKey !== key) img = null;
+        if ((dsKey && dsKey !== key) || mdImgConflictsWithKey(img, key)) img = null;
       }
       if (!img || !img.isConnected) img = findMangaDexImgByKey(key);
       if (!img) {
@@ -580,10 +608,11 @@
       }
       let img = rec.img;
       if (img && img.isConnected) {
-        // Same reuse guard as above: a re-stamped element belongs to another
-        // page/chapter now, never draw this overlay on top of it.
+        // Same reuse guard as above: a re-stamped element (or one whose alt
+        // filename no longer matches) belongs to another page/chapter now —
+        // never draw this overlay on top of it.
         const dsKey = String(img.dataset.tpOriginalKey || "");
-        if (dsKey && dsKey !== key) img = null;
+        if ((dsKey && dsKey !== key) || mdImgConflictsWithKey(img, key)) img = null;
       }
       if (!img || !img.isConnected) img = findMangaDexImgByKey(key);
       if (!img) {

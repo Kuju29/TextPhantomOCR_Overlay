@@ -16,6 +16,10 @@ import {
   migratePromptMap,
   normalizeAiModel,
   normalizePrompt,
+  promptHistoryBack,
+  promptHistoryForward,
+  promptHistoryPush,
+  promptHistoryState,
 } from "../shared/prompt.js";
 
 const els = {
@@ -24,6 +28,8 @@ const els = {
   api: document.getElementById("ps-api"),
   loadDefault: document.getElementById("ps-load-default"),
   clear: document.getElementById("ps-clear"),
+  back: document.getElementById("ps-back"),
+  forward: document.getElementById("ps-forward"),
   save: document.getElementById("ps-save"),
   text: document.getElementById("ps-text"),
   count: document.getElementById("ps-count"),
@@ -53,6 +59,18 @@ function updateCount() {
   els.key.textContent = currentKey().replace("::", " · ");
 }
 
+/** Enable/disable Back/Forward from the stored history for the current key. */
+async function refreshHistoryButtons() {
+  if (!els.back && !els.forward) return;
+  try {
+    const st = await promptHistoryState(currentKey(), String(els.text.value || ""));
+    if (els.back) els.back.disabled = !st.canBack;
+    if (els.forward) els.forward.disabled = !st.canForward;
+  } catch {
+    /* history is best-effort */
+  }
+}
+
 /** Load the saved prompt for the current (lang, model) into the editor. */
 function loadCurrent() {
   const key = currentKey();
@@ -61,6 +79,8 @@ function loadCurrent() {
     : "";
   els.text.value = saved;
   updateCount();
+  // Seed the history baseline (dedupes) and sync the nav buttons.
+  void promptHistoryPush(key, saved).then(refreshHistoryButtons);
 }
 
 async function save() {
@@ -70,12 +90,34 @@ async function save() {
   els.text.value = value;
   updateCount();
   await setStorage({ aiPromptByLang: state.promptByLang });
+  // Every save is a history version (truncates any forward branch).
+  void promptHistoryPush(key, value).then(refreshHistoryButtons);
   try {
     chrome.runtime?.sendMessage?.({ type: "AI_SETTINGS_CHANGED" });
   } catch {
     /* popup may be closed */
   }
   setStatus("Saved ✓", "ok");
+  setTimeout(() => setStatus(""), 1800);
+}
+
+/** Apply a history navigation result: restore text AND save it (like the
+ * browser actually navigating, not just previewing). */
+async function applyHistoryResult(res) {
+  if (!res) return refreshHistoryButtons();
+  const key = currentKey();
+  els.text.value = res.text;
+  state.promptByLang[key] = normalizePrompt(res.text, AI_PROMPT_MAX_CHARS);
+  updateCount();
+  await setStorage({ aiPromptByLang: state.promptByLang });
+  try {
+    chrome.runtime?.sendMessage?.({ type: "AI_SETTINGS_CHANGED" });
+  } catch {
+    /* popup may be closed */
+  }
+  if (els.back) els.back.disabled = !res.canBack;
+  if (els.forward) els.forward.disabled = !res.canForward;
+  setStatus("Restored version ✓", "ok");
   setTimeout(() => setStatus(""), 1800);
 }
 
@@ -163,7 +205,21 @@ async function init() {
 els.lang.addEventListener("change", loadCurrent);
 els.model.addEventListener("input", updateCount);
 els.model.addEventListener("change", loadCurrent);
-els.text.addEventListener("input", updateCount);
+els.text.addEventListener("input", () => {
+  updateCount();
+  // Typing makes Back available (returns to the last saved version) and
+  // invalidates Forward until the edit is saved.
+  if (els.back) els.back.disabled = false;
+  if (els.forward) els.forward.disabled = true;
+});
+els.back?.addEventListener("click", async () => {
+  const res = await promptHistoryBack(currentKey(), String(els.text.value || ""));
+  await applyHistoryResult(res);
+});
+els.forward?.addEventListener("click", async () => {
+  const res = await promptHistoryForward(currentKey());
+  await applyHistoryResult(res);
+});
 els.api.addEventListener("change", async () => {
   const normalized = normalizeUrl(els.api.value || "");
   const defaultApi = normalizeUrl(state.apiDefaults.defaultApiUrl || "");

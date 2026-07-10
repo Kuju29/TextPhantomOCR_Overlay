@@ -7,6 +7,7 @@ queue lives on ``app.state.job_queue`` (set up in ``main.py``).
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Query, Request
@@ -15,6 +16,12 @@ from backend.jobs.queue import JobQueue, QueueFull
 from backend.log import dbg, event
 
 router = APIRouter()
+
+# Batch poll limits: bound request size and response payload. Full results are
+# large (background image + HTML), so only a few are inlined per response; the
+# rest are flagged ``result_ready`` and fetched individually by the client.
+_POLL_MAX_IDS = 200
+_POLL_MAX_INLINE_RESULTS = 3
 
 
 def _job_queue(request: Request) -> JobQueue:
@@ -80,6 +87,50 @@ async def translate_cancel(payload: dict[str, Any], request: Request) -> dict:
     )
     dbg("rest.cancel", {**result, "batch_id": str(payload.get("batch_id") or "")})
     return result
+
+
+@router.post("/translate/poll")
+async def translate_poll(payload: dict[str, Any], request: Request) -> dict:
+    """Batch long-poll: one request tracks a whole batch of jobs.
+
+    Body: ``{"ids": [...], "wait": 20, "max_results": 3}``. Waits until at
+    least one id is terminal (or timeout), then returns every id's status.
+    ``done`` jobs beyond ``max_results`` omit the (large) result payload and
+    carry ``result_ready: true`` — the client fetches those individually via
+    ``GET /translate/{id}`` (instant, the result is already available).
+
+    This replaces N per-job long-poll connections with 1 request per batch,
+    which is the main client-side result-latency fix for large batches.
+    """
+    raw_ids = payload.get("ids") or []
+    if not isinstance(raw_ids, list):
+        raw_ids = [raw_ids]
+    ids = [str(j) for j in raw_ids if str(j or "").strip()][:_POLL_MAX_IDS]
+    if not ids:
+        return {"jobs": [], "server_time": time.time()}
+
+    wait = float(payload.get("wait") or 0.0)
+    try:
+        max_inline = int(payload.get("max_results") or _POLL_MAX_INLINE_RESULTS)
+    except (TypeError, ValueError):
+        max_inline = _POLL_MAX_INLINE_RESULTS
+    max_inline = max(1, min(10, max_inline))
+
+    jq = _job_queue(request)
+    await jq.wait_any(ids, wait_sec=wait)
+
+    jobs: list[dict[str, Any]] = []
+    inlined = 0
+    for jid in ids:
+        rec = jq.get(jid)
+        if str(rec.get("status") or "") == "done" and rec.get("result") is not None:
+            if inlined < max_inline:
+                inlined += 1
+            else:
+                rec = {k: v for k, v in rec.items() if k != "result"}
+                rec["result_ready"] = True
+        jobs.append(rec)
+    return {"jobs": jobs, "server_time": time.time()}
 
 
 @router.get("/translate/{job_id}")

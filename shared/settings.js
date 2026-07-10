@@ -69,6 +69,7 @@ export async function readFullSettings() {
     "aiCharMemory",
     "aiSendImage",
     "aiPageImage",
+    "aiThinking",
     "aiPromptByLang",
     "aiPrompt",
   ]);
@@ -124,6 +125,8 @@ export async function readFullSettings() {
       it.aiPageImage === "always" || (it.aiPageImage == null && it.aiSendImage)
         ? "always"
         : "off",
+    // Reasoning control (Gemini): "default" = think normally, "off" = fastest.
+    aiThinking: it.aiThinking === "off" ? "off" : "default",
     aiPrompt,
   };
 }

@@ -25,6 +25,10 @@ import {
   migratePromptMap,
   normalizeAiModel,
   normalizePrompt,
+  promptHistoryBack,
+  promptHistoryForward,
+  promptHistoryPush,
+  promptHistoryState,
 } from "../shared/prompt.js";
 import {
   filterImageFiles,
@@ -283,7 +287,7 @@ async function refreshAiMeta() {
     state.lastResolvedKey = aiKey;
 
     const models = Array.isArray(data.models) ? data.models : [];
-    const preferred =
+    let preferred =
       (state.modelDirty ? (els.aiModel.value || "").trim() : (state.desiredAiModel || "").trim()) ||
       currentModel ||
       "auto";
@@ -291,7 +295,18 @@ async function refreshAiMeta() {
     // the /ai/resolve model list happens to omit it (some providers don't
     // enumerate every model). Keep it as a selectable option so it survives —
     // otherwise the selection silently resets to "auto" on each refresh.
-    const userPinned = Boolean(preferred && preferred !== "auto");
+    let userPinned = Boolean(preferred && preferred !== "auto");
+    // EXCEPTION: the server says this exact model was retired/replaced (e.g.
+    // a stored gemini-2.0-flash after Google shut the 2.0 family down). Adopt
+    // the replacement so the UI shows what actually runs, and tell the user
+    // instead of silently answering with a different model.
+    const requestedModel = String(data.requested_model || "").trim();
+    const remapped = Boolean(data.model_remapped) && requestedModel && requestedModel === preferred && data.model;
+    if (remapped) {
+      preferred = String(data.model).trim();
+      userPinned = true;
+      setEmojiStatus("ok", `Model ${requestedModel} was retired → using ${preferred}`);
+    }
     setModelOptions(models, { keepValue: preferred, strict: !userPinned });
 
     const optionValues = [...els.aiModel.options].map((o) => o.value);
@@ -328,6 +343,33 @@ function scheduleResolveAiMeta({ immediate = false } = {}) {
 }
 
 // --- AI prompt (per language/model) ---------------------------------------
+
+/** Enable/disable the prompt back/forward buttons from the stored history. */
+async function refreshPromptHistoryButtons() {
+  if (!els.aiPromptBack && !els.aiPromptForward) return;
+  try {
+    const key = makePromptKey(state.desiredLang, state.desiredAiModel);
+    const st = await promptHistoryState(key, String(els.aiPrompt.value || ""));
+    if (els.aiPromptBack) els.aiPromptBack.disabled = !st.canBack;
+    if (els.aiPromptForward) els.aiPromptForward.disabled = !st.canForward;
+  } catch {
+    /* history is best-effort */
+  }
+}
+
+/** Apply a history navigation result to the editor + storage. */
+async function applyPromptHistoryResult(key, res) {
+  if (!res) return;
+  els.aiPrompt.value = res.text;
+  state.aiPromptByLang[key] = normalizePrompt(res.text);
+  state.aiPromptDirtyByLang[key] = false;
+  updatePromptCount(AI_PROMPT_MAX_CHARS, res.text);
+  await setStorage({ aiPromptByLang: state.aiPromptByLang });
+  broadcast({ type: "AI_SETTINGS_CHANGED" });
+  if (els.aiPromptBack) els.aiPromptBack.disabled = !res.canBack;
+  if (els.aiPromptForward) els.aiPromptForward.disabled = !res.canForward;
+}
+
 async function applyPromptForLang(lang, { forceFetch = false } = {}) {
   if (!canUseAiUi()) return;
   const l = (lang || state.desiredLang || els.lang.value || "en").trim() || "en";
@@ -338,6 +380,9 @@ async function applyPromptForLang(lang, { forceFetch = false } = {}) {
     const saved = String(state.aiPromptByLang[key] || "");
     els.aiPrompt.value = saved;
     updatePromptCount(AI_PROMPT_MAX_CHARS, saved);
+    // Seed the edit history with the loaded baseline so the first Back after
+    // an edit can return to it (push dedupes identical tips).
+    void promptHistoryPush(key, saved).then(refreshPromptHistoryButtons);
     return;
   }
   if (!forceFetch && Object.prototype.hasOwnProperty.call(state.aiPromptDefaultsByLang, key)) {
@@ -371,6 +416,7 @@ async function resetPromptForLang(lang) {
   updatePromptCount(AI_PROMPT_MAX_CHARS, def);
   await setStorage({ aiPromptByLang: state.aiPromptByLang });
   broadcast({ type: "AI_SETTINGS_CHANGED" });
+  void promptHistoryPush(key, def).then(refreshPromptHistoryButtons);
 }
 
 /** Persist the in-textarea prompt for (lang, model) if it was edited. */
@@ -382,6 +428,9 @@ async function flushPromptForLang(lang, model = null) {
   state.aiPromptByLang[key] = normalizePrompt(String(els.aiPrompt.value || ""));
   state.aiPromptDirtyByLang[key] = false;
   await setStorage({ aiPromptByLang: state.aiPromptByLang });
+  // Each saved edit becomes a history version (browser-like: truncates any
+  // forward branch left over from earlier Back navigation).
+  void promptHistoryPush(key, state.aiPromptByLang[key]).then(refreshPromptHistoryButtons);
 }
 
 // --- Debounced persistence -------------------------------------------------
@@ -507,6 +556,7 @@ async function loadSettings() {
     "aiCharMemory",
     "aiSendImage",
     "aiPageImage",
+    "aiThinking",
     "aiPromptByLang",
     "fontScale",
   ]);
@@ -547,6 +597,10 @@ async function loadSettings() {
   }
   void refreshSeriesMemory();
   if (els.aiCharMemory) els.aiCharMemory.checked = stored.aiCharMemory !== false;
+  // AI thinking mode — "default" = think normally, "off" = fastest.
+  if (els.aiThinking) {
+    els.aiThinking.value = stored.aiThinking === "off" ? "off" : "default";
+  }
   if (els.aiPageImage) {
     els.aiPageImage.checked =
       stored.aiPageImage === "always" ||
@@ -563,6 +617,7 @@ async function loadSettings() {
     : "";
   els.aiPrompt.value = prompt;
   updatePromptCount(AI_PROMPT_MAX_CHARS, prompt);
+  void promptHistoryPush(promptKey, prompt).then(refreshPromptHistoryButtons);
 
   toggleUi();
 
@@ -792,6 +847,10 @@ els.aiPageImage?.addEventListener("change", async () => {
   await setStorage({ aiPageImage: els.aiPageImage.checked ? "always" : "off" });
 });
 
+els.aiThinking?.addEventListener("change", async () => {
+  await setStorage({ aiThinking: els.aiThinking.value === "off" ? "off" : "default" });
+});
+
 els.aiCharMemory?.addEventListener("change", async () => {
   await setStorage({ aiCharMemory: Boolean(els.aiCharMemory.checked) });
 });
@@ -808,7 +867,25 @@ els.aiModel.addEventListener("change", async () => {
 els.aiPrompt.addEventListener("input", () => {
   state.aiPromptDirtyByLang[makePromptKey(state.desiredLang, state.desiredAiModel)] = true;
   updatePromptCount(AI_PROMPT_MAX_CHARS);
+  // Typing makes Back available (returns to the last saved version) and
+  // invalidates Forward — cheap sync toggle, no storage read per keystroke.
+  if (els.aiPromptBack) els.aiPromptBack.disabled = false;
+  if (els.aiPromptForward) els.aiPromptForward.disabled = true;
   scheduleSaveAi();
+});
+
+els.aiPromptBack?.addEventListener("click", async () => {
+  const key = makePromptKey(state.desiredLang, state.desiredAiModel);
+  const res = await promptHistoryBack(key, String(els.aiPrompt.value || ""));
+  if (res) await applyPromptHistoryResult(key, res);
+  else await refreshPromptHistoryButtons();
+});
+
+els.aiPromptForward?.addEventListener("click", async () => {
+  const key = makePromptKey(state.desiredLang, state.desiredAiModel);
+  const res = await promptHistoryForward(key);
+  if (res) await applyPromptHistoryResult(key, res);
+  else await refreshPromptHistoryButtons();
 });
 els.aiPrompt.addEventListener("blur", async () => {
   state.aiPromptDirtyByLang[makePromptKey(state.desiredLang, state.desiredAiModel)] = true;

@@ -103,6 +103,10 @@
                   <option value="vllm">vLLM</option>
                   <option value="llamafile">llamafile</option>
                   <option value="gpt4all">GPT4All</option>
+                  <option value="koboldcpp">KoboldCpp</option>
+                  <option value="vllm">vLLM</option>
+                  <option value="llamafile">llamafile</option>
+                  <option value="gpt4all">GPT4All</option>
                 </optgroup>
               </select>
             </div>
@@ -134,10 +138,33 @@
               <select id="ai-model" aria-label="AI Model"></select>
             </div>
 
+            <div class="field" id="ai-thinking-wrap" style="display: none">
+              <label for="ai-thinking">AI thinking</label>
+              <select id="ai-thinking" aria-label="AI thinking mode">
+                <option value="default" selected>Normal thinking (model default)</option>
+                <option value="off">Thinking off (much faster)</option>
+              </select>
+              <div class="hint">Gemini only: turning thinking off makes translation several times faster with nearly identical quality (pro models cannot disable it).</div>
+            </div>
+
             <div class="field" id="ai-prompt-wrap" style="display: none">
               <label for="ai-prompt" class="label-row">
                 <span>AI Style (optional)</span>
                 <span class="label-actions">
+                  <button
+                    type="button"
+                    id="ai-prompt-back"
+                    class="icon-btn"
+                    title="Back to the previous prompt version"
+                    aria-label="Back to the previous prompt version"
+                  >↶</button>
+                  <button
+                    type="button"
+                    id="ai-prompt-forward"
+                    class="icon-btn"
+                    title="Forward to the next prompt version"
+                    aria-label="Forward to the next prompt version"
+                  >↷</button>
                   <button
                     type="button"
                     id="ai-prompt-studio"

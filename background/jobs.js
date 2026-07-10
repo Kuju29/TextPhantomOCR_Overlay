@@ -96,7 +96,7 @@ export function failAllPending(message) {
 
     if (batch && imageKey) {
       batchMark(batchId, imageKey, { status: "aborted", lastError: message });
-      batchUpdateToast(batch, "ยกเลิก");
+      batchUpdateToast(batch, "Cancelled");
       finalizeBatch(batch);
     }
   }
@@ -113,14 +113,14 @@ export function handleStaleJob(jobId) {
   const batch = batchId ? ensureBatch(batchId, ctx.tabId || 0, ctx.frameId || 0) : null;
   if (batch && imageKey) {
     batchMark(batchId, imageKey, { status: "aborted" });
-    batchUpdateToast(batch, "ยกเลิก", true);
+    batchUpdateToast(batch, "Cancelled", true);
     finalizeBatch(batch);
   }
 }
 
 /** Handle a job error: notify the tab (unless stale) and update the batch. */
 export function handleJobError(jobId, errMsg = "Unknown error") {
-  const cls = classifyJobError(errMsg);
+  let cls = classifyJobError(errMsg);
   const ctx = pendingByJob.get(jobId);
   const curSession = ctx?.tabId ? getTabSessionId(ctx.tabId) : "";
   const isStale = Boolean(ctx?.sessionId && curSession && ctx.sessionId !== curSession);
@@ -128,6 +128,15 @@ export function handleJobError(jobId, errMsg = "Unknown error") {
   const batchId = String(ctx?.batchId || ctx?.metadata?.batch_id || "").trim();
   const imageKey = String(ctx?.imageKey || ctx?.metadata?.image_id || "").trim();
   const batch = batchId ? ensureBatch(batchId, ctx?.tabId || 0, ctx?.frameId || 0) : null;
+
+  // URL-first job failed: the server may simply have been unable to download
+  // this domain's images (hotlink/cookie protection). Remember the domain and
+  // keep the error TRANSIENT so pass 2 retries with browser-fetched bytes.
+  const item = batch && imageKey ? batch.items.get(imageKey) : null;
+  if (item?.payload && isUrlOnlyPayload(item.payload)) {
+    markDomainNeedsDataUri(item.payload.src);
+    if (cls.permanent) cls = { permanent: false };
+  }
 
   if (ctx?.tabId && !isStale) {
     sendToTab(
@@ -145,7 +154,7 @@ export function handleJobError(jobId, errMsg = "Unknown error") {
       lastError: errMsg,
       permanent: !!cls.permanent,
     });
-    batchUpdateToast(batch, cls.permanent ? "ผิดพลาด (ถาวร)" : "ผิดพลาด");
+    batchUpdateToast(batch, cls.permanent ? "Error (permanent)" : "Error");
     finalizeBatch(batch);
   }
 }
@@ -249,10 +258,10 @@ export async function handleResult(jobId, result) {
     if (batch && imageKey) {
       if (ctx.keepCacheOnStale) {
         batchMark(batchId, imageKey, { status: "done", cachedOnly: true });
-        batchUpdateToast(batch, "บันทึกแล้ว", true);
+        batchUpdateToast(batch, "Saved", true);
       } else {
         batchMark(batchId, imageKey, { status: "aborted" });
-        batchUpdateToast(batch, "ยกเลิก", true);
+        batchUpdateToast(batch, "Cancelled", true);
       }
       finalizeBatch(batch);
     }
@@ -261,7 +270,7 @@ export async function handleResult(jobId, result) {
 
   if (batch && imageKey) {
     batchMark(batchId, imageKey, { status: "inserting" });
-    batchUpdateToast(batch, "แทรกกลับ");
+    batchUpdateToast(batch, "Inserting");
   }
 
   // Apply to the page: image swap for non-text modes, overlay for text modes.
@@ -289,9 +298,18 @@ export async function handleResult(jobId, result) {
     if (!newImg) {
       // Lens-direct text modes can legitimately return no overlay when Lens
       // found no text.  Treat that as a skipped image, not a red error badge.
+      // BUT: Lens sometimes returns a transient empty payload under load (and
+      // the server no longer caches those), so the FIRST no-overlay result is
+      // retried once via the batch's pass 2; only a repeat becomes "skipped".
       if (isTextNoOverlaySkippable(mode, ctx.source || result?.source || "", result)) {
-        ok = true;
-        errMsg = "No text detected";
+        const item = batch && imageKey ? batch.items.get(imageKey) : null;
+        if (item && Number(item.attempt || 1) < 2) {
+          ok = false;
+          errMsg = "No text detected (retrying)";
+        } else {
+          ok = true;
+          errMsg = "No text detected";
+        }
       } else {
         await enqueueDomInsert(
           tabId,
@@ -321,7 +339,7 @@ export async function handleResult(jobId, result) {
         status: skipped ? "skipped" : "done",
         lastError: skipped ? errMsg : "",
       });
-      batchUpdateToast(batch, skipped ? "ข้าม: ไม่พบข้อความ" : "เสร็จ 1 ภาพ");
+      batchUpdateToast(batch, skipped ? "Skipped: no text" : "1 image done");
     } else {
       const cls = classifyJobError(errMsg);
       batchMark(batchId, imageKey, {
@@ -329,7 +347,7 @@ export async function handleResult(jobId, result) {
         lastError: errMsg || "Unknown error",
         permanent: !!cls.permanent,
       });
-      batchUpdateToast(batch, cls.permanent ? "ผิดพลาด (ถาวร)" : "ผิดพลาด");
+      batchUpdateToast(batch, cls.permanent ? "Error (permanent)" : "Error");
     }
     finalizeBatch(batch);
   }
@@ -361,7 +379,7 @@ export function finalizeBatch(b) {
     if (!failed.length) {
       batchUpdateToast(
         b,
-        permanentErrors ? `เสร็จสิ้น (ผิดพลาดถาวร ${permanentErrors})` : "เสร็จสิ้น",
+        permanentErrors ? `Done (${permanentErrors} permanent errors)` : "Done",
         true,
       );
       batchStopKeepAlive(b);
@@ -382,14 +400,14 @@ export function finalizeBatch(b) {
         status: "queued",
       });
     }
-    batchUpdateToast(b, `พักก่อน แล้วลองแก้ไขอีกครั้ง ${failed.length} ภาพ`, true);
+    batchUpdateToast(b, `Retrying ${failed.length} failed image(s) shortly`, true);
     addTask(() => runRetryPass(b));
     return;
   }
 
   // pass 2
   const s2 = batchPassStats(b);
-  batchUpdateToast(b, s2.error > 0 ? `เสร็จสิ้น (ยังผิดพลาด ${s2.error})` : "เสร็จสิ้น", true);
+  batchUpdateToast(b, s2.error > 0 ? `Done (${s2.error} still failing)` : "Done", true);
   batchStopKeepAlive(b);
 }
 
@@ -415,7 +433,7 @@ async function runRetryPass(b) {
   for (const it of b.items.values()) {
     if (it?.attempt === 2 && it.status === "queued" && it.payload) payloads.push(it.payload);
   }
-  batchUpdateToast(b, "เริ่มรอบแก้ไข", true);
+  batchUpdateToast(b, "Starting retry pass", true);
 
   for (const pl of payloads) {
     let next = pl;
@@ -435,7 +453,9 @@ async function runRetryPass(b) {
       }
     } catch (e) {
       const msg = String(e?.message || e);
-      const cls = classifyJobError(msg);
+      // 403 here is only the SW-origin fetch being hotlink-blocked; processJob's
+      // prefetch retries through the content script (page origin) — not fatal.
+      const cls = /\bHTTP 403\b/i.test(msg) ? { permanent: false } : classifyJobError(msg);
       const k = imageKeyFromPayload(pl);
       if (k && b.items.has(k)) {
         const it = b.items.get(k);
@@ -488,16 +508,56 @@ async function idempotencyKeyForPayload(payload) {
   return sha256Hex(stableString({ mode, lang, source, src, dataFingerprint, ai }));
 }
 
+// --- URL-first upload (per-domain memory) -----------------------------------
+// For public http(s) images the server downloads the bytes itself (it has far
+// more bandwidth than the user's uplink), so the extension sends only the URL.
+// Domains whose images the server could NOT fetch (login/cookie/Cloudflare
+// protected) are remembered here; their images fall back to the old behaviour
+// of downloading in the browser and uploading a data URI. Only the FIRST image
+// of such a domain pays the extra round-trip (it is retried with bytes in the
+// batch's pass 2).
+const dataUriDomains = new Set();
+
+/** Hostname of a URL, or "" when unparseable. */
+function hostOf(u) {
+  try {
+    return new URL(String(u || "")).hostname;
+  } catch {
+    return "";
+  }
+}
+
+/** Remember that this image's domain needs browser-side bytes. */
+export function markDomainNeedsDataUri(src) {
+  const host = hostOf(src);
+  if (host) dataUriDomains.add(host);
+}
+
 /** Should this payload have its image pre-downloaded as a data URI? */
 function shouldPrefetchDataUri(payload) {
   if (payload?.imageDataUri) return false;
   const src = String(payload?.src || "").trim();
   if (!src) return false;
-  if (/^(?:https?:|blob:|data:|file:|chrome-extension:)/i.test(src)) return true;
-  // AI text mode always wants the bytes available server-side.
+  // Bytes only exist in the page/browser for these — must inline.
+  if (/^(?:blob:|data:|file:|chrome-extension:)/i.test(src)) return true;
+  if (/^https?:/i.test(src)) {
+    // URL-first: let the server download public images itself. Prefetch only
+    // for domains that already proved to need browser cookies/session.
+    return dataUriDomains.has(hostOf(src));
+  }
+  // Unknown scheme: keep the old behaviour for AI (bytes wanted server-side).
   return (
     payload?.mode === "lens_text" &&
     String(payload?.source || "").toLowerCase() === "ai"
+  );
+}
+
+/** Was this job submitted URL-only (no inlined image bytes)? */
+function isUrlOnlyPayload(payload) {
+  return Boolean(
+    payload &&
+    !payload.imageDataUri &&
+    /^https?:/i.test(String(payload.src || "").trim()),
   );
 }
 
@@ -525,7 +585,7 @@ export async function processJob(payload, tabId, frameId = 0) {
   if (originSession && curSession && originSession !== curSession && !isMd) {
     if (batch && imageKey) {
       batchMark(batchId, imageKey, { status: "aborted", lastError: "navigation" });
-      batchUpdateToast(batch, "ยกเลิก");
+      batchUpdateToast(batch, "Cancelled");
       finalizeBatch(batch);
       batchStopKeepAlive(batch);
     }
@@ -535,7 +595,7 @@ export async function processJob(payload, tabId, frameId = 0) {
   if (batch && imageKey) {
     const it = batch.items.get(imageKey);
     if (it) batch.items.set(imageKey, { ...it, status: "processing" });
-    batchUpdateToast(batch, "ประมวลผล");
+    batchUpdateToast(batch, "Processing");
   }
 
   const base = await getApiBase();
@@ -606,7 +666,7 @@ export async function processJob(payload, tabId, frameId = 0) {
             if (payload?.metadata?.image_id) pendingByImage.delete(payload.metadata.image_id);
             if (batch && imageKey) {
               batchMark(batchId, imageKey, { status: "error", lastError: errMsg, permanent: true });
-              batchUpdateToast(batch, "ผิดพลาด (ถาวร)");
+              batchUpdateToast(batch, "Error (permanent)");
               finalizeBatch(batch);
             }
             failJobImmediately(tabId, payload?.src || null, errMsg, frameId);
@@ -622,7 +682,7 @@ export async function processJob(payload, tabId, frameId = 0) {
     const msg = "Connection closed. Please run the menu again.";
     if (batch && imageKey) {
       batchMark(batchId, imageKey, { status: "aborted", lastError: msg });
-      batchUpdateToast(batch, "ยกเลิก");
+      batchUpdateToast(batch, "Cancelled");
       finalizeBatch(batch);
     }
     failJobImmediately(tabId, payload?.src || null, msg, frameId);
@@ -726,7 +786,7 @@ async function submitAndPollRest(base, payload, makeContext, { tabId, frameId, b
     if (batch && imageKey) {
       const cls = classifyJobError(msg);
       batchMark(batchId, imageKey, { status: "error", lastError: msg, permanent: !!cls.permanent });
-      batchUpdateToast(batch, cls.permanent ? "ผิดพลาด (ถาวร)" : "ผิดพลาด");
+      batchUpdateToast(batch, cls.permanent ? "Error (permanent)" : "Error");
       finalizeBatch(batch);
     }
     failJobImmediately(tabId, payload?.src || null, msg, frameId);
@@ -777,7 +837,7 @@ export function cancelTabWork(tabId, reason = "navigation") {
 
     if (batch && imageKey) {
       batchMark(batchId, imageKey, { status: "aborted", lastError: msg });
-      batchUpdateToast(batch, "ยกเลิก");
+      batchUpdateToast(batch, "Cancelled");
       finalizeBatch(batch);
       batchStopKeepAlive(batch);
     }

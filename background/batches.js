@@ -100,17 +100,17 @@ export function batchUpdateToast(b, stage, force = false) {
   if (!b) return;
   pruneBatches();
   const s = batchPassStats(b);
-  const head = b.pass === 2 ? "TextPhantom: รอบแก้ไข" : "TextPhantom:";
+  const head = b.pass === 2 ? "TextPhantom: retry pass" : "TextPhantom:";
   const parts = [];
-  if (s.total) parts.push(`รับภาพ ${s.total}`);
+  if (s.total) parts.push(`images ${s.total}`);
   if (s.processing || s.inserting || s.queued) {
-    parts.push(`ประมวลผล ${s.processing + s.inserting}/${s.total}`);
+    parts.push(`processing ${s.processing + s.inserting}/${s.total}`);
   }
-  if (s.done) parts.push(`แทรกกลับ ${s.done}/${s.total}`);
+  if (s.done) parts.push(`inserted ${s.done}/${s.total}`);
   const skippedTotal = (Number(s.skipped) || 0) + (Number(s.scanSkipped) || 0);
-  if (skippedTotal) parts.push(`ข้าม ${skippedTotal}`);
-  if (s.error) parts.push(`ผิดพลาด ${s.error}`);
-  if (s.aborted) parts.push(`ยกเลิก ${s.aborted}`);
+  if (skippedTotal) parts.push(`skipped ${skippedTotal}`);
+  if (s.error) parts.push(`errors ${s.error}`);
+  if (s.aborted) parts.push(`cancelled ${s.aborted}`);
   const msg = `${head} ${parts.join(" | ")} ${stage ? `• ${stage}` : ""}`.trim();
 
   const ms = s.finished >= s.total && s.total ? 2400 : 60000;

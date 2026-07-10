@@ -62,6 +62,9 @@ class AiConfig:
     send_image: bool | str = False
     image_b64: str = ""
     image_mime: str = "image/jpeg"
+    # Reasoning control (currently Gemini only): "default" lets the model
+    # think normally; "off" minimises thinking for the fastest answers.
+    thinking: str = "default"
 
 
 class AiResult(TypedDict):
@@ -162,6 +165,7 @@ def translate(
         result = gemini_client.generate(
             api_key, model, system_text, user_parts,
             image_b64=image_b64, image_mime=image_mime,
+            thinking=str(getattr(ai, "thinking", "") or ""),
         )
     elif provider == "anthropic":
         result = anthropic_client.generate(

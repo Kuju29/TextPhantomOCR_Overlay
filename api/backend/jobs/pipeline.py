@@ -61,6 +61,35 @@ from backend.utils.images import (
 
 SUPPORTED_MODES = {"lens_images", "lens_text"}
 
+# --- Background-image encoding ----------------------------------------------
+# The erased background does not need to be lossless. Scanned/JPEG-sourced
+# pages carry sensor+compression noise that PNG must encode exactly (multi-MB
+# payloads); WebP q80 discards it and is typically several times smaller.
+# Clean digital pages with large flat areas can go the other way, so BOTH are
+# encoded and the smaller one wins — the result payload is never worse than
+# the old PNG-only behaviour. TP_LENS_DIRECT_IMG_FORMAT=png forces PNG only.
+_BG_FORMAT = (os.environ.get("TP_LENS_DIRECT_IMG_FORMAT", "auto") or "auto").strip().lower()
+_WEBP_QUALITY = max(1, min(100, int(os.environ.get("TP_LENS_DIRECT_WEBP_QUALITY", "80"))))
+
+
+def _encode_bg_data_uri(img: Image.Image) -> str:
+    """Encode the (erased) background image as a compact data URI."""
+    png_buf = io.BytesIO()
+    img.save(png_buf, format="PNG", compress_level=1)
+    png_bytes = png_buf.getvalue()
+    if _BG_FORMAT == "png":
+        return bytes_to_data_uri(png_bytes, "image/png")
+    try:
+        webp_buf = io.BytesIO()
+        img.save(webp_buf, format="WEBP", quality=_WEBP_QUALITY, method=2)
+        webp_bytes = webp_buf.getvalue()
+        if len(webp_bytes) < len(png_bytes):
+            return bytes_to_data_uri(webp_bytes, "image/webp")
+    except Exception:
+        pass  # Pillow without WebP support — PNG below.
+    return bytes_to_data_uri(png_bytes, "image/png")
+
+
 # CPU gate: workers may all wait on the Lens network call in parallel (cheap),
 # but only this many jobs may run the CPU-heavy stages (erase / bubble detect /
 # render / PNG) at once. Without the gate, a 14-image burst inflated those
@@ -780,9 +809,7 @@ def process_image(
 
             if settings.lens_direct_png:
                 _t = time.perf_counter()
-                buf = io.BytesIO()
-                base_img.save(buf, format="PNG", compress_level=1)
-                out["imageDataUri"] = bytes_to_data_uri(buf.getvalue(), "image/png")
+                out["imageDataUri"] = _encode_bg_data_uri(base_img)
                 stages["png_ms"] = round((time.perf_counter() - _t) * 1000, 1)
             else:
                 stages["png_ms"] = 0.0
@@ -932,11 +959,7 @@ def process_image(
 
         # --- Image data URI (already erased above) -------------------------
         _t = time.perf_counter()
-        buf = io.BytesIO()
-        # compress_level=1: measured png_ms was 0.4-3.8 s at the default
-        # level 6; level 1 encodes ~5x faster, quality identical (lossless).
-        base_img.save(buf, format="PNG", compress_level=1)
-        out["imageDataUri"] = bytes_to_data_uri(buf.getvalue(), "image/png")
+        out["imageDataUri"] = _encode_bg_data_uri(base_img)
         stages["png_ms"] = round((time.perf_counter() - _t) * 1000, 1)
     finally:
         _CPU_GATE.release()
@@ -998,7 +1021,34 @@ def _build_ai_config(payload: dict, mode: str, source: str) -> AiConfig | None:
             if isinstance(ai.get("send_image"), str)
             else bool(ai.get("send_image"))
         ),
+        # "default" = model thinks normally; "off" = fastest (Gemini only).
+        thinking=str(ai.get("thinking") or "default").strip().lower() or "default",
     )
+
+
+def _result_worth_caching(mode: str, source: str, out: dict[str, Any]) -> bool:
+    """Never cache empty results.
+
+    A transient empty Lens/AI response must not become sticky: a cached empty
+    result made the extension silently skip the image ("no text") on every
+    retry until the process restarted. Re-running a genuinely textless image
+    is cheap compared to that failure mode.
+    """
+    if mode == "lens_images":
+        return bool(out.get("imageDataUri"))
+    if source == "ai":
+        ai = out.get("Ai") or {}
+        return bool(ai.get("aihtml"))
+    has_overlay = bool(
+        (out.get("original") or {}).get("originalhtml")
+        or (out.get("translated") or {}).get("translatedhtml")
+    )
+    has_text = bool(
+        str(out.get("originalTextFull") or "").strip()
+        or out.get("originalParagraphs")
+        or out.get("translatedParagraphs")
+    )
+    return has_overlay and has_text
 
 
 def process_payload(payload: dict) -> dict[str, Any]:
@@ -1055,7 +1105,7 @@ def process_payload(payload: dict) -> dict[str, Any]:
         # One compact perf line per processed job (cache hits don't get here),
         # so slow stages are visible straight from the production logs.
         event("translate.perf", {"mode": mode, "lang": lang, "source": source, **out["perf"]})
-        if cache_used and cache_key:
+        if cache_used and cache_key and _result_worth_caching(mode, source, out):
             cache = cache_mod.ai_result_cache if source == "ai" else cache_mod.result_cache
             cache.set(cache_key, out)
         return out

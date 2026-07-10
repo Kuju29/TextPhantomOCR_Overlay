@@ -94,6 +94,8 @@ async function buildAiPayload(mode, source, settings, seriesKey) {
     // Character-memory toggle: off = smallest prompt, cheapest tokens.
     char_memory: settings.aiCharMemory !== false,
     send_image: sendImage,
+    // Reasoning control (Gemini): "default" = think normally, "off" = fastest.
+    thinking: String(settings.aiThinking || "default"),
   };
 }
 
@@ -170,7 +172,7 @@ async function handleTranslateOne(menuInfo, tab, ctx) {
   batch.total1 = 1;
   const key = imageKeyFromPayload(payload);
   if (key) batch.items.set(key, { payload, attempt: 1, status: "queued", lastError: "" });
-  batchUpdateToast(batch, "รับภาพ", true);
+  batchUpdateToast(batch, "Collecting", true);
 
   enqueue(payload, tab.id, frameId);
 }
@@ -269,7 +271,7 @@ async function handleTranslateAll(menuInfo, tab, ctx) {
       batch.items.set(k, { payload: pl, attempt: 1, status: "queued", lastError: "" });
     }
   }
-  batchUpdateToast(batch, "รับภาพ", true);
+  batchUpdateToast(batch, "Collecting", true);
 
   for (const pl of payloads) enqueue(pl, tab.id, imagesFrameId);
 }
@@ -311,8 +313,8 @@ export async function onContextMenuClicked(menuInfo, tab) {
       tab.id,
       menuInfo.menuItemId === "img_all" ? 0 : Number(menuInfo.frameId) || 0,
       menuInfo.menuItemId === "img_all"
-        ? "TextPhantom: กำลังรับภาพ…"
-        : "TextPhantom: กำลังประมวลผล…",
+        ? "TextPhantom: collecting images…"
+        : "TextPhantom: processing…",
       60000,
     );
 
