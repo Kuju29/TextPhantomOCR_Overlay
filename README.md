@@ -1,6 +1,8 @@
 [![GitHub Sponsors](https://img.shields.io/badge/Sponsor-GitHub-pink?logo=githubsponsors)](https://github.com/sponsors/Kuju29)
 
-*Note: ผมเน้นที่ความเร็วเป็นหลัก เป็นเหตุผลว่าทำไมไม่ค่อยมีโมเดลลบข้อความหรือจัดกล่องช่วย แต่ว่าหลังจากนี้ว่าจะใช้โมเดลช่วยเป็นหลัก รวมถึงมองหา ai ที่เรียนรู้การแปลด้วย เพราะจากที่เห็นเว็บแปลมังงะหลายเว็บเริ่มใช้ ai ในการปั้มมังงะกันแล้ว ดูได้ง่ายๆคือ ai มันไม่รู้ว่าคนที่พูดเป็นชายหรือหญิงและบทพูดจะดูสับสนบางส่วน ผมเลยว่าจะเรียนรู้จากพวกเขานำมาปรับแก้ครับ* 
+*Note: ถ้าใครไม่ได้ปรับปรุง prompt เองหรือมี prompt เป็นของตัวเอง มันจะมีการอัพเดต prompt ใหม่เสมอ ทุกครั้งที่ผมแก้โค๊ด ถ้าอันเดิมแปลไม่ดี ก็ให้ลองกดรี prompt เพื่อลองใช้อันใหม่ตามภาพครับ แต่แนะนำให้กดคัดลอก prompt เดิมไว้ด้วยเผื่อเปลี่ยนใจ* 
+<img width="466" height="113" alt="image" src="https://github.com/user-attachments/assets/c66431ce-8f44-466b-85bb-a5c75ac0389f" />
+
 
 ![Desktop2026 02 06-08 11 52 01-ezgif com-video-to-gif-converter](https://github.com/user-attachments/assets/43cc9a1e-eb79-46f0-b4a1-08ca9bcd49f5)
 
