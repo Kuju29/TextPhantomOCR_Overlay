@@ -35,13 +35,13 @@ SYSTEM_BASE: Final[str] = (
 LANG_STYLE: Final[dict[str, str]] = {
     # Thai — a single editable prompt that must work on every model size:
     # short numbered rules (priority order), one inline example per rule,
-    # and a worked example at the end that small models can imitate.
+    # and worked examples at the end that small models can imitate.
     "th": (
         "Target language: Thai (ภาษาไทย)\n"
         "Write like an experienced Thai scanlator: natural spoken Thai that fits speech bubbles — punchy, "
-        "in-character, faithful to the meaning, never word-for-word. Rules are numbered by priority; if two "
-        "conflict, the lower number wins.\n"
-        "1) TRANSLATE THE THOUGHT, NOT THE WORDS. Read all markers first — they are ONE page of ONE conversation. "
+        "in-character, faithful to the meaning, never word-for-word.\n"
+        "=== RULES (priority order — if two conflict, the lower number wins) ===\n"
+        "1) THOUGHT, NOT WORDS. All markers are ONE page of ONE conversation — read them all first. "
         "A reply must connect to the previous line (รับคำ / สวนกลับ / เออออ / ปัดตก). If one sentence is split "
         "across consecutive markers (bubble pairs ending with - or an unfinished clause), translate the WHOLE "
         "thought first, then split it back across those same markers naturally.\n"
@@ -96,7 +96,134 @@ LANG_STYLE: Final[dict[str, str]] = {
         "<<TP_P1>> ไอ้บ้าเอ๊ย!! นี่เคยขออะไรที่มันสมเหตุสมผลบ้างไหมวะเนี่ย!!\n"
         "<<TP_P2>> อ้ากก ร้อนโว้ยยย!!!\n"
         "<<TP_P3>> ว่าแล้วเชียว...\n"
-        "<<TP_P4>> ห๊ะ? อ่า...รับทราบ เดี๋ยวจะรีบแจ้งทุกคนให้"
+        "<<TP_P4>> ห๊ะ? อ่า...รับทราบ เดี๋ยวจะรีบแจ้งทุกคนให้\n"
+        "REAL SCANLATOR PAGES — the source before each Output block (Japanese OR English, whichever your OCR "
+        "hands you) is what you receive; the Thai below is exactly what a human scanlator published for that "
+        "page. The SAME four pages appear in both source languages and map to the SAME published Thai, so "
+        "translate from whichever you are given. Copy this level of naturalness and register control — never the "
+        "literal words, and never change the meaning. Notice: 俺/お前 (I/you) are dropped or become แก/ฉัน only "
+        "where the line needs a subject; さん -> ซัง; digits get a space (2 อัน, not 2อัน); the deity speaks with "
+        "เจ้า + bare imperatives; a defiant human shout earns ฉัน + !!; one thought split across boxes is "
+        "rendered whole, then split back across the SAME markers.\n"
+        "=== JAPANESE-SOURCE PAGES ===\n"
+        "A) Deity / system voice — cold, commanding, zero polite particles:\n"
+        "Input:\n"
+        "<<TP_P0>> 最終試練『心の試練』を開始します\n"
+        "<<TP_P1>> 鍵は首輪を二つまで開放可能\n"
+        "<<TP_P2>> 鍵を使用し生贄を選択せよ\n"
+        "Output:\n"
+        "<<TP_P0>> จากนี้ไป จะเริ่มการทดสอบสุดท้าย การทดสอบแห่งจิตใจ\n"
+        "<<TP_P1>> กุญแจสามารถปลดปลอกคอได้เพียง 2 อัน\n"
+        "<<TP_P2>> จะสังเวยใคร เจ้าจงเลือกซะ!!\n"
+        "B) Inner monologue sliding into darkness — drop 俺, keep ฉัน only where the line needs it; P6-P8 are ONE "
+        "thought spread over three boxes, translated as a whole then split:\n"
+        "Input:\n"
+        "<<TP_P0>> この鍵で、首輪を外すのか…\n"
+        "<<TP_P1>> だけど外せるのは二つまで…二人しか助けられない…\n"
+        "<<TP_P2>> それか田中さんたち二人か…\n"
+        "<<TP_P3>> 俺ともう一人…\n"
+        "<<TP_P4>> つまり現状\n"
+        "<<TP_P5>> 俺だけがこの場の生殺与奪の権利をもっていることになる…\n"
+        "<<TP_P6>> 思考を巡らせる度に\n"
+        "<<TP_P7>> 無理に保っていた理性が\n"
+        "<<TP_P8>> じわじわとどす黒い感情が混ざっていくのを感じた\n"
+        "Output:\n"
+        "<<TP_P0>> กุญแจสำหรับปลดปลอกคอ งั้นสินะ...\n"
+        "<<TP_P1>> แต่ปลดได้แค่ 2 อัน หมายความว่ารอดไปได้แค่ 2 คน\n"
+        "<<TP_P2>> หรือไม่ก็ทานากะซังกับอีกคนนึง...\n"
+        "<<TP_P3>> ฉันกับอีกคนนึง...\n"
+        "<<TP_P4>> พูดอีกอย่างก็คือ...\n"
+        "<<TP_P5>> สิทธิ์ตัดสินความเป็นความตายของทุกคนขึ้นอยู่กับฉันคนเดียว...\n"
+        "<<TP_P6>> ทุกครั้งที่เริ่มคิด\n"
+        "<<TP_P7>> สติที่ควบคุมไว้ก็ค่อยๆ จางหายไป...\n"
+        "<<TP_P8>> สุดท้ายความคิดด้านลบมันก็เริ่มเข้ามา...\n"
+        "C) Rough casual male taunting — แก for 'you', มัน/พวกมัน for the people talked about, rhetorical "
+        "ใช่ไหมล่ะ / รึไง, no polite particles at all:\n"
+        "Input:\n"
+        "<<TP_P0>> 考えてみろ！\n"
+        "<<TP_P1>> 今日会ったばかりの他人だぜ？\n"
+        "<<TP_P2>> 約束を守る道理なんてあるわけねぇだろ！\n"
+        "<<TP_P3>> ここでの約束は他の奴は誰も知らねぇ…\n"
+        "<<TP_P4>> 俺ならお荷物を一生抱えるなんて御免だね…\n"
+        "<<TP_P5>> そんなことになるくらいなら残りの時間妹ちゃんのそばにいてやろうぜ…\n"
+        "Output:\n"
+        "<<TP_P0>> ลองคิดตามที่ฉันพูดดูดีๆ\n"
+        "<<TP_P1>> 2 คนนั้นมันก็แค่คนแปลกหน้าที่แกพึ่งเจอวันนี้ใช่ไหมล่ะ?\n"
+        "<<TP_P2>> มันมีเหตุผลอะไรที่พวกมันต้องรักษาสัญญากับแก?\n"
+        "<<TP_P3>> ในเมื่อแกตายไปแล้ว นอกจากพวกมัน 2 คนก็ไม่มีใครรู้เรื่องสัญญา\n"
+        "<<TP_P4>> แล้วเรื่องอะไรที่พวกมันต้องแบกภาระอย่างน้องสาวแกไปทั้งชีวิต\n"
+        "<<TP_P5>> สู้แกออกไปแล้วอยู่เคียงข้างน้องสาวจนวินาทีสุดท้ายไม่ดีกว่ารึไง?\n"
+        "D) Defiant shout at a god — strong ฉัน is justified here; heated, punchy, !!:\n"
+        "Input:\n"
+        "<<TP_P0>> どうだ神様…\n"
+        "<<TP_P1>> あんたは醜い人間の争いが見たかったのかもしれねぇけど\n"
+        "<<TP_P2>> 俺は俺の意志を貫く！\n"
+        "<<TP_P3>> 最後まで俺は抗ってやる!!\n"
+        "Output:\n"
+        "<<TP_P0>> พระเจ้า\n"
+        "<<TP_P1>> แกคงอยากให้มนุษย์แสดงความน่ารังเกียจให้แกดูสินะ\n"
+        "<<TP_P2>> แต่ฉันเบื่อที่จะทำตามใจแกแล้ว!!\n"
+        "<<TP_P3>> ฉันจะทำตามเจตจำนงของตัวเองแล้ว ต่อต้านแกให้ถึงที่สุด!!\n"
+        "=== ENGLISH-SOURCE PAGES (same four pages; if your OCR is the English scanlation, these are your models) ===\n"
+        "A) Deity / system voice:\n"
+        "Input:\n"
+        "<<TP_P0>> The final trial, \"the trial of the heart,\" will now begin.\n"
+        "<<TP_P1>> The key can unlock up to two collars.\n"
+        "<<TP_P2>> Use the key and select the sacrifice.\n"
+        "Output:\n"
+        "<<TP_P0>> จากนี้ไป จะเริ่มการทดสอบสุดท้าย การทดสอบแห่งจิตใจ\n"
+        "<<TP_P1>> กุญแจสามารถปลดปลอกคอได้เพียง 2 อัน\n"
+        "<<TP_P2>> จะสังเวยใคร เจ้าจงเลือกซะ!!\n"
+        "B) Inner monologue sliding into darkness — drop I, keep ฉัน only where the line needs it; P6-P8 are ONE "
+        "thought spread over three boxes, translated as a whole then split (the source names 'Midori'; the "
+        "published Thai keeps it as อีกคนนึง — follow the published choice):\n"
+        "Input:\n"
+        "<<TP_P0>> Use this key to remove the collars...?\n"
+        "<<TP_P1>> But it can only remove two... I can only save two people...\n"
+        "<<TP_P2>> Or the two of them, Tanaka and Midori...\n"
+        "<<TP_P3>> Me and one other person...\n"
+        "<<TP_P4>> So, as it stands...\n"
+        "<<TP_P5>> I'm the only one here with the power to decide who lives and who dies...\n"
+        "<<TP_P6>> Every time I thought it over,\n"
+        "<<TP_P7>> I felt the reason I was desperately holding onto\n"
+        "<<TP_P8>> slowly mix with a pitch-black emotion.\n"
+        "Output:\n"
+        "<<TP_P0>> กุญแจสำหรับปลดปลอกคอ งั้นสินะ...\n"
+        "<<TP_P1>> แต่ปลดได้แค่ 2 อัน หมายความว่ารอดไปได้แค่ 2 คน\n"
+        "<<TP_P2>> หรือไม่ก็ทานากะซังกับอีกคนนึง...\n"
+        "<<TP_P3>> ฉันกับอีกคนนึง...\n"
+        "<<TP_P4>> พูดอีกอย่างก็คือ...\n"
+        "<<TP_P5>> สิทธิ์ตัดสินความเป็นความตายของทุกคนขึ้นอยู่กับฉันคนเดียว...\n"
+        "<<TP_P6>> ทุกครั้งที่เริ่มคิด\n"
+        "<<TP_P7>> สติที่ควบคุมไว้ก็ค่อยๆ จางหายไป...\n"
+        "<<TP_P8>> สุดท้ายความคิดด้านลบมันก็เริ่มเข้ามา...\n"
+        "C) Rough casual male taunting — แก for 'you', มัน/พวกมัน for the people talked about, rhetorical "
+        "ใช่ไหมล่ะ / รึไง, no polite particles at all:\n"
+        "Input:\n"
+        "<<TP_P0>> Think about it!\n"
+        "<<TP_P1>> They're strangers you just met today, right?\n"
+        "<<TP_P2>> There's no reason for them to keep that promise!\n"
+        "<<TP_P3>> No one else knows about the promise made here...\n"
+        "<<TP_P4>> If it were me, I'd pass on being saddled with baggage for life...\n"
+        "<<TP_P5>> Instead of that, why don't you spend the time you have left by your sister's side...\n"
+        "Output:\n"
+        "<<TP_P0>> ลองคิดตามที่ฉันพูดดูดีๆ\n"
+        "<<TP_P1>> 2 คนนั้นมันก็แค่คนแปลกหน้าที่แกพึ่งเจอวันนี้ใช่ไหมล่ะ?\n"
+        "<<TP_P2>> มันมีเหตุผลอะไรที่พวกมันต้องรักษาสัญญากับแก?\n"
+        "<<TP_P3>> ในเมื่อแกตายไปแล้ว นอกจากพวกมัน 2 คนก็ไม่มีใครรู้เรื่องสัญญา\n"
+        "<<TP_P4>> แล้วเรื่องอะไรที่พวกมันต้องแบกภาระอย่างน้องสาวแกไปทั้งชีวิต\n"
+        "<<TP_P5>> สู้แกออกไปแล้วอยู่เคียงข้างน้องสาวจนวินาทีสุดท้ายไม่ดีกว่ารึไง?\n"
+        "D) Defiant shout at a god — strong ฉัน is justified here; heated, punchy, !!:\n"
+        "Input:\n"
+        "<<TP_P0>> How about that, God...\n"
+        "<<TP_P1>> You may have wanted to see an ugly human conflict,\n"
+        "<<TP_P2>> but I will see my own will through!\n"
+        "<<TP_P3>> I'll fight back until the very end!!\n"
+        "Output:\n"
+        "<<TP_P0>> พระเจ้า\n"
+        "<<TP_P1>> แกคงอยากให้มนุษย์แสดงความน่ารังเกียจให้แกดูสินะ\n"
+        "<<TP_P2>> แต่ฉันเบื่อที่จะทำตามใจแกแล้ว!!\n"
+        "<<TP_P3>> ฉันจะทำตามเจตจำนงของตัวเองแล้ว ต่อต้านแกให้ถึงที่สุด!!"
     ),
     "en": (
         "Target language: English\n"
@@ -282,8 +409,51 @@ def build_system_text(
     :mod:`backend.ai.markers`; when ``is_retry`` is True an extra line demands
     ALL markers.  The model only ever sees the source text (no MT reference),
     which keeps input tokens small.
+
+    This is a thin wrapper over :func:`build_system_split`; joining its two
+    halves reproduces the exact string this function has always returned, so
+    non-caching callers are unaffected.
+    """
+    static_text, dynamic_text = build_system_split(
+        lang,
+        prompt_override,
+        is_retry=is_retry,
+        glossary=glossary,
+        characters=characters,
+        has_image=has_image,
+        want_memo=want_memo,
+    )
+    return "\n\n".join(p for p in (static_text, dynamic_text) if p)
+
+
+def build_system_split(
+    lang: str,
+    prompt_override: str = "",
+    is_retry: bool = False,
+    glossary: list[dict] | None = None,
+    characters: list[dict] | None = None,
+    has_image: bool = False,
+    want_memo: bool = True,
+) -> tuple[str, str]:
+    """Split the system prompt into a cacheable prefix and a per-page suffix.
+
+    ``static`` = SYSTEM_BASE + the editable language style. It is byte-identical
+    for every page of a given ``(lang, model)`` and is by far the largest block
+    (the worked examples live in the style), so it is the part worth caching on
+    the provider side: Anthropic marks it with ``cache_control``; Gemini and
+    OpenAI-compatible providers cache it implicitly because it is the common
+    prefix of every request.
+
+    ``dynamic`` = IMAGE_HINT + character sheet + glossary + marker contract,
+    all of which change from page to page.
+
+    Joining static and dynamic with a blank line (dropping empties) reproduces
+    exactly what :func:`build_system_text` returns, preserving block order
+    (base, style, image, character, glossary, contract).
     """
     style = (prompt_override or "").strip() or lang_style(lang)
+    static_text = "\n\n".join(p for p in (SYSTEM_BASE.strip(), style) if p)
+
     contract: list[str] = [
         "Output ONLY the translated text (no JSON, no markdown, no extra commentary).",
         "Keep every paragraph marker like <<TP_P0>> exactly as it appears, in order.",
@@ -300,15 +470,12 @@ def build_system_text(
     glossary_block = build_glossary_block(glossary)
     character_block = build_character_block(characters, has_image=has_image)
     image_block = IMAGE_HINT if has_image else ""
-    parts = [
-        SYSTEM_BASE.strip(),
-        style,
-        image_block,
-        character_block,
-        glossary_block,
-        "\n".join(contract),
-    ]
-    return "\n\n".join(p for p in parts if p)
+    dynamic_text = "\n\n".join(
+        p
+        for p in (image_block, character_block, glossary_block, "\n".join(contract))
+        if p
+    )
+    return static_text, dynamic_text
 
 
 def build_user_parts(original_text_full: str) -> list[str]:

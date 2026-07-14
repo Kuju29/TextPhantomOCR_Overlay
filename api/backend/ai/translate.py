@@ -146,13 +146,18 @@ def translate(
     image_mime = (getattr(ai, "image_mime", "") or "image/jpeg").strip()
     char_memory = bool(getattr(ai, "char_memory", True))
 
-    system_text = prompts.build_system_text(
+    # Build the system prompt as a cacheable (static) prefix + a per-page
+    # (dynamic) suffix. Joining the two reproduces the legacy single-string
+    # prompt, so the non-caching providers below are unaffected; the Anthropic
+    # client uses the split to mark the static prefix with cache_control.
+    system_static, system_dynamic = prompts.build_system_split(
         target_lang, ai.prompt_editable, is_retry=is_retry,
         glossary=getattr(ai, "glossary", None),
         characters=getattr(ai, "characters", None) if char_memory else None,
         has_image=bool(image_b64),
         want_memo=char_memory,
     )
+    system_text = "\n\n".join(p for p in (system_static, system_dynamic) if p)
     user_parts = prompts.build_user_parts(original_text_full)
 
     # Local servers ignore the key but the OpenAI client always sends a
@@ -171,6 +176,7 @@ def translate(
         result = anthropic_client.generate(
             api_key, model, system_text, user_parts,
             image_b64=image_b64, image_mime=image_mime,
+            system_static=system_static, system_dynamic=system_dynamic,
         )
     elif is_hf_provider(provider, base_url):
         result = throttle.generate_with_backoff(

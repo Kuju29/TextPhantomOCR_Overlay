@@ -26,6 +26,10 @@ def _build_payload(
     image_b64: str = "",
     image_mime: str = "image/jpeg",
 ) -> dict:
+    # The system message opens with the static prefix (SYSTEM_BASE + style +
+    # worked examples) that is identical across pages of a series, so providers
+    # with automatic prefix caching (OpenAI, DeepSeek, Groq, …) reuse it for
+    # free. Providers without it simply pay full price, unchanged.
     messages: list[dict] = [{"role": "system", "content": system_text}]
     if (image_b64 or "").strip():
         # Vision request: one user message with an image part + text parts

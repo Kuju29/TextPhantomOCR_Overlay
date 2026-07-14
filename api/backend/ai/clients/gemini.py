@@ -108,6 +108,10 @@ def generate(
     if (image_b64 or "").strip():
         parts.append({"inline_data": {"mime_type": image_mime or "image/jpeg", "data": image_b64}})
     parts.extend({"text": p} for p in user_parts if (p or "").strip())
+    # ``system_text`` opens with the static prefix (SYSTEM_BASE + style +
+    # worked examples) and ends with the per-page bits, so Gemini 2.x implicit
+    # caching automatically reuses that shared prefix across pages of a series —
+    # no explicit cachedContent call needed.
     payload = {
         "systemInstruction": {"parts": [{"text": system_text}]},
         "contents": [{"role": "user", "parts": parts}],
