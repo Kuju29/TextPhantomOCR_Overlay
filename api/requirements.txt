@@ -1,14 +1,10 @@
-# PINNED to a known-good, mutually-compatible set. Unpinned ranges let HF
-# rebuilds pull brand-new majors (opencv 5.x, numpy 2.x, starlette 1.x, ...)
-# that break startup — the classic "worked yesterday, hangs today" Space bug.
-# Bump deliberately, one at a time, and re-test after each change.
-fastapi==0.115.6
-uvicorn[standard]==0.32.1
-httpx==0.27.2
-numpy==1.26.4
-opencv-python-headless==4.10.0.84
-Pillow==10.4.0
-budoux>=0.6,<0.9
+fastapi>=0.110
+uvicorn[standard]>=0.23
+httpx>=0.24
+numpy
+opencv-python-headless
+Pillow
+budoux
 # Manga text-block detector (Kiuyha/Manga-Bubble-YOLO, Apache-2.0).
 # Optional at runtime: if missing, grouping falls back to pure geometry.
-onnxruntime==1.19.2
+onnxruntime

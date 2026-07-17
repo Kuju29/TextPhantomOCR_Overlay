@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 from collections import OrderedDict
 from threading import Lock
 from typing import Any
@@ -60,6 +61,28 @@ def _ai_prompt_signature(prompt: str) -> str:
     return hashlib.sha256(t.encode("utf-8")).hexdigest()[:12] if t else ""
 
 
+def _ai_context_signature(ai_cfg: AiConfig) -> str:
+    """Short stable hash of the FROZEN series context (for cache keys).
+
+    The context is immutable for one read-then-translate batch, so folding its
+    hash in keeps the key both correct (new chapter/brief -> new entries) and
+    hit-friendly (re-translating within the same batch -> real hits).
+    Per-page ``speakers`` / ``prev_context`` are page-local and deterministic
+    per (image, batch), so they are included via the same signature.
+    """
+    payload = json.dumps(
+        {
+            "state": str(getattr(ai_cfg, "series_state", "") or ""),
+            "speakers": getattr(ai_cfg, "speakers", None) or {},
+            "prev": getattr(ai_cfg, "prev_context", None) or [],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
+
 def build_cache_key(
     img_hash: str,
     lang: str,
@@ -88,4 +111,7 @@ def build_cache_key(
                 f"think_{str(getattr(ai_cfg, 'thinking', '') or 'default').lower()}",
             ]
         )
+        # Frozen series context: immutable per batch -> correct AND cacheable.
+        if bool(getattr(ai_cfg, "context_frozen", False)):
+            parts.append("ctx_" + _ai_context_signature(ai_cfg))
     return "|".join(p for p in parts if p is not None)

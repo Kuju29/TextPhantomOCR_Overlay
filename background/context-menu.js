@@ -91,6 +91,9 @@ async function buildAiPayload(mode, source, settings, seriesKey) {
     // Per-series character sheet from <<TP_MEMO>> blocks — keeps each
     // character's gender / pronouns / register right across pages.
     characters: memory.characters,
+    // Series bible written by the last chapter brief (empty until one ran).
+    // Single-image jobs use it as-is; brief batches overwrite it (pass 2).
+    series_state: memory.state || "",
     // Character-memory toggle: off = smallest prompt, cheapest tokens.
     char_memory: settings.aiCharMemory !== false,
     send_image: sendImage,
@@ -273,6 +276,12 @@ async function handleTranslateAll(menuInfo, tab, ctx) {
   }
   batchUpdateToast(batch, "Collecting", true);
 
+  // Every source runs as itself — original/translated = Lens data, ai =
+  // translate from the original. The chapter-brief two-pass flow (pass 1 as
+  // "translated" jobs feeding /ai/brief) is intentionally NOT wired in here:
+  // the user chose the direct model — no jobs of another source running
+  // under an AI batch. brief.js + /ai/brief stay available for a future
+  // explicit opt-in toggle.
   for (const pl of payloads) enqueue(pl, tab.id, imagesFrameId);
 }
 

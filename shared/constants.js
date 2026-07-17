@@ -10,6 +10,7 @@ export const API_PATHS = {
   TRANSLATE_POLL: "/translate/poll",
   AI_RESOLVE: "/ai/resolve",
   AI_PROMPT_DEFAULT: "/ai/prompt/default",
+  AI_BRIEF: "/ai/brief",
 };
 
 /** Translation modes shown in the popup. */

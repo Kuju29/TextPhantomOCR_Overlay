@@ -433,6 +433,22 @@ def _run_ai_layer(
             except Exception:
                 pass  # vision is best-effort; translation continues text-only
 
+    # Chapter-brief speaker map: the brief numbers speakers by RAW OCR
+    # paragraph index (blank-line split of originalTextFull), but the markers
+    # sent to the model are BUBBLE-GROUP units (several raw paragraphs can
+    # merge into one marker). Remap raw -> group here so the SPEAKER MAP's
+    # <<TP_Pn>> labels line up with what the model actually receives.
+    _raw_speakers = getattr(ai_cfg, "speakers", None) or {}
+    if _raw_speakers:
+        _remapped: dict[str, str] = {}
+        for _gi, _idxs in enumerate(group_para_indices):
+            for _ri in _idxs:
+                _name = str(_raw_speakers.get(str(_ri)) or "").strip()
+                if _name:
+                    _remapped[str(_gi)] = _name
+                    break
+        ai_cfg.speakers = _remapped
+
     # First attempt; retry once (with runaway-repeat clamping) if markers drop.
     result = ai_translate(
         src_text, target_lang, ai_cfg,
@@ -1023,6 +1039,11 @@ def _build_ai_config(payload: dict, mode: str, source: str) -> AiConfig | None:
         ),
         # "default" = model thinks normally; "off" = fastest (Gemini only).
         thinking=str(ai.get("thinking") or "default").strip().lower() or "default",
+        # Frozen series context (read-then-translate batches; see ai/brief.py).
+        series_state=str(ai.get("series_state") or "").strip(),
+        speakers=ai.get("speakers") if isinstance(ai.get("speakers"), dict) else {},
+        prev_context=ai.get("prev_context") if isinstance(ai.get("prev_context"), list) else [],
+        context_frozen=bool(ai.get("context_frozen", False)),
     )
 
 
@@ -1102,6 +1123,11 @@ def process_payload(payload: dict) -> dict[str, Any]:
             "tmp_ms": round((t_tmp - t_img) * 1000, 1),
             **stages,
         }
+        # NO-SILENT-FALLBACK: brief pass-2 jobs ask to reuse pass-1 Lens data
+        # (reuse_lens). Server-side reuse is not implemented yet, so the second
+        # OCR round-trip must be VISIBLE in translate.perf instead of silent.
+        if payload.get("reuse_lens"):
+            out["perf"]["lens_reused"] = False
         # One compact perf line per processed job (cache hits don't get here),
         # so slow stages are visible straight from the production logs.
         event("translate.perf", {"mode": mode, "lang": lang, "source": source, **out["perf"]})

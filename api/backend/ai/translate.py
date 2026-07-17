@@ -65,6 +65,18 @@ class AiConfig:
     # Reasoning control (currently Gemini only): "default" lets the model
     # think normally; "off" minimises thinking for the fastest answers.
     thinking: str = "default"
+    # --- Frozen series context (read-then-translate batches) ---------------
+    # Filled by the chapter-brief flow: every page of one batch carries the
+    # SAME immutable context, so parallel translation cannot race and the
+    # per-page memo emission is skipped (the brief already updated memory).
+    # series_state: the series bible ("STORY SO FAR") text.
+    series_state: str = ""
+    # speakers: this page's marker->speaker map, e.g. {"0": "Rey"}.
+    speakers: dict = field(default_factory=dict)
+    # prev_context: previous page's SOURCE tail, [{"src": ..., "who"?: ...}].
+    prev_context: list = field(default_factory=list)
+    # True = context above is frozen for the whole batch -> no <<TP_MEMO>>.
+    context_frozen: bool = False
 
 
 class AiResult(TypedDict):
@@ -145,17 +157,26 @@ def translate(
     image_b64 = (getattr(ai, "image_b64", "") or "").strip()
     image_mime = (getattr(ai, "image_mime", "") or "image/jpeg").strip()
     char_memory = bool(getattr(ai, "char_memory", True))
+    context_frozen = bool(getattr(ai, "context_frozen", False))
 
     # Build the system prompt as a cacheable (static) prefix + a per-page
     # (dynamic) suffix. Joining the two reproduces the legacy single-string
     # prompt, so the non-caching providers below are unaffected; the Anthropic
     # client uses the split to mark the static prefix with cache_control.
+    # Frozen batches: the brief already updated the series memory, so the
+    # per-page <<TP_MEMO>> emission is skipped (shorter, cheaper output) while
+    # the character sheet itself IS still injected.
     system_static, system_dynamic = prompts.build_system_split(
         target_lang, ai.prompt_editable, is_retry=is_retry,
         glossary=getattr(ai, "glossary", None),
-        characters=getattr(ai, "characters", None) if char_memory else None,
+        characters=(
+            getattr(ai, "characters", None) if (char_memory or context_frozen) else None
+        ),
         has_image=bool(image_b64),
-        want_memo=char_memory,
+        want_memo=char_memory and not context_frozen,
+        series_state=str(getattr(ai, "series_state", "") or ""),
+        speakers=getattr(ai, "speakers", None),
+        prev_context=getattr(ai, "prev_context", None),
     )
     system_text = "\n\n".join(p for p in (system_static, system_dynamic) if p)
     user_parts = prompts.build_user_parts(original_text_full)
@@ -203,6 +224,8 @@ def translate(
         "provider": provider,
         "base_url": base_url,
         "target_lang": normalize_lang(target_lang),
+        # NO-SILENT-FALLBACK: which flow actually ran, visible in every log.
+        "ai_flow": "brief_frozen" if context_frozen else "per_page",
     }
     if characters:
         meta["characters"] = characters

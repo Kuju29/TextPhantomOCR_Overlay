@@ -186,6 +186,31 @@ def parse_character_memo(memo: str) -> list[dict]:
     return out
 
 
+def parse_speaker_pairs(body: str) -> dict[str, str]:
+    """Parse one page's speaker list from a ``<<TP_SPEAKERS>>`` line.
+
+    ``body`` is the part after ``page N:``, e.g. ``"0=Rey; 1=Marnie, 2=unknown"``.
+    Returns ``{"0": "Rey", "1": "Marnie"}`` — ``unknown``/empty names are
+    dropped so downstream prompts only ever see real attributions.
+    Best-effort: malformed fragments are skipped.
+    """
+    out: dict[str, str] = {}
+    for frag in re.split(r"[;,]", body or ""):
+        idx, sep, name = frag.partition("=")
+        if not sep:
+            idx, sep, name = frag.partition(":")
+        idx = idx.strip()
+        name = name.strip().strip("\"'")
+        if not sep or not idx.isdigit() or not name:
+            continue
+        if name.lower() in ("unknown", "none", "n/a", "-", "?"):
+            continue
+        out[idx] = name[:40]
+        if len(out) >= 50:
+            break
+    return out
+
+
 def parse_text(raw: str) -> str:
     """Extract translated text from a plain-text AI response.
 

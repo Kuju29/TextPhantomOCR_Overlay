@@ -46,6 +46,8 @@ LANG_STYLE: Final[dict[str, str]] = {
         "across consecutive markers (bubble pairs ending with - or an unfinished clause), translate the WHOLE "
         "thought first, then split it back across those same markers naturally.\n"
         "   'Teach you what it means–' + 'to stand side by side!' -> สอนให้รู้ว่ามัน... + หมายถึงอะไรที่ได้ยืนเคียงข้างกัน!\n"
+        "   Puns/wordplay: translate the JOKE's effect, not the literal words — build an equivalent Thai pun, "
+        "or drop to a line that is naturally funny in Thai. Never explain the joke.\n"
         "2) DROP I/YOU, KEEP 'มัน'. Thai omits subjects: even when the source says I / you, drop the pronoun "
         "(ผม ฉัน นาย เธอ คุณ) unless the line breaks without it — use a name or title instead (ท่านลอร์ด, "
         "หัวหน้ากิลด์). Third person is the OPPOSITE: use มัน / พวกมัน (enemies, monsters, contempt), หมอนั่น, "
@@ -351,6 +353,90 @@ def build_glossary_block(glossary: list[dict] | None, limit: int = 40) -> str:
     )
 
 
+def looks_like_term(src: str, tgt: str, min_len: int = 3) -> bool:
+    """Heuristic: is ``src => tgt`` a reusable TERM (name/place/skill/item)?
+
+    Guards the glossary and the brief's TERMS block against full sentences and
+    interjections, which poison later pages when pinned.  ``min_len`` is 2 for
+    brief-authored terms (CJK names are often exactly 2 chars) and 3 for
+    memo-harvested pairs.
+    """
+    s, t = (src or "").strip(), (tgt or "").strip()
+    if not s or not t or len(s) < min_len:
+        return False
+    if len(s) > 40 or len(t) > 60:
+        return False
+    if "\n" in s or "\n" in t:
+        return False
+    # Sentence punctuation (interior) = a sentence, not a term.
+    if any(ch in s for ch in "。.!?！？…,、"):
+        return False
+    if len(s.split()) > 5:
+        return False
+    return True
+
+
+def build_series_block(series_state: str) -> str:
+    """Render the frozen series bible (STORY SO FAR) block, or ``""``."""
+    state = (series_state or "").strip()
+    if not state:
+        return ""
+    return (
+        "STORY SO FAR (series bible from reading the whole chapter — background truth for tone, "
+        "relationships and scene; NEVER restate or translate it in the output):\n" + state
+    )
+
+
+def build_speaker_block(speakers: dict | None) -> str:
+    """Render this page's marker->speaker map (from the chapter brief).
+
+    ``speakers`` maps paragraph indices to character names, e.g.
+    ``{"0": "Rey", "2": "Marnie"}``.  Unknown markers are simply absent.
+    Returns ``""`` when there is nothing usable.
+    """
+    if not isinstance(speakers, dict) or not speakers:
+        return ""
+    lines: list[str] = []
+    for idx in sorted(speakers, key=lambda k: int(k) if str(k).isdigit() else 0):
+        name = str(speakers[idx] or "").strip()
+        if name:
+            lines.append(f"  <<TP_P{idx}>> = {name}")
+        if len(lines) >= 50:
+            break
+    if not lines:
+        return ""
+    return (
+        "SPEAKER MAP (decided from the WHOLE chapter — trust it over per-line guessing; give each "
+        "line the voice its speaker has in the character sheet):\n" + "\n".join(lines)
+    )
+
+
+def build_prev_context_block(prev_context: list | None, limit: int = 6) -> str:
+    """Render the previous page's SOURCE tail for cross-page flow (R4).
+
+    ``prev_context`` is ``[{"src": ..., "who": ...?}, ...]`` in reading order —
+    source text only (from OCR), so parallel translation never waits on another
+    page's result.  Returns ``""`` when there is nothing usable.
+    """
+    if not isinstance(prev_context, list) or not prev_context:
+        return ""
+    lines: list[str] = []
+    for entry in prev_context[-limit:]:
+        if not isinstance(entry, dict):
+            continue
+        src = str(entry.get("src") or "").strip().replace("\n", " ")
+        if not src:
+            continue
+        who = str(entry.get("who") or "").strip()
+        lines.append(f"  [{who}] {src}"[:200] if who else f"  {src}"[:200])
+    if not lines:
+        return ""
+    return (
+        "PREVIOUS PAGE (source text tail, context only — the conversation may continue from here; "
+        "do NOT translate or output these lines):\n" + "\n".join(lines)
+    )
+
+
 def build_character_block(
     characters: list[dict] | None, limit: int = 30, has_image: bool = False
 ) -> str:
@@ -399,6 +485,9 @@ def build_system_text(
     characters: list[dict] | None = None,
     has_image: bool = False,
     want_memo: bool = True,
+    series_state: str = "",
+    speakers: dict | None = None,
+    prev_context: list | None = None,
 ) -> str:
     """Build the system prompt that gets prepended to every AI call.
 
@@ -422,6 +511,9 @@ def build_system_text(
         characters=characters,
         has_image=has_image,
         want_memo=want_memo,
+        series_state=series_state,
+        speakers=speakers,
+        prev_context=prev_context,
     )
     return "\n\n".join(p for p in (static_text, dynamic_text) if p)
 
@@ -434,6 +526,9 @@ def build_system_split(
     characters: list[dict] | None = None,
     has_image: bool = False,
     want_memo: bool = True,
+    series_state: str = "",
+    speakers: dict | None = None,
+    prev_context: list | None = None,
 ) -> tuple[str, str]:
     """Split the system prompt into a cacheable prefix and a per-page suffix.
 
@@ -451,7 +546,22 @@ def build_system_split(
     exactly what :func:`build_system_text` returns, preserving block order
     (base, style, image, character, glossary, contract).
     """
-    style = (prompt_override or "").strip() or lang_style(lang)
+    # R9 — the user's edited prompt must actually take effect:
+    # - an override that starts with "Target language" is a full style REPLACEMENT
+    #   (that is how every built-in style begins, i.e. the user edited the default);
+    # - anything else is APPENDED to the default style as SERIES NOTES, so short
+    #   user additions never silently erase the built-in translation rules.
+    override = (prompt_override or "").strip()
+    if not override:
+        style = lang_style(lang)
+    elif override.lower().startswith("target language"):
+        style = override
+    else:
+        style = (
+            lang_style(lang)
+            + "\n\nSERIES NOTES (from the user — follow these even when they conflict with a rule above):\n"
+            + override
+        )
     static_text = "\n\n".join(p for p in (SYSTEM_BASE.strip(), style) if p)
 
     contract: list[str] = [
@@ -470,9 +580,20 @@ def build_system_split(
     glossary_block = build_glossary_block(glossary)
     character_block = build_character_block(characters, has_image=has_image)
     image_block = IMAGE_HINT if has_image else ""
+    series_block = build_series_block(series_state)
+    speaker_block = build_speaker_block(speakers)
+    prev_block = build_prev_context_block(prev_context)
     dynamic_text = "\n\n".join(
         p
-        for p in (image_block, character_block, glossary_block, "\n".join(contract))
+        for p in (
+            image_block,
+            series_block,
+            character_block,
+            glossary_block,
+            speaker_block,
+            prev_block,
+            "\n".join(contract),
+        )
         if p
     )
     return static_text, dynamic_text
