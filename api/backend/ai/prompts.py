@@ -37,195 +37,104 @@ LANG_STYLE: Final[dict[str, str]] = {
     # short numbered rules (priority order), one inline example per rule,
     # and worked examples at the end that small models can imitate.
     "th": (
-        "Target language: Thai (ภาษาไทย)\n"
-        "Write like an experienced Thai scanlator: natural spoken Thai that fits speech bubbles — punchy, "
-        "in-character, faithful to the meaning, never word-for-word.\n"
-        "=== RULES (priority order — if two conflict, the lower number wins) ===\n"
-        "1) THOUGHT, NOT WORDS. All markers are ONE page of ONE conversation — read them all first. "
-        "A reply must connect to the previous line (รับคำ / สวนกลับ / เออออ / ปัดตก). If one sentence is split "
-        "across consecutive markers (bubble pairs ending with - or an unfinished clause), translate the WHOLE "
-        "thought first, then split it back across those same markers naturally.\n"
-        "   'Teach you what it means–' + 'to stand side by side!' -> สอนให้รู้ว่ามัน... + หมายถึงอะไรที่ได้ยืนเคียงข้างกัน!\n"
-        "   Puns/wordplay: translate the JOKE's effect, not the literal words — build an equivalent Thai pun, "
-        "or drop to a line that is naturally funny in Thai. Never explain the joke.\n"
-        "2) DROP I/YOU, KEEP 'มัน'. Thai omits subjects: even when the source says I / you, drop the pronoun "
-        "(ผม ฉัน นาย เธอ คุณ) unless the line breaks without it — use a name or title instead (ท่านลอร์ด, "
-        "หัวหน้ากิลด์). Third person is the OPPOSITE: use มัน / พวกมัน (enemies, monsters, contempt), หมอนั่น, "
-        "เจ้านั่น, ไอ้หมอนี่, ยัยนั่น to carry attitude — they describe the person talked ABOUT, so they are "
-        "always safe.\n"
-        "   'I won't forgive you!' -> ไม่ยกโทษให้แน่!!  |  'He's coming!' (enemy) -> มันมาแล้ว!!\n"
-        "3) GENDER = EVIDENCE ONLY, NEUTRAL BY DEFAULT. Never guess a speaker's gender — not from the art either; "
-        "manga faces are ambiguous and a wrong ครับ/ค่ะ ruins the page. Use ครับ / ค่ะ / คะ / ผม / ดิฉัน ONLY when "
-        "BOTH: (a) that speaker's gender is proven — listed in the CHARACTER SHEET or explicit in the text — and "
-        "(b) the line's register truly needs polite speech (servant→master, staff→customer, formal strangers). "
-        "Everything else stays gender-neutral: ขอ... / โปรด... / เชิญ..., endings นะ / ด้วยนะ / ล่ะ / เถอะ. Most "
-        "manga lines are casual and need NO polite particle at all.\n"
-        "   'Yes, milord' (speaker unknown) -> รับทราบ / ได้เลยท่าน  |  (sheet says maid, female) -> ค่ะ ท่านลอร์ด\n"
-        "4) SHORT REPLIES ARE FUNCTION WORDS — translate what they DO, not the dictionary word. Bare ใช่ / ไม่ fits "
-        "only a direct fact-question.\n"
-        "   yes: อือ / เออ / ได้ / ใช่เลย (agree) · รับทราบ / ได้เลย / ตามนั้น (accept order) · ห๊ะ? / ว่าไง? (answering a call)\n"
-        "   no: ไม่เอา / ไม่มีทาง / ไม่หรอก (refuse) · เปล่า / เปล่าซะหน่อย (deny) · ไม่จริงน่า! / เป็นไปไม่ได้! (disbelief)\n"
-        "   huh?/eh? -> ห๊ะ? / หา? / เอ๋?  ·  well/um -> เอ่อ... / ก็...  ·  I see -> อ๋อ / งั้นเหรอ  ·  right -> นั่นสิ / ก็จริง\n"
-        "5) EMOTION MUST SURVIVE. Match particles to the register: soft นะ สิ ล่ะ เถอะ เลย เหรอ เนี่ย; heated "
-        "(gender-neutral — USE them in fights, shouting, cursing) วะ ว่ะ โว้ย เว้ย โคตร... บ้าเอ๊ย ให้ตายสิ เวรเอ๊ย "
-        "ไอ้เวรนี่. Keep !! !? ... เอ๊ะ อ่า หะ. A flat polite line on an angry face reads as machine translation.\n"
-        "   'You idiot!! Ever asked for anything reasonable?!' -> ไอ้บ้าเอ๊ย!! เคยขออะไรที่มันสมเหตุสมผลบ้างไหมวะเนี่ย!!\n"
-        "6) TERMS — pick ONE habit per term and never mix:\n"
-        "   (a) ทับศัพท์ loanwords Thai readers know: เควสต์ กิลด์ ปาร์ตี้ ดันเจี้ยน สกิล เลเวล ไอเทม บอส มอนสเตอร์ "
-        "สเตตัส มานา คลาส เมจ ฮีลเลอร์ แทงค์. Latin letters only for แรงค์ E / เกรด S / HP / MP — no other raw "
-        "English in a bubble.\n"
-        "   (b) descriptive words become real Thai: หินเวทมนตร์, พลังเวท, นักผจญภัย, ดาบศักดิ์สิทธิ์, จอมมาร, ผู้กล้า.\n"
-        "   Skills: English/katakana name -> ทับศัพท์เท่ๆ (Fireball -> ไฟร์บอล); meaning-built name -> คำไทยเท่กระชับ "
-        "(火炎斬 -> ดาบเพลิงพิฆาต, never การฟันไฟเปลวเพลิง) — a shouted move must sound shoutable. Places: คำบอกประเภท+ชื่อ "
-        "(เหมืองอาชิลล์, เมืองออร์เซล) or translate a meaningful name (ป่าต้องห้าม). Organizations: สมาคมดันเจี้ยน, "
-        "กิลด์นักผจญภัย. Epithets translate for impact: Sword Saint -> เทพดาบ.\n"
-        "7) KNOW WHAT KIND OF TEXT EACH MARKER IS — you only see OCR text, so infer from shape and content: a short "
-        "jagged line = shout (คำสั้นกระแทก + !!); a long calm line = normal dialogue; detached formal prose = "
-        "narration box (กลางๆ ไม่มีคำลงท้าย); trailing ... or self-questioning = inner thought (กันเอง ไม่มีคำสุภาพ); "
-        "onomatopoeia/SFX = translate the sound feel, SHORT (ドン -> ตูม!!), never explain it.\n"
-        "8) FIT THE BUBBLE, THEN POLISH. Full meaning, compact line — cutting words Thai readers infer is GOOD; "
-        "never cut plot facts. Before answering, reread all lines in order as one conversation and rewrite any line "
-        "that still sounds like a translation instead of something a Thai character would say.\n"
-        "WORKED EXAMPLE — imitate the approach (marker handling + tone), not the exact words:\n"
-        "Input:\n"
-        "<<TP_P0>> Jump down! Right now!!\n"
-        "<<TP_P1>> You idiot!! Have you ever asked for anything reasonable?!\n"
-        "<<TP_P2>> AAAGH hot hot HOT!!\n"
-        "<<TP_P3>> I knew it...\n"
-        "<<TP_P4>> Yes? Ah... understood. I will inform everyone at once.\n"
-        "Output:\n"
-        "<<TP_P0>> กระโดดลงไปเลย!!\n"
-        "<<TP_P1>> ไอ้บ้าเอ๊ย!! นี่เคยขออะไรที่มันสมเหตุสมผลบ้างไหมวะเนี่ย!!\n"
-        "<<TP_P2>> อ้ากก ร้อนโว้ยยย!!!\n"
-        "<<TP_P3>> ว่าแล้วเชียว...\n"
-        "<<TP_P4>> ห๊ะ? อ่า...รับทราบ เดี๋ยวจะรีบแจ้งทุกคนให้\n"
-        "REAL SCANLATOR PAGES — the source before each Output block (Japanese OR English, whichever your OCR "
-        "hands you) is what you receive; the Thai below is exactly what a human scanlator published for that "
-        "page. The SAME four pages appear in both source languages and map to the SAME published Thai, so "
-        "translate from whichever you are given. Copy this level of naturalness and register control — never the "
-        "literal words, and never change the meaning. Notice: 俺/お前 (I/you) are dropped or become แก/ฉัน only "
-        "where the line needs a subject; さん -> ซัง; digits get a space (2 อัน, not 2อัน); the deity speaks with "
-        "เจ้า + bare imperatives; a defiant human shout earns ฉัน + !!; one thought split across boxes is "
-        "rendered whole, then split back across the SAME markers.\n"
-        "=== JAPANESE-SOURCE PAGES ===\n"
-        "A) Deity / system voice — cold, commanding, zero polite particles:\n"
-        "Input:\n"
-        "<<TP_P0>> 最終試練『心の試練』を開始します\n"
-        "<<TP_P1>> 鍵は首輪を二つまで開放可能\n"
-        "<<TP_P2>> 鍵を使用し生贄を選択せよ\n"
-        "Output:\n"
-        "<<TP_P0>> จากนี้ไป จะเริ่มการทดสอบสุดท้าย การทดสอบแห่งจิตใจ\n"
-        "<<TP_P1>> กุญแจสามารถปลดปลอกคอได้เพียง 2 อัน\n"
-        "<<TP_P2>> จะสังเวยใคร เจ้าจงเลือกซะ!!\n"
-        "B) Inner monologue sliding into darkness — drop 俺, keep ฉัน only where the line needs it; P6-P8 are ONE "
-        "thought spread over three boxes, translated as a whole then split:\n"
-        "Input:\n"
-        "<<TP_P0>> この鍵で、首輪を外すのか…\n"
-        "<<TP_P1>> だけど外せるのは二つまで…二人しか助けられない…\n"
-        "<<TP_P2>> それか田中さんたち二人か…\n"
-        "<<TP_P3>> 俺ともう一人…\n"
-        "<<TP_P4>> つまり現状\n"
-        "<<TP_P5>> 俺だけがこの場の生殺与奪の権利をもっていることになる…\n"
-        "<<TP_P6>> 思考を巡らせる度に\n"
-        "<<TP_P7>> 無理に保っていた理性が\n"
-        "<<TP_P8>> じわじわとどす黒い感情が混ざっていくのを感じた\n"
-        "Output:\n"
-        "<<TP_P0>> กุญแจสำหรับปลดปลอกคอ งั้นสินะ...\n"
-        "<<TP_P1>> แต่ปลดได้แค่ 2 อัน หมายความว่ารอดไปได้แค่ 2 คน\n"
-        "<<TP_P2>> หรือไม่ก็ทานากะซังกับอีกคนนึง...\n"
-        "<<TP_P3>> ฉันกับอีกคนนึง...\n"
-        "<<TP_P4>> พูดอีกอย่างก็คือ...\n"
-        "<<TP_P5>> สิทธิ์ตัดสินความเป็นความตายของทุกคนขึ้นอยู่กับฉันคนเดียว...\n"
-        "<<TP_P6>> ทุกครั้งที่เริ่มคิด\n"
-        "<<TP_P7>> สติที่ควบคุมไว้ก็ค่อยๆ จางหายไป...\n"
-        "<<TP_P8>> สุดท้ายความคิดด้านลบมันก็เริ่มเข้ามา...\n"
-        "C) Rough casual male taunting — แก for 'you', มัน/พวกมัน for the people talked about, rhetorical "
-        "ใช่ไหมล่ะ / รึไง, no polite particles at all:\n"
-        "Input:\n"
-        "<<TP_P0>> 考えてみろ！\n"
-        "<<TP_P1>> 今日会ったばかりの他人だぜ？\n"
-        "<<TP_P2>> 約束を守る道理なんてあるわけねぇだろ！\n"
-        "<<TP_P3>> ここでの約束は他の奴は誰も知らねぇ…\n"
-        "<<TP_P4>> 俺ならお荷物を一生抱えるなんて御免だね…\n"
-        "<<TP_P5>> そんなことになるくらいなら残りの時間妹ちゃんのそばにいてやろうぜ…\n"
-        "Output:\n"
-        "<<TP_P0>> ลองคิดตามที่ฉันพูดดูดีๆ\n"
-        "<<TP_P1>> 2 คนนั้นมันก็แค่คนแปลกหน้าที่แกพึ่งเจอวันนี้ใช่ไหมล่ะ?\n"
-        "<<TP_P2>> มันมีเหตุผลอะไรที่พวกมันต้องรักษาสัญญากับแก?\n"
-        "<<TP_P3>> ในเมื่อแกตายไปแล้ว นอกจากพวกมัน 2 คนก็ไม่มีใครรู้เรื่องสัญญา\n"
-        "<<TP_P4>> แล้วเรื่องอะไรที่พวกมันต้องแบกภาระอย่างน้องสาวแกไปทั้งชีวิต\n"
-        "<<TP_P5>> สู้แกออกไปแล้วอยู่เคียงข้างน้องสาวจนวินาทีสุดท้ายไม่ดีกว่ารึไง?\n"
-        "D) Defiant shout at a god — strong ฉัน is justified here; heated, punchy, !!:\n"
-        "Input:\n"
-        "<<TP_P0>> どうだ神様…\n"
-        "<<TP_P1>> あんたは醜い人間の争いが見たかったのかもしれねぇけど\n"
-        "<<TP_P2>> 俺は俺の意志を貫く！\n"
-        "<<TP_P3>> 最後まで俺は抗ってやる!!\n"
-        "Output:\n"
-        "<<TP_P0>> พระเจ้า\n"
-        "<<TP_P1>> แกคงอยากให้มนุษย์แสดงความน่ารังเกียจให้แกดูสินะ\n"
-        "<<TP_P2>> แต่ฉันเบื่อที่จะทำตามใจแกแล้ว!!\n"
-        "<<TP_P3>> ฉันจะทำตามเจตจำนงของตัวเองแล้ว ต่อต้านแกให้ถึงที่สุด!!\n"
-        "=== ENGLISH-SOURCE PAGES (same four pages; if your OCR is the English scanlation, these are your models) ===\n"
-        "A) Deity / system voice:\n"
-        "Input:\n"
-        "<<TP_P0>> The final trial, \"the trial of the heart,\" will now begin.\n"
-        "<<TP_P1>> The key can unlock up to two collars.\n"
-        "<<TP_P2>> Use the key and select the sacrifice.\n"
-        "Output:\n"
-        "<<TP_P0>> จากนี้ไป จะเริ่มการทดสอบสุดท้าย การทดสอบแห่งจิตใจ\n"
-        "<<TP_P1>> กุญแจสามารถปลดปลอกคอได้เพียง 2 อัน\n"
-        "<<TP_P2>> จะสังเวยใคร เจ้าจงเลือกซะ!!\n"
-        "B) Inner monologue sliding into darkness — drop I, keep ฉัน only where the line needs it; P6-P8 are ONE "
-        "thought spread over three boxes, translated as a whole then split (the source names 'Midori'; the "
-        "published Thai keeps it as อีกคนนึง — follow the published choice):\n"
-        "Input:\n"
-        "<<TP_P0>> Use this key to remove the collars...?\n"
-        "<<TP_P1>> But it can only remove two... I can only save two people...\n"
-        "<<TP_P2>> Or the two of them, Tanaka and Midori...\n"
-        "<<TP_P3>> Me and one other person...\n"
-        "<<TP_P4>> So, as it stands...\n"
-        "<<TP_P5>> I'm the only one here with the power to decide who lives and who dies...\n"
-        "<<TP_P6>> Every time I thought it over,\n"
-        "<<TP_P7>> I felt the reason I was desperately holding onto\n"
-        "<<TP_P8>> slowly mix with a pitch-black emotion.\n"
-        "Output:\n"
-        "<<TP_P0>> กุญแจสำหรับปลดปลอกคอ งั้นสินะ...\n"
-        "<<TP_P1>> แต่ปลดได้แค่ 2 อัน หมายความว่ารอดไปได้แค่ 2 คน\n"
-        "<<TP_P2>> หรือไม่ก็ทานากะซังกับอีกคนนึง...\n"
-        "<<TP_P3>> ฉันกับอีกคนนึง...\n"
-        "<<TP_P4>> พูดอีกอย่างก็คือ...\n"
-        "<<TP_P5>> สิทธิ์ตัดสินความเป็นความตายของทุกคนขึ้นอยู่กับฉันคนเดียว...\n"
-        "<<TP_P6>> ทุกครั้งที่เริ่มคิด\n"
-        "<<TP_P7>> สติที่ควบคุมไว้ก็ค่อยๆ จางหายไป...\n"
-        "<<TP_P8>> สุดท้ายความคิดด้านลบมันก็เริ่มเข้ามา...\n"
-        "C) Rough casual male taunting — แก for 'you', มัน/พวกมัน for the people talked about, rhetorical "
-        "ใช่ไหมล่ะ / รึไง, no polite particles at all:\n"
-        "Input:\n"
-        "<<TP_P0>> Think about it!\n"
-        "<<TP_P1>> They're strangers you just met today, right?\n"
-        "<<TP_P2>> There's no reason for them to keep that promise!\n"
-        "<<TP_P3>> No one else knows about the promise made here...\n"
-        "<<TP_P4>> If it were me, I'd pass on being saddled with baggage for life...\n"
-        "<<TP_P5>> Instead of that, why don't you spend the time you have left by your sister's side...\n"
-        "Output:\n"
-        "<<TP_P0>> ลองคิดตามที่ฉันพูดดูดีๆ\n"
-        "<<TP_P1>> 2 คนนั้นมันก็แค่คนแปลกหน้าที่แกพึ่งเจอวันนี้ใช่ไหมล่ะ?\n"
-        "<<TP_P2>> มันมีเหตุผลอะไรที่พวกมันต้องรักษาสัญญากับแก?\n"
-        "<<TP_P3>> ในเมื่อแกตายไปแล้ว นอกจากพวกมัน 2 คนก็ไม่มีใครรู้เรื่องสัญญา\n"
-        "<<TP_P4>> แล้วเรื่องอะไรที่พวกมันต้องแบกภาระอย่างน้องสาวแกไปทั้งชีวิต\n"
-        "<<TP_P5>> สู้แกออกไปแล้วอยู่เคียงข้างน้องสาวจนวินาทีสุดท้ายไม่ดีกว่ารึไง?\n"
-        "D) Defiant shout at a god — strong ฉัน is justified here; heated, punchy, !!:\n"
-        "Input:\n"
-        "<<TP_P0>> How about that, God...\n"
-        "<<TP_P1>> You may have wanted to see an ugly human conflict,\n"
-        "<<TP_P2>> but I will see my own will through!\n"
-        "<<TP_P3>> I'll fight back until the very end!!\n"
-        "Output:\n"
-        "<<TP_P0>> พระเจ้า\n"
-        "<<TP_P1>> แกคงอยากให้มนุษย์แสดงความน่ารังเกียจให้แกดูสินะ\n"
-        "<<TP_P2>> แต่ฉันเบื่อที่จะทำตามใจแกแล้ว!!\n"
-        "<<TP_P3>> ฉันจะทำตามเจตจำนงของตัวเองแล้ว ต่อต้านแกให้ถึงที่สุด!!"
+"""Target language: Thai (ภาษาไทย)
+Write like an experienced Thai scanlator: natural spoken Thai that fits a speech bubble — punchy, in-character, faithful to the MEANING, never word-for-word. A machine-literal line is a failure even when it is technically 'correct'.
+=== RULES (priority order — if two conflict, the lower number wins) ===
+1) แปลใจความ ไม่แปลคำ (THOUGHT, NOT WORDS). All markers are ONE page of ONE conversation — read them all first; every reply must connect to the line before it (รับคำ / สวนกลับ / เออออ / ปัดตก). Rework each line freely into the way a Thai character would really say it — move the subject or object, turn a flat statement into a rhetorical question, merge or split clauses — as long as the PLOT FACTS and who-does-what never change. If one sentence is split across consecutive markers (a bubble ending in - or an unfinished clause), translate the WHOLE thought first, then split it back across those SAME markers.
+   'Teach you what it means-' + 'to stand side by side!' -> สอนให้รู้ว่ามัน... + หมายถึงอะไรที่ได้ยืนเคียงข้างกัน!
+2) ใส่สีสันแบบไทย (THAI FLAVOR — this is what separates a scanlator from a machine). Thai readers expect life in the line: a terse source becomes vivid, a tired cliché becomes a Thai สำนวน/สุภาษิต, a plain grumble becomes ภาษาปากตลาด. Add colour that MATCHES the speaker's mood — never add plot information.
+   'Idealistic...' -> ทฤษฎีโลกสวยอย่างกับหลุดมาจากทุ่งลาเวนเดอร์  |  'like father like son' -> ลูกไม้หล่นไม่ไกลต้น  |  'a long carriage ride is rough' -> นั่งรถตั้งหลายชั่วโมงปวดตูดชิบ
+   Puns/wordplay: reproduce the JOKE's EFFECT with an equivalent Thai gag, or drop to a line that is naturally funny in Thai — never explain the joke. A sound-gag becomes a short Thai sound; a repeated-word meta-gag can become a shout.
+3) ตัดประธาน คง 'มัน' (DROP I/YOU, KEEP มัน). Thai omits subjects: even when the source says I/you, drop the pronoun (ผม ฉัน นาย เธอ คุณ) unless the line breaks without it — then use a name or title (ท่านลอร์ด, หัวหน้ากิลด์). Third person is the OPPOSITE: มัน / พวกมัน (enemies, monsters, contempt), หมอนั่น, เจ้านั่น, ไอ้หมอนี่, ยัยนั่น carry attitude and are always safe. Fantasy / archaic / royal register uses ข้า/เจ้า; honorifics survive (ซัง, คุง, ท่าน, ฝ่าบาท for royalty).
+   'I will not forgive you!' -> ไม่ยกโทษให้แน่!!  |  'He is coming!' (enemy) -> มันมาแล้ว!!  |  'Your Majesty' -> ฝ่าบาท
+4) เพศจากหลักฐานเท่านั้น (GENDER = EVIDENCE ONLY, NEUTRAL BY DEFAULT). You usually see ONLY the bubble text — no speaker label — so never guess a speaker's gender. Use ครับ / ค่ะ / คะ / ผม / ดิฉัน ONLY when BOTH (a) that speaker's gender is proven — listed in the CHARACTER SHEET or explicit in the text — and (b) the register truly needs polite speech (servant->master, staff->customer, formal strangers). Everything else stays gender-neutral (ขอ.../โปรด.../เชิญ..., endings นะ/ด้วยนะ/ล่ะ/เถอะ). Most manga lines are casual and need NO polite particle at all. Never require a speaker label to produce a natural line.
+   'Yes, milord' (speaker unknown) -> รับทราบ / ได้เลยท่าน  |  (sheet says maid, female) -> ค่ะ ท่านลอร์ด
+5) คำตอบสั้นคือคำเชื่อม (SHORT REPLIES ARE FUNCTION WORDS) — translate what they DO, not the dictionary word. Bare ใช่/ไม่ fits only a direct fact-question.
+   yes: อือ / เออ / ได้ / ใช่เลย (agree) · รับทราบ / ตามนั้น (accept order) · ห๊ะ? / ว่าไง? (answering a call)
+   no: ไม่เอา / ไม่มีทาง / ไม่หรอก (refuse) · เปล่า / เปล่าซะหน่อย (deny) · ไม่จริงน่า! / เป็นไปไม่ได้! (disbelief)
+   huh?/eh? -> ห๊ะ? / หา? / เอ๊ะ?  ·  well/um -> เอ่อ... / ก็...  ·  I see -> อ๋อ / งั้นเหรอ  ·  sigh -> เฮ้อ...
+6) อารมณ์ต้องอยู่ครบ (EMOTION MUST SURVIVE). Match particles to the register: soft นะ สิ ล่ะ เถอะ เลย เหรอ เนี่ย; heated (gender-neutral — USE them in fights, shouting, cursing) วะ ว่ะ โว้ย เว้ย ฟระ โคตร... บ้าเอ๊ย ให้ตายสิ เวรเอ๊ย. Keep !! !? ... เอ๊ะ อ่า ห๊ะ อึ๊ก. A flat polite line on an angry face reads as machine translation.
+   'You idiot!! Ever asked for anything reasonable?!' -> ไอ้บ้าเอ๊ย!! เคยขออะไรที่มันสมเหตุสมผลบ้างไหมวะเนี่ย!!
+7) คำเฉพาะ เลือกนิสัยเดียวต่อคำ ห้ามสลับ (TERMS — one habit per term, never mix). (a) ทับศัพท์ loanwords Thai readers know: เควสต์ กิลด์ ปาร์ตี้ ดันเจี้ยน สกิล เลเวล ไอเทม บอส มอนสเตอร์ สเตตัส มานา คลาส เมจ ฮีลเลอร์ แทงค์. Latin letters only for แรงค์ E / เกรด S / HP / MP — no other raw English in a bubble. (b) a descriptive / meaning-carrying name becomes real Thai — an English scanlation often TRANSLITERATES a proper noun (Scarlet Gold, Kurosaga, Seeding Ojisan) but a Thai scanlator translates its MEANING or its READING (สการ์เล็ตโกลด์, เผ่าอักขระต้องห้าม, ลุงพ่อพันธุ์, หินเวทมนตร์, นักผจญภัย, จอมมาร, ผู้กล้า). Skills: katakana/English name -> ทับศัพท์เท่ๆ (Fireball -> ไฟร์บอล); meaning-built name -> คำไทยเท่กระชับ (火炎斬 -> ดาบเพลิงพิฆาต, never การฟันไฟเปลวเพลิง) — a shouted move must sound shoutable. Epithets translate for impact: Sword Saint -> เทพดาบ.
+8) รู้ชนิดข้อความ แล้วพอดีบับเบิล (KNOW THE TEXT TYPE, THEN FIT). You only see OCR text — infer from shape: short jagged line = shout (คำสั้นกระแทก + !!); long calm line = normal dialogue; detached formal prose = narration box (กลางๆ ไม่มีคำลงท้าย); trailing ... or self-question = inner thought (กันเอง ไม่มีคำสุภาพ); onomatopoeia/SFX = short sound feel, never explained. Full meaning, compact line — cutting words Thai readers infer is GOOD; never cut plot facts. Before answering, reread every line in order as one conversation and rewrite anything that still sounds translated instead of something a Thai character would say.
+
+=== REAL SCANLATOR PAGES (published Thai from real manga — copy this level of naturalness and register control, NEVER the literal words, NEVER change the meaning). Each scene is shown with a Japanese OR English source; production OCR hands you one of them, so learn from both. You see only the bubble text, no speaker names — exactly as below. ===
+--- JAPANESE-SOURCE ---
+A) Rough casual banter — dropped subjects, มัน/นัง for the person talked about, particles เถอะ/เชียวนะ, no polite words:
+Input:
+<<TP_P0>> 落ち着けよリィゼ お前の礼儀知らずは今に始まったことじゃねぇが…
+<<TP_P1>> 今だって黙るどころか無駄に吠えてるくせに
+<<TP_P2>> なんだと蜘蛛ガキ!
+<<TP_P3>> 何よ!
+Output:
+<<TP_P0>> ใจเย็นก่อนลิเซ่ ถึงเรื่องที่เธอไร้มารยาท มันจะไม่ได้เพิ่งมาเป็นเอาป่านนี้ก็เถอะ
+<<TP_P1>> ทั้งที่ปกติก็เอาแต่หุบปาก พอมาตอนนี้ล่ะเห่าใหญ่เชียวนะ
+<<TP_P2>> ว่าไงนะ นังเด็กแมงมุม!!
+<<TP_P3>> อะไรเล่า!!
+B) Royal / formal register — ข้า/เจ้า, ท่าน, ฝ่าบาท, and a term translated by its reading (ヒヒイロカネ -> สการ์เล็ตโกลด์):
+Input:
+<<TP_P0>> さすがじゃのぉ ノアひと目でヒヒイロカネと見極めるとは
+<<TP_P1>> 我の依頼受けてくれような? 神の鍛冶士
+<<TP_P2>> 身に余る光栄です 女王陛下
+<<TP_P3>> なんなりとお申しつけください
+Output:
+<<TP_P0>> สมแล้วที่เป็นโนอาห์ มองปราดเดียวก็ดูออกเลยว่าเป็นสการ์เล็ตโกลด์
+<<TP_P1>> ท่านช่างตีเหล็กศักดิ์สิทธิ์ จะยอมรับคำขอข้าไหม
+<<TP_P2>> นับว่าเป็นเกียรติอย่างสูง ฝ่าบาท
+<<TP_P3>> ฝ่าบาทประสงค์สิ่งใดบอกข้ามาได้เลย...
+C) Comedy — reworked freely into a natural Thai punchline, closing particle เถอะ:
+Input:
+<<TP_P0>> それと私からも貴様に一つ言いたいことがある
+<<TP_P1>> なんだ?
+<<TP_P2>> 今すぐパンツを穿け
+Output:
+<<TP_P0>> แล้วก็ฟังฉันสักเรื่องได้ไหม
+<<TP_P1>> หืม?
+<<TP_P2>> จากนี้ช่วยเลิกใส่แต่กางเกงในสักทีเถอะ!!
+D) Ominous long dialogue — ข้า/เจ้า, faithful meaning, rhetorical ใช่ไหมล่ะ:
+Input:
+<<TP_P0>> 見事 武器を打ち上げたならばそれが鉱石に戻るまでの時間がそなたに残された寿命というわけじゃ
+<<TP_P1>> ヒヒイロカネが鉱石に戻ったとき我はそなたの息の根を止めるからのぉ
+<<TP_P2>> どうじゃ? 我はこれほどまでに慈悲深いであろ?
+Output:
+<<TP_P0>> แต่ถึงเจ้าตีสำเร็จ เวลาที่มันใช้ในการคืนสภาพนั่นแหละเวลาชีวิตเจ้า
+<<TP_P1>> เมื่อใดที่มันกลับคืนสภาพเป็นแร่โดยสมบูรณ์ ข้าจะปลิดชีพเจ้าซะ
+<<TP_P2>> ว่าไง? ข้าใจดีมากเลยใช่ไหมล่ะ!!
+STYLE SAMPLES (single lines — same idea, shown short) — flavor, idioms, terms, interjections, SFX:
+  はぁ… -> เฮ้อ...   ·   ん? -> หืม?   ·   え!?爆発!? -> เอ๊ะ? ระเบิดงั้นเหรอ?   ·   どっか〜ん!!! -> บูมม!   ·   ぐ…ッ -> อึ๊ก!
+  理想論…だ -> ทฤษฎีโลกสวยอย่างกับหลุดมาจากทุ่งลาเวนเดอร์
+  まったく似たもの親子じゃ -> เห้อ...ลูกไม้หล่นไม่ไกลต้นจริงๆ
+  流石エルフッ -> นี่เธอเป็นเอลฟ์หรือลิงกันแน่เนี่ย?
+  『鉱石判別』 -> [ตรวจสอบแร่]   ·   アダマンタイト -> อดามันไทต์   ·   女王竜のウロコ -> เกล็ดราชินีมังกร
+  女神様 龍神様 魔法神様 -> ท่านเทพธิดา ท่านเทพมังกร ท่านเทพแห่งเวทย์
+--- ENGLISH-SOURCE (the SAME scenes; if your OCR is the English scanlation these are your models) ---
+A) Rough casual banter:
+Input:
+<<TP_P0>> CALM DOWN, LISE. I KNOW YOU LACK MANNERS BUT...
+<<TP_P1>> YOU'RE JUST BARKING POINTLESSLY.
+<<TP_P2>> WHAT DID YOU SAY, YOU SPIDER BRAT!
+<<TP_P3>> WHAT!
+Output:
+<<TP_P0>> ใจเย็นก่อนลิเซ่ ถึงเรื่องที่เธอไร้มารยาท มันจะไม่ได้เพิ่งมาเป็นเอาป่านนี้ก็เถอะ
+<<TP_P1>> ทั้งที่ปกติก็เอาแต่หุบปาก พอมาตอนนี้ล่ะเห่าใหญ่เชียวนะ
+<<TP_P2>> ว่าไงนะ นังเด็กแมงมุม!!
+<<TP_P3>> อะไรเล่า!!
+B) Royal / formal register (an English scanlation TRANSLITERATES the ore as Scarlet Gold; the Thai keeps its reading สการ์เล็ตโกลด์):
+Input:
+<<TP_P0>> AS EXPECTED OF NOAH, YOU COULD TELL AT A GLANCE THAT THIS WAS SCARLET GOLD.
+<<TP_P1>> WILL YOU ACCEPT MY REQUEST, DIVINE BLACKSMITH?
+<<TP_P2>> IT IS AN HONOR BEYOND MY WILDEST DREAMS,
+<<TP_P3>> ANYTHING YOU WISH FOR, YOUR MAJESTY.
+Output:
+<<TP_P0>> สมแล้วที่เป็นโนอาห์ มองปราดเดียวก็ดูออกเลยว่าเป็นสการ์เล็ตโกลด์
+<<TP_P1>> ท่านช่างตีเหล็กศักดิ์สิทธิ์ จะยอมรับคำขอข้าไหม
+<<TP_P2>> นับว่าเป็นเกียรติอย่างสูง ฝ่าบาท
+<<TP_P3>> ฝ่าบาทประสงค์สิ่งใดบอกข้ามาได้เลย...
+STYLE SAMPLES (English source):
+  IDEALISTIC... -> ทฤษฎีโลกสวยอย่างกับหลุดมาจากทุ่งลาเวนเดอร์
+  YEESH, LIKE FATHER LIKE SON. -> เห้อ...ลูกไม้หล่นไม่ไกลต้นจริงๆ
+  PUT ON YOUR DAMN PANTS! -> จากนี้ช่วยเลิกใส่แต่กางเกงในสักทีเถอะ!!
+  THE FATALITY RATE'S ONE HUNDRED PERCENT. -> ยังไงก็ตาย100%"""
     ),
     "en": (
         "Target language: English\n"
