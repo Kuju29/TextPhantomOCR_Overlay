@@ -121,38 +121,53 @@
     return { left, top, right, bottom, width: right - left, height: bottom - top };
   }
 
-  function positionButton(img, btn) {
+  /** Compute a button's placement — READS ONLY. null = hidden. */
+  function computePlacement(img) {
     const r = visibleRectOf(img);
+    if (!r) return null;
     const tooSmall =
-      !r ||
       Math.min(r.width, r.height) < MIN_RENDERED_SIDE ||
       r.width * r.height < MIN_RENDERED_AREA;
     const offScreen =
-      !r ||
       r.bottom < 0 ||
       r.right < 0 ||
       r.top > window.innerHeight ||
       r.left > window.innerWidth;
-    if (tooSmall || offScreen) {
+    if (tooSmall || offScreen) return null;
+    // Top-right corner of the VISIBLE part (viewport coords — layer is fixed).
+    return { left: Math.round(r.right - BTN_SIZE - 6), top: Math.round(r.top + 6) };
+  }
+
+  /** Apply a placement — WRITES ONLY. */
+  function applyPlacement(btn, p) {
+    if (!p) {
       btn.style.display = "none";
       return;
     }
     btn.style.display = "";
-    // Top-right corner of the VISIBLE part (viewport coords — layer is fixed).
-    btn.style.left = `${Math.round(r.right - BTN_SIZE - 6)}px`;
-    btn.style.top = `${Math.round(r.top + 6)}px`;
+    btn.style.left = `${p.left}px`;
+    btn.style.top = `${p.top}px`;
   }
 
+  function positionButton(img, btn) {
+    applyPlacement(btn, computePlacement(img));
+  }
+
+  // Batched read-then-write: interleaving rect reads with style writes can
+  // force one reflow PER BUTTON per frame; two phases keep it to (at most)
+  // one layout pass regardless of how many buttons exist.
   function repositionAll() {
     rafPending = false;
+    const plans = [];
     for (const [img, btn] of buttons.entries()) {
       if (!img.isConnected) {
         btn.remove();
         buttons.delete(img);
         continue;
       }
-      positionButton(img, btn);
+      plans.push([btn, computePlacement(img)]); // read phase
     }
+    for (const [btn, p] of plans) applyPlacement(btn, p); // write phase
   }
 
   function scheduleReposition() {
