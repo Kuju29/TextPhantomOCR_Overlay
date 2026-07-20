@@ -1,4 +1,6 @@
 /**
+ *
+ * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
  * Remote-configured default API URLs.
  *
  * The extension ships with no hard-coded API endpoint. Instead it fetches a

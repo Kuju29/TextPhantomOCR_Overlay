@@ -1,5 +1,7 @@
 """WebSocket job-event endpoint.
 
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+
 The socket is now an event channel for the same shared queue used by REST.
 Clients should submit jobs with REST for the fastest first response, then
 ``subscribe`` to the returned job id.  For backward compatibility, the socket

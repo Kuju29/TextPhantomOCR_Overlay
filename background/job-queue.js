@@ -1,4 +1,6 @@
 /**
+ *
+ * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
  * Outgoing job queue.
  *
  * v12 intentionally disables the old client-side processing cap. The extension

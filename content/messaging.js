@@ -1,4 +1,6 @@
 /**
+ *
+ * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
  * The content script's `chrome.runtime.onMessage` router.
  *
  * Handles control messages (ping / keep-alive / toast) and the four real

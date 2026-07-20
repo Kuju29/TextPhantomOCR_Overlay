@@ -1,5 +1,7 @@
 """Minimal protobuf wire-format reader for Google Lens responses.
 
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+
 Google Lens returns OCR geometry as nested, *unschematised* protobuf messages
 embedded inside the JSON response.  We only need a handful of fields, so
 instead of compiling ``.proto`` files we walk the wire format directly.

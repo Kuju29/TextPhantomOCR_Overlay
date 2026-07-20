@@ -1,5 +1,7 @@
 """Build an AI render tree directly from bubble_groups + translated text.
 
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+
 This module replaces the old ``patch.py`` geometry-borrowing approach.
 Instead of deep-copying the Lens ``translated`` tree (which carries the
 *source* language's item geometry — rotated 90° for vertical Japanese),

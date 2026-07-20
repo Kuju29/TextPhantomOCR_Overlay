@@ -1,4 +1,7 @@
-"""Small text helpers shared across modules."""
+"""Small text helpers shared across modules.
+
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+"""
 
 from __future__ import annotations
 

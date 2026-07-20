@@ -1,4 +1,6 @@
 /**
+ *
+ * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
  * Shared registry of in-flight jobs.
  *
  * Lives in its own module (importing nothing) so both `transport.js` and

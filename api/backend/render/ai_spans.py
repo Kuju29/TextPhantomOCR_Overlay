@@ -1,5 +1,9 @@
 """Rebuild AI-layer spans after a font-size change.
 
+⛔ STATUS: DORMANT — ยังไม่ได้ใช้งาน (ORPHAN: ไม่มีไฟล์ไหน import โมดูลนี้เลย,
+ตรวจ 20 ก.ค. 2026). โค้ดถูกเขียนไว้แต่ไม่เคยถูกต่อเข้า render pipeline —
+อย่าเข้าใจว่า span rebuild นี้ทำงานอยู่
+
 After :func:`backend.render.tp_html.compute_shared_para_sizes` forces a
 uniform font size onto the AI tree, each item's spans no longer match their
 text at the new size.  These helpers re-tokenise every AI item and re-emit

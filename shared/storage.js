@@ -1,4 +1,8 @@
-/** Promise wrappers around `chrome.storage.local`. */
+/**
+ * Promise wrappers around `chrome.storage.local`.
+ *
+ * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+ */
 
 /**
  * Read keys from `chrome.storage.local`.

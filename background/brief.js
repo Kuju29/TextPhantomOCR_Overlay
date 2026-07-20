@@ -1,7 +1,8 @@
 /**
- * ⛔ DORMANT (18 ก.ค. 2026): ไม่มีใครเรียก briefBegin — ผู้ใช้ถอดปลั๊ก flow นี้
- * เพราะ pass 1 ยิงงาน source "translated" บังหน้า batch AI ซึ่งขัดโมเดล
- * "source ไหนวิ่งเป็นตัวเอง" ดู STATUS-CURRENT.md ก่อนต่อกลับ ห้ามเปิด default
+ * ⛔ STATUS: DORMANT (18 ก.ค. 2026) — ยังไม่ได้ใช้งาน: ไม่มีใครเรียก briefBegin
+ * ผู้ใช้ถอดปลั๊ก flow นี้เพราะ pass 1 ยิงงาน source "translated" บังหน้า batch AI
+ * ซึ่งขัดโมเดล "source ไหนวิ่งเป็นตัวเอง" — ห้ามต่อกลับเป็น default โดยไม่ถามผู้ใช้
+ * (briefOnResult ยังถูก jobs.js เรียกทุก result แต่เป็น no-op เพราะ boards ว่างเสมอ)
  *
  * Chapter-Brief orchestration (read-then-translate batches).
  *

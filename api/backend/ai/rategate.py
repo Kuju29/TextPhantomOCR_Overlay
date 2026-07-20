@@ -1,5 +1,7 @@
 """Proactive per-provider AI request pacing (the "batch gate").
 
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+
 Why this exists
 ---------------
 On a manga page with many images the extension enqueues one AI translation

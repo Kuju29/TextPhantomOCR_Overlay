@@ -1,4 +1,6 @@
 /**
+ *
+ * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
  * DOM / URL utilities shared by the other content-script modules:
  * URL normalisation, picking the best image URL, lazy-image normalisation,
  * the image-to-overlay scaling math, and the on-page toast.

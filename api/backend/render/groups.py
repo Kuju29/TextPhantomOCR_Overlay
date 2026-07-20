@@ -1,5 +1,7 @@
 """Paragraph-to-bubble grouping for TextPhantom render trees.
 
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+
 Turns the flat tree["paragraphs"] list (one entry per Lens OCR paragraph)
 into tree["bubble_groups"], where each entry is one renderable speech-bubble
 region. Paragraphs that share a reading axis and are spatially adjacent across

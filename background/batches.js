@@ -1,4 +1,6 @@
 /**
+ *
+ * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
  * Batch tracking.
  *
  * A "batch" groups the images of one context-menu run (a single image, or all
@@ -126,6 +128,8 @@ export function batchUpdateToast(b, stage, force = false) {
     stats: s,
     ts: Date.now(),
   };
+  // ⛔ DORMANT — broadcast นี้ไม่มีผู้ฟังแล้ว ตั้งแต่ลบกล่อง Status ใน popup
+  // (20 ก.ค. 2026); ไม่มีผลข้างเคียง (fire-and-forget) เก็บไว้เผื่อ UI อนาคต
   broadcast({ type: "BATCH_STATUS_UPDATE", batch: lastBatchStatus });
 }
 

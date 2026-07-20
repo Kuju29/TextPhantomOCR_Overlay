@@ -1,5 +1,7 @@
 """OpenAI-compatible chat client.
 
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+
 Works against OpenAI itself plus every gateway that speaks the same
 ``/chat/completions`` dialect: OpenRouter, Groq, Together, DeepSeek,
 Featherless and the Hugging Face router.

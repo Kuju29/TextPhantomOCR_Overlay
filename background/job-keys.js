@@ -1,4 +1,8 @@
-/** Identity helpers for images / job payloads. */
+/**
+ * Identity helpers for images / job payloads.
+ *
+ * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+ */
 
 /** Normalise an image URL for use as a map key (drops the hash fragment). */
 export function normImgSrc(src) {

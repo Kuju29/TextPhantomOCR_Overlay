@@ -1,4 +1,6 @@
 /**
+ *
+ * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
  * IndexedDB-backed store for the local image viewer.
  *
  * The popup can open local images / a folder; those files are saved as a

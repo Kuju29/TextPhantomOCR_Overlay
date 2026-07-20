@@ -1,5 +1,7 @@
 """Low-level text classification / sanitisation used by the renderer.
 
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+
 Kept separate from :mod:`backend.utils.text` because these helpers are tied
 to *drawing* concerns (Thai-vs-Latin font selection, control-char stripping)
 rather than general text munging.

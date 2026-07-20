@@ -1,5 +1,7 @@
 """Quiet HTTP/WebSocket logging for production.
 
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+
 The stock uvicorn access log is too noisy for this app because extensions poll
 ``/health``, ``/warmup``, ``/meta`` and ``/translate/{id}`` frequently.  By
 default we disable uvicorn access logs and only emit compact application events
@@ -24,6 +26,42 @@ from backend.log import event
 _UVICORN_MODE = "uvicorn"
 _EVENT_MODES = {"summary", "custom", "tp", "plain"}
 _NOISY_PATHS = ("/health", "/warmup", "/meta")
+
+# The app's REAL route prefixes. A 404 on anything else is internet background
+# noise — vulnerability scanners probing /.env, /.git/config, /phpinfo.php,
+# /actuator/... on every public host. Those used to be logged one line each
+# (dozens per sweep, several sweeps per hour on a public HF Space) and drowned
+# out real errors; now they are AGGREGATED into one compact summary line per
+# window (see _note_scanner_probe).
+_KNOWN_PREFIXES = (
+    "/translate", "/ai/", "/ws", "/health", "/warmup", "/meta", "/version",
+)
+
+_SCANNER_WINDOW_SEC = 600  # one summary line per 10 minutes at most
+_scanner = {"count": 0, "since": 0.0, "samples": []}
+
+
+def _note_scanner_probe(method: str, path: str) -> None:
+    """Count an off-route 404 and emit one summary line per window."""
+    import time
+
+    now = time.time()
+    if not _scanner["since"]:
+        _scanner["since"] = now
+    _scanner["count"] += 1
+    if len(_scanner["samples"]) < 5:
+        _scanner["samples"].append(f"{method} {path}"[:80])
+    if now - _scanner["since"] >= _SCANNER_WINDOW_SEC:
+        event(
+            "http.scanner",
+            {
+                "probes": _scanner["count"],
+                "window_min": round((now - _scanner["since"]) / 60, 1),
+                "samples": list(_scanner["samples"]),
+            },
+            ok=False,
+        )
+        _scanner.update(count=0, since=now, samples=[])
 
 
 def _quiet_logger(name: str, *, disable: bool = False) -> None:
@@ -77,17 +115,22 @@ async def access_log_middleware(request: Request, call_next):
             path = request.url.path
             # No health/warmup/meta/poll success spam.  Only surface HTTP errors.
             if response.status_code >= 400 and not path.startswith(_NOISY_PATHS):
-                phrase = HTTPStatus(response.status_code).phrase
-                event(
-                    "http.error",
-                    {
-                        "method": request.method,
-                        "path": path,
-                        "status": response.status_code,
-                        "message": phrase,
-                    },
-                    ok=False,
-                )
+                # Scanner-bot probes (404 on a path we never served) are
+                # aggregated, not logged per line — keeps real errors visible.
+                if response.status_code == 404 and not path.startswith(_KNOWN_PREFIXES):
+                    _note_scanner_probe(request.method, path)
+                else:
+                    phrase = HTTPStatus(response.status_code).phrase
+                    event(
+                        "http.error",
+                        {
+                            "method": request.method,
+                            "path": path,
+                            "status": response.status_code,
+                            "message": phrase,
+                        },
+                        ok=False,
+                    )
         except Exception:
             pass
     return response

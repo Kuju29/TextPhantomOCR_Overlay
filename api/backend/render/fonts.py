@@ -1,5 +1,7 @@
 """Font resolution, loading and caching.
 
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+
 Three layers of caching keep this cheap:
 - ``_resolve_cache``  : font path -> resolved path on disk (or "" if missing).
 - ``_pair_cache``     : (thai, latin, size) -> (thai_font, latin_font) objects.

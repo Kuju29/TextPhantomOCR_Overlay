@@ -1,5 +1,7 @@
 """AI configuration endpoints used by the extension's settings UI.
 
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+
 ``/ai/resolve``        — given an API key (and optional provider/model),
                          return the resolved provider + selectable models.
 ``/ai/prompt/default`` — return the default editable prompt for a language.
@@ -61,6 +63,8 @@ async def prompt_default(lang: str = "en") -> dict:
     return ai_resolve.prompt_default(lang)
 
 
+# ⛔ DORMANT endpoint — route ยังตอบได้ แต่ไม่มีผู้เรียกใน flow ปัจจุบัน
+# (client เดียวคือ extension background/brief.js ซึ่ง dormant — ดู ai/brief.py)
 @router.post("/ai/brief")
 def chapter_brief(payload: dict[str, Any]) -> dict:
     """Run the chapter brief: ONE AI call that reads the whole chapter.

@@ -1,5 +1,7 @@
 """Background-colour sampling and contrast helpers.
 
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+
 When the renderer erases original text it needs to know the surrounding
 background colour; when it draws translated text it needs a legible
 foreground colour.  Both jobs live here.

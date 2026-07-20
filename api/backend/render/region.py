@@ -1,5 +1,7 @@
 """Deterministic text-region geometry for the AI overlay layer.
 
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+
 Ported from manga-image-translator (textblock.py + rendering). Every
 decision here is a closed-form computation. The model has three pieces:
 

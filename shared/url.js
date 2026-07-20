@@ -1,4 +1,8 @@
-/** URL helpers for the API base address. */
+/**
+ * URL helpers for the API base address.
+ *
+ * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+ */
 
 /**
  * Normalise a user-typed API URL:

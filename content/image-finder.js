@@ -1,4 +1,6 @@
 /**
+ *
+ * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
  * Locating image elements + tracking their replacement state.
  *
  * "Which `<img>` does this result belong to?" is surprisingly hard: the URL in

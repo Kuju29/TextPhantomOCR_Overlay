@@ -1,5 +1,7 @@
 """Prompt templates and language-specific style hints for AI translation.
 
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+
 Design choices:
 
 - ONE editable prompt per language.  Everything about HOW to translate —
@@ -285,6 +287,10 @@ def looks_like_term(src: str, tgt: str, min_len: int = 3) -> bool:
     return True
 
 
+# ⛔ NOTE: build_series_block / build_speaker_block / build_prev_context_block
+# ยัง ACTIVE ในโค้ด (ถูกเรียกจาก build_system_split) แต่ปัจจุบันได้ค่า "ว่าง" เสมอ
+# เพราะข้อมูลต้นทาง (bible/speakers/prev_context) มาจาก chapter-brief flow ที่
+# dormant อยู่ — บล็อกพวกนี้จึงไม่ปรากฏใน prompt จริงตอนนี้
 def build_series_block(series_state: str) -> str:
     """Render the frozen series bible (STORY SO FAR) block, or ``""``."""
     state = (series_state or "").strip()

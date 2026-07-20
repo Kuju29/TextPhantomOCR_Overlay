@@ -1,5 +1,7 @@
 """Language list and code normalisation shared across the backend.
 
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+
 The list of UI languages is what the Chrome extension shows in its picker.
 ``normalize`` is the canonical helper used everywhere a user-supplied code
 needs to be coerced into the form Google Lens expects.

@@ -1,4 +1,6 @@
 /**
+ *
+ * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
  * Derive a stable per-series key from a reader page URL.
  *
  * Goal: pages of the SAME series/chapter run share one key, so the AI

@@ -1,4 +1,6 @@
 /**
+ *
+ * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
  * Batched DOM insertion queue.
  *
  * Server work can now complete many images at nearly the same time. Sending one

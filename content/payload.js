@@ -1,4 +1,6 @@
 /**
+ *
+ * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
  * Building job payloads from image elements.
  *
  * A payload is what the service worker forwards to the API: the source URL (or

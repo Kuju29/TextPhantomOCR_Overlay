@@ -1,5 +1,7 @@
 """Static configuration for AI providers.
 
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+
 This module knows nothing about live API calls — it just holds the defaults,
 aliases and prompt templates that other modules consume.
 """

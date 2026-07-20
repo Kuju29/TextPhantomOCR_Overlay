@@ -1,5 +1,7 @@
 """Small logging helpers used across the backend.
 
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+
 Production defaults are intentionally quiet: no uvicorn access spam, no health
 polls, and no debug payload dumps.  ``event`` emits one compact JSON line for
 important outcomes only (for example a translation job finishing or failing).

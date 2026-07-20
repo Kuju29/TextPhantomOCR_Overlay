@@ -1,5 +1,7 @@
 """Firebase-hosted Google Lens session cookie.
 
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+
 The Lens upload endpoint needs a valid cookie jar.  Rather than logging in
 from the server we pull a pre-baked cookie object from a Firebase Realtime
 Database URL.  The result is cached in-process for ``firebase_cookie_ttl_sec``.

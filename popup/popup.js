@@ -1,4 +1,6 @@
 /**
+ *
+ * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
  * Popup orchestrator.
  *
  * Owns the popup's state and wires the UI: it loads settings, checks the API,

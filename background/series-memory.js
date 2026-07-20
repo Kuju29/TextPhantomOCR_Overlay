@@ -1,4 +1,6 @@
 /**
+ *
+ * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
  * Per-series AI memory (translation glossary + character sheet).
  *
  * Stored in `chrome.storage.local` under one key:
@@ -118,6 +120,9 @@ export async function accumulateSeriesMemory(seriesKey, result) {
 }
 
 /**
+ * ⛔ DORMANT — ยังไม่ได้ถูกเรียกใช้จริง: caller เดียวคือ brief.js ซึ่ง dormant ทั้ง flow
+ * (briefBegin ไม่มีใครเรียก) ผลคือ `state` (series bible) ใน storage เป็น "" เสมอ
+ *
  * Commit one chapter brief's context to the series memory in ONE write
  * (read-then-translate batches; no per-page accumulate race).
  *

@@ -1,4 +1,7 @@
-"""Google Gemini (generativelanguage.googleapis.com) chat client."""
+"""Google Gemini (generativelanguage.googleapis.com) chat client.
+
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+"""
 
 from __future__ import annotations
 

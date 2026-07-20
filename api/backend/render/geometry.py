@@ -1,5 +1,7 @@
 """Pure geometry helpers for text boxes / baselines.
 
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+
 Coordinates in the tree are normalised 0..1; these helpers convert them to
 pixel space and produce the rotated quadrilaterals (``quad``) that the
 renderer and the eraser both consume.

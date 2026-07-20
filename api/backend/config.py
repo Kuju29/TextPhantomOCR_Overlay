@@ -1,5 +1,7 @@
 """Centralised runtime configuration loaded from environment variables.
 
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+
 All tunables live here so the rest of the codebase does not call ``os.environ``
 directly.  The values are read once on import; callers that need a fresh read
 should call :func:`reload` (useful in tests).

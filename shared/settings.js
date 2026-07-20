@@ -1,4 +1,6 @@
 /**
+ *
+ * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
  * Reading the user's stored settings.
  *
  * Two readers are exported because the service worker and the content script

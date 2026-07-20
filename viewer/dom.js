@@ -1,4 +1,6 @@
 /**
+ *
+ * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
  * Local-viewer DOM references + pure helpers.
  *
  * Stateless utilities only: element lookups, formatting, and small DOM

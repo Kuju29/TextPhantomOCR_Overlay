@@ -1,4 +1,6 @@
 /**
+ *
+ * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
  * MangaDex-specific helpers and caches.
  *
  * MangaDex is a single-page app that serves chapter pages as blob: URLs, so it

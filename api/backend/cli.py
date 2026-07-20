@@ -1,5 +1,7 @@
 """Local-file pipeline runner + debug dumper.
 
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+
 Runs the full translation pipeline on an image file **without starting the
 HTTP server**, and writes every intermediate artefact to a directory so the
 Lens trees and the generated AI tree can be inspected and compared.

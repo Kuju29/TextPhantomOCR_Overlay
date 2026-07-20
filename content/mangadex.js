@@ -1,4 +1,6 @@
 /**
+ *
+ * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
  * MangaDex-specific content-script logic.
  *
  * MangaDex is a single-page reader that serves pages as blob: URLs whose

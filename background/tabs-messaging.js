@@ -1,4 +1,6 @@
 /**
+ *
+ * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
  * Helpers for talking to content scripts in a tab/frame.
  *
  * Content scripts can be slow to appear (document_start vs. first message), so

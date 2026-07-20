@@ -1,4 +1,7 @@
-"""Anthropic (api.anthropic.com) chat client."""
+"""Anthropic (api.anthropic.com) chat client.
+
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+"""
 
 from __future__ import annotations
 

@@ -1,4 +1,6 @@
 /**
+ *
+ * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
  * Job orchestration: enqueue → submit → handle result/error → finalise batch.
  *
  * This is the heart of the service worker. It ties together the transport, the

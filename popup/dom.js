@@ -1,4 +1,6 @@
 /**
+ *
+ * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
  * Popup DOM references + pure render helpers.
  *
  * Everything here is stateless: it reads/writes the DOM but holds no app

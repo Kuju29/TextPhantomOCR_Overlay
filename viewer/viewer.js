@@ -1,4 +1,6 @@
 /**
+ *
+ * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
  * Local-viewer orchestrator.
  *
  * Loads a saved image session, renders the sidebar page list + reader strip,

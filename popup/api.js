@@ -1,4 +1,6 @@
 /**
+ *
+ * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
  * Popup network helpers — thin wrappers around the API endpoints.
  *
  * All functions here are stateless: they take a base URL (and params), do one

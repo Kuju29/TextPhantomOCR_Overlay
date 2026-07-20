@@ -1,4 +1,6 @@
 """Paragraph-marker protocol used to keep AI translations aligned with the
+
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
 original paragraph order.
 
 The OCR step gives us N original paragraphs.  We feed them to the LLM as

@@ -1,4 +1,8 @@
-/** Constants shared across the extension (API paths, defaults, fallbacks). */
+/**
+ * Constants shared across the extension (API paths, defaults, fallbacks).
+ *
+ * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+ */
 
 /** REST/meta endpoints on the TextPhantom API. */
 export const API_PATHS = {

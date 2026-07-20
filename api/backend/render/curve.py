@@ -1,5 +1,7 @@
 """Curved-text support.
 
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+
 Google Lens never reports a curved baseline directly — instead it splits a
 curved line into several short, *individually straight* items at slightly
 different angles.  A single item therefore looks straight, but a run of

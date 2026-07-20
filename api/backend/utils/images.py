@@ -1,4 +1,7 @@
-"""Image byte helpers: base64 / data-URI conversion and remote downloads."""
+"""Image byte helpers: base64 / data-URI conversion and remote downloads.
+
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+"""
 
 from __future__ import annotations
 

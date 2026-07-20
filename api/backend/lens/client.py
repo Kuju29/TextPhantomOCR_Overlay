@@ -1,5 +1,7 @@
 """Google Lens HTTP client.
 
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+
 Two-step flow:
 1. ``POST https://lens.google.com/v3/upload`` with the image — Lens responds
    with a 302 redirect to a result URL.

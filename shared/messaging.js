@@ -1,4 +1,6 @@
 /**
+ *
+ * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
  * Promise wrappers around the `chrome.runtime` / `chrome.tabs` messaging APIs.
  *
  * All helpers swallow `chrome.runtime.lastError` (the messaging APIs throw it

@@ -1,5 +1,7 @@
 """The translation pipeline — turns a request payload into a render result.
 
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+
 This is the orchestration layer.  It does not contain any low-level logic
 itself; it wires together the lens / ai / render modules:
 

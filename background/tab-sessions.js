@@ -1,4 +1,6 @@
 /**
+ *
+ * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
  * Per-tab "session" tracking.
  *
  * Every time a tab navigates we mint a fresh session id. Job results carry the

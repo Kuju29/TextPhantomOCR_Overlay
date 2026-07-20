@@ -1,4 +1,7 @@
-"""Liveness / build-info endpoints."""
+"""Liveness / build-info endpoints.
+
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+"""
 
 from __future__ import annotations
 

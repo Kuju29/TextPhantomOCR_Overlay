@@ -1,5 +1,7 @@
 """Pixel-accurate measurement of a single rendered line of text.
 
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+
 Both helpers walk the Thai/Latin runs of a string, measure each run with its
 own font, and aggregate the result.  They share the same scan loop — the only
 difference is what they return.

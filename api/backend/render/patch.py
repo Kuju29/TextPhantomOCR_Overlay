@@ -1,5 +1,7 @@
 """Pour an AI translation into a template tree.
 
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+
 ``patch`` takes the marker-encoded AI text plus a *template tree* (normally
 the Lens **Translated** tree, because it already carries target-language
 geometry: the right number of lines per bubble, each line's free-angle

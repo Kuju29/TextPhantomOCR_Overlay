@@ -1,4 +1,6 @@
 /**
+ *
+ * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
  * Image / byte helpers used by the service worker, plus job-error
  * classification (which errors are worth retrying vs. permanent failures).
  */

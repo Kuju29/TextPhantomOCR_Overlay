@@ -1,5 +1,7 @@
 """Rate-limit handling for the Hugging Face router.
 
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+
 Free HF inference is aggressively rate-limited.  This module wraps the
 OpenAI-compatible client with:
 

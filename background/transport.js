@@ -1,4 +1,6 @@
 /**
+ *
+ * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
  * Job transport: REST submit/long-poll + best-effort WebSocket events.
  *
  * Fast path for the first user action:

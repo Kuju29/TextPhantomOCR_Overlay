@@ -1,5 +1,7 @@
 """Service behind ``/ai/resolve`` and ``/ai/prompt/default``.
 
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+
 Given a (possibly partial) AI configuration, work out the concrete provider,
 model, base URL and the list of models the user can pick from.  Kept out of
 the route module so it stays unit-testable.

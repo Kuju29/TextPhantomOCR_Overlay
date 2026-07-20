@@ -1,5 +1,7 @@
 """Render an OCR tree as the HTML overlay the extension injects on a page.
 
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+
 Layout rules (per *item*):
 
 - **Original / Translated layers** — render every Lens item as it came back

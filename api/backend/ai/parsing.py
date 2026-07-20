@@ -1,5 +1,7 @@
 """Robust parsing of AI responses.
 
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+
 LLMs frequently wrap their output in code fences, add stray prose, emit raw
 newlines inside JSON strings, or get "stuck" repeating a character.  These
 helpers recover the actual translated text from that mess.

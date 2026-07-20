@@ -1,5 +1,7 @@
 """Remove the original text from an image so translated text can be drawn.
 
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+
 Several strategies are available; the public entry point is
 :func:`erase_text_with_boxes`, which dispatches on ``mode``:
 

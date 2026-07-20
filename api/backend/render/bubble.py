@@ -1,5 +1,7 @@
 """Detect speech-bubble masks from an inpainted image + Lens text centers.
 
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+
 The Lens tree only tells us where the *text* sits (each item is a tight
 rotated rectangle around a run of glyphs).  The actual speech *bubble*
 extends well past those rectangles — that's the canvas the AI translation

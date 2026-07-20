@@ -1,5 +1,7 @@
 """Translation job endpoints.
 
+STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+
 ``POST /translate`` enqueues a job and returns its id immediately;
 ``GET /translate/{id}?wait=25`` is a long-poll status endpoint.  The async
 queue lives on ``app.state.job_queue`` (set up in ``main.py``).

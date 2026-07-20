@@ -1,5 +1,13 @@
 """Per-series AI conversation history (server-side) — "คุยต่อ ไม่เปิดแชทใหม่".
 
+⛔ STATUS: DORMANT — ยังไม่ได้ใช้งาน เป็นแค่ไอเดียที่เขียนค้างไว้ (18 ก.ค. 2026).
+NOT wired in: ไม่มีไฟล์ไหน import โมดูลนี้เลย (ตรวจ 20 ก.ค. 2026) — pipeline.py /
+translate.py / routes ไม่เรียก record()/history() ใดๆ ทั้งสิ้น
+ห้ามเข้าใจว่า flow "แชทต่อเนื่อง" ทำงานอยู่ — ปัจจุบันทุกหน้ายังเป็น request
+อิสระ + series memory (glossary/characters) ที่ฉีดเข้า prompt เท่านั้น
+ถ้าจะเปิดใช้: ต่อสาย 2 จุดใน jobs/pipeline.py (record() หลังได้ผล AI,
+history() ก่อนเรียก translate) — ดูรายละเอียดด้านล่าง
+
 The user's chosen design (18 Jul 2026): translating a page CONTINUES the same
 chat the AI had for earlier pages of the same series — exactly like a chat
 thread — instead of opening a fresh conversation for every page.  The prompt

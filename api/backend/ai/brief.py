@@ -1,10 +1,12 @@
 """Chapter Brief — ONE AI call that READS the whole chapter before any page
 is translated.
 
-⛔ DORMANT (18 Jul 2026): the extension no longer calls ``POST /ai/brief`` —
-the user unplugged this flow (pass 1 ran "translated" jobs under an AI batch,
-which conflicts with the chosen "every source runs as itself" model).
-Read STATUS-CURRENT.md (extension root) before wiring it back in.
+⛔ STATUS: DORMANT (18 Jul 2026) — ยังไม่ได้ใช้งาน: the extension no longer
+calls ``POST /ai/brief`` — the user unplugged this flow (pass 1 ran
+"translated" jobs under an AI batch, which conflicts with the chosen "every
+source runs as itself" model). The route in api/routes/ai.py still exists and
+answers, but NOTHING calls it in the current flow (the only client was
+extension background/brief.js, itself dormant — briefBegin has no caller).
 
 This is the heart of the read-then-translate architecture (see
 DESIGN-TRANSLATION-TH.md): a human translator reads the chapter first, then
