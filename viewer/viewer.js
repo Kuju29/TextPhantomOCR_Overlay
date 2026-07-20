@@ -12,6 +12,7 @@
 import {
   deleteLocalSession,
   filterImageFiles,
+  isTopLevelRelativePath,
   loadLocalSession,
   saveLocalSession,
   sortLocalPages,
@@ -531,7 +532,13 @@ async function loadSessionIntoView(id) {
   revokeObjectUrls();
   pageOrder = [];
 
-  const pages = Array.isArray(currentSession?.pages) ? currentSession.pages : [];
+  let pages = Array.isArray(currentSession?.pages) ? currentSession.pages : [];
+  // Folder sessions: enforce "top-level images only" at LOAD time too, so a
+  // session saved before this rule existed (or by any other path) can never
+  // resurface subfolder images in the reader.
+  if (String(currentSession?.title || "") === "folder") {
+    pages = pages.filter((p) => isTopLevelRelativePath(p?.relativePath));
+  }
   for (const raw of pages) {
     const objectUrl = URL.createObjectURL(raw.blob);
     objectUrls.set(raw.id, objectUrl);
@@ -559,7 +566,8 @@ async function loadSessionIntoView(id) {
 }
 
 async function replaceSessionFromFiles(fileList, sourceLabel) {
-  const files = filterImageFiles(fileList);
+  // Folder picker: only images DIRECTLY in the chosen folder (no subfolders).
+  const files = filterImageFiles(fileList, { topLevelOnly: sourceLabel === "folder" });
   if (!files.length) return;
   const next = await saveLocalSession({
     id: crypto.randomUUID(),

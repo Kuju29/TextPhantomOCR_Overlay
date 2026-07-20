@@ -39,7 +39,11 @@ export const els = {
   aiPromptStudio: document.getElementById("ai-prompt-studio"),
   apiUrl: document.getElementById("api-url"),
   apiStatusEmoji: document.getElementById("api-status-emoji"),
+  apiStatusEmoji2: document.getElementById("api-status-emoji-2"),
   resetApi: document.getElementById("reset-api"),
+  tabAi: document.getElementById("tab-ai"),
+  translatePageBtn: document.getElementById("translate-page-btn"),
+  imgButtonsToggle: document.getElementById("img-buttons-toggle"),
   fontScaleRange: document.getElementById("font-scale-range"),
   fontScaleDown: document.getElementById("font-scale-down"),
   fontScaleUp: document.getElementById("font-scale-up"),
@@ -49,10 +53,6 @@ export const els = {
   openLocalFolder: document.getElementById("open-local-folder"),
   localImagesInput: document.getElementById("local-images-input"),
   localFolderInput: document.getElementById("local-folder-input"),
-  runStatusText: document.getElementById("run-status-text"),
-  runProgress: document.querySelector(".run-progress"),
-  runProgressBar: document.getElementById("run-progress-bar"),
-  runStatusSub: document.getElementById("run-status-sub"),
 };
 
 /**
@@ -135,19 +135,21 @@ export function setModelOptions(models, { keepValue = "", strict = true } = {}) 
   els.aiModel.value = canKeep || pinned ? prev : "auto";
 }
 
-/** Update the API-status emoji indicator. */
+/** Update the API-status emoji indicators (header + Custom API URL label). */
 export function setEmojiStatus(type, detail) {
-  const el = els.apiStatusEmoji;
-  if (!el) return;
+  let emoji = "❌";
+  let title = detail || "Offline / Not reachable";
   if (type === "loading") {
-    el.textContent = "⏳";
-    el.title = detail || "Checking API...";
+    emoji = "⏳";
+    title = detail || "Checking API...";
   } else if (type === "ok") {
-    el.textContent = "✅";
-    el.title = detail || "Online";
-  } else {
-    el.textContent = "❌";
-    el.title = detail || "Offline / Not reachable";
+    emoji = "✅";
+    title = detail || "Online";
+  }
+  for (const el of [els.apiStatusEmoji, els.apiStatusEmoji2]) {
+    if (!el) continue;
+    el.textContent = emoji;
+    el.title = title;
   }
 }
 
@@ -187,6 +189,15 @@ export function toggleUi({ hasEnvKey }) {
   const showAi = isText && source === "ai";
   if (els.aiGroup) els.aiGroup.style.display = showAi ? "" : "none";
 
+  // The whole "Ai option" tab only exists when Source is AI. If it was the
+  // active tab when the source changed away from AI, fall back to Translate.
+  if (els.tabAi) {
+    els.tabAi.style.display = showAi ? "" : "none";
+    if (!showAi && els.tabAi.classList.contains("active")) {
+      window.__tpActivateTab?.("translate");
+    }
+  }
+
   const provider = (els.aiProvider?.value || "auto").trim();
   const local = isLocalProvider(provider);
 
@@ -202,26 +213,4 @@ export function toggleUi({ hasEnvKey }) {
   els.aiPromptWrap.style.display = showAi && canConfigureAi ? "" : "none";
   if (els.aiCharactersWrap) els.aiCharactersWrap.style.display = showAi && canConfigureAi ? "" : "none";
   if (els.aiPageImageWrap) els.aiPageImageWrap.style.display = showAi && canConfigureAi ? "" : "none";
-}
-
-/** Render the run-status panel from a batch-status broadcast. */
-export function renderBatchStatus(batch) {
-  if (!els.runStatusText || !els.runProgress || !els.runProgressBar) return;
-  const stats = batch && typeof batch.stats === "object" ? batch.stats : null;
-  const total = Number(stats?.total) || 0;
-  const finished = Number(stats?.finished) || 0;
-
-  els.runStatusText.textContent = batch?.message || "Idle";
-  const pct = total ? Math.max(0, Math.min(100, Math.round((finished / total) * 100))) : 0;
-  els.runProgressBar.style.width = pct + "%";
-  els.runProgress.setAttribute("aria-valuenow", String(pct));
-
-  if (els.runStatusSub) {
-    if (total) {
-      const stage = typeof batch?.stage === "string" && batch.stage ? `• ${batch.stage}` : "";
-      els.runStatusSub.textContent = `pass ${Number(batch?.pass) || 1} • ${finished}/${total} ${stage}`.trim();
-    } else {
-      els.runStatusSub.textContent = "";
-    }
-  }
 }

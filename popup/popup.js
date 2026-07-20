@@ -44,7 +44,6 @@ import {
   setEmojiStatus,
   updatePromptCount,
   toggleUi as toggleUiDom,
-  renderBatchStatus,
 } from "./dom.js";
 import {
   buildUrl,
@@ -503,7 +502,8 @@ function scheduleSaveAi() {
 
 // --- Local viewer ----------------------------------------------------------
 async function openLocalViewerFromFiles(fileList, sourceLabel) {
-  const images = filterImageFiles(fileList);
+  // Folder picker: only images DIRECTLY in the chosen folder (no subfolders).
+  const images = filterImageFiles(fileList, { topLevelOnly: sourceLabel === "folder" });
   if (!images.length) return;
   const session = await saveLocalSession({
     id: crypto.randomUUID(),
@@ -531,14 +531,6 @@ function handleWsStatus(status) {
   else setEmojiStatus("error", "WS disconnected");
 }
 
-// --- Run-status panel ------------------------------------------------------
-function initRunStatus() {
-  sendRuntimeMessage({ type: "GET_BATCH_STATUS" }).then((resp) => renderBatchStatus(resp?.batch));
-  chrome.runtime.onMessage.addListener((msg) => {
-    if (msg?.type === "BATCH_STATUS_UPDATE") renderBatchStatus(msg.batch);
-  });
-}
-
 // --- Initial load ----------------------------------------------------------
 async function loadSettings() {
   setSelectOptions(els.mode, MODES, { valueKey: "id", labelKey: "name", keepValue: els.mode.value });
@@ -559,7 +551,10 @@ async function loadSettings() {
     "aiThinking",
     "aiPromptByLang",
     "fontScale",
+    "imgButtonsEnabled",
   ]);
+
+  if (els.imgButtonsToggle) els.imgButtonsToggle.checked = Boolean(stored.imgButtonsEnabled);
 
   renderFontScale(stored.fontScale ?? 1);
 
@@ -894,6 +889,29 @@ els.aiPrompt.addEventListener("blur", async () => {
   scheduleSaveAi();
 });
 
+// --- Page actions (for sites that block right-click) -----------------------
+// "Translate all images on this page" = the img_all context-menu flow,
+// triggered from the popup instead of a right-click.
+els.translatePageBtn?.addEventListener("click", async () => {
+  els.translatePageBtn.disabled = true;
+  try {
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    const tab = tabs?.[0];
+    if (!tab?.id) return;
+    await sendRuntimeMessage({ type: "TP_RUN_TRANSLATE_ALL", tabId: tab.id });
+    // Close the popup so the user sees the on-page progress toast.
+    window.close();
+  } finally {
+    els.translatePageBtn.disabled = false;
+  }
+});
+
+// Toggle the per-image 🔍 buttons. Content scripts on every page react to the
+// storage change themselves — no broadcast needed.
+els.imgButtonsToggle?.addEventListener("change", async () => {
+  await setStorage({ imgButtonsEnabled: Boolean(els.imgButtonsToggle.checked) });
+});
+
 els.openLocalImages?.addEventListener("click", () => {
   if (els.localImagesInput) els.localImagesInput.value = "";
   els.localImagesInput?.click();
@@ -989,4 +1007,3 @@ chrome.runtime.onMessage?.addListener((msg) => {
 
 // --- Go --------------------------------------------------------------------
 loadSettings();
-initRunStatus();

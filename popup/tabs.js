@@ -47,6 +47,10 @@
     e.preventDefault();
   });
 
+  // Let popup.js switch tabs programmatically (e.g. when the "Ai option" tab
+  // is hidden because Source is no longer AI).
+  window.__tpActivateTab = activate;
+
   let saved = null;
   try {
     saved = localStorage.getItem(STORAGE_KEY);

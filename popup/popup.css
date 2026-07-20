@@ -77,8 +77,9 @@ body {
 
 /* ============ Tabs ============ */
 .tabs {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  /* Flex (not a fixed 3-column grid) so the pill shrinks/reflows when a tab
+     is hidden — e.g. "Ai option" disappears while Source is not AI. */
+  display: flex;
   gap: 4px;
   margin: 0 16px 12px;
   padding: 4px;
@@ -89,6 +90,7 @@ body {
 
 .tab {
   appearance: none;
+  flex: 1 1 0;
   border: 0;
   background: transparent;
   color: var(--tp-muted);
@@ -385,80 +387,38 @@ textarea {
   font-variant-numeric: tabular-nums;
 }
 
-/* ============ AI empty-state ============ */
-/* Shown only while #ai-group is hidden (source != AI). */
-.empty-note {
-  display: none;
-  align-items: center;
-  gap: 10px;
-  padding: 14px 12px;
-  border: 1px dashed var(--tp-line-2);
-  border-radius: var(--tp-radius-sm);
-  color: var(--tp-muted);
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.empty-note p {
-  margin: 0;
-}
-
-.empty-note-icon {
-  font-size: 20px;
-}
-
-#panel-ai:has(#ai-group[style*="none"]) .empty-note {
-  display: flex;
-}
-
-/* ============ Status bar ============ */
-.status-bar {
+/* ============ Page actions (Translate tab) ============ */
+/* Its own card, clearly separated from the fields above (where the old
+   Status box used to live). */
+.action-box {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin: 0 16px 14px;
-  padding: 10px 12px;
+  gap: 8px;
+  padding: 12px;
   background: var(--tp-surface);
   border: 1px solid var(--tp-line);
   border-radius: var(--tp-radius);
 }
 
-.status-line {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  min-width: 0;
+.toggle-row {
+  cursor: pointer;
+  padding: 2px 2px 0;
 }
 
-.status-label {
-  font-size: 10.5px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--tp-muted);
-  flex: none;
+.toggle-row input[type="checkbox"] {
+  accent-color: var(--tp-accent);
+  cursor: pointer;
 }
 
-.run-status {
-  font-size: 12px;
-  color: var(--tp-text);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+#translate-page-btn {
+  width: 100%;
 }
 
-.run-progress {
-  height: 6px;
-  border-radius: 999px;
-  background: var(--tp-surface-2);
-  border: 1px solid var(--tp-line);
-  overflow: hidden;
-}
-
-.run-progress-bar {
-  height: 100%;
-  width: 0%;
-  background: var(--tp-grad);
-  border-radius: 999px;
-  transition: width var(--tp-transition);
+/* ============ Inline API status dot (after "Custom API URL") ============ */
+.api-dot-inline {
+  font-size: 11px;
+  line-height: 1;
+  vertical-align: middle;
+  margin-left: 4px;
+  cursor: default;
 }

@@ -175,6 +175,49 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       fetchImageBlob(msg).then(sendResponse);
       return true; // async response
 
+    // Popup button: translate every image on the page — same flow as the
+    // "Translate all images on page" context-menu item (for sites that
+    // block right-click).
+    case "TP_RUN_TRANSLATE_ALL": {
+      (async () => {
+        let tab = null;
+        const tabId = Number(msg?.tabId);
+        if (Number.isFinite(tabId) && tabId > 0) {
+          tab = await chrome.tabs.get(tabId).catch(() => null);
+        }
+        if (!tab?.id) {
+          const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+          tab = tabs?.[0] || null;
+        }
+        if (!tab?.id) throw new Error("no active tab");
+        await onContextMenuClicked({ menuItemId: "img_all", frameId: 0 }, tab);
+      })()
+        .then(() => sendResponse({ ok: true }))
+        .catch((e) => sendResponse({ ok: false, error: e?.message || String(e) }));
+      return true;
+    }
+
+    // On-image 🔍 button (content script): translate ONE image — same flow
+    // as the "Translate this image" context-menu item. The content script
+    // already registered the clicked <img> as the last-clicked target, so
+    // blob:/data: sources resolve exactly like a real right-click.
+    case "TP_RUN_TRANSLATE_ONE": {
+      const tab = sender?.tab;
+      if (!tab?.id) {
+        sendResponse({ ok: false, error: "no sender tab" });
+        return true;
+      }
+      const menuInfo = {
+        menuItemId: "img_one",
+        srcUrl: String(msg?.srcUrl || "") || undefined,
+        frameId: Number(sender?.frameId) || 0,
+      };
+      onContextMenuClicked(menuInfo, tab)
+        .then(() => sendResponse({ ok: true }))
+        .catch((e) => sendResponse({ ok: false, error: e?.message || String(e) }));
+      return true;
+    }
+
     default:
       return false;
   }

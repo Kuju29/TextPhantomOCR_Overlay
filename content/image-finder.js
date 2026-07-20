@@ -58,18 +58,27 @@
     }
   }
 
+  /**
+   * Register `img` as the current translate target — exactly what a real
+   * right-click does. Also used by the on-image 🔍 button (image-buttons.js)
+   * so sites that block the context menu still resolve blob:/data: sources.
+   */
+  function setLastRightClick(img) {
+    if (!img) return;
+    const urls = [img.currentSrc, img.src, TP.getBestImgUrl(img)]
+      .filter(Boolean)
+      .map(TP.normUrl)
+      .filter(Boolean);
+    if (urls[0] && img?.dataset) img.dataset.tpOriginal = urls[0];
+    lastRightClick = { img, ts: Date.now(), urls };
+    rememberImgUrls(img, urls);
+  }
+
   document.addEventListener(
     "contextmenu",
     (e) => {
       const img = e?.target?.closest ? e.target.closest("img") : null;
-      if (!img) return;
-      const urls = [img.currentSrc, img.src, TP.getBestImgUrl(img)]
-        .filter(Boolean)
-        .map(TP.normUrl)
-        .filter(Boolean);
-      if (urls[0] && img?.dataset) img.dataset.tpOriginal = urls[0];
-      lastRightClick = { img, ts: Date.now(), urls };
-      rememberImgUrls(img, urls);
+      if (img) setLastRightClick(img);
     },
     true,
   );
@@ -146,6 +155,7 @@
     setReplaceState,
     rememberImgUrls,
     getLastRightClick,
+    setLastRightClick,
     findTargetImage,
     markImageError,
   });

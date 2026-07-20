@@ -40,6 +40,17 @@ function txComplete(tx) {
 
 const trim = (v) => String(v || "").trim();
 
+/**
+ * True when a `webkitRelativePath` points DIRECTLY inside the picked folder.
+ * "" (plain multi-file picker) counts as top-level; "Folder/img.jpg" is
+ * top-level; "Folder/sub/img.jpg" is not. Splits on / and \ to be safe.
+ */
+export function isTopLevelRelativePath(relativePath) {
+  const rel = trim(relativePath);
+  if (!rel) return true;
+  return rel.split(/[\\/]+/).filter(Boolean).length <= 2;
+}
+
 /** Locale-aware natural comparison (handles "page2" < "page10"). */
 export function naturalCompare(a, b) {
   return new Intl.Collator(undefined, { numeric: true, sensitivity: "base" }).compare(
@@ -72,11 +83,20 @@ export function toLocalPageRecord(file, index = 0) {
   };
 }
 
-/** Keep only image files from a FileList. */
-export function filterImageFiles(files) {
-  return [...(files || [])].filter((file) =>
-    trim(file?.type).toLowerCase().startsWith("image/"),
-  );
+/**
+ * Keep only image files from a FileList.
+ *
+ * `topLevelOnly` (folder picker): keep only files sitting DIRECTLY in the
+ * selected folder. A `webkitdirectory` FileList recursively includes every
+ * subfolder's files, whose `webkitRelativePath` has extra "/" segments
+ * ("Folder/sub/img.jpg" vs "Folder/img.jpg"), so depth > 1 is filtered out.
+ */
+export function filterImageFiles(files, { topLevelOnly = false } = {}) {
+  return [...(files || [])].filter((file) => {
+    if (!trim(file?.type).toLowerCase().startsWith("image/")) return false;
+    if (topLevelOnly && !isTopLevelRelativePath(file?.webkitRelativePath)) return false;
+    return true;
+  });
 }
 
 /** Persist (create or replace) a viewer session. */

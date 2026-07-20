@@ -24,7 +24,7 @@
       <!-- ============ TABS ============ -->
       <nav class="tabs" role="tablist" aria-label="Sections">
         <button type="button" class="tab" id="tab-translate" data-tab="translate" role="tab" aria-controls="panel-translate" aria-selected="true">Translate</button>
-        <button type="button" class="tab" id="tab-ai" data-tab="ai" role="tab" aria-controls="panel-ai" aria-selected="false">AI</button>
+        <button type="button" class="tab" id="tab-ai" data-tab="ai" role="tab" aria-controls="panel-ai" aria-selected="false">Ai option</button>
         <button type="button" class="tab" id="tab-tools" data-tab="tools" role="tab" aria-controls="panel-tools" aria-selected="false">Tools</button>
       </nav>
 
@@ -46,7 +46,7 @@
             <select id="sources" aria-label="Source"></select>
           </div>
 
-          <div class="note">💡 Right-click any image on a page to translate it.</div>
+          <div class="note">💡 Right-click any image on a page to translate it — or use the Page actions below on sites that block right-click.</div>
 
           <!-- Display applies to text overlays only — hidden in Google Lens
                (image) mode, where the translation is baked into the image. -->
@@ -68,15 +68,23 @@
             <div class="hint">Scales every translated line across all overlays at once.</div>
           </div>
           </div>
+
+          <!-- Page actions: translate without the context menu (sits where
+               the old Status box used to be — its own separate card). -->
+          <div class="divider" role="separator"></div>
+          <div class="section-title">Page actions</div>
+          <div class="action-box">
+            <button type="button" id="translate-page-btn" class="action-btn primary">🔍 Translate all images on this page</button>
+            <label class="label-row toggle-row">
+              <span>🔘 Translate buttons on images</span>
+              <input type="checkbox" id="img-buttons-toggle" />
+            </label>
+            <div class="hint">Shows a small 🔍 button on the top-right corner of every image so you can translate a single image without right-clicking.</div>
+          </div>
         </section>
 
         <!-- ============ 2. AI ENGINE ============ -->
         <section class="panel" id="panel-ai" role="tabpanel" aria-labelledby="tab-ai">
-          <div id="ai-empty-note" class="empty-note">
-            <span class="empty-note-icon">🤖</span>
-            <p>AI engine is used when <strong>Source</strong> is set to <strong>AI</strong> in the Translate tab.</p>
-          </div>
-
           <section id="ai-group" class="ai-group" style="display: none">
             <div class="field" id="ai-provider-wrap">
               <label for="ai-provider">Provider</label>
@@ -239,7 +247,7 @@
           <div class="section-title">Advanced</div>
 
           <div class="field">
-            <label for="api-url">Custom API URL</label>
+            <label for="api-url">Custom API URL <span id="api-status-emoji-2" class="api-dot-inline" aria-live="polite" title="Loading…">⏳</span></label>
             <div class="inline-row">
               <input type="text" id="api-url" placeholder="https://plan291037-api-ocr-test.hf.space" />
               <button id="reset-api" class="icon-btn" aria-label="Reset to default" title="Reset to default API">⟲</button>
@@ -249,17 +257,6 @@
         </section>
       </div>
 
-      <!-- ============ RUN STATUS (always visible) ============ -->
-      <footer class="status-bar" id="run-status-wrap">
-        <div class="status-line">
-          <span class="status-label">Status</span>
-          <span id="run-status-text" class="run-status" aria-live="polite">Idle</span>
-        </div>
-        <div class="run-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-          <div id="run-progress-bar" class="run-progress-bar" style="width: 0%"></div>
-        </div>
-        <div id="run-status-sub" class="hint"></div>
-      </footer>
     </div>
 
     <script src="tabs.js"></script>
