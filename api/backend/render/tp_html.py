@@ -152,6 +152,20 @@ def overlay_css() -> str:
         "0 1px 1px rgba(0,0,0,.35));"
         "text-rendering:geometricPrecision;"
         "}"
+        # --- Browser-translate dual layer (Original overlay only) ----------
+        # .tp-src holds the pixel-exact per-line source divs and carries
+        # translate="no" so the browser's Google Translate can NEVER touch
+        # (or shift) them.  .tp-gtext is ONE hidden block per bubble holding
+        # the full sentence; Google translates it as one segment.  When the
+        # user runs right-click page translation, Chrome adds
+        # class="translated-ltr|rtl" to <html> — pure CSS then swaps the
+        # layers: source lines hide, the translated sentence block shows.
+        # No translation => nothing changes on screen at all.
+        ".tp-gtext{opacity:0;}"
+        "html.translated-ltr .tp-src,html.translated-rtl .tp-src"
+        "{visibility:hidden;}"
+        "html.translated-ltr .tp-gtext,html.translated-rtl .tp-gtext"
+        "{opacity:1;}"
         # Dark-background variant: white text with a dark halo. Applied per
         # paragraph by the renderer when the sampled background is dark.
         ".tp-on-dark{"
@@ -1034,19 +1048,144 @@ def render_tree_overlay(
     # same speech bubble (spec §17), and vertical paragraphs get a
     # vertical-specific fit so a column of CJK glyphs is sized by its
     # actual area rather than by horizontal width × height.
+    #
+    # ORIGINAL layer only — browser-translate DUAL LAYER.
+    #
+    # Lesson learned the hard way (see chat 20 ก.ค. 2026): Chrome's built-in
+    # Google Translate segments by LAYOUT, not by tag — absolutely-positioned
+    # elements are each their own segment, so per-line divs AND per-line
+    # spans inside one wrapper both translate word-by-word ("ISN'T THAT" →
+    # "ไม่ใช่อย่างนั้น" per box).  Merging lines into one visible block (the
+    # v1.0.1 shape) translates correctly but shifts the source layout.
+    #
+    # So the Original layer now emits BOTH, and pure CSS swaps them when
+    # Chrome translates the page (html.translated-ltr/rtl — see overlay_css):
+    #
+    #   .tp-src    — the pixel-exact per-line divs, translate="no"/
+    #                notranslate: Google never touches them, nothing shifts.
+    #   .tp-gtext  — ONE hidden block per bubble with the full sentence as a
+    #                single text node: Google translates it as one segment
+    #                and re-inserts it as one readable group in the bubble.
+    is_original_layer = str(tree.get("side") or "").lower() == "original"
+
     for para in paragraphs_in_order:
         shared_fs = _font_for_para(para)
+        chunks: list[str] = []
         for item in para.get("items") or []:
             text = str(item.get("text") or "").strip()
             if not text:
                 continue
             chunk = _render_item_horizontal(item, text, para, img_w, img_h, override_fs=shared_fs)
             if chunk:
-                parts.append(_wrap_on_dark(chunk, para))
-                has_any = True
+                chunks.append(chunk)
+        if not chunks:
+            continue
+        if is_original_layer:
+            group = (
+                '<div class="tp-src notranslate" translate="no">'
+                + "".join(chunks)
+                + "</div>"
+                + _render_original_gtext_block(
+                    para, img_w, img_h,
+                    override_fs=shared_fs,
+                    is_vertical=para_vertical[id(para)],
+                )
+            )
+            parts.append(_wrap_on_dark(group, para))
+        else:
+            for c in chunks:
+                parts.append(_wrap_on_dark(c, para))
+        has_any = True
 
     parts.append("</div></div>")
     return "".join(parts) if has_any else ""
+
+
+def _render_original_gtext_block(
+    para: dict,
+    img_w: int,
+    img_h: int,
+    override_fs: int | None,
+    is_vertical: bool,
+) -> str:
+    """The hidden translate-target block: ONE ``.tp-gtext`` per bubble.
+
+    Invisible (opacity:0) until the browser translates the page — then CSS
+    (html.translated-*) shows it while hiding the ``.tp-src`` line layer.
+    Geometry: the union of the paragraph's item AABBs, so the translated
+    sentence appears exactly where the bubble is.  Text: item lines joined
+    into a SINGLE text node (space-separated; no separator when the source
+    is CJK-dominant), so Chrome translates the whole bubble as ONE segment
+    with full context.  Rendered horizontally even for vertical sources —
+    the translation target (e.g. Thai) reads horizontally.
+    A near-uniform source tilt is preserved via the paragraph rotation.
+    """
+    items = [
+        (it, str(it.get("text") or "").strip())
+        for it in (para.get("items") or [])
+    ]
+    items = [(it, tx) for it, tx in items if tx]
+    if not items:
+        return ""
+
+    # Union of the items' rotated AABBs (px) -> paragraph box.  Items carry
+    # either normalised (0..1) box fields or *_pct fields depending on the
+    # decode path — mirror _render_item_horizontal's fallback for both.
+    left = top = float("inf")
+    right = bottom = float("-inf")
+    for it, _tx in items:
+        aabb = _item_rotated_aabb_px(it, img_w, img_h)
+        if aabb is None:
+            box = it.get("box") or {}
+            l_pct = _num(box.get("left_pct"), _num(box.get("left")) * 100.0)
+            t_pct = _num(box.get("top_pct"), _num(box.get("top")) * 100.0)
+            w_pct = _num(box.get("width_pct"), _num(box.get("width")) * 100.0)
+            h_pct = _num(box.get("height_pct"), _num(box.get("height")) * 100.0)
+            if w_pct <= 0 or h_pct <= 0:
+                continue
+            aabb = (
+                l_pct / 100.0 * img_w, t_pct / 100.0 * img_h,
+                w_pct / 100.0 * img_w, h_pct / 100.0 * img_h,
+            )
+        l, t, w, h = aabb
+        left, top = min(left, l), min(top, t)
+        right, bottom = max(right, l + w), max(bottom, t + h)
+    if not (right > left and bottom > top):
+        return ""
+
+    # Join into ONE text node. CJK sources have no word spaces — joining
+    # their lines with spaces would feed Google fake word boundaries and
+    # (per the user's v1.0.1 experience) skew the translation.
+    line_texts = [tx for _it, tx in items]
+    sep = "" if _is_cjk_dominant("".join(line_texts)) else " "
+    text = sep.join(line_texts)
+
+    if override_fs is not None and override_fs >= _MIN_FONT_PX:
+        fs = int(override_fs)
+    else:
+        sizes = sorted(_font_size_for_item(it, img_w, img_h) for it, _tx in items)
+        fs = max(_MIN_FONT_PX, sizes[len(sizes) // 2])
+    lh = int(round(fs * 1.12))
+
+    # Horizontal always (the translation target reads horizontally); keep a
+    # genuine source tilt so labels drawn at an angle stay on the art.
+    rot = 0.0 if is_vertical else _para_rotation(para)
+    style = (
+        f"left:{left / max(1, img_w) * 100.0:.4f}%;"
+        f"top:{top / max(1, img_h) * 100.0:.4f}%;"
+        f"width:{(right - left) / max(1, img_w) * 100.0:.4f}%;"
+        f"height:{(bottom - top) / max(1, img_h) * 100.0:.4f}%;"
+        + (f"transform:rotate({rot:.4f}deg);" if abs(rot) > 0.5 else "")
+        + "white-space:normal;text-align:center;"
+        f"font-size:calc(var(--tp-font-scale,1) * {fs}px);"
+        f"line-height:calc(var(--tp-font-scale,1) * {lh}px);"
+    )
+    cls = "tp-line tp-gtext rtl" if contains_rtl(text) else "tp-line tp-gtext"
+    pi = int(para.get("para_index", 0))
+    return (
+        f'<div class="{cls}" data-pi="{pi}" data-fs="{fs}" '
+        f'style="{style}">{_escape_text(text)}</div>'
+    )
 
 
 def _render_item_upright_vertical(
