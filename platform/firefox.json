@@ -1,0 +1,38 @@
+{
+  "permissions": [
+    "menus",
+    "storage",
+    "activeTab"
+  ],
+  "background": {
+    "scripts": [
+      "background/index.js"
+    ],
+    "type": "module"
+  },
+  "action": {
+    "default_title": "TextPhantom",
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/16.png",
+      "32": "icons/32.png",
+      "48": "icons/48.png"
+    }
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "textphantom@kuju29",
+      "strict_min_version": "140.0",
+      "data_collection_permissions": {
+        "required": [
+          "authenticationInfo",
+          "browsingActivity",
+          "websiteContent"
+        ]
+      }
+    },
+    "gecko_android": {
+      "strict_min_version": "142.0"
+    }
+  }
+}
