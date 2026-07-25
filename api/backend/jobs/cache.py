@@ -1,6 +1,6 @@
 """Thread-safe LRU caches for translation results.
 
-STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+STATUS: ACTIVE — in use in the current flow.
 
 Two caches are kept separate because AI results depend on extra inputs
 (provider / model / prompt) and tend to be larger and slower to recompute,

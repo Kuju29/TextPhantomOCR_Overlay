@@ -1,6 +1,6 @@
 /**
  *
- * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+ * STATUS: ACTIVE — in use in the current flow.
  * Prompt Studio — a full-page editor for the per-(language, model) AI Style
  * prompt.  It reads/writes the SAME storage the popup uses
  * (`aiPromptByLang` keyed by `lang::model`), so edits here show up in the

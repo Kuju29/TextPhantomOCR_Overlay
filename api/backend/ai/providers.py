@@ -1,6 +1,6 @@
 """Provider/model resolution helpers.
 
-STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+STATUS: ACTIVE — in use in the current flow.
 
 These functions answer questions like "which provider does this API key
 belong to?" and "what is the real model name for ``auto``?".  They are pure

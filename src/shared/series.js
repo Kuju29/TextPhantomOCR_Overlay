@@ -2,7 +2,7 @@ import { getStorage, setStorage } from "./storage.js";
 
 /**
  *
- * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+ * STATUS: ACTIVE — in use in the current flow.
  * Derive a stable per-series key from a reader page URL.
  *
  * Goal: pages of the SAME series/chapter run share one key, so the AI

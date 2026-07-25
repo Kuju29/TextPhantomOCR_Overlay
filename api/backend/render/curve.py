@@ -1,6 +1,6 @@
 """Curved-text support.
 
-STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+STATUS: ACTIVE — in use in the current flow.
 
 Google Lens never reports a curved baseline directly — instead it splits a
 curved line into several short, *individually straight* items at slightly

@@ -1,6 +1,6 @@
 /**
  *
- * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+ * STATUS: ACTIVE — in use in the current flow.
  * Popup DOM references + pure render helpers.
  *
  * Everything here is stateless: it reads/writes the DOM but holds no app
@@ -28,7 +28,7 @@ export const els = {
   aiCharactersWrap: document.getElementById("ai-characters-wrap"),
   aiCharactersCount: document.getElementById("ai-characters-count"),
   aiCharactersClear: document.getElementById("ai-characters-clear"),
-  aiCharMemory: document.getElementById("ai-char-memory"),
+  aiMemoryMode: document.getElementById("ai-memory-mode"),
   aiPageImageWrap: document.getElementById("ai-page-image-wrap"),
   aiPageImage: document.getElementById("ai-page-image"),
   aiPromptWrap: document.getElementById("ai-prompt-wrap"),
@@ -153,6 +153,38 @@ export function setEmojiStatus(type, detail) {
     el.textContent = emoji;
     el.title = title;
   }
+}
+
+/**
+ * Show (or clear) a small inline validation message inside a field wrapper.
+ *
+ * Created lazily so no HTML edits are needed. `type` drives the colour via a
+ * data attribute ("error" | "warn" | "info"); pass an empty `text` to remove
+ * the message. One message per wrapper.
+ * @param {HTMLElement|null} wrap
+ * @param {"error"|"warn"|"info"} type
+ * @param {string} text
+ */
+export function setFieldMessage(wrap, type, text) {
+  if (!wrap) return;
+  let el = wrap.querySelector(":scope > .tp-field-msg");
+  if (!text) {
+    if (el) el.remove();
+    return;
+  }
+  if (!el) {
+    el = document.createElement("div");
+    el.className = "tp-field-msg";
+    wrap.appendChild(el);
+  }
+  el.dataset.type = type || "info";
+  el.textContent = text;
+}
+
+/** The current message type on a field wrapper, or "" when none. */
+export function fieldMessageType(wrap) {
+  const el = wrap?.querySelector?.(":scope > .tp-field-msg");
+  return el ? String(el.dataset.type || "") : "";
 }
 
 /** Update the AI-prompt character counter. */

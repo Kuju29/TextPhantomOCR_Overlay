@@ -1,7 +1,7 @@
 /**
  * Promise wrappers around `chrome.storage.local`.
  *
- * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+ * STATUS: ACTIVE — in use in the current flow.
  */
 
 /**

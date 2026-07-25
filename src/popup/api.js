@@ -1,6 +1,6 @@
 /**
  *
- * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+ * STATUS: ACTIVE — in use in the current flow.
  * Popup network helpers — thin wrappers around the API endpoints.
  *
  * All functions here are stateless: they take a base URL (and params), do one
@@ -101,21 +101,32 @@ export async function warmup(base) {
   }
 }
 
-/** Fetch the default editable prompt for a (language, model). */
+/**
+ * Fetch the default editable prompt for a (language, model).
+ *
+ * Returns the normalized prompt string on success (which may legitimately be
+ * ""), or `null` when the request FAILED (no/invalid API base, unreachable,
+ * timeout, non-ok response). Callers must distinguish the two: a failure must
+ * surface an error and NOT overwrite the user's current prompt, so a network
+ * blip can never silently swap the user's value for a blank/server default.
+ * @returns {Promise<string|null>}
+ */
 export async function fetchDefaultPrompt(base, lang, model = "auto") {
   const url = buildUrl(base, API_PATHS.AI_PROMPT_DEFAULT, {
     lang: (lang || "en").trim() || "en",
     model: normalizeAiModel(model),
   });
-  if (!url) return "";
+  if (!url) return null; // no/invalid API base — a failure, not an empty default
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), PROMPT_TIMEOUT_MS);
   try {
     const res = await fetch(url, { signal: ctrl.signal });
-    const data = res ? await res.json().catch(() => null) : null;
-    return normalizePrompt(data?.ok ? String(data.prompt_editable_default || "").trim() : "");
+    if (!res || !res.ok) return null; // server unreachable / error status
+    const data = await res.json().catch(() => null);
+    if (!data?.ok) return null; // server explicitly not-ok
+    return normalizePrompt(String(data.prompt_editable_default || "").trim());
   } catch {
-    return "";
+    return null; // timeout / network / abort
   } finally {
     clearTimeout(timer);
   }

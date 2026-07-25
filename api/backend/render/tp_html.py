@@ -1,6 +1,6 @@
 """Render an OCR tree as the HTML overlay the extension injects on a page.
 
-STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+STATUS: ACTIVE — in use in the current flow.
 
 Layout rules (per *item*):
 
@@ -1051,7 +1051,7 @@ def render_tree_overlay(
     #
     # ORIGINAL layer only — browser-translate DUAL LAYER.
     #
-    # Lesson learned the hard way (see chat 20 ก.ค. 2026): Chrome's built-in
+    # Lesson learned the hard way (see chat 2026-07-20): Chrome's built-in
     # Google Translate segments by LAYOUT, not by tag — absolutely-positioned
     # elements are each their own segment, so per-line divs AND per-line
     # spans inside one wrapper both translate word-by-word ("ISN'T THAT" →

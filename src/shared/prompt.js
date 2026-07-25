@@ -1,6 +1,6 @@
 /**
  *
- * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+ * STATUS: ACTIVE — in use in the current flow.
  * AI prompt helpers.
  *
  * Editable per-language style prompts are stored under a `lang::model` key so

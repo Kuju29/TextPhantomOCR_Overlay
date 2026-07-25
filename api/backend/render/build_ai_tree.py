@@ -1,6 +1,6 @@
 """Build an AI render tree directly from bubble_groups + translated text.
 
-STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+STATUS: ACTIVE — in use in the current flow.
 
 This module replaces the old ``patch.py`` geometry-borrowing approach.
 Instead of deep-copying the Lens ``translated`` tree (which carries the

@@ -1,7 +1,7 @@
 /**
  * Identity helpers for images / job payloads.
  *
- * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+ * STATUS: ACTIVE — in use in the current flow.
  */
 
 /** Normalise an image URL for use as a map key (drops the hash fragment). */

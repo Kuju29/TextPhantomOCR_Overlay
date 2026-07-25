@@ -211,11 +211,15 @@
                 <button type="button" id="ai-characters-clear" class="icon-btn" title="Clear this series' memory" aria-label="Clear this series' memory">🗑</button>
               </label>
               <label class="label-row" style="cursor: pointer">
-                <span>Remember characters</span>
-                <input type="checkbox" id="ai-char-memory" checked />
+                <span>Mode</span>
+                <select id="ai-memory-mode">
+                  <option value="off">Off</option>
+                  <option value="terms">Terms only</option>
+                  <option value="full">Full (+ characters)</option>
+                </select>
               </label>
               <div id="ai-characters-count" class="hint">No memory for this series yet</div>
-              <div class="hint">Terms + each character's gender &amp; speech style, kept per series (auto-detected from the page URL). A new series starts fresh automatically.</div>
+              <div class="hint">Off: each page translates cleanly (recommended). Terms only: keep names/terms spelled the same across pages. Full: also remember each character's gender &amp; speech — this can push pronouns/particles back, so use it only if you want gendered speech. Kept per series (auto-detected from the page URL); a new series starts fresh.</div>
             </div>
 
             <div class="field" id="ai-page-image-wrap" style="display: none">

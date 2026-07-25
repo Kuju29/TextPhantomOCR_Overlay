@@ -1,6 +1,6 @@
 /**
  *
- * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+ * STATUS: ACTIVE — in use in the current flow.
  * On-image translate buttons (for sites that block right-click).
  *
  * When the popup toggle `imgButtonsEnabled` is on, every translate-worthy

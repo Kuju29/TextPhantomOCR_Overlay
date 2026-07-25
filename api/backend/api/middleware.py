@@ -1,6 +1,6 @@
 """Quiet HTTP/WebSocket logging for production.
 
-STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+STATUS: ACTIVE — in use in the current flow.
 
 The stock uvicorn access log is too noisy for this app because extensions poll
 ``/health``, ``/warmup``, ``/meta`` and ``/translate/{id}`` frequently.  By

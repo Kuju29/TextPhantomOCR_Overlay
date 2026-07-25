@@ -1,6 +1,6 @@
 /**
  *
- * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+ * STATUS: ACTIVE — in use in the current flow.
  * Content-script bootstrap + shared namespace.
  *
  * The content script is split across several classic (non-module) files that

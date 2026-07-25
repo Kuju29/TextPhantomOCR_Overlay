@@ -1,6 +1,6 @@
 """FastAPI application entry point for the TextPhantom OCR API.
 
-STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+STATUS: ACTIVE — in use in the current flow.
 
 Wires the routers, CORS, the custom access log, and the async job queue
 together.  Run with::

@@ -1,6 +1,6 @@
 """Robust parsing of AI responses.
 
-STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+STATUS: ACTIVE — in use in the current flow.
 
 LLMs frequently wrap their output in code fences, add stray prose, emit raw
 newlines inside JSON strings, or get "stuck" repeating a character.  These
@@ -159,7 +159,7 @@ def parse_character_memo(memo: str) -> list[dict]:
 
     Expected line format (loosely enforced — LLM output varies):
 
-        Name | gender: female | speech: สุภาพ ค่ะ | note: guild receptionist
+        Name | gender: female | speech: cheerful, formal wording | note: guild receptionist
 
     Returns a list of ``{"name", "gender", "speech", "note"}`` dicts with
     empty/unknown fields omitted.  Best-effort: malformed lines are skipped.

@@ -5,6 +5,31 @@
   box-sizing: border-box;
 }
 
+/* Inline field validation message (created lazily by setFieldMessage). */
+.tp-field-msg {
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.35;
+  border-radius: 6px;
+  padding: 4px 7px;
+  word-break: break-word;
+}
+.tp-field-msg[data-type="error"] {
+  color: #ffd7d2;
+  background: color-mix(in srgb, #c0392b 26%, transparent);
+  border: 1px solid color-mix(in srgb, #c0392b 55%, transparent);
+}
+.tp-field-msg[data-type="warn"] {
+  color: #ffe6b3;
+  background: color-mix(in srgb, #d29a2b 22%, transparent);
+  border: 1px solid color-mix(in srgb, #d29a2b 50%, transparent);
+}
+.tp-field-msg[data-type="info"] {
+  color: var(--tp-muted);
+  background: var(--tp-surface);
+  border: 1px solid var(--tp-line);
+}
+
 html,
 body {
   margin: 0;

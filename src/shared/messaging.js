@@ -1,6 +1,6 @@
 /**
  *
- * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+ * STATUS: ACTIVE — in use in the current flow.
  * Promise wrappers around the `chrome.runtime` / `chrome.tabs` messaging APIs.
  *
  * All helpers swallow `chrome.runtime.lastError` (the messaging APIs throw it

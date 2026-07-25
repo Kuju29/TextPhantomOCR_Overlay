@@ -1,6 +1,6 @@
 """Pour an AI translation into a template tree.
 
-STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+STATUS: ACTIVE — in use in the current flow.
 
 ``patch`` takes the marker-encoded AI text plus a *template tree* (normally
 the Lens **Translated** tree, because it already carries target-language

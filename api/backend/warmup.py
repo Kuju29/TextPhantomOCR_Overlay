@@ -1,6 +1,6 @@
 """Warm caches so the first real request is fast.
 
-STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+STATUS: ACTIVE — in use in the current flow.
 
 Primes three things: the Lens session cookie, the font files for ``lang``,
 and the in-memory font-pair cache at a couple of common sizes.

@@ -1,6 +1,6 @@
 """Decode Google Lens OCR data into the structured "tree" the renderer uses.
 
-STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+STATUS: ACTIVE — in use in the current flow.
 
 Tree shape::
 

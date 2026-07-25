@@ -1,6 +1,6 @@
 """Detect speech-bubble masks from an inpainted image + Lens text centers.
 
-STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+STATUS: ACTIVE — in use in the current flow.
 
 The Lens tree only tells us where the *text* sits (each item is a tight
 rotated rectangle around a run of glyphs).  The actual speech *bubble*

@@ -1,6 +1,6 @@
 /**
  *
- * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+ * STATUS: ACTIVE — in use in the current flow.
  * MangaDex site adapter — ALL MangaDex-specific page knowledge lives here.
  *
  * Why a dedicated file: sites like MangaDex need special handling (the page

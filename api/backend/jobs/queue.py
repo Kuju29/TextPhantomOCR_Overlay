@@ -1,6 +1,6 @@
 """Async split job queue + worker pools.
 
-STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+STATUS: ACTIVE — in use in the current flow.
 
 ``/translate`` enqueues a payload and returns a job id immediately; the
 client then uses long-polling to receive updates.  Jobs are split into two

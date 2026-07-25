@@ -1,6 +1,6 @@
 /**
  *
- * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+ * STATUS: ACTIVE — in use in the current flow.
  * API base resolution, warmup and health cache for the service worker.
  *
  * The base URL is the user's custom URL if set, otherwise the remote-default

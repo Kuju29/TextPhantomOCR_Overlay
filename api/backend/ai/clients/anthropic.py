@@ -1,6 +1,6 @@
 """Anthropic (api.anthropic.com) chat client.
 
-STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+STATUS: ACTIVE — in use in the current flow.
 """
 
 from __future__ import annotations

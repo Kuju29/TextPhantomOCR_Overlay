@@ -1,6 +1,6 @@
 /**
  *
- * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+ * STATUS: ACTIVE — in use in the current flow.
  * DOM / URL utilities shared by the other content-script modules:
  * URL normalisation, picking the best image URL, lazy-image normalisation,
  * the image-to-overlay scaling math, and the on-page toast.
@@ -234,7 +234,11 @@
     return new Promise((resolve) => {
       chrome.storage.local.get(["mode", "lang", "sources", "aiKey"], (it) => {
         resolve({
-          mode: typeof it.mode === "string" ? it.mode : "lens_images",
+          // Must match DEFAULT_MODE in shared/constants.js. Content scripts are
+          // classic scripts (no ES imports), so the constant is mirrored here;
+          // keep both in sync so an unset mode never resolves differently than
+          // the popup/background readers.
+          mode: typeof it.mode === "string" ? it.mode : "lens_text",
           lang: typeof it.lang === "string" ? it.lang : "th",
           sources: typeof it.sources === "string" ? it.sources : "translated",
           aiKey: typeof it.aiKey === "string" ? it.aiKey : "",

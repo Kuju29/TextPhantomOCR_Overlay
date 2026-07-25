@@ -1,6 +1,6 @@
 /**
  *
- * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+ * STATUS: ACTIVE — in use in the current flow.
  * Context-menu setup and click handling.
  *
  * Two menu items:
@@ -110,22 +110,30 @@ async function buildAiPayload(mode, source, settings, seriesKey) {
   // Simple toggle: "always" sends the page image on every request; anything
   // else stays cheap text-only.
   const sendImage = String(settings.aiPageImage || "off") === "always" ? "always" : false;
+  // Series-memory mode (default "off"):
+  //   off   -> send nothing; a page translates like a clean run.
+  //   terms -> send the glossary only (names/terms spelled consistently);
+  //            no character sheet, so pronouns/particles are not pushed back.
+  //   full  -> glossary + character sheet + series bible + <<TP_MEMO>> emission.
+  const memMode = ["off", "terms", "full"].includes(settings.aiMemoryMode)
+    ? settings.aiMemoryMode
+    : "off";
+  const useGlossary = memMode === "terms" || memMode === "full";
+  const useChars = memMode === "full";
   return {
     api_key: settings.aiKey || "",
     model: settings.aiModel || "auto",
     provider: settings.aiProvider || "auto",
     base_url: settings.aiBaseUrl || "auto",
     prompt: settings.aiPrompt || "",
-    // Per-series translation memory (terminology consistency).
-    glossary: memory.glossary,
-    // Per-series character sheet from <<TP_MEMO>> blocks — keeps each
-    // character's gender / pronouns / register right across pages.
-    characters: memory.characters,
-    // Series bible written by the last chapter brief (empty until one ran).
-    // Single-image jobs use it as-is; brief batches overwrite it (pass 2).
-    series_state: memory.state || "",
-    // Character-memory toggle: off = smallest prompt, cheapest tokens.
-    char_memory: settings.aiCharMemory !== false,
+    // Per-series translation memory (terminology consistency) — terms/full.
+    glossary: useGlossary ? memory.glossary : [],
+    // Per-series character sheet from <<TP_MEMO>> blocks — full only.
+    characters: useChars ? memory.characters : [],
+    // Series bible written by the last chapter brief — full only.
+    series_state: useChars ? (memory.state || "") : "",
+    // char_memory drives the <<TP_MEMO>> emission + sheet use — full only.
+    char_memory: useChars,
     send_image: sendImage,
     // Reasoning control (Gemini): "default" = think normally, "off" = fastest.
     thinking: String(settings.aiThinking || "default"),
@@ -208,8 +216,8 @@ async function handleTranslateOne(menuInfo, tab, ctx) {
   if (!payload.imageDataUri && (isFileUrl(sourceUrl) || isFileUrl(tab?.url))) {
     const allowed = await isAllowedFileSchemeAccess();
     const msg = allowed
-      ? "TextPhantom: อ่านไฟล์รูปในเครื่องไม่สำเร็จ ลองรีเฟรชหน้าแล้วคลิกขวาแปลใหม่"
-      : "TextPhantom: เปิด “Allow access to file URLs” ให้ส่วนขยายก่อน (chrome://extensions → TextPhantom → Details) แล้วรีเฟรชหน้ารูป";
+      ? "TextPhantom: couldn’t read the local image file. Refresh the page and right-click to translate again."
+      : "TextPhantom: enable “Allow access to file URLs” for the extension first (chrome://extensions → TextPhantom → Details), then refresh the image page.";
     log.warn("file:// image without bytes", { allowed, sourceUrl });
     // Toast reaches the page only when a content script is running — which is
     // exactly what file access being OFF prevents. Fall back to a toolbar-icon
@@ -338,11 +346,7 @@ async function handleTranslateAll(menuInfo, tab, ctx) {
   batchUpdateToast(batch, "Collecting", true);
 
   // Every source runs as itself — original/translated = Lens data, ai =
-  // translate from the original. The chapter-brief two-pass flow (pass 1 as
-  // "translated" jobs feeding /ai/brief) is intentionally NOT wired in here:
-  // the user chose the direct model — no jobs of another source running
-  // under an AI batch. brief.js + /ai/brief stay available for a future
-  // explicit opt-in toggle.
+  // translate from the original.
   for (const pl of payloads) enqueue(pl, tab.id, imagesFrameId);
 }
 

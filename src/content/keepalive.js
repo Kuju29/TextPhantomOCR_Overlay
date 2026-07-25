@@ -1,6 +1,6 @@
 /**
  *
- * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+ * STATUS: ACTIVE — in use in the current flow.
  * Keep-alive connection.
  *
  * While a batch runs, the content script holds a `chrome.runtime` port open so

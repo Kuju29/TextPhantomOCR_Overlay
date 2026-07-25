@@ -1,6 +1,6 @@
 """Metadata + warmup endpoints used by the extension's settings UI.
 
-STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+STATUS: ACTIVE — in use in the current flow.
 """
 
 from __future__ import annotations

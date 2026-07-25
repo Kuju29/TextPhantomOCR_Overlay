@@ -1,6 +1,6 @@
 """High-level AI translation orchestration.
 
-STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+STATUS: ACTIVE — in use in the current flow.
 
 This is the single entry point the rest of the backend uses to turn a block
 of marked source text into a marked translation.  It owns:
@@ -54,8 +54,9 @@ class AiConfig:
     # model knows each character's gender / pronouns / register.
     characters: list = field(default_factory=list)
     # Toggle for the character-memory feature (memo request + sheet injection).
-    # Off = smallest prompt/response, cheapest tokens.
-    char_memory: bool = True
+    # Series memory master switch — default OFF (off = smallest prompt/response,
+    # cheapest tokens, and a page translates the same as a clean run).
+    char_memory: bool = False
     # Vision: when the client opts in (send_image) the pipeline downscales the
     # page and fills image_b64/image_mime so the model can SEE the speakers.
     # Accepts True/"always" (every page) or "auto" (the pipeline attaches the
@@ -68,10 +69,10 @@ class AiConfig:
     # think normally; "off" minimises thinking for the fastest answers.
     thinking: str = "default"
     # --- Frozen series context (read-then-translate batches) ---------------
-    # ⛔ DORMANT-FED — ฟิลด์กลุ่มนี้ (series_state / speakers / prev_context /
-    # context_frozen) ถูกเติมค่าโดย chapter-brief flow เท่านั้น ซึ่ง dormant อยู่
-    # (extension ไม่เรียก briefBegin) — ใน flow ปัจจุบันค่าจึงว่างเสมอ
-    # โค้ดฝั่งรับยัง ACTIVE และพร้อมทำงานทันทีถ้า flow ถูกต่อกลับ
+    # ⛔ DORMANT-FED — this group of fields (series_state / speakers / prev_context /
+    # context_frozen) is populated only by the chapter-brief flow, which is dormant
+    # (the extension never calls briefBegin) — so in the current flow they are always empty.
+    # The receiving code is still ACTIVE and ready to work immediately if the flow is reconnected.
     # Filled by the chapter-brief flow: every page of one batch carries the
     # SAME immutable context, so parallel translation cannot race and the
     # per-page memo emission is skipped (the brief already updated memory).
@@ -96,7 +97,7 @@ def translate(
     ai: AiConfig,
     *,
     is_retry: bool = False,
-    reference_text_full: str = "",  # ⛔ DORMANT param — รับไว้เพื่อ backward compat แต่ถูก "เมิน" เสมอ (ไม่ส่ง Lens MT ให้โมเดลแล้ว)
+    reference_text_full: str = "",  # ⛔ DORMANT param — kept for backward compat but always ignored (Lens MT is no longer sent to the model)
     capture_request: bool = False,
 ) -> AiResult:
     """Translate ``original_text_full`` into ``target_lang`` using ``ai``.

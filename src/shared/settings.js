@@ -1,6 +1,6 @@
 /**
  *
- * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+ * STATUS: ACTIVE — in use in the current flow.
  * Reading the user's stored settings.
  *
  * Two readers are exported because the service worker and the content script
@@ -69,6 +69,7 @@ export async function readFullSettings() {
     "aiBaseUrl",
     "aiGlossary",
     "aiCharMemory",
+    "aiMemoryMode",
     "aiSendImage",
     "aiPageImage",
     "aiThinking",
@@ -111,7 +112,10 @@ export async function readFullSettings() {
   }
 
   return {
-    mode: typeof it.mode === "string" ? it.mode : "lens_images",
+    // Single source of truth for the default: normalizeMode() falls back to
+    // DEFAULT_MODE, so every settings reader agrees (no silent lens_images vs
+    // lens_text divergence between readCoreSettings and readFullSettings).
+    mode: normalizeMode(it.mode),
     lang,
     sources: typeof it.sources === "string" ? it.sources : DEFAULT_SOURCE,
     maxConcurrency: Number.isFinite(Number(it.maxConcurrency)) ? Number(it.maxConcurrency) : DEFAULT_MAX_CONCURRENCY,
@@ -120,7 +124,14 @@ export async function readFullSettings() {
     aiProvider: typeof it.aiProvider === "string" ? it.aiProvider : "auto",
     aiBaseUrl: typeof it.aiBaseUrl === "string" ? it.aiBaseUrl : "",
     aiGlossary: Array.isArray(it.aiGlossary) ? it.aiGlossary : [],
-    aiCharMemory: it.aiCharMemory !== false, // default ON
+    aiCharMemory: it.aiCharMemory === true, // legacy boolean (Full == true)
+    // Series-memory mode: "off" (default) | "terms" (glossary only) | "full"
+    // (glossary + character sheet). Migrates the old boolean when unset.
+    aiMemoryMode: ["off", "terms", "full"].includes(it.aiMemoryMode)
+      ? it.aiMemoryMode
+      : it.aiCharMemory === true
+        ? "full"
+        : "off",
     // Page-image toggle: "always" (send every page) or "off" (text only).
     // Default "off"; migrates the older boolean `aiSendImage`.
     aiPageImage:

@@ -1,6 +1,6 @@
 """Image byte helpers: base64 / data-URI conversion and remote downloads.
 
-STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+STATUS: ACTIVE — in use in the current flow.
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 /**
  *
- * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+ * STATUS: ACTIVE — in use in the current flow.
  * Per-series AI memory (translation glossary + character sheet).
  *
  * Stored in `chrome.storage.local` under one key:
@@ -102,6 +102,10 @@ export async function accumulateSeriesMemory(seriesKey, result) {
     all[key] = {
       glossary: hasG ? mergeGlossary(cur.glossary, glossary) : (cur.glossary || []),
       characters: hasC ? mergeCharacters(cur.characters, characters) : (cur.characters || []),
+      // Preserve the series bible written by the chapter brief. Omitting it here
+      // used to wipe the bible on the next per-page accumulate (masked only
+      // because the brief flow is currently dormant).
+      state: typeof cur.state === "string" ? cur.state : "",
       visionPages: (Number(cur.visionPages) || 0) + (usedVision ? 1 : 0),
       at: Date.now(),
     };
@@ -118,55 +122,6 @@ export async function accumulateSeriesMemory(seriesKey, result) {
   } catch (e) {
     log.warn("accumulate failed", e?.message || String(e));
   }
-}
-
-/**
- * ⛔ DORMANT — ยังไม่ได้ถูกเรียกใช้จริง: caller เดียวคือ brief.js ซึ่ง dormant ทั้ง flow
- * (briefBegin ไม่มีใครเรียก) ผลคือ `state` (series bible) ใน storage เป็น "" เสมอ
- *
- * Commit one chapter brief's context to the series memory in ONE write
- * (read-then-translate batches; no per-page accumulate race).
- *
- * `ctx` = `{bible, characters, terms}` from `/ai/brief`. The bible REPLACES
- * the stored state (the brief already merged the previous bible in);
- * characters and terms MERGE into the existing sheet/glossary.
- * Returns the merged memory `{glossary, characters, state, visionPages}`.
- */
-export async function applyBriefContext(seriesKey, ctx) {
-  const key = String(seriesKey || "default");
-  const all = await readAll();
-  const cur = all[key] && typeof all[key] === "object" ? all[key] : {};
-  delete all[key]; // re-insert below to refresh recency
-
-  const bible = typeof ctx?.bible === "string" ? ctx.bible.trim() : "";
-  const merged = {
-    glossary: mergeGlossary(cur.glossary, Array.isArray(ctx?.terms) ? ctx.terms : []),
-    characters: mergeCharacters(
-      cur.characters,
-      Array.isArray(ctx?.characters) ? ctx.characters : [],
-    ),
-    state: bible || (typeof cur.state === "string" ? cur.state : ""),
-    visionPages: Number(cur.visionPages) || 0,
-    at: Date.now(),
-  };
-  all[key] = merged;
-
-  // LRU: evict the oldest series beyond the cap.
-  const keys = Object.keys(all);
-  if (keys.length > MAX_SERIES) {
-    keys
-      .sort((a, b) => (all[a]?.at || 0) - (all[b]?.at || 0))
-      .slice(0, keys.length - MAX_SERIES)
-      .forEach((k) => delete all[k]);
-  }
-  await setStorage({ [STORE_KEY]: all });
-  log.info("brief context committed", {
-    series: key,
-    glossary: merged.glossary.length,
-    characters: merged.characters.length,
-    bible: merged.state.length,
-  });
-  return merged;
 }
 
 /** Clear one series' memory (characters + glossary). */

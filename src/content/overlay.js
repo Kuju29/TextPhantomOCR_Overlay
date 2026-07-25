@@ -1,6 +1,6 @@
 /**
  *
- * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+ * STATUS: ACTIVE — in use in the current flow.
  * HTML-overlay rendering + in-DOM image replacement.
  *
  * An "overlay" is an absolutely-positioned host element kept aligned over the

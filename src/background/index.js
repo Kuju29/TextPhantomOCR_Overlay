@@ -1,6 +1,6 @@
 /**
  *
- * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+ * STATUS: ACTIVE — in use in the current flow.
  * Service-worker entry point.
  *
  * Wires the background modules together and registers every `chrome.*`
@@ -105,8 +105,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return true;
 
     case "GET_BATCH_STATUS":
-      // ⛔ DORMANT — ไม่มีผู้เรียกแล้ว ตั้งแต่ลบกล่อง Status ใน popup (20 ก.ค. 2026);
-      // เก็บไว้เผื่อ UI อนาคต สถานะแปลปัจจุบันแสดงผ่าน toast บนหน้าเว็บเท่านั้น
+      // ⛔ DORMANT — no longer called since the popup Status box was removed (2026-07-20);
+      // kept for a future UI. Current translation status is shown only via on-page toasts.
       sendResponse({ ok: true, batch: getLastBatchStatus() });
       return true;
 

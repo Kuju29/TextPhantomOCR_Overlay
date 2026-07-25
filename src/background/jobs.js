@@ -1,6 +1,6 @@
 /**
  *
- * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+ * STATUS: ACTIVE — in use in the current flow.
  * Job orchestration: enqueue → submit → handle result/error → finalise batch.
  *
  * This is the heart of the service worker. It ties together the transport, the
@@ -36,9 +36,6 @@ import {
   stripImageFields,
 } from "./mangadex.js";
 import { accumulateSeriesMemory } from "./series-memory.js";
-// Circular import (brief.js imports `enqueue` from here) — safe: both sides
-// only call hoisted function declarations at runtime, never at module init.
-import { briefOnResult } from "./brief.js";
 import { resolveSeriesKey } from "../shared/series.js";
 import { bumpTabSession, getTabSessionId } from "./tab-sessions.js";
 import {
@@ -223,15 +220,6 @@ export async function handleResult(jobId, result) {
     ctx.imageKey || ctx.metadata?.image_id || result?.metadata?.image_id || "",
   ).trim();
   const batch = batchId ? ensureBatch(batchId, tabId, frameId) : null;
-
-  // Chapter-brief pass 1: feed this page's OCR text into the brief board
-  // (no-op for non-brief batches). The Lens MT overlay below still renders
-  // progressively; the AI pass 2 replaces it once the brief is done.
-  try {
-    briefOnResult(batchId, imageKey, result);
-  } catch (e) {
-    log.warn("briefOnResult failed", e?.message || String(e));
-  }
 
   const newImg = extractNewImage(result);
   const { aiHtml, translatedHtml, originalHtml } = extractHtml(result);
@@ -487,7 +475,7 @@ async function runRetryPass(b) {
           permanent: cls.permanent,
         });
         if (cls.permanent) {
-          batchUpdateToast(b, "ผิดพลาด (ถาวร)");
+          batchUpdateToast(b, "Error (permanent)");
           finalizeBatch(b);
         }
       }

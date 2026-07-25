@@ -1,6 +1,6 @@
 /**
  *
- * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+ * STATUS: ACTIVE — in use in the current flow.
  * MangaDex-specific content-script logic.
  *
  * MangaDex is a single-page reader that serves pages as blob: URLs whose

@@ -1,6 +1,6 @@
 """Shared types for AI chat clients.
 
-STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+STATUS: ACTIVE — in use in the current flow.
 
 Every client exposes a ``generate(api_key, model, system_text, user_parts)``
 function returning :class:`ChatResult` — a ``(text, used_model)`` pair.  The

@@ -1,6 +1,6 @@
 """Google Lens HTTP client.
 
-STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+STATUS: ACTIVE — in use in the current flow.
 
 Two-step flow:
 1. ``POST https://lens.google.com/v3/upload`` with the image — Lens responds

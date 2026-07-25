@@ -1,6 +1,6 @@
 """Manga TEXT-BLOCK detector — the grouping authority for vertical text.
 
-STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+STATUS: ACTIVE — in use in the current flow.
 
 Model: ``Kiuyha/Manga-Bubble-YOLO`` (YOLO26, 2025, Apache-2.0) — trained on
 Manga109 + MangaDex pages with Magiv2-assisted annotations to detect text

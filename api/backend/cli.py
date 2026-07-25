@@ -1,6 +1,6 @@
 """Local-file pipeline runner + debug dumper.
 
-STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+STATUS: ACTIVE — in use in the current flow.
 
 Runs the full translation pipeline on an image file **without starting the
 HTTP server**, and writes every intermediate artefact to a directory so the
@@ -536,6 +536,7 @@ def _run_cross(args: argparse.Namespace, image_paths: list[Path], ai_cfg: AiConf
             t0 = time.perf_counter()
             result = process_image(
                 str(src), tgt_lang, args.mode, ai_cfg,
+                source="ai",
                 lens_data=lens_data, capture_ai_request=True,
             )
             result.setdefault("perf", {})["cli_total_ms"] = round(
@@ -655,6 +656,7 @@ def main(argv: list[str] | None = None) -> int:
         t0 = time.perf_counter()
         result = process_image(
             str(image_path), args.lang, args.mode, ai_cfg,
+            source=source,
             lens_data=lens_data, capture_ai_request=True,
         )
         result.setdefault("perf", {})["cli_total_ms"] = round((time.perf_counter() - t0) * 1000, 1)

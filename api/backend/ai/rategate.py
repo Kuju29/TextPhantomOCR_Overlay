@@ -1,6 +1,6 @@
 """Proactive per-provider AI request pacing (the "batch gate").
 
-STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+STATUS: ACTIVE — in use in the current flow.
 
 Why this exists
 ---------------
@@ -74,6 +74,14 @@ def _env_int(name: str, default: int) -> int:
         return int(os.environ.get(name, str(default)))
     except (TypeError, ValueError):
         return default
+
+
+# Upper bound on how many distinct (provider, model, key) buckets we keep. Each
+# bucket is tiny, but on a multi-user server the set of API keys is unbounded,
+# so idle buckets are pruned to keep memory flat. Only IDLE buckets (no waiters
+# and no pending refill timer) are ever evicted; an evicted bucket simply starts
+# full again next time, which is the correct state for one that was quiet.
+_MAX_BUCKETS = _env_int("TP_RATE_MAX_BUCKETS", 512)
 
 
 class _Waiter:
@@ -177,6 +185,7 @@ class RateGate:
         key = self._bucket_key(provider, model, api_key)
         bucket = self._buckets.get(key)
         if bucket is None:
+            self._prune_buckets()
             bucket = _Bucket(burst, rpm / 60.0)
             self._buckets[key] = bucket
 
@@ -244,6 +253,24 @@ class RateGate:
         }
 
     # --- internals ---------------------------------------------------------
+    def _prune_buckets(self) -> None:
+        """Evict idle buckets (no waiters, no pending timer) when over the cap.
+
+        Oldest-refilled first. Buckets that are actively pacing (have queued
+        waiters or a scheduled refill) are never touched, so pacing state is
+        never lost mid-batch.
+        """
+        if len(self._buckets) <= _MAX_BUCKETS:
+            return
+        idle = [
+            (b.last, k)
+            for k, b in self._buckets.items()
+            if not b.jobset and b.timer is None
+        ]
+        idle.sort()
+        for _, k in idle[: len(self._buckets) - _MAX_BUCKETS]:
+            self._buckets.pop(k, None)
+
     def _next_session(self, bucket: _Bucket) -> str | None:
         """Pick the next session round-robin and rotate it to the back."""
         if not bucket.sessions:

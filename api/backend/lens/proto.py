@@ -1,6 +1,6 @@
 """Minimal protobuf wire-format reader for Google Lens responses.
 
-STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+STATUS: ACTIVE — in use in the current flow.
 
 Google Lens returns OCR geometry as nested, *unschematised* protobuf messages
 embedded inside the JSON response.  We only need a handful of fields, so

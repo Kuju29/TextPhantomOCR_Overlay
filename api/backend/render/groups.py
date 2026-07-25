@@ -1,6 +1,6 @@
 """Paragraph-to-bubble grouping for TextPhantom render trees.
 
-STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+STATUS: ACTIVE — in use in the current flow.
 
 Turns the flat tree["paragraphs"] list (one entry per Lens OCR paragraph)
 into tree["bubble_groups"], where each entry is one renderable speech-bubble

@@ -1,7 +1,7 @@
 /**
  * URL helpers for the API base address.
  *
- * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+ * STATUS: ACTIVE — in use in the current flow.
  */
 
 /**

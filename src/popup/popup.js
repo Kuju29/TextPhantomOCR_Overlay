@@ -1,6 +1,6 @@
 /**
  *
- * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+ * STATUS: ACTIVE — in use in the current flow.
  * Popup orchestrator.
  *
  * Owns the popup's state and wires the UI: it loads settings, checks the API,
@@ -46,6 +46,8 @@ import {
   setModelOptions,
   setEmojiStatus,
   updatePromptCount,
+  setFieldMessage,
+  fieldMessageType,
   toggleUi as toggleUiDom,
 } from "./dom.js";
 import {
@@ -97,7 +99,13 @@ function isRemoteDefaultApiUrl(url) {
 }
 
 // --- Small helpers ---------------------------------------------------------
-const toggleUi = () => toggleUiDom({ hasEnvKey: Boolean(state.metaCache?.has_env_ai_key) });
+const toggleUi = () => {
+  toggleUiDom({ hasEnvKey: Boolean(state.metaCache?.has_env_ai_key) });
+  // Keep inline validations in sync with mode/source/visibility changes.
+  updateAiPromptWarning();
+  validateAiKey();
+  validateLangSource();
+};
 
 // Default localhost endpoints for the popular local runtimes (mirrors the
 // backend PROVIDER_DEFAULTS) so picking a local provider pre-fills its URL.
@@ -273,10 +281,18 @@ async function refreshAiMeta() {
     if (seq !== state.aiMetaSeq) return;
 
     if (!data?.ok) {
+      // Server couldn't resolve the provider/model list. Keep the user's
+      // choice, but say so instead of silently pretending it resolved.
       setModelOptions([], { keepValue: currentModel, strict: false });
+      setFieldMessage(
+        els.aiModelWrap,
+        "warn",
+        "⚠ Couldn’t fetch the model list — keeping your selection (check key/provider/endpoint)",
+      );
       toggleUi();
       return;
     }
+    setFieldMessage(els.aiModelWrap, "", "");
 
     const provider = String(data.provider || "").trim();
     const providerChanged = Boolean(
@@ -329,7 +345,11 @@ async function refreshAiMeta() {
     }
     toggleUi();
   } catch {
-    /* resolve is optional */
+    // Network/timeout reaching /ai/resolve — surface it (the model list may be
+    // stale) rather than failing silently.
+    if (seq === state.aiMetaSeq) {
+      setFieldMessage(els.aiModelWrap, "warn", "⚠ Couldn’t reach the server to fetch models — keeping your selection");
+    }
   }
 }
 
@@ -395,9 +415,23 @@ async function applyPromptForLang(lang, { forceFetch = false } = {}) {
   }
 
   const def = await fetchDefaultPrompt(els.apiUrl.value, l, state.desiredAiModel);
+  if (def === null) {
+    // Fetch failed (API unreachable). Do NOT overwrite with a blank — surface
+    // the error and leave whatever is there. The no-prompt warning below tells
+    // the user that translating now would fall back to the server's own style.
+    setFieldMessage(
+      els.aiPromptWrap,
+      "error",
+      "Couldn’t load the default prompt (API unreachable)",
+    );
+    updateAiPromptWarning();
+    return;
+  }
+  setFieldMessage(els.aiPromptWrap, "", "");
   state.aiPromptDefaultsByLang[key] = def;
   els.aiPrompt.value = def;
   updatePromptCount(AI_PROMPT_MAX_CHARS, def);
+  updateAiPromptWarning();
 }
 
 async function resetPromptForLang(lang) {
@@ -408,10 +442,33 @@ async function resetPromptForLang(lang) {
   const seq = ++state.promptSeq;
 
   const cached = String(state.aiPromptDefaultsByLang[key] || "").trim();
-  const def = cached ? normalizePrompt(cached) : await fetchDefaultPrompt(els.apiUrl.value, l, model);
+  let def;
+  if (cached) {
+    def = normalizePrompt(cached);
+  } else {
+    const fetched = await fetchDefaultPrompt(els.apiUrl.value, l, model);
+    if (seq !== state.promptSeq) return;
+    if (fetched === null) {
+      // API unreachable — keep the user's CURRENT prompt untouched and tell
+      // them the reset couldn't run, instead of silently blanking their work.
+      setFieldMessage(
+        els.aiPromptWrap,
+        "error",
+        "Reset failed: API unreachable — keeping your current prompt",
+      );
+      return;
+    }
+    def = normalizePrompt(fetched);
+  }
   if (seq !== state.promptSeq) return;
 
+  setFieldMessage(els.aiPromptWrap, "", "");
   state.aiPromptDefaultsByLang[key] = def;
+  // Reset pulls the server's CURRENT default and SAVES it as the user's prompt.
+  // The user's stored prompt stays authoritative (it is exactly what gets sent);
+  // Reset is simply how the user chooses to refresh it to the latest server
+  // default. If the server default is stale, that is a redeploy problem — not a
+  // reason to override the user's control here.
   state.aiPromptByLang[key] = def;
   state.aiPromptDirtyByLang[key] = false;
   els.aiPrompt.value = def;
@@ -419,6 +476,99 @@ async function resetPromptForLang(lang) {
   await setStorage({ aiPromptByLang: state.aiPromptByLang });
   broadcast({ type: "AI_SETTINGS_CHANGED" });
   void promptHistoryPush(key, def).then(refreshPromptHistoryButtons);
+  updateAiPromptWarning();
+}
+
+/**
+ * Warn (non-blocking) when Source is AI but the prompt box is empty: the user
+ * is allowed to translate with no prompt — the user is in control — but the
+ * server will then fall back to its own built-in style, so we say so plainly
+ * instead of letting the intended prompt silently be nothing. Never clobbers a
+ * higher-priority error message already shown on the field.
+ */
+function updateAiPromptWarning() {
+  if (!els.aiPromptWrap) return;
+  if (fieldMessageType(els.aiPromptWrap) === "error") return;
+  const isAi = canUseAiUi();
+  const empty = !String(els.aiPrompt?.value || "").trim();
+  if (isAi && empty) {
+    setFieldMessage(
+      els.aiPromptWrap,
+      "warn",
+      "⚠ No prompt set — translating now will use the server’s own default style",
+    );
+  } else if (fieldMessageType(els.aiPromptWrap) === "warn") {
+    setFieldMessage(els.aiPromptWrap, "", "");
+  }
+}
+
+// Key prefixes we recognise. A custom OpenAI-compatible gateway may use any
+// string, so an unknown prefix is a soft WARNING, never a hard block.
+const KNOWN_KEY_PREFIXES = ["hf_", "sk-or-", "sk-ant-", "sk-", "gsk_", "AIza"];
+
+/**
+ * Validate the AI key field (only while it is visible = cloud provider on AI).
+ * Empty-but-required and odd-looking keys are surfaced so a missing/typo'd key
+ * never silently degrades to the "No AI key" badge without explanation.
+ */
+function validateAiKey() {
+  if (!els.aiKeyWrap) return;
+  if (els.aiKeyWrap.style.display === "none") {
+    setFieldMessage(els.aiKeyWrap, "", "");
+    return;
+  }
+  const key = (els.aiKey.value || "").trim();
+  if (!key) {
+    if (state.metaCache?.has_env_ai_key) {
+      setFieldMessage(els.aiKeyWrap, "", "");
+    } else {
+      setFieldMessage(els.aiKeyWrap, "warn", "⚠ No API key set — AI won’t run");
+    }
+    return;
+  }
+  if (/\s/.test(key)) {
+    setFieldMessage(els.aiKeyWrap, "error", "The key contains whitespace — please double-check it");
+    return;
+  }
+  const provider = (els.aiProvider?.value || "auto").trim().toLowerCase();
+  const known = KNOWN_KEY_PREFIXES.some((p) => key.startsWith(p));
+  if (provider === "auto" && !known) {
+    setFieldMessage(
+      els.aiKeyWrap,
+      "warn",
+      "⚠ Key format looks unusual (usually starts with hf_/sk-/AIza/gsk_) — ignore if you use a custom gateway",
+    );
+    return;
+  }
+  setFieldMessage(els.aiKeyWrap, "", "");
+}
+
+/**
+ * Warn when the stored language/source is not offered by the server (or the
+ * fallback list) — otherwise the request silently uses whatever the <select>
+ * snapped to, not what the user chose.
+ */
+function validateLangSource() {
+  // Skip until the <select>s are populated, so the initial empty state during
+  // load never flashes a false "not supported" warning.
+  if (els.langWrap && els.langWrap.style.display !== "none" && els.lang.options.length) {
+    const want = String(state.desiredLang || "");
+    const present = [...els.lang.options].some((o) => o.value === want);
+    setFieldMessage(
+      els.langWrap,
+      present ? "" : "warn",
+      present ? "" : `⚠ Language "${want}" is not in the supported list`,
+    );
+  }
+  if (els.sourcesWrap && els.sourcesWrap.style.display !== "none" && els.sources.options.length) {
+    const want = String(state.desiredSources || "");
+    const present = [...els.sources.options].some((o) => o.value === want);
+    setFieldMessage(
+      els.sourcesWrap,
+      present ? "" : "warn",
+      present ? "" : `⚠ Source "${want}" is not in the list`,
+    );
+  }
 }
 
 /** Persist the in-textarea prompt for (lang, model) if it was edited. */
@@ -441,7 +591,16 @@ function scheduleSaveApi(raw) {
   state.pendingApiSave = true;
   apiDebounce = setTimeout(async () => {
     state.pendingApiSave = false;
+    const rawTrim = String(raw || "").trim();
     const normalized = normalizeUrl(raw);
+
+    // Typed-but-invalid URL: do NOT silently fall back to the remote default
+    // (that would hide the user's mistake and make a bad URL look accepted).
+    // Surface the error and keep the last good saved value untouched.
+    if (rawTrim && !normalized) {
+      setEmojiStatus("error", "Invalid API URL format (must start with http:// or https://)");
+      return;
+    }
 
     // Empty field, or the same value as the remote default/reset URL, means
     // "use REMOTE_DEFAULTS_URL". Do not store that value as customApiUrl,
@@ -549,6 +708,7 @@ async function loadSettings() {
     "aiProvider",
     "aiBaseUrl",
     "aiCharMemory",
+    "aiMemoryMode",
     "aiSendImage",
     "aiPageImage",
     "aiThinking",
@@ -594,7 +754,17 @@ async function loadSettings() {
     if (!els.aiBaseUrl.value) els.aiBaseUrl.value = defaultEndpointFor(els.aiProvider?.value || "auto");
   }
   void refreshSeriesMemory();
-  if (els.aiCharMemory) els.aiCharMemory.checked = stored.aiCharMemory !== false;
+  if (els.aiMemoryMode) {
+    // Migrate the old boolean: a legacy "remember characters = on" maps to Full;
+    // everything else (including unset) defaults to Off.
+    const mode =
+      ["off", "terms", "full"].includes(String(stored.aiMemoryMode))
+        ? stored.aiMemoryMode
+        : stored.aiCharMemory === true
+          ? "full"
+          : "off";
+    els.aiMemoryMode.value = mode;
+  }
   // AI thinking mode — "default" = think normally, "off" = fastest.
   if (els.aiThinking) {
     els.aiThinking.value = stored.aiThinking === "off" ? "off" : "default";
@@ -792,10 +962,12 @@ els.apiUrl.addEventListener("blur", (e) => scheduleSaveApi(e.target.value));
 
 els.aiKey.addEventListener("input", () => {
   state.modelDirty = false;
+  validateAiKey();
   scheduleSaveAi();
   scheduleResolveAiMeta();
 });
 els.aiKey.addEventListener("blur", () => {
+  validateAiKey();
   scheduleSaveAi();
   scheduleResolveAiMeta({ immediate: true });
 });
@@ -849,8 +1021,10 @@ els.aiThinking?.addEventListener("change", async () => {
   await setStorage({ aiThinking: els.aiThinking.value === "off" ? "off" : "default" });
 });
 
-els.aiCharMemory?.addEventListener("change", async () => {
-  await setStorage({ aiCharMemory: Boolean(els.aiCharMemory.checked) });
+els.aiMemoryMode?.addEventListener("change", async () => {
+  const mode = ["off", "terms", "full"].includes(els.aiMemoryMode.value) ? els.aiMemoryMode.value : "off";
+  // Keep the legacy boolean in sync so older code paths still behave.
+  await setStorage({ aiMemoryMode: mode, aiCharMemory: mode === "full" });
 });
 
 els.aiModel.addEventListener("change", async () => {
@@ -869,6 +1043,11 @@ els.aiPrompt.addEventListener("input", () => {
   // invalidates Forward — cheap sync toggle, no storage read per keystroke.
   if (els.aiPromptBack) els.aiPromptBack.disabled = false;
   if (els.aiPromptForward) els.aiPromptForward.disabled = true;
+  // Typing clears a stale fetch error; refresh the empty-prompt warning live.
+  if (String(els.aiPrompt.value || "").trim() && fieldMessageType(els.aiPromptWrap) === "error") {
+    setFieldMessage(els.aiPromptWrap, "", "");
+  }
+  updateAiPromptWarning();
   scheduleSaveAi();
 });
 
@@ -958,9 +1137,17 @@ els.resetApi.addEventListener("click", () => {
 window.addEventListener("pagehide", () => {
   try {
     if (state.pendingApiSave) {
+      const rawTrim = String(els.apiUrl.value || "").trim();
       const normalized = normalizeUrl(els.apiUrl.value);
-      if (!normalized || isRemoteDefaultApiUrl(normalized)) setStorage({ customApiUrl: "" });
-      else setStorage({ customApiUrl: normalized });
+      // Typed-but-invalid on close: leave the saved value as-is (don't clear to
+      // remote default) — same no-silent-fallback rule as the debounced save.
+      if (rawTrim && !normalized) {
+        /* keep last good value */
+      } else if (!normalized || isRemoteDefaultApiUrl(normalized)) {
+        setStorage({ customApiUrl: "" });
+      } else {
+        setStorage({ customApiUrl: normalized });
+      }
     }
     const aiKey = (els.aiKey.value || "").trim();
     const aiModel = normalizeAiModel((els.aiModel.value || "").trim() || state.desiredAiModel || "auto");

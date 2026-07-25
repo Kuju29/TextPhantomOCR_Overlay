@@ -1,6 +1,6 @@
 /**
  *
- * STATUS: ACTIVE — ใช้งานจริงใน flow ปัจจุบัน (in use).
+ * STATUS: ACTIVE — in use in the current flow.
  * Tiny namespaced console logger shared by the service worker, popup and viewer.
  *
  * Level can be raised by setting `window.LOG_LEVEL` before this module loads;
