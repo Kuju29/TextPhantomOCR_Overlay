@@ -39,6 +39,34 @@ function ignoreMenuError() {
   void chrome.runtime.lastError;
 }
 
+/**
+ * Whether the extension may read `file://` URLs.
+ *
+ * Local images (a file dragged into the browser and shown at a `file://` URL)
+ * can only be translated when the user has enabled "Allow access to file URLs"
+ * in chrome://extensions. Without it Chrome injects no content script on the
+ * page AND the service worker cannot fetch the file, so a right-click silently
+ * does nothing. This lets the caller detect that state and tell the user how to
+ * fix it instead of enqueuing a job the server can never fetch.
+ *
+ * Chrome-only API; on Firefox/Thunderbird it is absent, so assume allowed and
+ * let the normal path try.
+ * @returns {Promise<boolean>}
+ */
+function isAllowedFileSchemeAccess() {
+  return new Promise((resolve) => {
+    try {
+      const fn = chrome.extension?.isAllowedFileSchemeAccess;
+      if (typeof fn !== "function") return resolve(true);
+      fn((allowed) => resolve(Boolean(allowed) && !chrome.runtime.lastError));
+    } catch {
+      resolve(true);
+    }
+  });
+}
+
+const isFileUrl = (u) => /^file:/i.test(String(u || ""));
+
 // Guard so overlapping bootstrap calls (onInstalled + onStartup can fire
 // close together) don't interleave two removeAll→create sequences, which
 // produced "Cannot create item with duplicate id img_one/img_all".
@@ -170,6 +198,36 @@ async function handleTranslateOne(menuInfo, tab, ctx) {
     } catch (e) {
       log.warn("blob datauri fetch failed", e?.message || String(e));
     }
+  }
+
+  // Local file image (dragged into the browser, shown at a file:// URL): the
+  // server can never fetch a file:// src, so it MUST arrive inlined. If we
+  // have no bytes it means either file access is off (no content script ran)
+  // or the read failed — enqueuing the file:// src would just fail server-side
+  // and look like "nothing happened". Give the user an actionable message.
+  if (!payload.imageDataUri && (isFileUrl(sourceUrl) || isFileUrl(tab?.url))) {
+    const allowed = await isAllowedFileSchemeAccess();
+    const msg = allowed
+      ? "TextPhantom: อ่านไฟล์รูปในเครื่องไม่สำเร็จ ลองรีเฟรชหน้าแล้วคลิกขวาแปลใหม่"
+      : "TextPhantom: เปิด “Allow access to file URLs” ให้ส่วนขยายก่อน (chrome://extensions → TextPhantom → Details) แล้วรีเฟรชหน้ารูป";
+    log.warn("file:// image without bytes", { allowed, sourceUrl });
+    // Toast reaches the page only when a content script is running — which is
+    // exactly what file access being OFF prevents. Fall back to a toolbar-icon
+    // badge + title so the user still gets a visible, actionable hint.
+    if (!allowed) {
+      try {
+        chrome.action?.setBadgeText?.({ text: "!", tabId: tab.id });
+        chrome.action?.setBadgeBackgroundColor?.({ color: "#c0392b" });
+        chrome.action?.setTitle?.({
+          tabId: tab.id,
+          title: 'TextPhantom: enable "Allow access to file URLs" in chrome://extensions to translate local images',
+        });
+      } catch {
+        /* action API unavailable */
+      }
+    }
+    sendToastToTab(tab.id, frameId, msg, 9000);
+    return;
   }
 
   if (!payload.src && !payload.imageDataUri) return;

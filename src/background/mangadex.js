@@ -79,12 +79,22 @@ function mdScopeFromMode(mode) {
   return String(mode || "");
 }
 
-/** Build the result-cache key for (md key, language, mode). */
-export function mdCacheKey(mdKey, lang, mode) {
+/** Build the result-cache key for (md key, language, mode, source).
+ *
+ * `source` MUST be part of the key: lens_text renders a different overlay per
+ * source (original / translated / ai) but the same image+lang+mode, so without
+ * it the three sources collide in one slot and switching source replays the
+ * previously cached result. It only differentiates text overlays; lens_images
+ * has a single result, so its key is left unchanged for backward compatibility.
+ */
+export function mdCacheKey(mdKey, lang, mode, source = "") {
   const k = String(mdKey || "");
   const l = String(lang || "");
   const s = mdScopeFromMode(mode);
-  return k && l && s ? `${k}::${l}::${s}` : "";
+  if (!(k && l && s)) return "";
+  const src =
+    s === "text" ? String(source || "translated").trim().toLowerCase() || "translated" : "";
+  return src ? `${k}::${l}::${s}::${src}` : `${k}::${l}::${s}`;
 }
 
 /** Strip all image-bearing fields from a result (cache stores them separately). */

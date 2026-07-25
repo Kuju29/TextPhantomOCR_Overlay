@@ -237,6 +237,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 function collectMdCacheItems(msg) {
   const lang = typeof msg?.lang === "string" ? msg.lang : "";
   const mode = typeof msg?.mode === "string" ? msg.mode : "";
+  const source = typeof msg?.source === "string" ? msg.source : "";
   if (!lang || !mode) return {};
 
   const includeNewImg = Boolean(msg?.includeNewImg);
@@ -244,7 +245,7 @@ function collectMdCacheItems(msg) {
 
   const items = {};
   for (const mdKey of keys) {
-    const cacheKey = mdCacheKey(String(mdKey || ""), lang, mode);
+    const cacheKey = mdCacheKey(String(mdKey || ""), lang, mode, source);
     if (!cacheKey) continue;
     const rec = getCachedResult(cacheKey);
     if (!rec) continue;

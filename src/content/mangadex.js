@@ -152,12 +152,12 @@
   // --- Service-worker result cache ----------------------------------------
 
   /** Ask the SW for cached results for a set of md keys. */
-  const mdCacheGet = (keys, includeNewImg = false, lang = "", mode = "") =>
-    TP.sendBg({ type: "TP_MD_CACHE_GET", keys, includeNewImg: !!includeNewImg, lang, mode });
+  const mdCacheGet = (keys, includeNewImg = false, lang = "", mode = "", source = "") =>
+    TP.sendBg({ type: "TP_MD_CACHE_GET", keys, includeNewImg: !!includeNewImg, lang, mode, source });
 
   /** Resolve just the cached "new image" URL for one md key. */
-  async function mdCacheGetNewImg(key, lang, mode) {
-    const resp = await mdCacheGet([key], true, lang, mode);
+  async function mdCacheGetNewImg(key, lang, mode, source = "") {
+    const resp = await mdCacheGet([key], true, lang, mode, source);
     const rec = resp?.items?.[key] || null;
     return (
       rec?.newImg ||
@@ -168,8 +168,8 @@
   }
 
   /** Apply a cached "new image" to an md-keyed image (overlay or in-place). */
-  function mdApplyCachedNewImg(originalUrl, key, isTextMode, imgElement, lang, mode) {
-    mdCacheGetNewImg(key, lang, mode).then((newSrc) => {
+  function mdApplyCachedNewImg(originalUrl, key, isTextMode, imgElement, lang, mode, source = "") {
+    mdCacheGetNewImg(key, lang, mode, source).then((newSrc) => {
       if (!newSrc) return;
       if (isTextMode) {
         const mdKey = mdKeyFromUrl(originalUrl);
@@ -200,6 +200,7 @@
             needMode: "replace",
             needLang: lang,
             needCacheMode: mode,
+            needSource: source,
           });
         }
       });
@@ -219,12 +220,11 @@
     if (!keys.length) return null;
 
     const st = await TP.getSettings();
-    const resp = await mdCacheGet(keys, false, st.lang, st.mode);
-    const items = resp?.items || null;
-    if (!items) return null;
-
     const isText = String(st.mode || "lens_text") === "lens_text";
     const source = isText ? String(st.sources || "translated") : "translated";
+    const resp = await mdCacheGet(keys, false, st.lang, st.mode, source);
+    const items = resp?.items || null;
+    if (!items) return null;
 
     for (const p of pairs) {
       const rec = items[p.key];
@@ -242,13 +242,14 @@
         Boolean(TP.extractNewImageSrc(rec?.result || null));
       if (hasNewImg) {
         const img = TP.findTargetImage(p.url);
-        if (img) mdApplyCachedNewImg(p.url, p.key, isText, img, st.lang, st.mode);
+        if (img) mdApplyCachedNewImg(p.url, p.key, isText, img, st.lang, st.mode, source);
         else
           mdRememberPending(p.url, {
             needNewImg: true,
             needMode: isText ? "clean" : "replace",
             needLang: st.lang,
             needCacheMode: st.mode,
+            needSource: source,
           });
       }
     }
@@ -342,7 +343,15 @@
       }
     }
     if (pending.needNewImg) {
-      mdApplyCachedNewImg(url, key, pending.needMode === "clean", img, pending.needLang, pending.needCacheMode);
+      mdApplyCachedNewImg(
+        url,
+        key,
+        pending.needMode === "clean",
+        img,
+        pending.needLang,
+        pending.needCacheMode,
+        pending.needSource,
+      );
     }
   }
 
@@ -842,6 +851,35 @@
     } catch {
       /* observer/history patch unsupported */
     }
+  }
+
+  // Live source/mode/lang switch: the popup writes the new value to storage, so
+  // re-render from the source-scoped cache. hydrate replaces each image's
+  // overlay in place with the newly selected source's cached result.
+  //
+  // IMPORTANT: do NOT clear the data-tp-* stamps here. On MangaDex the <img>
+  // src is a blob: URL, so those stamps are the ONLY way findTargetImage() can
+  // match a page/AI result back to its <img>. Clearing them mid-chapter makes
+  // hydrate (and any in-flight result, e.g. slow AI) unable to find the image,
+  // which wipes the overlay entirely. Stamp clearing belongs to chapter change.
+  //
+  // Because the cache is now source-scoped, hydrate only repaints images that
+  // actually have a cached result for the NEW source; images without one keep
+  // their current overlay until the user re-runs the translation — never a
+  // different source's text, and never a blank page.
+  try {
+    let mdSwitchTimer = 0;
+    chrome.storage.onChanged?.addListener((changes, area) => {
+      if (area !== "local") return;
+      if (!(changes?.sources || changes?.mode || changes?.lang)) return;
+      if (!isMangaDexHost() || !TP.isTop) return;
+      clearTimeout(mdSwitchTimer);
+      mdSwitchTimer = setTimeout(() => {
+        hydrateMangaDexFromCache().catch(() => {});
+      }, 150);
+    });
+  } catch {
+    /* storage.onChanged unavailable */
   }
 
   Object.assign(TP, {

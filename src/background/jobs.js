@@ -252,7 +252,14 @@ export async function handleResult(jobId, result) {
   const hasHtml = Boolean(aiHtml || translatedHtml || originalHtml);
 
   // MangaDex: cache the result so re-visiting the chapter renders instantly.
-  const cacheKey = mdCacheKey(mdKeyFromUrl(imgUrl), ctx.lang || ctx.metadata?.lang, mode);
+  // Keyed by source too — otherwise the original/translated/ai overlays for one
+  // image share a slot and switching source replays the old source's result.
+  const cacheKey = mdCacheKey(
+    mdKeyFromUrl(imgUrl),
+    ctx.lang || ctx.metadata?.lang,
+    mode,
+    ctx.source || ctx.metadata?.source,
+  );
   if (cacheKey && (newImg || hasHtml)) {
     setCachedResult(cacheKey, {
       newImg: newImg || null,

@@ -23,6 +23,30 @@ const baseManifest = JSON.parse(
 );
 const version = baseManifest.version;
 
+// --- Single source of truth for the version --------------------------------
+// platform/base.json is the ONLY place to edit the version: every browser
+// manifest is merged from it. package.json needs a valid npm semver, so a
+// four-segment manifest version like "2026.7.24.1" maps to the prerelease
+// "2026.7.24-1". Sync it here so bumping base.json alone keeps everything in
+// step — no second edit, no drift.
+function manifestToNpmVersion(v) {
+  const parts = String(v).split(".").filter(Boolean);
+  const core = parts.slice(0, 3).join(".");
+  const rest = parts.slice(3).join(".");
+  return rest ? `${core}-${rest}` : core;
+}
+
+{
+  const pkgPath = path.join(projectRoot, "package.json");
+  const pkg = JSON.parse(await readFile(pkgPath, "utf8"));
+  const desired = manifestToNpmVersion(version);
+  if (pkg.version !== desired) {
+    pkg.version = desired;
+    await writeFile(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`);
+    console.log(`Synced package.json version -> ${desired}`);
+  }
+}
+
 const targets = [
   {
     id: "chrome",
@@ -218,16 +242,22 @@ for (const directory of ["src", "platform", "scripts"]) {
   }
 }
 for (const filename of [
+  "README.md",
   "README-TH.md",
   "STORE-CHECKLIST-TH.md",
   "package.json",
   "build.bat",
   "build.sh",
 ]) {
-  sourceEntries.push({
-    absolute: path.join(projectRoot, filename),
-    name: filename,
-  });
+  const absolute = path.join(projectRoot, filename);
+  // Optional docs (README-TH / STORE-CHECKLIST-TH) may be absent — skip any
+  // file that does not exist so the source bundle never fails the whole build.
+  try {
+    if (!(await stat(absolute)).isFile()) continue;
+  } catch {
+    continue;
+  }
+  sourceEntries.push({ absolute, name: filename });
 }
 for (const file of builtPackages) {
   sourceEntries.push({

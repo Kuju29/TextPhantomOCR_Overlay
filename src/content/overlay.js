@@ -126,10 +126,10 @@
 
   // --- Small builders ------------------------------------------------------
 
-  /** A small status badge ("AI…", "No text", …). */
+  /** A small status badge ("No AI key", "No text", …). */
   function createOverlayBadge(label) {
     const badge = document.createElement("div");
-    badge.textContent = label || "AI…";
+    badge.textContent = label || "No AI key";
     Object.assign(badge.style, {
       position: "absolute",
       left: "6px",
@@ -543,7 +543,15 @@
       rec.scope.textContent = "";
       const aiMeta = result?.Ai?.meta || {};
       const reason = String(aiMeta.skipped_reason || aiMeta.reason || "").trim();
-      const label = reason === "no_text" ? "No text" : reason === "rate_limited" ? "Rate limit" : "AI…";
+      // An empty AI layer with no specific reason means the server skipped the
+      // AI translation entirely (`_run_ai` was False) — which only happens when
+      // no API key reached it. Say so plainly instead of a cryptic "AI…".
+      const label =
+        reason === "no_text"
+          ? "No text"
+          : reason === "rate_limited"
+            ? "Rate limit"
+            : "No AI key";
       rec.scope.appendChild(createOverlayBadge(label));
       nudgeOverlay(imgElement, ops.schedule);
       return;
