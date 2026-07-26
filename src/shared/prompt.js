@@ -24,9 +24,12 @@ export function normalizeAiModel(model) {
 }
 
 /** Build the storage key for a (language, model) prompt entry. */
-export function makePromptKey(lang, model) {
-  const l = String(lang || "").trim() || "en";
-  return `${l}::${normalizeAiModel(model)}`;
+export function makePromptKey(lang, _model) {
+  // Prompts are keyed by LANGUAGE ONLY. The model used to be part of the key,
+  // which made a saved prompt "disappear" whenever the resolved model changed
+  // (or could not be resolved while offline). The model argument is accepted so
+  // existing call sites keep working, but it is intentionally ignored.
+  return String(lang || "").trim() || "en";
 }
 
 /**
@@ -53,12 +56,19 @@ export function migratePromptMap(input) {
   for (const [key, value] of Object.entries(input)) {
     if (typeof value !== "string") continue;
     const normalized = normalizePrompt(value);
-    if (!normalized && !value) continue;
-    if (key.includes("::")) {
-      map[key] = normalized;
+    if (!normalized) {
+      if (value) changed = true; // dropped an empty/whitespace entry
+      continue;
+    }
+    // Collapse any legacy "lang::model" key down to "lang" (language only).
+    const lang = makePromptKey(String(key).split("::")[0]);
+    if (lang !== key) changed = true;
+    if (!Object.prototype.hasOwnProperty.call(map, lang)) {
+      map[lang] = normalized;
       if (normalized !== value) changed = true;
     } else {
-      map[makePromptKey(key, "auto")] = normalized;
+      // A duplicate model-specific entry for the same language — keep the first
+      // (non-empty) one, drop the rest.
       changed = true;
     }
   }

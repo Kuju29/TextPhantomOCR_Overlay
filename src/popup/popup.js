@@ -392,45 +392,23 @@ async function applyPromptHistoryResult(key, res) {
   if (els.aiPromptForward) els.aiPromptForward.disabled = !res.canForward;
 }
 
-async function applyPromptForLang(lang, { forceFetch = false } = {}) {
+function applyPromptForLang(lang) {
   if (!canUseAiUi()) return;
   const l = (lang || state.desiredLang || els.lang.value || "en").trim() || "en";
-  const key = makePromptKey(l, normalizeAiModel(state.desiredAiModel));
+  const key = makePromptKey(l);
   if (state.aiPromptDirtyByLang[key]) return;
 
-  if (!forceFetch && Object.prototype.hasOwnProperty.call(state.aiPromptByLang, key)) {
-    const saved = String(state.aiPromptByLang[key] || "");
-    els.aiPrompt.value = saved;
-    updatePromptCount(AI_PROMPT_MAX_CHARS, saved);
-    // Seed the edit history with the loaded baseline so the first Back after
-    // an edit can return to it (push dedupes identical tips).
-    void promptHistoryPush(key, saved).then(refreshPromptHistoryButtons);
-    return;
-  }
-  if (!forceFetch && Object.prototype.hasOwnProperty.call(state.aiPromptDefaultsByLang, key)) {
-    const def = String(state.aiPromptDefaultsByLang[key] || "");
-    els.aiPrompt.value = def;
-    updatePromptCount(AI_PROMPT_MAX_CHARS, def);
-    return;
-  }
-
-  const def = await fetchDefaultPrompt(els.apiUrl.value, l, state.desiredAiModel);
-  if (def === null) {
-    // Fetch failed (API unreachable). Do NOT overwrite with a blank — surface
-    // the error and leave whatever is there. The no-prompt warning below tells
-    // the user that translating now would fall back to the server's own style.
-    setFieldMessage(
-      els.aiPromptWrap,
-      "error",
-      "Couldn’t load the default prompt (API unreachable)",
-    );
-    updateAiPromptWarning();
-    return;
-  }
-  setFieldMessage(els.aiPromptWrap, "", "");
-  state.aiPromptDefaultsByLang[key] = def;
-  els.aiPrompt.value = def;
-  updatePromptCount(AI_PROMPT_MAX_CHARS, def);
+  // Show EXACTLY what is stored for this language, or empty. No fallback: no
+  // cross-key lookup and no fetching/substituting the built-in default. An empty
+  // box literally means "nothing saved for this language" — the user clicks
+  // Reset to pull the default. (A fallback here only hides the real state and
+  // has repeatedly led to mis-diagnosing where a value actually comes from.)
+  const saved = Object.prototype.hasOwnProperty.call(state.aiPromptByLang, key)
+    ? String(state.aiPromptByLang[key] || "")
+    : "";
+  els.aiPrompt.value = saved;
+  updatePromptCount(AI_PROMPT_MAX_CHARS, saved);
+  void promptHistoryPush(key, saved).then(refreshPromptHistoryButtons);
   updateAiPromptWarning();
 }
 
@@ -780,6 +758,7 @@ async function loadSettings() {
     keepValue: state.desiredAiModel,
     strict: !(state.desiredAiModel && state.desiredAiModel !== "auto"),
   });
+  // Direct lookup by language, no fallback: shown value == stored value, or empty.
   const prompt = Object.prototype.hasOwnProperty.call(state.aiPromptByLang, promptKey)
     ? String(state.aiPromptByLang[promptKey] || "")
     : "";
@@ -818,7 +797,7 @@ async function loadSettings() {
     .catch(() => {});
 
   if (canUseAiUi()) {
-    applyPromptForLang(state.desiredLang).catch(() => {});
+    applyPromptForLang(state.desiredLang);
     refreshAiMeta();
   }
 
@@ -910,9 +889,8 @@ els.aiPromptReset?.addEventListener("click", () => resetPromptForLang(els.lang.v
 // Expand / collapse the style editor for comfortable long-prompt editing.
 els.aiPromptStudio?.addEventListener("click", () => {
   const lang = encodeURIComponent(els.lang.value || "en");
-  const model = encodeURIComponent((els.aiModel.value || "auto").trim() || "auto");
   chrome.tabs?.create?.({
-    url: chrome.runtime.getURL(`prompt/prompt.html?lang=${lang}&model=${model}`),
+    url: chrome.runtime.getURL(`prompt/prompt.html?lang=${lang}`),
   });
 });
 
@@ -1179,7 +1157,7 @@ chrome.storage?.onChanged?.addListener((changes, area) => {
   if (changes.aiPromptByLang) {
     const next = changes.aiPromptByLang.newValue;
     state.aiPromptByLang = next && typeof next === "object" ? next : {};
-    if (canUseAiUi()) applyPromptForLang(els.lang.value, { forceFetch: false });
+    if (canUseAiUi()) applyPromptForLang(els.lang.value);
   }
 });
 

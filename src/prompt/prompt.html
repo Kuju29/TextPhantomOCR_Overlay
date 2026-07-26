@@ -11,7 +11,7 @@
     <header class="ps-head">
       <div class="ps-title">
         <h1>Prompt Studio</h1>
-        <span class="ps-sub">Edit the AI translation style for each language &amp; model</span>
+        <span class="ps-sub">Edit the AI translation style for each language</span>
       </div>
       <div class="ps-head-actions">
         <span id="ps-status" class="ps-status" aria-live="polite"></span>
@@ -24,17 +24,7 @@
           <label for="ps-lang">Language</label>
           <select id="ps-lang" aria-label="Language"></select>
         </div>
-        <div class="ps-field">
-          <label for="ps-model">Model</label>
-          <input id="ps-model" type="text" placeholder="auto" aria-label="Model" />
-          <div class="ps-hint">Style is saved per (language · model). Use "auto" for all models.</div>
-        </div>
-
-        <div class="ps-field">
-          <label for="ps-api">API URL</label>
-          <input id="ps-api" type="text" placeholder="http://localhost:7860" aria-label="API URL" />
-          <div class="ps-hint">Used to load the built-in default style for a language.</div>
-        </div>
+        <div class="ps-hint">The style is saved per language and applies to every model.</div>
 
         <div class="ps-actions">
           <button type="button" id="ps-load-default" class="ps-btn">Load built-in default</button>
@@ -58,7 +48,7 @@
 
       <section class="ps-editor">
         <div class="ps-editor-bar">
-          <span id="ps-key" class="ps-key">en · auto</span>
+          <span id="ps-key" class="ps-key">en</span>
           <span id="ps-count" class="ps-count">0</span>
         </div>
         <textarea

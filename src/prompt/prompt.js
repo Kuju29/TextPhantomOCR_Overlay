@@ -1,11 +1,10 @@
 /**
  *
  * STATUS: ACTIVE — in use in the current flow.
- * Prompt Studio — a full-page editor for the per-(language, model) AI Style
- * prompt.  It reads/writes the SAME storage the popup uses
- * (`aiPromptByLang` keyed by `lang::model`), so edits here show up in the
- * popup's small "AI Style" box and vice-versa.  This page just gives a much
- * bigger workspace for long prompts.
+ * Prompt Studio — a full-page editor for the per-LANGUAGE AI Style prompt.
+ * It reads/writes the SAME storage the popup uses (`aiPromptByLang`, keyed by
+ * language only), so edits here show up in the popup's small "AI Style" box and
+ * vice-versa. This page just gives a much bigger workspace for long prompts.
  */
 
 import { getStorage, setStorage } from "../shared/storage.js";
@@ -16,7 +15,6 @@ import {
   AI_PROMPT_MAX_CHARS,
   makePromptKey,
   migratePromptMap,
-  normalizeAiModel,
   normalizePrompt,
   promptHistoryBack,
   promptHistoryForward,
@@ -26,8 +24,6 @@ import {
 
 const els = {
   lang: document.getElementById("ps-lang"),
-  model: document.getElementById("ps-model"),
-  api: document.getElementById("ps-api"),
   loadDefault: document.getElementById("ps-load-default"),
   clear: document.getElementById("ps-clear"),
   back: document.getElementById("ps-back"),
@@ -41,6 +37,8 @@ const els = {
 
 const state = {
   promptByLang: {},
+  // API base used only to fetch the built-in default style. It is taken from the
+  // same setting the popup uses — this page no longer has its own URL field.
   apiUrl: "",
   apiDefaults: { defaultApiUrl: "", resetApiUrl: "", fetchedAt: 0 },
 };
@@ -51,14 +49,14 @@ function setStatus(msg, kind = "") {
 }
 
 function currentKey() {
-  return makePromptKey(els.lang.value || "en", normalizeAiModel(els.model.value));
+  return makePromptKey(els.lang.value || "en");
 }
 
 function updateCount() {
   const len = els.text.value.length;
   els.count.textContent = `${len.toLocaleString()} / ${AI_PROMPT_MAX_CHARS.toLocaleString()}`;
   els.count.classList.toggle("warn", len > AI_PROMPT_MAX_CHARS * 0.95);
-  els.key.textContent = currentKey().replace("::", " · ");
+  els.key.textContent = currentKey();
 }
 
 /** Enable/disable Back/Forward from the stored history for the current key. */
@@ -73,7 +71,7 @@ async function refreshHistoryButtons() {
   }
 }
 
-/** Load the saved prompt for the current (lang, model) into the editor. */
+/** Load the saved prompt for the current language into the editor. */
 function loadCurrent() {
   const key = currentKey();
   const saved = Object.prototype.hasOwnProperty.call(state.promptByLang, key)
@@ -103,8 +101,7 @@ async function save() {
   setTimeout(() => setStatus(""), 1800);
 }
 
-/** Apply a history navigation result: restore text AND save it (like the
- * browser actually navigating, not just previewing). */
+/** Apply a history navigation result: restore text AND save it. */
 async function applyHistoryResult(res) {
   if (!res) return refreshHistoryButtons();
   const key = currentKey();
@@ -125,9 +122,9 @@ async function applyHistoryResult(res) {
 
 /** Fetch the built-in default style for the current language from the API. */
 async function loadBuiltinDefault() {
-  const base = String(els.api.value || "").trim().replace(/\/+$/, "");
+  const base = String(state.apiUrl || "").trim().replace(/\/+$/, "");
   if (!base) {
-    setStatus("Set the API URL first", "err");
+    setStatus("No API URL configured (set it in the popup)", "err");
     return;
   }
   const lang = els.lang.value || "en";
@@ -160,7 +157,6 @@ async function init() {
   const stored = await getStorage([
     "aiPromptByLang",
     "lang",
-    "aiModel",
     "customApiUrl",
     "apiUrlDefault",
     "apiUrlReset",
@@ -180,33 +176,26 @@ async function init() {
   if (![...els.lang.options].some((o) => o.value === els.lang.value)) {
     els.lang.value = "en";
   }
-  els.model.value = normalizeAiModel(stored.aiModel);
+
+  // API base for "Load built-in default" — reuse the popup's configured URL.
   const customApi = normalizeUrl(stored.customApiUrl || "");
   const defaultApi = normalizeUrl(state.apiDefaults.defaultApiUrl || stored.apiUrlDefault || "");
   const resetApi = normalizeUrl(state.apiDefaults.resetApiUrl || stored.apiUrlReset || "");
-  // Repair old Reset behavior: if customApiUrl equals the remote default/reset,
-  // clear it so future REMOTE_DEFAULTS_URL changes remain effective.
-  if (customApi && (customApi === defaultApi || customApi === resetApi)) {
-    await setStorage({ customApiUrl: "" });
-    els.api.value = defaultApi || resetApi || "";
-  } else {
-    els.api.value = customApi || defaultApi || resetApi || "";
-  }
-  state.apiUrl = els.api.value;
+  state.apiUrl =
+    customApi && customApi !== defaultApi && customApi !== resetApi
+      ? customApi
+      : defaultApi || resetApi || customApi || "";
 
   loadCurrent();
 
-  // read query params (?lang=&model=) so the popup can deep-link.
+  // Deep-link from the popup — only the language matters now.
   const q = new URLSearchParams(location.search);
   if (q.get("lang")) els.lang.value = q.get("lang");
-  if (q.get("model")) els.model.value = normalizeAiModel(q.get("model"));
   loadCurrent();
 }
 
 // --- events -----------------------------------------------------------------
 els.lang.addEventListener("change", loadCurrent);
-els.model.addEventListener("input", updateCount);
-els.model.addEventListener("change", loadCurrent);
 els.text.addEventListener("input", () => {
   updateCount();
   // Typing makes Back available (returns to the last saved version) and
@@ -221,23 +210,6 @@ els.back?.addEventListener("click", async () => {
 els.forward?.addEventListener("click", async () => {
   const res = await promptHistoryForward(currentKey());
   await applyHistoryResult(res);
-});
-els.api.addEventListener("change", async () => {
-  const normalized = normalizeUrl(els.api.value || "");
-  const defaultApi = normalizeUrl(state.apiDefaults.defaultApiUrl || "");
-  const resetApi = normalizeUrl(state.apiDefaults.resetApiUrl || "");
-
-  // Empty or same as remote default/reset means keep using REMOTE_DEFAULTS_URL.
-  if (!normalized || normalized === defaultApi || normalized === resetApi) {
-    await setStorage({ customApiUrl: "" });
-    els.api.value = defaultApi || resetApi || "";
-    state.apiUrl = els.api.value;
-    return;
-  }
-
-  await setStorage({ customApiUrl: normalized });
-  els.api.value = normalized;
-  state.apiUrl = normalized;
 });
 els.save.addEventListener("click", save);
 els.loadDefault.addEventListener("click", loadBuiltinDefault);
