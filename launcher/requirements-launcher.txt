@@ -1,0 +1,21 @@
+# Everything the .exe must carry.
+#
+# The launcher itself only needs the Python standard library (tkinter ships
+# with the official python.org installer).  The packages below are the ones
+# the *API* imports at runtime — they are baked into the exe so a downloaded
+# API update never has to pip-install anything.
+#
+# Keep this list in sync with api/requirements.txt when that file gains a
+# new entry.  The launcher warns in its log when it detects a new dependency.
+
+fastapi>=0.110
+uvicorn[standard]>=0.23
+httpx>=0.24
+numpy
+opencv-python-headless
+Pillow
+budoux
+onnxruntime
+
+# Build-time only.
+pyinstaller>=6.6
