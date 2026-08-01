@@ -151,10 +151,14 @@ class RateGate:
         return not (is_local_provider(provider) or provider == "huggingface")
 
     @staticmethod
-    def _bucket_key(provider: str, model: str, api_key: str) -> str:
+    def _bucket_key(provider: str, model: str, api_key: str, rpm: float, burst: int) -> str:
         kf = hashlib.sha1((api_key or "").encode("utf-8")).hexdigest()[:12]
         resolved = (resolve_model(provider, model) or "auto").strip().lower()
-        return f"{provider}|{resolved}|{kf}"
+        # rpm/burst are part of the key on purpose: a ``_Bucket`` fixes its rate
+        # and capacity at construction, so a user who raises their limit in the
+        # popup must get a NEW bucket instead of silently keeping the old, slower
+        # pacing for as long as the bucket lives.
+        return f"{provider}|{resolved}|{kf}|{rpm:g}/{int(burst)}"
 
     # --- public API --------------------------------------------------------
     async def acquire(
@@ -167,6 +171,8 @@ class RateGate:
         job_id: str,
         deadline_sec: float,
         max_waiters: int,
+        rpm_override: float | None = None,
+        burst_override: int | None = None,
     ) -> None:
         """Block until this request may call the provider.
 
@@ -174,15 +180,25 @@ class RateGate:
         deadline elapses first, :class:`RateGateRejected` if the bucket is
         already saturated, or :class:`asyncio.CancelledError` if the waiter is
         cancelled (never consuming a token in any of those cases).
+
+        ``rpm_override`` / ``burst_override`` come from the user's own rate
+        settings in the extension. They replace the built-in per-provider policy
+        for this request, because only the user knows whether their key is on a
+        free tier or a paid one. Values <= 0 are ignored (treated as "not set")
+        rather than being read as "no requests allowed".
         """
         provider = canonical_provider(provider or "auto")
         if not self.enabled() or not self._gated(provider):
             return
         rpm, burst = self._policy(provider)
+        if rpm_override is not None and float(rpm_override) > 0:
+            rpm = float(rpm_override)
+        if burst_override is not None and int(burst_override) > 0:
+            burst = int(burst_override)
         if rpm <= 0:
             return  # gate disabled for this provider via config
 
-        key = self._bucket_key(provider, model, api_key)
+        key = self._bucket_key(provider, model, api_key, rpm, burst)
         bucket = self._buckets.get(key)
         if bucket is None:
             self._prune_buckets()

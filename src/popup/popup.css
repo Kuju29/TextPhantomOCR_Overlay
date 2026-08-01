@@ -307,6 +307,37 @@ textarea {
   flex: 1;
 }
 
+/* Rate-limit numbers: two labelled number inputs side by side. The label sits
+   above its input so the narrow popup never truncates "Requests / min". */
+.rate-row {
+  align-items: flex-end;
+  margin-top: 6px;
+}
+
+.rate-field {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--tp-muted);
+}
+
+.rate-field input {
+  width: 100%;
+}
+
+/* Reference line under the rate inputs. Turns amber when the entered RPM is
+   far above the provider's known policy — a silent typo there costs the user a
+   whole failed chapter. */
+.rate-preset {
+  margin-top: 6px;
+}
+
+.rate-preset[data-warn="1"] {
+  color: var(--tp-warn);
+}
+
 /* ============ Buttons ============ */
 .icon-btn {
   appearance: none;

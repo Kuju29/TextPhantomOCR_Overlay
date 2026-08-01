@@ -28,6 +28,15 @@ const WS_OPEN_TIMEOUT_MS = 8000;
 const WS_RETRIES = 2;
 const LONG_POLL_WAIT_SEC = 25;
 const LONG_POLL_FETCH_TIMEOUT_MS = 32000;
+// Submitting uploads the image bytes, so this is deliberately far longer than
+// the poll timeout: a multi-megabyte body on a slow uplink to a Space that is
+// still waking up is slow, not broken. But it must exist — without it a hung
+// or waking server left the POST pending forever and the user saw a batch that
+// simply never moved, with no error and nothing to retry.
+const SUBMIT_TIMEOUT_MS = 90000;
+// Ceiling on a server-sent Retry-After, so a bad header cannot park the
+// extension for an hour.
+const MAX_BACKOFF_MS = 60000;
 // v12 full-speed: long-poll is the reliable event path. Disable browser WS
 // subscriptions by default to avoid Hugging Face/proxy keepalive churn during
 // large unlimited batches. REST submit + long-poll still receives every result.
@@ -58,6 +67,70 @@ export function setHandlers(next) {
 export const isWsReady = () => wsReady && ws && ws.readyState === WebSocket.OPEN;
 export const getWsStatus = () => wsStatus;
 export const isWsBlocked = () => wsBlocked;
+
+// --- Server-requested backoff ----------------------------------------------
+// A 503 (queue full) or 429 from the API carries `Retry-After`. Honour it
+// GLOBALLY: "the queue is full" is a property of the server, not of the one job
+// that happened to hit it, so holding back only that job would just send the
+// next 20 straight into the same wall.
+//
+// This value used to be read off the response into `err.retryAfter` and then
+// never looked at by anything, so the client retried on its own 1.8 s gap —
+// faster than the server had just asked for, on the exact server that was
+// already saturated.
+let backoffUntil = 0;
+
+/** Record a Retry-After hint from a failed response. Returns the delay in ms. */
+function noteRetryAfter(res) {
+  const secs = Number(res.headers.get("Retry-After") || 0) || 0;
+  if (secs <= 0) return 0;
+  const ms = Math.min(secs * 1000, MAX_BACKOFF_MS);
+  backoffUntil = Math.max(backoffUntil, Date.now() + ms);
+  return ms;
+}
+
+/** Milliseconds the server has asked us to stay off it (0 when clear). */
+export function serverBackoffMs() {
+  return Math.max(0, backoffUntil - Date.now());
+}
+
+/** Sleep out any server-requested backoff. Returns how long it waited. */
+export async function awaitServerBackoff() {
+  const ms = serverBackoffMs();
+  if (ms <= 0) return 0;
+  log.info("server asked us to back off", { ms });
+  await new Promise((r) => setTimeout(r, ms));
+  return ms;
+}
+
+/**
+ * Parse a JSON response, failing with a message that names the real problem.
+ *
+ * A sleeping or still-booting Hugging Face Space answers with an HTML holding
+ * page — frequently with status 200 — and `res.json()` then throws
+ * "Unexpected token '<'", which is shown to the user verbatim and tells them
+ * nothing about what to do. Detect that case and say it in words instead.
+ */
+async function readJson(res, what) {
+  const ctype = String(res.headers.get("content-type") || "").toLowerCase();
+  if (ctype.includes("json")) return res.json();
+
+  const body = await readLimitedText(res);
+  if (ctype.includes("html") || /^\s*(?:<!doctype|<html|<)/i.test(body)) {
+    throw new Error(
+      `${what}: the API returned a web page instead of data — the server is probably still starting up. Try again in a moment.`,
+    );
+  }
+  // No JSON content type, but the body may still be JSON (a proxy that strips
+  // headers). Try it rather than failing a request that would have worked.
+  try {
+    return JSON.parse(body);
+  } catch {
+    throw new Error(
+      `${what}: expected JSON, got ${ctype || "no content type"}${body ? ` - ${body.slice(0, 200)}` : ""}`,
+    );
+  }
+}
 export const clearWsBlock = () => {
   wsBlocked = false;
 };
@@ -298,25 +371,44 @@ export function sendWsJob(jobId, payload) {
 
 /** `POST /translate` — returns the new job id and server hints. */
 export async function submitJobViaRest(base, payload, { idempotencyKey = "" } = {}) {
+  // If the server has told us it is saturated, wait before adding to the pile.
+  await awaitServerBackoff();
+
   const body = JSON.stringify(payload);
   const t0 = Date.now();
   const headers = { "Content-Type": "application/json" };
   if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
-  const res = await fetch(base.replace(/\/+$/, "") + API_PATHS.TRANSLATE, {
-    method: "POST",
-    headers,
-    cache: "no-store",
-    redirect: "follow",
-    body,
-  });
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), SUBMIT_TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch(base.replace(/\/+$/, "") + API_PATHS.TRANSLATE, {
+      method: "POST",
+      headers,
+      cache: "no-store",
+      redirect: "follow",
+      signal: ctrl.signal,
+      body,
+    });
+  } catch (e) {
+    if (e?.name === "AbortError") {
+      throw new Error(
+        `REST submit timed out after ${Math.round(SUBMIT_TIMEOUT_MS / 1000)}s — the server did not respond. It may be starting up or overloaded.`,
+      );
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
   if (!res.ok) {
+    const retryAfterMs = noteRetryAfter(res);
     const errBody = await readLimitedText(res);
     const err = new Error(`REST submit failed: HTTP ${res.status}${errBody ? ` - ${errBody}` : ""}`);
     err.status = res.status;
-    err.retryAfter = Number(res.headers.get("Retry-After") || 0) || 0;
+    err.retryAfterMs = retryAfterMs;
     throw err;
   }
-  const data = await res.json();
+  const data = await readJson(res, "REST submit failed");
   if (!data?.id) throw new Error("REST submit failed: no id");
   log.info("job submitted (rest)", {
     id: data.id,
@@ -367,10 +459,11 @@ async function fetchJobStatus(url) {
   try {
     const res = await fetch(url, { cache: "no-store", signal: ctrl.signal });
     if (!res.ok) {
+      noteRetryAfter(res);
       const body = await readLimitedText(res);
       throw new Error(`REST poll failed: HTTP ${res.status}${body ? ` - ${body}` : ""}`);
     }
-    return await res.json();
+    return await readJson(res, "REST poll failed");
   } finally {
     clearTimeout(t);
   }
@@ -439,12 +532,13 @@ async function fetchBatchPoll(base, ids) {
       }),
     });
     if (!res.ok) {
+      noteRetryAfter(res);
       const body = await readLimitedText(res);
       const err = new Error(`Batch poll failed: HTTP ${res.status}${body ? ` - ${body}` : ""}`);
       err.status = res.status;
       throw err;
     }
-    return await res.json();
+    return await readJson(res, "Batch poll failed");
   } finally {
     clearTimeout(t);
   }
@@ -521,7 +615,11 @@ async function dispatchBatchRecord(base, rec) {
     return true;
   }
 
-  return false; // queued / running — keep waiting
+  // Queued / running. The server tells us WHERE in the queue this job sits on
+  // every poll; report it so a long wait can be shown as "you are 12th in line"
+  // rather than as a progress bar that has silently stopped moving.
+  handlers.onStatus(jobId, rec);
+  return false; // keep waiting
 }
 
 async function runBatchPollLoop() {

@@ -1,6 +1,8 @@
 """Headless checks for the launcher's non-GUI logic (tkinter is stubbed)."""
 from __future__ import annotations
 
+import json
+import shutil
 import io
 import os
 import sys
@@ -181,6 +183,102 @@ check("source file recorded", sample["TP_LENS_CACHE_MAX"].where == "backend/lens
       sample["TP_LENS_CACHE_MAX"].where)
 advanced = [v for v in found if v.name not in L.CURATED_KEYS]
 check("advanced page would show the rest", len(advanced) > 25, f"{len(advanced)} rows")
+
+print("\n== settings schema reconciliation ==")
+schema = L.build_schema(API)
+check("built-in layout used when the repo ships none", schema.origin == "built-in",
+      schema.origin)
+check("no curated field is stale against the real api", schema.hidden == [],
+      str(schema.hidden))
+check("every curated field survived", len(schema.specs) == len(L.CURATED))
+check("the rest is offered as extra", len(schema.extra) > 20, str(len(schema.extra)))
+workers = next(s for s in schema.specs if s.key == "SERVER_MAX_WORKERS")
+check("default comes from the API source, not the exe", workers.default == "15",
+      workers.default)
+gemini = next(s for s in schema.specs if s.key == "TP_GEMINI_THINKING")
+check("choice fields keep their kind", gemini.kind == "choice", gemini.kind)
+key = next(s for s in schema.specs if s.key == "AI_API_KEY")
+check("secret fields keep their kind", key.kind == "secret", key.kind)
+
+# An API that dropped an option must not leave a dead control behind.
+shrunk = SANDBOX / "api-shrunk"
+shutil.rmtree(shrunk, ignore_errors=True)
+(shrunk / "backend").mkdir(parents=True, exist_ok=True)
+(shrunk / "backend" / "main.py").write_text("app = 1\n")
+(shrunk / "backend" / "config.py").write_text(
+    'a = _env_int("SERVER_MAX_WORKERS", 8)\n'
+    'b = _env_bool("TP_DEBUG", False)\n'
+    'c = _env_str("TP_BRAND_NEW_OPTION", "hello")\n', encoding="utf-8")
+small = L.build_schema(shrunk)
+kept = {s.key for s in small.specs}
+check("only the options this API reads are shown",
+      kept == {"SERVER_MAX_WORKERS", "TP_DEBUG"}, str(sorted(kept)))
+check("removed options are reported as hidden",
+      "TP_VERTICAL_ROI" in small.hidden and "AI_API_KEY" in small.hidden,
+      f"{len(small.hidden)} hidden")
+check("a brand new option is surfaced as extra",
+      small.extra == ["TP_BRAND_NEW_OPTION"], str(small.extra))
+check("its default is read from the source",
+      next(s for s in small.specs if s.key == "SERVER_MAX_WORKERS").default == "8")
+check("empty groups are dropped", set(small.groups) == {"server", "logging"},
+      str(sorted(small.groups)))
+check("the change is explained in the notes",
+      any("hidden because" in m for _lvl, m in small.notes),
+      str([m[:40] for _l, m in small.notes]))
+
+print("\n== repo-supplied ui-settings.json ==")
+(shrunk / "ui-settings.json").write_text(json.dumps({
+    "groups": [{"id": "mine", "en": "My group", "th": "กลุ่มของฉัน"}],
+    "fields": [
+        {"key": "TP_BRAND_NEW_OPTION", "group": "mine", "kind": "str",
+         "en": "Brand new", "th": "ของใหม่"},
+        {"key": "SERVER_MAX_WORKERS", "group": "mine", "kind": "int",
+         "en": "Workers", "th": "เวิร์กเกอร์"},
+        {"key": "GONE_FROM_API", "group": "mine", "en": "Ghost", "th": "ผี"},
+    ],
+}, ensure_ascii=False), encoding="utf-8")
+repo = L.build_schema(shrunk)
+check("repo layout wins over the built-in one", repo.origin == "ui-settings.json",
+      repo.origin)
+check("repo fields are shown", {s.key for s in repo.specs}
+      == {"TP_BRAND_NEW_OPTION", "SERVER_MAX_WORKERS"},
+      str(sorted(s.key for s in repo.specs)))
+check("a repo field the API does not read is still hidden",
+      repo.hidden == ["GONE_FROM_API"], str(repo.hidden))
+check("repo group titles are used", repo.groups["mine"] == ("My group", "กลุ่มของฉัน"))
+check("repo labels are bilingual",
+      next(s for s in repo.specs if s.key == "TP_BRAND_NEW_OPTION").th == "ของใหม่")
+check("TP_DEBUG moved to extra because the repo layout omits it",
+      "TP_DEBUG" in repo.extra, str(repo.extra))
+
+(shrunk / "ui-settings.json").write_text("{ this is not json", encoding="utf-8")
+broken = L.build_schema(shrunk)
+check("a broken layout file falls back loudly, not silently",
+      broken.origin == "built-in"
+      and any(lvl == "err" for lvl, _m in broken.notes),
+      str([m for _l, m in broken.notes])[:100])
+(shrunk / "ui-settings.json").write_text(json.dumps(
+    {"fields": [{"group": "x", "en": "no key here"}]}), encoding="utf-8")
+broken2 = L.build_schema(shrunk)
+check("a field without a key is rejected with a reason",
+      any("has no 'key'" in m for _l, m in broken2.notes),
+      str([m for _l, m in broken2.notes])[:120])
+(shrunk / "ui-settings.json").unlink()
+
+print("\n== update diff snapshot ==")
+before = L.discover_env_vars(shrunk)
+added, removed = L.record_env_snapshot(before)
+check("first snapshot reports nothing as new", (added, removed) == ([], []),
+      f"{added} {removed}")
+(shrunk / "backend" / "config.py").write_text(
+    'a = _env_int("SERVER_MAX_WORKERS", 8)\n'
+    'd = _env_str("TP_ANOTHER_ONE", "x")\n', encoding="utf-8")
+added, removed = L.record_env_snapshot(L.discover_env_vars(shrunk))
+check("added options detected", added == ["TP_ANOTHER_ONE"], str(added))
+check("removed options detected", removed == ["TP_BRAND_NEW_OPTION", "TP_DEBUG"],
+      str(removed))
+check("snapshot persisted for the next launch",
+      L.read_env_snapshot()["added"] == ["TP_ANOTHER_ONE"])
 
 print("\n== prompt reading ==")
 for lang in ("th", "en", "ja"):

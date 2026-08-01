@@ -44,6 +44,77 @@
     return payload;
   }
 
+  // --- Canvas upload encoding ----------------------------------------------
+  // This path used to always emit PNG. A full manga page is 5-15 MB of
+  // lossless PNG, every byte of it is base64'd (+33%), pushed through the
+  // service worker, sent over the wire, and then DECODED by the API container
+  // — which on a 2-vCPU box is the most expensive thing the direct lane does
+  // before any translation work starts. WebP q92 is visually indistinguishable
+  // at OCR resolution and typically 15-25x smaller.
+  //
+  // Both sides stay switchable. Set `uploadFormat` in extension storage to
+  // "png" to restore the original lossless upload; the API accepts either, so
+  // the two settings can be moved independently while measuring.
+  const UPLOAD_DEFAULTS = { format: "webp", quality: 0.92 };
+  const UPLOAD_FORMATS = new Set(["webp", "png", "jpeg"]);
+  let uploadPrefsPromise = null;
+  let encodeFallbackWarned = false;
+
+  function readUploadPrefs() {
+    if (uploadPrefsPromise) return uploadPrefsPromise;
+    uploadPrefsPromise = new Promise((resolve) => {
+      try {
+        chrome.storage.local.get(["uploadFormat", "uploadQuality"], (it) => {
+          void chrome.runtime.lastError;
+          const fmt = String(it?.uploadFormat || "").trim().toLowerCase();
+          const q = Number(it?.uploadQuality);
+          resolve({
+            format: UPLOAD_FORMATS.has(fmt) ? fmt : UPLOAD_DEFAULTS.format,
+            quality: Number.isFinite(q) && q > 0 && q <= 1 ? q : UPLOAD_DEFAULTS.quality,
+          });
+        });
+      } catch (e) {
+        // Storage is unreadable (torn-down context). The defaults ARE the
+        // intended behaviour, but say so rather than let a silent PNG-vs-WebP
+        // swap look like a code change nobody made.
+        TP.log.warn("upload prefs unreadable; using defaults", {
+          error: e?.message || String(e),
+          ...UPLOAD_DEFAULTS,
+        });
+        resolve({ ...UPLOAD_DEFAULTS });
+      }
+    });
+    return uploadPrefsPromise;
+  }
+
+  // Keep the cached prefs honest when the popup changes them mid-session.
+  try {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area === "local" && ("uploadFormat" in changes || "uploadQuality" in changes))
+        uploadPrefsPromise = null;
+    });
+  } catch {
+    /* no storage listener available — prefs are read once per page */
+  }
+
+  /** Encode a canvas, reporting when the browser could not honour the format. */
+  function encodeCanvas(canvas, prefs) {
+    if (prefs.format === "png") return canvas.toDataURL("image/png");
+    const mime = `image/${prefs.format}`;
+    const du = canvas.toDataURL(mime, prefs.quality);
+    // toDataURL silently returns PNG when the MIME type is unsupported. The
+    // output is still CORRECT, just ~20x the bytes, so this must be visible:
+    // otherwise the whole point of the change disappears without a trace.
+    if (du && !du.startsWith(`data:${mime}`) && !encodeFallbackWarned) {
+      encodeFallbackWarned = true;
+      TP.log.warn("canvas cannot encode requested format; browser produced PNG instead", {
+        requested: mime,
+        got: du.slice(5, du.indexOf(";")),
+      });
+    }
+    return du;
+  }
+
   /**
    * Get a data URI for an image element: its own `src` if already inline, else
    * draw it to a canvas, else fetch the bytes.
@@ -64,7 +135,7 @@
         const ctx = canvas.getContext("2d", { willReadFrequently: false });
         if (ctx) {
           ctx.drawImage(img, 0, 0, w, h);
-          const du = canvas.toDataURL("image/png");
+          const du = encodeCanvas(canvas, await readUploadPrefs());
           if (du && du.startsWith("data:image/")) return du;
         }
       }

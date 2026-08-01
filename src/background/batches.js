@@ -15,6 +15,7 @@
 
 import { broadcast } from "../shared/messaging.js";
 import { sendToTab, sendToastToTab } from "./tabs-messaging.js";
+import { serverBackoffMs } from "./transport.js";
 
 const TOAST_MIN_INTERVAL_MS = 350;
 const BATCH_TTL_MS = 20 * 60 * 1000;
@@ -97,6 +98,48 @@ export function batchToast(b, text, ms = 2000, force = false) {
   sendToastToTab(b.tabId, b.frameId || 0, text, ms);
 }
 
+// --- Server queue visibility ------------------------------------------------
+// The API reports `queue_position` / `queue_depth` on every status poll, but
+// nothing used to read them: on a busy server the toast sat at
+// "processing 3/20" for a minute and looked frozen, which is what makes people
+// cancel and re-run — adding more load to the server that was already the
+// problem. Keep the most recent (lowest) position so the toast can say where
+// the run actually stands.
+const QUEUE_INFO_TTL_MS = 15000;
+let queueInfo = { position: 0, depth: 0, ts: 0 };
+
+/** Record a server status record (from the poll transport). */
+export function noteQueueStatus(msg) {
+  const depth = Number(msg?.queue_depth) || 0;
+  const position = Number(msg?.queue_position) || 0;
+  if (depth <= 0 && position <= 0) {
+    // Nothing waiting: clear immediately rather than letting a stale "queue #9"
+    // linger while the run is in fact already flowing.
+    queueInfo = { position: 0, depth: 0, ts: 0 };
+    return;
+  }
+  const now = Date.now();
+  const fresh = now - queueInfo.ts < QUEUE_INFO_TTL_MS;
+  // Lowest position across this window = how close the run's FRONT is.
+  const best =
+    fresh && queueInfo.position > 0 && position > 0
+      ? Math.min(queueInfo.position, position)
+      : position;
+  queueInfo = { position: best, depth, ts: now };
+}
+
+/** Human-readable queue/backoff suffix, or "" when the server is keeping up. */
+function queueSuffix() {
+  const backoff = serverBackoffMs();
+  if (backoff > 0) return `server busy, waiting ${Math.ceil(backoff / 1000)}s`;
+  if (Date.now() - queueInfo.ts > QUEUE_INFO_TTL_MS) return "";
+  if (queueInfo.position > 0 && queueInfo.depth > 0) {
+    return `queue #${queueInfo.position} of ${queueInfo.depth}`;
+  }
+  if (queueInfo.depth > 0) return `${queueInfo.depth} waiting on server`;
+  return "";
+}
+
 /** Render and broadcast the batch's current progress. */
 export function batchUpdateToast(b, stage, force = false) {
   if (!b) return;
@@ -113,6 +156,10 @@ export function batchUpdateToast(b, stage, force = false) {
   if (skippedTotal) parts.push(`skipped ${skippedTotal}`);
   if (s.error) parts.push(`errors ${s.error}`);
   if (s.aborted) parts.push(`cancelled ${s.aborted}`);
+  // Only while work is still outstanding — a finished run showing a queue
+  // number would just be confusing.
+  const queue = s.finished >= s.total && s.total ? "" : queueSuffix();
+  if (queue) parts.push(queue);
   const msg = `${head} ${parts.join(" | ")} ${stage ? `• ${stage}` : ""}`.trim();
 
   const ms = s.finished >= s.total && s.total ? 2400 : 60000;

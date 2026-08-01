@@ -60,7 +60,7 @@ from typing import Any
 from backend.lens.languages import normalize as normalize_lang
 from backend.render.fonts import budoux_parser
 from backend.render.layout import distribute_to_template, pad_lines, font_size_minimum_for_image
-from backend.render.region import LANGUAGE_DIRECTION, is_cjk_text, resolve_text_direction
+from backend.render.region import direction_preset, is_cjk_text, resolve_text_direction
 from backend.render.patch import _line_text  # type: ignore[attr-defined]
 from backend.render.tp_html import fit_item_font_size
 
@@ -930,7 +930,10 @@ def build_ai_tree(
     #   source  0° → target 90°  : image_rotates = True   (flat → vertical)
     #   source  0° → target  0°  : image_rotates = False  (no change)
     #   source 90° → target 90°  : image_rotates = False  (no change)
-    lang_preset = LANGUAGE_DIRECTION.get(lang_norm, "")
+    # Not ``LANGUAGE_DIRECTION[lang_norm]``: lang_norm is Lens-cased ("zh-CN")
+    # and the table is lowercase, so Chinese used to read as an unlisted
+    # language and follow the source page instead of its own "auto" entry.
+    lang_preset = direction_preset(target_lang)
     image_orientation = detect_image_orientation(bubble_groups)
     if lang_preset in ("h", "hr"):
         target_orientation = "h"

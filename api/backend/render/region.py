@@ -18,6 +18,10 @@ from typing import Final, NamedTuple
 
 # Reading direction per target language. "h" horizontal, "v" vertical,
 # "hr" horizontal right-to-left, "auto" decide by region aspect.
+#
+# Keys are LOWERCASE. Never index this dict directly — call
+# :func:`direction_preset`, which normalises first. Two different normalisers
+# exist in this codebase and only one of them lowercases; see that function.
 LANGUAGE_DIRECTION: Final[dict[str, str]] = {
     "th": "h", "en": "h", "id": "h", "ms": "h", "vi": "h", "tl": "h",
     "fil": "h", "fr": "h", "de": "h", "es": "h", "pt": "h", "it": "h",
@@ -98,6 +102,33 @@ def _normalise_lang(lang: str) -> str:
     return (lang or "").strip().lower().replace("_", "-")
 
 
+def direction_preset(lang: str) -> str:
+    """LANGUAGE_DIRECTION entry for *lang*, or ``""`` when it is unlisted.
+
+    The single entry point for reading the table, because indexing it directly
+    is a trap. There are two language normalisers in this codebase:
+
+      * this module's :func:`_normalise_lang` lowercases;
+      * :func:`backend.lens.languages.normalize` preserves the mixed case Lens
+        itself demands — it returns ``"zh-CN"``, not ``"zh-cn"``.
+
+    The table is keyed lowercase, so every caller that passed a Lens-normalised
+    code missed on Chinese and read it as an unlisted language. That is how
+    ``zh-CN`` came to be typeset horizontally while ``ja`` — the same ``"auto"``
+    entry one line over — was vertical, and it also made the ``zh-hans`` /
+    ``zh-hant`` keys unreachable. Nothing raised; the miss just looked like a
+    deliberate default.
+
+    Regional variants fall back to their primary subtag (``zh-Hans-CN`` ->
+    ``zh``), matching what :func:`is_rtl` already does for ``fa-IR`` / ``ar-EG``.
+    """
+    code = _normalise_lang(lang)
+    if code in LANGUAGE_DIRECTION:
+        return LANGUAGE_DIRECTION[code]
+    primary = code.split("-", 1)[0]
+    return LANGUAGE_DIRECTION.get(primary, "")
+
+
 def resolve_text_direction(target_lang: str, text: str = "") -> str:
     """Return "h" or "v" for the target language - deterministic.
 
@@ -105,8 +136,7 @@ def resolve_text_direction(target_lang: str, text: str = "") -> str:
     separate concern handled by :func:`is_rtl` / the CSS ``direction`` property,
     not by this axis selection.
     """
-    code = _normalise_lang(target_lang)
-    preset = LANGUAGE_DIRECTION.get(code)
+    preset = direction_preset(target_lang)
     if preset in ("h", "hr"):
         return "h"
     if preset == "v":

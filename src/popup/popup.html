@@ -48,6 +48,21 @@
 
           <div class="note">💡 Right-click any image on a page to translate it — or use the Page actions below on sites that block right-click.</div>
 
+          <!-- Reading direction: rebuild text boxes when the page reads on a
+               different axis than the target language. Only shown for the text
+               overlay modes, where there is a layout to rebuild. -->
+          <div id="relayout-wrap" class="relayout-wrap" style="display: none">
+            <div class="divider" role="separator"></div>
+            <div class="section-title">Reading direction</div>
+            <div class="action-box">
+              <label class="label-row toggle-row">
+                <span>↔️ Rotate Translated to fit language</span>
+                <input type="checkbox" id="relayout-translated" />
+              </label>
+              <div class="hint">Vertical Japanese into horizontal Thai/English gets rebuilt into lines that read the right way instead of sideways columns. Only runs on pages that actually change direction. Turn off to keep Google Lens's original boxes.</div>
+            </div>
+          </div>
+
           <!-- Display applies to text overlays only — hidden in Google Lens
                (image) mode, where the translation is baked into the image. -->
           <div id="display-wrap" class="display-wrap">
@@ -228,6 +243,32 @@
                 <input type="checkbox" id="ai-page-image" />
               </label>
               <div class="hint">Lets the model see who is speaking (gender, mood, replies) for more natural dialogue. Uses more tokens per page; needs a vision-capable model.</div>
+            </div>
+
+            <!-- Rate limit: pace requests to the user's own model quota. -->
+            <div class="field" id="ai-rate-wrap" style="display: none">
+              <label class="label-row" style="cursor: pointer">
+                <span>Pace requests to my limit</span>
+                <input type="checkbox" id="rate-limit-enabled" />
+              </label>
+              <div class="inline-row rate-row">
+                <label class="rate-field">
+                  <span>Requests / min</span>
+                  <input type="number" id="rate-rpm" min="1" max="600" step="1" placeholder="Auto" />
+                </label>
+                <label class="rate-field">
+                  <span>Burst</span>
+                  <input type="number" id="rate-burst" min="1" max="60" step="1" placeholder="Auto" />
+                </label>
+              </div>
+              <div id="rate-preset-hint" class="hint rate-preset" aria-live="polite"></div>
+              <div class="hint">
+                <strong>Leave both empty</strong> unless you know your quota — the server already uses a safe limit for your provider.<br />
+                <strong>Requests / min:</strong> copy the number from your provider's rate-limit page. It is per API key, not per page.<br />
+                <strong>Burst:</strong> how many may fire back-to-back before pacing starts. A quarter of your RPM is a good rule; leave empty to let the server pick.<br />
+                Setting these HIGHER than your real quota does not make translation faster — the provider just answers with 429 errors and those pages fail.
+              </div>
+              <div class="hint">Turning the switch off removes pacing entirely: fine for a few pages, likely to fail on a 20-page chapter.</div>
             </div>
           </section>
         </section>

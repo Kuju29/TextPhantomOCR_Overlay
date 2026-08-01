@@ -7,6 +7,7 @@ only show up on the user's Windows machine.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -101,6 +102,82 @@ app.adv_vars[name].set("")
 app._save_from_ui()
 check("cleared advanced value removed",
       name not in L.load_settings().get("advanced_env", {}))
+
+print("\n== the settings page follows the installed API ==")
+check("schema built at startup", len(app.schema.specs) == len(L.CURATED),
+      f"{len(app.schema.specs)} fields")
+check("a widget exists for every live field",
+      all(k in app.vars for k in app.schema.keys),
+      str(sorted(app.schema.keys - set(app.vars))))
+check("banner points at the extras but reports nothing hidden",
+      app.schema_banner is not None
+      and "Advanced page" in app.schema_banner["text"]
+      and "hidden" not in app.schema_banner["text"],
+      app.schema_banner["text"] if app.schema_banner else "no banner")
+
+# Simulate an API update that drops most options and adds a new one.
+shrunk = Path("/tmp/tp-ui/api-next")
+shutil.rmtree(shrunk, ignore_errors=True)
+(shrunk / "backend").mkdir(parents=True, exist_ok=True)
+(shrunk / "backend" / "main.py").write_text("app = 1\n")
+(shrunk / "backend" / "config.py").write_text(
+    'a = _env_int("SERVER_MAX_WORKERS", 3)\n'
+    'b = _env_str("TP_SHINY_NEW", "yes")\n', encoding="utf-8")
+L.record_env_snapshot(L.discover_env_vars(API))          # baseline = old API
+app.var_source.set(str(shrunk))
+app._reload_schema()
+
+check("vanished fields are gone from the page",
+      "TP_VERTICAL_ROI" not in app.schema.keys and "AI_API_KEY" not in app.schema.keys,
+      str(sorted(app.schema.keys)))
+check("surviving field kept", "SERVER_MAX_WORKERS" in app.schema.keys)
+check("its default now comes from the new source",
+      next(s for s in app.schema.specs if s.key == "SERVER_MAX_WORKERS").default == "3")
+check("a banner explains what happened", app.schema_banner is not None)
+banner = app.schema_banner["text"]
+check("banner names the hidden count", "hidden" in banner, banner[:80])
+app._set_lang("th")
+check("banner is translated too", "ซ่อน" in app.schema_banner["text"],
+      app.schema_banner["text"][:60])
+app._set_lang("en")
+
+added, removed = L.record_env_snapshot(L.discover_env_vars(shrunk))
+check("snapshot sees the new option", added == ["TP_SHINY_NEW"], str(added))
+app._reload_advanced()
+check("new option is on the advanced page", "TP_SHINY_NEW" in app.adv_vars)
+check("nav badge counts it", app._nav_badges.get("advanced") == "● 1",
+      str(app._nav_badges))
+check("badge survives a language switch",
+      (app._set_lang("th"), "● 1" in app._nav_buttons["advanced"]["text"])[1],
+      app._nav_buttons["advanced"]["text"])
+app._set_lang("en")
+check("removed options are summarised", len(removed) > 10, f"{len(removed)} removed")
+
+print("\n== cleaning up values the API no longer has ==")
+app.settings["env"]["TP_VERTICAL_ROI"] = "false"      # left over from the old API
+app.settings["advanced_env"]["TP_LENS_CACHE_MAX"] = "64"
+app.settings["advanced_env"]["TP_SHINY_NEW"] = "keep-me"
+orphans = app._orphan_setting_keys()
+check("orphans detected", "TP_VERTICAL_ROI" in orphans and "TP_LENS_CACHE_MAX" in orphans,
+      str(orphans))
+check("still-valid values are not touched", "TP_SHINY_NEW" not in orphans)
+app._cleanup_orphan_settings()
+stored = L.load_settings()
+check("orphans removed from disk",
+      "TP_VERTICAL_ROI" not in stored["env"]
+      and "TP_LENS_CACHE_MAX" not in stored["advanced_env"], str(stored["env"]))
+check("valid value survived cleanup",
+      stored["advanced_env"]["TP_SHINY_NEW"] == "keep-me")
+check("cleanup button disabled once clean", app.btn_cleanup["state"] == "disabled")
+
+# back to the real API for the remaining checks
+app.var_source.set(str(API))
+app._reload_schema()
+L.record_env_snapshot(L.discover_env_vars(API))
+app._reload_advanced()
+check("page restored after pointing back at the full API",
+      len(app.schema.specs) == len(L.CURATED) and app.schema_banner is not None,
+      f"{len(app.schema.specs)} fields")
 
 print("\n== prompt page ==")
 app.var_prompt_lang.set("th")

@@ -109,12 +109,21 @@ class Settings:
     textblock_model_path: str = field(
         default_factory=lambda: _env_str("TP_TEXTBLOCK_MODEL", "models/manga-bubble-yolo.onnx")
     )
-    # Repo files live under onnx/: yolo26n.onnx (nano) and yolo26s.onnx
-    # (small, mAP50 0.961 vs 0.947).  Default is s; switch via env var.
+    # Repo files live under onnx/: yolo26n.onnx (nano, mAP50 0.947) and
+    # yolo26s.onnx (small, mAP50 0.961).
+    #
+    # Default is NANO. On a 2-vCPU container the small model is the largest
+    # single CPU cost in the AI lane, and nano runs 2-3x faster for 1.4 points
+    # of mAP50. Set TP_TEXTBLOCK_MODEL_URL to the yolo26s URL to go back.
+    #
+    # The Dockerfile takes the SAME name as a build ARG, so on Hugging Face a
+    # Space variable named TP_TEXTBLOCK_MODEL_URL switches both the model baked
+    # in at build time and the one the runtime downloader would fetch — keep
+    # this default and the Dockerfile's ARG default in sync.
     textblock_model_url: str = field(
         default_factory=lambda: _env_str(
             "TP_TEXTBLOCK_MODEL_URL",
-            "https://huggingface.co/Kiuyha/Manga-Bubble-YOLO/resolve/main/onnx/yolo26s.onnx",
+            "https://huggingface.co/Kiuyha/Manga-Bubble-YOLO/resolve/main/onnx/yolo26n.onnx",
         )
     )
     # How many parallel ONNX sessions to keep ready.
@@ -129,6 +138,32 @@ class Settings:
         # Default to one session. Only lens_text.ai needs this model; direct Lens
         # paths must not pay for a multi-session ONNX pool on small HF CPUs.
         default_factory=lambda: max(1, _env_int("TP_TEXTBLOCK_POOL_SIZE", 1))
+    )
+
+    # Vertical ROI cropping for the text-block model -------------------------
+    # When a page has vertical text, the detector can be run on crops of just
+    # those regions instead of the whole page.
+    #
+    # This is NOT a speed optimisation. The model resizes every input to
+    # 1280x1280, so one crop costs the same as one full page and N crops cost N
+    # times as much. The gain is effective RESOLUTION: a narrow column blown up
+    # to 1280 px is far easier to read than the same column in a downscaled
+    # full page. The two limits below keep that trade honest — crops are only
+    # used when there are few of them and they are genuinely smaller than the
+    # page; otherwise the full-page path runs and says so in the log.
+    vertical_roi_enabled: bool = field(default_factory=lambda: _env_bool("TP_VERTICAL_ROI", True))
+    # Padding around each vertical region, as a fraction of its shorter side
+    # (a two-glyph-height floor also applies). Keeps the bubble outline in.
+    vertical_roi_margin_ratio: float = field(
+        default_factory=lambda: max(0.0, _env_float("TP_VERTICAL_ROI_MARGIN_RATIO", 0.15))
+    )
+    # How many crops may be inferred before falling back to their union.
+    vertical_roi_max_calls: int = field(
+        default_factory=lambda: max(1, _env_int("TP_VERTICAL_ROI_MAX_CALLS", 3))
+    )
+    # If the crops already cover this much of the page, cropping buys nothing.
+    vertical_roi_max_coverage: float = field(
+        default_factory=lambda: min(1.0, max(0.05, _env_float("TP_VERTICAL_ROI_MAX_COVERAGE", 0.6)))
     )
 
     # Lens-direct rendering --------------------------------------------------
@@ -146,6 +181,24 @@ class Settings:
     # quality : always run ONNX/self-block path for lens_text.ai.
     ai_layout_mode: str = field(
         default_factory=lambda: (_env_str("TP_AI_LAYOUT_MODE", "auto") or "auto").lower()
+    )
+
+    # Orientation relayout for the Translated layer ---------------------------
+    # When a page's source text runs on the other axis from the target language
+    # (vertical Japanese -> horizontal Thai), Lens's own MT boxes are rebuilt at
+    # the target orientation instead of rendering 90°-rotated columns. No
+    # provider call is involved, so users without AI quota get readable
+    # vertical->horizontal pages too.
+    #
+    # The AI layer deliberately has no equivalent switch: it always builds
+    # geometry from the target language (see _should_use_onnx_for_ai).
+    #
+    # This is a DEFAULT only. A request may carry ``{"layout":
+    # {"relayout_translated": bool}}`` from the extension's toggle, and that
+    # always wins — this value applies when the client sends nothing (older
+    # builds, curl, the CLI).
+    relayout_translated: bool = field(
+        default_factory=lambda: _env_bool("TP_RELAYOUT_TRANSLATED", True)
     )
 
     # Warmup -----------------------------------------------------------------

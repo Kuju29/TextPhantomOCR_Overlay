@@ -1,0 +1,65 @@
+{
+  "_readme": [
+    "OPTIONAL. Copy this file into the repo as  api/ui-settings.json  to take",
+    "control of the launcher's Settings page from the API side — no new .exe.",
+    "",
+    "The launcher reads it from the downloaded api folder every time it starts",
+    "and after every update. Rules it applies afterwards:",
+    "  * a field whose 'key' is not read by the API source is hidden,",
+    "  * 'default' and the value type are taken from the API source, not here,",
+    "  * anything you do not list still shows up on the Advanced page.",
+    "If this file is malformed the launcher says so in the log and keeps its",
+    "own built-in layout — it never silently ignores you.",
+    "",
+    "kind: str | int | float | bool | choice | secret",
+    "      (choice needs 'choices'; secret masks the input)"
+  ],
+
+  "version": 1,
+
+  "groups": [
+    { "id": "server",   "en": "Server & performance", "th": "เซิร์ฟเวอร์และประสิทธิภาพ" },
+    { "id": "ai",       "en": "AI provider",          "th": "ผู้ให้บริการ AI" },
+    { "id": "pipeline", "en": "Pipeline & rendering", "th": "ไปป์ไลน์และการเรนเดอร์" },
+    { "id": "logging",  "en": "Logging",              "th": "การบันทึก log" }
+  ],
+
+  "fields": [
+    {
+      "key": "SERVER_MAX_WORKERS",
+      "group": "server",
+      "kind": "int",
+      "en": "Total workers (parallel jobs)",
+      "th": "จำนวน worker รวม (งานที่รันพร้อมกัน)",
+      "hint_en": "Total processing budget. 4-8 is plenty on a home PC.",
+      "hint_th": "โควตางานรวมทั้งหมด เครื่องบ้านทั่วไปใช้ 4-8 ก็พอ"
+    },
+    {
+      "key": "AI_API_KEY",
+      "group": "ai",
+      "kind": "secret",
+      "en": "AI API key",
+      "th": "คีย์ AI (API key)",
+      "hint_en": "Used when the extension sends no key of its own.",
+      "hint_th": "ใช้เมื่อส่วนขยายไม่ได้ส่งคีย์มาเอง"
+    },
+    {
+      "key": "TP_AI_LAYOUT_MODE",
+      "group": "pipeline",
+      "kind": "choice",
+      "choices": ["auto", "fast", "quality"],
+      "en": "AI layout mode",
+      "th": "โหมดจัดเลย์เอาต์ของ AI",
+      "hint_en": "fast = never run ONNX, quality = always.",
+      "hint_th": "fast = ไม่รัน ONNX เลย, quality = รันทุกครั้ง"
+    },
+    {
+      "key": "TP_ACCESS_LOG_MODE",
+      "group": "logging",
+      "kind": "choice",
+      "choices": ["summary", "uvicorn", "off"],
+      "en": "Log mode",
+      "th": "โหมดบันทึก log"
+    }
+  ]
+}

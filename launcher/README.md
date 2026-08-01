@@ -13,6 +13,7 @@ launcher/
 ├─ requirements-launcher.txt   what the exe must carry
 ├─ build_exe.bat               Windows build  → dist\TextPhantomLocalAPI.exe
 ├─ build_exe.sh                Linux / macOS build
+├─ ui-settings.example.json    optional: let the repo drive the Settings page
 └─ tests/                      headless checks (no GUI needed)
 ```
 
@@ -114,9 +115,9 @@ way beforehand.
 | Page | What it does |
 |---|---|
 | **Dashboard / หน้าหลัก** | Start · Stop · Restart, the local address, uptime, and the live colour-coded log. The level filter *hides* lines rather than dropping them, so switching back to *all* still shows the history; *Wrap lines* swaps the horizontal scrollbar for word wrapping. |
-| **Settings / ตั้งค่า** | Host & port, worker counts, CPU gate, timeouts, AI key, rate limits, layout mode, ONNX sessions, log verbosity — each with its env-var name and the API's own default shown underneath. |
+| **Settings / ตั้งค่า** | Host & port, worker counts, CPU gate, timeouts, AI key, rate limits, layout mode, ONNX sessions, log verbosity — each with its env-var name and the API's own default shown underneath. The page **rebuilds itself from the installed API** (see §6). |
 | **AI prompt / พรอมต์ AI** | Loads the API's built-in style prompt for a language and lets you replace it. Used when the extension does not send its own prompt. |
-| **Advanced / ขั้นสูง** | **Auto-generated**: every `os.environ` / `_env_*` option found in the downloaded API source (29 extra options today). New API options appear here by themselves after an update. |
+| **Advanced / ขั้นสูง** | **Auto-generated**: every `os.environ` / `_env_*` option found in the downloaded API source (34 extra options today). Options an update added are tagged `NEW` and listed first; removed ones are named at the top. |
 | **Source & update / ต้นทาง & อัปเดต** | The source URL, *Check update*, *Update now*, the installed commit, and the cache folder. |
 | **About** | Paths, versions, endpoint list. |
 
@@ -154,7 +155,48 @@ Updating is blocked while the server runs — stop it first.
 
 ---
 
-## 6. Limits worth knowing / ข้อจำกัดที่ควรรู้
+## 6. The settings menu maintains itself / เมนูตั้งค่าปรับตัวเอง
+
+Every time the launcher starts — and immediately after an update — it scans the
+API source it just downloaded and rebuilds both settings pages from what it
+finds. Nothing is hard-wired to one API version.
+
+ทุกครั้งที่เปิดโปรแกรม และทันทีหลังอัปเดต โปรแกรมจะสแกนซอร์ส API ที่โหลดมา
+แล้วสร้างหน้าตั้งค่าใหม่จากสิ่งที่เจอจริง ไม่ได้ผูกกับ API เวอร์ชันใดเวอร์ชันหนึ่ง
+
+| The API… | What you see |
+|---|---|
+| **adds** an option | it appears on **Advanced**, tagged `NEW`, sorted to the top, with a count badge on the sidebar. ตัวเลือกใหม่ขึ้นเอง ติดป้าย NEW |
+| **removes** an option | the field is **hidden** from Settings (a dead control is worse than none) and named in a banner + in the log. ช่องที่ API ไม่ใช้แล้วจะถูกซ่อนพร้อมบอกว่าตัวไหน |
+| **changes a default** | the "default: …" line under each field follows the source, even on an old .exe. ค่าเริ่มต้นอ่านจากซอร์สจริงเสมอ |
+| **changes a type** | int / float / bool / str is taken from the source. |
+| leaves values you set for options that no longer exist | **Clean up unused values** on the Advanced page removes them. ปุ่มล้างค่าที่ไม่ได้ใช้แล้ว |
+
+The log after an update says it plainly:
+
+```
+update: this version adds 2 setting(s) — TP_NEW_KNOB, TP_OTHER
+update: this version drops 1 setting(s) — TP_OLD_KNOB
+settings: hidden because this API version no longer reads them — TP_OLD_KNOB
+```
+
+### Taking full control from the repo / คุมเลย์เอาต์จากฝั่ง repo
+
+The built-in layout only decides *grouping and wording*. If you want a new
+option promoted from *Advanced* onto the main Settings page — with your own
+Thai/English label — add **`api/ui-settings.json`** to the repo. The launcher
+reads it from the downloaded folder, so it takes effect on the next *Update
+now*, **without a new .exe**.
+
+`ui-settings.example.json` in this folder is a ready-to-copy template. Rules:
+
+* a field whose `key` the API source does not read is hidden anyway,
+* `default` and the value type always come from the source, not from the file,
+* anything you omit still appears on the Advanced page,
+* a malformed file is reported in the log and the built-in layout is used —
+  it is never silently ignored.
+
+## 7. Limits worth knowing / ข้อจำกัดที่ควรรู้
 
 * **A new pip dependency needs a new exe.** The launcher compares the
   downloaded `requirements.txt` with the previous one and writes a loud warning
@@ -191,7 +233,7 @@ Updating is blocked while the server runs — stop it first.
 
 ---
 
-## 7. Tests / การทดสอบ
+## 8. Tests / การทดสอบ
 
 No GUI, no network, no server needed for the first two:
 

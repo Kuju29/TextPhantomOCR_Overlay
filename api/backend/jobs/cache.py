@@ -91,13 +91,23 @@ def build_cache_key(
     mode: str,
     source: str,
     ai_cfg: AiConfig | None,
+    layout: dict[str, Any] | None = None,
 ) -> str:
     """Build a deterministic cache key for one translation request.
 
     For AI requests the provider / model / base-url / prompt are folded in so
     changing any of them yields a fresh result.
+
+    ``layout`` holds the per-request relayout switches. They change the rendered
+    geometry, so each combination needs its own entry — without this, turning a
+    toggle off would replay the cached relaid-out overlay and the switch would
+    appear broken.
     """
     parts = [img_hash, normalize_lang(lang), (mode or "").strip(), (source or "").strip()]
+    if isinstance(layout, dict) and layout:
+        parts.append(
+            "lay_" + ",".join(f"{k}={int(bool(v))}" for k, v in sorted(layout.items()))
+        )
     if ai_cfg and (source or "").strip().lower() == "ai":
         parts.extend(
             [

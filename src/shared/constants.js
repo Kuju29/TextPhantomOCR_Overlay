@@ -37,6 +37,76 @@ export const DEFAULT_SOURCE = "translated";
 /** Client-side cap. 0 = unlimited submit; server split queues own backpressure. */
 export const DEFAULT_MAX_CONCURRENCY = 0;
 
+/**
+ * How the content script encodes a canvas-captured page before uploading it.
+ *
+ * PNG was the original behaviour and is lossless, but a full manga page costs
+ * 5-15 MB — base64'd (+33%) through the service worker, over the wire, and
+ * then decoded by the API container, where on a 2-vCPU box that decode is the
+ * heaviest thing the direct lane does before translation even starts. WebP
+ * q92 is visually equivalent at OCR resolution and 15-25x smaller.
+ *
+ * Set `uploadFormat` to "png" to restore the lossless upload. The API accepts
+ * any of these, so this switch is independent of the server's own
+ * TP_LENS_DIRECT_IMG_FORMAT (which governs the RESULT background, not the
+ * upload). Mirrored in content/payload.js — content scripts are classic
+ * scripts and cannot import this module, so keep both in sync.
+ */
+export const DEFAULT_UPLOAD_FORMAT = "webp";
+export const DEFAULT_UPLOAD_QUALITY = 0.92;
+export const UPLOAD_FORMATS = ["webp", "png", "jpeg"];
+
+/**
+ * Relayout default — rebuild the Translated overlay's boxes when the source
+ * page reads on the other axis from the target language (vertical Japanese ->
+ * horizontal Thai). ON, because an unreadable 90°-rotated overlay is never the
+ * better default, and the work only happens on pages that change axis.
+ */
+export const DEFAULT_RELAYOUT_TRANSLATED = true;
+
+/**
+ * AI rate-limit pacing. ON by default because a multi-image batch fired at
+ * full speed trips a provider's requests-per-minute limit and most of the
+ * page errors out at once. Users who translate a few pages at a time can turn
+ * it off and skip the pacing wait entirely.
+ * 0 = use the server's per-provider policy for this provider.
+ */
+export const DEFAULT_RATE_LIMIT_ENABLED = true;
+export const DEFAULT_RATE_RPM = 0;
+export const DEFAULT_RATE_BURST = 0;
+
+/**
+ * Hard bounds for the rate inputs. These exist to stop a typo from breaking
+ * translation silently: 1000000 RPM is not "no limit", it just guarantees the
+ * provider answers 429 and the whole batch fails; 0.5 RPM would pace one page
+ * every two minutes and look like a hang.
+ */
+export const RATE_RPM_MIN = 1;
+export const RATE_RPM_MAX = 600;
+export const RATE_BURST_MIN = 1;
+export const RATE_BURST_MAX = 60;
+
+/**
+ * What the server uses for each provider when the boxes are left empty —
+ * mirrors RATE_POLICY_DEFAULTS in api/backend/ai/config.py. Shown in the popup
+ * so a user can see a sane reference before typing their own numbers.
+ * Values are sized for each provider's FREE tier.
+ * @type {Record<string, {rpm:number, burst:number, note?:string}>}
+ */
+export const RATE_PRESETS = {
+  gemini: { rpm: 12, burst: 4, note: "free tier is ~15/min" },
+  openai: { rpm: 60, burst: 8 },
+  anthropic: { rpm: 50, burst: 8 },
+  openrouter: { rpm: 60, burst: 8, note: "free models are much lower" },
+  groq: { rpm: 30, burst: 6 },
+  together: { rpm: 60, burst: 8 },
+  deepseek: { rpm: 60, burst: 8 },
+  featherless: { rpm: 30, burst: 6 },
+};
+
+/** Fallback policy for providers not listed above. */
+export const RATE_PRESET_DEFAULT = { rpm: 30, burst: 4 };
+
 /** Port name used by the content-script keep-alive connection. */
 export const KEEPALIVE_PORT_NAME = "TP_KEEPALIVE";
 

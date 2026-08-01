@@ -21,6 +21,14 @@ import {
   FALLBACK_SOURCES,
   PINNED_LANG_CODES,
   API_PATHS,
+  DEFAULT_RELAYOUT_TRANSLATED,
+  DEFAULT_RATE_LIMIT_ENABLED,
+  RATE_RPM_MIN,
+  RATE_RPM_MAX,
+  RATE_BURST_MIN,
+  RATE_BURST_MAX,
+  RATE_PRESETS,
+  RATE_PRESET_DEFAULT,
 } from "../shared/constants.js";
 import {
   AI_PROMPT_MAX_CHARS,
@@ -693,6 +701,10 @@ async function loadSettings() {
     "aiPromptByLang",
     "fontScale",
     "imgButtonsEnabled",
+    "relayoutTranslated",
+    "rateLimitEnabled",
+    "rateRpm",
+    "rateBurst",
   ]);
 
   if (els.imgButtonsToggle) els.imgButtonsToggle.checked = Boolean(stored.imgButtonsEnabled);
@@ -752,6 +764,28 @@ async function loadSettings() {
       stored.aiPageImage === "always" ||
       (stored.aiPageImage == null && Boolean(stored.aiSendImage));
   }
+  // Reading-direction + rate settings. These default ON, so an unset value must
+  // read as true — `Boolean(undefined)` would silently turn them off for every
+  // existing install.
+  if (els.relayoutTranslated) {
+    els.relayoutTranslated.checked =
+      typeof stored.relayoutTranslated === "boolean"
+        ? stored.relayoutTranslated
+        : DEFAULT_RELAYOUT_TRANSLATED;
+  }
+  if (els.rateLimitEnabled) {
+    els.rateLimitEnabled.checked =
+      typeof stored.rateLimitEnabled === "boolean"
+        ? stored.rateLimitEnabled
+        : DEFAULT_RATE_LIMIT_ENABLED;
+  }
+  // 0 means "use the server's policy for this provider" — show it as an empty
+  // box with the "Auto" placeholder rather than a literal 0 the user must clear.
+  if (els.rateRpm) els.rateRpm.value = Number(stored.rateRpm) > 0 ? String(stored.rateRpm) : "";
+  if (els.rateBurst) {
+    els.rateBurst.value = Number(stored.rateBurst) > 0 ? String(stored.rateBurst) : "";
+  }
+  updateRatePresetHint();
   // Keep the stored model selectable before the model list is fetched, so a
   // pinned model isn't briefly shown as "auto" on popup open.
   setModelOptions([], {
@@ -962,6 +996,8 @@ els.aiProvider?.addEventListener("change", async () => {
   }
   await setStorage({ aiProvider: provider, aiBaseUrl: (els.aiBaseUrl?.value || "").trim() });
   toggleUi();
+  // The rate reference is per provider, so it has to follow this selection.
+  updateRatePresetHint();
   scheduleResolveAiMeta({ immediate: true });
 });
 
@@ -994,6 +1030,89 @@ els.aiCharactersClear?.addEventListener("click", async () => {
 els.aiPageImage?.addEventListener("change", async () => {
   await setStorage({ aiPageImage: els.aiPageImage.checked ? "always" : "off" });
 });
+
+// --- Reading direction + rate limit ---------------------------------------
+
+els.relayoutTranslated?.addEventListener("change", async () => {
+  await setStorage({ relayoutTranslated: Boolean(els.relayoutTranslated.checked) });
+});
+
+els.rateLimitEnabled?.addEventListener("change", async () => {
+  await setStorage({ rateLimitEnabled: Boolean(els.rateLimitEnabled.checked) });
+  // Re-run the visibility pass so the RPM / burst boxes enable or grey out.
+  toggleUi();
+});
+
+/** The server-side rate policy for the currently selected provider. */
+function ratePresetForProvider() {
+  const provider = String(els.aiProvider?.value || "auto").trim().toLowerCase();
+  return RATE_PRESETS[provider] || null;
+}
+
+/**
+ * Show what the server would use if the boxes are left empty, so a user has a
+ * concrete reference instead of guessing. Also warns when their own numbers are
+ * far above that reference — the usual way people "tune" this and then wonder
+ * why every page fails with 429.
+ */
+function updateRatePresetHint() {
+  const el = els.ratePresetHint;
+  if (!el) return;
+  const preset = ratePresetForProvider();
+  const p = preset || RATE_PRESET_DEFAULT;
+  const label = preset
+    ? `Server default for this provider: ${p.rpm}/min, burst ${p.burst}`
+    : `Server default (unlisted provider): ${p.rpm}/min, burst ${p.burst}`;
+  const note = preset?.note ? ` — ${preset.note}` : "";
+
+  const rpm = Number(els.rateRpm?.value || 0);
+  const warn =
+    rpm > 0 && rpm > p.rpm * 4
+      ? ` ⚠️ ${rpm}/min is well above that. If your key cannot really sustain it, pages will fail with 429 instead of going faster.`
+      : "";
+  el.textContent = `${label}${note}.${warn}`;
+  el.dataset.warn = warn ? "1" : "";
+}
+
+/**
+ * Persist one of the rate-limit number boxes.
+ *
+ * An empty box or an unparseable one means "no override" and is stored as 0 —
+ * the server then applies its own per-provider policy. A number outside the
+ * allowed range is CLAMPED and written back into the box, so the user can see
+ * what was actually saved rather than believing a typo took effect.
+ * @param {HTMLInputElement|null} el
+ * @param {string} key
+ * @param {number} min
+ * @param {number} max
+ */
+async function saveRateNumber(el, key, min, max) {
+  if (!el) return;
+  const raw = String(el.value || "").trim();
+  const n = Number(raw);
+  let value = raw && Number.isFinite(n) ? Math.floor(n) : 0;
+  if (value > 0) value = Math.min(max, Math.max(min, value));
+  el.value = value > 0 ? String(value) : "";
+  await setStorage({ [key]: value });
+
+  // Burst larger than the whole per-minute budget is meaningless: the bucket
+  // can never refill that far, so it silently behaves as if it equalled RPM.
+  // Pull it down rather than storing a number that does nothing.
+  const rpm = Number(els.rateRpm?.value || 0);
+  const burst = Number(els.rateBurst?.value || 0);
+  if (rpm > 0 && burst > rpm && els.rateBurst) {
+    els.rateBurst.value = String(rpm);
+    await setStorage({ rateBurst: rpm });
+  }
+  updateRatePresetHint();
+}
+
+els.rateRpm?.addEventListener("change", () =>
+  saveRateNumber(els.rateRpm, "rateRpm", RATE_RPM_MIN, RATE_RPM_MAX),
+);
+els.rateBurst?.addEventListener("change", () =>
+  saveRateNumber(els.rateBurst, "rateBurst", RATE_BURST_MIN, RATE_BURST_MAX),
+);
 
 els.aiThinking?.addEventListener("change", async () => {
   await setStorage({ aiThinking: els.aiThinking.value === "off" ? "off" : "default" });

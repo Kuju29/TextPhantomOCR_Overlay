@@ -168,6 +168,33 @@ class JobQueue:
             return {"id": job_id, "status": "error", "result": "job_not_found"}
         return self.public_record(job_id)
 
+    @staticmethod
+    def _rate_options(payload: dict) -> dict[str, Any]:
+        """Read the user's rate-limit settings out of a payload.
+
+        The extension sends ``{"rate": {"enabled": bool, "rpm": number,
+        "burst": number}}``. A missing ``rate`` object means "client didn't say",
+        which falls back to the server default (``TP_RATE_GATE``, on) — NOT to
+        "off", because losing the pacing silently is how a batch trips a
+        provider's 429s. ``rpm``/``burst`` of 0 mean "use the provider policy".
+        """
+        raw = payload.get("rate") if isinstance(payload.get("rate"), dict) else {}
+        enabled = raw.get("enabled")
+        if enabled is None:
+            enabled = bool(settings.rate_gate_enabled)
+        elif isinstance(enabled, str):
+            enabled = enabled.strip().lower() in ("1", "true", "yes", "on")
+        else:
+            enabled = bool(enabled)
+
+        def _num(key: str) -> float:
+            try:
+                return max(0.0, float(raw.get(key) or 0.0))
+            except (TypeError, ValueError):
+                return 0.0
+
+        return {"enabled": enabled, "rpm": _num("rpm"), "burst": int(_num("burst"))}
+
     async def _await_ai_slot(self, job_id: str, payload: dict) -> bool:
         """Acquire a rate-gate token for an AI job before it runs.
 
@@ -175,7 +202,14 @@ class JobQueue:
         (deadline elapsed / bucket saturated) after setting an error status.
         Propagates :class:`asyncio.CancelledError` so the caller marks it
         aborted. Never consumes a token unless it returns ``True``.
+
+        A request whose ``rate.enabled`` is false skips the gate entirely and
+        returns immediately — the user has taken responsibility for staying
+        under their provider's limit.
         """
+        rate = self._rate_options(payload)
+        if not rate["enabled"]:
+            return True
         ai = payload.get("ai") if isinstance(payload.get("ai"), dict) else {}
         api_key = str(ai.get("api_key") or "")
         provider = resolve_provider(str(ai.get("provider") or "auto"), api_key)
@@ -191,6 +225,8 @@ class JobQueue:
                 job_id=job_id,
                 deadline_sec=settings.rate_max_wait_sec,
                 max_waiters=settings.rate_max_waiters_per_bucket,
+                rpm_override=rate["rpm"] or None,
+                burst_override=rate["burst"] or None,
             )
             return True
         except (RateGateTimeout, RateGateRejected) as exc:
@@ -421,14 +457,24 @@ class JobQueue:
                 queue.task_done()
                 continue
 
+            # Time spent waiting for a WORKER is measured up to here — before
+            # the rate gate. The two waits have completely different causes
+            # (too few workers vs. the provider's requests-per-minute budget)
+            # and folding them into one number made every AI job look like a
+            # queue backlog: a 12-RPM provider paces one job every 5 s, which
+            # showed up as queue_wait_ms climbing 175 s -> 230 s across a batch
+            # while the actual queue was nearly empty.
+            enqueue_ts = float((self._jobs.get(job_id) or {}).get("ts") or 0.0)
+            queue_wait_ms = round(max(0.0, time.time() - enqueue_ts) * 1000, 1) if enqueue_ts else 0.0
+
             # AI lane: wait for a provider rate-gate token before running. This
             # is a cheap async wait (it does not pin the worker thread) and it
             # keeps every provider under its requests-per-minute limit.
+            gate_wait_ms = 0.0
             if kind == self.AI and rate_gate.enabled():
+                _t_gate = time.perf_counter()
                 try:
-                    if not await self._await_ai_slot(job_id, payload):
-                        queue.task_done()
-                        continue
+                    granted = await self._await_ai_slot(job_id, payload)
                 except asyncio.CancelledError:
                     prev = dict(self._jobs.get(job_id) or {})
                     await self._set_job(
@@ -438,10 +484,17 @@ class JobQueue:
                     )
                     queue.task_done()
                     continue
+                gate_wait_ms = round((time.perf_counter() - _t_gate) * 1000, 1)
+                if not granted:
+                    event(
+                        "translate.gatewait",
+                        {"job_id": job_id, "ai_gate_wait_ms": gate_wait_ms, "granted": False},
+                        ok=False,
+                    )
+                    queue.task_done()
+                    continue
 
             t0 = time.perf_counter()
-            enqueue_ts = float((self._jobs.get(job_id) or {}).get("ts") or 0.0)
-            queue_wait_ms = round(max(0.0, time.time() - enqueue_ts) * 1000, 1) if enqueue_ts else 0.0
             summary = {
                 "job_id": job_id,
                 "queue_kind": kind,
@@ -450,6 +503,7 @@ class JobQueue:
                 "lang": str(payload.get("lang") or ""),
                 "source": str(payload.get("source") or ""),
                 "queue_wait_ms": queue_wait_ms,
+                "ai_gate_wait_ms": gate_wait_ms,
             }
             try:
                 prev = dict(self._jobs.get(job_id) or {})
@@ -458,6 +512,12 @@ class JobQueue:
                     asyncio.to_thread(self._processor, payload),
                     timeout=max(10.0, settings.job_run_timeout_sec),
                 )
+                # Surface both waits in the result the client receives, so the
+                # extension's own timing report can separate "server was busy"
+                # from "your provider's rate limit paced this request".
+                if isinstance(result, dict) and isinstance(result.get("perf"), dict):
+                    result["perf"]["queue_wait_ms"] = queue_wait_ms
+                    result["perf"]["ai_gate_wait_ms"] = gate_wait_ms
                 await self._set_job(job_id, {**prev, "status": "done", "result": result, "ts": time.time(), "queue_kind": kind})
                 event("translate.done", {**summary, "dt_ms": round((time.perf_counter() - t0) * 1000, 1)})
             except asyncio.TimeoutError:

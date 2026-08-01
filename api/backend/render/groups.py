@@ -189,6 +189,107 @@ def _has_kanji(text: str) -> bool:
     return any(0x3400 <= ord(c) <= 0x9FFF for c in text)
 
 
+# A reading is set at roughly half the size of the character it annotates, so a
+# base run must be clearly bigger before a neighbour counts as its ruby. Same
+# figure as the paragraph-level test, which compares glyph heights.
+_RUBY_MIN_BASE_RATIO: float = 1.6
+
+
+def _item_font_px(item: dict, img_h: int) -> float:
+    """Glyph height of one item in pixels.
+
+    A rotated item's ``box`` is stored unrotated, so ``height`` is the glyph
+    size for vertical columns as well as horizontal lines. ``font_size_px`` is
+    preferred when the decoder supplied it.
+    """
+    fs = item.get("font_size_px")
+    if fs:
+        try:
+            if float(fs) > 1.0:
+                return float(fs)
+        except (TypeError, ValueError):
+            pass
+    box = item.get("box") or {}
+    return float(box.get("height") or 0.0) * img_h
+
+
+def _ruby_item_indices(items: list[dict], img_h: int) -> set[int]:
+    """Indices of ruby ITEMS inside one vertical paragraph.
+
+    Lens does not always give a reading its own paragraph — inside a vertical
+    column it commonly arrives as extra *items* of the same paragraph. That
+    makes ``para["text"]`` the reading glued to the run it annotates
+    ("なにせんぱい何先輩"), which is not readable Japanese. Handed to a
+    translator, source language detection fails on it and the result comes back
+    as kana noise, which reads as "it translated Japanese into Japanese". The
+    paragraph-level test cannot see this: there is only one paragraph.
+
+    An item is ruby when it is a short pure-kana reading AND a markedly larger
+    kanji-bearing item in the same paragraph sits BESIDE it — a parallel column
+    (x-ranges apart, y-ranges overlapping), which is where furigana is set in
+    vertical typesetting. Real kana dialogue has no such larger neighbour
+    hugging it, so it survives.
+    """
+    info: list[tuple[int, str, list[float], float, bool]] = []
+    for idx, it in enumerate(items):
+        text = str(it.get("text") or "").strip()
+        bp = it.get("bounds_px")
+        if not text or not isinstance(bp, (list, tuple)) or len(bp) != 4:
+            continue
+        rect = [float(v) for v in bp]
+        if rect[2] <= rect[0] or rect[3] <= rect[1]:
+            continue
+        info.append(
+            (idx, text, rect, _item_font_px(it, img_h), _has_kanji(text))
+        )
+
+    ruby: set[int] = set()
+    for idx, text, rect, font, _kanji in info:
+        if font <= 0 or not _is_kana_only_reading(text):
+            continue
+        x1, y1, x2, y2 = rect
+        width = max(1.0, x2 - x1)
+        length = max(1.0, y2 - y1)
+        for jdx, _jtext, jrect, jfont, jkanji in info:
+            if jdx == idx or not jkanji:
+                continue
+            if jfont < _RUBY_MIN_BASE_RATIO * font:
+                continue
+            jx1, jy1, jx2, jy2 = jrect
+            span = max(0.0, min(y2, jy2) - max(y1, jy1)) / length
+            gap = max(jx1 - x2, x1 - jx2, 0.0)
+            if span >= 0.4 and gap <= 1.6 * width:
+                ruby.add(idx)
+                break
+    return ruby
+
+
+def _para_text_without_ruby(para: dict, img_h: int) -> tuple[str, int]:
+    """The paragraph's text with ruby items removed, and how many were removed.
+
+    Returns ``para["text"]`` untouched when no ruby is found, so a paragraph
+    without readings produces exactly the same string as before.
+    """
+    items = [
+        it for it in (para.get("items") or [])
+        if str(it.get("text") or "").strip()
+    ]
+    if len(items) < 2:
+        return _para_full_text(para), 0
+    ruby = _ruby_item_indices(items, img_h)
+    if not ruby:
+        return _para_full_text(para), 0
+    kept = [
+        str(it.get("text") or "").strip()
+        for i, it in enumerate(items)
+        if i not in ruby
+    ]
+    if not kept:
+        return _para_full_text(para), 0
+    sep = "" if _is_cjk_dominant("".join(kept)) else " "
+    return sep.join(kept).strip(), len(ruby)
+
+
 def _ruby_para_indices(paras: list[dict], img_h: int) -> set[int]:
     """Indices (into paras) of ruby paragraphs inside one vertical group.
 
@@ -269,8 +370,8 @@ def _trusted_blob_key(para: dict) -> tuple[float, ...] | None:
     return key
 
 
-def _is_strict_vertical(para: dict) -> bool:
-    """True when a paragraph is *unambiguously* a vertical CJK column set.
+def _is_strict_vertical(para: dict, require_cjk: bool = True) -> bool:
+    """True when a paragraph is *unambiguously* a vertical column set.
 
     Merging exists for exactly one reason: Lens splits ONE vertical sentence
     into per-column paragraphs.  Everything else must keep the Lens paragraph
@@ -278,16 +379,25 @@ def _is_strict_vertical(para: dict) -> bool:
     truth).  So a merge candidate must be:
 
     1. majority-vertical by item rotation (``paragraph_reading_axis``), AND
-    2. CJK-dominant text — multi-column splitting is a CJK typesetting
-       phenomenon; a Thai/Latin paragraph never needs column re-joining, AND
+    2. CJK-dominant text — see ``require_cjk`` below, AND
     3. not just rotation noise: a single-item paragraph only counts when its
        pixel bounds are clearly portrait (height > 2x width).  This blocks the
        axis-vote tie (n_v >= n_h) from sweeping a lone horizontal word whose
        angle Lens misreported into the vertical merge path.
+
+    ``require_cjk`` exists because rule 2 reads the SCRIPT to infer the
+    TYPESETTING, and that inference is wrong for the Lens "translated" tree: its
+    paragraphs carry Thai/English text laid out in the *source's* vertical
+    Japanese columns, so every column failed the CJK test and nothing ever
+    merged — the translated layer came back as one group per column, each
+    relaid out inside a single-column strip.  The geometry is the same on both
+    trees; only the script changed.  So callers that have stronger evidence of
+    the region (the trained text-block detector) pass ``require_cjk=False`` and
+    let geometry plus the detected block decide.
     """
     if _para_axis(para) != "v":
         return False
-    if not _is_cjk_dominant(_para_full_text(para)):
+    if require_cjk and not _is_cjk_dominant(_para_full_text(para)):
         return False
     items = [it for it in (para.get("items") or []) if str(it.get("text") or "").strip()]
     if len(items) >= 2:
@@ -359,7 +469,14 @@ def _should_merge(
       Real neighbouring bubbles fail at least one of these.
     Every threshold scales with glyph size — resolution-independent.
     """
-    if not _is_strict_vertical(a) or not _is_strict_vertical(b):
+    # Under model authority the detected block carries the region evidence, so
+    # the CJK-script gate is dropped: it would otherwise veto every column of
+    # the Lens "translated" tree, whose text is already Thai/English but whose
+    # columns are still the source's vertical Japanese typesetting.
+    require_cjk = not tb_authority
+    if not _is_strict_vertical(a, require_cjk) or not _is_strict_vertical(
+        b, require_cjk
+    ):
         return False
     ra, rb = _para_xyxy(a), _para_xyxy(b)
     if ra is None or rb is None:
@@ -403,7 +520,7 @@ def _should_merge(
 
 
 def _split_vertical_run_at_gap_jumps(
-    run: list[dict], img_h: int
+    run: list[dict], img_h: int, tb_authority: bool = False
 ) -> list[list[dict]]:
     """Split one vertical run (= one detected text region) into TEXT SETS.
 
@@ -421,6 +538,13 @@ def _split_vertical_run_at_gap_jumps(
        round bubble).  The jump is measured against the run's own MEDIAN
        top-delta, so uniformly staircased cover layouts (constant drift)
        are not falsely split.  Threshold: |delta - median| > 0.8 glyph.
+
+    Under ``tb_authority`` rule 2 is DISABLED.  The top-edge signal is a guess
+    about intent from a few pixels of vertical jitter, and when the detector has
+    already ruled that these columns are one region that guess is the weaker
+    evidence — letting it win is how a five-column bubble came back out as five
+    separate groups.  The hard column-gap rule still applies, because a wide
+    band of whitespace is unambiguous at any resolution.
 
     ``run`` must already be in reading order (columns right-to-left).
     """
@@ -442,7 +566,7 @@ def _split_vertical_run_at_gap_jumps(
         # prev is the column to the RIGHT (reading order); gap = horizontal
         # whitespace between it and the next column to the left.
         gap = max(0.0, prev[0] - now[2])
-        top_jump = abs(deltas[i - 1] - median_delta)
+        top_jump = 0.0 if tb_authority else abs(deltas[i - 1] - median_delta)
         if gap > 1.2 * glyph or top_jump > 0.8 * glyph:
             out.append(cur)
             cur = [run[i]]
@@ -509,7 +633,11 @@ def _merge_paragraphs(
             # region into TEXT SETS. The detector's blocks are bubble/region
             # granularity — a region holding two utterances must still split,
             # under model authority as well.
-            runs.extend(_split_vertical_run_at_gap_jumps(ordered_members, img_h))
+            runs.extend(
+                _split_vertical_run_at_gap_jumps(
+                    ordered_members, img_h, tb_authority
+                )
+            )
         else:
             runs.append(ordered_members)
 
@@ -557,90 +685,312 @@ def group_paragraphs_into_bubbles(
         ordered, img_w, img_h, base_img, tb_authority
     )
 
-    bubble_groups: list[dict[str, Any]] = []
-
-    for bubble_index, paras in enumerate(runs):
-        items: list[dict] = []
-        for p in paras:
-            items.extend(p.get("items") or [])
-
-        # Combined text for AI translation.  Ruby (furigana) paragraphs are
-        # excluded HERE ONLY \u2014 they remain untouched in tree["paragraphs"], so
-        # original / translated rendering still shows every word.  Dropping the
-        # redundant kana readings (which sit right-of their kanji and would
-        # otherwise interleave as "\u304a\u308c\u307e\u3048\u4ffa\u306e\u524d\u3067\u304d\u307f\u3002...") gives the model a
-        # clean, correctly-ordered sentence so the translation reads naturally.
-        ruby_idx = _ruby_para_indices(paras, img_h) if direction_is_vertical_hint(paras) else set()
-        kept = [p for i, p in enumerate(paras) if i not in ruby_idx]
-        if not kept:
-            kept = list(paras)
-        fragments = [t for t in (_para_full_text(p) for p in kept) if t]
-        sep = "" if _is_cjk_dominant("".join(fragments)) else " "
-        text = sep.join(fragments).strip()
-        # Full text (every word incl. ruby) kept for debugging / provenance.
-        all_fragments = [t for t in (_para_full_text(p) for p in paras) if t]
-        text_full = sep.join(all_fragments).strip()
-
-        text_items = [it for it in items if str(it.get("text") or "").strip()]
-        item_rots = [
-            float((it.get("box") or {}).get("rotation_deg")
-                   or (it.get("box") or {}).get("rotation_deg_css") or 0.0)
-            for it in text_items
-        ]
-        med_abs_rot = (
-            sorted(abs(r) for r in item_rots)[len(item_rots) // 2]
-            if item_rots else 0.0
-        )
-
-        # Direction: vertical when item boxes are portrait OR baselines are
-        # near-vertical (|rot| ~ 90, cut-off 78 so tilted labels stay h).
-        n_portrait = sum(1 for it in text_items if _is_portrait_item(it))
-        is_vertical = (
-            n_portrait > max(1, len(text_items)) / 2 or med_abs_rot > 78.0
-        )
-        direction = "v" if is_vertical else "h"
-
-        # Representative rotation: sign-normalized magnitude for vertical
-        # (avoids +/-90 cancellation); signed mean for tilted/horizontal.
-        if not item_rots:
-            avg_rot = 0.0
-        elif is_vertical:
-            sign = 1.0 if sum(item_rots) >= 0 else -1.0
-            avg_rot = sign * med_abs_rot
-        else:
-            avg_rot = sum(item_rots) / len(item_rots)
-
-        font_size_px = _median_font_px(paras, img_h)
-
-        # Merged bubble bounds = union of members' blobs.
-        member_blobs = [
-            p.get("bubble_bounds_px") for p in paras
-            if isinstance(p.get("bubble_bounds_px"), (list, tuple))
-            and len(p.get("bubble_bounds_px")) == 4
-        ]
-        if member_blobs:
-            union_blob = [
-                min(float(b[0]) for b in member_blobs),
-                min(float(b[1]) for b in member_blobs),
-                max(float(b[2]) for b in member_blobs),
-                max(float(b[3]) for b in member_blobs),
-            ]
-        else:
-            union_blob = None
-
-        bubble_groups.append(
-            {
-                "bubble_index": bubble_index,
-                "bubble_bounds_px": union_blob,
-                "direction": direction,
-                "rotation_deg": round(avg_rot, 2),
-                "para_indices": [int(p.get("para_index", 0)) for p in paras],
-                "text": text,
-                "text_full": text_full,
-                "font_size_px": font_size_px,
-                "items": items,
-            }
-        )
+    bubble_groups = [
+        _build_group(i, paras, img_w, img_h) for i, paras in enumerate(runs)
+    ]
 
     tree["bubble_groups"] = bubble_groups
     return bubble_groups
+
+
+def _build_group(
+    bubble_index: int, paras: list[dict], img_w: int, img_h: int
+) -> dict[str, Any]:
+    """Derive one bubble_groups entry from the paragraphs of one run.
+
+    Extracted so a later pass (``merge_groups_sharing_canvas``) can rebuild a
+    group from a different paragraph set without duplicating any of the field
+    derivation — text assembly, ruby stripping, direction and rotation must
+    stay defined in exactly one place.
+    """
+    items: list[dict] = []
+    for p in paras:
+        items.extend(p.get("items") or [])
+
+    # Combined text for translation \u2014 the AI model and the browser both read
+    # this one string.  Ruby (furigana) is excluded HERE ONLY; the readings stay
+    # untouched in tree["paragraphs"], so original / translated rendering still
+    # shows every word.
+    #
+    # Ruby has to be removed at BOTH granularities Lens produces it at:
+    #   * whole paragraphs beside a base column, and
+    #   * extra items inside one column's paragraph.
+    # Missing the second case leaves the reading glued to what it annotates
+    # ("\u306a\u306b\u305b\u3093\u3071\u3044\u4f55\u5148\u8f29"), which is not readable Japanese \u2014 the translator
+    # then returns kana noise, and the page looks like it was translated into
+    # its own language.
+    is_vertical_run = direction_is_vertical_hint(paras)
+    ruby_idx = _ruby_para_indices(paras, img_h) if is_vertical_run else set()
+    kept = [p for i, p in enumerate(paras) if i not in ruby_idx]
+    if not kept:
+        kept = list(paras)
+
+    ruby_items = 0
+    fragments: list[str] = []
+    for p in kept:
+        if is_vertical_run:
+            frag, dropped = _para_text_without_ruby(p, img_h)
+            ruby_items += dropped
+        else:
+            frag = _para_full_text(p)
+        if frag:
+            fragments.append(frag)
+    sep = "" if _is_cjk_dominant("".join(fragments)) else " "
+    text = sep.join(fragments).strip()
+    # Full text (every word incl. ruby) kept for debugging / provenance.
+    all_fragments = [t for t in (_para_full_text(p) for p in paras) if t]
+    text_full = sep.join(all_fragments).strip()
+
+    text_items = [it for it in items if str(it.get("text") or "").strip()]
+    item_rots = [
+        float((it.get("box") or {}).get("rotation_deg")
+               or (it.get("box") or {}).get("rotation_deg_css") or 0.0)
+        for it in text_items
+    ]
+    med_abs_rot = (
+        sorted(abs(r) for r in item_rots)[len(item_rots) // 2]
+        if item_rots else 0.0
+    )
+
+    # Direction: vertical when item boxes are portrait OR baselines are
+    # near-vertical (|rot| ~ 90, cut-off 78 so tilted labels stay h).
+    n_portrait = sum(1 for it in text_items if _is_portrait_item(it))
+    is_vertical = (
+        n_portrait > max(1, len(text_items)) / 2 or med_abs_rot > 78.0
+    )
+    direction = "v" if is_vertical else "h"
+
+    # Representative rotation: sign-normalized magnitude for vertical
+    # (avoids +/-90 cancellation); signed mean for tilted/horizontal.
+    if not item_rots:
+        avg_rot = 0.0
+    elif is_vertical:
+        sign = 1.0 if sum(item_rots) >= 0 else -1.0
+        avg_rot = sign * med_abs_rot
+    else:
+        avg_rot = sum(item_rots) / len(item_rots)
+
+    font_size_px = _median_font_px(paras, img_h)
+
+    # Merged bubble bounds = union of members' blobs.
+    member_blobs = [
+        p.get("bubble_bounds_px") for p in paras
+        if isinstance(p.get("bubble_bounds_px"), (list, tuple))
+        and len(p.get("bubble_bounds_px")) == 4
+    ]
+    if member_blobs:
+        union_blob = [
+            min(float(b[0]) for b in member_blobs),
+            min(float(b[1]) for b in member_blobs),
+            max(float(b[2]) for b in member_blobs),
+            max(float(b[3]) for b in member_blobs),
+        ]
+    else:
+        union_blob = None
+
+    return {
+        "bubble_index": bubble_index,
+        "bubble_bounds_px": union_blob,
+        "direction": direction,
+        "rotation_deg": round(avg_rot, 2),
+        "para_indices": [int(p.get("para_index", 0)) for p in paras],
+        "text": text,
+        "text_full": text_full,
+        "ruby_items_dropped": ruby_items,
+        "font_size_px": font_size_px,
+        "items": items,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Canvas-conflict repair (runs AFTER the text-block rects are attached)
+# ---------------------------------------------------------------------------
+
+_CANVAS_FONT_RATIO: float = 1.8
+
+# A canvas is EXPECTED to dwarf the ink it holds — a single vertical column is a
+# thin strip inside its balloon, which is exactly why the detected rect is the
+# better canvas. So size cannot be judged against the ink, only against the
+# page. One speech bubble does not cover a fifth of a manga page; a rect that
+# does came from a detection that swallowed several panels, and pouring one line
+# into it renders that line as a speck.
+_CANVAS_MAX_PAGE_FRACTION: float = 0.20
+
+
+def canvas_is_oversized(
+    rect: Any, img_w: int | None, img_h: int | None
+) -> bool:
+    """True when a canvas rect is too large to be one bubble on this page.
+
+    Shared by both canvas producers — the OpenCV balloon outline and the trained
+    text-block detector — so the size rule is defined once. Returns False when
+    the page size is unknown rather than guessing a default: without it there is
+    no evidence to judge against.
+    """
+    if not img_w or not img_h:
+        return False
+    if not isinstance(rect, (list, tuple)) or len(rect) != 4:
+        return False
+    w = float(rect[2]) - float(rect[0])
+    h = float(rect[3]) - float(rect[1])
+    page = float(img_w) * float(img_h)
+    if w <= 0 or h <= 0 or page <= 0:
+        return False
+    return (w * h) / page > _CANVAS_MAX_PAGE_FRACTION
+
+
+def merge_groups_sharing_canvas(
+    tree: dict[str, Any], img_w: int, img_h: int
+) -> dict[str, int]:
+    """Repair canvas conflicts between groups, and return what changed.
+
+    Two groups whose ``bubble_bounds_px`` is the same rect are, by definition,
+    the same bubble: something upstream saw one region and the paragraph merge
+    disagreed.  Left alone they render two overlays stacked at identical
+    coordinates, so one hides the other and the page looks half-translated.
+
+    A conflict is repaired no matter WHICH producer created the rect.  An
+    earlier version trusted a shared OpenCV balloon on the grounds that a
+    balloon outline is already per-bubble — but the two producers disagree about
+    granularity: the text-block model splits a balloon holding two utterances
+    into two regions, and both of those groups then inherit the one balloon as
+    their canvas.  Provenance decides nothing here; a duplicated rect is a bug
+    either way.
+
+    A shared rect is NOT enough on its own: one region can legitimately hold a
+    huge SFX and a small line of dialogue.  Groups only merge when they read
+    along the same axis AND their glyph scales are within
+    ``_CANVAS_FONT_RATIO``.  Groups that share a rect but fail that test keep
+    their own identity and instead have the shared canvas withdrawn, so they
+    fall back to their own ink box and stop overlapping.
+
+    A canvas that covers too much of the page is withdrawn outright, shared or
+    not: it came from a detection that swallowed several panels, and it would
+    render the text as a speck in a huge empty box.
+
+    Returns ``{"merged": n_groups_absorbed, "unshared": n_canvases_withdrawn}``.
+    """
+    groups: list[dict] = tree.get("bubble_groups") or []
+    if not groups:
+        return {"merged": 0, "unshared": 0}
+
+    by_index: dict[int, dict] = {
+        int(p.get("para_index", i)): p
+        for i, p in enumerate(tree.get("paragraphs") or [])
+        if isinstance(p, dict)
+    }
+
+    merged = unshared = 0
+    absorbed: set[int] = set()
+    rebuilt: dict[int, dict] = {}
+
+    # Oversized canvases go first: a rect that is not a bubble must not then be
+    # treated as evidence that the groups holding it are one bubble.
+    for bg in groups:
+        if canvas_is_oversized(bg.get("bubble_bounds_px"), img_w, img_h):
+            bg["bubble_bounds_px"] = None
+            bg["bubble_bounds_source"] = "canvas_oversized_withdrawn"
+            unshared += 1
+
+    def canvas_key(bg: dict) -> tuple[float, ...] | None:
+        bb = bg.get("bubble_bounds_px")
+        if not isinstance(bb, (list, tuple)) or len(bb) != 4:
+            return None
+        return tuple(round(float(v), 1) for v in bb)
+
+    buckets: dict[tuple[float, ...], list[dict]] = {}
+    for bg in groups:
+        key = canvas_key(bg)
+        if key is not None:
+            buckets.setdefault(key, []).append(bg)
+
+    for key, members in buckets.items():
+        if len(members) < 2:
+            continue
+        fonts = [float(bg.get("font_size_px") or 0.0) for bg in members]
+        fonts = [f for f in fonts if f > 0]
+        scale_ok = (
+            not fonts
+            or max(fonts) / max(1.0, min(fonts)) <= _CANVAS_FONT_RATIO
+        )
+        axis_ok = len({str(bg.get("direction") or "") for bg in members}) == 1
+        if not (scale_ok and axis_ok):
+            # Different utterances that merely share a detected box: give each
+            # its own ink box back rather than letting them stack.
+            for bg in members:
+                bg["bubble_bounds_px"] = None
+                bg["bubble_bounds_source"] = "canvas_conflict_withdrawn"
+                unshared += 1
+            continue
+
+        paras = [
+            by_index[pi]
+            for bg in members
+            for pi in (bg.get("para_indices") or [])
+            if int(pi) in by_index
+        ]
+        if len(paras) < 2:
+            continue
+        axis = paragraph_reading_axis(
+            [it for p in paras for it in (p.get("items") or [])]
+        )
+
+        def _key(p: dict, _axis: str = axis) -> tuple[float, float]:
+            c = _para_centroid(p, img_w, img_h) or (0.0, 0.0)
+            return (-c[0], c[1]) if _axis == "v" else (c[1], c[0])
+
+        keep = min(members, key=lambda bg: int(bg.get("bubble_index", 0)))
+        fresh = _build_group(
+            int(keep.get("bubble_index", 0)),
+            sorted(paras, key=_key),
+            img_w,
+            img_h,
+        )
+        fresh["bubble_bounds_px"] = [float(v) for v in key]
+        fresh["bubble_bounds_source"] = "textblock"
+        fresh["merged_from_canvas"] = sorted(
+            int(bg.get("bubble_index", 0)) for bg in members
+        )
+        rebuilt[id(keep)] = fresh
+        for bg in members:
+            if bg is not keep:
+                absorbed.add(id(bg))
+                merged += 1
+
+    if not merged and not unshared:
+        return {"merged": 0, "unshared": 0}
+
+    out: list[dict] = []
+    for bg in groups:
+        if id(bg) in absorbed:
+            continue
+        out.append(rebuilt.get(id(bg), bg))
+    for i, bg in enumerate(out):
+        bg["bubble_index"] = i
+    tree["bubble_groups"] = out
+    return {"merged": merged, "unshared": unshared}
+
+
+def group_is_ruby_only(bg: dict, tree: dict[str, Any], img_h: int) -> bool:
+    """True when a group carries nothing but a furigana reading.
+
+    ``_ruby_para_indices`` can only strip ruby that shares a run with the kanji
+    column it annotates.  When the merge leaves a reading alone in its own
+    group, that group's whole text is a bare kana pronunciation — useless to a
+    translator and, sent to the browser on its own, translated into noise.
+    Detected page-wide (the base column is looked up across every paragraph, not
+    just this group's), so a stray reading is still recognised.
+    """
+    text = str(bg.get("text") or "").strip()
+    if not text or not _is_kana_only_reading(text):
+        return False
+    members = {int(pi) for pi in (bg.get("para_indices") or [])}
+    paras = [
+        p
+        for p in (tree.get("paragraphs") or [])
+        if isinstance(p, dict) and int(p.get("para_index", -1)) in members
+    ]
+    if not paras:
+        return False
+    page = [p for p in (tree.get("paragraphs") or []) if isinstance(p, dict)]
+    return bool(_ruby_para_indices(paras + page, img_h) & set(range(len(paras))))

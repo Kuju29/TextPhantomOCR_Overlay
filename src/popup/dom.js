@@ -31,6 +31,13 @@ export const els = {
   aiMemoryMode: document.getElementById("ai-memory-mode"),
   aiPageImageWrap: document.getElementById("ai-page-image-wrap"),
   aiPageImage: document.getElementById("ai-page-image"),
+  aiRateWrap: document.getElementById("ai-rate-wrap"),
+  rateLimitEnabled: document.getElementById("rate-limit-enabled"),
+  rateRpm: document.getElementById("rate-rpm"),
+  rateBurst: document.getElementById("rate-burst"),
+  ratePresetHint: document.getElementById("rate-preset-hint"),
+  relayoutWrap: document.getElementById("relayout-wrap"),
+  relayoutTranslated: document.getElementById("relayout-translated"),
   aiPromptWrap: document.getElementById("ai-prompt-wrap"),
   aiPrompt: document.getElementById("ai-prompt"),
   aiPromptBack: document.getElementById("ai-prompt-back"),
@@ -220,6 +227,14 @@ export function toggleUi({ hasEnvKey }) {
   const showLang = !(isText && source === "original");
   els.langWrap.style.display = showLang ? "" : "none";
 
+  // The switch only affects the Translated overlay, so it is shown only while
+  // that overlay is the one being rendered. (Original must keep Lens geometry
+  // to stay aligned with the artwork; the Ai layer decides its own direction
+  // from the target language and needs no switch.)
+  if (els.relayoutWrap) {
+    els.relayoutWrap.style.display = isText && source === "translated" ? "" : "none";
+  }
+
   const showAi = isText && source === "ai";
   if (els.aiGroup) els.aiGroup.style.display = showAi ? "" : "none";
 
@@ -247,4 +262,15 @@ export function toggleUi({ hasEnvKey }) {
   els.aiPromptWrap.style.display = showAi && canConfigureAi ? "" : "none";
   if (els.aiCharactersWrap) els.aiCharactersWrap.style.display = showAi && canConfigureAi ? "" : "none";
   if (els.aiPageImageWrap) els.aiPageImageWrap.style.display = showAi && canConfigureAi ? "" : "none";
+  // Rate pacing applies to cloud providers only: a local server has no
+  // per-minute quota to respect, and the server-side gate skips it anyway.
+  if (els.aiRateWrap) {
+    els.aiRateWrap.style.display = showAi && canConfigureAi && !local ? "" : "none";
+  }
+  // The RPM / burst boxes are inert while pacing is off — disable rather than
+  // hide, so the numbers stay visible and come back exactly as they were.
+  const paceOn = Boolean(els.rateLimitEnabled?.checked);
+  for (const el of [els.rateRpm, els.rateBurst]) {
+    if (el) el.disabled = !paceOn;
+  }
 }

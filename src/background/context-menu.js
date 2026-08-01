@@ -140,6 +140,31 @@ async function buildAiPayload(mode, source, settings, seriesKey) {
   };
 }
 
+/** Build the `layout` sub-object — the Translated orientation relayout switch.
+ *
+ * Sent on every `lens_text` job. The Ai layer has no switch: it always builds
+ * its own geometry from the target language, which is the only thing that can
+ * be correct for it. The server only acts on this for the layer it renders.
+ */
+function buildLayoutPayload(mode, settings) {
+  if (mode !== "lens_text") return null;
+  return { relayout_translated: settings.relayoutTranslated !== false };
+}
+
+/** Build the `rate` sub-object — the user's own AI rate-limit settings.
+ *
+ * Only AI jobs are paced, so non-AI jobs send nothing. `rpm`/`burst` of 0 tell
+ * the server to use its built-in policy for that provider.
+ */
+function buildRatePayload(mode, source, settings) {
+  if (mode !== "lens_text" || source !== "ai") return null;
+  return {
+    enabled: settings.rateLimitEnabled !== false,
+    rpm: Number(settings.rateRpm) > 0 ? Number(settings.rateRpm) : 0,
+    burst: Number(settings.rateBurst) > 0 ? Number(settings.rateBurst) : 0,
+  };
+}
+
 /** Common metadata block for a job payload. */
 function buildMetadata({ existing, imageId, batchId, sourceUrl, stage }) {
   const meta = existing && typeof existing === "object" ? existing : {};
@@ -159,7 +184,7 @@ function buildMetadata({ existing, imageId, batchId, sourceUrl, stage }) {
 
 /** Handle a click on `img_one`. */
 async function handleTranslateOne(menuInfo, tab, ctx) {
-  const { mode, lang, source, aiPayload, tabSessionId, batchId, seriesKey } = ctx;
+  const { mode, lang, source, aiPayload, layoutPayload, ratePayload, tabSessionId, batchId, seriesKey } = ctx;
   const frameId = Number(menuInfo.frameId) || 0;
   let originalUrl = menuInfo.srcUrl;
 
@@ -189,6 +214,8 @@ async function handleTranslateOne(menuInfo, tab, ctx) {
     menu: "img_one",
     source,
     ai: aiPayload,
+    layout: layoutPayload,
+    rate: ratePayload,
     context: {
       ...(payload?.context && typeof payload.context === "object" ? payload.context : {}),
       page_url: tab?.url || null,
@@ -273,7 +300,7 @@ function mergeScanStats(a, b) {
 
 /** Handle a click on `img_all`. */
 async function handleTranslateAll(menuInfo, tab, ctx) {
-  const { mode, lang, source, aiPayload, tabSessionId, batchId, seriesKey } = ctx;
+  const { mode, lang, source, aiPayload, layoutPayload, ratePayload, tabSessionId, batchId, seriesKey } = ctx;
   const scanFrameId = 0;
 
   await sendToTab(tab.id, { type: "TP_KEEPALIVE_START", ms: KEEPALIVE_MS }, scanFrameId);
@@ -313,6 +340,8 @@ async function handleTranslateAll(menuInfo, tab, ctx) {
         menu: "img_all",
         source,
         ai: aiPayload,
+        layout: layoutPayload,
+        rate: ratePayload,
         context: {
           page_url: tab?.url || null,
           series_key: seriesKey || null,
@@ -369,6 +398,8 @@ export async function onContextMenuClicked(menuInfo, tab) {
       tab?.title || "",
     );
     const aiPayload = await buildAiPayload(mode, source, settings, seriesKey);
+    const layoutPayload = buildLayoutPayload(mode, settings);
+    const ratePayload = buildRatePayload(mode, source, settings);
 
     // AI jobs get a softer concurrency cap (the HF router is rate-limited).
     const isAi = mode === "lens_text" && source === "ai";
@@ -382,7 +413,17 @@ export async function onContextMenuClicked(menuInfo, tab) {
     // Warm up the API; event WebSocket is opened after REST returns a job id.
     await getApiBase().catch(() => "");
 
-    const ctx = { mode, lang, source, aiPayload, tabSessionId, batchId, seriesKey };
+    const ctx = {
+      mode,
+      lang,
+      source,
+      aiPayload,
+      layoutPayload,
+      ratePayload,
+      tabSessionId,
+      batchId,
+      seriesKey,
+    };
     sendToastToTab(
       tab.id,
       menuInfo.menuItemId === "img_all" ? 0 : Number(menuInfo.frameId) || 0,

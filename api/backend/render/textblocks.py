@@ -31,6 +31,8 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
+from backend.render.groups import canvas_is_oversized
+
 from backend.config import settings
 from backend.log import dbg, event
 
@@ -173,7 +175,14 @@ def detect_text_blocks(img: Image.Image, timings: dict | None = None) -> list[Bo
     With pool_size=4, max wait ≈ (pool_size−1)xinfer_ms instead of
     (workers−1)xinfer_ms.
     """
+    # Model load is measured separately: on a cold process this is seconds of
+    # work that used to vanish into the caller's blocks_ms with no matching
+    # lock/infer time, which reads as "inference was mysteriously slow once".
+    _t_load = time.perf_counter()
     _ensure_pool()
+    load_ms = round((time.perf_counter() - _t_load) * 1000, 1)
+    if timings is not None:
+        timings["load_ms"] = timings.get("load_ms", 0.0) + load_ms
     if _session_failed or _pool_count == 0:
         return []
     try:
@@ -197,8 +206,15 @@ def detect_text_blocks(img: Image.Image, timings: dict | None = None) -> list[Bo
         finally:
             _pool.put(session)  # always return, even on exception
         if timings is not None:
-            timings["lock_ms"] = round((t_infer - t_wait) * 1000, 1)
-            timings["infer_ms"] = round((time.perf_counter() - t_infer) * 1000, 1)
+            # Accumulate: the ROI path calls this once per crop, and a caller
+            # reading "how long did detection take" must see the total, not the
+            # last crop's slice.
+            timings["lock_ms"] = round(
+                timings.get("lock_ms", 0.0) + (t_infer - t_wait) * 1000, 1
+            )
+            timings["infer_ms"] = round(
+                timings.get("infer_ms", 0.0) + (time.perf_counter() - t_infer) * 1000, 1
+            )
 
         det = np.asarray(out)
         det = det.reshape(-1, det.shape[-1])  # (300, 6)
@@ -220,6 +236,228 @@ def detect_text_blocks(img: Image.Image, timings: dict | None = None) -> list[Bo
     except Exception as e:  # noqa: BLE001 - never break the pipeline
         event("textblocks.detect_failed", {"error": str(e)[:200]}, ok=False)
         return []
+
+
+# --- ROI (cropped) detection ------------------------------------------------
+#
+# Cropping does NOT reduce inference cost: every input is resized to
+# _INPUT_SIZE x _INPUT_SIZE, so one crop costs the same as one full page and N
+# crops cost N times as much. What cropping buys is EFFECTIVE RESOLUTION — a
+# narrow vertical column blown up to 1280 px is much easier for the model to
+# read than the same column inside a downscaled full page.
+#
+# So the ROI path is only worth taking when the crops are few AND small. Both
+# conditions are enforced below, and the reason for the choice is always
+# reported so a log reader never has to guess which path ran.
+
+def _roi_plan(
+    rois: list[Box], img_w: int, img_h: int
+) -> tuple[list[Box], str]:
+    """Decide which crops to run. Returns ``(rois_to_run, reason)``.
+
+    An empty list means "run the full page instead".
+    """
+    if not settings.vertical_roi_enabled:
+        return [], "disabled"
+    if not rois:
+        return [], "no_vertical_rois"
+    page_area = float(max(1, img_w * img_h))
+
+    def _area(r: Box) -> float:
+        return max(0.0, r[2] - r[0]) * max(0.0, r[3] - r[1])
+
+    coverage = sum(_area(r) for r in rois) / page_area
+    if coverage >= settings.vertical_roi_max_coverage:
+        # The crops already cover most of the page: the zoom gain is small and
+        # we would pay for several inferences to see nearly the same pixels.
+        return [], f"coverage_{coverage:.2f}"
+    if len(rois) > settings.vertical_roi_max_calls:
+        # Too many crops to be worth N inferences. Try their union: if that is
+        # still meaningfully smaller than the page, one crop still zooms in.
+        xs1 = min(r[0] for r in rois)
+        ys1 = min(r[1] for r in rois)
+        xs2 = max(r[2] for r in rois)
+        ys2 = max(r[3] for r in rois)
+        union: Box = (xs1, ys1, xs2, ys2)
+        if _area(union) / page_area < settings.vertical_roi_max_coverage:
+            return [union], f"union_of_{len(rois)}"
+        return [], f"too_many_rois_{len(rois)}"
+    return list(rois), f"roi_{len(rois)}"
+
+
+def _dedupe_boxes(boxes: list[Box], iou_thresh: float = 0.6) -> list[Box]:
+    """Drop near-duplicate boxes produced by overlapping crops."""
+    kept: list[Box] = []
+    for b in boxes:
+        b_area = max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+        dup = False
+        for k in kept:
+            ix = max(0.0, min(b[2], k[2]) - max(b[0], k[0]))
+            iy = max(0.0, min(b[3], k[3]) - max(b[1], k[1]))
+            inter = ix * iy
+            if inter <= 0:
+                continue
+            k_area = max(0.0, k[2] - k[0]) * max(0.0, k[3] - k[1])
+            union = b_area + k_area - inter
+            if union > 0 and inter / union >= iou_thresh:
+                dup = True
+                break
+        if not dup:
+            kept.append(b)
+    return kept
+
+
+def detect_text_blocks_in_rois(
+    img: Image.Image,
+    rois: list[Box],
+    timings: dict | None = None,
+) -> list[Box]:
+    """Detect text blocks by running the model on cropped regions.
+
+    Falls back to a full-page detection whenever :func:`_roi_plan` says the
+    crops are not worth it, so the caller always gets a usable result. The
+    decision is written into ``timings["roi_reason"]`` — it is never silent,
+    because "ROI was enabled but the full page ran" is exactly the kind of
+    thing that makes a benchmark meaningless.
+    """
+    W, H = img.size
+    plan, reason = _roi_plan(list(rois or []), W, H)
+    if timings is not None:
+        timings["roi_reason"] = reason
+        timings["roi_candidates"] = len(rois or [])
+        timings["roi_calls"] = len(plan)
+    if not plan:
+        return detect_text_blocks(img, timings=timings)
+
+    boxes: list[Box] = []
+    for r in plan:
+        x1 = max(0, int(r[0]))
+        y1 = max(0, int(r[1]))
+        x2 = min(W, int(round(r[2])))
+        y2 = min(H, int(round(r[3])))
+        if x2 - x1 < 8 or y2 - y1 < 8:
+            continue
+        crop = img.crop((x1, y1, x2, y2))
+        for b in detect_text_blocks(crop, timings=timings):
+            # Crop-local pixels -> page pixels.
+            boxes.append((b[0] + x1, b[1] + y1, b[2] + x1, b[3] + y1))
+    merged = _dedupe_boxes(boxes)
+    dbg("textblocks.roi", {"crops": len(plan), "boxes": len(merged), "reason": reason})
+    return merged
+
+
+def attach_block_bounds_to_groups(
+    tree: dict | None,
+    blocks: list[Box],
+    img_w: int | None = None,
+    img_h: int | None = None,
+) -> int:
+    """Give every bubble group without a bubble outline its ONNX block rect.
+
+    ``bubble_bounds_px`` normally comes from the OpenCV balloon detector and is
+    what the relayout uses as the canvas to pour text into. When that detector
+    finds nothing (common on borderless panels, narration boxes and dark
+    bubbles) the relayout falls back to the union of the source items — which
+    for vertical text is a TALL, NARROW column. Horizontal text poured into it
+    wraps to one or two characters per line, which is the "text stacked in a
+    thin strip" failure.
+
+    The trained text-block model already knows the real extent of the text set,
+    so its rect is a far better canvas than a single column's AABB. This fills
+    that gap in, and only that gap: a group that already has a detected balloon
+    keeps it, because the balloon outline is the more accurate shape.
+
+    Returns how many groups were given a fallback rect.
+    """
+    if not isinstance(tree, dict) or not blocks:
+        return 0
+    by_index: dict[int, dict] = {
+        int(p.get("para_index", i)): p
+        for i, p in enumerate(tree.get("paragraphs") or [])
+        if isinstance(p, dict)
+    }
+    filled = 0
+    for bg in tree.get("bubble_groups") or []:
+        if not isinstance(bg, dict):
+            continue
+        bb = bg.get("bubble_bounds_px")
+        if isinstance(bb, (list, tuple)) and len(bb) == 4:
+            continue
+        # Union of the block rects covering this group's paragraphs.
+        idxs: set[int] = set()
+        for pi in bg.get("para_indices") or []:
+            para = by_index.get(int(pi))
+            if para is not None and para.get("_tb_block") is not None:
+                idxs.add(int(para["_tb_block"]))
+        rects = [blocks[i] for i in sorted(idxs) if 0 <= i < len(blocks)]
+        if not rects:
+            continue
+        cand = (
+            min(r[0] for r in rects), min(r[1] for r in rects),
+            max(r[2] for r in rects), max(r[3] for r in rects),
+        )
+        if not _canvas_is_plausible(cand, bg, by_index, img_w, img_h):
+            bg["bubble_bounds_source"] = "textblock_rejected_oversize"
+            continue
+        bg["bubble_bounds_px"] = list(cand)
+        bg["bubble_bounds_source"] = "textblock"
+        filled += 1
+    return filled
+
+
+# How much of the group's own ink the rect must cover to count as its canvas.
+_CANVAS_MIN_INK_COVERAGE: float = 0.6
+
+
+def _canvas_is_plausible(
+    cand: Box,
+    bg: dict,
+    by_index: dict[int, dict],
+    img_w: int | None = None,
+    img_h: int | None = None,
+) -> bool:
+    """True when a block rect is a believable canvas for this group's text.
+
+    Guards the one failure this fallback can introduce: a bad detection that
+    covers half the page becomes the layout canvas, and the relaid-out line is
+    then centred inside a huge empty box. Rejecting it is strictly better than
+    accepting it — the caller simply leaves ``bubble_bounds_px`` unset and the
+    renderer falls back to the paragraph union, which is at least the right
+    order of magnitude. The rejection is recorded in ``bubble_bounds_source``
+    rather than dropped silently, so a page that looks wrong can be traced to
+    this decision instead of looking like a layout bug.
+
+    Both tests are skipped when the evidence for them is missing rather than
+    guessed at: no page size means no page-fraction test, no paragraph rects
+    mean no coverage test.
+    """
+    cw, ch = float(cand[2]) - float(cand[0]), float(cand[3]) - float(cand[1])
+    if cw <= 0 or ch <= 0:
+        return False
+
+    if canvas_is_oversized(cand, img_w, img_h):
+        return False
+
+    ink = [
+        _para_rect(by_index[int(pi)])
+        for pi in (bg.get("para_indices") or [])
+        if int(pi) in by_index
+    ]
+    ink = [r for r in ink if r is not None]
+    if not ink:
+        return True  # nothing to compare against — keep the detector's word
+
+    ix1 = min(r[0] for r in ink)
+    iy1 = min(r[1] for r in ink)
+    ix2 = max(r[2] for r in ink)
+    iy2 = max(r[3] for r in ink)
+    ink_area = max(1.0, (ix2 - ix1) * (iy2 - iy1))
+
+    # The block must actually contain the ink it claims to describe; a rect
+    # that only clips the text set is a mis-assignment, not a canvas.
+    ox = max(0.0, min(ix2, float(cand[2])) - max(ix1, float(cand[0])))
+    oy = max(0.0, min(iy2, float(cand[3])) - max(iy1, float(cand[1])))
+    return (ox * oy) / ink_area >= _CANVAS_MIN_INK_COVERAGE
 
 
 def _para_rect(para: dict) -> Box | None:

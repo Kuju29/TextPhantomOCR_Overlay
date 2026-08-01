@@ -11,7 +11,19 @@
  */
 
 import { getStorage, setStorage } from "./storage.js";
-import { DEFAULT_LANG, DEFAULT_MODE, DEFAULT_SOURCE, DEFAULT_MAX_CONCURRENCY } from "./constants.js";
+import {
+  DEFAULT_LANG,
+  DEFAULT_MODE,
+  DEFAULT_SOURCE,
+  DEFAULT_MAX_CONCURRENCY,
+  DEFAULT_RELAYOUT_TRANSLATED,
+  DEFAULT_RATE_LIMIT_ENABLED,
+  DEFAULT_RATE_RPM,
+  DEFAULT_RATE_BURST,
+  DEFAULT_UPLOAD_FORMAT,
+  DEFAULT_UPLOAD_QUALITY,
+  UPLOAD_FORMATS,
+} from "./constants.js";
 import {
   makePromptKey,
   migratePromptMap,
@@ -34,16 +46,59 @@ export function normalizeSource(value) {
 }
 
 /**
+ * Read a stored boolean that has a non-false default.
+ *
+ * `Boolean(undefined)` is false, so a plain truthiness check would silently
+ * turn every default-on switch off for users who have never touched it. Only an
+ * explicit `false` counts as off.
+ * @param {unknown} value
+ * @param {boolean} fallback
+ */
+function readBool(value, fallback) {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+/**
+ * Read a stored non-negative number. Anything unparseable falls back to the
+ * default rather than becoming NaN (which would serialize to null in the
+ * payload and read as "not set" on the server).
+ * @param {unknown} value
+ * @param {number} fallback
+ */
+function readCount(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+/**
+ * Canvas upload encoding. See DEFAULT_UPLOAD_FORMAT in constants.js for why
+ * the default moved off PNG.
+ */
+export function normalizeUploadFormat(value) {
+  const v = String(value || "").trim().toLowerCase();
+  return UPLOAD_FORMATS.includes(v) ? v : DEFAULT_UPLOAD_FORMAT;
+}
+
+/** Quality is a 0-1 canvas fraction; anything outside that is not a quality. */
+export function normalizeUploadQuality(value) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 && n <= 1 ? n : DEFAULT_UPLOAD_QUALITY;
+}
+
+/**
  * Lightweight settings slice used by the content script.
- * @returns {Promise<{mode:string, lang:string, sources:string, aiKey:string}>}
+ * @returns {Promise<{mode:string, lang:string, sources:string, aiKey:string,
+ *   uploadFormat:string, uploadQuality:number}>}
  */
 export async function readCoreSettings() {
-  const it = await getStorage(["mode", "lang", "sources", "aiKey"]);
+  const it = await getStorage(["mode", "lang", "sources", "aiKey", "uploadFormat", "uploadQuality"]);
   return {
     mode: normalizeMode(it.mode),
     lang: typeof it.lang === "string" && it.lang ? it.lang : DEFAULT_LANG,
     sources: typeof it.sources === "string" ? it.sources : DEFAULT_SOURCE,
     aiKey: typeof it.aiKey === "string" ? it.aiKey : "",
+    uploadFormat: normalizeUploadFormat(it.uploadFormat),
+    uploadQuality: normalizeUploadQuality(it.uploadQuality),
   };
 }
 
@@ -75,6 +130,10 @@ export async function readFullSettings() {
     "aiThinking",
     "aiPromptByLang",
     "aiPrompt",
+    "relayoutTranslated",
+    "rateLimitEnabled",
+    "rateRpm",
+    "rateBurst",
   ]);
 
   const lang = typeof it.lang === "string" ? it.lang : DEFAULT_LANG;
@@ -141,5 +200,11 @@ export async function readFullSettings() {
     // Reasoning control (Gemini): "default" = think normally, "off" = fastest.
     aiThinking: it.aiThinking === "off" ? "off" : "default",
     aiPrompt,
+    // Orientation relayout for the Translated overlay. Default ON.
+    relayoutTranslated: readBool(it.relayoutTranslated, DEFAULT_RELAYOUT_TRANSLATED),
+    // AI rate-limit pacing. 0 for rpm/burst = use the server's provider policy.
+    rateLimitEnabled: readBool(it.rateLimitEnabled, DEFAULT_RATE_LIMIT_ENABLED),
+    rateRpm: readCount(it.rateRpm, DEFAULT_RATE_RPM),
+    rateBurst: readCount(it.rateBurst, DEFAULT_RATE_BURST),
   };
 }

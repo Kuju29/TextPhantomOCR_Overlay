@@ -25,6 +25,7 @@ import threading
 import time
 from typing import Any
 
+import numpy as np
 from PIL import Image
 
 from backend.ai import markers
@@ -41,13 +42,25 @@ from backend.render.bubble import attach_bubble_bounds, detect_bubble_bounds_com
 from backend.render.colors import region_is_dark
 from backend.render.textblocks import (
     annotate_paragraph_blocks,
+    attach_block_bounds_to_groups,
     available as textblocks_available,
     detect_text_blocks,
+    detect_text_blocks_in_rois,
 )
 from backend.render.erase import erase_text_with_boxes
-from backend.render.groups import group_paragraphs_into_bubbles
+from backend.render.groups import (
+    group_paragraphs_into_bubbles,
+    merge_groups_sharing_canvas,
+)
 from backend.render.build_ai_tree import build_ai_tree
-from backend.render.region import LANGUAGE_DIRECTION
+from backend.render.relayout import (
+    build_vertical_rois,
+    normalize_group_rotation_signs,
+    rebuild_tree_for_target,
+    relayout_decision,
+    scan_tree_orientation,
+    target_orientation_for_lang,
+)
 from backend.render.patch import patch as patch_ai_tree
 from backend.render.tp_html import (
     fit_tree_font_sizes,
@@ -66,30 +79,142 @@ SUPPORTED_MODES = {"lens_images", "lens_text"}
 # --- Background-image encoding ----------------------------------------------
 # The erased background does not need to be lossless. Scanned/JPEG-sourced
 # pages carry sensor+compression noise that PNG must encode exactly (multi-MB
-# payloads); WebP q80 discards it and is typically several times smaller.
-# Clean digital pages with large flat areas can go the other way, so BOTH are
-# encoded and the smaller one wins — the result payload is never worse than
-# the old PNG-only behaviour. TP_LENS_DIRECT_IMG_FORMAT=png forces PNG only.
+# payloads); WebP discards it and is typically several times smaller. Clean
+# digital pages with large flat areas go the other way: PNG is both smaller
+# AND faster on line art.
+#
+# This used to encode BOTH formats and return the smaller blob. That is the
+# right answer for BYTES and the wrong one for CPU — it paid for two full
+# encodes of every page on a 2-vCPU container where encoding is already the
+# hottest stage of the direct lane. It now encodes ONCE, choosing the format
+# from a sampled flatness measurement taken on a small native-resolution crop
+# (tens of microseconds, versus ~0.3-1.5 s for the encode it replaces).
+#
+# TP_LENS_DIRECT_IMG_FORMAT:
+#   auto (default) — sample the image, run exactly one encode
+#   webp / png     — force one format, skip the sampling
+#   compare        — the old behaviour: encode both, return the smaller.
+#                    Roughly 2x the encode CPU; kept for A/B measurement.
 _BG_FORMAT = (os.environ.get("TP_LENS_DIRECT_IMG_FORMAT", "auto") or "auto").strip().lower()
 _WEBP_QUALITY = max(1, min(100, int(os.environ.get("TP_LENS_DIRECT_WEBP_QUALITY", "80"))))
+# Pillow's WebP effort knob (0 fastest .. 6 smallest). 2 keeps most of the size
+# win at a fraction of the default (4) cost.
+_WEBP_METHOD = max(0, min(6, int(os.environ.get("TP_LENS_DIRECT_WEBP_METHOD", "2"))))
+# --- "auto" format heuristic ---
+# PNG only beats WebP on QUANTIZED art: screentone/halftone, line art, flat
+# webtoon colour. On a measured 1400x2000 halftone page PNG is 54 KB and WebP
+# q80 is 872 KB — 16x larger and 4x slower — so getting this class wrong is
+# far more expensive than the sampling. On anything scanned or JPEG-sourced
+# the ordering reverses hard (2374 KB PNG vs 125 KB WebP).
+#
+# Neither signal is sufficient alone:
+#   • colour count alone misfires on flat-toned grey scans, which have few
+#     distinct values but compress terribly as PNG because of pixel noise;
+#   • flatness alone misfires on halftone, whose 2-3 px dither pattern puts
+#     adjacency near 0.67 — well inside the range real scans occupy.
+# Requiring BOTH is what separates them: quantized art has few colours AND
+# long identical runs, scan noise has neither.
+#
+# Accepted trade: pure line art and flat webtoon colour would still be a few
+# tens of KB smaller as WebP, and they are routed to PNG here. Those pages are
+# 40-100 KB either way, so the loss is bounded and absolute; the cases this
+# protects (halftone at 16x, scans at 19x) are measured in megabytes.
+_MAX_PALETTE_COLORS = max(2, int(os.environ.get("TP_LENS_DIRECT_COLOR_LIMIT", "256")))
+# Stride for the colour sample. NEAREST keeps exact pixel values, so counting
+# distinct colours on the subsample stays meaningful (unlike the noise
+# measurement below, which must be taken at native resolution).
+_COLOR_SAMPLE_STEP = max(1, int(os.environ.get("TP_LENS_DIRECT_COLOR_STEP", "3")))
+# Side of the native-resolution centre crop used to measure flatness.
+_FLAT_SAMPLE_PX = max(32, int(os.environ.get("TP_LENS_DIRECT_SAMPLE_PX", "256")))
+# Fraction of horizontally-adjacent identical pixels. Scans sit at 0.04-0.13,
+# halftone at ~0.67, line art and flat colour above 0.98.
+_FLAT_THRESHOLD = min(1.0, max(0.0, float(os.environ.get("TP_LENS_DIRECT_FLAT_THRESHOLD", "0.45"))))
+
+# WebP support is a property of the Pillow BUILD, not of any single image, so
+# it is resolved once here. Doing it per-call inside a bare `except` hid a
+# permanently-degraded deployment behind a silent PNG fallback.
+try:
+    from PIL import features as _pil_features
+
+    _WEBP_AVAILABLE = bool(_pil_features.check("webp"))
+except Exception:  # noqa: BLE001 - very old Pillow without PIL.features
+    _WEBP_AVAILABLE = False
+if not _WEBP_AVAILABLE and _BG_FORMAT in ("auto", "webp"):
+    event(
+        "encode.webp_unavailable",
+        {
+            "requested_format": _BG_FORMAT,
+            "detail": "Pillow was built without WebP; every background will be "
+            "encoded as PNG (much larger payloads). Install a Pillow wheel "
+            "with WebP support or set TP_LENS_DIRECT_IMG_FORMAT=png to make "
+            "this explicit.",
+        },
+        ok=False,
+    )
+
+
+def _encode_png(img: Image.Image) -> bytes:
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", compress_level=1)
+    return buf.getvalue()
+
+
+def _encode_webp(img: Image.Image) -> bytes:
+    buf = io.BytesIO()
+    img.save(buf, format="WEBP", quality=_WEBP_QUALITY, method=_WEBP_METHOD)
+    return buf.getvalue()
+
+
+def _flatness(img: Image.Image) -> float:
+    """Fraction of horizontally-adjacent identical pixels in a centre crop.
+
+    Sampled at NATIVE resolution — downscaling first would smear exactly the
+    per-pixel noise the measurement is looking for. The crop is capped at
+    ``_FLAT_SAMPLE_PX`` per side, so this reads at most ~65k pixels regardless
+    of page size.
+    """
+    w, h = img.size
+    side = min(_FLAT_SAMPLE_PX, w, h)
+    left = (w - side) // 2
+    top = (h - side) // 2
+    crop = img.crop((left, top, left + side, top + side)).convert("L")
+    arr = np.asarray(crop, dtype=np.uint8)
+    if arr.ndim != 2 or arr.shape[1] < 2:
+        raise ValueError(f"flatness sample has unusable shape {arr.shape}")
+    return float(np.mean(arr[:, 1:] == arr[:, :-1]))
+
+
+def _is_quantized_art(img: Image.Image) -> bool:
+    """True for screentone / line art / flat colour — the pages PNG wins on."""
+    w, h = img.size
+    step = _COLOR_SAMPLE_STEP
+    small = img.resize((max(1, w // step), max(1, h // step)), Image.NEAREST)
+    # getcolors returns None past maxcolors, so this early-exits on real scans.
+    if small.getcolors(maxcolors=_MAX_PALETTE_COLORS) is None:
+        return False
+    return _flatness(img) >= _FLAT_THRESHOLD
 
 
 def _encode_bg_data_uri(img: Image.Image) -> str:
-    """Encode the (erased) background image as a compact data URI."""
-    png_buf = io.BytesIO()
-    img.save(png_buf, format="PNG", compress_level=1)
-    png_bytes = png_buf.getvalue()
-    if _BG_FORMAT == "png":
-        return bytes_to_data_uri(png_bytes, "image/png")
-    try:
-        webp_buf = io.BytesIO()
-        img.save(webp_buf, format="WEBP", quality=_WEBP_QUALITY, method=2)
-        webp_bytes = webp_buf.getvalue()
+    """Encode the (erased) background image as a compact data URI.
+
+    Runs exactly one encode unless ``TP_LENS_DIRECT_IMG_FORMAT=compare``.
+    """
+    if _BG_FORMAT == "png" or not _WEBP_AVAILABLE:
+        return bytes_to_data_uri(_encode_png(img), "image/png")
+    if _BG_FORMAT == "webp":
+        return bytes_to_data_uri(_encode_webp(img), "image/webp")
+    if _BG_FORMAT == "compare":
+        png_bytes = _encode_png(img)
+        webp_bytes = _encode_webp(img)
         if len(webp_bytes) < len(png_bytes):
             return bytes_to_data_uri(webp_bytes, "image/webp")
-    except Exception:
-        pass  # Pillow without WebP support — PNG below.
-    return bytes_to_data_uri(png_bytes, "image/png")
+        return bytes_to_data_uri(png_bytes, "image/png")
+
+    # "auto": sample (<1 ms), then run exactly one encode.
+    if _is_quantized_art(img):
+        return bytes_to_data_uri(_encode_png(img), "image/png")
+    return bytes_to_data_uri(_encode_webp(img), "image/webp")
 
 
 # CPU gate: workers may all wait on the Lens network call in parallel (cheap),
@@ -163,78 +288,6 @@ def _pick_template_tree(original_tree: dict | None, translated_tree: dict | None
     return translated_tree or original_tree or {}
 
 
-def _target_orientation_for_lang(target_lang: str) -> str:
-    """Return the renderer orientation wanted by *target_lang* (``h``/``v``).
-
-    This mirrors ``build_ai_tree``: CJK/``auto`` targets default to vertical;
-    Thai/Latin and unknown languages stay horizontal.
-    """
-    lang_norm = normalize_lang(target_lang)
-    preset = LANGUAGE_DIRECTION.get(lang_norm, "")
-    if preset in ("h", "hr"):
-        return "h"
-    if preset in ("v", "auto"):
-        return "v"
-    return "h"
-
-
-def _source_orientation_from_lens_tree(tree: dict | None) -> tuple[str, dict[str, Any]]:
-    """Classify Lens source layout as horizontal or vertical from item geometry.
-
-    The detector is intentionally cheap and uses only Lens geometry.  It does
-    not run ONNX.  Axis-aligned items within ~12 degrees of 0/90 vote; if
-    rotation is missing, a tall/narrow ``bounds_px`` item can vote vertical.
-    """
-    n_h = n_v = n_axis = n_items = 0
-    rot_samples: list[float] = []
-    if isinstance(tree, dict):
-        for para in tree.get("paragraphs") or []:
-            if not isinstance(para, dict):
-                continue
-            for it in para.get("items") or []:
-                if not isinstance(it, dict) or not str(it.get("text") or "").strip():
-                    continue
-                n_items += 1
-                box = it.get("box") or {}
-                try:
-                    rot = float(box.get("rotation_deg") or box.get("rotation_deg_css") or 0.0)
-                except Exception:
-                    rot = 0.0
-                rot_samples.append(rot)
-                residual = ((rot + 45.0) % 90.0) - 45.0
-                if abs(residual) <= 12.0:
-                    n_axis += 1
-                    r_mod = rot % 180.0
-                    if r_mod > 90.0:
-                        r_mod -= 180.0
-                    if abs(r_mod) > 45.0:
-                        n_v += 1
-                    else:
-                        n_h += 1
-                    continue
-                # Fallback for Lens payloads whose rotation is missing but
-                # bounds show a clear portrait text item.
-                bpx = it.get("bounds_px")
-                if isinstance(bpx, (list, tuple)) and len(bpx) == 4:
-                    try:
-                        w = float(bpx[2]) - float(bpx[0])
-                        h = float(bpx[3]) - float(bpx[1])
-                    except Exception:
-                        w = h = 0.0
-                    if w > 0 and h > 2.2 * w:
-                        n_axis += 1
-                        n_v += 1
-    orient = "v" if n_axis > 0 and n_v * 2 >= n_axis else "h"
-    return orient, {
-        "source_orientation": orient,
-        "source_axis_items": n_axis,
-        "source_vertical_items": n_v,
-        "source_horizontal_items": n_h,
-        "source_items": n_items,
-        "rotation_samples": [round(x, 1) for x in rot_samples[:12]],
-    }
-
-
 def _should_use_onnx_for_ai(
     original_tree: dict | None,
     translated_tree: dict | None,  # noqa: ARG001 - reserved for future geometry quality checks
@@ -242,20 +295,33 @@ def _should_use_onnx_for_ai(
 ) -> tuple[bool, dict[str, Any]]:
     """Decide whether ``lens_text.ai`` really needs the ONNX self-block path.
 
-    Policy:
+    The AI layer has no user switch: it always builds its own geometry from the
+    target language, because there is no sensible "leave it rotated" answer for
+    a layer that exists to produce readable translated text. Policy:
+
       * ``TP_AI_LAYOUT_MODE=fast``    -> never run ONNX; patch AI into Lens geometry.
       * ``TP_AI_LAYOUT_MODE=quality`` -> always run ONNX.
       * ``auto`` (default)            -> run ONNX only when source and target
         reading orientations differ, e.g. vertical Japanese -> horizontal Thai
         or horizontal English -> vertical Japanese.
 
-    Horizontal -> horizontal AI now stays on the fast Lens-template path.
+    Horizontal -> horizontal AI stays on the fast Lens-template path.
     """
     mode = (getattr(settings, "ai_layout_mode", "auto") or "auto").strip().lower()
-    source_orientation, meta = _source_orientation_from_lens_tree(original_tree)
-    target_orientation = _target_orientation_for_lang(target_lang)
-    meta["target_orientation"] = target_orientation
-    meta["ai_layout_mode"] = mode
+    source_orientation, scan = scan_tree_orientation(original_tree)
+    target_orientation = target_orientation_for_lang(target_lang)
+    # Keep the historical ``source_*`` key names so existing log queries and
+    # dashboards built on translate.perf keep working.
+    meta: dict[str, Any] = {
+        "source_orientation": source_orientation,
+        "source_axis_items": scan["axis_items"],
+        "source_vertical_items": scan["vertical_items"],
+        "source_horizontal_items": scan["horizontal_items"],
+        "source_items": scan["items"],
+        "rotation_samples": scan["rotation_samples"],
+        "target_orientation": target_orientation,
+        "ai_layout_mode": mode,
+    }
     if mode in ("fast", "lens", "lens_template", "direct", "0", "off", "false", "no"):
         meta["onnx_reason"] = "forced_fast"
         return False, meta
@@ -267,6 +333,35 @@ def _should_use_onnx_for_ai(
         return True, meta
     meta["onnx_reason"] = "same_orientation_fast"
     return False, meta
+
+
+# --- Per-request layout options --------------------------------------------
+
+def _layout_options(payload: dict | None) -> dict[str, bool]:
+    """Resolve the ``layout`` switches for one request.
+
+    The extension sends ``{"layout": {"relayout_translated": bool}}``.  A
+    missing key falls back to the server default in :mod:`backend.config` —
+    that fallback is for clients that predate the switch, so it must stay
+    explicit rather than being silently coerced to ``False`` by a truthiness
+    test on an absent field.
+    """
+    raw = payload.get("layout") if isinstance(payload, dict) else None
+    raw = raw if isinstance(raw, dict) else {}
+
+    def _flag(key: str, default: bool) -> bool:
+        if key not in raw or raw[key] is None:
+            return default
+        value = raw[key]
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on")
+        return bool(value)
+
+    return {
+        "relayout_translated": _flag(
+            "relayout_translated", bool(getattr(settings, "relayout_translated", True))
+        ),
+    }
 
 
 # --- Text-colour annotation -------------------------------------------------
@@ -605,27 +700,38 @@ def process_image(
     source: str = "translated",
     lens_data: dict[str, Any] | None = None,
     capture_ai_request: bool = False,
+    layout_opts: dict[str, bool] | None = None,
 ) -> dict[str, Any]:
     """Run the full pipeline on a local image file.
 
     ``lens_data`` may be passed in to skip the Google Lens fetch — useful for
     the local CLI (``backend.cli``), which can save and replay a Lens response
     so the Lens round-trip isn't repeated on every run.
+
+    ``layout_opts`` carries the per-request relayout switch
+    (``relayout_translated``); see :func:`_layout_options`.
     """
     mode_id = mode if mode in SUPPORTED_MODES else "lens_images"
     source_id = str(source or "translated").strip().lower() or "translated"
     target_lang = normalize_lang(lang)
+    layout = layout_opts if isinstance(layout_opts, dict) else _layout_options(None)
 
     # IMPORTANT pipeline contract:
     #   * lens_images                 -> Lens-direct image result
     #   * lens_text.original          -> Lens-direct OCR/layout overlay
-    #   * lens_text.translated        -> Lens-direct translated layout overlay
+    #   * lens_text.translated        -> Lens-direct translated layout overlay,
+    #                                    OR (switch on + axis change) the same
+    #                                    Lens MT text re-laid out at the target
+    #                                    orientation via the self-block path
     #   * lens_text.ai                -> AUTO:
     #       - same orientation        -> fast Lens-template AI, no ONNX
     #       - direction changed       -> self-built block path with ONNX
     wants_ai = (mode_id == "lens_text" and source_id == "ai" and ai_cfg is not None)
     needs_self_blocks = False
     ai_layout_meta: dict[str, Any] = {}
+    # Set once the translated layer has been rebuilt at the target orientation.
+    relayout_translated = False
+    tr_layout_meta: dict[str, Any] = {}
 
     # Per-stage wall-clock timings (ms), surfaced via the translate.perf log
     # line so slow jobs can be diagnosed from the logs alone.
@@ -733,6 +839,11 @@ def process_image(
     translated_tree = decode_tree(
         out["translatedParagraphs"], out["translatedTextFull"] or "", "translated", W, H
     )
+    # The tree that actually gets rendered as the translated overlay. It is
+    # ``translated_tree`` unless the relayout below replaces it with a rebuilt
+    # one; keeping them separate means the AI layer and the debug export still
+    # see Lens's untouched structure.
+    translated_render_tree = translated_tree
     out["original"] = {"originalTree": original_tree, "originalTextFull": out["originalTextFull"] or ""}
     out["translated"] = {
         "translatedTree": translated_tree,
@@ -746,21 +857,85 @@ def process_image(
             original_tree, translated_tree, target_lang
         )
         stages.update(ai_layout_meta)
-        stages["pipeline_path"] = "self_blocks_ai" if needs_self_blocks else "lens_ai_fast"
-        out["pipelinePath"] = stages["pipeline_path"]
-        if needs_self_blocks:
-            _t = time.perf_counter()
-            text_blocks = detect_text_blocks(img, timings=_tb_timings)
-            stages["blocks_ms"] = round((time.perf_counter() - _t) * 1000, 1)
-            stages["blocks"] = len(text_blocks)
-            stages["blocks_lock_ms"] = float(_tb_timings.get("lock_ms", 0.0))
-            stages["blocks_infer_ms"] = float(_tb_timings.get("infer_ms", 0.0))
+
+    # Translated relayout: decided from the TRANSLATED tree's own geometry,
+    # because that is the tree whose text gets re-laid out.  Lens gives the MT
+    # layer the source's boxes, so a vertical Japanese page yields vertical Thai
+    # columns — this is the check that catches it.  Only ``lens_text`` jobs that
+    # actually display the translated layer pay for it (the AI layer replaces
+    # that overlay anyway, and the original layer must always keep Lens
+    # geometry so it lines up with the untouched glyphs).
+    if mode_id == "lens_text" and source_id == "translated":
+        relayout_translated, tr_layout_meta = relayout_decision(
+            translated_tree, target_lang, enabled=layout["relayout_translated"]
+        )
+        stages.update(
+            {f"tr_{k}": v for k, v in tr_layout_meta.items() if k != "rotation_samples"}
+        )
+        stages["tr_relayout"] = relayout_translated
+
+    # Vertical pages need the text-block model even when nothing is being
+    # rotated.  Lens returns vertical Japanese as one paragraph PER COLUMN with
+    # no set boundaries, so without grouping:
+    #   * Original  — the browser-translate targets are per column, so Chrome
+    #     translates fragments out of order instead of whole bubbles;
+    #   * Translated — columns of one sentence render as separate boxes and can
+    #     even face opposite ways (+/-90 decode noise).
+    # Grouping is what fixes both, and only vertical pages pay for it.
+    needs_groups = False
+    if mode_id == "lens_text" and source_id in ("original", "translated") and not relayout_translated:
+        _grp_tree = original_tree if source_id == "original" else translated_tree
+        _grp_orient, _grp_scan = scan_tree_orientation(_grp_tree)
+        needs_groups = _grp_orient == "v" and int(_grp_scan.get("axis_items") or 0) > 0
+        stages["group_scan_orientation"] = _grp_orient
+        stages["group_pass"] = needs_groups
+
+    if wants_ai or relayout_translated or needs_groups:
+        if wants_ai:
+            stages["pipeline_path"] = "self_blocks_ai" if needs_self_blocks else "lens_ai_fast"
         else:
-            text_blocks = []
-            stages["blocks_ms"] = 0.0
-            stages["blocks"] = 0
-            stages["blocks_lock_ms"] = 0.0
-            stages["blocks_infer_ms"] = 0.0
+            stages["pipeline_path"] = "self_blocks_translated"
+        out["pipelinePath"] = stages["pipeline_path"]
+
+    # The self-block path is shared: both the AI relayout and the translated
+    # relayout need real bubble geometry (detected text blocks + bubble
+    # outlines), so either one turns it on.
+    if needs_self_blocks or relayout_translated or needs_groups:
+        needs_self_blocks = True
+        # Crop to the vertical regions Lens found, so the detector sees those
+        # columns at full resolution instead of shrunk inside the whole page.
+        # The ROI tree is whichever layer drove the decision: the AI layer works
+        # from the ORIGINAL geometry, the translated layers from their own.
+        _roi_tree = (
+            translated_tree
+            if (not wants_ai and source_id == "translated")
+            else original_tree
+        )
+        _t_roi = time.perf_counter()
+        _rois = build_vertical_rois(
+            _roi_tree, W, H, margin_ratio=settings.vertical_roi_margin_ratio
+        )
+        stages["roi_build_ms"] = round((time.perf_counter() - _t_roi) * 1000, 1)
+
+        _t = time.perf_counter()
+        text_blocks = detect_text_blocks_in_rois(img, _rois, timings=_tb_timings)
+        stages["blocks_ms"] = round((time.perf_counter() - _t) * 1000, 1)
+        stages["blocks"] = len(text_blocks)
+        stages["blocks_load_ms"] = float(_tb_timings.get("load_ms", 0.0))
+        stages["blocks_lock_ms"] = float(_tb_timings.get("lock_ms", 0.0))
+        stages["blocks_infer_ms"] = float(_tb_timings.get("infer_ms", 0.0))
+        # Which path actually ran — never leave "ROI on but full page ran"
+        # invisible, or a before/after benchmark means nothing.
+        stages["roi_reason"] = str(_tb_timings.get("roi_reason", ""))
+        stages["roi_candidates"] = int(_tb_timings.get("roi_candidates", 0))
+        stages["roi_calls"] = int(_tb_timings.get("roi_calls", 0))
+    elif wants_ai:
+        text_blocks = []
+        stages["blocks_ms"] = 0.0
+        stages["blocks"] = 0
+        stages["blocks_load_ms"] = 0.0
+        stages["blocks_lock_ms"] = 0.0
+        stages["blocks_infer_ms"] = 0.0
 
     original_span_tokens = flatten_spans(original_tree)
 
@@ -905,10 +1080,86 @@ def process_image(
         dbg("groups.original", {"bubble_groups": len(original_tree.get("bubble_groups") or [])})
         dbg("groups.translated", {"bubble_groups": len(translated_tree.get("bubble_groups") or [])})
 
+        # Furigana readings dropped from the translation text. Zero on a page
+        # that clearly has readings means the reading is still glued to the run
+        # it annotates, and whatever translates that string will return noise.
+        stages["ruby_items_dropped"] = sum(
+            int(bg.get("ruby_items_dropped") or 0)
+            for tree in (original_tree, translated_tree)
+            for bg in (tree.get("bubble_groups") or [])
+        )
+
+        # Give groups the model's block rect when OpenCV found no balloon.
+        # Without this the relayout canvas falls back to the union of the
+        # source items, which for vertical text is a tall narrow strip — the
+        # horizontal translation then wraps to one or two characters per line.
+        if tb_authority and text_blocks:
+            _n_og = attach_block_bounds_to_groups(
+                original_tree, text_blocks, W, H
+            )
+            _n_tr = attach_block_bounds_to_groups(
+                translated_tree, text_blocks, W, H
+            )
+            stages["group_bounds_from_blocks"] = _n_og + _n_tr
+
+        # Two groups handed the SAME canvas are one bubble that the paragraph
+        # merge split; left alone they render two overlays at identical
+        # coordinates and one hides the other. Runs unconditionally: the shared
+        # rect can just as easily come from one OpenCV balloon covering two
+        # detected regions, which happens whether or not the model ran.
+        _m_og = merge_groups_sharing_canvas(original_tree, W, H)
+        _m_tr = merge_groups_sharing_canvas(translated_tree, W, H)
+        stages["group_canvas_merged"] = _m_og["merged"] + _m_tr["merged"]
+        stages["group_canvas_unshared"] = (
+            _m_og["unshared"] + _m_tr["unshared"]
+        )
+
+        # Columns of one bubble that Lens decoded as +90 and -90 render facing
+        # opposite ways. Snap each group to one sign before anything renders.
+        stages["rotation_flips"] = (
+            normalize_group_rotation_signs(original_tree)
+            + normalize_group_rotation_signs(translated_tree)
+        )
+
+        # --- Translated relayout ------------------------------------------
+        # Rebuild the MT layer with boxes at the target orientation, using the
+        # translated tree's OWN groups and OWN text.  Nothing is translated
+        # again — this is pure geometry, so it costs no provider call and works
+        # without an API key.
+        #
+        # The rebuilt tree is kept in a separate variable: ``translated_tree``
+        # still holds Lens's original structure, which the AI layer's marker
+        # repair reads paragraph-by-paragraph (relayout drops furigana and
+        # 1-character fragments, so its paragraph indices no longer line up).
+        if relayout_translated:
+            _t = time.perf_counter()
+            rebuilt = rebuild_tree_for_target(translated_tree, target_lang, W, H)
+            stages["tr_relayout_ms"] = round((time.perf_counter() - _t) * 1000, 1)
+            if rebuilt is None:
+                # NO-SILENT-FALLBACK: the switch said relayout, the decision
+                # said the axis changed, and we still could not rebuild (no
+                # usable bubble groups). Rendering the rotated Lens layer is
+                # the only option, but it must be visible in the log rather
+                # than looking like the relayout simply had no effect.
+                relayout_translated = False
+                stages["tr_relayout"] = False
+                stages["tr_relayout_failed"] = "no_bubble_groups"
+                event(
+                    "relayout.translated.unavailable",
+                    {"reason": "no_bubble_groups", "lang": target_lang},
+                    ok=False,
+                )
+            else:
+                translated_render_tree = rebuilt
+                stages["tr_relayout_paragraphs"] = len(rebuilt.get("paragraphs") or [])
+                dbg("relayout.translated", {"stats": tree_stats(rebuilt), "lang": target_lang})
+
         # Per-paragraph background luminance → text colour flag, sampled on
         # the erased image (original glyphs removed). Cheap: ≤24x24 median.
         _annotate_text_light(original_tree, base_img)
         _annotate_text_light(translated_tree, base_img)
+        if translated_render_tree is not translated_tree:
+            _annotate_text_light(translated_render_tree, base_img)
     finally:
         _CPU_GATE.release()
 
@@ -933,7 +1184,11 @@ def process_image(
         or any(h in (ai_cfg.base_url or "").lower()
                for h in ("localhost", "127.0.0.1", "0.0.0.0"))
     )
-    _run_ai = bool(ai_cfg and ((ai_cfg.api_key or "").strip() or _ai_is_local))
+    # ``wants_ai`` matters here now: this branch used to be reachable only for
+    # AI jobs, but a translated-relayout job also lands in it. Without the guard
+    # a caller that supplies an AiConfig for a non-AI source (the CLI does) would
+    # silently pay for a provider call it never asked for.
+    _run_ai = bool(wants_ai and ai_cfg and ((ai_cfg.api_key or "").strip() or _ai_is_local))
 
     # Submit AI to a background thread so it overlaps with render+PNG below.
     _f_ai: concurrent.futures.Future | None = None
@@ -968,8 +1223,21 @@ def process_image(
         fit_tree_font_sizes(original_tree, thai_font, latin_font, W, H)
         out["original"]["originalhtml"] = render_tree_overlay(original_tree, W, H)
 
-        fit_tree_font_sizes(translated_tree, thai_font, latin_font, W, H)
-        out["translated"]["translatedhtml"] = render_tree_overlay(translated_tree, W, H)
+        # A relaid-out translated tree carries ``side == "Ai"``, which selects
+        # the deterministic bubble-block renderer — that is the whole point of
+        # rebuilding the geometry — and that path needs ``target_lang`` to pick
+        # the reading direction.
+        fit_tree_font_sizes(translated_render_tree, thai_font, latin_font, W, H)
+        out["translated"]["translatedhtml"] = render_tree_overlay(
+            translated_render_tree, W, H, target_lang=target_lang if relayout_translated else ""
+        )
+        if relayout_translated:
+            out["translated"]["translatedTree"] = translated_render_tree
+            out["translated"]["relayout"] = {
+                "applied": True,
+                "source_orientation": tr_layout_meta.get("source_orientation"),
+                "target_orientation": tr_layout_meta.get("target_orientation"),
+            }
 
         out["htmlCss"] = overlay_css()
         out["htmlMeta"] = {"baseW": int(W), "baseH": int(H), "format": "tp"}
@@ -1087,6 +1355,7 @@ def process_payload(payload: dict) -> dict[str, Any]:
         raise ValueError("No image data")
 
     ai_cfg = _build_ai_config(payload, mode, source)
+    layout = _layout_options(payload)
 
     # --- cache lookup ------------------------------------------------------
     img_hash = sha256_hex(img_bytes)
@@ -1097,7 +1366,12 @@ def process_payload(payload: dict) -> dict[str, Any]:
         # after extension retries/reconnects. AI still gets its separate cache
         # because prompt/model/provider affect the result.
         cache_source = "ai" if source == "ai" else source or "translated"
-        cache_key = cache_mod.build_cache_key(img_hash, lang, mode, cache_source, ai_cfg)
+        # The relayout switches change the rendered geometry, so they MUST be
+        # part of the key — otherwise flipping a toggle would serve the old
+        # layout back from cache and look like the switch did nothing.
+        cache_key = cache_mod.build_cache_key(
+            img_hash, lang, mode, cache_source, ai_cfg, layout=layout
+        )
         cache = cache_mod.ai_result_cache if source == "ai" else cache_mod.result_cache
         cached = cache.get(cache_key)
         if cached:
@@ -1116,7 +1390,7 @@ def process_payload(payload: dict) -> dict[str, Any]:
         tmp_path = f.name
     t_tmp = time.perf_counter()
     try:
-        out = process_image(tmp_path, lang, mode, ai_cfg, source=source)
+        out = process_image(tmp_path, lang, mode, ai_cfg, source=source, layout_opts=layout)
         stages = out.pop("perfStages", {}) or {}
         out["perf"] = {
             "cache": "miss" if cache_used else "off",

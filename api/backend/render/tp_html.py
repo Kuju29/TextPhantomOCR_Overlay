@@ -33,6 +33,7 @@ import math
 from typing import Any, Final
 
 from backend.lens.tree import iter_paragraphs
+from backend.render.groups import group_is_ruby_only
 from backend.render.region import (
     compute_region_geometry,
     fit_render_box,
@@ -1068,6 +1069,32 @@ def render_tree_overlay(
     #                and re-inserts it as one readable group in the bubble.
     is_original_layer = str(tree.get("side") or "").lower() == "original"
 
+    # BUBBLE-LEVEL translate targets.
+    #
+    # Chrome segments by layout, so ONE .tp-gtext per Lens paragraph means one
+    # translation segment per paragraph. That is fine for horizontal text, where
+    # a Lens paragraph IS the sentence — but vertical Japanese comes back as one
+    # paragraph PER COLUMN, so a single bubble was handed to Google as several
+    # unrelated fragments, in Lens's order rather than reading order. The result
+    # is a bubble whose translated lines are shuffled and translated without
+    # each other's context.
+    #
+    # ``tree["bubble_groups"]`` (from the text-block model, via groups.py)
+    # already carries the columns of one utterance joined into ``text`` in
+    # reading order — right-to-left for vertical Japanese. So when groups exist,
+    # the translate target is built per GROUP and the per-line .tp-src layer is
+    # left exactly as it was: nothing moves on screen, Google just receives whole
+    # sentences.
+    group_of_para: dict[int, int] = {}
+    groups_list = tree.get("bubble_groups") or [] if is_original_layer else []
+    for gi, bg in enumerate(groups_list):
+        if not isinstance(bg, dict):
+            continue
+        for pi in bg.get("para_indices") or []:
+            group_of_para[int(pi)] = gi
+    # Emit each group's translate block once, at its first paragraph.
+    gtext_done: set[int] = set()
+
     for para in paragraphs_in_order:
         shared_fs = _font_for_para(para)
         chunks: list[str] = []
@@ -1081,15 +1108,32 @@ def render_tree_overlay(
         if not chunks:
             continue
         if is_original_layer:
-            group = (
-                '<div class="tp-src notranslate" translate="no">'
-                + "".join(chunks)
-                + "</div>"
-                + _render_original_gtext_block(
+            gi = group_of_para.get(int(para.get("para_index", -1)))
+            gtext = ""
+            if gi is None:
+                # No grouping ran (horizontal page, or the model was off) —
+                # per-paragraph target, the original behaviour.
+                gtext = _render_original_gtext_block(
                     para, img_w, img_h,
                     override_fs=shared_fs,
                     is_vertical=para_vertical[id(para)],
                 )
+            elif gi not in gtext_done:
+                gtext_done.add(gi)
+                # A group holding nothing but a furigana reading gets NO target
+                # block: on its own a bare kana pronunciation carries no
+                # meaning, and the browser turns it into noise that then paints
+                # over the neighbouring bubble's real translation.
+                if not group_is_ruby_only(groups_list[gi], tree, img_h):
+                    gtext = _render_group_gtext_block(
+                        groups_list[gi], paragraphs_in_order, img_w, img_h,
+                        override_fs=shared_fs,
+                    )
+            group = (
+                '<div class="tp-src notranslate" translate="no">'
+                + "".join(chunks)
+                + "</div>"
+                + gtext
             )
             parts.append(_wrap_on_dark(group, para))
         else:
@@ -1099,6 +1143,76 @@ def render_tree_overlay(
 
     parts.append("</div></div>")
     return "".join(parts) if has_any else ""
+
+
+def _render_group_gtext_block(
+    bg: dict,
+    paragraphs: list[dict],
+    img_w: int,
+    img_h: int,
+    override_fs: int | None,
+) -> str:
+    """ONE ``.tp-gtext`` for a whole bubble group (all its columns together).
+
+    Geometry is the union of the group's paragraph boxes — preferring the
+    detected bubble/text-block rect when there is one, since that is the shape
+    the reader sees. Text comes straight from ``bg["text"]``, which groups.py
+    already assembled in reading order with the right separator (no spaces for
+    CJK), and with furigana columns dropped so the kana readings do not
+    interleave into the sentence.
+
+    Always rendered horizontally: the translation target (Thai, English…) reads
+    horizontally regardless of how the source was typeset.
+    """
+    text = str(bg.get("text") or "").strip()
+    if not text:
+        return ""
+
+    members = {int(pi) for pi in (bg.get("para_indices") or [])}
+    paras = [p for p in paragraphs if int(p.get("para_index", -1)) in members]
+    if not paras:
+        return ""
+
+    left = top = float("inf")
+    right = bottom = float("-inf")
+    bb = bg.get("bubble_bounds_px")
+    if isinstance(bb, (list, tuple)) and len(bb) == 4:
+        left, top, right, bottom = (float(v) for v in bb)
+    else:
+        for p in paras:
+            for it in p.get("items") or []:
+                if not str(it.get("text") or "").strip():
+                    continue
+                aabb = _item_rotated_aabb_px(it, img_w, img_h)
+                if aabb is None:
+                    continue
+                l, t, w, h = aabb
+                left, top = min(left, l), min(top, t)
+                right, bottom = max(right, l + w), max(bottom, t + h)
+    if not (right > left and bottom > top):
+        return ""
+
+    if override_fs is not None and override_fs >= _MIN_FONT_PX:
+        fs = int(override_fs)
+    else:
+        fs = max(_MIN_FONT_PX, int(float(bg.get("font_size_px") or 0)))
+    lh = int(round(fs * 1.12))
+
+    style = (
+        f"left:{left / max(1, img_w) * 100.0:.4f}%;"
+        f"top:{top / max(1, img_h) * 100.0:.4f}%;"
+        f"width:{(right - left) / max(1, img_w) * 100.0:.4f}%;"
+        f"height:{(bottom - top) / max(1, img_h) * 100.0:.4f}%;"
+        "white-space:normal;text-align:center;"
+        f"font-size:calc(var(--tp-font-scale,1) * {fs}px);"
+        f"line-height:calc(var(--tp-font-scale,1) * {lh}px);"
+    )
+    cls = "tp-line tp-gtext rtl" if contains_rtl(text) else "tp-line tp-gtext"
+    gi = int(bg.get("bubble_index", 0))
+    return (
+        f'<div class="{cls}" data-bg="{gi}" data-fs="{fs}" '
+        f'style="{style}">{_escape_text(text)}</div>'
+    )
 
 
 def _render_original_gtext_block(

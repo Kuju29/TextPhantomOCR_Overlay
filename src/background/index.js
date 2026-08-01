@@ -16,7 +16,7 @@ import { getTab, queryTabs } from "../shared/browser-api.js";
 import { KEEPALIVE_PORT_NAME } from "../shared/constants.js";
 
 import { getApiBase, healthCache, warmupApi } from "./api.js";
-import { getLastBatchStatus } from "./batches.js";
+import { getLastBatchStatus, noteQueueStatus } from "./batches.js";
 import { blobToDataUri } from "./images.js";
 import { setMaxConcurrency, describeLimits, applyServerConcurrencyHint } from "./job-queue.js";
 import { pendingByJob } from "./job-registry.js";
@@ -45,7 +45,10 @@ const log = createLogger("SW");
 setHandlers({
   onResult: handleResult,
   onError: handleJobError,
-  onStatus: (_jobId, msg) => applyServerConcurrencyHint(msg?.recommended_client_concurrency),
+  onStatus: (_jobId, msg) => {
+    applyServerConcurrencyHint(msg?.recommended_client_concurrency);
+    noteQueueStatus(msg);
+  },
   onWsEnded: () => {},
   onStale: handleStaleJob,
 });
@@ -74,6 +77,11 @@ chrome.runtime.onConnect.addListener((port) => {
   const frameId = port.sender?.frameId;
   port.onMessage.addListener(() => {});
   port.onDisconnect.addListener(() => {
+    // Read lastError to acknowledge the expected close. When the content page is
+    // frozen into the back/forward cache Chrome severs the channel and sets
+    // "...page keeping the extension port is moved into back/forward cache...";
+    // leaving it unread logs it as an "Unchecked runtime.lastError".
+    void chrome.runtime.lastError;
     if (!Number.isFinite(tabId)) return;
     if (Number.isFinite(frameId) && frameId !== 0) return; // only the top frame matters
     bumpTabSession(tabId, "");

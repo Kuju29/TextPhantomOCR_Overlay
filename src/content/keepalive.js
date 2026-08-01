@@ -20,9 +20,8 @@
   let timer = null;
   let stopAt = 0;
 
-  /** Tear down the keep-alive port + timer. */
-  function stop() {
-    stopAt = 0;
+  /** Drop the port + timer but KEEP the deadline (so we can resume later). */
+  function teardownPort() {
     if (timer) {
       clearInterval(timer);
       timer = null;
@@ -37,6 +36,24 @@
     }
   }
 
+  /** Fully stop the keep-alive and forget the deadline. */
+  function stop() {
+    stopAt = 0;
+    teardownPort();
+  }
+
+  /**
+   * The port closed from the other end. Chrome force-closes it when the page is
+   * frozen into the back/forward cache; if we don't READ runtime.lastError here
+   * it logs "Unchecked runtime.lastError: ...moved into back/forward cache...".
+   * Read it to acknowledge the expected close, and keep the deadline so a
+   * bfcache restore (pageshow) can re-open the port.
+   */
+  function onPortDisconnect() {
+    void chrome.runtime?.lastError;
+    teardownPort();
+  }
+
   /**
    * Start (or extend) the keep-alive for `ms` milliseconds.
    * @param {number} [ms]
@@ -48,9 +65,9 @@
     if (!port) {
       try {
         port = chrome.runtime.connect({ name: PORT_NAME });
-        port.onDisconnect.addListener(stop);
+        port.onDisconnect.addListener(onPortDisconnect);
       } catch {
-        stop();
+        teardownPort();
         return;
       }
     }
@@ -64,12 +81,26 @@
       try {
         port.postMessage({ type: "TP_KEEPALIVE", ts: Date.now() });
       } catch {
-        stop();
+        teardownPort();
       }
     };
     ping();
     if (!timer) timer = setInterval(ping, PING_MS);
   }
+
+  // Back/forward cache handling. A live port left open while the page freezes
+  // into the bfcache is force-closed by Chrome and logs an "Unchecked
+  // runtime.lastError". Close it OURSELVES before the freeze (a self-disconnect
+  // is clean and does not fire onDisconnect), keeping the deadline; then re-open
+  // on restore if the keep-alive is still meant to be running. A real unload
+  // (not persisted) is a full stop.
+  window.addEventListener("pagehide", (e) => {
+    if (e.persisted) teardownPort();
+    else stop();
+  });
+  window.addEventListener("pageshow", (e) => {
+    if (e.persisted && stopAt && Date.now() < stopAt) start(stopAt - Date.now());
+  });
 
   TP.keepAlive = { start, stop };
 })();

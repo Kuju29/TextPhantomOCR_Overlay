@@ -56,9 +56,9 @@ import urllib.parse
 import urllib.request
 import webbrowser
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -817,6 +817,180 @@ def discover_env_vars(api_dir: Path) -> list[DiscoveredVar]:
 
 
 # ---------------------------------------------------------------------------
+# Settings schema — the curated page adapts to the API that is installed.
+#
+# Three layers, in priority order:
+#   1. ``ui-settings.json`` shipped inside the api folder (repo-controlled),
+#   2. the CURATED table compiled into this launcher,
+#   3. the raw scan of the source, which fills in every default and shows
+#      anything neither layer knows about on the Advanced page.
+#
+# A field whose environment variable has disappeared from the API is hidden
+# instead of lingering as a control that silently does nothing.
+# ---------------------------------------------------------------------------
+UI_SCHEMA_FILES = ("ui-settings.json", "launcher-ui.json")
+_KIND_FROM_SOURCE = {"int": "int", "float": "float", "bool": "bool", "str": "str"}
+
+
+@dataclass
+class SchemaResult:
+    specs: list[FieldSpec]
+    groups: dict[str, tuple[str, str]]
+    origin: str                       # where the layout came from
+    hidden: list[str]                 # curated keys the API no longer reads
+    extra: list[str]                  # API options the curated page misses
+    discovered: list[DiscoveredVar]
+    notes: list[tuple[str, str]]      # (level, message) for the log
+
+    @property
+    def keys(self) -> set[str]:
+        return {s.key for s in self.specs}
+
+
+def load_ui_schema_file(api_dir: Path) -> tuple[list[FieldSpec], dict[str, tuple[str, str]], str]:
+    """Read an optional UI layout shipped with the API.
+
+    Lets the repository reorganise this launcher's Settings page — add a field,
+    rename a label, regroup — without anybody rebuilding the .exe.  Raises
+    ValueError with a precise reason when the file exists but is unusable;
+    the caller reports that and keeps the built-in layout.
+    """
+    path = next((api_dir / name for name in UI_SCHEMA_FILES
+                 if (api_dir / name).is_file()), None)
+    if path is None:
+        return [], {}, ""
+
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"{path.name} could not be read: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"{path.name} must contain a JSON object")
+
+    groups: dict[str, tuple[str, str]] = {}
+    for entry in data.get("groups") or []:
+        if not isinstance(entry, dict) or not entry.get("id"):
+            raise ValueError(f"{path.name}: every group needs an 'id'")
+        gid = str(entry["id"])
+        groups[gid] = (str(entry.get("en") or gid), str(entry.get("th") or entry.get("en") or gid))
+
+    raw_fields = data.get("fields")
+    if not isinstance(raw_fields, list) or not raw_fields:
+        raise ValueError(f"{path.name}: 'fields' must be a non-empty list")
+
+    specs: list[FieldSpec] = []
+    for i, entry in enumerate(raw_fields):
+        if not isinstance(entry, dict):
+            raise ValueError(f"{path.name}: field #{i} is not an object")
+        key = str(entry.get("key") or "").strip()
+        if not key:
+            raise ValueError(f"{path.name}: field #{i} has no 'key'")
+        group = str(entry.get("group") or "other")
+        if group not in groups:
+            groups[group] = (group.replace("_", " ").title(),
+                             group.replace("_", " ").title())
+        kind = str(entry.get("kind") or "str")
+        if kind not in ("str", "int", "float", "bool", "choice", "secret"):
+            raise ValueError(f"{path.name}: field '{key}' has unknown kind '{kind}'")
+        specs.append(FieldSpec(
+            key=key, group=group,
+            en=str(entry.get("en") or key), th=str(entry.get("th") or entry.get("en") or key),
+            kind=kind, default=str(entry.get("default") or ""),
+            choices=tuple(str(c) for c in (entry.get("choices") or ())),
+            hint_en=str(entry.get("hint_en") or ""),
+            hint_th=str(entry.get("hint_th") or entry.get("hint_en") or ""),
+        ))
+    return specs, groups, path.name
+
+
+def build_schema(api_dir: Path) -> SchemaResult:
+    """Reconcile the settings layout with the API that is actually installed."""
+    notes: list[tuple[str, str]] = []
+    discovered = discover_env_vars(api_dir)
+
+    specs = list(CURATED)
+    groups = dict(GROUP_TITLES)
+    origin = "built-in"
+    try:
+        file_specs, file_groups, filename = load_ui_schema_file(api_dir)
+        if file_specs:
+            specs, origin = file_specs, filename
+            groups = {**GROUP_TITLES, **file_groups}
+            notes.append(("ok", f"settings layout loaded from the API's {filename} "
+                                f"({len(file_specs)} fields)"))
+    except ValueError as exc:
+        notes.append(("err", f"settings layout: {exc} — using the built-in layout"))
+
+    if not discovered:
+        notes.append(("warn", "settings: no API source to inspect yet, showing the "
+                              "built-in layout unverified"))
+        return SchemaResult(specs, groups, origin, [], [], [], notes)
+
+    by_name = {v.name: v for v in discovered}
+    live: list[FieldSpec] = []
+    hidden: list[str] = []
+    for spec in specs:
+        found = by_name.get(spec.key)
+        if found is None:
+            hidden.append(spec.key)
+            continue
+        # The API source is the authority on the default and the value type,
+        # so an outdated exe still shows the truth.
+        kind = spec.kind if spec.kind in ("choice", "secret") else \
+            _KIND_FROM_SOURCE.get(found.kind, spec.kind)
+        live.append(replace(spec, default=found.default or spec.default, kind=kind))
+
+    extra = sorted(set(by_name) - {s.key for s in live})
+    if hidden:
+        notes.append(("warn", "settings: hidden because this API version no longer "
+                              "reads them — " + ", ".join(sorted(hidden))))
+    if extra:
+        notes.append(("info", f"settings: {len(extra)} further option(s) available "
+                              f"on the Advanced page"))
+    used_groups = {s.group for s in live}
+    return SchemaResult(live, {k: v for k, v in groups.items() if k in used_groups},
+                        origin, sorted(hidden), extra, discovered, notes)
+
+
+# ---------------------------------------------------------------------------
+# What an API update added / removed
+# ---------------------------------------------------------------------------
+SNAPSHOT_FILE = "env_snapshot.json"
+
+
+def read_env_snapshot() -> dict[str, Any]:
+    path = DATA_DIR / SNAPSHOT_FILE
+    if path.is_file():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+        except (OSError, ValueError):
+            pass
+    return {}
+
+
+def record_env_snapshot(discovered: Iterable[DiscoveredVar]) -> tuple[list[str], list[str]]:
+    """Store the current option list and return ``(added, removed)``.
+
+    Called right after an install, so the Advanced page can point at exactly
+    what the update changed instead of leaving the user to spot it.
+    """
+    names = sorted({v.name for v in discovered})
+    previous = read_env_snapshot().get("names")
+    if not isinstance(previous, list) or not previous:
+        previous = names  # first install: nothing is "new"
+    added = sorted(set(names) - set(previous))
+    removed = sorted(set(previous) - set(names))
+    ensure_dirs()
+    (DATA_DIR / SNAPSHOT_FILE).write_text(json.dumps(
+        {"names": names, "previous": previous, "added": added, "removed": removed,
+         "at": time.strftime("%Y-%m-%d %H:%M:%S")},
+        ensure_ascii=False, indent=2), encoding="utf-8")
+    return added, removed
+
+
+# ---------------------------------------------------------------------------
 # Server controller
 # ---------------------------------------------------------------------------
 STATE_STOPPED = "stopped"
@@ -1187,6 +1361,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "btn.download_model": "Download detector model",
         "btn.load_default": "Load API default",
         "btn.clear_override": "Remove override",
+        "btn.cleanup": "Clean up unused values",
         "state.stopped": "Stopped",
         "state.starting": "Starting…",
         "state.running": "Running",
@@ -1219,8 +1394,9 @@ STRINGS: dict[str, dict[str, str]] = {
                         "language. It is used when the browser extension does not send "
                         "a prompt of its own."),
         "hint.advanced": ("Every environment option found in the downloaded API source. "
-                          "Blank = keep the API's own default. New options appear here "
-                          "automatically after an update — no new .exe needed."),
+                          "Blank = keep the API's own default. Options an update added "
+                          "are marked NEW and listed first; ones it removed are named "
+                          "above. No new .exe is ever needed for this."),
         "hint.source": ("Point this at any fork or branch. A folder path on this "
                         "computer is used directly, which is handy while developing."),
         "hint.extension": "Set this address as the API endpoint in the browser extension.",
@@ -1264,6 +1440,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "btn.download_model": "ดาวน์โหลดโมเดลตรวจกรอบ",
         "btn.load_default": "ดึงพรอมต์เริ่มต้นของ API",
         "btn.clear_override": "ยกเลิกการแทนที่",
+        "btn.cleanup": "ล้างค่าที่ไม่ได้ใช้แล้ว",
         "state.stopped": "หยุดอยู่",
         "state.starting": "กำลังเริ่ม…",
         "state.running": "ทำงานอยู่",
@@ -1295,8 +1472,9 @@ STRINGS: dict[str, dict[str, str]] = {
         "hint.prompt": ("ใช้แทนพรอมต์สไตล์ที่มาพร้อม API ของภาษาที่เลือก "
                         "จะถูกใช้เมื่อส่วนขยายในเบราว์เซอร์ไม่ได้ส่งพรอมต์ของตัวเองมา"),
         "hint.advanced": ("รวมทุกตัวเลือก environment ที่พบในซอร์ส API ที่ดาวน์โหลดมา "
-                          "เว้นว่าง = ใช้ค่าเริ่มต้นของ API เอง ตัวเลือกใหม่จะขึ้นมาที่นี่"
-                          "อัตโนมัติหลังอัปเดต ไม่ต้องสร้าง .exe ใหม่"),
+                          "เว้นว่าง = ใช้ค่าเริ่มต้นของ API เอง ตัวที่อัปเดตเพิ่มเข้ามาจะติดป้าย "
+                          "NEW และเรียงขึ้นก่อน ส่วนตัวที่ถูกเอาออกจะแจ้งไว้ด้านบน "
+                          "ทั้งหมดนี้ไม่ต้องสร้าง .exe ใหม่"),
         "hint.source": ("ตั้งเป็น fork หรือ branch ไหนก็ได้ ถ้าใส่เป็นพาธโฟลเดอร์ในเครื่อง "
                         "จะใช้โฟลเดอร์นั้นตรงๆ เหมาะกับเวลาแก้โค้ดเอง"),
         "hint.extension": "นำที่อยู่นี้ไปตั้งเป็น API endpoint ในส่วนขยายเบราว์เซอร์",
@@ -1478,8 +1656,10 @@ class App(tk.Tk):
         self.adv_vars: dict[str, tk.StringVar] = {}
         self._pages: dict[str, tk.Frame] = {}
         self._nav_buttons: dict[str, FlatButton] = {}
+        self._nav_badges: dict[str, str] = {}
         self._current_page = "dashboard"
         self._log_lines = 0
+        self.schema = build_schema(self._effective_api_dir())
 
         sys.stdout = StreamToBus(self.bus, sys.__stdout__)
         sys.stderr = StreamToBus(self.bus, sys.__stderr__)
@@ -1493,6 +1673,8 @@ class App(tk.Tk):
         self.bus.emit(f"{APP_NAME} {LAUNCHER_VERSION} — {platform.platform()}", "info")
         self.bus.emit(f"data folder: {DATA_DIR}", "info")
         cleanup_tmp(self.bus)
+        for level, message in self.schema.notes:
+            self.bus.emit(message, level)
         threading.Thread(target=preload_runtime_deps, args=(self.bus,),
                          daemon=True).start()
         self.after(150, self._tick)
@@ -1608,6 +1790,7 @@ class App(tk.Tk):
                 self._i18n.remove((widget, key, attr))
         self._refresh_status()
         self._refresh_api_card()
+        self._apply_nav_badges()
 
     def _set_lang(self, lang: str) -> None:
         if lang == self.lang:
@@ -1881,30 +2064,10 @@ class App(tk.Tk):
             self.reg(chk, key)
             chk.pack(anchor="w", pady=2)
 
-        self._group_frames: dict[str, tk.Frame] = {}
-        for group in ("server", "ai", "pipeline", "logging"):
-            block = card(host)
-            block.pack(fill="x", pady=(0, 12))
-            inner = tk.Frame(block, bg=C.PANEL)
-            inner.pack(fill="x", padx=16, pady=14)
-            title = tk.Label(inner, bg=C.PANEL, fg=C.MUTED, font=(UI_FONT, 9, "bold"))
-            title.pack(anchor="w", pady=(0, 10))
-            self._group_frames[f"{group}__title"] = title
-            grid = tk.Frame(inner, bg=C.PANEL)
-            grid.pack(fill="x")
-            grid.columnconfigure(1, weight=1)
-            self._group_frames[group] = grid
-            row = 0
-            for spec in [s for s in CURATED if s.group == group]:
-                self._field_row(grid, row, spec)
-                row += 2
-            if group == "ai":
-                for skey, label_key in (("ai_temperature", "lbl.temperature"),
-                                        ("ai_max_tokens", "lbl.max_tokens")):
-                    var = tk.StringVar(value=str(self.settings.get(skey, "")))
-                    self.vars[f"__{skey}"] = var
-                    self._labeled_row(grid, row, label_key, var, width=12)
-                    row += 2
+        # The generated part lives in its own container so an API update can
+        # re-render it (fields appear / disappear) without restarting the app.
+        self.settings_body = tk.Frame(host, bg=C.BG)
+        self.settings_body.pack(fill="x")
 
         actions = tk.Frame(host, bg=C.BG)
         actions.pack(fill="x", pady=(0, 16))
@@ -1916,6 +2079,55 @@ class App(tk.Tk):
         btn2.pack(side="left", padx=8)
         self.reg(tk.Label(actions, bg=C.BG, fg=C.MUTED, font=(UI_FONT, 9)),
                  "hint.restart").pack(side="left", padx=12)
+        self._render_settings_fields()
+
+    def _render_settings_fields(self) -> None:
+        """Draw the settings groups from the reconciled schema."""
+        for child in self.settings_body.winfo_children():
+            child.destroy()
+        self._group_frames: dict[str, tk.Frame] = {}
+        for spec in self.schema.specs:          # drop widgets of vanished fields
+            self.vars.pop(spec.key, None)
+
+        schema = self.schema
+        if schema.hidden or schema.extra or schema.origin != "built-in":
+            banner = card(self.settings_body)
+            banner.pack(fill="x", pady=(0, 12))
+            self.schema_banner = tk.Label(
+                banner, bg=C.PANEL, fg=C.WARN if schema.hidden else C.MUTED,
+                font=(UI_FONT, 9), justify="left", anchor="w", wraplength=700)
+            self.schema_banner.pack(fill="x", padx=16, pady=12)
+        else:
+            self.schema_banner = None
+
+        for group in schema.groups:
+            specs = [s for s in schema.specs if s.group == group]
+            if not specs and group != "ai":
+                continue
+            block = card(self.settings_body)
+            block.pack(fill="x", pady=(0, 12))
+            inner = tk.Frame(block, bg=C.PANEL)
+            inner.pack(fill="x", padx=16, pady=14)
+            title = tk.Label(inner, bg=C.PANEL, fg=C.MUTED, font=(UI_FONT, 9, "bold"))
+            title.pack(anchor="w", pady=(0, 10))
+            self._group_frames[f"{group}__title"] = title
+            grid = tk.Frame(inner, bg=C.PANEL)
+            grid.pack(fill="x")
+            grid.columnconfigure(1, weight=1)
+            self._group_frames[group] = grid
+            row = 0
+            for spec in specs:
+                self._field_row(grid, row, spec)
+                row += 2
+            if group == "ai":
+                # Not environment variables — the launcher patches these module
+                # constants at start, so they are always available.
+                for skey, label_key in (("ai_temperature", "lbl.temperature"),
+                                        ("ai_max_tokens", "lbl.max_tokens")):
+                    var = tk.StringVar(value=str(self.settings.get(skey, "")))
+                    self.vars[f"__{skey}"] = var
+                    self._labeled_row(grid, row, label_key, var, width=12)
+                    row += 2
         self._rebuild_settings_labels()
 
     def _labeled_row(self, grid: tk.Frame, row: int, label_key: str,
@@ -1961,19 +2173,41 @@ class App(tk.Tk):
         frames = getattr(self, "_group_frames", None)
         if not frames:
             return
-        for group, (en, th) in GROUP_TITLES.items():
+        for group, (en, th) in self.schema.groups.items():
             widget = frames.get(f"{group}__title")
             if widget is not None:
                 widget.configure(text=en if self.lang == "en" else th)
-        for spec in CURATED:
+        for spec in self.schema.specs:
             label = frames.get(f"field__{spec.key}")
             if label is not None:
                 label.configure(text=spec.en if self.lang == "en" else spec.th)
             hint = frames.get(f"hint__{spec.key}")
             if hint is not None:
                 text = spec.hint_en if self.lang == "en" else spec.hint_th
-                default = f"{spec.key} · default: {spec.default}"
+                default = f"{spec.key} · default: {spec.default or '—'}"
                 hint.configure(text=f"{default}  —  {text}" if text else default)
+        if getattr(self, "schema_banner", None) is not None:
+            self.schema_banner.configure(text=self._schema_banner_text())
+
+    def _schema_banner_text(self) -> str:
+        """Explain, in the current language, how the page adapted itself."""
+        schema = self.schema
+        parts: list[str] = []
+        if schema.origin != "built-in":
+            parts.append(f"Layout from the API's {schema.origin}" if self.lang == "en"
+                         else f"ใช้เลย์เอาต์จาก {schema.origin} ของ API")
+        if schema.hidden:
+            names = ", ".join(schema.hidden)
+            parts.append(
+                f"{len(schema.hidden)} option(s) hidden — this API version no "
+                f"longer reads them: {names}" if self.lang == "en" else
+                f"ซ่อน {len(schema.hidden)} ตัวเลือก เพราะ API เวอร์ชันนี้ไม่ได้ใช้แล้ว: {names}")
+        if schema.extra:
+            parts.append(
+                f"{len(schema.extra)} further option(s) are on the Advanced page"
+                if self.lang == "en" else
+                f"มีอีก {len(schema.extra)} ตัวเลือกอยู่ในหน้าขั้นสูง")
+        return "  ·  ".join(parts)
 
     # -- prompt -------------------------------------------------------------
     def _page_prompt(self, parent: tk.Frame) -> None:
@@ -2077,7 +2311,12 @@ class App(tk.Tk):
         self.reg(btn, "btn.apply")
         btn.pack(side="left")
         FlatButton(row, "ghost", padx=10, pady=4, font=(UI_FONT, 9), text="⟳",
-                   command=self._reload_advanced).pack(side="left", padx=6)
+                   command=self._reload_schema).pack(side="left", padx=6)
+        self.btn_cleanup = FlatButton(row, "ghost", padx=10, pady=4,
+                                      font=(UI_FONT, 9),
+                                      command=self._cleanup_orphan_settings)
+        self.reg(self.btn_cleanup, "btn.cleanup")
+        self.btn_cleanup.pack(side="left", padx=6)
         self.adv_count = tk.Label(row, text="", bg=C.PANEL, fg=C.MUTED,
                                   font=(UI_FONT, 9))
         self.adv_count.pack(side="left", padx=10)
@@ -2091,31 +2330,87 @@ class App(tk.Tk):
             child.destroy()
         self.adv_vars.clear()
         api_dir = self._effective_api_dir()
-        found = [v for v in discover_env_vars(api_dir) if v.name not in CURATED_KEYS]
-        self.adv_count.config(text=f"{len(found)} options · {api_dir}")
+        curated = self.schema.keys
+        found = [v for v in self.schema.discovered if v.name not in curated]
+        snapshot = read_env_snapshot()
+        added = set(snapshot.get("added") or ())
+        removed = [n for n in (snapshot.get("removed") or ())]
+        orphans = self._orphan_setting_keys()
+
+        summary = f"{len(found)} options · {api_dir}"
+        if added:
+            summary += f"  ·  {len(added)} new since the last update"
+        if removed:
+            summary += f"  ·  {len(removed)} removed"
+        self.adv_count.config(text=summary)
+        self.btn_cleanup.configure(
+            state="normal" if orphans else "disabled",
+            text=self.t("btn.cleanup") + (f" ({len(orphans)})" if orphans else ""))
+        self._nav_badges["advanced"] = f"● {len(added)}" if added else ""
+        self._apply_nav_badges()
+
         if not found:
             tk.Label(self.adv_area.inner,
                      text="No API source cached yet — fetch it from the "
                           "'Source & update' page.",
                      bg=C.BG, fg=C.MUTED, font=(UI_FONT, 10)).pack(anchor="w", pady=20)
             return
+
+        if removed:
+            note = card(self.adv_area.inner)
+            note.pack(fill="x", pady=(0, 12))
+            tk.Label(note, bg=C.PANEL, fg=C.WARN, font=(UI_FONT, 9), justify="left",
+                     anchor="w", wraplength=700,
+                     text=("The last API update removed: " if self.lang == "en"
+                           else "อัปเดต API ล่าสุดเอาตัวเลือกเหล่านี้ออก: ")
+                          + ", ".join(removed)).pack(fill="x", padx=16, pady=10)
+
         block = card(self.adv_area.inner)
         block.pack(fill="x")
         grid = tk.Frame(block, bg=C.PANEL)
         grid.pack(fill="x", padx=16, pady=14)
-        grid.columnconfigure(2, weight=1)
-        for i, var in enumerate(found):
-            tk.Label(grid, text=var.name, bg=C.PANEL, fg=C.FG,
+        grid.columnconfigure(3, weight=1)
+        # New options first — they are the reason someone opens this page.
+        for i, var in enumerate(sorted(found, key=lambda v: (v.name not in added,
+                                                             v.name))):
+            is_new = var.name in added
+            tk.Label(grid, text="NEW" if is_new else "", bg=C.PANEL,
+                     fg=C.OK, font=(UI_FONT, 8, "bold"), anchor="w").grid(
+                row=i, column=0, sticky="w", padx=(0, 6), pady=3)
+            tk.Label(grid, text=var.name, bg=C.PANEL,
+                     fg=C.OK if is_new else C.FG,
                      font=(MONO_FONT, 9), anchor="w").grid(
-                row=i, column=0, sticky="w", padx=(0, 12), pady=3)
+                row=i, column=1, sticky="w", padx=(0, 12), pady=3)
             sv = tk.StringVar(value=str((self.settings.get("advanced_env") or {})
                                         .get(var.name, "")))
             self.adv_vars[var.name] = sv
             ttk.Entry(grid, textvariable=sv, width=22, style="TP.TEntry").grid(
-                row=i, column=1, sticky="w", pady=3)
+                row=i, column=2, sticky="w", pady=3)
             tk.Label(grid, text=f"default: {var.default or '—'}   ·   {var.where}",
                      bg=C.PANEL, fg=C.MUTED, font=(UI_FONT, 8), anchor="w").grid(
-                row=i, column=2, sticky="w", padx=12, pady=3)
+                row=i, column=3, sticky="w", padx=12, pady=3)
+
+    def _orphan_setting_keys(self) -> list[str]:
+        """Stored values whose environment variable the API no longer reads."""
+        if not self.schema.discovered:
+            return []                      # nothing to compare against — say nothing
+        known = {v.name for v in self.schema.discovered}
+        stored = {k for k, v in (self.settings.get("env") or {}).items() if str(v).strip()}
+        stored |= {k for k, v in (self.settings.get("advanced_env") or {}).items()
+                   if str(v).strip()}
+        return sorted(stored - known)
+
+    def _cleanup_orphan_settings(self) -> None:
+        orphans = self._orphan_setting_keys()
+        if not orphans:
+            return
+        for key in orphans:
+            (self.settings.get("env") or {}).pop(key, None)
+            (self.settings.get("advanced_env") or {}).pop(key, None)
+        save_settings(self.settings)
+        self.bus.emit("settings: removed values for options this API no longer "
+                      "has — " + ", ".join(orphans), "ok")
+        self._reload_advanced()
 
     # -- source & update ----------------------------------------------------
     def _page_source(self, parent: tk.Frame) -> None:
@@ -2227,7 +2522,7 @@ class App(tk.Tk):
         self.settings["ai_temperature"] = self.vars["__ai_temperature"].get().strip()
         self.settings["ai_max_tokens"] = self.vars["__ai_max_tokens"].get().strip()
         env = self.settings.setdefault("env", {})
-        for spec in CURATED:
+        for spec in self.schema.specs:
             var = self.vars.get(spec.key)
             if var is not None:
                 env[spec.key] = str(var.get()).strip()
@@ -2246,7 +2541,7 @@ class App(tk.Tk):
 
     def _reset_curated(self) -> None:
         self.settings["env"] = {}
-        for spec in CURATED:
+        for spec in self.schema.specs:
             var = self.vars.get(spec.key)
             if var is not None:
                 var.set("")
@@ -2260,6 +2555,30 @@ class App(tk.Tk):
             self.bus.emit(f"source: {exc}", "err")
             messagebox.showerror(APP_NAME, str(exc))
             return None
+
+    def _reload_schema(self) -> None:
+        """Re-read the API source and redraw the pages it drives.
+
+        Called after an update so options the new version added appear — and
+        ones it dropped disappear — without restarting the launcher.
+        """
+        self.schema = build_schema(self._effective_api_dir())
+        for level, message in self.schema.notes:
+            self.bus.emit(message, level)
+        if hasattr(self, "settings_body"):
+            self._render_settings_fields()
+        if hasattr(self, "adv_area"):
+            self._reload_advanced()
+        self._apply_nav_badges()
+
+    def _apply_nav_badges(self) -> None:
+        """Put a count next to a nav entry that has something to look at."""
+        for name, badge in self._nav_badges.items():
+            btn = self._nav_buttons.get(name)
+            if btn is None:
+                continue
+            base = self.t(f"nav.{name}")
+            btn.configure(text=f"{base}   {badge}" if badge else base)
 
     def _effective_api_dir(self) -> Path:
         """The folder the server will import from.
@@ -2343,8 +2662,18 @@ class App(tk.Tk):
         save_settings(self.settings)
         try:
             self.updater.install(source, progress=self._progress)
+            added, removed = record_env_snapshot(
+                discover_env_vars(self._effective_api_dir()))
+            if added:
+                self.bus.emit(f"update: this version adds {len(added)} setting(s) — "
+                              + ", ".join(added), "ok")
+            if removed:
+                self.bus.emit(f"update: this version drops {len(removed)} setting(s) — "
+                              + ", ".join(removed), "warn")
+            if not added and not removed:
+                self.bus.emit("update: the available settings are unchanged", "info")
             self.after(0, self._refresh_api_card)
-            self.after(0, self._reload_advanced)
+            self.after(0, self._reload_schema)
             return True
         except Exception as exc:  # noqa: BLE001
             self.bus.emit(f"update: FAILED — {exc}", "err")
@@ -2528,6 +2857,9 @@ class App(tk.Tk):
         self._refresh_status()
         self._refresh_api_card()
         self._load_prompt_into_box(False)
+        if self.schema.discovered and not read_env_snapshot():
+            # Baseline for the "what did this update change?" report.
+            record_env_snapshot(self.schema.discovered)
         if not (self._effective_api_dir() / "backend" / "main.py").is_file():
             self.bus.emit(
                 "no API source cached yet — press 'Update now' (or 'Start', "
