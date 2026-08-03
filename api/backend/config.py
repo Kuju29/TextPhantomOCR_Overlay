@@ -213,7 +213,12 @@ class Settings:
     # for example one line when a translation job succeeds/fails.
     # Values:
     #   summary/custom/tp/plain = compact app outcome logs
-    #   off/none                = no app outcome logs
+    #   errors/error/err/warn   = FAILURES ONLY — recommended under load. Drops
+    #                             ~99% of lines (successes) while keeping every
+    #                             line that explains a problem.
+    #   off/none                = no app outcome logs at all. This hides errors
+    #                             too; prefer "errors" unless you really want
+    #                             the server to be silent about failures.
     #   uvicorn                 = restore stock uvicorn access logs
     access_log_mode: str = field(
         default_factory=lambda: (_env_str("TP_ACCESS_LOG_MODE", "summary") or "summary").lower()
