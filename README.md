@@ -1,7 +1,5 @@
 [![GitHub Sponsors](https://img.shields.io/badge/Sponsor-GitHub-pink?logo=githubsponsors)](https://github.com/sponsors/Kuju29)
 
-### ขอบคุณทุกการ Donate นะครับ ผมจะเอาเงินส่วนนี้ไปเป็นค่าเซิฟเวอร์ให้ครับ นั่นหมายความว่าไม่ใช่การโดเนทให้ผมแต่เป็นการช่วยเพื่อนๆที่ใช้ส่วนขยายนี้ได้ใช้ api ลื่นขึ้นอีกหน่อยครับ [https://kuju29.github.io/](https://kuju29.github.io/)
-
 *Note: ถ้าท่านไหนอยากใช้ api ส่วนตัวดูได้ที่ [How to online API](https://www.youtube.com/watch?v=NMHwaI8mn4c) หรือใช่ [exe](https://github.com/Kuju29/TextPhantomOCR_Overlay/releases) รันเองในเครื่อง*
 
 ![Desktop2026 02 06-08 11 52 01-ezgif com-video-to-gif-converter](https://github.com/user-attachments/assets/43cc9a1e-eb79-46f0-b4a1-08ca9bcd49f5)
