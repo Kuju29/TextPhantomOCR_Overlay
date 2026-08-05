@@ -15,7 +15,8 @@ import { createLogger } from "../shared/logger.js";
 
 const log = createLogger("SW.api");
 
-const WARMUP_TIMEOUT_MS = 2500;
+// A sleeping Hugging Face Space commonly needs more than 2.5 seconds to wake.
+const WARMUP_TIMEOUT_MS = 15000;
 const WARMUP_TTL_MS = 20 * 60 * 1000;
 
 /** base URL -> last warmup timestamp */
@@ -33,18 +34,27 @@ export async function warmupApi(base) {
   if (!b) return;
   const now = Date.now();
   if (now - (warmupByBase.get(b) || 0) < WARMUP_TTL_MS) return;
-  warmupByBase.set(b, now);
-
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), WARMUP_TIMEOUT_MS);
   try {
-    await fetch(b.replace(/\/+$/, "") + API_PATHS.WARMUP, {
+    const response = await fetch(b.replace(/\/+$/, "") + API_PATHS.WARMUP, {
       method: "GET",
-      cache: "force-cache",
+      cache: "no-store",
       signal: ctrl.signal,
     });
-  } catch {
-    /* warmup is best-effort */
+    if (!response.ok) throw new Error(`Warmup HTTP ${response.status}`);
+
+    // Throttle only after a successful response. A failed cold start must be
+    // allowed to retry instead of being suppressed for 20 minutes.
+    warmupByBase.set(b, Date.now());
+    healthCache.ok = true;
+    healthCache.ts = Date.now();
+    return true;
+  } catch (error) {
+    healthCache.ok = false;
+    healthCache.ts = Date.now();
+    log.warn("API warmup failed", error?.message || String(error));
+    return false;
   } finally {
     clearTimeout(timer);
   }

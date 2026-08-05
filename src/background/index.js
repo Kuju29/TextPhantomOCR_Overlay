@@ -307,6 +307,11 @@ function bootstrap() {
 chrome.runtime.onInstalled.addListener(bootstrap);
 chrome.runtime.onStartup?.addListener(bootstrap);
 
+// A Manifest V3 service worker may be woken by an event other than
+// runtime.onStartup. Initialize on every worker evaluation too, so opening the
+// popup is never required before the API can be used.
+bootstrap();
+
 // Load the user's concurrency cap on every SW start.
 getStorage({ maxConcurrency: 0 }).then(({ maxConcurrency }) => {
   // v12 full-speed build: disable the extension-side cap on startup.
