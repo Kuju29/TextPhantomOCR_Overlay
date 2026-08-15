@@ -1,7 +1,6 @@
 /**
  * Constants shared across the extension (API paths, defaults, fallbacks).
  *
- * STATUS: ACTIVE — in use in the current flow.
  */
 
 /** REST/meta endpoints on the TextPhantom API. */
@@ -12,6 +11,24 @@ export const API_PATHS = {
   TRANSLATE: "/translate",
   TRANSLATE_CANCEL: "/translate/cancel",
   TRANSLATE_POLL: "/translate/poll",
+  // v1: one request, one result. TRANSLATE/TRANSLATE_POLL above are the legacy
+  // submit+poll pair, kept so an updated extension still works against a
+  // server that has not been deployed yet.
+  CAPABILITIES: "/v1/capabilities",
+  TRANSLATE_V1: "/v1/translate",
+  // No LENS_DECODE. The protobuf decode runs in the service worker now
+  // (`src/shared/lens-tree.js`, `README.md#architecture-and-ownership`). The server route
+  // still exists for older builds, but nothing in this one calls it, and a
+  // constant for a path we never request is a wrong answer to "what does the
+  // extension talk to?".
+  // Service 1: the API uploads to Lens and returns the response UNDECODED, so
+  // the service worker can decode it with `src/shared/lens-tree.js`. A browser
+  // cannot do this upload itself; see `README.md#architecture-and-ownership`.
+  LENS_RAW: "/v1/lens/raw",
+  // ONNX + the paragraph merge, for vertical pages only.
+  GROUPS: "/v1/groups",
+  // Service 3: text units only. The image/tree stays in the extension.
+  AI_TRANSLATE_V1: "/v1/ai/translate",
   AI_RESOLVE: "/ai/resolve",
   AI_PROMPT_DEFAULT: "/ai/prompt/default",
 };
@@ -231,3 +248,33 @@ export const FALLBACK_LANGS = [
   { code: "yi", name: "Yiddish" },
   { code: "ny", name: "Chichewa" },
 ];
+
+// AI providers that run on the user's own machine; nothing about them is metered.
+export const LOCAL_AI_PROVIDERS = new Set([
+  "ollama", "lmstudio", "localai", "jan", "textgen",
+  "koboldcpp", "vllm", "llamafile", "gpt4all", "local", "llama",
+]);
+
+// Returns whether a provider id names a runtime on the user's own machine.
+export function isLocalAiProvider(provider) {
+  return LOCAL_AI_PROVIDERS.has(String(provider || "").trim().toLowerCase());
+}
+
+// Returns whether a URL points at this machine or the local network.
+export function isLocalHostUrl(url) {
+  const raw = String(url || "").trim();
+  if (!raw) return false;
+  let host = "";
+  try {
+    host = new URL(raw).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) return true;
+  if (host === "::1" || host === "[::1]" || host === "0.0.0.0") return true;
+  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+  if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+  if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+  return false;
+}

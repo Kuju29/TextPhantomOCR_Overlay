@@ -1,6 +1,5 @@
 """Liveness / build-info endpoints.
 
-STATUS: ACTIVE — in use in the current flow.
 """
 
 from __future__ import annotations

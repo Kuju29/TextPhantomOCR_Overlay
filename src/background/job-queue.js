@@ -1,51 +1,60 @@
-/**
- *
- * STATUS: ACTIVE — in use in the current flow.
- * Outgoing job queue.
- *
- * v12 intentionally disables the old client-side processing cap. The extension
- * now submits all discovered images as quickly as the browser/network allows;
- * the backend split queues decide how many jobs actually run at once.
- *
- * A positive maxConcurrency value is kept only for future/manual debugging, but
- * the shipped default is 0 = unlimited. Server backpressure hints are ignored
- * in this build because SERVER_MAX_WORKERS/direct/AI lanes are authoritative.
- */
+// Bounds top-level jobs before they allocate image/request resources.
+// A user value of 0 means automatic admission, not infinite parallelism.
 
 import { DEFAULT_MAX_CONCURRENCY } from "../shared/constants.js";
 
-const SOFT_MAX_DEFAULT = 15;
+const AUTO_FALLBACK = 8;
+const AUTO_MIN = 2;
+const AUTO_MAX = 24;
+const EXPLICIT_MAX = 64;
+const SERVER_GROW_CONFIRMATIONS = 3;
 
-let userMaxConcurrency = DEFAULT_MAX_CONCURRENCY; // 0 = unlimited
-let softMaxConcurrency = SOFT_MAX_DEFAULT;
-let forceSoftMax = false;
+let userMaxConcurrency = DEFAULT_MAX_CONCURRENCY;
+let serverMaxConcurrency = 0;
+let pendingServerIncrease = 0;
+let pendingServerConfirmations = 0;
 
 let running = 0;
 const queue = [];
 
-function unlimited() {
-  return !Number.isFinite(Number(userMaxConcurrency)) || Number(userMaxConcurrency) <= 0;
+function clampInteger(value, low, high) {
+  const n = Math.floor(Number(value));
+  return Number.isFinite(n) && n > 0 ? Math.min(high, Math.max(low, n)) : 0;
 }
 
-/** Effective client-side submission/long-poll concurrency. */
+// Hardware concurrency is only a signal: jobs include network waits but also
+// hold decoded page images, so cap high-core machines to bounded retention.
+function automaticMax() {
+  const cores = clampInteger(globalThis.navigator?.hardwareConcurrency, 1, 128);
+  if (!cores) return AUTO_FALLBACK;
+  return clampInteger(Math.ceil(cores * 1.5), AUTO_MIN, AUTO_MAX);
+}
+
 function effectiveMax() {
-  if (unlimited()) return Number.POSITIVE_INFINITY;
-  let max = Math.max(1, Number(userMaxConcurrency));
-  if (forceSoftMax) {
-    const soft = Number(softMaxConcurrency) > 0 ? Number(softMaxConcurrency) : SOFT_MAX_DEFAULT;
-    max = Math.min(max, soft);
-  }
-  return Math.max(1, max);
+  const clientMax = userMaxConcurrency > 0 ? userMaxConcurrency : automaticMax();
+  return serverMaxConcurrency > 0 ? Math.min(clientMax, serverMaxConcurrency) : clientMax;
 }
 
-/** Pump the queue while slots are free. */
+function skipTask(task) {
+  if (task.signal?.aborted) return true;
+  if (typeof task.shouldStart !== "function") return false;
+  try {
+    return task.shouldStart() === false;
+  } catch (error) {
+    console.error("[SW.queue] admission check error", error);
+    return true;
+  }
+}
+
+// Cancelled/stale entries are discarded without consuming a running slot.
 function pump() {
   const max = effectiveMax();
   while (queue.length && running < max) {
-    running++;
     const task = queue.shift();
+    if (skipTask(task)) continue;
+    running++;
     Promise.resolve()
-      .then(task)
+      .then(task.fn)
       .catch((e) => console.error("[SW.queue] task error", e))
       .finally(() => {
         running--;
@@ -54,44 +63,64 @@ function pump() {
   }
 }
 
-/** Enqueue an async task. */
-export function addTask(fn) {
-  queue.push(fn);
+// Optional admission guards preserve addTask(fn) compatibility while allowing
+// callers to cancel or reject stale work before it starts.
+export function addTask(fn, { signal = null, shouldStart = null } = {}) {
+  if (typeof fn !== "function") throw new TypeError("addTask requires a function");
+  queue.push({ fn, signal, shouldStart });
   pump();
 }
 
-/** Set client cap. 0/invalid = unlimited. */
+// 0/invalid restores hardware-aware automatic admission.
 export function setMaxConcurrency(value) {
   const n = Number(value);
-  userMaxConcurrency = Number.isFinite(n) && n > 0 ? n : 0;
+  userMaxConcurrency = Number.isFinite(n) && n > 0
+    ? clampInteger(n, 1, EXPLICIT_MAX)
+    : 0;
   pump();
 }
 
-/** No-op in v12: server split queues own backpressure. */
-export function applyServerConcurrencyHint(_value) {
-  return;
-}
-
-/** Configure optional soft cap; ignored when maxConcurrency=0/unlimited. */
-export function setSoftConcurrency(force, soft = SOFT_MAX_DEFAULT) {
-  forceSoftMax = !!force;
-  softMaxConcurrency = forceSoftMax ? soft : SOFT_MAX_DEFAULT;
+// Reductions take effect immediately. Increases need repeated evidence so one
+// optimistic response cannot suddenly release a large queued batch.
+export function applyServerConcurrencyHint(value) {
+  // Missing fields are common on older status messages and are not evidence
+  // that a previously learned server ceiling should be removed.
+  if (value == null || String(value).trim() === "") return;
+  const next = clampInteger(value, 1, EXPLICIT_MAX);
+  if (!next) {
+    serverMaxConcurrency = 0;
+    pendingServerIncrease = 0;
+    pendingServerConfirmations = 0;
+    pump();
+    return;
+  }
+  if (!serverMaxConcurrency || next <= serverMaxConcurrency) {
+    serverMaxConcurrency = next;
+    pendingServerIncrease = 0;
+    pendingServerConfirmations = 0;
+  } else {
+    if (pendingServerIncrease !== next) {
+      pendingServerIncrease = next;
+      pendingServerConfirmations = 1;
+    } else {
+      pendingServerConfirmations++;
+    }
+    if (pendingServerConfirmations >= SERVER_GROW_CONFIRMATIONS) {
+      serverMaxConcurrency = next;
+      pendingServerIncrease = 0;
+      pendingServerConfirmations = 0;
+    }
+  }
   pump();
 }
 
-/** Soft cap to use for an AI key — retained for manual capped mode. */
-export function aiSoftMaxForKey(key) {
-  return String(key || "").trim().startsWith("hf_") ? 2 : 4;
-}
-
-/** Snapshot of current limits (for logging/UI). */
+// Returns a snapshot of the current limits and queue depth.
 export function describeLimits() {
   return {
     max: userMaxConcurrency,
-    server: 0,
-    soft: softMaxConcurrency,
-    forceSoft: forceSoftMax,
-    effective: unlimited() ? "unlimited" : effectiveMax(),
+    auto: automaticMax(),
+    server: serverMaxConcurrency,
+    effective: effectiveMax(),
     running,
     queued: queue.length,
   };

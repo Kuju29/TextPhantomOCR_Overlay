@@ -1,6 +1,5 @@
 """Small text helpers shared across modules.
 
-STATUS: ACTIVE — in use in the current flow.
 """
 
 from __future__ import annotations

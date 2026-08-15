@@ -1,6 +1,5 @@
 """Language list and code normalisation shared across the backend.
 
-STATUS: ACTIVE — in use in the current flow.
 
 The list of UI languages is what the Chrome extension shows in its picker.
 ``normalize`` is the canonical helper used everywhere a user-supplied code

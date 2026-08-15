@@ -1,23 +1,14 @@
-/**
- *
- * STATUS: ACTIVE — in use in the current flow.
- * Shared registry of in-flight jobs.
- *
- * Lives in its own module (importing nothing) so both `transport.js` and
- * `jobs.js` can read/write it without a circular import.
- *
- * - `pendingByJob`  : jobId  -> context (tabId, frameId, mode, batchId, ...)
- * - `pendingByImage`: imageId -> context (used to recover a result whose jobId
- *   we lost, e.g. after a WS reconnect)
- */
+// Shared registry of in-flight jobs, indexed by job id and by image id, persisted across service-worker restarts.
+
+// Imports nothing so transport.js and jobs.js can both use it without a circular import.
 
 const STORAGE_KEY = "tpPendingJobsV2";
 const PERSIST_DEBOUNCE_MS = 250;
 
-/** @type {Map<string, object>} */
+// jobId -> job context.
 export const pendingByJob = new Map();
 
-/** @type {Map<string, object>} */
+// imageId -> job context, used to recover a result whose job id was lost.
 export const pendingByImage = new Map();
 
 let persistTimer = null;
@@ -39,6 +30,7 @@ function schedulePersist() {
   }, PERSIST_DEBOUNCE_MS);
 }
 
+// Writes the pending-job contexts to session storage.
 export async function persistPendingJobs() {
   const area = storageArea();
   if (!area) return;
@@ -49,6 +41,7 @@ export async function persistPendingJobs() {
   await area.set({ [STORAGE_KEY]: records });
 }
 
+// Reloads persisted job contexts into the registry and returns the restored job ids.
 export async function restorePendingJobs() {
   const area = storageArea();
   if (!area) return [];
@@ -67,7 +60,7 @@ export async function restorePendingJobs() {
   return restored;
 }
 
-/** Remember a job and persist it so MV3 service-worker restarts can resume. */
+// Records a job's context in the registry and schedules a persist.
 export function rememberJob(jobId, ctx) {
   const id = String(jobId || "").trim();
   if (!id) return;
@@ -77,7 +70,7 @@ export function rememberJob(jobId, ctx) {
   schedulePersist();
 }
 
-/** Look up a job context by id, falling back to the image-id map. */
+// Looks up a job context by job id, falling back to the image-id map.
 export function findContext(jobId, imageId) {
   const direct = pendingByJob.get(jobId);
   if (direct) return direct;
@@ -88,7 +81,7 @@ export function findContext(jobId, imageId) {
   return null;
 }
 
-/** Remove a job (and its image-id entry) from the registry. */
+// Removes a job and its image-id entry from the registry.
 export function removeJob(jobId, imageId) {
   pendingByJob.delete(jobId);
   if (imageId) pendingByImage.delete(imageId);

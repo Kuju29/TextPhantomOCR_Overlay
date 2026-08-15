@@ -1,30 +1,28 @@
-/**
- *
- * STATUS: ACTIVE — in use in the current flow.
- * Building job payloads from image elements.
- *
- * A payload is what the service worker forwards to the API: the source URL (or
- * an inlined data URI), the mode/language, and metadata (image id, on-page
- * position, a pipeline trail for debugging).
- */
+// Builds the job payloads the service worker forwards to the API.
 
 (function () {
   const TP = window.__TP;
   if (!TP || TP.bail) return;
 
-  /** Build a payload from raw fields. */
-  function buildPayload({ original_image_url, position, imageDataUri }, mode, lang, menuSource = "page_scan", customStage) {
+  // Builds a payload from raw fields.
+  function buildPayload({ original_image_url, position, imageDataUri, background, generation, naturalSize }, mode, lang, menuSource = "page_scan", customStage) {
     const payload = {
       mode,
       lang,
       type: "image",
       src: original_image_url || null,
       imageDataUri: imageDataUri || null,
+      render: {
+        background: background || "image",
+        lensDocument: mode === "lens_text",
+      },
       menu: menuSource,
       context: {
         page_url: location.href,
         timestamp: new Date().toISOString(),
       },
+      generation: generation || null,
+      naturalSize: naturalSize || null,
       metadata: {
         image_id: crypto.randomUUID(),
         original_image_url: original_image_url || null,
@@ -44,22 +42,12 @@
     return payload;
   }
 
-  // --- Canvas upload encoding ----------------------------------------------
-  // This path used to always emit PNG. A full manga page is 5-15 MB of
-  // lossless PNG, every byte of it is base64'd (+33%), pushed through the
-  // service worker, sent over the wire, and then DECODED by the API container
-  // — which on a 2-vCPU box is the most expensive thing the direct lane does
-  // before any translation work starts. WebP q92 is visually indistinguishable
-  // at OCR resolution and typically 15-25x smaller.
-  //
-  // Both sides stay switchable. Set `uploadFormat` in extension storage to
-  // "png" to restore the original lossless upload; the API accepts either, so
-  // the two settings can be moved independently while measuring.
   const UPLOAD_DEFAULTS = { format: "webp", quality: 0.92 };
   const UPLOAD_FORMATS = new Set(["webp", "png", "jpeg"]);
   let uploadPrefsPromise = null;
   let encodeFallbackWarned = false;
 
+  // Reads the upload format and quality from storage, once per page.
   function readUploadPrefs() {
     if (uploadPrefsPromise) return uploadPrefsPromise;
     uploadPrefsPromise = new Promise((resolve) => {
@@ -74,9 +62,6 @@
           });
         });
       } catch (e) {
-        // Storage is unreadable (torn-down context). The defaults ARE the
-        // intended behaviour, but say so rather than let a silent PNG-vs-WebP
-        // swap look like a code change nobody made.
         TP.log.warn("upload prefs unreadable; using defaults", {
           error: e?.message || String(e),
           ...UPLOAD_DEFAULTS,
@@ -87,24 +72,19 @@
     return uploadPrefsPromise;
   }
 
-  // Keep the cached prefs honest when the popup changes them mid-session.
   try {
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area === "local" && ("uploadFormat" in changes || "uploadQuality" in changes))
         uploadPrefsPromise = null;
     });
   } catch {
-    /* no storage listener available — prefs are read once per page */
   }
 
-  /** Encode a canvas, reporting when the browser could not honour the format. */
+  // Encodes a canvas, reporting when the browser could not honour the format.
   function encodeCanvas(canvas, prefs) {
     if (prefs.format === "png") return canvas.toDataURL("image/png");
     const mime = `image/${prefs.format}`;
     const du = canvas.toDataURL(mime, prefs.quality);
-    // toDataURL silently returns PNG when the MIME type is unsupported. The
-    // output is still CORRECT, just ~20x the bytes, so this must be visible:
-    // otherwise the whole point of the change disappears without a trace.
     if (du && !du.startsWith(`data:${mime}`) && !encodeFallbackWarned) {
       encodeFallbackWarned = true;
       TP.log.warn("canvas cannot encode requested format; browser produced PNG instead", {
@@ -115,16 +95,12 @@
     return du;
   }
 
-  /**
-   * Get a data URI for an image element: its own `src` if already inline, else
-   * draw it to a canvas, else fetch the bytes.
-   */
+  // Returns a data URI for an image element via its src, a canvas draw, or a fetch.
   async function getImageDataUriFromElement(img) {
     const src = TP.normUrl(TP.getBestImgUrl(img));
     if (!src) return "";
     if (src.startsWith("data:")) return src;
 
-    // Try canvas (works for same-origin / CORS-clean images).
     try {
       const w = Number(img?.naturalWidth) || Number(img?.width) || 0;
       const h = Number(img?.naturalHeight) || Number(img?.height) || 0;
@@ -140,24 +116,39 @@
         }
       }
     } catch {
-      /* tainted canvas — fall through */
     }
 
-    // Fall back to fetching the bytes.
     try {
       const res = await fetch(src, { cache: "force-cache" });
       const du = await TP.blobToDataUri(await res.blob());
       if (du) return du;
     } catch {
-      /* cross-origin / network error */
     }
     return "";
   }
 
-  /**
-   * Build a payload from an `<img>` element.
-   * @param {boolean} includeDataUri - inline the bytes for blob/data/file URLs
-   */
+  TP.localRenderEnabled = false;
+  TP.clientBackgroundEnabled = true;
+  try {
+    chrome.storage.local.get(["localRender"], (it) => {
+      void chrome.runtime.lastError;
+      TP.localRenderEnabled = it?.localRender === true;
+      TP.clientBackgroundEnabled = true;
+      if (TP.localRenderEnabled) TP.log.info("local overlay rendering is ON");
+      if (TP.clientBackgroundEnabled) TP.log.info("client-painted background is ON");
+    });
+  } catch {
+  }
+
+  // Returns "boxes" when this page will paint the erased background itself, else "image".
+  function chooseBackgroundMode(img, mode) {
+    if (String(mode || "") !== "lens_text") return "image";
+    if (TP.clientBackgroundEnabled !== true) return "image";
+    if (!TP.buildErasedBackground) return "image";
+    return "boxes";
+  }
+
+  // Builds a payload from an image element, optionally inlining its bytes.
   async function buildPayloadFromImage(img, mode, lang, menuSource = "page_scan", customStage, includeDataUri = false) {
     const src = TP.normUrl(TP.getBestImgUrl(img));
     const imageDataUri =
@@ -168,6 +159,12 @@
         original_image_url: src || null,
         position: TP.buildPositionFromElement(img),
         imageDataUri: imageDataUri || null,
+        background: chooseBackgroundMode(img, mode),
+        generation: TP.generationFor ? TP.generationFor(img) : null,
+        naturalSize: {
+          width: Number(img?.naturalWidth) || 0,
+          height: Number(img?.naturalHeight) || 0,
+        },
       },
       mode,
       lang,
@@ -178,38 +175,36 @@
 
 
 
-  // --- Page-scan image filtering -----------------------------------------
-  // These rules keep icons / avatars / tracking pixels / placeholders out of
-  // bulk translation runs.  Skipped candidates are not errors: they were never
-  // eligible translation jobs.
-  //
-  // IMPORTANT: both regexes are word/token-bounded and are tested ONLY
-  // against the URL (SKIP_URL_RE) or class/id/role (SKIP_CLASS_RE) — never
-  // against alt/title.  Manga page images carry the series title in alt text,
-  // and substring matching used to skip whole galleries (e.g. alt containing
-  // "Hegemonicon" matched `icon`, "Karada" matched `ads?`, and any URL with
-  // "download"/"uploads" matched `ad`).
   const SKIP_URL_RE =
     /\b(?:favicon|sprites?|icons?|logos?|avatars?|emojis?|badges?|buttons?|spinner|loaders?|placeholder|blank|pixel|tracking|analytics|ads?|adverts?|banners?|doubleclick|googletag|gravatar)\b/i;
   const SKIP_CLASS_RE =
     /(?:^|[\s_-])(?:avatars?|icons?|logos?|emojis?|badges?|buttons?|spinner|loaders?|placeholder|ads?|lazy-placeholder|profile|thumbnails?|thumb)(?:$|[\s_-])/i;
+  const REACTION_ASSET_RE =
+    /(?:^|[-_.])(?:upvote|downvote|reaction|funny|angry|sad|surprised)(?:[-_.]|$)/i;
   const BAD_EXT_RE = /\.(?:svg|ico)(?:[?#].*)?$/i;
 
+  function isReactionAssetUrl(src) {
+    try {
+      const url = new URL(src, location.href);
+      const pathname = url.pathname.toLowerCase();
+      if (!/(?:^|\/)static\/(?:img|images)\//.test(pathname)) return false;
+      return REACTION_ASSET_RE.test(pathname.split("/").pop() || "");
+    } catch {
+      return false;
+    }
+  }
+
   function scanMinSizeForMode(mode) {
-    // Text overlay modes need larger images than lens_images because tiny UI
-    // thumbnails rarely contain useful readable text and often cause false
-    // errors later.
     return String(mode || "") === "lens_text"
       ? { minSide: 140, minArea: 80_000 }
       : { minSide: 120, minArea: 60_000 };
   }
 
+  // Returns why an image is not a translation candidate, or "" when it is one.
   function imageSkipReason(img, mode = "") {
     if (!img || !img.isConnected) return "detached";
     const srcRaw = TP.getBestImgUrl(img) || img.currentSrc || img.src || "";
     const src = TP.normUrl(srcRaw);
-    // class/id/role only — alt/title are page CONTENT (series titles, page
-    // numbers) and must never be matched against UI-asset keywords.
     const classText = [
       img.id || "",
       String(img.className || ""),
@@ -220,7 +215,10 @@
     if (!src && !img.getAttribute?.("data-src") && !img.getAttribute?.("data-original")) return "no_src";
     if (src && /^(?:chrome-extension:|moz-extension:|about:|javascript:)/i.test(src)) return "internal_url";
     if (src && BAD_EXT_RE.test(src)) return "vector_icon";
-    if ((src && SKIP_URL_RE.test(src)) || SKIP_CLASS_RE.test(classText)) return "ui_asset";
+    if (
+      (src && (SKIP_URL_RE.test(src) || isReactionAssetUrl(src))) ||
+      SKIP_CLASS_RE.test(classText)
+    ) return "ui_asset";
 
     const r = typeof img.getBoundingClientRect === "function" ? img.getBoundingClientRect() : null;
     const cssW = Math.max(0, Number(r?.width) || Number(img.width) || Number(img.clientWidth) || 0);
@@ -230,19 +228,12 @@
     const w = Math.max(cssW, natW);
     const h = Math.max(cssH, natH);
 
-    // Lazy-managed images (real URL parked in data-src) are page CONTENT the
-    // browser simply hasn't fetched yet.  The background fetches image bytes
-    // by URL itself, so "not loaded in the DOM" must not skip them — on
-    // long-strip readers only the ~4 images near the viewport are loaded at
-    // scan time and every other page used to be dropped here.
     const lazyManaged = Boolean(
       img.getAttribute?.("data-src") ||
         img.getAttribute?.("data-original") ||
         img.getAttribute?.("data-lazy-src"),
     );
 
-    // Explicitly hidden / collapsed DOM images are usually templates or lazy
-    // sentinels.  If natural size is also missing, skip them.
     if ((cssW <= 1 || cssH <= 1) && (!natW || !natH) && !lazyManaged) return "not_visible";
 
     const { minSide, minArea } = scanMinSizeForMode(mode);
@@ -251,9 +242,6 @@
       if (w * h < minArea) return "too_small_area";
     }
 
-    // Common transparent placeholders often have a valid large CSS box but no
-    // loaded image bytes yet.  Do not send them as failed jobs — unless the
-    // image is lazy-managed (see above): then the URL is real and fetchable.
     if (!img.complete && !natW && !natH && !src.startsWith("data:") && !lazyManaged)
       return "not_loaded";
 
@@ -267,7 +255,7 @@
     stats.reasons[key] = (stats.reasons[key] || 0) + 1;
   }
 
-  /** Collect translate-worthy images on the page (skips tiny icons). */
+  // Collects payloads for every translate-worthy image on the page.
   async function collectImagesForScan(mode, lang, sourceTag) {
     const seen = new Set();
     const out = [];
@@ -290,11 +278,6 @@
         continue;
       }
       seen.add(key);
-      // Bind the job to this node the same way a right-click does: lazy-load
-      // sites swap `src` back to a placeholder as the user scrolls, so by the
-      // time a batch result arrives URL-based lookup fails. `data-tp-original`
-      // lives on the element and survives any src churn, so findTargetImage()
-      // can always locate the right <img> for the overlay.
       if (img?.dataset && !img.dataset.tpOriginal) img.dataset.tpOriginal = key;
       out.push(payload);
     }

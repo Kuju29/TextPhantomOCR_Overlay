@@ -30,7 +30,7 @@ RUN FROM SOURCE
 
 BUILD THE ONE-FILE EXE
 ----------------------
-    build_exe.bat            (see README.md for details)
+    build_exe.bat            (see ../README.md#desktop-launcher for details)
 """
 
 from __future__ import annotations
@@ -70,10 +70,8 @@ USER_AGENT = f"TextPhantomLocalAPI/{LAUNCHER_VERSION} (+launcher)"
 HTTP_TIMEOUT = 60
 
 
-# ---------------------------------------------------------------------------
 # Paths — everything the app writes lives in ONE private directory.
 # Nothing is ever created next to the executable.
-# ---------------------------------------------------------------------------
 def _base_data_dir() -> Path:
     if os.name == "nt":
         root = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
@@ -126,14 +124,12 @@ def cleanup_tmp(log: "LogBus | None" = None) -> int:
     return removed
 
 
-# ---------------------------------------------------------------------------
 # Dependency pre-load.
 #
 # The API source is imported dynamically at runtime, so PyInstaller cannot see
 # its imports.  Listing them here in real ``import`` statements makes the
 # frozen build pick up the wheels + their hooks, and warming them in a
 # background thread makes the first server start fast.
-# ---------------------------------------------------------------------------
 def _static_dependency_manifest() -> None:  # pragma: no cover - never called
     """Real ``import`` statements so PyInstaller bundles the API's wheels.
 
@@ -174,9 +170,7 @@ def preload_runtime_deps(log: "LogBus") -> None:
         )
 
 
-# ---------------------------------------------------------------------------
 # Log bus + stdout/stderr capture
-# ---------------------------------------------------------------------------
 LEVELS = ("info", "ok", "warn", "err", "dbg")
 
 
@@ -272,9 +266,7 @@ class StreamToBus(io.TextIOBase):
                 pass
 
 
-# ---------------------------------------------------------------------------
 # Settings
-# ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class FieldSpec:
     """One editable setting mapped to an API environment variable."""
@@ -427,9 +419,7 @@ def write_install_info(info: dict[str, Any]) -> None:
     INSTALL_FILE.write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-# ---------------------------------------------------------------------------
 # Source location (GitHub URL or local folder) — user editable
-# ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class Source:
     kind: str                # "github" | "local"
@@ -517,9 +507,7 @@ def parse_source(text: str) -> Source:
                   branch=branch, subpath=subpath)
 
 
-# ---------------------------------------------------------------------------
 # HTTP helpers (stdlib only — the launcher must work before the wheels load)
-# ---------------------------------------------------------------------------
 def http_get(url: str, timeout: int = HTTP_TIMEOUT) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT,
                                                "Accept": "*/*"})
@@ -569,9 +557,7 @@ def http_download(url: str, dest: Path, log: LogBus,
     return dest
 
 
-# ---------------------------------------------------------------------------
 # Updater
-# ---------------------------------------------------------------------------
 class Updater:
     """Fetches the ``api/`` folder from GitHub into the private cache."""
 
@@ -776,9 +762,7 @@ class Updater:
         return dest
 
 
-# ---------------------------------------------------------------------------
 # Environment-variable discovery — this is what keeps the UI future-proof.
-# ---------------------------------------------------------------------------
 @dataclass
 class DiscoveredVar:
     name: str
@@ -816,7 +800,6 @@ def discover_env_vars(api_dir: Path) -> list[DiscoveredVar]:
     return sorted(found.values(), key=lambda v: v.name)
 
 
-# ---------------------------------------------------------------------------
 # Settings schema — the curated page adapts to the API that is installed.
 #
 # Three layers, in priority order:
@@ -827,7 +810,6 @@ def discover_env_vars(api_dir: Path) -> list[DiscoveredVar]:
 #
 # A field whose environment variable has disappeared from the API is hidden
 # instead of lingering as a control that silently does nothing.
-# ---------------------------------------------------------------------------
 UI_SCHEMA_FILES = ("ui-settings.json", "launcher-ui.json")
 _KIND_FROM_SOURCE = {"int": "int", "float": "float", "bool": "bool", "str": "str"}
 
@@ -952,9 +934,7 @@ def build_schema(api_dir: Path) -> SchemaResult:
                         origin, sorted(hidden), extra, discovered, notes)
 
 
-# ---------------------------------------------------------------------------
 # What an API update added / removed
-# ---------------------------------------------------------------------------
 SNAPSHOT_FILE = "env_snapshot.json"
 
 
@@ -990,9 +970,7 @@ def record_env_snapshot(discovered: Iterable[DiscoveredVar]) -> tuple[list[str],
     return added, removed
 
 
-# ---------------------------------------------------------------------------
 # Server controller
-# ---------------------------------------------------------------------------
 STATE_STOPPED = "stopped"
 STATE_STARTING = "starting"
 STATE_RUNNING = "running"
@@ -1330,9 +1308,7 @@ def read_default_prompt(api_dir: Path, lang: str) -> str:
     raise KeyError(f"no prompt for '{lang}' and no 'default' entry")
 
 
-# ---------------------------------------------------------------------------
 # Translations
-# ---------------------------------------------------------------------------
 STRINGS: dict[str, dict[str, str]] = {
     "en": {
         "app.title": APP_NAME,
@@ -1493,9 +1469,7 @@ STRINGS: dict[str, dict[str, str]] = {
 }
 
 
-# ---------------------------------------------------------------------------
 # Theme
-# ---------------------------------------------------------------------------
 class C:
     BG = "#0e1014"
     PANEL = "#161922"
@@ -1553,9 +1527,7 @@ def resolve_fonts(log: LogBus) -> None:
     log.emit(f"fonts: ui={UI_FONT} mono={MONO_FONT}", "dbg")
 
 
-# ---------------------------------------------------------------------------
 # Small widget helpers
-# ---------------------------------------------------------------------------
 class FlatButton(tk.Button):
     """tk.Button with full colour control + hover, in three variants."""
 
@@ -1638,9 +1610,7 @@ class ScrollArea(tk.Frame):
         self.canvas.yview_scroll(-delta * 3, "units")
 
 
-# ---------------------------------------------------------------------------
 # The application window
-# ---------------------------------------------------------------------------
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -2886,7 +2856,6 @@ class App(tk.Tk):
         self.destroy()
 
 
-# ---------------------------------------------------------------------------
 class SingleInstance:
     """One window per user — a second launch would fight over the same port.
 

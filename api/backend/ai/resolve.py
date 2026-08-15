@@ -1,6 +1,5 @@
 """Service behind ``/ai/resolve`` and ``/ai/prompt/default``.
 
-STATUS: ACTIVE — in use in the current flow.
 
 Given a (possibly partial) AI configuration, work out the concrete provider,
 model, base URL and the list of models the user can pick from.  Kept out of
@@ -9,6 +8,7 @@ the route module so it stays unit-testable.
 
 from __future__ import annotations
 
+import hashlib
 from typing import Any, TypedDict
 
 from backend.ai import prompts
@@ -177,11 +177,16 @@ def _enumerate_models(provider: str, api_key: str, base_url: str, requested_mode
     return _dedupe_sorted(models)
 
 
-def prompt_default(lang: str) -> dict[str, Any]:
+def prompt_default(lang: str, *, want_memo: bool = True) -> dict[str, Any]:
     """Return the default prompt pieces for ``lang`` (for ``/ai/prompt/default``)."""
     code = normalize_lang(lang)
     style = prompts.lang_style(code)
-    system_text = prompts.build_system_text(code)
+    # Backward-compatible default: older extension/settings callers expect the
+    # character memo instruction. Browser-direct translation has no memory
+    # store, so it opts out explicitly instead of letting <<TP_MEMO>> become
+    # part of the final bubble in its simpler parser.
+    system_text = prompts.build_system_text(code, want_memo=want_memo)
+    metadata = prompts.prompt_metadata(code)
     return {
         "ok": True,
         "lang": code,
@@ -189,4 +194,8 @@ def prompt_default(lang: str) -> dict[str, Any]:
         "lang_style": style,
         "system_base": prompts.SYSTEM_BASE.strip(),
         "system_text": system_text,
+        "want_memo": bool(want_memo),
+        **metadata,
+        "systemPromptHash": hashlib.sha256(system_text.encode("utf-8")).hexdigest(),
+        "systemPromptChars": len(system_text),
     }

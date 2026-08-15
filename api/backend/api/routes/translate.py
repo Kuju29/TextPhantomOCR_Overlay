@@ -1,6 +1,5 @@
 """Translation job endpoints.
 
-STATUS: ACTIVE — in use in the current flow.
 
 ``POST /translate`` enqueues a job and returns its id immediately;
 ``GET /translate/{id}?wait=25`` is a long-poll status endpoint.  The async
@@ -16,6 +15,7 @@ from fastapi import APIRouter, Header, HTTPException, Query, Request
 
 from backend.jobs.queue import JobQueue, QueueFull
 from backend.log import dbg, event
+from backend import cancellation
 
 router = APIRouter()
 
@@ -82,6 +82,7 @@ async def translate_cancel(payload: dict[str, Any], request: Request) -> dict:
     raw_ids = payload.get("job_ids") or payload.get("ids") or []
     if not isinstance(raw_ids, list):
         raw_ids = [raw_ids]
+    cancellation.mark_batch(str(payload.get("batch_id") or ""))
     result = await _job_queue(request).cancel(
         job_ids=raw_ids,
         batch_id=str(payload.get("batch_id") or ""),

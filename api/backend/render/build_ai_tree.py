@@ -1,6 +1,5 @@
 """Build an AI render tree directly from bubble_groups + translated text.
 
-STATUS: ACTIVE — in use in the current flow.
 
 This module replaces the old ``patch.py`` geometry-borrowing approach.
 Instead of deep-copying the Lens ``translated`` tree (which carries the
@@ -55,6 +54,7 @@ orientation.
 from __future__ import annotations
 
 import math
+import unicodedata
 from typing import Any
 
 from backend.lens.languages import normalize as normalize_lang
@@ -65,9 +65,7 @@ from backend.render.patch import _line_text  # type: ignore[attr-defined]
 from backend.render.tp_html import fit_item_font_size
 
 
-# ---------------------------------------------------------------------------
 # Internal geometry helpers
-# ---------------------------------------------------------------------------
 
 def _item_aabb(
     bg: dict,
@@ -298,9 +296,7 @@ def _make_item_box(
     }
 
 
-# ---------------------------------------------------------------------------
 # Rotation-aware canvas
-# ---------------------------------------------------------------------------
 
 def _source_rotation_canvas(
     bg: dict,
@@ -360,9 +356,7 @@ def _source_rotation_canvas(
     return l0, t0, w0, h0, avg_rot
 
 
-# ---------------------------------------------------------------------------
 # Canvas expansion for direction-change boxes (spec §10 / §16)
-# ---------------------------------------------------------------------------
 
 def _expand_canvas_for_rotation(
     src_aabb: tuple[float, float, float, float],
@@ -439,9 +433,7 @@ def _expand_canvas_for_rotation(
     return src_aabb
 
 
-# ---------------------------------------------------------------------------
 # Span building
-# ---------------------------------------------------------------------------
 
 def _tokenise_for_spans(
     text: str,
@@ -584,9 +576,7 @@ def _build_item_spans(
     return spans
 
 
-# ---------------------------------------------------------------------------
 # Image-level orientation (the "50 % box rule")
-# ---------------------------------------------------------------------------
 
 def _count_text_items(bg: dict) -> int:
     """Number of text-bearing items inside a bubble group."""
@@ -851,9 +841,7 @@ def detect_image_orientation(bubble_groups: list[dict]) -> str:
     return "v" if n_vert * 2 >= len(pool) else "h"
 
 
-# ---------------------------------------------------------------------------
 # Public API
-# ---------------------------------------------------------------------------
 
 def build_ai_tree(
     bubble_groups: list[dict],
@@ -958,11 +946,18 @@ def build_ai_tree(
         group_text = ai_group_texts[gi] if gi < len(ai_group_texts) else ""
         group_text = (group_text or "").strip()
 
-        # Skip single-character source fragments (Lens OCR artefacts like
-        # "し", "も" detached from their sentence).  These generate meaningless
-        # one-word translations that render over the real bubble text.
+        # Skip single-letter source fragments (Lens OCR artefacts like "し",
+        # "も" detached from their sentence). Numeric / punctuation / symbol
+        # groups are layout-significant: '?' is a real reaction bubble and
+        # '10' is a page label. The old blanket length check silently dropped
+        # the former, which is why test1 had 11 translated groups but only 10
+        # AI paragraphs.
         src_text = str(bg.get("text") or "").strip()
-        if sum(1 for c in src_text if not c.isspace()) < 2:
+        src_visible = [c for c in src_text if not c.isspace()]
+        significant_singleton = bool(src_visible) and all(
+            unicodedata.category(c)[0] in ("N", "P", "S") for c in src_visible
+        )
+        if len(src_visible) < 2 and not significant_singleton:
             continue
 
 

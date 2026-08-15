@@ -1,13 +1,8 @@
-/**
- *
- * STATUS: ACTIVE — in use in the current flow.
- * Image / byte helpers used by the service worker, plus job-error
- * classification (which errors are worth retrying vs. permanent failures).
- */
+// Fetches and encodes images for the service worker and classifies job errors as permanent or transient.
 
 import { requestFromTabEnsured } from "./tabs-messaging.js";
 
-/** Base64-encode a Uint8Array in 32 KB chunks (avoids call-stack limits). */
+// Base64-encodes a Uint8Array in 32 KB chunks.
 export function bytesToBase64(bytes) {
   let binary = "";
   const chunk = 0x8000;
@@ -17,14 +12,14 @@ export function bytesToBase64(bytes) {
   return btoa(binary);
 }
 
-/** Convert a Blob to a `data:` URI. */
+// Converts a Blob to a `data:` URI.
 export async function blobToDataUri(blob, mimeOverride) {
   const buffer = await blob.arrayBuffer();
   const mime = String(mimeOverride || blob.type || "application/octet-stream");
   return `data:${mime};base64,${bytesToBase64(new Uint8Array(buffer))}`;
 }
 
-/** Read a (truncated) text body from a Response, swallowing errors. */
+// Reads a truncated text body from a Response, returning "" when it cannot be read.
 export async function readLimitedText(res, limit = 1600) {
   try {
     const text = String((await res.text()) || "").trim();
@@ -35,12 +30,7 @@ export async function readLimitedText(res, limit = 1600) {
   }
 }
 
-/**
- * Fetch a remote image and return it as a `data:` URI.
- * @param {string} url
- * @param {string} [pageUrl] - used as the Referer (some CDNs hot-link protect)
- * @returns {Promise<string>}
- */
+// Fetches a remote image from the worker and returns it as a `data:` URI, sending the page URL as the referrer.
 export async function fetchImageDataUriFromUrl(url, pageUrl) {
   const u = String(url || "").trim();
   if (!u) return "";
@@ -65,15 +55,7 @@ export async function fetchImageDataUriFromUrl(url, pageUrl) {
   return blobToDataUri(blob, mime || blob.type);
 }
 
-/**
- * Fetch an image via the content script (page context), bypassing CDN
- * hotlink protection that blocks Service Worker origin.
- * Used as a fallback when the direct SW fetch returns 403.
- * @param {number} tabId
- * @param {string} url
- * @param {number} [frameId]
- * @returns {Promise<string>} data URI
- */
+// Fetches an image in the page's context via the content script and returns it as a `data:` URI.
 export async function fetchImageDataUriFromTab(tabId, url, frameId = 0) {
   if (!tabId) throw new Error("no tabId for tab fetch");
   const resp = await requestFromTabEnsured(
@@ -87,16 +69,15 @@ export async function fetchImageDataUriFromTab(tabId, url, frameId = 0) {
   return du;
 }
 
-/**
- * Decide whether a job error is permanent (don't retry) or transient.
- * @param {string} msg
- * @returns {{permanent: boolean}}
- */
-export function classifyJobError(msg) {
+// Decides whether a job error is permanent or transient.
+export function classifyJobError(msg, context = {}) {
   const m = String(msg || "").toLowerCase();
+  // One generation per image: once the model has actually been asked, nothing
+  // is asked again. Failures BEFORE that — a Lens 502, a dropped socket — never
+  // reached the model, so they are transient like any other transport error.
+  if (context?.aiGenerationAttempted) return { permanent: true };
   if (!m) return { permanent: false };
 
-  // Permanent: nothing more we can do for this image.
   if (m.includes("no overlay data")) return { permanent: true };
   if (m.includes("no image data")) return { permanent: true };
   if (/\b(401|403|404|410)\b/.test(m)) return { permanent: true };
@@ -105,7 +86,25 @@ export function classifyJobError(msg) {
     return { permanent: true };
   }
   if (m.includes("unsupported") && m.includes("image")) return { permanent: true };
+  if (
+    m.includes("incomplete single ai response") ||
+    m.includes("ai text was incomplete; no automatic retry was made")
+  ) {
+    return { permanent: true };
+  }
+  if (m.includes("ai text layer cannot be rendered faithfully")) return { permanent: true };
 
-  // Transient: rate limits / overload / timeouts — worth a retry.
   return { permanent: false };
+}
+
+// Returns the first-pass failures eligible for batch pass 2, alongside the permanent-error count.
+export function selectBatchRetryCandidates(items) {
+  const failed = [];
+  let permanentErrors = 0;
+  for (const [key, item] of items?.entries?.() || []) {
+    if (item?.attempt !== 1 || item.status !== "error") continue;
+    if (item.permanent) permanentErrors += 1;
+    else failed.push(key);
+  }
+  return { failed, permanentErrors };
 }

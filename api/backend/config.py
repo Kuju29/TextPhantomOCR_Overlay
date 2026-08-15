@@ -1,7 +1,5 @@
 """Centralised runtime configuration loaded from environment variables.
 
-STATUS: ACTIVE — in use in the current flow.
-
 All tunables live here so the rest of the codebase does not call ``os.environ``
 directly.  The values are read once on import; callers that need a fresh read
 should call :func:`reload` (useful in tests).
@@ -9,8 +7,10 @@ should call :func:`reload` (useful in tests).
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Final
 
 
@@ -39,6 +39,46 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
+def _diagnostics_profile() -> str:
+    """Simple diagnostic preset; legacy variables remain authoritative."""
+    raw = _env_str("TP_DIAGNOSTICS", "normal").lower()
+    aliases = {"0": "normal", "off": "normal", "1": "activity", "summary": "activity", "full": "deep"}
+    value = aliases.get(raw, raw)
+    return value if value in {"normal", "activity", "deep"} else "normal"
+
+
+def _access_log_default() -> str:
+    explicit = os.environ.get("TP_ACCESS_LOG_MODE")
+    if explicit is not None:
+        return (explicit or "summary").strip().lower()
+    return "summary" if _diagnostics_profile() in {"activity", "deep"} else "errors"
+
+
+def _release_build_id(*, api_root: Path | None = None) -> str:
+    """Read build identity from the release tree or its staged API manifest."""
+    explicit = _env_str("TP_BUILD_ID")
+    if explicit:
+        return explicit
+    resolved_api_root = api_root or Path(__file__).resolve().parents[1]
+    extension_root = resolved_api_root.parent
+    candidates = (
+        extension_root / "platform" / "base.json",
+        resolved_api_root / "build-manifest.json",
+        extension_root / "package.json",
+    )
+    for candidate in candidates:
+        try:
+            document = json.loads(candidate.read_text(encoding="utf-8"))
+            if candidate.name == "build-manifest.json" and document.get("schema") != "tp.build-manifest/1":
+                continue
+            value = str(document.get("version") or "").strip()
+        except (OSError, ValueError, TypeError):
+            continue
+        if value:
+            return value
+    return "unknown"
+
+
 @dataclass(frozen=True)
 class Settings:
     # Server-side worker pool & limits ---------------------------------------
@@ -55,6 +95,56 @@ class Settings:
     max_queue_size: int = field(default_factory=lambda: _env_int("TP_MAX_QUEUE_SIZE", 2000))
     max_jobs_tracked: int = field(default_factory=lambda: _env_int("TP_MAX_JOBS_TRACKED", 5000))
     job_run_timeout_sec: float = field(default_factory=lambda: _env_float("TP_JOB_RUN_TIMEOUT_SEC", 120.0))
+
+    # Synchronous endpoint admission control ---------------------------------
+    # /v1/translate has no queue. These bound how much runs at once and how
+    # briefly a request may wait for a slot before being told to come back.
+    # `sync_max_waiters` is deliberately small: it absorbs jitter between two
+    # arrivals, not a batch — a deep waiting list is a queue wearing a hat.
+    # 0 = derive from SERVER_MAX_WORKERS (resolved where the gate is built).
+    sync_max_concurrency: int = field(
+        default_factory=lambda: max(0, _env_int("TP_SYNC_MAX_CONCURRENCY", 0))
+    )
+    # AI jobs get their OWN admission lane, and a much bigger one.
+    #
+    # A `lens_text.ai` request spends 7.6 s of its 11.2 s median asleep on the
+    # provider's socket — measured over 34 images on 2026-08-07. With one shared
+    # gate that sleep occupied a processing slot, so image 2 could not start its
+    # Lens upload while image 1 waited on Gemini, even though the server was
+    # idle. That is the "งานกระจุกต่อคิว" this project set out to remove, and
+    # Lens waits are independent per image; keep this separate from CPU gates.
+    #
+    # The lane is wider than the Lens lane because its work is waiting, not
+    # computing; what stops it from being unbounded is the AI rate gate, which
+    # meters per (provider, model, key) and is the limit that actually belongs
+    # to something real. CPU is still protected by `TP_CPU_CONCURRENCY`, which
+    # every path goes through regardless of lane.
+    sync_ai_max_concurrency: int = field(
+        default_factory=lambda: max(0, _env_int("TP_SYNC_AI_MAX_CONCURRENCY", 48))
+    )
+    # A THIRD lane, for the detector-only calls (`/v1/groups`, `/v1/blocks`).
+    #
+    # These used to share the Lens lane, which is the wrong pool for them in
+    # both directions. ONNX is ~445 ms of pure CPU; a Lens upload is 3.7 s of
+    # network sleep. Putting a CPU job in the Lens lane means one image's
+    # 445 ms of compute holds a slot the next image's upload could have used —
+    # the same "asleep on a socket holding a processing slot" mistake the AI
+    # lane was split off to fix, in reverse.
+    #
+    # Sized from `TP_CPU_CONCURRENCY`, because that is what actually bounds this
+    # work: `_CPU_GATE` lets `cpu_concurrency` threads compute at once, and a
+    # wider admission lane in front of it would only build a queue behind the
+    # semaphore. A little headroom over it keeps the gate fed while a finished
+    # request serialises its reply.
+    sync_cpu_max_concurrency: int = field(
+        default_factory=lambda: max(0, _env_int("TP_SYNC_CPU_MAX_CONCURRENCY", 0))
+    )
+    sync_max_waiters: int = field(
+        default_factory=lambda: max(0, _env_int("TP_SYNC_MAX_WAITERS", 8))
+    )
+    sync_max_wait_sec: float = field(
+        default_factory=lambda: max(0.0, _env_float("TP_SYNC_MAX_WAIT_SEC", 10.0))
+    )
 
     # Split lane concurrency -------------------------------------------------
     # SERVER_MAX_WORKERS is the total processing budget. Lens-direct jobs are
@@ -91,9 +181,47 @@ class Settings:
     rate_default_burst: int = field(default_factory=lambda: max(1, _env_int("TP_RATE_BURST_DEFAULT", 4)))
 
     # AI key fall-back -------------------------------------------------------
+    # Used only when the request did NOT carry its own key. A request that
+    # falls back to this key may only talk to the provider hosts below —
+    # see backend/security.py, which closes the key-exfiltration hole where a
+    # caller-chosen base_url received this key.
     ai_api_key: str = field(default_factory=lambda: _env_str("AI_API_KEY"))
+    # Comma-separated extra hostnames the SERVER key may be sent to, on top of
+    # the built-in PROVIDER_DEFAULTS hosts (e.g. a company AI gateway).
+    ai_extra_hosts: str = field(default_factory=lambda: _env_str("TP_AI_EXTRA_HOSTS"))
+
+    # Remote image fetching (SSRF guard) -------------------------------------
+    # The API downloads `src` URLs supplied by the caller. Private/loopback/
+    # link-local targets are refused unless this is explicitly enabled, which
+    # is only appropriate for the desktop launcher where the server and the
+    # user are the same machine.
+    allow_private_image_hosts: bool = field(
+        default_factory=lambda: _env_bool("TP_ALLOW_PRIVATE_IMAGE_HOSTS", False)
+    )
+    max_image_bytes: int = field(
+        default_factory=lambda: max(1, _env_int("TP_MAX_IMAGE_BYTES", 24 * 1024 * 1024))
+    )
+    max_image_redirects: int = field(
+        default_factory=lambda: max(0, _env_int("TP_MAX_IMAGE_REDIRECTS", 4))
+    )
+
+    # CORS -------------------------------------------------------------------
+    # Comma-separated allowed origins. The extension does not need CORS at all
+    # (it fetches under its host permissions), so the safe production value is
+    # a concrete list — or "*", which is only honoured WITHOUT credentials.
+    allowed_origins: str = field(default_factory=lambda: _env_str("TP_ALLOWED_ORIGINS", "*"))
 
     # Lens (Firebase cookie source) -----------------------------------------
+    # The jar behind this URL holds AEC / NID / __Secure-STRP — Google's
+    # anti-abuse and signed-out preference cookies. It carries NONE of the
+    # account-session cookies (SID, HSID, SSID, APISID, SAPISID,
+    # __Secure-*PSID, LSID), so a reader cannot act as anybody's Google
+    # account with it. Publishing it is a quota and abuse question, not an
+    # account one, which is why the default is kept.
+    #
+    # What still matters: everyone using this deployment shares one browser
+    # identity with Google, so abuse of it is attributed to all of them
+    # together. Point FIREBASE_URL at your own jar to get your own identity.
     firebase_url: str = field(
         default_factory=lambda: _env_str(
             "FIREBASE_URL",
@@ -208,6 +336,7 @@ class Settings:
     textblock_warmup: bool = field(default_factory=lambda: _env_bool("TP_TEXTBLOCK_WARMUP", False))
 
     # Logging / debug --------------------------------------------------------
+    diagnostics_profile: str = field(default_factory=_diagnostics_profile)
     debug: bool = field(default_factory=lambda: _env_bool("TP_DEBUG", False))
     # Production default: quiet uvicorn and emit only compact important events,
     # for example one line when a translation job succeeds/fails.
@@ -221,11 +350,11 @@ class Settings:
     #                             the server to be silent about failures.
     #   uvicorn                 = restore stock uvicorn access logs
     access_log_mode: str = field(
-        default_factory=lambda: (_env_str("TP_ACCESS_LOG_MODE", "summary") or "summary").lower()
+        default_factory=_access_log_default
     )
 
     # Build metadata ---------------------------------------------------------
-    build_id: str = field(default_factory=lambda: _env_str("TP_BUILD_ID", "v15-ai-fast-auto-20260617"))
+    build_id: str = field(default_factory=_release_build_id)
 
 
 # Module-level singleton.  Import this from anywhere as ``from backend.config import settings``.

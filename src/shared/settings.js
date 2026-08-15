@@ -1,6 +1,5 @@
 /**
  *
- * STATUS: ACTIVE — in use in the current flow.
  * Reading the user's stored settings.
  *
  * Two readers are exported because the service worker and the content script
@@ -37,13 +36,7 @@ export function normalizeMode(value) {
   return v === "lens_images" || v === "lens_text" ? v : DEFAULT_MODE;
 }
 
-export function normalizeLang(value) {
-  return String(value || "").trim() || DEFAULT_LANG;
-}
 
-export function normalizeSource(value) {
-  return String(value || "").trim().toLowerCase() || DEFAULT_SOURCE;
-}
 
 /**
  * Read a stored boolean that has a non-false default.
@@ -127,13 +120,20 @@ export async function readFullSettings() {
     "aiMemoryMode",
     "aiSendImage",
     "aiPageImage",
+    "aiOnDevice",
+    "localRender",
+    "clientBackground",
     "aiThinking",
     "aiPromptByLang",
     "aiPrompt",
     "relayoutTranslated",
     "rateLimitEnabled",
+    "rateProfile",
     "rateRpm",
     "rateBurst",
+    "aiLocalUnlimited",
+    "apiLocalUnlimited",
+    "engineMode",
   ]);
 
   const lang = typeof it.lang === "string" ? it.lang : DEFAULT_LANG;
@@ -197,6 +197,18 @@ export async function readFullSettings() {
       it.aiPageImage === "always" || (it.aiPageImage == null && it.aiSendImage)
         ? "always"
         : "off",
+    // Chrome's on-device model. Off unless explicitly asked for: it is machine
+    // translation, close to what Lens already gave, so selecting it for someone
+    // who chose the AI layer would be a downgrade they did not request.
+    aiOnDevice: it.aiOnDevice === true,
+    // Draw the overlay in the page instead of using the server's markup.
+    // Off until compared against the server output on real pages: the local
+    // renderer is new, and the schema it draws from carries only the ORIGINAL
+    // layer's geometry.
+    localRender: it.localRender === true,
+    // Text overlays are extension-first. Ignore the hidden legacy false value;
+    // it caused an entire batch to fall back to server erase/render/PNG.
+    clientBackground: true,
     // Reasoning control (Gemini): "default" = think normally, "off" = fastest.
     aiThinking: it.aiThinking === "off" ? "off" : "default",
     aiPrompt,
@@ -204,6 +216,16 @@ export async function readFullSettings() {
     relayoutTranslated: readBool(it.relayoutTranslated, DEFAULT_RELAYOUT_TRANSLATED),
     // AI rate-limit pacing. 0 for rpm/burst = use the server's provider policy.
     rateLimitEnabled: readBool(it.rateLimitEnabled, DEFAULT_RATE_LIMIT_ENABLED),
+    // Opt-in, default off: pacing only comes off when the user says the runtime
+    // is their own machine, because only they know that.
+    // "extension" is the current engine; "api" restores the pre-v2 split where
+    // the server ran Lens, ONNX, AI and rendering.
+    engineMode: it.engineMode === "api" ? "api" : "extension",
+    aiLocalUnlimited: readBool(it.aiLocalUnlimited, false),
+    apiLocalUnlimited: readBool(it.apiLocalUnlimited, false),
+    rateProfile: ["auto", "stable", "balanced", "fast", "custom"].includes(it.rateProfile)
+      ? it.rateProfile
+      : (Number(it.rateRpm) > 0 || Number(it.rateBurst) > 0 ? "custom" : "auto"),
     rateRpm: readCount(it.rateRpm, DEFAULT_RATE_RPM),
     rateBurst: readCount(it.rateBurst, DEFAULT_RATE_BURST),
   };

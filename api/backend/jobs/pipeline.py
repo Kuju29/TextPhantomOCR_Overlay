@@ -1,7 +1,5 @@
 """The translation pipeline — turns a request payload into a render result.
 
-STATUS: ACTIVE — in use in the current flow.
-
 This is the orchestration layer.  It does not contain any low-level logic
 itself; it wires together the lens / ai / render modules:
 
@@ -18,6 +16,8 @@ Two modes:
 from __future__ import annotations
 
 import concurrent.futures
+import contextlib
+import copy
 import io
 import os
 import tempfile
@@ -34,20 +34,29 @@ from backend.config import settings
 from backend.jobs import cache as cache_mod
 from backend.jobs.fonts import resolve_font_pair
 from backend.lens import client as lens_client
+from backend.lens import document as lens_document
 from backend.lens.languages import normalize as normalize_lang
 from backend.ai.providers import is_local_provider
-from backend.lens.tree import decode_tree, flatten_spans, paragraph_texts, tree_stats
+from backend.lens.tree import (
+    decode_tree,
+    flatten_spans,
+    iter_paragraphs,
+    paragraph_texts,
+    spans_for_paragraphs,
+    tree_stats,
+)
 from backend.log import dbg, event
 from backend.render.bubble import attach_bubble_bounds, detect_bubble_bounds_combined
 from backend.render.colors import region_is_dark
+from backend.render.textblocks_pass import detect_blocks_with_second_look
 from backend.render.textblocks import (
     annotate_paragraph_blocks,
     attach_block_bounds_to_groups,
     available as textblocks_available,
-    detect_text_blocks,
     detect_text_blocks_in_rois,
 )
-from backend.render.erase import erase_text_with_boxes
+from backend.render.erase import erase_text_with_boxes, restore_token_regions
+from backend.render import erase_boxes as erase_boxes_mod
 from backend.render.groups import (
     group_paragraphs_into_bubbles,
     merge_groups_sharing_canvas,
@@ -61,6 +70,7 @@ from backend.render.relayout import (
     scan_tree_orientation,
     target_orientation_for_lang,
 )
+from backend.render.rotation_signs import presentation_rotation_copy
 from backend.render.patch import patch as patch_ai_tree
 from backend.render.tp_html import (
     fit_tree_font_sizes,
@@ -75,6 +85,22 @@ from backend.utils.images import (
 )
 
 SUPPORTED_MODES = {"lens_images", "lens_text"}
+
+
+def _image_to_rgb(src: Image.Image) -> Image.Image:
+    """Return opaque RGB, preserving palette transparency over white.
+
+    Pillow warns when a palette image carries a per-entry alpha table and is
+    converted straight to RGB.  More importantly, that direct conversion has
+    no defined page background for transparent pixels. Manga pages are white,
+    so promote to RGBA first and composite explicitly.
+    """
+    has_alpha = "A" in src.getbands() or "transparency" in src.info
+    if not has_alpha:
+        return src.convert("RGB")
+    rgba = src.convert("RGBA")
+    white = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+    return Image.alpha_composite(white, rgba).convert("RGB")
 
 # --- Background-image encoding ----------------------------------------------
 # The erased background does not need to be lossless. Scanned/JPEG-sourced
@@ -357,11 +383,51 @@ def _layout_options(payload: dict | None) -> dict[str, bool]:
             return value.strip().lower() in ("1", "true", "yes", "on")
         return bool(value)
 
+    render = payload.get("render") if isinstance(payload, dict) else None
+    render = render if isinstance(render, dict) else {}
+
     return {
         "relayout_translated": _flag(
             "relayout_translated", bool(getattr(settings, "relayout_translated", True))
         ),
+        # Emit the canonical tp.lens-document/1 alongside the rendered overlay.
+        # It changes the response, so it belongs in the cache key.
+        "lens_document": bool(render.get("lensDocument")),
+        # Who paints the text-erased background. These produce different
+        # responses from the same image, so this belongs in the cache key
+        # alongside the relayout switches — see build_cache_key.
+        "client_background": _background_is_client(payload),
     }
+
+
+# --- Background ownership ---------------------------------------------------
+
+_BACKGROUND_MODES = ("image", "boxes")
+
+
+def _background_is_client(payload: dict | None) -> bool:
+    """Whether the CLIENT will paint the background for this request.
+
+    ``{"render": {"background": "boxes"}}`` means the extension erases the
+    text itself on a canvas, so the server skips the inpaint/re-encode and
+    returns the boxes instead. ``"image"`` (the default, and what every older
+    build sends by not sending anything) keeps the server-rendered background.
+
+    An unrecognised value raises rather than falling back to the default: a
+    client that asked for something specific and silently got the opposite
+    would look like a client-side bug for as long as anyone cared to look.
+    """
+    raw = payload.get("render") if isinstance(payload, dict) else None
+    raw = raw if isinstance(raw, dict) else {}
+    value = raw.get("background")
+    if value is None or value == "":
+        return False
+    mode = str(value).strip().lower()
+    if mode not in _BACKGROUND_MODES:
+        raise ValueError(
+            f"render.background must be one of {_BACKGROUND_MODES}, got {value!r}"
+        )
+    return mode == "boxes"
 
 
 # --- Text-colour annotation -------------------------------------------------
@@ -436,6 +502,75 @@ def _encode_vision_image(img: Image.Image) -> tuple[str, str]:
     return base64.b64encode(buf.getvalue()).decode("ascii"), "image/jpeg"
 
 
+@contextlib.contextmanager
+def _stage(stages: dict[str, Any], name: str):
+    """Name the step being run, and stamp that name onto anything it raises.
+
+    Without this a failure before the provider reaches the client as a bare
+    ``RuntimeError`` and nobody can tell a download from a Lens upload from a
+    decode. The marker is read by the route and written into the failure trace;
+    guessing with a retry would only hide which step is broken.
+    """
+    stages["stage"] = name
+    try:
+        yield
+    except BaseException as exc:
+        stages["failed_stage"] = name
+        if getattr(exc, "tp_stage", None) is None:
+            try:
+                exc.tp_stage = name  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        raise
+
+
+def _restore_unanswered_paragraphs(
+    out: dict[str, Any],
+    original_tree: dict | None,
+    source_img: "Image.Image | None",
+    base_img: "Image.Image | None",
+    *,
+    client_background: bool,
+    stages: dict[str, Any],
+) -> int:
+    """Undo the erase for paragraphs the model did not answer.
+
+    The page is erased before the AI replies, so a partial answer leaves the
+    unanswered bubbles blank — the reader loses text that was there before the
+    translation ran. The extension already refuses to erase what it cannot
+    replace; this is the same rule on the server. Returns how many paragraphs
+    were restored.
+    """
+    meta = ((out.get("Ai") or {}).get("meta") or {})
+    indices = meta.get("missing_paragraph_indices") or []
+    if not indices:
+        return 0
+    tokens = spans_for_paragraphs(original_tree, indices)
+    if not tokens:
+        return 0
+
+    if client_background:
+        # The client paints the boxes: simply do not send the ones whose text
+        # is staying on screen.
+        keep = spans_for_paragraphs(
+            original_tree,
+            [i for i, _ in iter_paragraphs(original_tree) if i not in set(indices)],
+        )
+        out["eraseBoxes"] = erase_boxes_mod.build(keep)
+    elif base_img is not None and source_img is not None:
+        _t = time.perf_counter()
+        restore_token_regions(base_img, source_img, tokens)
+        if settings.lens_direct_png:
+            out["imageDataUri"] = _encode_bg_data_uri(base_img)
+        stages["ai_partial_restore_ms"] = round((time.perf_counter() - _t) * 1000, 1)
+    else:
+        return 0
+
+    stages["ai_partial_restored_paragraphs"] = len(indices)
+    dbg("ai.partial.restored", {"paragraphs": indices})
+    return len(indices)
+
+
 def _run_ai_layer(
     out: dict[str, Any],
     original_tree: dict | None,
@@ -470,6 +605,7 @@ def _run_ai_layer(
     bubble_groups_og = (original_tree or {}).get("bubble_groups") or []
     group_para_indices: list[list[int]] = []
     merged_src_paras: list[str] = []
+    grouping_degraded = False
 
     if bubble_groups_og and src_paras_raw:
         in_group: set[int] = set()
@@ -487,9 +623,48 @@ def _run_ai_layer(
                 merged_src_paras.append(t)
     else:
         # Fallback: one unit per paragraph (original behaviour).
+        #
+        # This is a QUALITY DEGRADATION, not a neutral default: without bubble
+        # groups a vertical page arrives as one unit per column, so a single
+        # sentence Lens split across three columns is translated three times in
+        # isolation. The extension refuses this case outright; the server takes
+        # it, and the only thing that makes the two comparable is saying so.
         for i, t in enumerate(src_paras_raw):
             group_para_indices.append([i])
             merged_src_paras.append(t)
+        grouping_degraded = bool(src_paras_raw)
+
+    # Units Lens read as digits, punctuation or symbols only are never sent: they
+    # cost tokens, come back unchanged, and their source text is the right answer.
+    # Same rule as `hasTranslatableText` in src/shared/lens-document.js.
+    passthrough_units: dict[int, str] = {}
+    kept_indices: list[list[int]] = []
+    kept_paras: list[str] = []
+    for idxs, text in zip(group_para_indices, merged_src_paras):
+        if markers.has_translatable_text(text):
+            kept_indices.append(idxs)
+            kept_paras.append(text)
+        else:
+            passthrough_units[len(kept_indices) + len(passthrough_units)] = text
+    if not kept_paras:
+        out["AiTextFull"] = ""
+        out["Ai"] = {"meta": {"skipped": True, "skipped_reason": "no_translatable_text"}}
+        return None
+    untranslatable = len(group_para_indices) - len(kept_paras)
+    if untranslatable:
+        # The boxes still need their text, so the source is written back verbatim.
+        group_para_indices = kept_indices + [
+            idxs for idxs, text in zip(group_para_indices, merged_src_paras)
+            if not markers.has_translatable_text(text)
+        ]
+        passthrough_texts = [
+            text for text in merged_src_paras if not markers.has_translatable_text(text)
+        ]
+        merged_src_paras = kept_paras
+    else:
+        passthrough_texts = []
+        group_para_indices = kept_indices
+        merged_src_paras = kept_paras
 
     # Clamp runaway character runs in the SOURCE from the very first attempt
     # (SFX like ヒヤァァァ… are the usual trigger that sends the model into a
@@ -527,8 +702,31 @@ def _run_ai_layer(
         if vimg is not None:
             try:
                 ai_cfg.image_b64, ai_cfg.image_mime = _encode_vision_image(vimg)
-            except Exception:
-                pass  # vision is best-effort; translation continues text-only
+            except Exception as exc:  # noqa: BLE001
+                # Was a bare `pass`. A page that silently translated text-only
+                # while the user believed the model could see it is a setting
+                # that "does nothing" for no visible reason.
+                event(
+                    "ai.vision.skipped",
+                    {"reason": str(exc)[:200], "size": list(vimg.size)},
+                    ok=False,
+                )
+
+    # Measured on a real page (api/logs, 2026-08-06): text-only ~2s, the same
+    # page with the image attached and thinking left on took 85s. That is a
+    # 40x cost from two switches that look independent in the UI and are not.
+    #
+    # Not changed automatically — silently overriding a setting is how the last
+    # three regressions happened. Stated, so the cost is attributable.
+    if want_image and str(getattr(ai_cfg, "thinking", "default")).lower() != "off":
+        event(
+            "ai.vision.expensive",
+            {
+                "note": "page image + thinking is the slow combination; "
+                "setting AI thinking to 'off' is the single biggest saving",
+                "model": getattr(ai_cfg, "model", ""),
+            },
+        )
 
     # Chapter-brief speaker map: the brief numbers speakers by RAW OCR
     # paragraph index (blank-line split of originalTextFull), but the markers
@@ -546,23 +744,14 @@ def _run_ai_layer(
                     break
         ai_cfg.speakers = _remapped
 
-    # First attempt; retry once (with runaway-repeat clamping) if markers drop.
+    # Exactly one AI generation for this image. Provider-native JSON Schema
+    # constrains P0..Pn where available; universal JSON prompting covers every
+    # other model. Incomplete output is terminal inside ai_translate — never
+    # repaired from Lens and never offered to the model a second time.
     result = ai_translate(
         src_text, target_lang, ai_cfg,
         capture_request=capture_request,
     )
-    first_attempt = result
-    retried = False
-    if merged_src_paras and markers.needs_retry(str(result.get("aiTextFull") or ""), n_src):
-        retried = True
-        dbg("ai.retry", {"expected_paras": n_src})
-        retry_text = markers.apply(
-            [markers.clamp_runaway_repeats(p) for p in merged_src_paras]
-        ) or src_text
-        result = ai_translate(
-            retry_text, target_lang, ai_cfg, is_retry=True,
-            capture_request=capture_request,
-        )
 
     # OUTPUT clamp — deterministic, always on. A repetition runaway in the
     # model's answer (thousands of repeated chars/clusters) can strike at any
@@ -575,42 +764,54 @@ def _run_ai_layer(
             meta["layout_rotation_samples"] = layout_meta.get("rotation_samples")
     meta["layout_path"] = "lens_template_fast" if use_lens_template else "self_blocks_onnx"
 
-    # When the request was captured for debugging, keep BOTH attempts so we
-    # can compare the truncated/dropped first attempt to the retry.
-    if capture_request and retried:
-        first_meta = first_attempt.get("meta") or {}
-        meta["debug_request_first"] = first_meta.get("debug_request")
-        meta["debug_response_raw_first"] = first_meta.get("debug_response_raw")
-        meta["debug_first_attempt_text"] = str(first_attempt.get("aiTextFull") or "")
-
-    # If markers are still incomplete, repair using the translated layer.
+    # The marker sequence must be structurally complete: the decoder fills an
+    # omitted id with an empty body rather than dropping it, so a gap here means
+    # the protocol itself broke, not that the model skipped one bubble.
     if merged_src_paras and not markers.has_complete_sequence(ai_text_full, n_src):
-        # Build group-level fallback texts from the translated tree.
-        trans_paras_raw = paragraph_texts(translated_tree or {})
-        fallback_texts: list[str] = []
-        for idxs in group_para_indices:
-            txts = [
-                trans_paras_raw[i] if 0 <= i < len(trans_paras_raw) else ""
-                for i in idxs
-            ]
-            fallback_texts.append("".join(t for t in txts if t).strip())
-        ai_text_full, repair_meta = markers.repair_with_fallback(
-            ai_text_full, n_src, fallback_texts
-        )
-        meta.update(repair_meta)
-        dbg("ai.marker.repaired", repair_meta)
+        raise RuntimeError(f"AI returned incomplete text units (expected {n_src})")
 
     dbg("ai.groups", {"n_groups": n_src, "n_paras": len(src_paras_raw)})
 
     # Extract per-group translated texts.
     extracted = markers.extract_paragraphs(ai_text_full, n_src)
-    if extracted is not None:
-        ai_group_texts, ai_text_full_clean = extracted
-    else:
-        ai_group_texts = (ai_text_full or "").split("\n\n")
-        if len(ai_group_texts) < n_src:
-            ai_group_texts += [""] * (n_src - len(ai_group_texts))
-        ai_text_full_clean = "\n\n".join(ai_group_texts[:n_src])
+    if extracted is None:
+        raise RuntimeError("AI returned no attributable text units")
+    ai_group_texts, ai_text_full_clean = extracted
+
+    # A unit the model returned empty stays empty and is named. Same rule as the
+    # extension path: draw what came back, report the rest, never invent filler.
+    missing_units = [i for i, t in enumerate(ai_group_texts) if not str(t or "").strip()]
+    if missing_units and len(missing_units) >= n_src:
+        raise RuntimeError("AI returned no usable text for any unit")
+    if passthrough_texts:
+        ai_group_texts = list(ai_group_texts) + list(passthrough_texts)
+    meta["missing_units"] = missing_units
+    meta["passthrough_units"] = len(passthrough_texts)
+    meta["units"] = n_src
+    # Named so a log can tell "the server grouped the page" from "the server
+    # gave up on grouping and translated the fragments anyway".
+    meta["grouping"] = "per_paragraph_fallback" if grouping_degraded else "bubble_groups"
+    if grouping_degraded:
+        dbg("ai.grouping.degraded", {"units": n_src})
+        event(
+            "ai.grouping.degraded",
+            {"units": n_src,
+             "note": "no bubble groups: each Lens paragraph was translated on its own, "
+                     "so one sentence split across columns was translated in fragments"},
+            ok=False,
+        )
+    # Which SOURCE paragraphs those units came from. The erase already ran, so
+    # the caller needs this to put the original pixels back before the reply is
+    # encoded — an unanswered bubble must show its own text, never a blank.
+    missing_paras: set[int] = set()
+    for unit in missing_units:
+        if 0 <= unit < len(group_para_indices):
+            missing_paras.update(int(i) for i in group_para_indices[unit])
+    meta["missing_paragraph_indices"] = sorted(missing_paras)
+    if missing_units:
+        dbg("ai.partial", {"expected": n_src, "missing": len(missing_units),
+                           "missing_units": missing_units,
+                           "missing_paragraph_indices": sorted(missing_paras)})
 
     if use_lens_template:
         # Fast same-orientation AI path: pour the AI wording into Lens's own
@@ -716,6 +917,13 @@ def process_image(
     target_lang = normalize_lang(lang)
     layout = layout_opts if isinstance(layout_opts, dict) else _layout_options(None)
 
+    # `lens_images` returns Lens's own translated PICTURE — there is no erased
+    # background to hand over, so the boxes mode does not apply to it. The
+    # answer is reported in the result (`backgroundMode`) rather than left for
+    # the client to infer from a missing field.
+    client_background = bool(layout.get("client_background")) and mode_id == "lens_text"
+    want_lens_document = bool(layout.get("lens_document")) and mode_id == "lens_text"
+
     # IMPORTANT pipeline contract:
     #   * lens_images                 -> Lens-direct image result
     #   * lens_text.original          -> Lens-direct OCR/layout overlay
@@ -737,59 +945,44 @@ def process_image(
     # line so slow jobs can be diagnosed from the logs alone.
     stages: dict[str, Any] = {"pipeline_path": "lens_direct"}
 
-    img = Image.open(image_path).convert("RGB")
-    W, H = img.size
+    with _stage(stages, "image_decode"):
+        with Image.open(image_path) as src_img:
+            img = _image_to_rgb(src_img)
+        W, H = img.size
     thai_font, latin_font = resolve_font_pair(target_lang)
 
     # =========================================================
-    # Phase 1 — Lens fetch || ONNX detection (both need only the
-    # image; neither depends on the other's result).
+    # Phase 1 — Lens fetch. ONNX does NOT run here.
     #
-    # Typical savings: ONNX ~1.3 s overlaps with Lens ~2 s → the
-    # two finish together at ~2 s instead of sequentially at ~3.3 s.
-    # Both Lens (httpx I/O) and ONNX (onnxruntime C-ext) release the
-    # GIL, so the threads run truly in parallel on CPython.
+    # This block used to carry a `Lens || ONNX` thread pool and a comment
+    # promising it saved ~1.3 s. It was guarded by `_need_onnx`, which was
+    # assigned `False` on the line above it and nowhere else — so no request
+    # ever entered it. Removed on 2026-08-07, with no behaviour change by
+    # construction: a branch that cannot be reached cannot be doing anything.
+    #
+    # The serialisation is deliberate, not an oversight. Which detector run is
+    # needed — full page, ROI crops, or none at all — is decided by
+    # `_should_use_onnx_for_ai` from Lens's own geometry, so ONNX genuinely
+    # cannot start until Lens has answered. Running it speculatively during the
+    # Lens wait would produce full-page boxes that the ROI path then has to
+    # discard, which is a different answer, not an earlier one.
+    #
+    # Measured 2026-08-07 on 2 vCPU (same as an HF free Space): one warm
+    # inference is ~262 ms, not the 1.3 s the deleted comment claimed. The real
+    # ONNX run happens below, after the decision, as `detect_text_blocks_in_rois`.
     # =========================================================
-    # Do NOT run ONNX before Lens in AUTO mode.  We first inspect Lens geometry
-    # and only then decide whether lens_text.ai really needs self-built blocks.
-    # This prevents horizontal->horizontal AI jobs from paying the ONNX cost.
-    _need_onnx = False
     _tb_timings: dict = {}
+    text_blocks: list = []
+    stages["blocks_ms"] = 0.0
     if isinstance(lens_data, dict):
-        # Lens result pre-supplied (CLI replay) — run ONNX alone if needed.
+        # Lens result pre-supplied (CLI replay): no HTTP call to time.
         data: dict = lens_data
-        if _need_onnx:
-            _t = time.perf_counter()
-            text_blocks = detect_text_blocks(img, timings=_tb_timings)
-            stages["lens_ms"] = 0.0
-            stages["blocks_ms"] = round((time.perf_counter() - _t) * 1000, 1)
-        else:
-            text_blocks = []
-            stages["lens_ms"] = 0.0
-            stages["blocks_ms"] = 0.0
+        stages["lens_ms"] = 0.0
     else:
         _t_p1 = time.perf_counter()
-        if _need_onnx:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as _p1:
-                _f_lens = _p1.submit(
-                    lens_client.fetch_lens_data, image_path, target_lang, settings.firebase_url
-                )
-                _f_onnx = _p1.submit(detect_text_blocks, img, _tb_timings)
-                # .result() re-raises exceptions from the worker thread.
-                # Wait for Lens first (usually the slower leg).
-                _raw = _f_lens.result()
-                _t_lens_done = time.perf_counter()
-                text_blocks = _f_onnx.result()
-                _t_onnx_done = time.perf_counter()
-            # Report wall-clock from phase start so log shows true parallel time.
-            stages["lens_ms"] = round((_t_lens_done - _t_p1) * 1000, 1)
-            stages["blocks_ms"] = round((_t_onnx_done - _t_p1) * 1000, 1)
-        else:
-            # lens_images: only Lens, no ONNX needed.
+        with _stage(stages, "lens_fetch"):
             _raw = lens_client.fetch_lens_data(image_path, target_lang, settings.firebase_url)
-            stages["lens_ms"] = round((time.perf_counter() - _t_p1) * 1000, 1)
-            stages["blocks_ms"] = 0.0
-            text_blocks = []
+        stages["lens_ms"] = round((time.perf_counter() - _t_p1) * 1000, 1)
         data = _raw if isinstance(_raw, dict) else {}
 
     if not isinstance(data, dict):
@@ -816,6 +1009,10 @@ def process_image(
         "Ai": {},
         "perfStages": stages,
         "pipelinePath": "lens_direct",
+        # Who painted the background, stated rather than implied. A client that
+        # asked for "boxes" and got "image" (lens_images, or an older server)
+        # can see that immediately instead of discovering it as a missing field.
+        "backgroundMode": "boxes" if client_background else "image",
     }
 
     # --- lens_images: just hand back the image -----------------------------
@@ -833,9 +1030,15 @@ def process_image(
         return out
 
     # --- lens_text: decode trees -------------------------------------------
+    stages["stage"] = "tree_decode"
     original_tree = decode_tree(
         out["originalParagraphs"], out["originalTextFull"] or "", "original", W, H
     )
+    # The Original server renderer needs the OCR language on its hidden
+    # browser-translate targets. Reader pages often declare `lang=en` even
+    # when the manga text is Japanese; without this override Chrome can treat
+    # Japanese OCR as English and leave Japanese fragments after Translate.
+    original_tree["source_lang"] = str(data.get("originalContentLanguage") or "").strip()
     translated_tree = decode_tree(
         out["translatedParagraphs"], out["translatedTextFull"] or "", "translated", W, H
     )
@@ -918,9 +1121,23 @@ def process_image(
         stages["roi_build_ms"] = round((time.perf_counter() - _t_roi) * 1000, 1)
 
         _t = time.perf_counter()
-        text_blocks = detect_text_blocks_in_rois(img, _rois, timings=_tb_timings)
+        # Same first-pass / second-look / recovery as `/v1/groups`. Before this
+        # the server took one detector view and accepted whatever it returned:
+        # 10 of 20 vertical AI pages on 2026-08-15 came back with zero blocks,
+        # which silently became one translation unit per Lens column.
+        text_blocks, _tb_pass = detect_blocks_with_second_look(
+            detect_text_blocks_in_rois, img, _roi_tree, _rois,
+            build_rois=lambda t, w, h: build_vertical_rois(
+                t, w, h, margin_ratio=settings.vertical_roi_margin_ratio
+            ),
+            width=W, height=H, timings=_tb_timings,
+        )
         stages["blocks_ms"] = round((time.perf_counter() - _t) * 1000, 1)
         stages["blocks"] = len(text_blocks)
+        stages["blocks_second_look"] = str(_tb_pass.get("reason") or "none")
+        stages["blocks_initial_outcome"] = str(_tb_pass.get("initialOutcome") or "")
+        stages["blocks_stamped"] = int(_tb_pass.get("stamped") or 0)
+        stages["blocks_recovered"] = len(_tb_pass.get("recovered") or [])
         stages["blocks_load_ms"] = float(_tb_timings.get("load_ms", 0.0))
         stages["blocks_lock_ms"] = float(_tb_timings.get("lock_ms", 0.0))
         stages["blocks_infer_ms"] = float(_tb_timings.get("infer_ms", 0.0))
@@ -951,15 +1168,40 @@ def process_image(
         stages["gate_wait_ms"] = round((time.perf_counter() - _t) * 1000, 1)
         try:
             _t = time.perf_counter()
-            if settings.lens_direct_erase and original_span_tokens:
+            if client_background:
+                # The client paints the background. Skipping the inpaint here
+                # is the point of the mode — the boxes go out instead.
+                out["eraseBoxes"] = erase_boxes_mod.build(original_span_tokens)
+            elif settings.lens_direct_erase and original_span_tokens:
                 base_img = erase_text_with_boxes(img, original_span_tokens)
             stages["erase_ms"] = round((time.perf_counter() - _t) * 1000, 1)
             stages["bubble_ms"] = 0.0
 
             # Cheap text-light annotation only; it uses Lens boxes and the
             # current background image, not any locally detected blocks.
+            #
+            # In client-background mode nothing has been erased yet, so this
+            # samples the ORIGINAL pixels — glyphs included — and a dense dark
+            # paragraph can read darker than its bubble really is. Logged
+            # rather than left to be discovered: it is the one quality
+            # difference between the two background modes.
+            stages["text_light_source"] = "original" if client_background else "erased"
             _annotate_text_light(original_tree, base_img)
             _annotate_text_light(translated_tree, base_img)
+
+            # The canonical document: paragraphs, text and the geometry needed
+            # to draw them, with none of Lens's protobuf field names. This is
+            # what the extension will render from once it owns the renderer;
+            # emitting it now lets that be built and compared side by side.
+            if want_lens_document:
+                out["lensDocument"] = lens_document.build(
+                    original_tree,
+                    translated_tree,
+                    width=W,
+                    height=H,
+                    source_lang=str(data.get("originalContentLanguage") or ""),
+                    target_lang=target_lang,
+                )
         finally:
             _CPU_GATE.release()
 
@@ -975,11 +1217,49 @@ def process_image(
         _f_ai: concurrent.futures.Future | None = None
         _ai_executor: concurrent.futures.ThreadPoolExecutor | None = None
         _t_ai_submit = time.perf_counter()
+        # Group and normalise a private presentation copy even when AI is off:
+        # Translated HTML itself must not inherit Lens's unstable +/-90 sign.
+        group_paragraphs_into_bubbles(original_tree, W, H, base_img=base_img)
+        group_paragraphs_into_bubbles(translated_tree, W, H, base_img=base_img)
+        translated_tree, _rotation_stats = presentation_rotation_copy(translated_tree)
+        stages["rotation_signs"] = {"translated": _rotation_stats}
+        stages["rotation_flips"] = _rotation_stats["flips"]
         if _run_ai:
+            # Group paragraphs into speech bubbles BEFORE the model sees them.
+            #
+            # Lens returns a bubble as one paragraph per LINE (and, for vertical
+            # Japanese, per column). `_run_ai_layer` builds one translation unit
+            # per `bubble_groups` entry and falls back to one-per-paragraph when
+            # the tree has no groups — and on this branch nothing had grouped it,
+            # so that fallback was always what ran.
+            #
+            # Measured 2026-08-07: `ai.groups n_groups: 12, n_paras: 12` on a page
+            # holding six bubbles. Two costs, both paid every time:
+            #   * the model answers twelve times instead of six — ai_ms 2.4s → 18.3s
+            #   * it translates half-sentences with no context, so "でもまずは
+            #     自分の人生を" comes back as a finished sentence when it is half
+            #     of one
+            #
+            # It is arithmetic on boxes that already exist (`blocks_ms` is 0.0 on
+            # this branch), so the only reason it was missing is that the call
+            # lived in the other branch.
+            # Presentation geometry is a private copy.  Original stays exactly
+            # as Lens decoded it, and the AI worker and HTML renderer share one
+            # already-normalised immutable template instead of racing a later
+            # in-place fix on translated_tree.
+            dbg(
+                "groups.pre_ai",
+                {
+                    "paras": len(original_tree.get("paragraphs") or []),
+                    "bubble_groups": len(original_tree.get("bubble_groups") or []),
+                },
+            )
+            ai_original_tree = copy.deepcopy(original_tree)
+            ai_translated_tree = copy.deepcopy(translated_tree)
             _ai_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
             _f_ai = _ai_executor.submit(
                 _run_ai_layer,
-                out, original_tree, translated_tree, ai_cfg, target_lang, W, H, thai_font, latin_font,
+                out, ai_original_tree, ai_translated_tree, ai_cfg, target_lang, W, H, thai_font, latin_font,
                 base_img=base_img,
                 vision_img=img,
                 capture_request=capture_ai_request,
@@ -1000,7 +1280,11 @@ def process_image(
             out["htmlMeta"] = {"baseW": int(W), "baseH": int(H), "format": "tp", "path": stages.get("pipeline_path", "lens_direct")}
             stages["render_ms"] = round((time.perf_counter() - _t) * 1000, 1)
 
-            if settings.lens_direct_png:
+            if client_background:
+                # No re-encode, no base64: the largest field in the response
+                # simply does not exist in this mode.
+                stages["png_ms"] = 0.0
+            elif settings.lens_direct_png:
                 _t = time.perf_counter()
                 out["imageDataUri"] = _encode_bg_data_uri(base_img)
                 stages["png_ms"] = round((time.perf_counter() - _t) * 1000, 1)
@@ -1015,6 +1299,21 @@ def process_image(
             finally:
                 _ai_executor.shutdown(wait=False)  # type: ignore[union-attr]
             stages["ai_ms"] = round((time.perf_counter() - _t_ai_submit) * 1000, 1)
+            # The background was encoded above while the model was still
+            # answering, so this runs after the join and re-encodes only when
+            # the answer actually came back short.
+            _restore_unanswered_paragraphs(
+                out, original_tree, img, base_img,
+                client_background=client_background, stages=stages,
+            )
+            # The AI layer's own per-line geometry, now that it exists. Without
+            # it the client renderer refuses the "ai" source on any page with a
+            # multi-line bubble — which is every page — and silently falls back
+            # to the server's markup, so the local renderer never ran at all.
+            _attached = lens_document.attach_ai_layer(
+                out.get("lensDocument"), (out.get("Ai") or {}).get("aiTree")
+            )
+            stages["doc_ai_paras"] = _attached
         else:
             stages.setdefault("ai_ms", 0.0)
         return out
@@ -1116,10 +1415,13 @@ def process_image(
 
         # Columns of one bubble that Lens decoded as +90 and -90 render facing
         # opposite ways. Snap each group to one sign before anything renders.
-        stages["rotation_flips"] = (
-            normalize_group_rotation_signs(original_tree)
-            + normalize_group_rotation_signs(translated_tree)
+        # Presentation normalisation belongs to the translated copy only.
+        # Original remains the byte-for-byte Lens geometry the user selected.
+        _rotation_stats: dict[str, int] = {}
+        stages["rotation_flips"] = normalize_group_rotation_signs(
+            translated_tree, stats=_rotation_stats
         )
+        stages["rotation_signs"] = {"translated": _rotation_stats}
 
         # --- Translated relayout ------------------------------------------
         # Rebuild the MT layer with boxes at the target orientation, using the
@@ -1243,10 +1545,19 @@ def process_image(
         out["htmlMeta"] = {"baseW": int(W), "baseH": int(H), "format": "tp"}
         stages["render_ms"] = round((time.perf_counter() - _t) * 1000, 1)
 
-        # --- Image data URI (already erased above) -------------------------
-        _t = time.perf_counter()
-        out["imageDataUri"] = _encode_bg_data_uri(base_img)
-        stages["png_ms"] = round((time.perf_counter() - _t) * 1000, 1)
+        # --- Background -----------------------------------------------------
+        # This branch still erases server-side: the bubble detector needs an
+        # inpainted image to find the real bubble outline. What it does NOT
+        # have to do is re-encode that image and base64 it into the reply —
+        # the client can repaint the same boxes over the picture it already
+        # has decoded on screen.
+        if client_background:
+            out["eraseBoxes"] = erase_boxes_mod.build(original_span_tokens)
+            stages["png_ms"] = 0.0
+        else:
+            _t = time.perf_counter()
+            out["imageDataUri"] = _encode_bg_data_uri(base_img)
+            stages["png_ms"] = round((time.perf_counter() - _t) * 1000, 1)
     finally:
         _CPU_GATE.release()
 
@@ -1257,6 +1568,10 @@ def process_image(
         finally:
             _ai_executor.shutdown(wait=False)  # type: ignore[union-attr]
         stages["ai_ms"] = round((time.perf_counter() - _t_ai_submit) * 1000, 1)
+        _restore_unanswered_paragraphs(
+            out, original_tree, img, base_img,
+            client_background=client_background, stages=stages,
+        )
 
     # Re-group the AI tree after patching (AI text may change para boundaries).
     ai_tree = (out.get("Ai") or {}).get("aiTree")
@@ -1291,12 +1606,25 @@ def _build_ai_config(payload: dict, mode: str, source: str) -> AiConfig | None:
     ai = payload.get("ai")
     if mode != "lens_text" or source != "ai" or not isinstance(ai, dict):
         return None
-    api_key = str(ai.get("api_key") or "").strip() or settings.ai_api_key
+    provider = str(ai.get("provider") or "auto").strip() or "auto"
+    base_url = str(ai.get("base_url") or "auto").strip() or "auto"
+    user_key = str(ai.get("api_key") or "").strip()
+
+    # The server's own key is a LAST resort, and never for a self-hosted
+    # endpoint: "localhost" in a payload means the server's localhost, not the
+    # user's machine. Which key is in play decides whether a caller-chosen
+    # base_url is allowed at all (backend/security.py).
+    looks_local = is_local_provider(provider) or any(
+        h in base_url.lower() for h in ("localhost", "127.0.0.1", "0.0.0.0", "[::1]")
+    )
+    api_key = user_key or ("" if looks_local else settings.ai_api_key)
+
     return AiConfig(
         api_key=api_key,
+        user_key=bool(user_key),
         model=str(ai.get("model") or "auto").strip() or "auto",
-        provider=str(ai.get("provider") or "auto").strip() or "auto",
-        base_url=str(ai.get("base_url") or "auto").strip() or "auto",
+        provider=provider,
+        base_url=base_url,
         prompt_editable=str(ai.get("prompt") or "").strip(),
         glossary=ai.get("glossary") if isinstance(ai.get("glossary"), list) else [],
         characters=ai.get("characters") if isinstance(ai.get("characters"), list) else [],
@@ -1349,7 +1677,17 @@ def process_payload(payload: dict) -> dict[str, Any]:
     lang = payload.get("lang") or "en"
     source = str(payload.get("source") or "").strip().lower() or "translated"
 
-    img_bytes, mime = _extract_image_bytes(payload)
+    # The download / data-URI decode is the first thing that can fail, and it
+    # fails before any stage counter inside process_image exists.
+    try:
+        img_bytes, mime = _extract_image_bytes(payload)
+    except BaseException as exc:
+        if getattr(exc, "tp_stage", None) is None:
+            try:
+                exc.tp_stage = "image_fetch"  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        raise
     t_img = time.perf_counter()
     if not img_bytes:
         raise ValueError("No image data")
@@ -1399,6 +1737,32 @@ def process_payload(payload: dict) -> dict[str, Any]:
             "tmp_ms": round((t_tmp - t_img) * 1000, 1),
             **stages,
         }
+
+        # What the AI layer was actually ASKED to do, and what it did.
+        #
+        # Without these, "the page-image option does not work" and "the
+        # page-image option works and takes 85 seconds" produce identical log
+        # lines — and they need opposite responses. `ai_vision` says whether
+        # the picture was really attached; `ai_thinking` and `ai_units` say why
+        # the call was as expensive as it was.
+        if ai_cfg is not None:
+            ai_meta = (out.get("Ai") or {}).get("meta") or {}
+            out["perf"].update(
+                {
+                    "ai_send_image": str(getattr(ai_cfg, "send_image", False)),
+                    "ai_vision": bool(ai_meta.get("vision")),
+                    "ai_thinking": str(getattr(ai_cfg, "thinking", "default")),
+                    "ai_model": str(ai_meta.get("model") or ""),
+                    # Series memory, which is the other option whose effect is
+                    # invisible from outside: these are the fields that grow
+                    # the prompt, so they are what explains a slow call.
+                    "ai_glossary": len(getattr(ai_cfg, "glossary", None) or []),
+                    "ai_characters_in": len(getattr(ai_cfg, "characters", None) or []),
+                    "ai_characters_out": len(ai_meta.get("characters") or []),
+                    "ai_series_state_chars": len(str(getattr(ai_cfg, "series_state", "") or "")),
+                    "ai_flow": str(ai_meta.get("ai_flow") or ""),
+                }
+            )
         # NO-SILENT-FALLBACK: brief pass-2 jobs ask to reuse pass-1 Lens data
         # (reuse_lens). Server-side reuse is not implemented yet, so the second
         # OCR round-trip must be VISIBLE in translate.perf instead of silent.

@@ -1,22 +1,9 @@
-/**
- *
- * STATUS: ACTIVE — in use in the current flow.
- * Locating image elements + tracking their replacement state.
- *
- * "Which `<img>` does this result belong to?" is surprisingly hard: the URL in
- * the result may differ from what the DOM now shows (lazy-load, blob swaps,
- * MangaDex). This module keeps several indices — the last right-clicked image,
- * a recent-URL map, `data-tp-original` markers — and resolves a target image
- * from any of them. It also tracks per-image replace state so we don't show an
- * error badge on an image that actually succeeded.
- */
+// Resolves which image element a result belongs to and tracks per-image replace state.
 
 (function () {
   const TP = window.__TP;
   if (!TP || TP.bail) return;
 
-  // --- Replace-state tracking ---------------------------------------------
-  // originalUrl -> { state: "pending"|"ok"|"fail", ts }
   const replaceStateByOriginal = new Map();
 
   function noteReplaceState(original, state) {
@@ -24,7 +11,7 @@
     if (key) replaceStateByOriginal.set(key, { state, ts: Date.now() });
   }
 
-  /** Whether an error badge should be shown (suppressed if a replace is ok/pending). */
+  // Returns true when an error badge is still warranted for an image.
   function shouldShowReplaceError(original) {
     const key = TP.normUrl(original);
     if (!key) return true;
@@ -35,22 +22,22 @@
     return true;
   }
 
-  /** Mark the `replaceStateByOriginal` entry (used by overlay.js on img load/error). */
+  // Records the replace outcome for one original URL.
   function setReplaceState(key, state) {
     if (key) replaceStateByOriginal.set(key, { state, ts: Date.now() });
   }
 
-  // --- Right-click + recent-URL tracking ----------------------------------
+  const RIGHT_CLICK_MAX_AGE_MS = 8000;
   let lastRightClick = { img: null, ts: 0, urls: [] };
   const recentImgByUrl = new Map();
 
+  // Indexes an image under each of its URLs, trimming the index when it grows.
   function rememberImgUrls(img, urls) {
     const ts = Date.now();
     for (const u of urls || []) {
       const k = TP.normUrl(u);
       if (k) recentImgByUrl.set(k, { img, ts });
     }
-    // Bound the map size.
     if (recentImgByUrl.size > 200) {
       const cutoff = ts - 5 * 60 * 1000;
       for (const [k, v] of recentImgByUrl.entries()) {
@@ -60,11 +47,7 @@
     }
   }
 
-  /**
-   * Register `img` as the current translate target — exactly what a real
-   * right-click does. Also used by the on-image 🔍 button (image-buttons.js)
-   * so sites that block the context menu still resolve blob:/data: sources.
-   */
+  // Registers an image as the current translate target.
   function setLastRightClick(img) {
     if (!img) return;
     const urls = [img.currentSrc, img.src, TP.getBestImgUrl(img)]
@@ -87,11 +70,45 @@
 
   const getLastRightClick = () => lastRightClick;
 
-  /**
-   * Resolve the `<img>` a result belongs to, trying (in order): MangaDex key,
-   * `data-tp-original`, recent-URL map, the last right-clicked image, then a
-   * direct `src`/`currentSrc` scan.
-   */
+  // Returns the recently right-clicked image only when the request names that same element.
+  function getFreshRightClickImageForTarget(request, now = Date.now()) {
+    const lrc = lastRightClick;
+    const img = lrc?.img;
+    if (!img || !img.isConnected) return null;
+    if (!Number.isFinite(lrc.ts) || now - lrc.ts < 0 || now - lrc.ts > RIGHT_CLICK_MAX_AGE_MS) {
+      return null;
+    }
+
+    const requested = TP.normUrl(request?.srcUrl);
+    const clicked = TP.normUrl(request?.clickedSrcUrl || request?.srcUrl);
+    if (!requested && !clicked) return null;
+
+    const clickAliases = new Set((lrc.urls || []).map(TP.normUrl).filter(Boolean));
+    const currentAliases = new Set(
+      [
+        img.currentSrc,
+        img.src,
+        img?.dataset?.tpOriginal,
+        typeof img.getAttribute === "function" ? img.getAttribute("data-src") : "",
+        typeof img.getAttribute === "function" ? img.getAttribute("data-original") : "",
+        typeof img.getAttribute === "function" ? img.getAttribute("data-lazy-src") : "",
+        TP.getBestImgUrl(img),
+      ]
+        .map(TP.normUrl)
+        .filter(Boolean),
+    );
+    const allAliases = new Set([...clickAliases, ...currentAliases]);
+
+    if (requested && !allAliases.has(requested)) return null;
+    if (clicked && !allAliases.has(clicked)) return null;
+
+    if (requested && clicked && requested !== clicked && !currentAliases.has(requested)) {
+      return null;
+    }
+    return img;
+  }
+
+  // Resolves the image element a result belongs to from every known index.
   function findTargetImage(original) {
     const o = TP.normUrl(original);
     const images = () => Array.from(document.images || []);
@@ -110,7 +127,7 @@
       if (rec?.img && rec.img.isConnected) return rec.img;
     }
 
-    if (lastRightClick.img && Date.now() - lastRightClick.ts < 8000) {
+    if (lastRightClick.img && Date.now() - lastRightClick.ts < RIGHT_CLICK_MAX_AGE_MS) {
       if (!o || (lastRightClick.urls || []).includes(o)) return lastRightClick.img;
     }
 
@@ -120,14 +137,13 @@
     return null;
   }
 
-  /** Draw a red outline + ⚠️ badge on an image that failed to translate. */
+  // Draws a red outline and a warning badge on an image that failed to translate.
   function markImageError(original, msg) {
     if (!shouldShowReplaceError(original)) return;
 
     const img = findTargetImage(original);
     if (!img || img.dataset.lensError) return;
 
-    // Skip if the image was already replaced (success despite a late error).
     const cur = img.currentSrc || img.src || "";
     if (img.dataset.tpBlobUrl || cur.startsWith("blob:") || cur.startsWith("data:")) return;
 
@@ -151,12 +167,21 @@
     TP.log.info("markImageError", { original: TP.truncate(original), message: msg });
   }
 
+  // Drops the per-URL image indexes so a client-side route change cannot resolve a stale element.
+  function forgetImageState() {
+    replaceStateByOriginal.clear();
+    recentImgByUrl.clear();
+    lastRightClick = { img: null, ts: 0, urls: [] };
+  }
+
   Object.assign(TP, {
+    forgetImageState,
     noteReplaceState,
     shouldShowReplaceError,
     setReplaceState,
     rememberImgUrls,
     getLastRightClick,
+    getFreshRightClickImageForTarget,
     setLastRightClick,
     findTargetImage,
     markImageError,

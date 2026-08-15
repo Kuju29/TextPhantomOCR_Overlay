@@ -1,12 +1,4 @@
-/**
- *
- * STATUS: ACTIVE — in use in the current flow.
- * Keep-alive connection.
- *
- * While a batch runs, the content script holds a `chrome.runtime` port open so
- * the service worker isn't suspended (and so the SW can detect the page
- * unloading). The port is pinged periodically and auto-closes after a deadline.
- */
+// Holds a runtime port open while a batch runs so the service worker stays alive.
 
 (function () {
   const TP = window.__TP;
@@ -20,7 +12,7 @@
   let timer = null;
   let stopAt = 0;
 
-  /** Drop the port + timer but KEEP the deadline (so we can resume later). */
+  // Closes the port and timer while keeping the deadline so it can resume.
   function teardownPort() {
     if (timer) {
       clearInterval(timer);
@@ -30,34 +22,24 @@
       try {
         port.disconnect();
       } catch {
-        /* already gone */
       }
       port = null;
     }
   }
 
-  /** Fully stop the keep-alive and forget the deadline. */
+  // Stops the keep-alive and forgets the deadline.
   function stop() {
     stopAt = 0;
     teardownPort();
   }
 
-  /**
-   * The port closed from the other end. Chrome force-closes it when the page is
-   * frozen into the back/forward cache; if we don't READ runtime.lastError here
-   * it logs "Unchecked runtime.lastError: ...moved into back/forward cache...".
-   * Read it to acknowledge the expected close, and keep the deadline so a
-   * bfcache restore (pageshow) can re-open the port.
-   */
+  // Acknowledges a close from the other end and keeps the deadline for a later restore.
   function onPortDisconnect() {
     void chrome.runtime?.lastError;
     teardownPort();
   }
 
-  /**
-   * Start (or extend) the keep-alive for `ms` milliseconds.
-   * @param {number} [ms]
-   */
+  // Starts or extends the keep-alive for the given number of milliseconds.
   function start(ms) {
     const duration = Number(ms) > 0 ? Number(ms) : DEFAULT_DURATION_MS;
     stopAt = Math.max(stopAt || 0, Date.now() + duration);
@@ -88,12 +70,6 @@
     if (!timer) timer = setInterval(ping, PING_MS);
   }
 
-  // Back/forward cache handling. A live port left open while the page freezes
-  // into the bfcache is force-closed by Chrome and logs an "Unchecked
-  // runtime.lastError". Close it OURSELVES before the freeze (a self-disconnect
-  // is clean and does not fire onDisconnect), keeping the deadline; then re-open
-  // on restore if the keep-alive is still meant to be running. A real unload
-  // (not persisted) is a full stop.
   window.addEventListener("pagehide", (e) => {
     if (e.persisted) teardownPort();
     else stop();

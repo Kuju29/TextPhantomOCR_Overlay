@@ -1,6 +1,5 @@
 """Image byte helpers: base64 / data-URI conversion and remote downloads.
 
-STATUS: ACTIVE — in use in the current flow.
 """
 
 from __future__ import annotations
@@ -11,8 +10,13 @@ import hashlib
 import httpx
 
 from backend.config import settings
+from backend.security import UnsafeImageUrl, assert_image_url_allowed
 
 _DOWNLOAD_USER_AGENT = "Mozilla/5.0 (TextPhantomOCR; +https://huggingface.co/spaces)"
+
+
+class ImageTooLarge(RuntimeError):
+    """A remote image exceeded ``TP_MAX_IMAGE_BYTES``."""
 
 
 def sha256_hex(blob: bytes) -> str:
@@ -52,6 +56,12 @@ def download(url: str, referer: str = "") -> tuple[bytes, str]:
 
     A ``referer`` header is attached when supplied — some CDNs hot-link
     protect their images and reject requests without it.
+
+    Redirects are followed MANUALLY so that every hop passes the SSRF policy.
+    With ``follow_redirects=True`` only the first URL would ever be checked,
+    and an attacker-controlled host could 302 the server to an internal
+    address. The body is also size-capped: the caller-supplied URL used to be
+    able to stream an unbounded response into the worker's memory.
     """
     u = (url or "").strip()
     if not u:
@@ -62,12 +72,48 @@ def download(url: str, referer: str = "") -> tuple[bytes, str]:
     if ref:
         headers["referer"] = ref
 
+    # Checked before anything is opened, so a refused URL costs no connection.
+    assert_image_url_allowed(u)
+
+    limit = settings.max_image_bytes
     with httpx.Client(
         timeout=settings.http_timeout_sec,
-        follow_redirects=True,
+        follow_redirects=False,
         headers=headers,
     ) as client:
-        r = client.get(u)
-        r.raise_for_status()
-        content_type = (r.headers.get("content-type") or "").split(";")[0].strip()
-        return r.content, content_type
+        for _hop in range(settings.max_image_redirects + 1):
+            with client.stream("GET", u) as r:
+                if r.is_redirect:
+                    location = r.headers.get("location") or ""
+                    if not location:
+                        raise UnsafeImageUrl(f"redirect from {u} carried no Location")
+                    u = str(httpx.URL(u).join(location))
+                    assert_image_url_allowed(u)  # every hop, not just the first
+                    continue
+                r.raise_for_status()
+
+                declared = r.headers.get("content-length")
+                if declared and int(declared) > limit:
+                    raise ImageTooLarge(
+                        f"image is {declared} bytes, limit is {limit} "
+                        f"(raise TP_MAX_IMAGE_BYTES to allow it)"
+                    )
+
+                chunks: list[bytes] = []
+                total = 0
+                for chunk in r.iter_bytes():
+                    total += len(chunk)
+                    if total > limit:
+                        raise ImageTooLarge(
+                            f"image exceeded {limit} bytes while downloading "
+                            f"(raise TP_MAX_IMAGE_BYTES to allow it)"
+                        )
+                    chunks.append(chunk)
+
+                content_type = (r.headers.get("content-type") or "").split(";")[0].strip()
+                return b"".join(chunks), content_type
+
+    raise UnsafeImageUrl(
+        f"too many redirects while fetching the image "
+        f"(limit {settings.max_image_redirects})"
+    )

@@ -1,6 +1,5 @@
 """Orientation-matching relayout — turn a Lens tree into the target's axis.
 
-STATUS: ACTIVE — in use in the current flow.
 
 Why this module exists
 ---------------------
@@ -40,6 +39,7 @@ from typing import Any
 
 from backend.render.build_ai_tree import build_ai_tree
 from backend.render.region import direction_preset
+from backend.render.rotation_signs import normalize_group_rotation_signs
 
 # An item within this many degrees of 0/90 counts as axis-aligned and is
 # allowed to vote on the tree's reading axis.  Anything further off the grid is
@@ -297,81 +297,6 @@ def build_vertical_rois(
     if not padded:
         return []
     return _merge_rects(padded)
-
-
-def normalize_group_rotation_signs(tree: dict | None) -> int:
-    """Make every column inside one bubble face the same way.
-
-    Lens decodes a near-vertical baseline as ``+90`` or ``-90`` depending on
-    which side of exactly 90 degrees the column happens to fall — a difference
-    of a fraction of a degree in the artwork. Two columns of the SAME sentence
-    can therefore come back with opposite signs, and the renderer faithfully
-    draws one top-to-bottom and its neighbour bottom-to-top.
-
-    The fix is per bubble group, not per page: a page may legitimately contain
-    text at genuinely different angles, but two columns the grouper decided
-    belong to one utterance cannot. Each group votes (by count, ties going to
-    the sign of the largest-magnitude rotation) and the minority columns are
-    flipped by 180 degrees, which points them the same way while keeping the
-    exact tilt off the axis.
-
-    Only near-vertical groups are touched. Returns the number of items flipped.
-    """
-    if not isinstance(tree, dict):
-        return 0
-    by_index: dict[int, dict] = {
-        int(p.get("para_index", i)): p
-        for i, p in enumerate(tree.get("paragraphs") or [])
-        if isinstance(p, dict)
-    }
-    flipped = 0
-    for bg in tree.get("bubble_groups") or []:
-        if not isinstance(bg, dict) or str(bg.get("direction") or "h") != "v":
-            continue
-        items: list[dict] = []
-        for pi in bg.get("para_indices") or []:
-            para = by_index.get(int(pi))
-            if para is None:
-                continue
-            items.extend(
-                it for it in (para.get("items") or [])
-                if isinstance(it, dict) and str(it.get("text") or "").strip()
-            )
-        rots: list[float] = []
-        for it in items:
-            box = it.get("box") or {}
-            try:
-                rots.append(float(box.get("rotation_deg") or box.get("rotation_deg_css") or 0.0))
-            except (TypeError, ValueError):
-                rots.append(0.0)
-        # Only act when the group really is split across the +/-90 boundary.
-        pos = [r for r in rots if r > 0]
-        neg = [r for r in rots if r < 0]
-        if not pos or not neg:
-            continue
-        if len(pos) > len(neg):
-            want = 1.0
-        elif len(neg) > len(pos):
-            want = -1.0
-        else:
-            want = 1.0 if max(rots, key=abs) > 0 else -1.0
-
-        for it, rot in zip(items, rots):
-            if rot == 0.0 or (rot > 0) == (want > 0):
-                continue
-            new_rot = rot + 180.0 * want
-            box = it.get("box") or {}
-            box["rotation_deg"] = new_rot
-            if "rotation_deg_css" in box:
-                box["rotation_deg_css"] = new_rot
-            # The baseline endpoints describe the same reversed direction, so
-            # swap them too — leaving them stale would make the box and the
-            # baseline disagree for anything that reads the baseline.
-            p1, p2 = it.get("baseline_p1"), it.get("baseline_p2")
-            if isinstance(p1, dict) and isinstance(p2, dict):
-                it["baseline_p1"], it["baseline_p2"] = p2, p1
-            flipped += 1
-    return flipped
 
 
 def rebuild_tree_for_target(

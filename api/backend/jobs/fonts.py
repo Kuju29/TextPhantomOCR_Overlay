@@ -1,6 +1,5 @@
 """Resolve the (thai_font, latin_font) path pair for a target language.
 
-STATUS: ACTIVE — in use in the current flow.
 
 The renderer always pairs a Thai face with a "latin" face — for CJK targets
 the latin slot is swapped for the matching Noto CJK font.  When

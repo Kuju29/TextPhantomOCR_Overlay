@@ -1,6 +1,5 @@
 """Pixel-accurate measurement of a single rendered line of text.
 
-STATUS: ACTIVE — in use in the current flow.
 
 Both helpers walk the Thai/Latin runs of a string, measure each run with its
 own font, and aggregate the result.  They share the same scan loop — the only

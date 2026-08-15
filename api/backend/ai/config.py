@@ -1,6 +1,5 @@
 """Static configuration for AI providers.
 
-STATUS: ACTIVE — in use in the current flow.
 
 This module knows nothing about live API calls — it just holds the defaults,
 aliases and prompt templates that other modules consume.
@@ -48,8 +47,10 @@ LOCAL_PROVIDERS: Final[frozenset[str]] = frozenset({
 
 
 class RatePolicy(TypedDict):
-    rpm: float   # sustained requests-per-minute budget for this provider
-    burst: int   # how many requests may fire back-to-back before pacing kicks in
+    rpm: float       # requests-per-minute this provider STARTS at, before adaptation
+    burst: int       # how many requests may fire back-to-back before pacing kicks in
+    rpm_min: float   # floor the adaptive gate will never go below
+    rpm_max: float   # ceiling the adaptive gate will never climb past
 
 
 # Per-provider rate-gate policy. Conservative defaults sized for the FREE tier
@@ -59,16 +60,31 @@ class RatePolicy(TypedDict):
 # Providers missing here fall back to Settings.rate_default_rpm / _burst.
 # Local providers and Hugging Face are NOT gated here (local = no limit;
 # Hugging Face keeps its dedicated throttle in ai/throttle.py).
+# `rpm` is where an unknown key STARTS, chosen to sit under the published free
+# tier. `rpm_min`/`rpm_max` bound where the adaptive gate may take it: it climbs
+# while the provider accepts the traffic and halves the moment the provider
+# answers 429, so a paid key finds its real ceiling and a free key settles back
+# down without either being configured by hand.
 RATE_POLICY_DEFAULTS: Final[dict[str, RatePolicy]] = {
-    "gemini":      {"rpm": 12.0, "burst": 4},
-    "openai":      {"rpm": 60.0, "burst": 8},
-    "anthropic":   {"rpm": 50.0, "burst": 8},
-    "openrouter":  {"rpm": 60.0, "burst": 8},
-    "groq":        {"rpm": 30.0, "burst": 6},
-    "together":    {"rpm": 60.0, "burst": 8},
-    "deepseek":    {"rpm": 60.0, "burst": 8},
-    "featherless": {"rpm": 30.0, "burst": 6},
+    "gemini":      {"rpm": 12.0, "burst": 4, "rpm_min": 4.0,  "rpm_max": 300.0},
+    "openai":      {"rpm": 60.0, "burst": 8, "rpm_min": 10.0, "rpm_max": 600.0},
+    "anthropic":   {"rpm": 50.0, "burst": 8, "rpm_min": 10.0, "rpm_max": 400.0},
+    "openrouter":  {"rpm": 60.0, "burst": 8, "rpm_min": 10.0, "rpm_max": 300.0},
+    "groq":        {"rpm": 30.0, "burst": 6, "rpm_min": 6.0,  "rpm_max": 300.0},
+    "together":    {"rpm": 60.0, "burst": 8, "rpm_min": 10.0, "rpm_max": 300.0},
+    "deepseek":    {"rpm": 60.0, "burst": 8, "rpm_min": 10.0, "rpm_max": 300.0},
+    "featherless": {"rpm": 30.0, "burst": 6, "rpm_min": 6.0,  "rpm_max": 150.0},
 }
+
+# Adaptive gate shape. Additive increase after a clean streak, multiplicative
+# decrease on a provider 429 — the same discipline the extension's lane uses, so
+# the two sides converge instead of fighting.
+RATE_ADAPT_OK_STREAK: Final[int] = 8
+RATE_ADAPT_STEP_RPM: Final[float] = 6.0
+RATE_ADAPT_BACKOFF: Final[float] = 0.5
+# A bucket that has not been touched for this long forgets what it learned and
+# returns to the provider's safe starting rpm.
+RATE_ADAPT_IDLE_RESET_SEC: Final[float] = 900.0
 
 
 PROVIDER_ALIASES: Final[dict[str, str]] = {

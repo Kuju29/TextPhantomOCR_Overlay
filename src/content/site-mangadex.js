@@ -1,33 +1,4 @@
-/**
- *
- * STATUS: ACTIVE — in use in the current flow.
- * MangaDex site adapter — ALL MangaDex-specific page knowledge lives here.
- *
- * Why a dedicated file: sites like MangaDex need special handling (the page
- * URL changes as the user scrolls, page <img>s are blob: URLs, real image
- * URLs must come from the site's own API) — keeping that knowledge in one
- * adapter makes it easy to add similar sites later without touching the
- * generic pipeline.
- *
- * What the reader's DOM looks like (confirmed from a live page):
- *
- *   /chapter/<chapterId>/<page>        <- <page> changes while scrolling;
- *                                         only <chapterId> identifies content
- *   <div class="md--page">
- *     <img class="img" alt="s1-86e16036....jpg"     <- EXACT at-home filename!
- *          src="blob:https://mangadex.org/...">     <- useless for the server
- *
- * The `alt` attribute IS the filename from the at-home API file list, so
- * blob <-> file mapping is exact — no index guessing.
- *
- * Exposed on TP (all consumers use optional calls, so this file is purely
- * additive — if it fails to load, the old behaviour remains):
- *   - mdSiteManifest(force)  -> chapter manifest from the at-home API
- *   - mdSiteMapDom()         -> stamp every page <img> with its real URL/key
- *   - mdSiteCollect(mode, lang) -> payloads for "translate all images",
- *        each carrying the image BYTES (fetched in the page context / canvas)
- *        so the backend never has to download from mangadex.network itself.
- */
+// MangaDex site adapter: resolves real page URLs and bytes from the site's own API.
 
 (function () {
   const TP = window.__TP;
@@ -36,21 +7,14 @@
 
   const API_BASE = "https://api.mangadex.org";
   const MANIFEST_TTL_MS = 180000;
-  // Soft cap on total bytes inlined into one GET_IMAGES response.
   const MAX_INLINE_BYTES = 48 * 1024 * 1024;
 
-  /** @type {null | {chapterId: string, ts: number, files: Array<object>, byAlt: Map<string, object>, primary: Array<object>}} */
   let man = null;
 
   const getChapterId = () =>
     (String(location.pathname || "").match(/\/chapter\/([a-f0-9-]{8,})/i) || [])[1] || "";
 
-  /**
-   * Fetch (and cache per chapter) the at-home manifest.
-   * Each file record: { path, file, index, url, key } where
-   * key = `md:<path>/<hash>/<file>` (the stable identity used everywhere).
-   * @param {boolean} [force]
-   */
+  // Fetches and caches the chapter's at-home file manifest.
   async function mdSiteManifest(force = false) {
     const id = getChapterId();
     if (!id) return null;
@@ -101,13 +65,9 @@
     }
   }
 
-  /** All reader page <img> elements currently in the DOM. */
   const pageImgs = () => Array.from(document.querySelectorAll(".md--page img"));
 
-  /**
-   * Stamp every page <img> with its real at-home URL + md key by EXACT
-   * alt-to-filename matching. Returns the number of images mapped.
-   */
+  // Stamps each page image with its at-home URL and key; the img alt attribute is the at-home filename.
   async function mdSiteMapDom() {
     const m = await mdSiteManifest();
     if (!m) return 0;
@@ -123,13 +83,7 @@
     return mapped;
   }
 
-  /**
-   * Resolve one page's bytes IN THE TAB (the site's own API/cache):
-   * 1. page-context fetch of the at-home URL — Origin is mangadex.org and the
-   *    reader has usually cached these bytes already;
-   * 2. canvas grab from the rendered <img> (blob is same-origin, not tainted).
-   * @returns {Promise<string>} data URI, or "" when unavailable
-   */
+  // Returns one page's bytes as a data URI, fetched in the tab or read off the rendered image.
   async function bytesForRecord(rec, img) {
     try {
       const res = await fetch(rec.url, { credentials: "omit", cache: "force-cache" });
@@ -141,7 +95,6 @@
         }
       }
     } catch {
-      /* fall through to canvas */
     }
     if (img) {
       const du = await TP.getImageDataUriFromElement(img).catch(() => "");
@@ -150,15 +103,7 @@
     return "";
   }
 
-  /**
-   * Build "translate all images" payloads for the whole chapter.
-   *
-   * - One payload per page, in chapter order, src = real at-home URL.
-   * - Bytes are attached (`imageDataUri`) so the server never downloads from
-   *   mangadex.network (its datacenter IP gets rejected -> the 404s).
-   * - The variant (data / data-saver) follows what the reader is showing, so
-   *   cache keys match the right-click flow.
-   */
+  // Builds one payload per chapter page, carrying the image bytes with each.
   async function mdSiteCollect(mode, lang) {
     const m = await mdSiteManifest();
     if (!m) return [];
@@ -170,7 +115,6 @@
       if (key && !domByKey.has(key)) domByKey.set(key, img);
     }
 
-    // Use the file-list variant the reader is actually displaying.
     const usedPaths = new Set(
       [...domByKey.keys()].map((k) => k.replace(/^md:/, "").split("/")[0]),
     );
@@ -193,6 +137,10 @@
           original_image_url: rec.url,
           position: img ? TP.buildPositionFromElement(img) : null,
           imageDataUri: dataUri || null,
+          naturalSize: img
+            ? { width: Number(img.naturalWidth) || 0, height: Number(img.naturalHeight) || 0 }
+            : null,
+          generation: img && TP.generationFor ? TP.generationFor(img) : null,
         },
         mode,
         lang,

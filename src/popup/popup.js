@@ -1,6 +1,5 @@
 /**
  *
- * STATUS: ACTIVE — in use in the current flow.
  * Popup orchestrator.
  *
  * Owns the popup's state and wires the UI: it loads settings, checks the API,
@@ -59,7 +58,6 @@ import {
   toggleUi as toggleUiDom,
 } from "./dom.js";
 import {
-  buildUrl,
   fetchJson,
   checkHealthOnce,
   warmup,
@@ -69,7 +67,7 @@ import {
   RETRY_DELAYS_MS,
 } from "./api.js";
 
-// --- State -----------------------------------------------------------------
+// State
 const state = {
   userInteractedApi: false,
   lastApiOk: false,
@@ -87,7 +85,6 @@ const state = {
   aiPromptByLang: {},
   seriesKey: "default",
   seriesMemory: { glossary: [], characters: [] },
-  aiPromptDefaultsByLang: {},
   aiPromptDirtyByLang: {},
   pendingApiSave: false,
   pendingAiSave: false,
@@ -106,7 +103,7 @@ function isRemoteDefaultApiUrl(url) {
   return Boolean(normalized && (normalized === remoteDefault || normalized === remoteReset));
 }
 
-// --- Small helpers ---------------------------------------------------------
+// Small helpers
 const toggleUi = () => {
   toggleUiDom({ hasEnvKey: Boolean(state.metaCache?.has_env_ai_key) });
   // Keep inline validations in sync with mode/source/visibility changes.
@@ -187,7 +184,7 @@ function warmupOnce(base) {
   }
 }
 
-// --- Health check ----------------------------------------------------------
+// Health check
 function scheduleHealthRetry(url, attemptIndex) {
   clearTimeout(state.retryTimer);
   if (attemptIndex >= RETRY_DELAYS_MS.length) return;
@@ -224,7 +221,7 @@ async function checkHealth(url, attemptIndex = 0) {
   }
 }
 
-// --- Meta (languages / sources) -------------------------------------------
+// Meta (languages / sources)
 async function refreshMeta(baseUrl) {
   try {
     const data = await fetchJson(`${baseUrl}${API_PATHS.META}`, null, HEALTH_TIMEOUT_MS);
@@ -261,7 +258,7 @@ function ensureAiAvailableOrFallback() {
   return false;
 }
 
-// --- AI meta (provider / model resolution) ---------------------------------
+// AI meta (provider / model resolution)
 async function refreshAiMeta() {
   if ((els.mode.value || "lens_text") !== "lens_text") return;
   if (!ensureAiAvailableOrFallback()) return;
@@ -372,7 +369,7 @@ function scheduleResolveAiMeta({ immediate = false } = {}) {
   else aiResolveDebounce = setTimeout(run, 350);
 }
 
-// --- AI prompt (per language/model) ---------------------------------------
+// AI prompt (per language/model)
 
 /** Enable/disable the prompt back/forward buttons from the stored history. */
 async function refreshPromptHistoryButtons() {
@@ -427,29 +424,25 @@ async function resetPromptForLang(lang) {
   const key = makePromptKey(l, model);
   const seq = ++state.promptSeq;
 
-  const cached = String(state.aiPromptDefaultsByLang[key] || "").trim();
-  let def;
-  if (cached) {
-    def = normalizePrompt(cached);
-  } else {
-    const fetched = await fetchDefaultPrompt(els.apiUrl.value, l, model);
-    if (seq !== state.promptSeq) return;
-    if (fetched === null) {
-      // API unreachable — keep the user's CURRENT prompt untouched and tell
-      // them the reset couldn't run, instead of silently blanking their work.
-      setFieldMessage(
-        els.aiPromptWrap,
-        "error",
-        "Reset failed: API unreachable — keeping your current prompt",
-      );
-      return;
-    }
-    def = normalizePrompt(fetched);
+  // Reset is an explicit request for the server's CURRENT policy. Never reuse
+  // a value cached by this popup: the API may have been redeployed while the
+  // editor remained open.
+  const fetched = await fetchDefaultPrompt(els.apiUrl.value, l, model);
+  if (seq !== state.promptSeq) return;
+  if (fetched === null) {
+    // API unreachable — keep the user's CURRENT prompt untouched and tell
+    // them the reset couldn't run, instead of silently blanking their work.
+    setFieldMessage(
+      els.aiPromptWrap,
+      "error",
+      "Reset failed: API unreachable — keeping your current prompt",
+    );
+    return;
   }
+  const def = normalizePrompt(fetched);
   if (seq !== state.promptSeq) return;
 
   setFieldMessage(els.aiPromptWrap, "", "");
-  state.aiPromptDefaultsByLang[key] = def;
   // Reset pulls the server's CURRENT default and SAVES it as the user's prompt.
   // The user's stored prompt stays authoritative (it is exactly what gets sent);
   // Reset is simply how the user chooses to refresh it to the latest server
@@ -492,6 +485,45 @@ function updateAiPromptWarning() {
 // string, so an unknown prefix is a soft WARNING, never a hard block.
 const KNOWN_KEY_PREFIXES = ["hf_", "sk-or-", "sk-ant-", "sk-", "gsk_", "AIza"];
 
+// The provider a key's prefix belongs to. Mirrors `detect_provider_from_key`
+// in api/backend/ai/providers.py so the popup's verdict is the server's verdict.
+// Order matters: the longer prefixes must be tested before bare "sk-".
+const KEY_PREFIX_PROVIDER = [
+  ["AIza", "gemini"],
+  ["hf_", "huggingface"],
+  ["sk-or-", "openrouter"],
+  ["sk-ant-", "anthropic"],
+  ["gsk_", "groq"],
+];
+
+// Providers whose keys are plain OpenAI-style `sk-...`, so a bare `sk-` key
+// cannot be attributed to any one of them and must not be reported as wrong.
+const SK_STYLE_PROVIDERS = new Set([
+  "openai", "deepseek", "together", "featherless", "mistral", "perplexity", "xai", "fireworks",
+]);
+
+// Returns the provider a key clearly belongs to, or "" when it is unattributable.
+function providerFromKey(key) {
+  for (const [prefix, provider] of KEY_PREFIX_PROVIDER) {
+    if (key.startsWith(prefix)) return provider;
+  }
+  return "";
+}
+
+const PROVIDER_LABELS = {
+  gemini: "Google Gemini",
+  huggingface: "Hugging Face",
+  openrouter: "OpenRouter",
+  anthropic: "Anthropic",
+  groq: "Groq",
+  openai: "OpenAI",
+  deepseek: "DeepSeek",
+  together: "Together",
+  featherless: "Featherless",
+};
+
+const providerLabel = (id) => PROVIDER_LABELS[id] || id;
+
 /**
  * Validate the AI key field (only while it is visible = cloud provider on AI).
  * Empty-but-required and odd-looking keys are surfaced so a missing/typo'd key
@@ -523,6 +555,28 @@ function validateAiKey() {
       els.aiKeyWrap,
       "warn",
       "⚠ Key format looks unusual (usually starts with hf_/sk-/AIza/gsk_) — ignore if you use a custom gateway",
+    );
+    return;
+  }
+  // A key whose prefix names a DIFFERENT provider is not a style question: the
+  // request would be sent to the selected provider with a credential it cannot
+  // accept, and the only symptom would be a 401 per image mid-batch.
+  const keyProvider = providerFromKey(key);
+  if (provider !== "auto" && keyProvider && keyProvider !== provider) {
+    setFieldMessage(
+      els.aiKeyWrap,
+      "error",
+      `✕ This is a ${providerLabel(keyProvider)} key but the provider is set to ` +
+      `${providerLabel(provider)} — paste a ${providerLabel(provider)} key, or switch the provider back.`,
+    );
+    return;
+  }
+  // The reverse case: an sk- key with a provider that does not use one.
+  if (provider !== "auto" && !keyProvider && key.startsWith("sk-") && !SK_STYLE_PROVIDERS.has(provider)) {
+    setFieldMessage(
+      els.aiKeyWrap,
+      "error",
+      `✕ ${providerLabel(provider)} does not use an sk- key — this looks like an OpenAI-style key.`,
     );
     return;
   }
@@ -571,7 +625,7 @@ async function flushPromptForLang(lang, model = null) {
   void promptHistoryPush(key, state.aiPromptByLang[key]).then(refreshPromptHistoryButtons);
 }
 
-// --- Debounced persistence -------------------------------------------------
+// Debounced persistence
 function scheduleSaveApi(raw) {
   clearTimeout(apiDebounce);
   state.pendingApiSave = true;
@@ -648,7 +702,7 @@ function scheduleSaveAi() {
   }, 400);
 }
 
-// --- Local viewer ----------------------------------------------------------
+// Local viewer
 async function openLocalViewerFromFiles(fileList, sourceLabel) {
   // Folder picker: only images DIRECTLY in the chosen folder (no subfolders).
   const images = filterImageFiles(fileList, { topLevelOnly: sourceLabel === "folder" });
@@ -671,15 +725,7 @@ async function handleLocalPickerChange(input, sourceLabel) {
   await openLocalViewerFromFiles(files, sourceLabel);
 }
 
-// --- WebSocket status (popup just reflects it in the emoji) ---------------
-function handleWsStatus(status) {
-  if (state.lastApiOk) return;
-  if (status === "connected") setEmojiStatus("ok", "WS connected");
-  else if (status === "connecting") setEmojiStatus("loading", "Connecting…");
-  else setEmojiStatus("error", "WS disconnected");
-}
-
-// --- Initial load ----------------------------------------------------------
+// Initial load
 async function loadSettings() {
   setSelectOptions(els.mode, MODES, { valueKey: "id", labelKey: "name", keepValue: els.mode.value });
   setEmojiStatus("loading", "Initializing…");
@@ -703,11 +749,18 @@ async function loadSettings() {
     "imgButtonsEnabled",
     "relayoutTranslated",
     "rateLimitEnabled",
+    "rateProfile",
     "rateRpm",
     "rateBurst",
+    "aiLocalUnlimited",
+    "apiLocalUnlimited",
+    "engineMode",
   ]);
 
   if (els.imgButtonsToggle) els.imgButtonsToggle.checked = Boolean(stored.imgButtonsEnabled);
+  if (els.aiLocalUnlimited) els.aiLocalUnlimited.checked = stored.aiLocalUnlimited === true;
+  if (els.apiLocalUnlimited) els.apiLocalUnlimited.checked = stored.apiLocalUnlimited === true;
+  if (els.engineMode) els.engineMode.value = stored.engineMode === "api" ? "api" : "extension";
 
   renderFontScale(stored.fontScale ?? 1);
 
@@ -779,6 +832,11 @@ async function loadSettings() {
         ? stored.rateLimitEnabled
         : DEFAULT_RATE_LIMIT_ENABLED;
   }
+  if (els.rateProfile) {
+    els.rateProfile.value = ["auto", "stable", "balanced", "fast", "custom"].includes(stored.rateProfile)
+      ? stored.rateProfile
+      : (Number(stored.rateRpm) > 0 || Number(stored.rateBurst) > 0 ? "custom" : "auto");
+  }
   // 0 means "use the server's policy for this provider" — show it as an empty
   // box with the "Auto" placeholder rather than a literal 0 the user must clear.
   if (els.rateRpm) els.rateRpm.value = Number(stored.rateRpm) > 0 ? String(stored.rateRpm) : "";
@@ -841,12 +899,9 @@ async function loadSettings() {
       setEmojiStatus("ok", "Online");
     }
   });
-  sendRuntimeMessage({ type: "GET_WS_STATUS" }).then((resp) => {
-    if (resp && typeof resp.status === "string") handleWsStatus(resp.status);
-  });
 }
 
-// --- Font-scale control ----------------------------------------------------
+// Font-scale control
 //
 // The popup writes a single `fontScale` number (1.0 = 100%) to extension
 // storage; `overlay.js` reads that on mount and on every `storage.onChanged`,
@@ -917,7 +972,7 @@ els.fontScaleReset?.addEventListener("click", () => {
   saveFontScale(1);
 });
 
-// --- Event wiring ----------------------------------------------------------
+// Event wiring
 els.aiPromptReset?.addEventListener("click", () => resetPromptForLang(els.lang.value));
 
 // Expand / collapse the style editor for comfortable long-prompt editing.
@@ -969,7 +1024,11 @@ els.sources.addEventListener("change", async () => {
   broadcast({ type: "AI_SETTINGS_CHANGED" });
 });
 
-els.apiUrl.addEventListener("input", (e) => scheduleSaveApi(e.target.value));
+els.apiUrl.addEventListener("input", (e) => {
+  scheduleSaveApi(e.target.value);
+  // The local-API switch appears as soon as the URL becomes a local one.
+  toggleUi();
+});
 els.apiUrl.addEventListener("blur", (e) => scheduleSaveApi(e.target.value));
 
 els.aiKey.addEventListener("input", () => {
@@ -998,6 +1057,8 @@ els.aiProvider?.addEventListener("change", async () => {
   toggleUi();
   // The rate reference is per provider, so it has to follow this selection.
   updateRatePresetHint();
+  // The key that was fine a moment ago may now belong to a different provider.
+  validateAiKey();
   scheduleResolveAiMeta({ immediate: true });
 });
 
@@ -1031,15 +1092,46 @@ els.aiPageImage?.addEventListener("change", async () => {
   await setStorage({ aiPageImage: els.aiPageImage.checked ? "always" : "off" });
 });
 
-// --- Reading direction + rate limit ---------------------------------------
+// Reading direction + rate limit
 
 els.relayoutTranslated?.addEventListener("change", async () => {
   await setStorage({ relayoutTranslated: Boolean(els.relayoutTranslated.checked) });
 });
 
+els.engineMode?.addEventListener("change", async () => {
+  const engineMode = els.engineMode.value === "api" ? "api" : "extension";
+  await setStorage({ engineMode });
+  // Results already in flight were produced by the other engine.
+  broadcast({ type: "AI_SETTINGS_CHANGED" });
+});
+
+els.aiLocalUnlimited?.addEventListener("change", async () => {
+  await setStorage({ aiLocalUnlimited: Boolean(els.aiLocalUnlimited.checked) });
+});
+
+els.apiLocalUnlimited?.addEventListener("change", async () => {
+  await setStorage({ apiLocalUnlimited: Boolean(els.apiLocalUnlimited.checked) });
+});
+
 els.rateLimitEnabled?.addEventListener("change", async () => {
   await setStorage({ rateLimitEnabled: Boolean(els.rateLimitEnabled.checked) });
   // Re-run the visibility pass so the RPM / burst boxes enable or grey out.
+  toggleUi();
+});
+
+els.rateProfile?.addEventListener("change", async () => {
+  const profile = els.rateProfile.value;
+  const preset = ratePresetForProvider() || RATE_PRESET_DEFAULT;
+  const factors = { stable: 0.5, balanced: 1, fast: 1.5 };
+  const factor = factors[profile];
+  const rateRpm = factor ? Math.max(1, Math.round(preset.rpm * factor)) : 0;
+  const rateBurst = factor ? Math.max(1, Math.round(preset.burst * factor)) : 0;
+  if (profile !== "custom") {
+    if (els.rateRpm) els.rateRpm.value = "";
+    if (els.rateBurst) els.rateBurst.value = "";
+  }
+  await setStorage({ rateProfile: profile, rateRpm, rateBurst });
+  updateRatePresetHint();
   toggleUi();
 });
 
@@ -1168,7 +1260,7 @@ els.aiPrompt.addEventListener("blur", async () => {
   scheduleSaveAi();
 });
 
-// --- Page actions (for sites that block right-click) -----------------------
+// Page actions (for sites that block right-click)
 // "Translate all images on this page" = the img_all context-menu flow,
 // triggered from the popup instead of a right-click.
 els.translatePageBtn?.addEventListener("click", async () => {
@@ -1288,9 +1380,5 @@ window.addEventListener("online", () => {
   if (els.apiUrl.value) checkHealth(els.apiUrl.value);
 });
 
-chrome.runtime.onMessage?.addListener((msg) => {
-  if (msg?.type === "WS_STATUS_UPDATE") handleWsStatus(msg.status);
-});
-
-// --- Go --------------------------------------------------------------------
+// Go
 loadSettings();

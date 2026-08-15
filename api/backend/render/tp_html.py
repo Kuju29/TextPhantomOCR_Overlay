@@ -1,6 +1,5 @@
 """Render an OCR tree as the HTML overlay the extension injects on a page.
 
-STATUS: ACTIVE — in use in the current flow.
 
 Layout rules (per *item*):
 
@@ -247,6 +246,11 @@ def _escape_text(s: str) -> str:
         .replace("<", "&lt;")
         .replace(">", "&gt;")
     )
+
+
+def _escape_attr(s: str) -> str:
+    """HTML-escape a quoted attribute value."""
+    return _escape_text(s).replace('"', "&quot;").replace("'", "&#x27;")
 
 
 def _is_cjk_char(ch: str) -> bool:
@@ -871,6 +875,7 @@ def render_tree_overlay(
         return ""
 
     is_ai_layer = str(tree.get("side") or "").lower() == "ai"
+    source_lang = str(tree.get("source_lang") or tree.get("originalContentLanguage") or "").strip()
 
     parts: list[str] = ['<div class="tp-draw-root"><div class="tp-draw-scope">']
     has_any = False
@@ -1117,6 +1122,7 @@ def render_tree_overlay(
                     para, img_w, img_h,
                     override_fs=shared_fs,
                     is_vertical=para_vertical[id(para)],
+                    source_lang=source_lang,
                 )
             elif gi not in gtext_done:
                 gtext_done.add(gi)
@@ -1128,6 +1134,7 @@ def render_tree_overlay(
                     gtext = _render_group_gtext_block(
                         groups_list[gi], paragraphs_in_order, img_w, img_h,
                         override_fs=shared_fs,
+                        source_lang=source_lang,
                     )
             group = (
                 '<div class="tp-src notranslate" translate="no">'
@@ -1135,7 +1142,18 @@ def render_tree_overlay(
                 + "</div>"
                 + gtext
             )
-            parts.append(_wrap_on_dark(group, para))
+            dark_para = para
+            if gi is not None and gtext:
+                member_indices = {
+                    int(pi) for pi in (groups_list[gi].get("para_indices") or [])
+                }
+                if any(
+                    bool(member.get("text_light"))
+                    for member in paragraphs_in_order
+                    if int(member.get("para_index", -1)) in member_indices
+                ):
+                    dark_para = {**para, "text_light": True}
+            parts.append(_wrap_on_dark(group, dark_para))
         else:
             for c in chunks:
                 parts.append(_wrap_on_dark(c, para))
@@ -1151,6 +1169,7 @@ def _render_group_gtext_block(
     img_w: int,
     img_h: int,
     override_fs: int | None,
+    source_lang: str = "",
 ) -> str:
     """ONE ``.tp-gtext`` for a whole bubble group (all its columns together).
 
@@ -1209,8 +1228,9 @@ def _render_group_gtext_block(
     )
     cls = "tp-line tp-gtext rtl" if contains_rtl(text) else "tp-line tp-gtext"
     gi = int(bg.get("bubble_index", 0))
+    language = f' lang="{_escape_attr(source_lang)}"' if source_lang else ""
     return (
-        f'<div class="{cls}" data-bg="{gi}" data-fs="{fs}" '
+        f'<div class="{cls}" data-bg="{gi}" data-fs="{fs}"{language} translate="yes" '
         f'style="{style}">{_escape_text(text)}</div>'
     )
 
@@ -1221,6 +1241,7 @@ def _render_original_gtext_block(
     img_h: int,
     override_fs: int | None,
     is_vertical: bool,
+    source_lang: str = "",
 ) -> str:
     """The hidden translate-target block: ONE ``.tp-gtext`` per bubble.
 
@@ -1296,8 +1317,9 @@ def _render_original_gtext_block(
     )
     cls = "tp-line tp-gtext rtl" if contains_rtl(text) else "tp-line tp-gtext"
     pi = int(para.get("para_index", 0))
+    language = f' lang="{_escape_attr(source_lang)}"' if source_lang else ""
     return (
-        f'<div class="{cls}" data-pi="{pi}" data-fs="{fs}" '
+        f'<div class="{cls}" data-pi="{pi}" data-fs="{fs}"{language} translate="yes" '
         f'style="{style}">{_escape_text(text)}</div>'
     )
 

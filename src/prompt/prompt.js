@@ -1,6 +1,5 @@
 /**
  *
- * STATUS: ACTIVE — in use in the current flow.
  * Prompt Studio — a full-page editor for the per-LANGUAGE AI Style prompt.
  * It reads/writes the SAME storage the popup uses (`aiPromptByLang`, keyed by
  * language only), so edits here show up in the popup's small "AI Style" box and
@@ -131,7 +130,7 @@ async function loadBuiltinDefault() {
   setStatus("Loading default…");
   try {
     const url = `${base}${API_PATHS.AI_PROMPT_DEFAULT}?lang=${encodeURIComponent(lang)}`;
-    const r = await fetch(url, { method: "GET" });
+    const r = await fetch(url, { method: "GET", cache: "no-store" });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
     const def = String(data?.prompt_editable_default || "").trim();
@@ -144,7 +143,7 @@ async function loadBuiltinDefault() {
   }
 }
 
-// --- init -------------------------------------------------------------------
+// init
 async function init() {
   // language options
   for (const l of FALLBACK_LANGS) {
@@ -194,7 +193,7 @@ async function init() {
   loadCurrent();
 }
 
-// --- events -----------------------------------------------------------------
+// events
 els.lang.addEventListener("change", loadCurrent);
 els.text.addEventListener("input", () => {
   updateCount();

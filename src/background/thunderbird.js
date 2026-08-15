@@ -1,10 +1,4 @@
-/**
- * Thunderbird-only integration for displayed email messages.
- *
- * Normal WebExtension content_scripts cover web tabs. Thunderbird 128+ uses
- * scripting.messageDisplay for scripts that run inside displayed messages.
- * The module is feature-detected and is therefore a no-op in web browsers.
- */
+// Registers the content scripts Thunderbird runs inside displayed email messages.
 
 const MESSAGE_SCRIPT_ID = "textphantom-message-display";
 
@@ -25,6 +19,7 @@ const MESSAGE_DISPLAY_SCRIPTS = [
 
 let registrationPromise = null;
 
+// Registers the message-display scripts once, resolving false when the host is not Thunderbird.
 export function ensureThunderbirdMessageScripts() {
   const api = globalThis.messenger || globalThis.browser;
   const messageDisplay = api?.scripting?.messageDisplay;

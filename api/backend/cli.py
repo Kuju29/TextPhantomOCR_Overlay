@@ -1,6 +1,5 @@
 """Local-file pipeline runner + debug dumper.
 
-STATUS: ACTIVE — in use in the current flow.
 
 Runs the full translation pipeline on an image file **without starting the
 HTTP server**, and writes every intermediate artefact to a directory so the
@@ -638,6 +637,9 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         ai_cfg = AiConfig(
             api_key=api_key,
+            # The CLI runs on the operator's own machine, so whatever key and
+            # base_url they pass are theirs to point wherever they like.
+            user_key=True,
             model=args.ai_model,
             provider=args.ai_provider,
             base_url=args.ai_base_url,

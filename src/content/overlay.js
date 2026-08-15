@@ -1,17 +1,4 @@
-/**
- *
- * STATUS: ACTIVE — in use in the current flow.
- * HTML-overlay rendering + in-DOM image replacement.
- *
- * An "overlay" is an absolutely-positioned host element kept aligned over the
- * target image. Its `.tp-ol-scope` holds the API's overlay markup, scaled so
- * the (image-space) markup lines up with the (rendered) image. A "clean layer"
- * `<img>` underneath shows the text-erased background for text mode.
- *
- * MangaDex uses a parallel set of overlay maps (see `mangadex.js`); this module
- * exposes the generic machinery and routes to the MangaDex variant when the
- * target image carries an `md:` key.
- */
+// Renders translated text as HTML overlays aligned over page images, and swaps images in place.
 
 (function () {
   const TP = window.__TP;
@@ -19,51 +6,38 @@
 
   const OVERLAY_STYLE_ID = "textphantom_overlay_css";
 
-  // key -> { host, scope, img, baseW, baseH, kind, ro, cleanImg }
   const htmlOverlaysByKey = new Map();
   let htmlOverlayRaf = 0;
+  let htmlOverlayGlobalPending = false;
+  const htmlOverlayPendingKeys = new Set();
 
-  // --- User font-scale (popup +/- buttons) --------------------------------
-  //
-  // The popup writes a single `fontScale` number (1.0 = 100%) to storage and
-  // broadcasts `FONT_SCALE_CHANGED`. We mirror that into the CSS variable
-  // `--tp-font-scale` on every `.tp-ol-scope`; every `.tp-line` inside reads
-  // it through `font-size: calc(var(--tp-font-scale,1) * Npx)` and resizes
-  // immediately — no DOM walking, no relayout of the host element.
+  // The popup writes `fontScale` to storage and broadcasts `FONT_SCALE_CHANGED`.
   const FONT_SCALE_MIN = 0.5;
   const FONT_SCALE_MAX = 2.0;
   let currentFontScale = 1;
 
-  /**
-   * Clamp any input to a finite scale in [MIN, MAX]. Falls back to 1 for
-   * garbage values so a corrupt storage entry can't break the overlay.
-   */
   function clampFontScale(v) {
     const n = Number(v);
     if (!Number.isFinite(n) || n <= 0) return 1;
     return Math.min(FONT_SCALE_MAX, Math.max(FONT_SCALE_MIN, n));
   }
 
-  /** Push the current scale onto a single scope element. */
+  // Applies the current font scale to one overlay scope element.
   function applyFontScaleToScope(scope) {
     if (!scope) return;
     scope.style.setProperty("--tp-font-scale", String(currentFontScale));
   }
 
-  /** Re-apply the scale to every overlay this content script knows about. */
   function applyFontScaleEverywhere() {
     for (const rec of htmlOverlaysByKey.values()) {
       if (rec?.scope) applyFontScaleToScope(rec.scope);
     }
-    // MangaDex maintains its own overlay map; let it apply the same scale.
     try {
       TP.mdApplyFontScaleAll?.(currentFontScale);
     } catch {
-      /* MangaDex overlay map absent on non-MangaDex hosts */
     }
   }
 
-  /** Read the saved scale from storage and broadcast to all scopes. */
   async function loadAndApplyFontScale() {
     try {
       const r = await new Promise((resolve) => {
@@ -78,7 +52,6 @@
 
   loadAndApplyFontScale();
 
-  // Live updates: popup writes `fontScale` -> storage event fires here.
   try {
     chrome.storage.onChanged?.addListener((changes, area) => {
       if (area !== "local" || !changes?.fontScale) return;
@@ -86,11 +59,8 @@
       applyFontScaleEverywhere();
     });
   } catch {
-    /* storage.onChanged unavailable in this context */
   }
 
-  // Some popups also broadcast a message so the change feels instant even
-  // when storage events are throttled.
   try {
     chrome.runtime.onMessage?.addListener((msg) => {
       if (msg?.type === "FONT_SCALE_CHANGED") {
@@ -99,12 +69,9 @@
       }
     });
   } catch {
-    /* runtime.onMessage unavailable */
   }
 
-  // --- Style injection -----------------------------------------------------
-
-  /** Inject (once) the API-provided overlay CSS plus our hardening rules. */
+  // Appends overlay CSS to the page's shared stylesheet, never replacing it.
   function ensureOverlayStyle(cssText = "") {
     let styleEl = document.getElementById(OVERLAY_STYLE_ID);
     if (!styleEl) {
@@ -113,20 +80,25 @@
       styleEl.type = "text/css";
       document.head.appendChild(styleEl);
     }
-    // Hardening: pages have aggressive resets; force the overlay to stay put.
-    const harden =
-      "\n/* TextPhantom harden */\n" +
-      ".tp-ol-root{position:absolute!important;left:0!important;top:0!important;pointer-events:none!important;z-index:2147483647!important;display:block!important;opacity:1!important;visibility:visible!important;overflow:visible!important;transform-origin:0 0!important;}" +
-      ".tp-ol-scope{position:absolute!important;left:0!important;top:0!important;pointer-events:none!important;display:block!important;opacity:1!important;visibility:visible!important;overflow:visible!important;}" +
-      ".tp-ol-scope *{box-sizing:border-box!important;pointer-events:none!important;}" +
-      ".tp-ol-container{position:relative!important;display:inline-block!important;line-height:0!important;overflow:visible!important;}";
-    const next = String(cssText) + harden;
-    if (styleEl.textContent !== next) styleEl.textContent = next;
+
+    const css = String(cssText || "").trim();
+    if (css && !styleEl.textContent.includes(css)) {
+      styleEl.appendChild(document.createTextNode(`\n/* TextPhantom overlay CSS */\n${css}\n`));
+    }
+
+    const hardenMarker = "/* TextPhantom harden */";
+    if (!styleEl.textContent.includes(hardenMarker)) {
+      const harden =
+        "\n/* TextPhantom harden */\n" +
+        ".tp-ol-root{position:absolute!important;left:0!important;top:0!important;pointer-events:none!important;z-index:2147483647!important;display:block!important;opacity:1!important;visibility:visible!important;overflow:visible!important;transform-origin:0 0!important;}" +
+        ".tp-ol-scope{position:absolute!important;left:0!important;top:0!important;pointer-events:none!important;display:block!important;opacity:1!important;visibility:visible!important;overflow:visible!important;}" +
+        ".tp-ol-scope *{box-sizing:border-box!important;pointer-events:none!important;}" +
+        ".tp-ol-container{position:relative!important;display:inline-block!important;line-height:0!important;overflow:visible!important;}";
+      styleEl.appendChild(document.createTextNode(harden));
+    }
   }
 
-  // --- Small builders ------------------------------------------------------
-
-  /** A small status badge ("No AI key", "No text", …). */
+  // Builds a small status badge element for a given label.
   function createOverlayBadge(label) {
     const badge = document.createElement("div");
     badge.textContent = label || "No AI key";
@@ -146,7 +118,7 @@
     return badge;
   }
 
-  /** Pull a replacement-image URL from a result. */
+  // Returns the replacement-image URL carried by a result, or null.
   function extractNewImageSrc(result) {
     return (
       result?.imageDataUri ||
@@ -158,7 +130,133 @@
     );
   }
 
-  /** Convert a data URI to a blob: URL (cheaper for the DOM to keep around). */
+  const localBackgrounds = new WeakMap();
+
+  function releaseLocalBackground(rec) {
+    const url = localBackgrounds.get(rec);
+    if (!url) return;
+    localBackgrounds.delete(rec);
+    try {
+      URL.revokeObjectURL(url);
+    } catch {
+    }
+  }
+
+  // Builds the text-erased background image and annotates paragraph contrast.
+  async function prepareLocalBackground(imgElement, result) {
+    if (!TP.buildErasedBackground) throw new Error("local background builder is unavailable");
+    const built = await TP.buildErasedBackground(
+      imgElement,
+      result?.eraseBoxes,
+      result?.sourceImageDataUri,
+      result?.lensDocument,
+    );
+    if (!built) {
+      TP.log.warn("overlay: local background failed; the original text is still visible", {
+        mode: result?.backgroundMode,
+        src: TP.truncate?.(TP.getBestImgUrl(imgElement)) || "",
+      });
+      TP.markImageError?.(
+        TP.getBestImgUrl(imgElement),
+        "Could not erase the original text — showing the translation over it",
+      );
+      throw new Error("could not erase the original text");
+    }
+    return built;
+  }
+
+  async function applyLocalBackground(rec, imgElement, result, prepared = null) {
+    const built = prepared || await prepareLocalBackground(imgElement, result);
+    if (!rec?.host?.isConnected) {
+      try {
+        URL.revokeObjectURL(built.url);
+      } catch {
+      }
+      return false;
+    }
+    releaseLocalBackground(rec);
+    localBackgrounds.set(rec, built.url);
+    updateCleanLayer(rec, imgElement, built.url);
+    return true;
+  }
+
+  // Returns true when the API sent erase boxes for the client to paint instead of an inpainted image.
+  function wantsLocalBackground(result) {
+    return String(result?.backgroundMode || "") === "boxes" && Boolean(result?.eraseBoxes);
+  }
+
+  let rendererPromise = null;
+
+  // Imports the overlay renderer module on demand from an extension URL.
+  function loadRenderer() {
+    if (rendererPromise) return rendererPromise;
+    rendererPromise = import(chrome.runtime.getURL("processors/render-overlay.js")).catch(
+      (e) => {
+        rendererPromise = null;
+        throw e;
+      },
+    );
+    return rendererPromise;
+  }
+
+  // Returns true when the result carries the geometry needed to render locally.
+  function wantsLocalRender(result) {
+    return Boolean(result?.lensDocument?.paragraphs);
+  }
+
+  // Builds the overlay DOM from the result's LensDocument geometry.
+  async function buildLocalRender(result, source) {
+    const renderer = await loadRenderer();
+    ensureOverlayStyle(renderer.OVERLAY_CSS);
+    const { root, report } = renderer.renderOverlay(result.lensDocument, {
+      source,
+      relayoutTranslated: result?.layout?.relayout_translated,
+    });
+    if (report.error) {
+      TP.log.warn(`overlay: local render refused the document — ${report.error}`, {
+        error: report.error,
+        source,
+      });
+      return { root: null, report };
+    }
+    const unanswered = report.aiUnanswered || [];
+    const structural = report.missingLayer.filter((id) => !unanswered.includes(id));
+    if (unanswered.length) {
+      // Not "no text": the text is still on screen. The model answered some
+      // units and not others, and this build leaves the source pixels of the
+      // unanswered ones alone rather than erasing them into a blank bubble.
+      //
+      // Two different counts, both needed. The model is asked per UNIT (one
+      // bubble = one unit, however many Lens paragraphs it spans), so the unit
+      // count is what it actually got wrong. The paragraph count is what the
+      // reader sees still in the source language. Reporting only paragraphs
+      // reads as a much worse failure than it is: 5 unanswered units across
+      // two-column bubbles print as "10".
+      const partial = result?.aiPartial || null;
+      const unitsMissing = Array.isArray(partial?.missing) ? partial.missing.length : null;
+      TP.log.warn("overlay: AI partial — kept the original text where the model did not answer", {
+        source,
+        units: unitsMissing === null
+          ? "unknown"
+          : `${unitsMissing} of ${unitsMissing + Number(partial?.translated || 0)} unanswered`,
+        paragraphs: unanswered.length,
+        unitIds: Array.isArray(partial?.missing) ? partial.missing : undefined,
+        ids: unanswered,
+      });
+    }
+    if (structural.length) {
+      // A different failure: the grouping names a paragraph this document does
+      // not have, so the sentence has nowhere honest to go.
+      TP.log.warn("overlay: grouping and document disagree; these paragraphs were not drawn", {
+        source,
+        ids: structural,
+      });
+    }
+    TP.log.debug("overlay: rendered locally", report);
+    return { root, report };
+  }
+
+  // Converts a data URI to a blob: URL.
   async function dataUriToBlobUrl(dataUri) {
     try {
       const blob = await (await fetch(dataUri)).blob();
@@ -168,8 +266,7 @@
     }
   }
 
-  // --- "Clean layer" (text-erased background) ------------------------------
-
+  // Returns the overlay's text-erased background <img>, creating it if needed.
   function ensureCleanLayer(rec) {
     if (rec?.cleanImg && rec.cleanImg.isConnected) return rec.cleanImg;
     if (!rec?.host) return null;
@@ -202,10 +299,10 @@
       if (cs?.objectFit) cleanImg.style.objectFit = cs.objectFit;
       if (cs?.objectPosition) cleanImg.style.objectPosition = cs.objectPosition;
     } catch {
-      /* element gone */
     }
   }
 
+  // Points the clean layer at a new background source, or hides it.
   function updateCleanLayer(rec, imgElement, newSrc) {
     if (!rec?.host || !imgElement) return;
     const layer = ensureCleanLayer(rec);
@@ -219,9 +316,7 @@
     layer.style.display = "block";
   }
 
-  // --- Overlay host positioning -------------------------------------------
-
-  /** Mount the overlay host as the previous sibling of its image. */
+  // Mounts the overlay host as the previous sibling of its image.
   function ensureOverlayHostMountedNearImage(rec, img) {
     const host = rec?.host;
     if (!host || !img?.isConnected) return null;
@@ -232,7 +327,6 @@
       try {
         host.parentElement?.removeChild(host);
       } catch {
-        /* not mounted */
       }
       try {
         parent.insertBefore(host, img);
@@ -240,19 +334,17 @@
         try {
           parent.appendChild(host);
         } catch {
-          /* parent gone */
         }
       }
     }
     try {
       if (getComputedStyle(parent).position === "static") parent.style.position = "relative";
     } catch {
-      /* ignore */
     }
     return host.parentElement === parent ? parent : null;
   }
 
-  /** The image's box relative to a (positioned) parent. */
+  // Returns the image's box relative to a positioned parent.
   function getOverlayBoxFromParent(img, parent) {
     const r = img.getBoundingClientRect();
     if (!parent) return { r, left: 0, top: 0 };
@@ -264,10 +356,78 @@
     };
   }
 
-  /** Re-position every tracked overlay (called from rAF). */
-  function updateHtmlOverlays() {
+  // Writes a style value only when it differs from the current one.
+  function setOverlayStyleIfChanged(element, property, value, priority = "") {
+    const style = element?.style;
+    if (!style) return false;
+    const nextValue = String(value ?? "");
+    const nextPriority = String(priority || "");
+    if (
+      style.getPropertyValue(property) === nextValue &&
+      style.getPropertyPriority(property) === nextPriority
+    ) {
+      return false;
+    }
+    style.setProperty(property, nextValue, nextPriority);
+    return true;
+  }
+
+  // Returns true when a node is part of TextPhantom's own overlay DOM.
+  function isOwnOverlayNode(node) {
+    if (!node) return false;
+    const element = node.nodeType === 1 ? node : node.parentElement;
+    if (!element) return false;
+    if (element.matches?.(".tp-ol-root, .tp-ol-clean-img, .tp-md-image-overlay")) return true;
+    return Boolean(element.closest?.(".tp-ol-root"));
+  }
+
+  // Returns true when mutation records include changes outside TextPhantom's overlays.
+  function overlayMutationsNeedUpdate(records) {
+    for (const record of records || []) {
+      if (record.type === "attributes") {
+        if (!isOwnOverlayNode(record.target)) return true;
+        continue;
+      }
+      if (record.type === "childList") {
+        if (isOwnOverlayNode(record.target)) continue;
+        const touched = [...record.addedNodes, ...record.removedNodes];
+        if (touched.length && touched.every((node) => isOwnOverlayNode(node))) continue;
+        return true;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  function disconnectOverlayResizeObserver(rec) {
+    if (!rec) return;
+    try {
+      rec.ro?.disconnect?.();
+    } catch {
+    }
+    rec.ro = null;
+    rec.roImg = null;
+  }
+
+  // Binds one ResizeObserver per tracked image, reusing an existing one.
+  function bindOverlayResizeObserver(rec, img, key) {
+    if (!rec || !img) {
+      disconnectOverlayResizeObserver(rec);
+      return;
+    }
+    if (typeof ResizeObserver !== "function") return;
+    if (rec.ro && rec.roImg === img) return;
+    disconnectOverlayResizeObserver(rec);
+    rec.ro = new ResizeObserver(() => scheduleHtmlOverlayUpdate(key));
+    rec.roImg = img;
+    rec.ro.observe(img);
+  }
+
+  // Re-positions tracked overlays, optionally restricted to a set of keys.
+  function updateHtmlOverlays(onlyKeys = null) {
     if (!htmlOverlaysByKey.size) return;
     for (const [key, rec] of htmlOverlaysByKey.entries()) {
+      if (onlyKeys && !onlyKeys.has(key)) continue;
       const { host, scope } = rec || {};
       if (!host || !scope) {
         htmlOverlaysByKey.delete(key);
@@ -277,14 +437,16 @@
       let img = rec.img;
       if (!img || !img.isConnected) img = TP.findTargetImage(key);
       if (!img) {
-        host.style.display = "none";
+        setOverlayStyleIfChanged(host, "display", "none");
+        disconnectOverlayResizeObserver(rec);
         rec.img = null;
         continue;
       }
 
       const curKey = TP.normUrl(TP.getBestImgUrl(img));
       if (curKey && curKey !== key) {
-        host.style.display = "none";
+        setOverlayStyleIfChanged(host, "display", "none");
+        disconnectOverlayResizeObserver(rec);
         rec.img = null;
         continue;
       }
@@ -292,78 +454,95 @@
       if (img !== rec.img) {
         if (img?.dataset) img.dataset.tpOriginal = key;
       }
-      rec.ro?.disconnect?.();
-      rec.ro = new ResizeObserver(() => scheduleHtmlOverlayUpdate());
-      rec.ro.observe(img);
+      bindOverlayResizeObserver(rec, img, key);
 
       const parent = ensureOverlayHostMountedNearImage(rec, img);
       if (!parent) {
-        host.style.display = "none";
+        setOverlayStyleIfChanged(host, "display", "none");
         rec.img = img;
         continue;
       }
 
       const { r, left, top } = getOverlayBoxFromParent(img, parent);
       if (r.width < 2 || r.height < 2) {
-        host.style.display = "none";
+        setOverlayStyleIfChanged(host, "display", "none");
         rec.img = img;
         continue;
       }
 
       rec.img = img;
-      host.style.display = "block";
-      host.style.setProperty("left", `${left}px`, "important");
-      host.style.setProperty("top", `${top}px`, "important");
-      host.style.setProperty("width", `${r.width}px`, "important");
-      host.style.setProperty("height", `${r.height}px`, "important");
+      setOverlayStyleIfChanged(host, "display", "block");
+      setOverlayStyleIfChanged(host, "left", `${left}px`, "important");
+      setOverlayStyleIfChanged(host, "top", `${top}px`, "important");
+      setOverlayStyleIfChanged(host, "width", `${r.width}px`, "important");
+      setOverlayStyleIfChanged(host, "height", `${r.height}px`, "important");
 
       if (rec.kind === "badge") {
-        scope.style.width = `${r.width}px`;
-        scope.style.height = `${r.height}px`;
-        scope.style.transform = "";
-        scope.style.transformOrigin = "0 0";
-        host.style.transform = "";
-        host.style.transformOrigin = "";
+        setOverlayStyleIfChanged(scope, "width", `${r.width}px`);
+        setOverlayStyleIfChanged(scope, "height", `${r.height}px`);
+        setOverlayStyleIfChanged(scope, "transform", "");
+        setOverlayStyleIfChanged(scope, "transform-origin", "0 0");
+        setOverlayStyleIfChanged(host, "transform", "");
+        setOverlayStyleIfChanged(host, "transform-origin", "");
         continue;
       }
 
       const { nw, nh, sx, sy, offX, offY } = TP.computeScale(img, rec.baseW, rec.baseH, true);
-      scope.style.width = `${nw}px`;
-      scope.style.height = `${nh}px`;
-      scope.style.transform = `translate(${offX}px, ${offY}px) scale(${sx}, ${sy})`;
-      scope.style.transformOrigin = "0 0";
-      host.style.transform = "";
-      host.style.transformOrigin = "";
+      setOverlayStyleIfChanged(scope, "width", `${nw}px`);
+      setOverlayStyleIfChanged(scope, "height", `${nh}px`);
+      setOverlayStyleIfChanged(
+        scope,
+        "transform",
+        `translate(${offX}px, ${offY}px) scale(${sx}, ${sy})`,
+      );
+      setOverlayStyleIfChanged(scope, "transform-origin", "0 0");
+      setOverlayStyleIfChanged(host, "transform", "");
+      setOverlayStyleIfChanged(host, "transform-origin", "");
     }
   }
 
-  function scheduleHtmlOverlayUpdate() {
+  // Schedules a rAF refresh of one overlay by key, or of all when no key is given.
+  function scheduleHtmlOverlayUpdate(key = "") {
+    const targetKey = typeof key === "string" ? key : "";
+    if (targetKey) htmlOverlayPendingKeys.add(targetKey);
+    else htmlOverlayGlobalPending = true;
+
     if (htmlOverlayRaf) return;
-    htmlOverlayRaf = requestAnimationFrame(() => {
+    htmlOverlayRaf = TP.onNextFrame(() => {
       htmlOverlayRaf = 0;
-      updateHtmlOverlays();
+      const updateAll = htmlOverlayGlobalPending;
+      const keys = new Set(htmlOverlayPendingKeys);
+      htmlOverlayGlobalPending = false;
+      htmlOverlayPendingKeys.clear();
+      if (updateAll) updateHtmlOverlays();
+      else if (keys.size) updateHtmlOverlays(keys);
     });
   }
 
-  /** Install scroll/resize/mutation listeners that keep overlays aligned. */
+  // Installs the scroll/resize/mutation listeners that keep overlays aligned.
   function ensureHtmlOverlayListeners() {
     if (window.__tpHtmlOverlayListeners) return;
     window.__tpHtmlOverlayListeners = true;
     window.addEventListener("scroll", scheduleHtmlOverlayUpdate, { passive: true, capture: true });
     window.addEventListener("resize", scheduleHtmlOverlayUpdate, { passive: true });
+    // Overlays inserted while the tab was hidden are realigned once it is shown again.
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") scheduleHtmlOverlayUpdate();
+    }, { passive: true });
     try {
-      new MutationObserver(() => scheduleHtmlOverlayUpdate()).observe(document.documentElement, {
+      new MutationObserver((records) => {
+        if (overlayMutationsNeedUpdate(records)) scheduleHtmlOverlayUpdate();
+      }).observe(document.documentElement, {
         subtree: true,
         childList: true,
         attributes: true,
         attributeFilter: ["src", "srcset", "data-src", "data-srcset", "style", "class"],
       });
     } catch {
-      /* MutationObserver unsupported */
     }
   }
 
-  /** Get or create the overlay record for a (non-MangaDex) image key. */
+  // Returns the overlay record for a non-MangaDex image key, creating it if needed.
   function upsertHtmlOverlay(key, img, baseW, baseH, kind) {
     let rec = htmlOverlaysByKey.get(key);
     if (!rec) {
@@ -380,9 +559,18 @@
       const scope = document.createElement("div");
       scope.className = "tp-ol-scope";
       scope.style.position = "relative";
-      applyFontScaleToScope(scope);  // seed --tp-font-scale before mount
+      applyFontScaleToScope(scope);
       host.appendChild(scope);
-      rec = { host, scope, img: null, baseW: 1, baseH: 1, kind: "html", ro: null };
+      rec = {
+        host,
+        scope,
+        img: null,
+        baseW: 1,
+        baseH: 1,
+        kind: "html",
+        ro: null,
+        roImg: null,
+      };
       htmlOverlaysByKey.set(key, rec);
       ensureHtmlOverlayListeners();
     }
@@ -393,10 +581,47 @@
     rec.baseH = Number.isFinite(baseH) && baseH > 0 ? baseH : 1;
     rec.kind = kind || "html";
     if (img?.dataset && !img.dataset.tpOriginal) img.dataset.tpOriginal = key;
-    rec.ro?.disconnect?.();
-    rec.ro = new ResizeObserver(() => scheduleHtmlOverlayUpdate());
-    rec.ro.observe(img);
+    bindOverlayResizeObserver(rec, img);
     return rec;
+  }
+
+  // Removes every overlay this document owns and forgets their records.
+  function destroyAllHtmlOverlays() {
+    let removed = 0;
+    for (const [key, rec] of Array.from(htmlOverlaysByKey.entries())) {
+      disconnectOverlayResizeObserver(rec);
+      releaseLocalBackground(rec);
+      try {
+        rec.cleanImg?.remove();
+        rec.host?.remove();
+      } catch (e) {
+        TP.log.debug("overlay host was already detached", { key, error: e?.message || String(e) });
+      }
+      htmlOverlaysByKey.delete(key);
+      removed++;
+    }
+    return removed;
+  }
+
+  // Clears the identity stamps that make a recycled <img> report the previous route's URL.
+  function clearImageStamps() {
+    for (const img of Array.from(document.images || [])) {
+      delete img.dataset.tpOriginal;
+      delete img.dataset.tpOriginalKey;
+      delete img.dataset.tpBlobUrl;
+      delete img.dataset.lensError;
+    }
+  }
+
+  // Tears down this document's overlays after a client-side route change.
+  function resetForNavigation(reason = "spa_navigation") {
+    if (TP.isMangaDexHost?.()) return 0;
+    const removed = destroyAllHtmlOverlays();
+    clearImageStamps();
+    TP.forgetImageState?.();
+    TP.resetPageInstance?.(reason);
+    TP.log.info("overlays cleared for navigation", { reason, removed });
+    return removed;
   }
 
   function hideHtmlOverlay(key) {
@@ -405,9 +630,7 @@
     if (rec?.host) rec.host.style.display = "none";
   }
 
-  // --- The main overlay applier -------------------------------------------
-
-  /** Strip TP paragraph markers that should never reach the DOM. */
+  // Strips TP paragraph markers that should never reach the DOM.
   const cleanOverlayHtml = (html) =>
     String(html || "")
       .replace(/<<TP_P\d+>>/g, "")
@@ -437,10 +660,7 @@
     "xlink:href",
   ]);
 
-  /**
-   * Parse the renderer's overlay markup in an inert document and remove
-   * executable/navigation-capable content before adopting it into the page.
-   */
+  // Parses overlay markup in an inert document and strips executable or navigating content.
   function parseSafeOverlayFragment(html) {
     const parsed = new DOMParser().parseFromString(cleanOverlayHtml(html), "text/html");
     for (const element of [...parsed.body.querySelectorAll("*")]) {
@@ -470,12 +690,12 @@
     return fragment;
   }
 
-  /** Replace a scope's children with sanitized overlay markup. */
+  // Replaces a scope's children with sanitized overlay markup.
   function fillScope(scope, html) {
     scope.replaceChildren(parseSafeOverlayFragment(html));
   }
 
-  /** Kick a schedule + a couple of follow-up updates once the image loads. */
+  // Schedules an overlay update now and again once the image finishes loading.
   function nudgeOverlay(imgElement, schedule) {
     schedule();
     if (!imgElement.complete) {
@@ -484,11 +704,8 @@
     setTimeout(schedule, 50);
   }
 
-  /**
-   * Apply a translation result to an image as an HTML overlay (and/or a clean
-   * background layer). Routes to the MangaDex overlay set when applicable.
-   */
-  function applyHtmlOverlay(imgElement, result, source, isTextMode, original = "") {
+  // Applies a translation result to an image as an HTML overlay and clean background layer.
+  async function applyHtmlOverlay(imgElement, result, source, isTextMode, original = "") {
     const aiHtml = result?.Ai?.aihtml || result?.ai?.aihtml || "";
     const translatedHtml = result?.translated?.translatedhtml || result?.translatedhtml || "";
     const originalHtml = result?.original?.originalhtml || result?.originalhtml || "";
@@ -497,7 +714,6 @@
     const chosen = req === "ai" || req === "original" ? req : "translated";
     const html = chosen === "ai" ? aiHtml : chosen === "original" ? originalHtml : translatedHtml;
 
-    // CSS: the base overlay CSS, plus the AI-specific CSS when showing AI.
     const cssParts = [String(result?.htmlCss || "")];
     if (chosen === "ai") cssParts.push(String(result?.Ai?.aihtmlCss || result?.ai?.aihtmlCss || ""));
     const cssText = Array.from(
@@ -509,18 +725,18 @@
     const baseW = Number(meta.baseW || meta.sourceWidth) || imgElement.naturalWidth || imgElement.width || 1;
     const baseH =
       Number(meta.baseH || meta.sourceHeight) || imgElement.naturalHeight || imgElement.height || 1;
-    const newImgSrc = isTextMode ? extractNewImageSrc(result) : null;
+    const localBg = isTextMode && wantsLocalBackground(result);
+    const newImgSrc = isTextMode && !localBg ? extractNewImageSrc(result) : null;
 
     ensureOverlayStyle(cssText);
 
-    // Choose the generic vs. MangaDex overlay operations.
     const mdKey = TP.isMangaDexHost?.() ? TP.mdGetKeyForImg?.(imgElement) : "";
     const useMd = Boolean(mdKey);
     const ops = useMd
       ? {
           key: mdKey,
           upsert: (kind) => TP.upsertMangaDexHtmlOverlay(mdKey, imgElement, baseW, baseH, kind),
-          schedule: () => TP.scheduleMangaDexOverlayUpdate(),
+          schedule: () => TP.scheduleMangaDexOverlayUpdate(mdKey),
           hide: () => TP.hideMangaDexHtmlOverlay(mdKey),
         }
       : (() => {
@@ -529,23 +745,20 @@
             ? {
                 key,
                 upsert: (kind) => upsertHtmlOverlay(key, imgElement, baseW, baseH, kind),
-                schedule: scheduleHtmlOverlayUpdate,
+                schedule: () => scheduleHtmlOverlayUpdate(key),
                 hide: () => hideHtmlOverlay(key),
               }
             : null;
         })();
     if (!ops) return;
 
-    // Case 1: AI requested but produced no markup → show a status badge.
-    if (isTextMode && req === "ai" && !aiHtml) {
+    if (isTextMode && req === "ai" && !aiHtml && !wantsLocalRender(result)) {
       const rec = ops.upsert("badge");
       updateCleanLayer(rec, imgElement, newImgSrc);
+      if (localBg) await applyLocalBackground(rec, imgElement, result);
       rec.scope.textContent = "";
       const aiMeta = result?.Ai?.meta || {};
       const reason = String(aiMeta.skipped_reason || aiMeta.reason || "").trim();
-      // An empty AI layer with no specific reason means the server skipped the
-      // AI translation entirely (`_run_ai` was False) — which only happens when
-      // no API key reached it. Say so plainly instead of a cryptic "AI…".
       const label =
         reason === "no_text"
           ? "No text"
@@ -557,12 +770,11 @@
       return;
     }
 
-    // Case 2: no markup at all.
-    if (!html) {
-      if (isTextMode && newImgSrc) {
-        // We at least have a cleaned background image.
+    if (!html && !(isTextMode && wantsLocalRender(result))) {
+      if (isTextMode && (newImgSrc || localBg)) {
         const rec = ops.upsert("badge");
         updateCleanLayer(rec, imgElement, newImgSrc);
+        if (localBg) await applyLocalBackground(rec, imgElement, result);
         rec.scope.textContent = "";
         nudgeOverlay(imgElement, ops.schedule);
         return;
@@ -571,10 +783,78 @@
       return;
     }
 
-    // Case 3: full HTML overlay.
+    // The font sizes actually drawn, from whichever route drew them. Both
+    // renderers emit `font-size:calc(var(--tp-font-scale,1) * Npx)`, so one
+    // reader answers "how big was the text?" for the local DOM and for the
+    // server's markup alike — the only way to compare the two engines on the
+    // same page without a screenshot.
+    const FONT_PX_RE = /font-size:\s*calc\(var\(--tp-font-scale,\s*1\)\s*\*\s*([\d.]+)px\)/g;
+    const fontStats = (text) => {
+      const sizes = [];
+      let match;
+      FONT_PX_RE.lastIndex = 0;
+      while ((match = FONT_PX_RE.exec(String(text || "")))) sizes.push(Number(match[1]));
+      if (!sizes.length) return null;
+      sizes.sort((a, b) => a - b);
+      return {
+        lines: sizes.length,
+        min: sizes[0],
+        median: sizes[(sizes.length - 1) >> 1],
+        max: sizes[sizes.length - 1],
+      };
+    };
+
+    // Logs which render route ran for this image.
+    const reportRoute = (outcome, reason, fonts = null) => {
+      TP.log.info("tp.route", {
+        stage: "render",
+        outcome,
+        reason,
+        source: chosen,
+        mode: isTextMode ? "lens_text" : "lens_images",
+        serverMarkupAvailable: Boolean(html),
+      });
+      TP.traceNote?.("content/overlay.js", "applyHtmlOverlay", {
+        ev: "route decided",
+        outcome,
+        reason,
+        source: chosen,
+        docParagraphs: (result?.lensDocument?.paragraphs || []).length,
+        serverMarkupAvailable: Boolean(html),
+        fonts,
+      });
+    };
+
+    let builtRoot = null;
+    let preparedLocalBackground = null;
+    let localFailure = "";
+    if (isTextMode && wantsLocalRender(result)) {
+      try {
+        if (localBg) preparedLocalBackground = await prepareLocalBackground(imgElement, result);
+        const built = await buildLocalRender(result, chosen);
+        builtRoot = built.root;
+        if (!builtRoot) localFailure = "local renderer refused the document";
+      } catch (e) {
+        localFailure = `local render threw: ${e?.message || String(e)}`;
+      }
+    }
+
     const rec = ops.upsert("html");
     updateCleanLayer(rec, imgElement, newImgSrc);
-    fillScope(rec.scope, html);
+    if (isTextMode && localBg) {
+      await applyLocalBackground(rec, imgElement, result, preparedLocalBackground);
+    }
+    if (builtRoot) {
+      rec.scope.replaceChildren(builtRoot);
+      reportRoute("new", "", fontStats(builtRoot.innerHTML));
+    } else {
+      if (localFailure) reportRoute("fell-back", localFailure);
+      // Not "old": the scope is replaced with the server's markup on the next
+      // line. Calling this "old" made a working API-engine page read as a
+      // page that had kept its previous overlay.
+      else reportRoute("server", isTextMode ? "drew the server's markup" : "image mode", fontStats(html));
+      fillScope(rec.scope, html);
+    }
     nudgeOverlay(imgElement, ops.schedule);
 
     if (!useMd) {
@@ -589,10 +869,8 @@
 
 
 
-  // --- Batched DOM insertion ----------------------------------------------
-
   function sleepFrame() {
-    return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+    return TP.nextFrame();
   }
 
   async function applyImageErrorMessage(msg) {
@@ -612,7 +890,25 @@
     const source = isText ? String(msg?.source || "").trim().toLowerCase() : "translated";
     if (isText && !source) return { ok: true, ignored: true };
 
-    const img = TP.findTargetImage(msg.original);
+    let img = TP.findTargetImage(msg.original);
+
+    if (!img && TP.waitForTarget && msg?.generation?.targetKey) {
+      img = await TP.waitForTarget(msg.generation.targetKey, () =>
+        TP.findTargetImage(msg.original),
+      );
+      if (!img) {
+        return { ok: true, applied: false, expired: true, reason: "target never remounted" };
+      }
+    }
+
+    if (img && TP.isStillCurrent) {
+      const current = TP.isStillCurrent(img, msg.generation);
+      if (!current.ok) {
+        TP.log.info("OVERLAY_HTML dropped: stale target", { reason: current.reason });
+        return { ok: true, applied: false, stale: true, reason: current.reason };
+      }
+    }
+
     TP.log.info("OVERLAY_HTML", {
       key: TP.mdKeyFromUrl ? TP.mdKeyFromUrl(msg.original) : "",
       found: Boolean(img),
@@ -620,7 +916,7 @@
     });
     if (img) {
       try {
-        applyHtmlOverlay(img, msg.result, source, isText, msg.original);
+        await applyHtmlOverlay(img, msg.result, source, isText, msg.original);
         return { ok: true, applied: true };
       } catch (e) {
         TP.log.warn("OVERLAY_HTML failed", e?.message || String(e));
@@ -638,9 +934,18 @@
     return { ok: true, applied: false, notFound: true };
   }
 
+  // Applies one insert message from the background to the page.
   async function applyInsertMessage(message) {
     const msg = message || {};
     const type = String(msg.type || "");
+
+    if (msg.tpTrace) TP.setTrace?.(msg.tpTrace);
+    TP.traceNote?.("content/overlay.js", "applyInsertMessage", {
+      ev: "insert message received",
+      type,
+      original: msg.original,
+    });
+
     if (type === "REPLACE_IMAGE") {
       const applied = await replaceImageInDOM(msg.original, msg.newSrc);
       if (!applied && TP.isMangaDexHost()) TP.mdRememberPending(msg.original, { newSrc: msg.newSrc });
@@ -651,6 +956,7 @@
     return { ok: true, ignored: true };
   }
 
+  // Applies insert messages in chunks, yielding a frame between chunks.
   async function applyInsertBatch(items, options = {}) {
     const list = Array.isArray(items) ? items : [];
     const chunkSize = Math.max(1, Math.min(32, Number(options?.chunkSize) || 16));
@@ -670,23 +976,11 @@
         }),
       );
       results.push(...settled);
-      scheduleHtmlOverlayUpdate();
-      try {
-        TP.scheduleMangaDexOverlayUpdate?.();
-      } catch {
-        /* non-MangaDex */
-      }
     }
     return { ok: true, bulk: true, results };
   }
 
-  // --- In-DOM image replacement (non-text modes) ---------------------------
-
-  /**
-   * Swap an image's `src` for a translated one. MangaDex images are handled by
-   * the MangaDex overlay variant instead of an in-place swap.
-   * @returns {Promise<number>} 1 if applied, 0 otherwise
-   */
+  // Swaps an image's src for a translated one, returning 1 when applied.
   async function replaceImageInDOM(original, newSrc) {
     if (TP.isMangaDexHost?.() && TP.mdKeyFromUrl?.(original)) {
       return TP.replaceMangaDexImageWithOverlay(original, newSrc);
@@ -704,7 +998,6 @@
     if (key) img.dataset.tpOriginal = key;
     TP.noteReplaceState(original, "pending");
 
-    // Track load/error once so we know whether the swap really succeeded.
     if (!img.dataset.tpReplaceTracked) {
       img.dataset.tpReplaceTracked = "1";
       img.addEventListener(
@@ -725,20 +1018,17 @@
 
     const before = img.currentSrc || img.src;
 
-    // Prefer a blob: URL over a huge data: URI.
     let nextSrc = newSrc;
     if (typeof newSrc === "string" && newSrc.startsWith("data:")) {
       const blobUrl = await dataUriToBlobUrl(newSrc);
       if (blobUrl) nextSrc = blobUrl;
     }
 
-    // Revoke any previous blob URL we created for this image.
     const prevBlob = img.dataset.tpBlobUrl;
     if (prevBlob && prevBlob.startsWith("blob:")) {
       try {
         URL.revokeObjectURL(prevBlob);
       } catch {
-        /* already revoked */
       }
       delete img.dataset.tpBlobUrl;
     }
@@ -770,12 +1060,16 @@
     updateCleanLayer,
     ensureOverlayHostMountedNearImage,
     getOverlayBoxFromParent,
+    setOverlayStyleIfChanged,
+    overlayMutationsNeedUpdate,
     scheduleHtmlOverlayUpdate,
     applyHtmlOverlay,
     applyInsertBatch,
     applyInsertMessage,
     replaceImageInDOM,
-    applyFontScaleToScope,        // MangaDex variant uses this on its scopes
+    applyFontScaleToScope,
+    destroyAllHtmlOverlays,
+    resetForNavigation,
     getCurrentFontScale: () => currentFontScale,
   });
 })();

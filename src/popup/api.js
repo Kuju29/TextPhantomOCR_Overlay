@@ -1,6 +1,5 @@
 /**
  *
- * STATUS: ACTIVE — in use in the current flow.
  * Popup network helpers — thin wrappers around the API endpoints.
  *
  * All functions here are stateless: they take a base URL (and params), do one
@@ -120,7 +119,7 @@ export async function fetchDefaultPrompt(base, lang, model = "auto") {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), PROMPT_TIMEOUT_MS);
   try {
-    const res = await fetch(url, { signal: ctrl.signal });
+    const res = await fetch(url, { cache: "no-store", signal: ctrl.signal });
     if (!res || !res.ok) return null; // server unreachable / error status
     const data = await res.json().catch(() => null);
     if (!data?.ok) return null; // server explicitly not-ok

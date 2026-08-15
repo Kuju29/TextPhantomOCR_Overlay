@@ -1,6 +1,5 @@
 """Robust parsing of AI responses.
 
-STATUS: ACTIVE — in use in the current flow.
 
 LLMs frequently wrap their output in code fences, add stray prose, emit raw
 newlines inside JSON strings, or get "stuck" repeating a character.  These

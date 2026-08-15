@@ -1,12 +1,4 @@
-/**
- *
- * STATUS: ACTIVE — in use in the current flow.
- * Helpers for talking to content scripts in a tab/frame.
- *
- * Content scripts can be slow to appear (document_start vs. first message), so
- * `sendToTab` / `requestFromTab` retry on the top frame and, if still failing,
- * poll for the content script before giving up.
- */
+// Sends messages to content scripts in a tab or frame and waits for them to become reachable.
 
 import { createLogger } from "../shared/logger.js";
 
@@ -14,7 +6,7 @@ const log = createLogger("SW.tabs");
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** Ping a content script; resolves true if it answered. */
+// Pings a content script and resolves true when it answered.
 function pingContent(tabId, frameId = 0) {
   return new Promise((resolve) => {
     try {
@@ -27,7 +19,7 @@ function pingContent(tabId, frameId = 0) {
   });
 }
 
-/** Poll (up to ~1s) until the content script is reachable on the top frame. */
+// Polls until the content script is reachable on the top frame, giving up after about a second.
 export async function ensureContentScript(tabId) {
   for (let i = 0; i < 8; i++) {
     if (await pingContent(tabId, 0)) return true;
@@ -36,7 +28,7 @@ export async function ensureContentScript(tabId) {
   return false;
 }
 
-/** Low-level single send attempt. */
+// Makes one sendMessage attempt and reports the outcome instead of throwing.
 function attemptSend(tabId, message, opts) {
   return new Promise((resolve) => {
     try {
@@ -50,11 +42,7 @@ function attemptSend(tabId, message, opts) {
   });
 }
 
-/**
- * Send a message to a tab/frame, with fallbacks: retry on frame 0, then
- * ensure the content script is alive and retry once more.
- * @returns {Promise<boolean>} whether the message was delivered
- */
+// Sends a message to a tab or frame and returns whether it was delivered.
 export async function sendToTab(tabId, message, frameId = 0) {
   const opts = { frameId: Number(frameId) || 0 };
 
@@ -72,9 +60,7 @@ export async function sendToTab(tabId, message, frameId = 0) {
   return false;
 }
 
-/**
- * Send a message and return its response (null on failure). Retries on frame 0.
- */
+// Sends a message to a tab and returns its response, or null when there is none.
 export async function requestFromTab(tabId, message, frameId = 0) {
   const primary = { frameId: Number(frameId) || 0 };
   let r = await attemptSend(tabId, message, primary);
@@ -86,7 +72,7 @@ export async function requestFromTab(tabId, message, frameId = 0) {
   return null;
 }
 
-/** Like {@link requestFromTab} but ensures the content script first. */
+// Requests a response from a tab, waiting for the content script to appear before the second try.
 export async function requestFromTabEnsured(tabId, message, frameId = 0) {
   const resp = await requestFromTab(tabId, message, frameId);
   if (resp != null) return resp;
@@ -94,7 +80,7 @@ export async function requestFromTabEnsured(tabId, message, frameId = 0) {
   return requestFromTab(tabId, message, frameId);
 }
 
-/** Show a toast inside a tab. */
+// Shows a toast inside a tab.
 export function sendToastToTab(tabId, frameId, text, ms = 1600) {
   if (!tabId || !text) return;
   try {
@@ -105,6 +91,5 @@ export function sendToastToTab(tabId, frameId, text, ms = 1600) {
       () => void chrome.runtime.lastError,
     );
   } catch {
-    /* tab gone */
   }
 }

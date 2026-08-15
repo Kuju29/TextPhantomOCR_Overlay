@@ -1,6 +1,5 @@
 """Paragraph-to-bubble grouping for TextPhantom render trees.
 
-STATUS: ACTIVE — in use in the current flow.
 
 Turns the flat tree["paragraphs"] list (one entry per Lens OCR paragraph)
 into tree["bubble_groups"], where each entry is one renderable speech-bubble
@@ -19,17 +18,13 @@ from typing import Any
 from backend.render.region import classify_item_axis, paragraph_reading_axis
 
 
-# ---------------------------------------------------------------------------
 # Constants
-# ---------------------------------------------------------------------------
 
 _SPATIAL_THRESHOLD: float = 3.0
 _CJK_THRESHOLD: float = 0.45
 
 
-# ---------------------------------------------------------------------------
 # Internal geometry helpers
-# ---------------------------------------------------------------------------
 
 def _is_cjk(ch: str) -> bool:
     """True for CJK ideographs, Kana, Hangul, and fullwidth punctuation."""
@@ -164,9 +159,7 @@ def _median_font_px(paras: list[dict], img_h: int) -> int:
     return max(6, int(round(sizes[len(sizes) // 2])))
 
 
-# ---------------------------------------------------------------------------
 # Furigana (ruby) detection \u2014 for AI TEXT ONLY (never removes from the tree)
-# ---------------------------------------------------------------------------
 
 _RUBY_STRIP = "\u3002\u3001\uff65\u30fb\u2026\uff01!\uff1f?\u30fc\u2015\u301c~\uff08\uff09()\u300c\u300d\u300e\u300f \u3000\t\r\n"
 
@@ -324,9 +317,7 @@ def _ruby_para_indices(paras: list[dict], img_h: int) -> set[int]:
     return ruby
 
 
-# ---------------------------------------------------------------------------
 # Bubble merging (union-find by axis + proximity)
-# ---------------------------------------------------------------------------
 
 def _para_xyxy(para: dict) -> tuple[float, float, float, float] | None:
     """Paragraph bounds_px as (x1, y1, x2, y2) in pixels."""
@@ -539,12 +530,12 @@ def _split_vertical_run_at_gap_jumps(
        top-delta, so uniformly staircased cover layouts (constant drift)
        are not falsely split.  Threshold: |delta - median| > 0.8 glyph.
 
-    Under ``tb_authority`` rule 2 is DISABLED.  The top-edge signal is a guess
-    about intent from a few pixels of vertical jitter, and when the detector has
-    already ruled that these columns are one region that guess is the weaker
-    evidence — letting it win is how a five-column bubble came back out as five
-    separate groups.  The hard column-gap rule still applies, because a wide
-    band of whitespace is unambiguous at any resolution.
+    Under ``tb_authority`` a normal top-edge wobble remains disabled. The model
+    detects REGIONS, however, and one balloon can contain two utterances. A
+    very large top offset may therefore split a detected region only when at
+    least two columns remain on BOTH sides of the boundary. This deliberately
+    excludes a shifted first/last column and small stair layouts: both were
+    false-positive patterns in earlier versions.
 
     ``run`` must already be in reading order (columns right-to-left).
     """
@@ -553,7 +544,7 @@ def _split_vertical_run_at_gap_jumps(
     rects = [_para_xyxy(p) for p in run]
     if any(r is None for r in rects):
         return [run]
-    glyph = max(max((_para_font_px(p, img_h) for p in run), default=0.0), 1.0)
+    glyphs = [max(_para_font_px(p, img_h), 1.0) for p in run]
 
     deltas = [rects[i][1] - rects[i - 1][1] for i in range(1, len(run))]
     sorted_d = sorted(deltas)
@@ -566,8 +557,28 @@ def _split_vertical_run_at_gap_jumps(
         # prev is the column to the RIGHT (reading order); gap = horizontal
         # whitespace between it and the next column to the left.
         gap = max(0.0, prev[0] - now[2])
-        top_jump = 0.0 if tb_authority else abs(deltas[i - 1] - median_delta)
-        if gap > 1.2 * glyph or top_jump > 0.8 * glyph:
+        # A boundary is local evidence.  Using the largest glyph anywhere in
+        # the detector block let one nearby title/impact word inflate the
+        # threshold for every normal dialogue column and hide an otherwise
+        # obvious whitespace break.  `max` of the two neighbours remains
+        # conservative around ruby: a tiny reading beside a normal kanji run
+        # inherits the base run's larger scale rather than creating a split.
+        boundary_glyph = max(glyphs[i - 1], glyphs[i], 1.0)
+        top_jump = abs(deltas[i - 1] - median_delta)
+        if tb_authority:
+            # Model blocks are region-level, not necessarily utterance-level.
+            # Require two real runs and a conspicuous discontinuity before
+            # overruling one block. A uniform staircase has delta ~= median;
+            # a lone shifted edge cannot satisfy the two-columns-per-side gate.
+            offset_boundary = (
+                i >= 2
+                and len(run) - i >= 2
+                and abs(deltas[i - 1]) > 1.8 * boundary_glyph
+                and top_jump > 1.2 * boundary_glyph
+            )
+        else:
+            offset_boundary = top_jump > 0.8 * boundary_glyph
+        if gap > 1.2 * boundary_glyph or offset_boundary:
             out.append(cur)
             cur = [run[i]]
         else:
@@ -648,9 +659,7 @@ def _merge_paragraphs(
     return runs
 
 
-# ---------------------------------------------------------------------------
 # Public API
-# ---------------------------------------------------------------------------
 
 def direction_is_vertical_hint(paras: list[dict]) -> bool:
     """True when the run reads vertically (so ruby detection is meaningful)."""
@@ -698,10 +707,8 @@ def _build_group(
 ) -> dict[str, Any]:
     """Derive one bubble_groups entry from the paragraphs of one run.
 
-    Extracted so a later pass (``merge_groups_sharing_canvas``) can rebuild a
-    group from a different paragraph set without duplicating any of the field
-    derivation — text assembly, ruby stripping, direction and rotation must
-    stay defined in exactly one place.
+    Kept as the single definition of group-field derivation: text assembly,
+    ruby stripping, direction and rotation must not drift between callers.
     """
     items: list[dict] = []
     for p in paras:
@@ -802,11 +809,7 @@ def _build_group(
     }
 
 
-# ---------------------------------------------------------------------------
 # Canvas-conflict repair (runs AFTER the text-block rects are attached)
-# ---------------------------------------------------------------------------
-
-_CANVAS_FONT_RATIO: float = 1.8
 
 # A canvas is EXPECTED to dwarf the ink it holds — a single vertical column is a
 # thin strip inside its balloon, which is exactly why the detected rect is the
@@ -844,25 +847,18 @@ def merge_groups_sharing_canvas(
 ) -> dict[str, int]:
     """Repair canvas conflicts between groups, and return what changed.
 
-    Two groups whose ``bubble_bounds_px`` is the same rect are, by definition,
-    the same bubble: something upstream saw one region and the paragraph merge
-    disagreed.  Left alone they render two overlays stacked at identical
-    coordinates, so one hides the other and the page looks half-translated.
+    A shared canvas is layout evidence, never semantic evidence.  Touching or
+    overlapping speech-balloon lobes are one connected white component to the
+    OpenCV detector, so two real text sets can legitimately inherit the exact
+    same ``bubble_bounds_px``.  Re-merging them here undoes the explicit
+    column-gap/top-gap split upstream and turns two visible boxes into one
+    translation unit.
 
-    A conflict is repaired no matter WHICH producer created the rect.  An
-    earlier version trusted a shared OpenCV balloon on the grounds that a
-    balloon outline is already per-bubble — but the two producers disagree about
-    granularity: the text-block model splits a balloon holding two utterances
-    into two regions, and both of those groups then inherit the one balloon as
-    their canvas.  Provenance decides nothing here; a duplicated rect is a bug
-    either way.
-
-    A shared rect is NOT enough on its own: one region can legitimately hold a
-    huge SFX and a small line of dialogue.  Groups only merge when they read
-    along the same axis AND their glyph scales are within
-    ``_CANVAS_FONT_RATIO``.  Groups that share a rect but fail that test keep
-    their own identity and instead have the shared canvas withdrawn, so they
-    fall back to their own ink box and stop overlapping.
+    Therefore a duplicate canvas is withdrawn from every conflicting group.
+    Their paragraph membership is preserved byte-for-byte and rendering falls
+    back to each group's own ink geometry.  If an upstream split is wrong it
+    must be corrected where that split is made; a late layout pass must never
+    rewrite translation-unit identity merely to avoid overlapping canvases.
 
     A canvas that covers too much of the page is withdrawn outright, shared or
     not: it came from a detection that swallowed several panels, and it would
@@ -874,15 +870,7 @@ def merge_groups_sharing_canvas(
     if not groups:
         return {"merged": 0, "unshared": 0}
 
-    by_index: dict[int, dict] = {
-        int(p.get("para_index", i)): p
-        for i, p in enumerate(tree.get("paragraphs") or [])
-        if isinstance(p, dict)
-    }
-
     merged = unshared = 0
-    absorbed: set[int] = set()
-    rebuilt: dict[int, dict] = {}
 
     # Oversized canvases go first: a rect that is not a bubble must not then be
     # treated as evidence that the groups holding it are one bubble.
@@ -904,70 +892,14 @@ def merge_groups_sharing_canvas(
         if key is not None:
             buckets.setdefault(key, []).append(bg)
 
-    for key, members in buckets.items():
+    for _key, members in buckets.items():
         if len(members) < 2:
             continue
-        fonts = [float(bg.get("font_size_px") or 0.0) for bg in members]
-        fonts = [f for f in fonts if f > 0]
-        scale_ok = (
-            not fonts
-            or max(fonts) / max(1.0, min(fonts)) <= _CANVAS_FONT_RATIO
-        )
-        axis_ok = len({str(bg.get("direction") or "") for bg in members}) == 1
-        if not (scale_ok and axis_ok):
-            # Different utterances that merely share a detected box: give each
-            # its own ink box back rather than letting them stack.
-            for bg in members:
-                bg["bubble_bounds_px"] = None
-                bg["bubble_bounds_source"] = "canvas_conflict_withdrawn"
-                unshared += 1
-            continue
-
-        paras = [
-            by_index[pi]
-            for bg in members
-            for pi in (bg.get("para_indices") or [])
-            if int(pi) in by_index
-        ]
-        if len(paras) < 2:
-            continue
-        axis = paragraph_reading_axis(
-            [it for p in paras for it in (p.get("items") or [])]
-        )
-
-        def _key(p: dict, _axis: str = axis) -> tuple[float, float]:
-            c = _para_centroid(p, img_w, img_h) or (0.0, 0.0)
-            return (-c[0], c[1]) if _axis == "v" else (c[1], c[0])
-
-        keep = min(members, key=lambda bg: int(bg.get("bubble_index", 0)))
-        fresh = _build_group(
-            int(keep.get("bubble_index", 0)),
-            sorted(paras, key=_key),
-            img_w,
-            img_h,
-        )
-        fresh["bubble_bounds_px"] = [float(v) for v in key]
-        fresh["bubble_bounds_source"] = "textblock"
-        fresh["merged_from_canvas"] = sorted(
-            int(bg.get("bubble_index", 0)) for bg in members
-        )
-        rebuilt[id(keep)] = fresh
         for bg in members:
-            if bg is not keep:
-                absorbed.add(id(bg))
-                merged += 1
+            bg["bubble_bounds_px"] = None
+            bg["bubble_bounds_source"] = "canvas_conflict_withdrawn"
+            unshared += 1
 
-    if not merged and not unshared:
-        return {"merged": 0, "unshared": 0}
-
-    out: list[dict] = []
-    for bg in groups:
-        if id(bg) in absorbed:
-            continue
-        out.append(rebuilt.get(id(bg), bg))
-    for i, bg in enumerate(out):
-        bg["bubble_index"] = i
-    tree["bubble_groups"] = out
     return {"merged": merged, "unshared": unshared}
 
 

@@ -1,6 +1,11 @@
 fastapi>=0.110
 uvicorn[standard]>=0.23
 httpx>=0.24
+# Required by /v1/lens/fallback, which takes the image as multipart rather than
+# as a base64 field. Without it FastAPI refuses to build the route AT IMPORT
+# TIME, so a missing dependency here is a server that will not start — not one
+# that starts and fails on the first fallback.
+python-multipart>=0.0.9
 numpy
 opencv-python-headless
 Pillow

@@ -1,6 +1,5 @@
 /**
  *
- * STATUS: ACTIVE — in use in the current flow.
  * AI prompt helpers.
  *
  * Editable per-language style prompts are stored under a `lang::model` key so
@@ -75,7 +74,7 @@ export function migratePromptMap(input) {
   return { map, changed };
 }
 
-// --- Prompt edit history (browser-like back / forward) ----------------------
+// Prompt edit history (browser-like back / forward)
 // Stored in chrome.storage.local under `aiPromptHistory`:
 //   { [lang::model]: { stack: string[], idx: number } }
 // `idx` points at the CURRENT version. Going back moves idx left; committing

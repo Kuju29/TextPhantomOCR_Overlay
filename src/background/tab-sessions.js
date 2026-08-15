@@ -1,19 +1,8 @@
-/**
- *
- * STATUS: ACTIVE — in use in the current flow.
- * Per-tab "session" tracking.
- *
- * Every time a tab navigates we mint a fresh session id. Job results carry the
- * session id they were started under; when a result comes back for a stale
- * session it is discarded instead of being injected into the wrong page.
- * (MangaDex is special-cased elsewhere because its SPA navigation keeps the
- * same page context.)
- */
+// Tracks a per-tab session id so results arriving for a navigated-away page can be discarded.
 
-/** tabId -> { id, href, ts } */
 const tabSessionById = new Map();
 
-/** Start a new session for a tab and return its id. */
+// Starts a new session for a tab and returns its id.
 export function bumpTabSession(tabId, href) {
   if (!Number.isFinite(tabId)) return "";
   const id = crypto.randomUUID();
@@ -21,20 +10,17 @@ export function bumpTabSession(tabId, href) {
   return id;
 }
 
-/** Current session id for a tab ("" if none). */
+// Returns the current session id for a tab, or "" when none.
 export function getTabSessionId(tabId) {
   return tabSessionById.get(tabId)?.id || "";
 }
 
-/** Current session record for a tab (null if none). */
+// Returns the current session record for a tab, or null when none.
 export function getTabSession(tabId) {
   return tabSessionById.get(tabId) || null;
 }
 
-/**
- * Ensure a tab has a session; create one if missing, refresh `href` if it
- * changed. Returns the (possibly new) session id.
- */
+// Returns a tab's session id, creating the session if missing and refreshing `href` when it changed.
 export function ensureTabSession(tabId, href) {
   const cur = getTabSession(tabId);
   const h = String(href || "");
@@ -45,7 +31,7 @@ export function ensureTabSession(tabId, href) {
   return cur.id;
 }
 
-/** Forget a tab entirely (called when the tab is closed). */
+// Forgets a tab's session entirely.
 export function dropTabSession(tabId) {
   tabSessionById.delete(tabId);
 }

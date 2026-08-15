@@ -1,6 +1,5 @@
 /**
  *
- * STATUS: ACTIVE — in use in the current flow.
  * Remote-configured default API URLs.
  *
  * The extension ships with no hard-coded API endpoint. Instead it fetches a

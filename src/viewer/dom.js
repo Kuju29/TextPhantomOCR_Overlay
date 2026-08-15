@@ -1,6 +1,5 @@
 /**
  *
- * STATUS: ACTIVE — in use in the current flow.
  * Local-viewer DOM references + pure helpers.
  *
  * Stateless utilities only: element lookups, formatting, and small DOM
@@ -90,18 +89,12 @@ export function badgeClass(page) {
   return page?.overlayApplied || page?.translatedImageDataUri ? "badge ok" : "badge";
 }
 
-// --- Page-element lookups --------------------------------------------------
+// Page-element lookups
 export const articleForPage = (pageId) =>
   document.querySelector(`.page-strip[data-page-id="${CSS.escape(pageId)}"]`);
 export const imageForPage = (pageId) => articleForPage(pageId)?.querySelector("img") || null;
 export const overlayRootForPage = (pageId) =>
   articleForPage(pageId)?.querySelector(".tp-ol-root") || null;
-
-/** True for URLs the browser can download without the `downloads` API. */
-export const isLocalDownloadUrl = (url) => {
-  const v = String(url || "");
-  return v.startsWith("data:") || v.startsWith("blob:") || v.startsWith("chrome-extension:");
-};
 
 /** Trigger a download via a temporary `<a download>` element. */
 export function triggerAnchorDownload(url, filename) {

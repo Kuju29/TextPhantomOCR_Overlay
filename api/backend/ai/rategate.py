@@ -1,6 +1,5 @@
 """Proactive per-provider AI request pacing (the "batch gate").
 
-STATUS: ACTIVE — in use in the current flow.
 
 Why this exists
 ---------------
@@ -96,13 +95,23 @@ class _Waiter:
 class _Bucket:
     """A single token bucket with per-session fair queues."""
 
-    __slots__ = ("capacity", "tokens", "rate", "last", "sessions", "jobset", "timer")
+    __slots__ = (
+        "capacity", "tokens", "rate", "last", "sessions", "jobset", "timer",
+        "rpm", "rpm_start", "rpm_min", "rpm_max", "pinned", "ok_streak", "touched",
+    )
 
     def __init__(self, capacity: int, rate_per_sec: float) -> None:
         self.capacity = float(max(1, capacity))
         self.tokens = float(max(1, capacity))  # start full so the first burst is instant
         self.rate = float(max(0.0, rate_per_sec))
         self.last = time.monotonic()
+        self.rpm = self.rate * 60.0
+        self.rpm_start = self.rpm
+        self.rpm_min = self.rpm
+        self.rpm_max = self.rpm
+        self.pinned = False
+        self.ok_streak = 0
+        self.touched = self.last
         # session -> FIFO deque of job_ids waiting; OrderedDict gives round-robin.
         self.sessions: "OrderedDict[str, deque[str]]" = OrderedDict()
         # every job_id currently waiting in this bucket (admission counting).
@@ -116,6 +125,16 @@ class _Bucket:
             if self.rate > 0:
                 self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
             self.last = now
+
+    # Moves the sustained rate without losing the tokens already earned.
+    def set_rpm(self, rpm: float) -> None:
+        self.refill()
+        self.rpm = max(0.0, float(rpm))
+        self.rate = self.rpm / 60.0
+
+    def set_capacity(self, burst: int) -> None:
+        self.capacity = float(max(1, burst))
+        self.tokens = min(self.tokens, self.capacity)
 
 
 class RateGate:
@@ -132,8 +151,8 @@ class RateGate:
         return bool(getattr(settings, "rate_gate_enabled", True))
 
     @staticmethod
-    def _policy(provider: str) -> tuple[float, int]:
-        """Return ``(rpm, burst)`` for a canonical provider, env-overridable."""
+    def _policy(provider: str) -> tuple[float, int, float, float]:
+        """Return ``(start_rpm, burst, rpm_min, rpm_max)``, env-overridable."""
         dflt = ai_config.RATE_POLICY_DEFAULTS.get(provider, {})
         rpm = _env_float(
             f"TP_RATE_RPM_{provider.upper()}",
@@ -143,22 +162,32 @@ class RateGate:
             f"TP_RATE_BURST_{provider.upper()}",
             int(dflt.get("burst", settings.rate_default_burst)),
         )
-        return max(0.0, rpm), max(1, burst)
+        rpm_min = _env_float(
+            f"TP_RATE_RPM_MIN_{provider.upper()}", float(dflt.get("rpm_min", rpm))
+        )
+        rpm_max = _env_float(
+            f"TP_RATE_RPM_MAX_{provider.upper()}", float(dflt.get("rpm_max", rpm))
+        )
+        rpm = max(0.0, rpm)
+        return rpm, max(1, burst), max(0.0, min(rpm_min, rpm)), max(rpm, rpm_max)
+
+    @staticmethod
+    def adaptive_enabled() -> bool:
+        return _env_int("TP_RATE_ADAPTIVE", 1) != 0
 
     @staticmethod
     def _gated(provider: str) -> bool:
         """Local servers have no limit; Hugging Face has its own throttle."""
         return not (is_local_provider(provider) or provider == "huggingface")
 
+    # Identity of one quota: provider + resolved model + API key. The rate is NOT
+    # part of the key, because the bucket's rate now moves at runtime — one key
+    # keeps one bucket and one learned rate for as long as it stays warm.
     @staticmethod
-    def _bucket_key(provider: str, model: str, api_key: str, rpm: float, burst: int) -> str:
+    def _bucket_key(provider: str, model: str, api_key: str) -> str:
         kf = hashlib.sha1((api_key or "").encode("utf-8")).hexdigest()[:12]
         resolved = (resolve_model(provider, model) or "auto").strip().lower()
-        # rpm/burst are part of the key on purpose: a ``_Bucket`` fixes its rate
-        # and capacity at construction, so a user who raises their limit in the
-        # popup must get a NEW bucket instead of silently keeping the old, slower
-        # pacing for as long as the bucket lives.
-        return f"{provider}|{resolved}|{kf}|{rpm:g}/{int(burst)}"
+        return f"{provider}|{resolved}|{kf}"
 
     # --- public API --------------------------------------------------------
     async def acquire(
@@ -190,21 +219,21 @@ class RateGate:
         provider = canonical_provider(provider or "auto")
         if not self.enabled() or not self._gated(provider):
             return
-        rpm, burst = self._policy(provider)
-        if rpm_override is not None and float(rpm_override) > 0:
-            rpm = float(rpm_override)
+        start_rpm, burst, rpm_min, rpm_max = self._policy(provider)
+        pinned = rpm_override is not None and float(rpm_override) > 0
+        if pinned:
+            start_rpm = float(rpm_override)
+            rpm_min = rpm_max = start_rpm
         if burst_override is not None and int(burst_override) > 0:
             burst = int(burst_override)
-        if rpm <= 0:
+        if start_rpm <= 0:
             return  # gate disabled for this provider via config
 
-        key = self._bucket_key(provider, model, api_key, rpm, burst)
-        bucket = self._buckets.get(key)
-        if bucket is None:
-            self._prune_buckets()
-            bucket = _Bucket(burst, rpm / 60.0)
-            self._buckets[key] = bucket
-
+        bucket = self._bucket_for(
+            provider, model, api_key,
+            start_rpm=start_rpm, burst=burst,
+            rpm_min=rpm_min, rpm_max=rpm_max, pinned=pinned,
+        )
         bucket.refill()
 
         # Fast path: nobody waiting and a token is ready -> go immediately.
@@ -246,6 +275,106 @@ class RateGate:
             raise
         finally:
             self._waiters.pop(job_id, None)
+
+    # Returns this quota's bucket, creating it or re-shaping it when the user's
+    # pinned rate changed. One (provider, model, key) keeps one learned rate.
+    def _bucket_for(
+        self,
+        provider: str,
+        model: str,
+        api_key: str,
+        *,
+        start_rpm: float,
+        burst: int,
+        rpm_min: float,
+        rpm_max: float,
+        pinned: bool,
+    ) -> "_Bucket":
+        key = self._bucket_key(provider, model, api_key)
+        bucket = self._buckets.get(key)
+        now = time.monotonic()
+        if bucket is not None and (now - bucket.touched) > ai_config.RATE_ADAPT_IDLE_RESET_SEC:
+            # A quota that has been quiet for this long is no longer evidence.
+            bucket.set_rpm(start_rpm)
+            bucket.ok_streak = 0
+        if bucket is None:
+            self._prune_buckets()
+            bucket = _Bucket(burst, start_rpm / 60.0)
+            self._buckets[key] = bucket
+        bucket.touched = now
+        bucket.rpm_start = start_rpm
+        bucket.rpm_min = rpm_min
+        bucket.rpm_max = rpm_max
+        bucket.set_capacity(burst)
+        if pinned != bucket.pinned:
+            # The user just pinned or un-pinned a number; honour it immediately.
+            bucket.pinned = pinned
+            bucket.set_rpm(start_rpm)
+            bucket.ok_streak = 0
+        elif pinned and abs(bucket.rpm - start_rpm) > 1e-9:
+            bucket.set_rpm(start_rpm)
+        elif not pinned:
+            bucket.set_rpm(min(max(bucket.rpm, rpm_min), rpm_max))
+        return bucket
+
+    def _lookup(self, provider: str, model: str, api_key: str) -> "_Bucket | None":
+        provider = canonical_provider(provider or "auto")
+        return self._buckets.get(self._bucket_key(provider, model, api_key))
+
+    # One clean provider call. After a streak of them the sustained rate climbs
+    # by a step, so a paid key stops being paced at the free tier's number.
+    def report_success(self, provider: str, model: str, api_key: str) -> None:
+        bucket = self._lookup(provider, model, api_key)
+        if bucket is None or bucket.pinned or not self.adaptive_enabled():
+            return
+        bucket.ok_streak += 1
+        if bucket.ok_streak < ai_config.RATE_ADAPT_OK_STREAK:
+            return
+        bucket.ok_streak = 0
+        if bucket.rpm < bucket.rpm_max:
+            bucket.set_rpm(min(bucket.rpm_max, bucket.rpm + ai_config.RATE_ADAPT_STEP_RPM))
+
+    # The provider itself said no. Halve the sustained rate immediately and, when
+    # it told us how long to wait, spend that time before handing out a token.
+    def report_rate_limited(
+        self, provider: str, model: str, api_key: str, *, retry_after_sec: float = 0.0
+    ) -> None:
+        bucket = self._lookup(provider, model, api_key)
+        if bucket is None:
+            return
+        bucket.ok_streak = 0
+        if not bucket.pinned and self.adaptive_enabled():
+            bucket.set_rpm(max(bucket.rpm_min, bucket.rpm * ai_config.RATE_ADAPT_BACKOFF))
+        wait = max(0.0, float(retry_after_sec))
+        if wait > 0:
+            bucket.refill()
+            bucket.tokens = min(bucket.tokens, 0.0) - wait * bucket.rate
+
+    # What this key is allowed right now, for the response body and the logs.
+    def snapshot(self, provider: str, model: str, api_key: str) -> dict:
+        provider = canonical_provider(provider or "auto")
+        if not self.enabled() or not self._gated(provider):
+            return {"gated": False, "adaptive": False, "rpm": 0.0, "burst": 0, "waiting": 0}
+        bucket = self._lookup(provider, model, api_key)
+        if bucket is None:
+            start_rpm, burst, rpm_min, rpm_max = self._policy(provider)
+            return {
+                "gated": True, "adaptive": self.adaptive_enabled(), "pinned": False,
+                "rpm": start_rpm, "burst": burst,
+                "rpmMin": rpm_min, "rpmMax": rpm_max, "waiting": 0,
+            }
+        bucket.refill()
+        return {
+            "gated": True,
+            "adaptive": self.adaptive_enabled() and not bucket.pinned,
+            "pinned": bucket.pinned,
+            "rpm": round(bucket.rpm, 2),
+            "burst": int(bucket.capacity),
+            "rpmMin": round(bucket.rpm_min, 2),
+            "rpmMax": round(bucket.rpm_max, 2),
+            "tokens": round(bucket.tokens, 2),
+            "waiting": len(bucket.jobset),
+        }
 
     def cancel_jobs(self, job_ids) -> int:
         """Cancel any waiting acquire() for these job ids. Returns count hit."""

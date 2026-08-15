@@ -1,15 +1,7 @@
-/**
- *
- * STATUS: ACTIVE — in use in the current flow.
- * Service-worker entry point.
- *
- * Wires the background modules together and registers every `chrome.*`
- * listener. All real logic lives in the imported modules — this file is just
- * the assembly + event routing.
- */
+// Service-worker entry point: wires the background modules together and registers every `chrome.*` listener.
 
 import "../shared/compat.js";
-import { createLogger } from "../shared/logger.js";
+import { createLogger, getLogLevel } from "../shared/logger.js";
 import { ensureApiDefaults } from "../shared/api-defaults.js";
 import { getStorage } from "../shared/storage.js";
 import { getTab, queryTabs } from "../shared/browser-api.js";
@@ -23,25 +15,32 @@ import { pendingByJob } from "./job-registry.js";
 import {
   bumpSettingsEpoch,
   cancelTabWork,
+  discardBatchResults,
   handleJobError,
   handleResult,
   handleStaleJob,
   resumePendingRestJobs,
 } from "./jobs.js";
+import { reportOnStartup } from "./workflow-track.js";
+import { forgetCapabilities } from "./capabilities.js";
+import { forgetPrompts } from "./ai-local.js";
+import { setLogSink } from "../shared/logger.js";
+import { flushLogs, recordLogLine, resetLogShippingSupport } from "../shared/log-sink.js";
+import { flushTrace, getTraceDetail, isTracing, traceRelay } from "../shared/trace.js";
 import {
   isMangaDexPageUrl,
   mdCacheKey,
   getCachedResult,
+  getCachedDataUri,
   stripImageFields,
 } from "./mangadex.js";
 import { bumpTabSession, dropTabSession, ensureTabSession } from "./tab-sessions.js";
-import { closeWebSocket, getWsStatus, isWsReady, setHandlers, cancelJobsViaRest } from "./transport.js";
+import { setHandlers, cancelJobsViaRest } from "./transport.js";
 import { onContextMenuClicked, recreateMenus } from "./context-menu.js";
 import { ensureThunderbirdMessageScripts } from "./thunderbird.js";
 
 const log = createLogger("SW");
 
-// --- Transport ↔ jobs wiring ----------------------------------------------
 setHandlers({
   onResult: handleResult,
   onError: handleJobError,
@@ -49,51 +48,50 @@ setHandlers({
     applyServerConcurrencyHint(msg?.recommended_client_concurrency);
     noteQueueStatus(msg);
   },
-  onWsEnded: () => {},
   onStale: handleStaleJob,
 });
 
-// Prime the remote API defaults early.
 ensureApiDefaults().catch(() => {});
 ensureThunderbirdMessageScripts().catch((error) => {
   log.warn("Thunderbird message scripts unavailable", error?.message || String(error));
 });
 
-// --- Settings epoch --------------------------------------------------------
+setLogSink(recordLogLine);
+log.info("boot", { build: chrome.runtime.getManifest().version });
+
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local" || !changes) return;
   if (changes.mode || changes.lang || changes.sources) bumpSettingsEpoch();
+
+  if (changes.customApiUrl) {
+    resetLogShippingSupport();
+    forgetCapabilities();
+    forgetPrompts();
+    log.info("api base changed; forgot cached capabilities and prompts");
+  }
 });
 
-// --- Context menu ----------------------------------------------------------
 chrome.contextMenus.onClicked.addListener(onContextMenuClicked);
 
-// --- Keep-alive port -------------------------------------------------------
-// The content script holds a port open while a batch runs. When it disconnects
-// (page unloaded) we treat that tab's work as cancelled.
+// The content script holds this port open while a batch runs; its disconnect means the page went away.
 chrome.runtime.onConnect.addListener((port) => {
   if (!port || port.name !== KEEPALIVE_PORT_NAME) return;
   const tabId = port.sender?.tab?.id;
   const frameId = port.sender?.frameId;
   port.onMessage.addListener(() => {});
   port.onDisconnect.addListener(() => {
-    // Read lastError to acknowledge the expected close. When the content page is
-    // frozen into the back/forward cache Chrome severs the channel and sets
-    // "...page keeping the extension port is moved into back/forward cache...";
-    // leaving it unread logs it as an "Unchecked runtime.lastError".
     void chrome.runtime.lastError;
     if (!Number.isFinite(tabId)) return;
-    if (Number.isFinite(frameId) && frameId !== 0) return; // only the top frame matters
+    if (Number.isFinite(frameId) && frameId !== 0) return;
     bumpTabSession(tabId, "");
     cancelTabWork(tabId, "page_unloaded");
   });
 });
 
-// --- Tab lifecycle ---------------------------------------------------------
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (!Number.isFinite(tabId) || changeInfo.status !== "loading") return;
   const href = changeInfo.url || tab?.url || "";
-  if (isMangaDexPageUrl(href)) return; // MangaDex SPA navigation keeps context
+  if (isMangaDexPageUrl(href)) return;
   bumpTabSession(tabId, href);
   cancelTabWork(tabId, "navigation");
 });
@@ -103,18 +101,17 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   dropTabSession(tabId);
 });
 
-// --- Runtime messages ------------------------------------------------------
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const type = String(msg?.type || "");
 
   switch (type) {
-    case "GET_WS_STATUS":
-      sendResponse({ status: getWsStatus(), ready: isWsReady() });
+    case "AI_SETTINGS_CHANGED":
+      forgetPrompts();
+      sendResponse({ ok: true });
       return true;
 
     case "GET_BATCH_STATUS":
-      // ⛔ DORMANT — no longer called since the popup Status box was removed (2026-07-20);
-      // kept for a future UI. Current translation status is shown only via on-page toasts.
+      // No caller: batch status currently reaches the user only through on-page toasts.
       sendResponse({ ok: true, batch: getLastBatchStatus() });
       return true;
 
@@ -123,7 +120,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return true;
 
     case "API_URL_CHANGED":
-      closeWebSocket("api_url_changed");
       healthCache.ts = 0;
       getApiBase()
         .then((b) => warmupApi(b))
@@ -131,13 +127,42 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: true });
       return true;
 
+    case "TP_LOG":
+      recordLogLine({
+        ...(msg.record || {}),
+        tabId: sender?.tab?.id ?? null,
+        frameId: sender?.frameId ?? null,
+      });
+      sendResponse({ ok: true });
+      return true;
+
+    case "TP_TRACE":
+      traceRelay({
+        ...(msg.record || {}),
+        tabId: sender?.tab?.id ?? null,
+        frameId: sender?.frameId ?? null,
+      });
+      sendResponse({ ok: true });
+      return true;
+
+    case "TP_TRACE_STATE":
+      sendResponse({
+        ok: true,
+        enabled: isTracing(),
+        detail: getTraceDetail(),
+        consoleLevel: getLogLevel(),
+      });
+      return true;
+
+    case "TP_FLUSH_LOGS":
+      Promise.allSettled([flushLogs(), flushTrace()]).then(() =>
+        sendResponse({ ok: true }),
+      );
+      return true;
+
     case "TP_CONTENT_READY":
       if (msg?.top && Number.isFinite(sender?.tab?.id)) {
         ensureTabSession(sender.tab.id, msg?.href);
-        // Pre-warm the API while the user is still reading the page, so a
-        // right-click translate moments later skips the cold-start cost.
-        // warmupApi() inside getApiBase() is throttled (once / 20 min per
-        // service-worker), so a large install base stays gentle on the server.
         getApiBase().catch(() => {});
       }
       sendResponse({ ok: true });
@@ -145,17 +170,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     case "TP_LOCATION_CHANGED":
       if (msg?.top && Number.isFinite(sender?.tab?.id)) {
-        ensureTabSession(sender.tab.id, msg?.href);
+        const tabId = sender.tab.id;
+        if (isMangaDexPageUrl(msg?.href || sender?.tab?.url || "")) {
+          // Only TP_MD_CHAPTER_CHANGED cancels MangaDex work; its URL also changes while scrolling one chapter.
+          ensureTabSession(tabId, msg?.href);
+        } else {
+          cancelTabWork(tabId, "spa_navigation");
+          bumpTabSession(tabId, msg?.href);
+        }
       }
       sendResponse({ ok: true });
       return true;
 
     case "TP_MD_CHAPTER_CHANGED": {
-      // MangaDex SPA chapter switch (no page reload, so no keep-alive
-      // disconnect and no tabs.onUpdated "loading"). Cancel the previous
-      // chapter's in-flight work like a normal navigation would.
       const tabId = sender?.tab?.id;
-      if (Number.isFinite(tabId)) cancelTabWork(tabId, "chapter_change");
+      if (Number.isFinite(tabId)) {
+        cancelTabWork(tabId, "chapter_change");
+        bumpTabSession(tabId, sender?.tab?.url || "");
+      }
       sendResponse({ ok: true });
       return true;
     }
@@ -174,6 +206,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     case "CANCEL_BATCH": {
       const bid = String(msg.batchId || "");
       if (bid) {
+        discardBatchResults(bid, "user_cancelled");
         const jobIds = [];
         for (const [jid, rec] of Array.from(pendingByJob.entries())) {
           if (rec?.batchId === bid) {
@@ -181,8 +214,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             pendingByJob.delete(jid);
           }
         }
-        // Tell the backend to drop these from its queue / rate gate so they
-        // stop consuming provider budget.
         cancelJobsViaRest({ jobIds, batchId: bid });
       }
       sendResponse({ success: true });
@@ -191,11 +222,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     case "fetchImageBlob":
       fetchImageBlob(msg).then(sendResponse);
-      return true; // async response
+      return true;
 
-    // Popup button: translate every image on the page — same flow as the
-    // "Translate all images on page" context-menu item (for sites that
-    // block right-click).
     case "TP_RUN_TRANSLATE_ALL": {
       (async () => {
         let tab = null;
@@ -215,10 +243,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return true;
     }
 
-    // On-image 🔍 button (content script): translate ONE image — same flow
-    // as the "Translate this image" context-menu item. The content script
-    // already registered the clicked <img> as the last-clicked target, so
-    // blob:/data: sources resolve exactly like a real right-click.
     case "TP_RUN_TRANSLATE_ONE": {
       const tab = sender?.tab;
       if (!tab?.id) {
@@ -241,7 +265,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 });
 
-/** Build the response for a `TP_MD_CACHE_GET` message. */
+// Builds the cached-result map answering a `TP_MD_CACHE_GET` message.
 function collectMdCacheItems(msg) {
   const lang = typeof msg?.lang === "string" ? msg.lang : "";
   const mode = typeof msg?.mode === "string" ? msg.mode : "";
@@ -263,16 +287,22 @@ function collectMdCacheItems(msg) {
       rec?.result?.image ||
       rec?.result?.imageUrl ||
       null;
+    const cachedResult = stripImageFields(rec.result);
+    const sourceImageDataUri = getCachedDataUri(String(rec?.result?.sourceImageKey || ""));
+    if (rec?.result?.sourceImageKey && !sourceImageDataUri) continue;
+    if (cachedResult && typeof cachedResult === "object") delete cachedResult.sourceImageKey;
     items[String(mdKey)] = {
       hasNewImg: Boolean(newImg),
-      result: stripImageFields(rec.result),
+      result: cachedResult
+        ? { ...cachedResult, ...(sourceImageDataUri ? { sourceImageDataUri } : {}) }
+        : cachedResult,
       ...(includeNewImg ? { newImg } : {}),
     };
   }
   return items;
 }
 
-/** Fetch a remote image and return it as base64 (used by the content script). */
+// Fetches a remote image for the content script and returns it as base64 with its MIME type.
 async function fetchImageBlob(msg) {
   try {
     const res = await fetch(String(msg.url || "").trim(), {
@@ -294,7 +324,7 @@ async function fetchImageBlob(msg) {
   }
 }
 
-// --- Install / startup -----------------------------------------------------
+// Recreates the menus, registers the Thunderbird scripts and warms the API.
 function bootstrap() {
   recreateMenus();
   ensureThunderbirdMessageScripts().catch((error) => {
@@ -307,17 +337,14 @@ function bootstrap() {
 chrome.runtime.onInstalled.addListener(bootstrap);
 chrome.runtime.onStartup?.addListener(bootstrap);
 
-// A Manifest V3 service worker may be woken by an event other than
-// runtime.onStartup. Initialize on every worker evaluation too, so opening the
-// popup is never required before the API can be used.
 bootstrap();
 
-// Load the user's concurrency cap on every SW start.
 getStorage({ maxConcurrency: 0 }).then(({ maxConcurrency }) => {
-  // v12 full-speed build: disable the extension-side cap on startup.
-  // The server split queues decide real processing concurrency.
-  if (Number(maxConcurrency) > 0) maxConcurrency = 0;
   setMaxConcurrency(maxConcurrency);
   log.info("concurrency limits", describeLimits());
   resumePendingRestJobs().catch((e) => log.warn("resume pending jobs failed", e?.message || String(e)));
 });
+
+reportOnStartup().catch((e) =>
+  log.warn("workflow store report failed", e?.message || String(e)),
+);

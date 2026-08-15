@@ -1,6 +1,5 @@
 """Decode Google Lens OCR data into the structured "tree" the renderer uses.
 
-STATUS: ACTIVE — in use in the current flow.
 
 Tree shape::
 
@@ -45,12 +44,60 @@ from backend.render.geometry import (
 Side = str
 
 
-def _slice_text(full_text: str, start: int | None, end: int | None) -> str:
-    """Safely slice ``full_text[start:end]``; empty string on bad ranges."""
+# Every reason this decode can drop something, so a count is never anonymous.
+# Kept as an explicit tuple rather than accumulated on demand: a reason that
+# only appears in the output when it fires is a reason nobody knows to look for.
+#
+# Every one of these is REACHABLE — `api/tests/test_lens_tree.py` fires all five
+# off the shared fixture. A counter that can never move is worse than no
+# counter: it reads as "this never happens" when it means "this cannot be seen".
+# Three earlier candidates (`item_no_geometry`, `item_text_out_of_range`,
+# `paragraph_text_out_of_range`) turned out to be unreachable given what
+# `is_item_message` already guarantees, so they are assertions now — see
+# `_impossible` below.
+DROP_REASONS = (
+    "item_unusable_geometry",
+    "item_degenerate_baseline",
+    "span_no_end",
+    "span_no_position",
+    "span_text_out_of_range",
+)
+
+
+class LensTreeInvariantError(RuntimeError):
+    """Raised when the decode reaches a state its own guards rule out.
+
+    Not a bad-input error — bad input has a counter. This means two functions
+    in this module disagree about what a well-formed item is, which is a code
+    bug, and a code bug that silently produced an empty string here would land
+    as "a bubble came out blank" three layers downstream.
+    """
+
+
+def _impossible(what: str) -> None:
+    raise LensTreeInvariantError(what)
+
+
+def _empty_diagnostics() -> dict[str, Any]:
+    return {
+        "drops": dict.fromkeys(DROP_REASONS, 0),
+        "deepWalkParagraphs": 0,
+        "exhaustedParagraphs": 0,
+    }
+
+
+def _slice_text(full_text: str, start: int | None, end: int | None) -> str | None:
+    """Slice ``full_text[start:end]``, or ``None`` when the range is unusable.
+
+    This used to return ``""`` on a bad range, which is what made a bad Lens
+    offset indistinguishable from a genuinely empty paragraph. The rendered
+    result is the same empty string either way; the difference is that the
+    caller can now count it and say so.
+    """
     if start is None or end is None:
-        return ""
+        return None
     if start < 0 or end < 0 or start > end or end > len(full_text):
-        return ""
+        return None
     return full_text[start:end]
 
 
@@ -72,13 +119,32 @@ def decode_tree(
 
     ``full_text`` is the concatenated text the span ranges index into.
     ``side`` labels the layer (``original`` / ``translated``).
+
+    The returned tree carries a ``diagnostics`` block counting everything this
+    decode skipped, by reason. Lens does send malformed items and there is
+    nothing to draw for them — but a page that quietly loses four of its eleven
+    paragraphs still renders, still looks like a translated page, and reads as
+    "the AI dropped some bubbles" or "the renderer is clipping": two wrong
+    files to go looking in.
+
+    Mirrored byte for byte by ``src/shared/lens-tree.js`` and pinned to
+    ``api/tests/fixtures/lens_tree.json``.
     """
     paragraphs: list[dict[str, Any]] = []
     cursor = 0
+    diagnostics = _empty_diagnostics()
+
+    def bump(reason: str) -> None:
+        diagnostics["drops"][reason] += 1
 
     for para_index, b64s in enumerate(paragraphs_b64):
         par_bytes = base64.b64decode(b64s)
-        item_msgs = proto.extract_items_from_paragraph(par_bytes)
+        found = proto.extract_items_from_paragraph(par_bytes)
+        item_msgs = found.items
+        if found.deep:
+            diagnostics["deepWalkParagraphs"] += 1
+        if found.exhausted:
+            diagnostics["exhaustedParagraphs"] += 1
 
         items: list[dict[str, Any]] = []
         para_ranges: list[tuple[int, int]] = []
@@ -87,10 +153,13 @@ def decode_tree(
         for item_index, item_bytes in enumerate(item_msgs):
             geom_bytes, spans_bytes = proto.extract_item_geom_spans(item_bytes)
             if geom_bytes is None:
-                continue
+                # `is_item_message` only calls something an item when it has a
+                # field-1 sub-message, and that is the same field this reads.
+                _impossible("an item message reached decode_tree with no geometry field")
 
             p1, p2, height_norm = proto.get_points_from_geom(geom_bytes)
             if p1 is None or p2 is None or height_norm is None:
+                bump("item_unusable_geometry")
                 continue
 
             x1n, y1n = p1
@@ -107,6 +176,7 @@ def decode_tree(
 
             length = math.hypot(dx, dy)
             if length <= 1e-12:
+                bump("item_degenerate_baseline")
                 continue
 
             ux, uy = dx / length, dy / length
@@ -125,21 +195,23 @@ def decode_tree(
                 else:
                     cursor = max(cursor, start)
                 if end is None:
+                    bump("span_no_end")
                     continue
                 cursor = max(cursor, end)
 
                 if t0 is None and t1 is None:
+                    bump("span_no_position")
                     continue
                 t0 = 0.0 if t0 is None else t0
                 t1 = 1.0 if t1 is None else t1
 
-                span_text = ""
-                valid_text = False
-                if 0 <= start <= end <= len(full_text):
-                    span_text = full_text[start:end]
-                    valid_text = span_text.strip() != ""
-                    if valid_text:
-                        item_ranges.append((start, end))
+                sliced = _slice_text(full_text, start, end)
+                if sliced is None:
+                    bump("span_text_out_of_range")
+                span_text = "" if sliced is None else sliced
+                valid_text = span_text.strip() != ""
+                if valid_text:
+                    item_ranges.append((start, end))
 
                 # Span endpoints along the baseline.
                 e1x = x1 + ux * (t0 * length)
@@ -204,8 +276,15 @@ def decode_tree(
                 item_spans.append(span_node)
 
             s0, s1 = _range_min_max(item_ranges)
-            item_text = _slice_text(full_text, s0, s1).strip() if s0 is not None else ""
+            item_text = ""
             if s0 is not None:
+                # `item_ranges` only ever holds ranges that already sliced
+                # cleanly, and [min start, max end] over those is still inside
+                # the text — so a None here is a broken invariant, not bad input.
+                sliced = _slice_text(full_text, s0, s1)
+                if sliced is None:
+                    _impossible(f"item range {s0}..{s1} escaped a set of validated ranges")
+                item_text = sliced.strip()  # type: ignore[union-attr]
                 para_ranges.append((s0, s1))  # type: ignore[arg-type]
 
             cx = (x1 + x2) / 2.0
@@ -251,7 +330,12 @@ def decode_tree(
             )
 
         p0, p1 = _range_min_max(para_ranges)
-        para_text = _slice_text(full_text, p0, p1).strip() if p0 is not None else ""
+        para_text = ""
+        if p0 is not None:
+            sliced = _slice_text(full_text, p0, p1)
+            if sliced is None:
+                _impossible(f"paragraph range {p0}..{p1} escaped a set of validated ranges")
+            para_text = sliced.strip()  # type: ignore[union-attr]
         paragraphs.append(
             {
                 "side": side,
@@ -265,7 +349,35 @@ def decode_tree(
             }
         )
 
-    return {"side": side, "paragraphs": paragraphs}
+    return {"side": side, "paragraphs": paragraphs, "diagnostics": diagnostics}
+
+
+def tree_warnings(tree: dict | None) -> list[str]:
+    """The drops worth telling somebody about, as human-readable lines.
+
+    An empty list means nothing was dropped — which is the common case, and is
+    worth being able to assert.
+    """
+    diagnostics = (tree or {}).get("diagnostics")
+    if not isinstance(diagnostics, dict):
+        return []
+    out: list[str] = []
+    for reason, count in (diagnostics.get("drops") or {}).items():
+        if count > 0:
+            out.append(f"dropped {count} × {reason}")
+    deep = int(diagnostics.get("deepWalkParagraphs") or 0)
+    if deep > 0:
+        out.append(
+            f"{deep} paragraph(s) needed the deep item walk — "
+            "Lens nested its items deeper than the shallow pass expects"
+        )
+    exhausted = int(diagnostics.get("exhaustedParagraphs") or 0)
+    if exhausted > 0:
+        out.append(
+            f"{exhausted} paragraph(s) hit the 20,000-node walk budget — "
+            "items past that point were NOT read"
+        )
+    return out
 
 
 # --- Tree traversal helpers ------------------------------------------------
@@ -287,6 +399,20 @@ def flatten_spans(tree: dict | None) -> list[dict]:
     for _, p in iter_paragraphs(tree):
         for it in p.get("items") or []:
             spans.extend(it.get("spans") or [])
+    return spans
+
+
+def spans_for_paragraphs(tree: dict | None, indices) -> list[dict]:
+    """Every span node belonging to these paragraph indices."""
+    want = {int(i) for i in (indices or [])}
+    if not want:
+        return []
+    spans: list[dict] = []
+    for index, para in iter_paragraphs(tree):
+        if index not in want:
+            continue
+        for item in para.get("items") or []:
+            spans.extend(item.get("spans") or [])
     return spans
 
 

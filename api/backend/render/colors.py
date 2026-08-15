@@ -1,6 +1,5 @@
 """Background-colour sampling and contrast helpers.
 
-STATUS: ACTIVE — in use in the current flow.
 
 When the renderer erases original text it needs to know the surrounding
 background colour; when it draws translated text it needs a legible
@@ -76,11 +75,40 @@ def region_is_dark(base_rgb: Image.Image, rect: Rect) -> bool:
     if r - l < 2 or b - t < 2:
         return False
     region = base_rgb.crop((l, t, r, b)).convert("RGB")
-    region.thumbnail((24, 24))
-    med = median_rgba(list(region.getdata()))
-    if not med:
+    region.thumbnail((32, 32))
+    rw, rh = region.size
+
+    # Three independent background readings make this work before *and* after
+    # erasure. Client-painted overlays annotate the original image, where a
+    # tight crop can contain more white source glyph than black panel. The
+    # outside frame and inside perimeter still see the panel. Conversely, a
+    # full black bubble can have a white outside frame, while its perimeter
+    # and full crop remain dark. Requiring two votes handles both cases.
+    readings: list[RGB] = []
+    full = median_rgba(list(region.getdata()))
+    if full:
+        readings.append(full[:3])
+
+    edge = max(1, min(rw, rh) // 5)
+    edge_pixels = (
+        list(region.crop((0, 0, rw, edge)).getdata())
+        + list(region.crop((0, max(0, rh - edge), rw, rh)).getdata())
+        + list(region.crop((0, edge, edge, max(edge, rh - edge))).getdata())
+        + list(region.crop((max(0, rw - edge), edge, rw, max(edge, rh - edge))).getdata())
+    )
+    inside = median_rgba(edge_pixels)
+    if inside:
+        readings.append(inside[:3])
+
+    margin = max(2, min(16, round(min(r - l, b - t) * 0.2)))
+    outside = sample_bg_color(base_rgb, (l, t, r, b), margin)
+    if outside:
+        readings.append(outside)
+
+    if not readings:
         return False
-    return pick_bw_text_color(med[:3]) == TEXT_COLOR_LIGHT
+    dark_votes = sum(pick_bw_text_color(rgb) == TEXT_COLOR_LIGHT for rgb in readings)
+    return dark_votes * 2 >= len(readings)
 
 
 def sample_bg_color(base_rgb: Image.Image, rect: Rect, margin_px: int) -> RGB:

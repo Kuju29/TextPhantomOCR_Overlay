@@ -1,28 +1,13 @@
-/**
- *
- * STATUS: ACTIVE — in use in the current flow.
- * MangaDex-specific helpers and caches.
- *
- * MangaDex is a single-page app that serves chapter pages as blob: URLs, so it
- * gets special treatment:
- * - `md:` keys identify a page by its `data|data-saver/hash/file` path so a
- *   result can be re-applied even after the blob URL changes.
- * - a result cache (`mdCacheByKey`) lets re-visited chapters render instantly.
- * - a data-URI cache (`mdDataUriCache`) avoids re-downloading the same image.
- */
+// Identifies MangaDex chapter pages by a blob-URL-independent key and caches their results and image bytes.
 
 const MD_RESULT_TTL_MS = 15 * 60 * 1000;
 const MD_DATAURI_TTL_MS = 15 * 60 * 1000;
 const MD_DATAURI_MAX = 80;
 
-/** cacheKey (`md:.. :: lang :: scope`) -> { newImg, result, ts } */
 const mdResultCache = new Map();
-/** normImgSrc -> { du, ts } */
 const mdDataUriCache = new Map();
 
-// --- URL / key parsing -----------------------------------------------------
-
-/** True if a page URL is on mangadex.org. */
+// Returns true when a page URL is on mangadex.org.
 export function isMangaDexPageUrl(u) {
   try {
     const host = new URL(String(u || "")).hostname.toLowerCase();
@@ -32,29 +17,8 @@ export function isMangaDexPageUrl(u) {
   }
 }
 
-/** Extract the chapter id from a MangaDex reader URL ("" if none). */
-export function mdChapterIdFromUrl(u) {
-  try {
-    const m = String(new URL(String(u || "")).pathname || "").match(
-      /\/chapter\/([a-f0-9-]{8,})/i,
-    );
-    return m ? String(m[1] || "") : "";
-  } catch {
-    return "";
-  }
-}
 
-/** True if two URLs point at the same MangaDex chapter. */
-export function isSameMangaDexChapter(a, b) {
-  const ca = mdChapterIdFromUrl(a);
-  const cb = mdChapterIdFromUrl(b);
-  return !!ca && !!cb && ca === cb;
-}
-
-/**
- * Build a stable `md:` key from an at-home image URL, i.e.
- * `md:data/<hash>/<file>`. Returns "" for non-MangaDex URLs.
- */
+// Builds the stable `md:data/<hash>/<file>` key for an at-home image URL, or "" when the URL is not one.
 export function mdKeyFromUrl(url) {
   try {
     const parts = new URL(String(url || "")).pathname.split("/").filter(Boolean);
@@ -66,27 +30,18 @@ export function mdKeyFromUrl(url) {
       }
     }
   } catch {
-    /* not a URL */
   }
   return "";
 }
 
-// --- Result cache ----------------------------------------------------------
-
+// Maps a job mode to the scope segment used in cache keys.
 function mdScopeFromMode(mode) {
   if (mode === "lens_text") return "text";
   if (mode === "lens_images") return "images";
   return String(mode || "");
 }
 
-/** Build the result-cache key for (md key, language, mode, source).
- *
- * `source` MUST be part of the key: lens_text renders a different overlay per
- * source (original / translated / ai) but the same image+lang+mode, so without
- * it the three sources collide in one slot and switching source replays the
- * previously cached result. It only differentiates text overlays; lens_images
- * has a single result, so its key is left unchanged for backward compatibility.
- */
+// Builds the result-cache key from md key, language, mode and, for text overlays, the text source.
 export function mdCacheKey(mdKey, lang, mode, source = "") {
   const k = String(mdKey || "");
   const l = String(lang || "");
@@ -97,30 +52,38 @@ export function mdCacheKey(mdKey, lang, mode, source = "") {
   return src ? `${k}::${l}::${s}::${src}` : `${k}::${l}::${s}`;
 }
 
-/** Strip all image-bearing fields from a result (cache stores them separately). */
+// Removes every image-bearing field from a result so the cache can store the pixels separately.
 export function stripImageFields(res) {
   if (!res || typeof res !== "object") return res;
   const out = { ...res };
-  for (const k of ["imageDataUri", "imageDataURI", "image", "imageUrl", "image_url", "imageURL"]) {
+  for (const k of [
+    "imageDataUri",
+    "imageDataURI",
+    "sourceImageDataUri",
+    "image",
+    "imageUrl",
+    "image_url",
+    "imageURL",
+  ]) {
     delete out[k];
   }
   return out;
 }
 
-/** Drop expired result-cache entries. */
+// Drops expired result-cache entries.
 function pruneResultCache(now = Date.now()) {
   for (const [k, rec] of mdResultCache.entries()) {
     if (!rec || now - rec.ts > MD_RESULT_TTL_MS) mdResultCache.delete(k);
   }
 }
 
-/** Read a result-cache entry (auto-prunes). */
+// Reads a result-cache entry, or null when absent.
 export function getCachedResult(cacheKey) {
   pruneResultCache();
   return cacheKey ? mdResultCache.get(cacheKey) || null : null;
 }
 
-/** Store a result-cache entry, merging with any existing one. */
+// Stores a result-cache entry, merging it with any existing one.
 export function setCachedResult(cacheKey, { newImg, result }) {
   if (!cacheKey) return;
   pruneResultCache();
@@ -132,9 +95,7 @@ export function setCachedResult(cacheKey, { newImg, result }) {
   });
 }
 
-// --- Data-URI cache --------------------------------------------------------
-
-/** Drop expired / overflowing data-URI cache entries. */
+// Drops expired data-URI entries and trims the cache back to its size limit.
 function pruneDataUriCache(now = Date.now()) {
   for (const [k, rec] of mdDataUriCache.entries()) {
     if (!rec || now - rec.ts > MD_DATAURI_TTL_MS) mdDataUriCache.delete(k);
@@ -146,7 +107,7 @@ function pruneDataUriCache(now = Date.now()) {
   }
 }
 
-/** Get a cached data URI for a normalised image key (auto-prunes). */
+// Returns the cached data URI for a normalised image key, or "".
 export function getCachedDataUri(normKey) {
   pruneDataUriCache();
   if (!normKey) return "";
@@ -154,7 +115,11 @@ export function getCachedDataUri(normKey) {
   return rec?.du && Date.now() - rec.ts <= MD_DATAURI_TTL_MS ? rec.du : "";
 }
 
-/** Store a data URI for a normalised image key. */
+// Stores a data URI for a normalised image key.
 export function setCachedDataUri(normKey, du) {
-  if (normKey && du) mdDataUriCache.set(normKey, { du, ts: Date.now() });
+  if (normKey && du) {
+    mdDataUriCache.delete(normKey);
+    mdDataUriCache.set(normKey, { du, ts: Date.now() });
+    pruneDataUriCache();
+  }
 }

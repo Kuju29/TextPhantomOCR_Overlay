@@ -36,7 +36,31 @@ RUN mkdir -p models \
 # disagree silently, because the file is already present so nothing re-downloads.
 ENV TP_TEXTBLOCK_MODEL_URL=${TP_TEXTBLOCK_MODEL_URL}
 
+# Fonts, baked in for the same reason as the model: so no request pays for a
+# download and no deployment depends on notofonts.github.io being reachable.
+#
+# `font_config.THAI_PATH` is the bare filename "NotoSansThai-Regular.ttf",
+# resolved against the working directory — which is why these land in /app and
+# not in a subfolder. Without them `ensure_font` would try to WRITE the
+# downloaded font here, and on a hosted runtime the app directory is usually
+# not writable by the runtime user (Hugging Face Spaces runs containers as uid
+# 1000, while WORKDIR is created by root). The write fails, and Pillow's bitmap
+# default takes over — which returns a fixed-size box from `textbbox` no matter
+# what size was asked for, so every fit calculation downstream is quietly wrong
+# and Thai renders as tofu. A font that must be fetched at runtime is a
+# rendering bug waiting for a bad network.
+COPY NotoSansThai-Regular.ttf NotoSans-Regular.ttf ./
+
+# Fail the BUILD, not the first request, if the two fonts are not real ones.
+RUN python -c "from PIL import ImageFont; [print(p, ImageFont.truetype(p, 24).getbbox('Aก')) for p in ('NotoSansThai-Regular.ttf','NotoSans-Regular.ttf')]"
+
+COPY build-manifest.json ./build-manifest.json
 COPY backend ./backend
+
+# Diagnostic log FILES stay off in a container: the filesystem is ephemeral (or
+# read-only), and the host already collects stdout. `TP_LOG_FILE=1` turns them
+# back on for a local docker run.
+ENV TP_LOG_FILE=0
 
 ENV PORT=7860
 EXPOSE 7860

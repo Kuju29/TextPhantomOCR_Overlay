@@ -1,6 +1,5 @@
 """Anthropic (api.anthropic.com) chat client.
 
-STATUS: ACTIVE — in use in the current flow.
 """
 
 from __future__ import annotations
@@ -12,6 +11,55 @@ from backend.ai.clients.base import ChatResult
 
 _ENDPOINT = "https://api.anthropic.com/v1/messages"
 _API_VERSION = "2023-06-01"
+
+
+def _is_model_or_snapshot(model: str, prefix: str) -> bool:
+    m = (model or "").strip().lower()
+    return m == prefix or m.startswith(prefix + "-")
+
+
+def _supports_native_schema(model: str) -> bool:
+    """Return true only for Claude families with documented output_config.
+
+    Sonnet/Opus/Haiku 4.5 and subsequent explicitly known releases support
+    native structured outputs. Older and unknown models keep the same JSON
+    contract in the prompt but receive no transport-level output_config.
+    """
+    m = (model or "").strip().lower()
+    supported_starts = (
+        "claude-sonnet-4-5",
+        "claude-sonnet-4-6",
+        "claude-sonnet-5",
+        "claude-opus-4-5",
+        "claude-opus-4-6",
+        "claude-opus-4-7",
+        "claude-opus-4-8",
+        "claude-opus-5",
+        "claude-haiku-4-5",
+        "claude-fable-5",
+        "claude-mythos-5",
+        "claude-mythos-preview",
+    )
+    return any(_is_model_or_snapshot(m, prefix) for prefix in supported_starts)
+
+
+def _accepts_temperature(model: str) -> bool:
+    """Whether a non-default sampling temperature is accepted by Claude.
+
+    Anthropic documents that Opus 4.7+, Sonnet 5, Fable 5, Mythos 5, and
+    Mythos Preview reject non-default temperature values. The decision is made
+    before the sole HTTP call; there is no send-fail-strip-resend negotiation.
+    """
+    rejects_sampling = (
+        "claude-opus-4-7",
+        "claude-opus-4-8",
+        "claude-opus-5",
+        "claude-sonnet-5",
+        "claude-fable-5",
+        "claude-mythos-5",
+        "claude-mythos-preview",
+    )
+    return not any(_is_model_or_snapshot(model, prefix) for prefix in rejects_sampling)
 
 
 def _build_system_field(
@@ -49,8 +97,9 @@ def generate(
     image_mime: str = "image/jpeg",
     system_static: str = "",
     system_dynamic: str = "",
+    response_schema: dict | None = None,
 ) -> ChatResult:
-    """Call Anthropic's Messages API and return the concatenated text reply.
+    """Call Anthropic's Messages API exactly once and return its reply.
 
     ``image_b64`` (optional) attaches the manga page as an image content block
     so a vision-capable model can see the speakers.
@@ -81,23 +130,41 @@ def generate(
     payload = {
         "model": model,
         "max_tokens": ai_config.MAX_TOKENS,
-        "temperature": ai_config.TEMPERATURE,
         "system": _build_system_field(system_text, system_static, system_dynamic),
         "messages": messages,
     }
+    if _accepts_temperature(model):
+        payload["temperature"] = ai_config.TEMPERATURE
+    use_schema = bool(response_schema) and _supports_native_schema(model)
+    if use_schema:
+        payload["output_config"] = {
+            "format": {"type": "json_schema", "schema": response_schema}
+        }
     headers = {
         "x-api-key": api_key,
         "anthropic-version": _API_VERSION,
         "content-type": "application/json",
     }
 
-    with httpx.Client(timeout=ai_config.TIMEOUT_SEC) as client:
-        r = client.post(_ENDPOINT, json=payload, headers=headers)
-        try:
-            r.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            raise RuntimeError(f"Anthropic HTTP {r.status_code}: {r.text}") from e
-        data = r.json()
+    try:
+        with httpx.Client(timeout=ai_config.TIMEOUT_SEC) as client:
+            r = client.post(_ENDPOINT, json=payload, headers=headers)
+    except httpx.RequestError as e:
+        raise RuntimeError(
+            f"Anthropic transport error (model={model}, attempts=1, "
+            f"errorType={type(e).__name__})"
+        ) from e
+    try:
+        r.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        raise RuntimeError(
+            f"Anthropic HTTP {r.status_code} (model={model}, attempts=1)"
+        ) from e
+    data = r.json()
+
+    stop_reason = str(data.get("stop_reason") or "").strip()
+    if stop_reason and stop_reason not in ("end_turn", "stop_sequence"):
+        raise RuntimeError(f"Anthropic response was incomplete (stop_reason={stop_reason})")
 
     content = data.get("content") or []
     text = "".join(

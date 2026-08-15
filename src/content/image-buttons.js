@@ -1,25 +1,4 @@
-/**
- *
- * STATUS: ACTIVE — in use in the current flow.
- * On-image translate buttons (for sites that block right-click).
- *
- * When the popup toggle `imgButtonsEnabled` is on, every translate-worthy
- * image on the page gets a small 🔍 button pinned to its top-RIGHT corner.
- * Clicking it runs the exact same flow as "Translate this image" in the
- * context menu: the image is registered as the last-clicked target
- * (setLastRightClick) and the service worker is asked to run the img_one
- * pipeline (TP_RUN_TRANSLATE_ONE).
- *
- * Design notes:
- * - One fixed container (pointer-events: none) holds all buttons; only the
- *   buttons themselves are clickable, so the page is never blocked.
- * - Eligibility reuses imageSkipReason() — the same filter as page scans —
- *   so buttons never appear on icons/avatars/tracking pixels.
- * - Positions follow scroll/resize (rAF-throttled) and a MutationObserver
- *   picks up lazy-loaded images; detached images lose their button.
- * - Runs in every frame (content scripts are all_frames), each frame owns
- *   its own images.
- */
+// Pins a translate button to every translate-worthy image on the page.
 
 (function () {
   const TP = window.__TP;
@@ -36,10 +15,9 @@
   let rescanTimer = 0;
   let rafPending = false;
   let currentMode = "lens_text";
-  /** HTMLImageElement -> HTMLButtonElement */
   const buttons = new Map();
 
-  // --- DOM scaffolding -------------------------------------------------------
+  // Creates the fixed button layer and its stylesheet when missing.
   function ensureDom() {
     if (!document.documentElement) return false;
     if (!styleEl || !styleEl.isConnected) {
@@ -60,44 +38,23 @@
     if (!container || !container.isConnected) {
       container = document.createElement("div");
       container.id = "tp-img-btn-layer";
-      // Parent on <html>, not <body>: a site styling body with
-      // position/margin/transform would shift every button's coordinates.
       document.documentElement.appendChild(container);
     }
     return true;
   }
 
-  // --- Eligibility -----------------------------------------------------------
+  // Returns true when an image should carry a translate button.
   function isEligible(img) {
-    // Never decorate our own error badges / overlay images.
     if (!img || !img.isConnected) return false;
     if (img.closest?.(".tp-ol-root")) return false;
     return !TP.imageSkipReason(img, currentMode);
   }
 
-  // --- Positioning -----------------------------------------------------------
-  // The layer is FIXED and viewport-sized with overflow:hidden, and buttons
-  // use viewport coordinates. This way off-screen images can never widen the
-  // page's scrollable area (an absolute document-space layer did exactly
-  // that: a button placed past the document edge grew the scroll width).
-  // Rendered-size gate: the button only shows on images that currently LOOK
-  // like content (manga pages), judged by their VISIBLE on-screen size — not
-  // natural size and not the raw element box. Hover-preview thumbnails (e.g.
-  // e-hentai listings) are big <img> elements cropped to ~20px by an
-  // overflow:hidden parent; the raw rect passes a size check, the visible
-  // rect does not.
   const MIN_RENDERED_SIDE = 120;
   const MIN_RENDERED_AREA = 60_000;
   const CLIP_WALK_MAX = 10;
 
-  /**
-   * The image's VISIBLE rect, or null when it is effectively invisible:
-   * - clipped away by an overflow:hidden/clip/auto/scroll ancestor, or
-   * - hidden via visibility (inherited — computed on the img itself), or
-   * - faded out via opacity:0 on the img or any walked ancestor
-   *   (hover-preview thumbnails on listing sites use exactly these tricks
-   *   while still occupying full-size layout space).
-   */
+  // Returns the image's visible rect after ancestor clipping, or null when it is invisible.
   function visibleRectOf(img) {
     const ics = getComputedStyle(img);
     if (ics.visibility !== "visible" || Number(ics.opacity) === 0) return null;
@@ -121,7 +78,7 @@
     return { left, top, right, bottom, width: right - left, height: bottom - top };
   }
 
-  /** Compute a button's placement — READS ONLY. null = hidden. */
+  // Returns a button's viewport placement, or null when it should stay hidden.
   function computePlacement(img) {
     const r = visibleRectOf(img);
     if (!r) return null;
@@ -134,11 +91,10 @@
       r.top > window.innerHeight ||
       r.left > window.innerWidth;
     if (tooSmall || offScreen) return null;
-    // Top-right corner of the VISIBLE part (viewport coords — layer is fixed).
     return { left: Math.round(r.right - BTN_SIZE - 6), top: Math.round(r.top + 6) };
   }
 
-  /** Apply a placement — WRITES ONLY. */
+  // Writes a placement onto a button, or hides it.
   function applyPlacement(btn, p) {
     if (!p) {
       btn.style.display = "none";
@@ -153,9 +109,7 @@
     applyPlacement(btn, computePlacement(img));
   }
 
-  // Batched read-then-write: interleaving rect reads with style writes can
-  // force one reflow PER BUTTON per frame; two phases keep it to (at most)
-  // one layout pass regardless of how many buttons exist.
+  // Repositions every button in one read phase followed by one write phase.
   function repositionAll() {
     rafPending = false;
     const plans = [];
@@ -165,9 +119,9 @@
         buttons.delete(img);
         continue;
       }
-      plans.push([btn, computePlacement(img)]); // read phase
+      plans.push([btn, computePlacement(img)]);
     }
-    for (const [btn, p] of plans) applyPlacement(btn, p); // write phase
+    for (const [btn, p] of plans) applyPlacement(btn, p);
   }
 
   function scheduleReposition() {
@@ -176,7 +130,7 @@
     requestAnimationFrame(repositionAll);
   }
 
-  // --- Button behaviour ------------------------------------------------------
+  // Runs the single-image translate flow for a clicked button.
   function onButtonClick(img, btn, event) {
     event.preventDefault();
     event.stopPropagation();
@@ -184,15 +138,11 @@
     btn.dataset.busy = "1";
     btn.textContent = "⏳";
 
-    // Same registration a real right-click performs — makes blob:/data:
-    // sources resolvable via GET_CONTEXT_IMAGE_PAYLOAD.
     TP.setLastRightClick?.(img);
     const srcUrl = TP.normUrl(TP.getBestImgUrl(img)) || img.currentSrc || img.src || "";
 
     chrome.runtime.sendMessage({ type: "TP_RUN_TRANSLATE_ONE", srcUrl }, (resp) => {
       void chrome.runtime.lastError;
-      // Progress + result arrive through the normal toast/overlay pipeline;
-      // the button just resets after a moment.
       setTimeout(() => {
         btn.dataset.busy = "";
         btn.textContent = "🔍";
@@ -210,16 +160,13 @@
     btn.textContent = "🔍";
     btn.title = "Translate this image (TextPhantom)";
     btn.addEventListener("click", (e) => onButtonClick(img, btn, e));
-    // Some sites cancel mousedown to fight toolbars — keep ours alive.
     btn.addEventListener("mousedown", (e) => e.stopPropagation());
     return btn;
   }
 
-  // --- Scanning --------------------------------------------------------------
+  // Adds buttons to newly eligible images and removes those that no longer qualify.
   function rescan() {
     if (!enabled || !ensureDom()) return;
-    // Re-evaluate EXISTING buttons too: an image may have loaded/changed src
-    // since the last scan and turned out to be an icon/avatar after all.
     for (const [img, btn] of buttons.entries()) {
       if (!isEligible(img)) {
         btn.remove();
@@ -242,7 +189,6 @@
     rescanTimer = setTimeout(rescan, RESCAN_DEBOUNCE_MS);
   }
 
-  // --- Enable / disable ------------------------------------------------------
   function enable() {
     if (enabled) return;
     enabled = true;
@@ -253,14 +199,11 @@
       } catch {
         currentMode = "lens_text";
       }
-      if (!enabled) return; // toggled off while reading settings
+      if (!enabled) return;
       rescan();
       window.addEventListener("scroll", scheduleReposition, { passive: true, capture: true });
       window.addEventListener("resize", scheduleReposition, { passive: true });
-      // Image "load" doesn't bubble, but a capture listener sees it: re-run
-      // the size gate the moment a lazy image gets its real dimensions.
       window.addEventListener("load", scheduleRescan, true);
-      // New / lazy-loaded images.
       observer = new MutationObserver(scheduleRescan);
       observer.observe(document.documentElement, {
         childList: true,
@@ -294,7 +237,6 @@
     TP.log.info("image buttons disabled");
   }
 
-  // --- Wiring ----------------------------------------------------------------
   try {
     chrome.storage.local.get(STORAGE_KEY, (items) => {
       void chrome.runtime.lastError;
@@ -306,6 +248,5 @@
       else disable();
     });
   } catch {
-    /* storage unavailable (rare) — feature simply stays off */
   }
 })();

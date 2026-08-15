@@ -1,6 +1,5 @@
 """Manga TEXT-BLOCK detector — the grouping authority for vertical text.
 
-STATUS: ACTIVE — in use in the current flow.
 
 Model: ``Kiuyha/Manga-Bubble-YOLO`` (YOLO26, 2025, Apache-2.0) — trained on
 Manga109 + MangaDex pages with Magiv2-assisted annotations to detect text
@@ -41,7 +40,6 @@ Box = tuple[float, float, float, float]
 _INPUT_SIZE = 1280
 _CONF_THRESH = 0.30
 
-# ---------------------------------------------------------------------------
 # Session pool — multiple independent ONNX sessions so workers can run
 # inference in parallel instead of serialising on a single lock.
 #
@@ -50,7 +48,6 @@ _CONF_THRESH = 0.30
 # (pool_size−1) x ~1.3 s ≈ 3.9 s, instead of (12−1) x 1.3 s ≈ 14 s.
 #
 # Memory cost per session: ~25 MB (yolo26s) / ~7 MB (yolo26n) — negligible.
-# ---------------------------------------------------------------------------
 _pool: _queue_mod.Queue[Any] = _queue_mod.Queue()
 _pool_count = 0          # sessions successfully loaded
 _pool_ready = False      # init has been attempted (success or failure)
@@ -285,7 +282,7 @@ def _roi_plan(
     return list(rois), f"roi_{len(rois)}"
 
 
-def _dedupe_boxes(boxes: list[Box], iou_thresh: float = 0.6) -> list[Box]:
+def dedupe_text_blocks(boxes: list[Box], iou_thresh: float = 0.6) -> list[Box]:
     """Drop near-duplicate boxes produced by overlapping crops."""
     kept: list[Box] = []
     for b in boxes:
@@ -311,6 +308,9 @@ def detect_text_blocks_in_rois(
     img: Image.Image,
     rois: list[Box],
     timings: dict | None = None,
+    *,
+    force_individual: bool = False,
+    max_calls: int = 0,
 ) -> list[Box]:
     """Detect text blocks by running the model on cropped regions.
 
@@ -321,7 +321,13 @@ def detect_text_blocks_in_rois(
     thing that makes a benchmark meaningless.
     """
     W, H = img.size
-    plan, reason = _roi_plan(list(rois or []), W, H)
+    candidates = list(rois or [])
+    if force_individual and candidates:
+        cap = max(1, int(max_calls or len(candidates)))
+        plan = candidates[:cap]
+        reason = f"forced_retry_{len(plan)}_of_{len(candidates)}"
+    else:
+        plan, reason = _roi_plan(candidates, W, H)
     if timings is not None:
         timings["roi_reason"] = reason
         timings["roi_candidates"] = len(rois or [])
@@ -341,7 +347,7 @@ def detect_text_blocks_in_rois(
         for b in detect_text_blocks(crop, timings=timings):
             # Crop-local pixels -> page pixels.
             boxes.append((b[0] + x1, b[1] + y1, b[2] + x1, b[3] + y1))
-    merged = _dedupe_boxes(boxes)
+    merged = dedupe_text_blocks(boxes)
     dbg("textblocks.roi", {"crops": len(plan), "boxes": len(merged), "reason": reason})
     return merged
 

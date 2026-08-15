@@ -1,6 +1,5 @@
 """Minimal protobuf wire-format reader for Google Lens responses.
 
-STATUS: ACTIVE — in use in the current flow.
 
 Google Lens returns OCR geometry as nested, *unschematised* protobuf messages
 embedded inside the JSON response.  We only need a handful of fields, so
@@ -16,9 +15,16 @@ message layout is not documented — we identify "item" sub-messages by their
 from __future__ import annotations
 
 import struct
+from typing import NamedTuple
 
 # A decoded field is (field_number, wire_type, value).
 ProtoField = tuple[int, int, object]
+
+# The widest varint the JavaScript port (`src/shared/lens-proto.js`) can hold
+# exactly. Python would carry a wider one happily and the two readers would
+# then disagree on the same bytes — the exact drift the shared fixture exists
+# to catch, except it would only show on a page nobody has yet.
+MAX_EXACT_VARINT = 2**53 - 1
 
 
 def read_varint(buf: bytes, i: int) -> tuple[int, int]:
@@ -32,6 +38,8 @@ def read_varint(buf: bytes, i: int) -> tuple[int, int]:
         i += 1
         result |= (b & 0x7F) << shift
         if (b & 0x80) == 0:
+            if result > MAX_EXACT_VARINT:
+                raise ValueError(f"varint {result} exceeds the safe integer range")
             return result, i
         shift += 7
         if shift > 70:
@@ -181,29 +189,50 @@ def is_item_message(msg_bytes: bytes) -> bool:
     return geom_ok and span_ok > 0
 
 
-def extract_items_from_paragraph(par_bytes: bytes) -> list[bytes]:
+class ParagraphItems(NamedTuple):
+    """Items found in a paragraph, and HOW they were found.
+
+    ``deep`` and ``exhausted`` are not decoration. The deep walk is a
+    compatibility path for a nesting Lens has used before; a build where Lens
+    started nesting everything one level down looks identical to one where it
+    did not, right up until the node budget runs out on a dense page and
+    paragraphs start vanishing. Saying which pass answered, and whether it ran
+    out of budget, is the difference between that showing up here and showing
+    up as "the renderer is dropping bubbles".
+    """
+
+    items: list[bytes]
+    deep: bool
+    exhausted: bool
+
+
+def extract_items_from_paragraph(par_bytes: bytes) -> ParagraphItems:
     """Find every item sub-message inside a paragraph message."""
-    items = [
+    shallow = [
         v
         for _, w, v in parse(par_bytes)
         if w == 2 and is_item_message(v)  # type: ignore[arg-type]
     ]
-    if items:
-        return items
+    if shallow:
+        return ParagraphItems(shallow, deep=False, exhausted=False)  # type: ignore[arg-type]
 
     found: list[bytes] = []
     seen: set[bytes] = set()
     nodes = 0
+    exhausted = False
 
     def walk(buf: bytes, depth: int) -> None:
-        nonlocal nodes
+        nonlocal nodes, exhausted
         if depth >= 4 or nodes > 20000:
+            if nodes > 20000:
+                exhausted = True
             return
         for _, w, v in parse(buf):
             if w != 2:
                 continue
             nodes += 1
             if nodes > 20000:
+                exhausted = True
                 return
             if is_item_message(v):  # type: ignore[arg-type]
                 if v not in seen:
@@ -213,7 +242,7 @@ def extract_items_from_paragraph(par_bytes: bytes) -> list[bytes]:
                 walk(v, depth + 1)  # type: ignore[arg-type]
 
     walk(par_bytes, 0)
-    return found
+    return ParagraphItems(found, deep=True, exhausted=exhausted)
 
 
 def extract_item_geom_spans(item_bytes: bytes) -> tuple[bytes | None, list[bytes]]:

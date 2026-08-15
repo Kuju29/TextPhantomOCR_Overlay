@@ -1,6 +1,5 @@
 """Quiet HTTP/WebSocket logging for production.
 
-STATUS: ACTIVE — in use in the current flow.
 
 The stock uvicorn access log is too noisy for this app because extensions poll
 ``/health``, ``/warmup``, ``/meta`` and ``/translate/{id}`` frequently.  By
@@ -20,13 +19,14 @@ from http import HTTPStatus
 
 from fastapi import Request
 
+from backend import trace
 from backend.config import settings
 from backend.log import event
 
 _UVICORN_MODE = "uvicorn"
 _EVENT_MODES = {"summary", "custom", "tp", "plain"}
-_NOISY_PATHS = ("/health", "/warmup", "/meta")
-
+_ERROR_ONLY_MODES = {"errors", "error", "err", "warn", "warnings"}
+_FAILURE_MODES = _EVENT_MODES | _ERROR_ONLY_MODES
 # The app's REAL route prefixes. A 404 on anything else is internet background
 # noise — vulnerability scanners probing /.env, /.git/config, /phpinfo.php,
 # /actuator/... on every public host. Those used to be logged one line each
@@ -34,7 +34,7 @@ _NOISY_PATHS = ("/health", "/warmup", "/meta")
 # out real errors; now they are AGGREGATED into one compact summary line per
 # window (see _note_scanner_probe).
 _KNOWN_PREFIXES = (
-    "/translate", "/ai/", "/ws", "/health", "/warmup", "/meta", "/version",
+    "/translate", "/ai/", "/v1/", "/health", "/warmup", "/meta", "/version",
 )
 
 _SCANNER_WINDOW_SEC = 600  # one summary line per 10 minutes at most
@@ -96,41 +96,54 @@ def configure_uvicorn_access_log() -> None:
 async def access_log_middleware(request: Request, call_next):
     """Log only HTTP failures; success summaries are emitted by route/job code."""
     try:
-        response = await call_next(request)
-    except Exception as exc:
-        if settings.access_log_mode in _EVENT_MODES:
-            event(
-                "http.error",
-                {
-                    "method": request.method,
-                    "path": request.url.path,
-                    "error": str(exc)[:240],
-                },
-                ok=False,
-            )
-        raise
-
-    if settings.access_log_mode in _EVENT_MODES:
         try:
-            path = request.url.path
-            # No health/warmup/meta/poll success spam.  Only surface HTTP errors.
-            if response.status_code >= 400 and not path.startswith(_NOISY_PATHS):
-                # Scanner-bot probes (404 on a path we never served) are
-                # aggregated, not logged per line — keeps real errors visible.
-                if response.status_code == 404 and not path.startswith(_KNOWN_PREFIXES):
-                    _note_scanner_probe(request.method, path)
-                else:
-                    phrase = HTTPStatus(response.status_code).phrase
-                    event(
-                        "http.error",
-                        {
-                            "method": request.method,
-                            "path": path,
-                            "status": response.status_code,
-                            "message": phrase,
-                        },
-                        ok=False,
-                    )
-        except Exception:
-            pass
-    return response
+            response = await call_next(request)
+        except Exception as exc:
+            if settings.access_log_mode in _FAILURE_MODES:
+                event(
+                    "http.error",
+                    {
+                        "method": request.method,
+                        "path": request.url.path,
+                        "error": str(exc)[:240],
+                    },
+                    ok=False,
+                )
+            raise
+
+        if settings.access_log_mode in _FAILURE_MODES:
+            try:
+                path = request.url.path
+                # No health/warmup/meta/poll success spam.  Only surface HTTP errors.
+                if response.status_code >= 400:
+                    # `POST /v1/logs -> 503` is the DOCUMENTED answer when file
+                    # logging is off, which is the default. It is a correct reply to
+                    # a correct request, so logging it as a server error puts a red
+                    # line in the log for the log endpoint being switched off — and
+                    # a log full of expected errors is a log nobody reads.
+                    if response.status_code == 503 and path == "/v1/logs":
+                        pass
+                    # Scanner-bot probes (404 on a path we never served) are
+                    # aggregated, not logged per line — keeps real errors visible.
+                    elif response.status_code == 404 and not path.startswith(_KNOWN_PREFIXES):
+                        _note_scanner_probe(request.method, path)
+                    else:
+                        phrase = HTTPStatus(response.status_code).phrase
+                        event(
+                            "http.error",
+                            {
+                                "method": request.method,
+                                "path": path,
+                                "status": response.status_code,
+                                "message": phrase,
+                            },
+                            ok=False,
+                        )
+            except Exception:
+                pass
+        return response
+    finally:
+        # Lens, ONNX, AI and browser-ingest routes are separate requests.  The
+        # old code flushed only /v1/translate, leaving the last stage buffered
+        # until another request happened or the process exited cleanly.
+        trace.flush()

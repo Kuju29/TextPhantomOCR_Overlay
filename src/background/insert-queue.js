@@ -1,17 +1,4 @@
-/**
- *
- * STATUS: ACTIVE — in use in the current flow.
- * Batched DOM insertion queue.
- *
- * Server work can now complete many images at nearly the same time. Sending one
- * chrome.tabs.sendMessage per result makes the "insert back" phase look serial
- * and creates lots of IPC/DOM churn. This module groups finished results by
- * tab/frame and flushes them to the content script in small bulk messages.
- *
- * The content script still applies overlays/replacements safely on the page's
- * main thread, but it does so in chunks per animation frame instead of one
- * message at a time.
- */
+// Groups finished results by tab and frame and flushes them to the content script as bulk insert messages.
 
 import { createLogger } from "../shared/logger.js";
 import { requestFromTabEnsured } from "./tabs-messaging.js";
@@ -20,15 +7,18 @@ const log = createLogger("SW.insert");
 
 const INSERT_FLUSH_DELAY_MS = 8;
 const INSERT_BATCH_MAX_ITEMS = 16;
-const INSERT_BATCH_MAX_CHARS = 14_000_000; // avoid huge multi-dataURI IPC messages
+const INSERT_BATCH_MAX_CHARS = 14_000_000;
+const INSERT_INFLIGHT_MAX_CHARS = 48_000_000;
 
 let seq = 0;
 const queues = new Map();
 
+// Returns the queue key identifying one tab and frame.
 function groupKey(tabId, frameId) {
   return `${Number(tabId) || 0}:${Number(frameId) || 0}`;
 }
 
+// Estimates a message's serialised size in characters.
 function approxMessageChars(message) {
   try {
     return JSON.stringify(message).length;
@@ -37,6 +27,7 @@ function approxMessageChars(message) {
   }
 }
 
+// Returns the pending queue for a tab and frame, creating it when absent.
 function getGroup(tabId, frameId) {
   const key = groupKey(tabId, frameId);
   let g = queues.get(key);
@@ -55,6 +46,7 @@ function getGroup(tabId, frameId) {
   return g;
 }
 
+// Arms the flush timer for a queue, firing at once when asked.
 function scheduleFlush(g, immediate = false) {
   if (!g || g.flushing) return;
   if (g.timer) return;
@@ -65,13 +57,13 @@ function scheduleFlush(g, immediate = false) {
   }, delay);
 }
 
+// Removes the next batch of queued items, bounded by item count and character budget.
 function takeBatch(g) {
   const batch = [];
   let chars = 0;
   while (g.items.length && batch.length < INSERT_BATCH_MAX_ITEMS) {
     const next = g.items[0];
     const sz = Number(next.size) || 0;
-    // Always allow at least one large item through; split big dataURI results.
     if (batch.length && chars + sz > INSERT_BATCH_MAX_CHARS) break;
     batch.push(g.items.shift());
     chars += sz;
@@ -80,11 +72,50 @@ function takeBatch(g) {
   return batch;
 }
 
+// Sends one queued item as its own message and settles it.
 async function sendSingleFallback(g, entry) {
   const resp = await requestFromTabEnsured(g.tabId, entry.message, g.frameId);
   entry.resolve(resp || { ok: false, error: "insert message failed" });
 }
 
+// Sends one batch to the content script and settles every entry in it.
+async function sendBatch(g, batch) {
+  const started = Date.now();
+  const items = batch.map((e) => ({ id: e.id, message: e.message }));
+  try {
+    const resp = await requestFromTabEnsured(
+      g.tabId,
+      { type: "TP_BULK_INSERT", items, chunkSize: INSERT_BATCH_MAX_ITEMS },
+      g.frameId,
+    );
+
+    if (resp?.ok && resp?.bulk && Array.isArray(resp.results)) {
+      const byId = new Map(resp.results.map((r) => [String(r?.id || ""), r]));
+      for (const entry of batch) {
+        entry.resolve(byId.get(entry.id) || { ok: false, error: "missing bulk result" });
+      }
+      log.debug?.("bulk insert flushed", {
+        count: batch.length,
+        ms: Date.now() - started,
+        tabId: g.tabId,
+        frameId: g.frameId,
+      });
+      return;
+    }
+
+    log.warn("bulk insert fallback", {
+      count: batch.length,
+      reason: resp?.error || "no bulk ack",
+    });
+    for (const entry of batch) await sendSingleFallback(g, entry);
+  } catch (e) {
+    const msg = e?.message || String(e);
+    log.warn("bulk insert failed", { err: msg, count: batch.length });
+    for (const entry of batch) entry.resolve({ ok: false, error: msg });
+  }
+}
+
+// Drains a queue, dispatching batches concurrently within the in-flight character budget.
 async function flushGroup(g) {
   if (!g || g.flushing) return;
   if (!g.items.length) {
@@ -94,42 +125,18 @@ async function flushGroup(g) {
   g.flushing = true;
   try {
     while (g.items.length) {
-      const batch = takeBatch(g);
-      if (!batch.length) break;
-      const started = Date.now();
-      const items = batch.map((e) => ({ id: e.id, message: e.message }));
-      const resp = await requestFromTabEnsured(
-        g.tabId,
-        {
-          type: "TP_BULK_INSERT",
-          items,
-          chunkSize: INSERT_BATCH_MAX_ITEMS,
-        },
-        g.frameId,
-      );
-
-      if (resp?.ok && resp?.bulk && Array.isArray(resp.results)) {
-        const byId = new Map(resp.results.map((r) => [String(r?.id || ""), r]));
-        for (const entry of batch) {
-          entry.resolve(byId.get(entry.id) || { ok: false, error: "missing bulk result" });
-        }
-        log.debug?.("bulk insert flushed", {
-          count: batch.length,
-          ms: Date.now() - started,
-          tabId: g.tabId,
-          frameId: g.frameId,
-        });
-      } else {
-        // Content script is old/not ready or bulk handler failed. Fall back to
-        // the original per-item messages so results are not lost.
-        log.warn("bulk insert fallback", { count: batch.length, reason: resp?.error || "no bulk ack" });
-        for (const entry of batch) await sendSingleFallback(g, entry);
+      const inFlight = [];
+      let bytes = 0;
+      while (g.items.length && (!inFlight.length || bytes < INSERT_INFLIGHT_MAX_CHARS)) {
+        const batch = takeBatch(g);
+        if (!batch.length) break;
+        bytes += batch.reduce((n, e) => n + (Number(e.size) || 0), 0);
+        inFlight.push(sendBatch(g, batch));
       }
+      if (!inFlight.length) break;
+      log.debug?.("bulk insert dispatched", { batches: inFlight.length, chars: bytes });
+      await Promise.all(inFlight);
     }
-  } catch (e) {
-    const msg = e?.message || String(e);
-    log.warn("bulk insert failed", { err: msg, pending: g.items.length });
-    for (const entry of g.items.splice(0)) entry.resolve({ ok: false, error: msg });
   } finally {
     g.flushing = false;
     if (g.items.length) scheduleFlush(g, true);
@@ -137,7 +144,7 @@ async function flushGroup(g) {
   }
 }
 
-/** Queue a page DOM insertion/replacement command. */
+// Queues a page DOM insertion or replacement command and resolves with the page's answer.
 export function enqueueDomInsert(tabId, message, frameId = 0) {
   if (!tabId || !message?.type) return Promise.resolve({ ok: false, error: "invalid insert target" });
   return new Promise((resolve) => {
@@ -154,14 +161,4 @@ export function enqueueDomInsert(tabId, message, frameId = 0) {
     const immediate = g.items.length >= INSERT_BATCH_MAX_ITEMS || g.bytes >= INSERT_BATCH_MAX_CHARS;
     scheduleFlush(g, immediate);
   });
-}
-
-export function describeInsertQueues() {
-  return [...queues.values()].map((g) => ({
-    tabId: g.tabId,
-    frameId: g.frameId,
-    queued: g.items.length,
-    bytes: g.bytes,
-    flushing: g.flushing,
-  }));
 }

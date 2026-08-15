@@ -1,6 +1,5 @@
 """Async split job queue + worker pools.
 
-STATUS: ACTIVE — in use in the current flow.
 
 ``/translate`` enqueues a payload and returns a job id immediately; the
 client then uses long-polling to receive updates.  Jobs are split into two
@@ -18,6 +17,7 @@ automatic split.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 import traceback
 import uuid
@@ -25,14 +25,106 @@ from typing import Any, Callable
 
 from backend.config import settings
 from backend.log import dbg, event
+from backend.ai.failure_reason import is_rate_limited as _ai_is_rate_limited
+from backend.ai.failure_reason import retry_after_sec as _ai_retry_after_sec
 from backend.ai.rategate import rate_gate, RateGateTimeout, RateGateRejected
+from backend.ai.errors import ModelOutputContractError
+from backend.ai.failure_reason import classify as classify_ai_failure
 from backend.ai.providers import resolve_provider
+from backend import trace
 
 Job = dict[str, Any]
 
 
+def _provider_attempted(exc: BaseException) -> bool:
+    """True only when the exception proves a generation request was made."""
+    if isinstance(exc, ModelOutputContractError):
+        return True
+    message = str(exc).lower()
+    return any(token in message for token in (
+        " http ", "http 4", "http 5", "transport error", "provider timeout",
+        "finish_reason", "stop_reason", "empty response", "empty text",
+    ))
+
+
+def _result_generation_attempts(result: Any) -> int:
+    """Prove a successful provider call from the pipeline result metadata."""
+    if not isinstance(result, dict):
+        return 0
+    perf = result.get("perf") if isinstance(result.get("perf"), dict) else {}
+    if str(perf.get("cache") or "").lower() == "hit":
+        return 0
+    ai_result = result.get("Ai") if isinstance(result.get("Ai"), dict) else {}
+    ai_meta = ai_result.get("meta") if isinstance(ai_result.get("meta"), dict) else {}
+    return 1 if (ai_meta.get("provider") or ai_meta.get("model")) else 0
+
+
+def _trace_ai_terminal(
+    payload: dict, job_id: str, event_name: str, *, exc: BaseException | None = None,
+    attempts: int | None = 0, duration_ms: float = 0.0,
+    attempt_state: str = "",
+) -> None:
+    """Write a safe terminal record for the legacy queued AI route."""
+    if not trace.enabled():
+        return
+    context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+    trace_id = str(context.get("tp_trace") or "")
+    if not trace_id:
+        return
+    ai = payload.get("ai") if isinstance(payload.get("ai"), dict) else {}
+    requested_provider = str(ai.get("provider") or "auto").strip() or "auto"
+    requested_model = str(ai.get("model") or "auto").strip() or "auto"
+    status_match = re.search(r"\bHTTP\s+(\d{3})\b", str(exc or ""), re.IGNORECASE)
+    data: dict[str, Any] = {
+        "stage": event_name,
+        "jobId": job_id,
+        "requestedProvider": requested_provider,
+        "requestedModel": requested_model,
+        "providerAttempts": attempts,
+        "generationAttempts": attempts,
+        "attemptsKnown": attempts is not None,
+        "attemptState": attempt_state or ("known" if attempts is not None else "unknown"),
+        "providerHttpStatuses": [int(status_match.group(1))] if status_match else [],
+        "automaticContentRetry": False,
+        "automaticTransportRetry": False,
+        "modelFallback": False,
+        "schemaFallback": False,
+        "durationMs": round(max(0.0, duration_ms), 1),
+    }
+    if exc is not None:
+        data["failureKind"] = classify_ai_failure(exc)
+        data["errorType"] = type(exc).__name__
+        if isinstance(exc, ModelOutputContractError):
+            data.update(dict(exc.structural_details))
+    trace.write(
+        "api", "jobs/queue.py", "JobQueue._worker_loop",
+        "!!" if exc is not None else "<-", data, trace_id=trace_id,
+    )
+    trace.flush()
+
+
 class QueueFull(Exception):
     """Raised by :meth:`JobQueue.enqueue` when the pending queue is saturated."""
+
+
+# Feeds the adaptive rate gate from the legacy queue, so the server-side pipeline
+# learns a key's real speed exactly like the v1 route does.
+def _report_rate_outcome(payload: dict, *, ok: bool, exc: BaseException | None = None) -> None:
+    ai = payload.get("ai") if isinstance(payload.get("ai"), dict) else {}
+    rate = JobQueue._rate_options(payload)
+    if not rate["enabled"] or (rate["rpm"] or 0) > 0:
+        return  # pacing off, or the user pinned a number we must not move
+    # The gate keyed the bucket on the RESOLVED provider; feeding it the raw
+    # "auto" would address a bucket that does not exist and learn nothing.
+    api_key = str(ai.get("api_key") or "")
+    provider = resolve_provider(str(ai.get("provider") or "auto"), api_key)
+    model = str(ai.get("model") or "auto")
+    if ok:
+        rate_gate.report_success(provider, model, api_key)
+    elif exc is not None and _ai_is_rate_limited(exc):
+        rate_gate.report_rate_limited(
+            provider, model, api_key, retry_after_sec=_ai_retry_after_sec(exc)
+        )
 
 
 class JobQueue:
@@ -238,6 +330,7 @@ class JobQueue:
             )
             event("translate.ratelimited", {"job_id": job_id, "provider": provider,
                                             "error": str(exc)[:160]}, ok=False)
+            _trace_ai_terminal(payload, job_id, "rate_gate", exc=exc, attempts=0)
             return False
 
     async def cancel(self, *, job_ids: Any = None, batch_id: str = "", session: str = "") -> dict:
@@ -454,6 +547,11 @@ class JobQueue:
 
             # Skip jobs cancelled while still queued (see cancel()).
             if str((self._jobs.get(job_id) or {}).get("status") or "") == "aborted":
+                if kind == self.AI:
+                    _trace_ai_terminal(
+                        payload, job_id, "cancelled_in_queue",
+                        exc=RuntimeError("cancelled before AI started"), attempts=0,
+                    )
                 queue.task_done()
                 continue
 
@@ -481,6 +579,10 @@ class JobQueue:
                         job_id,
                         {**prev, "status": "aborted", "result": "cancelled",
                          "ts": time.time(), "queue_kind": kind},
+                    )
+                    _trace_ai_terminal(
+                        payload, job_id, "cancelled_at_rate_gate",
+                        exc=RuntimeError("cancelled before AI started"), attempts=0,
                     )
                     queue.task_done()
                     continue
@@ -520,6 +622,15 @@ class JobQueue:
                     result["perf"]["ai_gate_wait_ms"] = gate_wait_ms
                 await self._set_job(job_id, {**prev, "status": "done", "result": result, "ts": time.time(), "queue_kind": kind})
                 event("translate.done", {**summary, "dt_ms": round((time.perf_counter() - t0) * 1000, 1)})
+                if kind == self.AI:
+                    # Same adaptive feedback the v1 route gives: a clean provider
+                    # call raises this key's sustained rate, nothing else does.
+                    _report_rate_outcome(payload, ok=True)
+                    _trace_ai_terminal(
+                        payload, job_id, "completed",
+                        attempts=_result_generation_attempts(result),
+                        duration_ms=(time.perf_counter() - t0) * 1000,
+                    )
             except asyncio.TimeoutError:
                 prev = dict(self._jobs.get(job_id) or {})
                 await self._set_job(
@@ -531,6 +642,13 @@ class JobQueue:
                     {**summary, "dt_ms": round((time.perf_counter() - t0) * 1000, 1), "error": "job timed out"},
                     ok=False,
                 )
+                if kind == self.AI:
+                    _trace_ai_terminal(
+                        payload, job_id, "job_timeout", exc=TimeoutError("job timed out"),
+                        attempts=None,
+                        attempt_state="unknown_after_worker_timeout",
+                        duration_ms=(time.perf_counter() - t0) * 1000,
+                    )
             except Exception as e:  # noqa: BLE001
                 tb = traceback.format_exc()
                 dbg("jobs.error", {"job_id": job_id, "error": str(e), "traceback": tb})
@@ -544,6 +662,13 @@ class JobQueue:
                     job_id,
                     {**prev, "status": "error", "result": str(e), "traceback": tb, "ts": time.time(), "queue_kind": kind},
                 )
+                if kind == self.AI:
+                    _report_rate_outcome(payload, ok=False, exc=e)
+                    _trace_ai_terminal(
+                        payload, job_id, "processing", exc=e,
+                        attempts=1 if _provider_attempted(e) else 0,
+                        duration_ms=(time.perf_counter() - t0) * 1000,
+                    )
             finally:
                 queue.task_done()
 

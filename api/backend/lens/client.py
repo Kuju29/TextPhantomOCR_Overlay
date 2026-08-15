@@ -1,6 +1,5 @@
 """Google Lens HTTP client.
 
-STATUS: ACTIVE — in use in the current flow.
 
 Two-step flow:
 1. ``POST https://lens.google.com/v3/upload`` with the image — Lens responds
@@ -25,12 +24,82 @@ from urllib.parse import parse_qs, urlencode, urlparse
 import httpx
 
 from backend.lens import cookie
+from backend import trace
 
 _UPLOAD_URL = "https://lens.google.com/v3/upload"
 _REQUEST_HEADERS = {
     "User-Agent": "Mozilla/5.0",
     "Referer": "https://lens.google.com/",
 }
+
+# --- Connection pool ---------------------------------------------------------
+# Every Lens call is two requests to the same host, and a `with httpx.Client()`
+# around each one meant every request opened a fresh TCP + TLS connection.
+# Counted on 2026-08-07: ten images cost TWENTY handshakes; a pooled client
+# costs one. Each handshake is two network round trips (TCP, then TLS 1.3), so
+# on a 3.0 s Lens call this is pure latency that buys nothing.
+#
+# ONE client per cookie jar, not one per request:
+#   * httpx 0.28 deprecated per-request `cookies=` (the persistence rules are
+#     ambiguous), so the jar has to live on the client;
+#   * the jar changes only when the Firebase cookie is refreshed, which a
+#     background task does about once an hour — so in practice one client
+#     serves every request.
+#
+# The default `keepalive_expiry` of 5 s is deliberately left alone: requests
+# within one image (and across a batch) are milliseconds apart and reuse the
+# connection, while an idle connection is dropped by us long before Google
+# would drop it — which is what makes a stale-socket error impossible here.
+_client_lock = threading.Lock()
+_client: httpx.Client | None = None
+_client_jar_key = ""
+_limits = httpx.Limits(max_connections=32, max_keepalive_connections=16)
+
+
+def _jar_key(ck: dict) -> str:
+    """Identity of a cookie jar, so a refresh is noticed and nothing else is."""
+    return hashlib.sha256(
+        json.dumps(ck or {}, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _session(ck: dict) -> httpx.Client:
+    """The pooled client for this cookie jar, rebuilt when the jar changes.
+
+    ``httpx.Client`` is safe to share across threads, which is what makes one
+    client serving fifteen workers correct rather than merely convenient.
+    """
+    global _client, _client_jar_key
+    key = _jar_key(ck)
+    with _client_lock:
+        if _client is not None and _client_jar_key == key:
+            return _client
+        stale = _client
+        _client = httpx.Client(
+            cookies=ck,
+            headers=_REQUEST_HEADERS,
+            follow_redirects=False,
+            timeout=60,
+            limits=_limits,
+        )
+        _client_jar_key = key
+    if stale is not None:
+        # Outside the lock: closing drains sockets and must not block a request
+        # that is only waiting to read the new client.
+        try:
+            stale.close()
+        except Exception:  # noqa: BLE001 - a client we are discarding anyway
+            pass
+    return _client
+
+
+def close_session() -> None:
+    """Drop the pooled client. For tests and shutdown."""
+    global _client, _client_jar_key
+    with _client_lock:
+        stale, _client, _client_jar_key = _client, None, ""
+    if stale is not None:
+        stale.close()
 
 # --- Lens response cache (in-process, TTL LRU) -------------------------------
 # Keyed by (sha256(image), lang). Switching source (original / translated /
@@ -43,6 +112,25 @@ _LENS_CACHE_MAX = max(8, int(os.environ.get("TP_LENS_CACHE_MAX", "256")))
 _LENS_CACHE_TTL_SEC = 600.0
 _lens_cache: OrderedDict[str, tuple[float, dict[str, Any]]] = OrderedDict()
 _lens_cache_lock = threading.Lock()
+
+
+class _Flight:
+    def __init__(self) -> None:
+        self.done = threading.Event()
+        self.data: dict[str, Any] | None = None
+        self.error: BaseException | None = None
+
+
+_FLIGHT_MAX = max(1, int(os.environ.get("TP_LENS_SINGLEFLIGHT_MAX", "128")))
+_flights: dict[str, _Flight] = {}
+_flights_lock = threading.Lock()
+
+
+def _cookie_trace(state: str, **data: Any) -> None:
+    """Emit compact recovery telemetry when the active trace build supports it."""
+    note = getattr(trace, "note", None)
+    if callable(note):
+        note("lens_cookie", {"state": state, **data}, file="lens/client.py")
 
 
 def _lens_cache_get(key: str) -> dict[str, Any] | None:
@@ -113,16 +201,20 @@ def _has_lens_text(data: dict[str, Any]) -> bool:
 
 
 def _fetch_lens_once(img_bytes: bytes, lang: str, ck: dict) -> dict[str, Any]:
-    """One upload+fetch round trip against Lens with the given cookie jar."""
-    with httpx.Client(cookies=ck, headers=_REQUEST_HEADERS, follow_redirects=False, timeout=60) as c:
-        r = c.post(_UPLOAD_URL, files={"encoded_image": ("file.jpg", img_bytes, "image/jpeg")})
-        if r.status_code not in (302, 303):
-            raise RuntimeError(f"Lens upload failed: {r.status_code}\n{r.text}")
-        redirect = r.headers["location"]
+    """One upload+fetch round trip against Lens with the given cookie jar.
+
+    The two requests are genuinely sequential — the second one's URL comes out
+    of the first one's redirect — so the only thing to win here is not paying
+    for a new connection twice. Both go through the pooled client.
+    """
+    c = _session(ck)
+    r = c.post(_UPLOAD_URL, files={"encoded_image": ("file.jpg", img_bytes, "image/jpeg")})
+    if r.status_code not in (302, 303):
+        raise RuntimeError(f"Lens upload failed: {r.status_code}\n{r.text}")
+    redirect = r.headers["location"]
 
     translated_url = _to_translated_url(redirect, lang)
-    with httpx.Client(cookies=ck, headers=_REQUEST_HEADERS, timeout=60) as c:
-        body = c.get(translated_url).text
+    body = c.get(translated_url).text
 
     # Strip the XSSI-protection prefix Google prepends to JSON responses.
     if body.startswith(")]}'"):
@@ -146,19 +238,74 @@ def fetch_lens_data(image_path: str, lang: str, firebase_url: str | None = None)
     if cached is not None:
         return cached
 
-    try:
-        data = _fetch_lens_once(img_bytes, lang, cookie.get(firebase_url))
-    except LensSessionError:
-        # Cookie went stale mid-flight — refresh it and retry once.
-        data = _fetch_lens_once(
-            img_bytes, lang, cookie.get(firebase_url, force_refresh=True)
-        )
+    leader = False
+    with _flights_lock:
+        flight = _flights.get(cache_key)
+        if flight is None and len(_flights) < _FLIGHT_MAX:
+            flight = _Flight()
+            _flights[cache_key] = flight
+            leader = True
+    if flight is not None and not leader:
+        # The route's admission/cancellation boundary remains outside this
+        # synchronous client. Waiting shares the leader's network result; it
+        # never starts a second Google upload.
+        flight.done.wait()
+        if flight.error is not None:
+            raise flight.error
+        return copy.deepcopy(flight.data or {})
 
-    # Cache only responses that carry text. Genuinely textless images are
-    # cheap to re-check; transient empty responses must never stick.
-    if isinstance(data, dict) and _has_lens_text(data):
-        _lens_cache_set(cache_key, data)
-    return data
+    try:
+        try:
+            initial = cookie.state(firebase_url)
+            _cookie_trace("initial", generation=initial.generation)
+            data = _fetch_lens_once(img_bytes, lang, initial.data)
+        except LensSessionError as initial_error:
+            # Refresh is global across image keys, while result singleflight is
+            # per image. Generation/epoch prevents every image in one stale
+            # batch from independently fetching the same Firebase jar.
+            try:
+                refreshed = cookie.refresh_after(initial, firebase_url, timeout_sec=30.0)
+            except BaseException as refresh_error:
+                _cookie_trace("refresh_failed", errorType=type(refresh_error).__name__)
+                raise LensSessionError("Lens cookie refresh failed") from refresh_error
+            changed = refreshed.generation != initial.generation
+            _cookie_trace(
+                "refreshed" if changed else "refresh_unchanged",
+                generation=refreshed.generation, coalesced=refreshed.coalesced,
+            )
+            if not changed:
+                # Retrying the identical rejected jar only repeats an upload and
+                # makes a stale Firebase value look transient.
+                raise LensSessionError("Lens cookie source still serves the rejected jar") from initial_error
+            try:
+                data = _fetch_lens_once(img_bytes, lang, refreshed.data)
+            except LensSessionError as refreshed_error:
+                _cookie_trace(
+                    "refreshed_failed", generation=refreshed.generation,
+                    coalesced=refreshed.coalesced,
+                )
+                raise LensSessionError("Lens rejected the refreshed cookie jar") from refreshed_error
+            _cookie_trace(
+                "refreshed_success", generation=refreshed.generation,
+                coalesced=refreshed.coalesced,
+            )
+
+        # Cache only responses that carry text. Genuinely textless images are
+        # cheap to re-check; transient empty responses must never stick.
+        if isinstance(data, dict) and _has_lens_text(data):
+            _lens_cache_set(cache_key, data)
+        if leader and flight is not None:
+            flight.data = copy.deepcopy(data)
+        return data
+    except BaseException as exc:
+        if leader and flight is not None:
+            flight.error = exc
+        raise
+    finally:
+        if leader and flight is not None:
+            flight.done.set()
+            with _flights_lock:
+                _flights.pop(cache_key, None)
 
 
 def _b64_pad(s: str) -> str:

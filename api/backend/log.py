@@ -1,6 +1,5 @@
 """Small logging helpers used across the backend.
 
-STATUS: ACTIVE — in use in the current flow.
 
 Production defaults are intentionally quiet: no uvicorn access spam, no health
 polls, and no debug payload dumps.  ``event`` emits one compact JSON line for
@@ -14,6 +13,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from backend import logfile
 from backend.config import settings
 
 _MAX_PAYLOAD_CHARS = 2000
@@ -57,6 +57,12 @@ def event(tag: str, data: Any | None = None, *, ok: bool = True) -> None:
       process errors. Note this hides FAILURES too, not just successes.
     - ``uvicorn``: do not duplicate uvicorn's own access log.
     """
+    # The FILE gets every event regardless of the console mode. The console
+    # setting exists to keep a loaded server quiet; the file exists to answer
+    # "what happened" afterwards, and a quiet console is exactly the situation
+    # where that question cannot be answered any other way.
+    logfile.api(tag, data if isinstance(data, dict) else ({"data": data} if data is not None else None), ok=ok)
+
     mode = settings.access_log_mode
     if mode in _ERROR_ONLY_MODES:
         if ok:
@@ -75,7 +81,21 @@ def event(tag: str, data: Any | None = None, *, ok: bool = True) -> None:
 
 
 def dbg(tag: str, data: Any | None = None) -> None:
-    """Print a tagged debug line only when ``TP_DEBUG`` is enabled."""
+    """Print a tagged debug line only when ``TP_DEBUG`` is enabled.
+
+    The file always gets it. Debug lines are the ones that explain a decision,
+    and needing to reproduce a problem with TP_DEBUG=1 to find out why it
+    happened means the first occurrence taught us nothing.
+    """
+    logfile.write(
+        "api",
+        {
+            "side": "api",
+            "tag": tag,
+            "level": "debug",
+            **(data if isinstance(data, dict) else ({"data": data} if data is not None else {})),
+        },
+    )
     if not settings.debug:
         return
     try:

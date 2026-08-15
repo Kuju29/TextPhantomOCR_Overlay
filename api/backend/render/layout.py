@@ -1,6 +1,5 @@
 """Text layout: tokenising, line-wrapping, font-fitting and span placement.
 
-STATUS: ACTIVE — in use in the current flow.
 
 The renderer's job is to pour translated text back into the *boxes* of the
 original OCR items.  This module owns that pour:

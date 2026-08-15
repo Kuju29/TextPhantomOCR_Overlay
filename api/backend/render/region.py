@@ -1,6 +1,5 @@
 """Deterministic text-region geometry for the AI overlay layer.
 
-STATUS: ACTIVE — in use in the current flow.
 
 Ported from manga-image-translator (textblock.py + rendering). Every
 decision here is a closed-form computation. The model has three pieces:
@@ -14,7 +13,7 @@ decision here is a closed-form computation. The model has three pieces:
 from __future__ import annotations
 
 import math
-from typing import Final, NamedTuple
+from typing import Any, Final, NamedTuple
 
 # Reading direction per target language. "h" horizontal, "v" vertical,
 # "hr" horizontal right-to-left, "auto" decide by region aspect.
@@ -156,6 +155,41 @@ def is_rtl(target_lang: str) -> bool:
     return code.split("-", 1)[0] in RTL_LANGUAGES
 
 
+def box_rotation_deg(box: Any) -> float:
+    """The rotation of one box, in degrees.
+
+    Reads ``rotation_deg``. ``rotation_deg_css`` is used ONLY when
+    ``rotation_deg`` is absent — not when it is zero.
+
+    This used to be spelled ``box.get("rotation_deg") or
+    box.get("rotation_deg_css") or 0.0``, which falls through on a rotation of
+    exactly 0 and silently answers with the OTHER key. The two are written
+    together everywhere today, so nothing is currently wrong; the failure it
+    sets up is that the day they diverge, an upright box reports the css value
+    and a whole page picks the wrong reading axis — surfacing as "ONNX ran on a
+    horizontal page", four files away from the lookup that caused it.
+
+    Absent from BOTH is 0°: an upright box legitimately omits the field, and
+    "unset" and "0°" are the same intent. A present-but-unreadable value is
+    not, and raises.
+
+    Mirrored by ``boxRotationDeg`` in ``src/shared/lens-axis.js``.
+    """
+    source = box if isinstance(box, dict) else {}
+    key = "rotation_deg" if "rotation_deg" in source else "rotation_deg_css"
+    if key not in source:
+        return 0.0
+    try:
+        value = float(source[key])
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"box.{key} is not a number: {source[key]!r}") from exc
+    # NaN / inf survive `float()` in Python but not `Number.isFinite` in the
+    # JavaScript port. Refusing both keeps the two answers identical.
+    if not math.isfinite(value):
+        raise ValueError(f"box.{key} is not a number: {source[key]!r}")
+    return value
+
+
 def classify_item_axis(item: dict, tilt_tol: float = 12.0) -> str:
     """Classify one item's reading axis from its baseline rotation.
 
@@ -164,8 +198,7 @@ def classify_item_axis(item: dict, tilt_tol: float = 12.0) -> str:
     label that must keep its angle, never auto-rotated). Sign-insensitive
     for the vertical case so the unstable +/-90 sign never matters.
     """
-    box = item.get("box") or {}
-    rot = float(box.get("rotation_deg") or box.get("rotation_deg_css") or 0.0)
+    rot = box_rotation_deg(item.get("box"))
     residual = ((rot + 45.0) % 90.0) - 45.0
     if abs(residual) > tilt_tol:
         return "tilted"
@@ -245,7 +278,7 @@ def compute_region_geometry(
             cy = float(box.get("top") or 0.0) + float(box.get("height") or 0.0) / 2.0
         cxs.append(float(cx) * img_w)
         cys.append(float(cy) * img_h)
-        rots.append(float(box.get("rotation_deg") or box.get("rotation_deg_css") or 0.0))
+        rots.append(box_rotation_deg(box))
         heights.append(float(box.get("height") or 0.0) * img_h)
 
     center_x = sum(cxs) / len(cxs)

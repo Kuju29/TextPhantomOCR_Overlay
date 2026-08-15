@@ -1,6 +1,5 @@
 """Font resolution, loading and caching.
 
-STATUS: ACTIVE — in use in the current flow.
 
 Three layers of caching keep this cheap:
 - ``_resolve_cache``  : font path -> resolved path on disk (or "" if missing).

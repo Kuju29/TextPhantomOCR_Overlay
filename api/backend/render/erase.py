@@ -1,6 +1,5 @@
 """Remove the original text from an image so translated text can be drawn.
 
-STATUS: ACTIVE — in use in the current flow.
 
 Several strategies are available; the public entry point is
 :func:`erase_text_with_boxes`, which dispatches on ``mode``:
@@ -250,6 +249,43 @@ def _erase_with_inpaint(base: Image.Image, box_tokens: list[dict], pad_px: int =
 
 
 # --- Public entry point ----------------------------------------------------
+
+def restore_token_regions(
+    base: Image.Image,
+    source: Image.Image,
+    box_tokens: list[dict],
+    pad_px: int = PADDING_PX,
+) -> Image.Image:
+    """Paste ``source``'s pixels back over exactly the regions these tokens erased.
+
+    The AI is asked for every unit on the page but may answer only some. The
+    erase runs before the answer exists, so the unanswered bubbles have already
+    lost their glyphs by the time we know they will get no replacement. Painting
+    the original pixels back is the only honest repair: no filler text, no blank
+    speech bubble. The same quad and padding as :func:`erase_text_with_boxes`
+    are used, so nothing outside what was erased is touched.
+    """
+    if not box_tokens:
+        return base
+    width, height = base.size
+    src = source.convert("RGB")
+    if src.size != base.size:
+        return base
+    for token in box_tokens:
+        quad = _token_mask_quad(token, width, height, pad_px)
+        if not quad:
+            continue
+        rect = quad_bbox(quad, width, height)
+        if not rect:
+            continue
+        left, top, right, bottom = rect
+        mask = Image.new("L", (right - left, bottom - top), 0)
+        ImageDraw.Draw(mask).polygon([(x - left, y - top) for x, y in quad], fill=255)
+        region = base.crop((left, top, right, bottom))
+        region.paste(src.crop((left, top, right, bottom)), mask=mask)
+        base.paste(region, (left, top))
+    return base
+
 
 def erase_text_with_boxes(
     img: Image.Image,

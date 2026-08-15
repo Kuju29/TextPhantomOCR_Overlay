@@ -1,6 +1,5 @@
 /**
  *
- * STATUS: ACTIVE — in use in the current flow.
  * Popup DOM references + pure render helpers.
  *
  * Everything here is stateless: it reads/writes the DOM but holds no app
@@ -32,7 +31,13 @@ export const els = {
   aiPageImageWrap: document.getElementById("ai-page-image-wrap"),
   aiPageImage: document.getElementById("ai-page-image"),
   aiRateWrap: document.getElementById("ai-rate-wrap"),
+  aiLocalUnlimited: document.getElementById("ai-local-unlimited"),
+  apiLocalUnlimitedWrap: document.getElementById("api-local-unlimited-wrap"),
+  apiLocalUnlimited: document.getElementById("api-local-unlimited"),
+  engineMode: document.getElementById("engine-mode"),
   rateLimitEnabled: document.getElementById("rate-limit-enabled"),
+  rateProfile: document.getElementById("rate-profile"),
+  rateCustomFields: document.getElementById("rate-custom-fields"),
   rateRpm: document.getElementById("rate-rpm"),
   rateBurst: document.getElementById("rate-burst"),
   ratePresetHint: document.getElementById("rate-preset-hint"),
@@ -210,6 +215,25 @@ const LOCAL_PROVIDERS = new Set([
   "koboldcpp", "vllm", "llamafile", "gpt4all", "local", "llama",
 ]);
 
+// Returns whether a custom API URL points at this machine or the local network.
+export function isLocalApiUrl(url) {
+  const raw = String(url || "").trim();
+  if (!raw) return false;
+  let host = "";
+  try {
+    host = new URL(raw).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) return true;
+  if (host === "::1" || host === "[::1]" || host === "0.0.0.0") return true;
+  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+  if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+  if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
+  return false;
+}
+
 export function isLocalProvider(provider) {
   return LOCAL_PROVIDERS.has(String(provider || "").trim().toLowerCase());
 }
@@ -267,10 +291,19 @@ export function toggleUi({ hasEnvKey }) {
   if (els.aiRateWrap) {
     els.aiRateWrap.style.display = showAi && canConfigureAi && !local ? "" : "none";
   }
+  // The unlimited switch belongs to the local endpoint block and is only
+  // meaningful there, so it appears and disappears with it.
+  if (els.apiLocalUnlimitedWrap) {
+    els.apiLocalUnlimitedWrap.style.display =
+      isLocalApiUrl(els.apiUrl?.value || "") ? "" : "none";
+  }
   // The RPM / burst boxes are inert while pacing is off — disable rather than
   // hide, so the numbers stay visible and come back exactly as they were.
   const paceOn = Boolean(els.rateLimitEnabled?.checked);
+  const customRate = els.rateProfile?.value === "custom";
+  if (els.rateProfile) els.rateProfile.disabled = !paceOn;
+  if (els.rateCustomFields) els.rateCustomFields.style.display = customRate ? "" : "none";
   for (const el of [els.rateRpm, els.rateBurst]) {
-    if (el) el.disabled = !paceOn;
+    if (el) el.disabled = !paceOn || !customRate;
   }
 }

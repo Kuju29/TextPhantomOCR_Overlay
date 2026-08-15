@@ -1,6 +1,5 @@
 /**
  *
- * STATUS: ACTIVE — in use in the current flow.
  * Popup tab switcher (classic script — MV3 CSP forbids inline scripts).
  *
  * Pure presentation: shows one `.panel` at a time and remembers the last

@@ -1,16 +1,22 @@
-/**
- *
- * STATUS: ACTIVE — in use in the current flow.
- * DOM / URL utilities shared by the other content-script modules:
- * URL normalisation, picking the best image URL, lazy-image normalisation,
- * the image-to-overlay scaling math, and the on-page toast.
- */
+// DOM and URL helpers shared by the content-script modules.
 
 (function () {
   const TP = window.__TP;
   if (!TP || TP.bail) return;
 
-  /** Normalise a URL against the page origin, dropping the hash. */
+  // Runs a callback on the next animation frame, or on the next task while the tab is hidden,
+  // because requestAnimationFrame does not fire in a background tab.
+  function onNextFrame(fn) {
+    if (document.visibilityState === "hidden") return setTimeout(fn, 0);
+    return requestAnimationFrame(fn);
+  }
+
+  // Awaits the next frame, or the next task while the tab is hidden.
+  function nextFrame() {
+    return new Promise((resolve) => onNextFrame(() => resolve()));
+  }
+
+  // Normalises a URL against the page origin, dropping the hash.
   function normUrl(u) {
     if (!u) return "";
     try {
@@ -33,7 +39,7 @@
     typeof u === "string" &&
     /^(?:data:|blob:|file:|chrome-extension:|moz-extension:)/i.test(u);
 
-  /** Best source URL for an image element (prefers a remembered original). */
+  // Returns the best source URL for an image element, preferring a remembered original.
   function getBestImgUrl(img) {
     const tp =
       img?.dataset?.tpOriginal ||
@@ -49,7 +55,7 @@
     );
   }
 
-  /** Read a Blob as a data URI (resolves "" on failure). */
+  // Reads a Blob as a data URI, resolving to "" on failure.
   function blobToDataUri(blob) {
     return new Promise((resolve) => {
       try {
@@ -63,7 +69,7 @@
     });
   }
 
-  /** Strip lazy-loading scripts and force `data-src` onto `src`. */
+  // Removes lazy-loading scripts and forces data-src onto src.
   function removeLazyScriptsAndForceSrc() {
     const lazyScripts = document.querySelectorAll('script[src*="lazy"]');
     lazyScripts.forEach((s) => s.remove());
@@ -75,7 +81,7 @@
     TP.log.info("lazy removed + src forced", { lazyScripts: lazyScripts.length });
   }
 
-  /** Promote `data-*` lazy attributes to real `src`/`srcset` and eager-load. */
+  // Promotes lazy data attributes to real src/srcset and switches images to eager loading.
   function normalizeLazyImages() {
     document.querySelectorAll("img").forEach((img) => {
       const candSet = img.getAttribute("data-srcset") || img.getAttribute("data-lazy-srcset");
@@ -87,10 +93,10 @@
     });
   }
 
-  /** A pipeline-event object for payload metadata. */
+  // Builds a pipeline-event object for payload metadata.
   const buildPipelineEvent = (stage) => ({ stage, at: new Date().toISOString() });
 
-  /** Capture an image's on-screen position + viewport context. */
+  // Captures an image's on-screen position and viewport context.
   function buildPositionFromElement(img) {
     const rect = img.getBoundingClientRect();
     return {
@@ -105,11 +111,7 @@
     };
   }
 
-  /**
-   * Compute how the overlay scope must be scaled/offset to sit exactly over an
-   * image, accounting for `object-fit` / `object-position` / CSS transforms.
-   * @returns {{rect,cw,ch,nw,nh,sx,sy,offX,offY,transform,transformOrigin}}
-   */
+  // Computes the scale and offset that place an overlay scope exactly over an image.
   function computeScale(imgElement, baseW, baseH, preferRect = false) {
     const rect = imgElement.getBoundingClientRect();
     const cw = preferRect
@@ -173,9 +175,10 @@
     };
   }
 
-  // --- On-page toast -------------------------------------------------------
   let toastEl = null;
   let toastTimer = 0;
+
+  // Shows a transient message in the corner of the page.
   function showToast(text, ms = 2000) {
     if (!text) return;
     if (!toastEl) {
@@ -204,18 +207,17 @@
     }, Math.max(800, Number(ms) || 0));
   }
 
-  /** Dispatch a `textphantom:*` CustomEvent (the local viewer listens for these). */
+  // Dispatches a textphantom:* CustomEvent that the local viewer listens for.
   function emitViewerEvent(type, detail) {
     try {
       window.dispatchEvent(
         new CustomEvent(type, { detail: detail && typeof detail === "object" ? detail : {} }),
       );
     } catch {
-      /* CustomEvent unsupported */
     }
   }
 
-  /** Promise-wrapped message to the service worker (resolves null on error). */
+  // Sends a message to the service worker, resolving null on error.
   function sendBg(message) {
     return new Promise((resolve) => {
       try {
@@ -229,15 +231,12 @@
     });
   }
 
-  /** Read the core user settings from storage. */
+  // Reads the core user settings from storage.
   function getSettings() {
     return new Promise((resolve) => {
       chrome.storage.local.get(["mode", "lang", "sources", "aiKey"], (it) => {
         resolve({
-          // Must match DEFAULT_MODE in shared/constants.js. Content scripts are
-          // classic scripts (no ES imports), so the constant is mirrored here;
-          // keep both in sync so an unset mode never resolves differently than
-          // the popup/background readers.
+          // Defaults must match DEFAULT_MODE in src/shared/constants.js.
           mode: typeof it.mode === "string" ? it.mode : "lens_text",
           lang: typeof it.lang === "string" ? it.lang : "th",
           sources: typeof it.sources === "string" ? it.sources : "translated",
@@ -248,6 +247,8 @@
   }
 
   Object.assign(TP, {
+    onNextFrame,
+    nextFrame,
     sendBg,
     getSettings,
     normUrl,

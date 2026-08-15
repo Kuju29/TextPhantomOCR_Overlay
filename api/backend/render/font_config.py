@@ -1,6 +1,5 @@
 """Static font configuration: which TTF/OTF to use per script, and where to
 
-STATUS: ACTIVE — in use in the current flow.
 download them from when they are missing on disk.
 
 The actual loading / caching logic lives in :mod:`backend.render.fonts`.

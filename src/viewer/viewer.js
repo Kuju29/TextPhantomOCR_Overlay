@@ -1,6 +1,5 @@
 /**
  *
- * STATUS: ACTIVE — in use in the current flow.
  * Local-viewer orchestrator.
  *
  * Loads a saved image session, renders the sidebar page list + reader strip,
@@ -42,7 +41,7 @@ import {
 const READER_WIDTH_KEY = "textphantom.viewer.width";
 const sessionId = String(new URLSearchParams(location.search).get("sid") || "").trim();
 
-// --- State -----------------------------------------------------------------
+// State
 const pagesById = new Map();
 const originalToPageId = new Map();
 const selectedPageIds = new Set();
@@ -52,7 +51,7 @@ let currentSession = null;
 let dragPageId = "";
 let readerWidth = Number(localStorage.getItem(READER_WIDTH_KEY) || 980);
 
-// --- Page collections ------------------------------------------------------
+// Page collections
 const getOrderedPages = () => pageOrder.map((id) => pagesById.get(id)).filter(Boolean);
 const getSelectedPages = () => getOrderedPages().filter((p) => selectedPageIds.has(p.id));
 
@@ -67,7 +66,7 @@ function revokeObjectUrls() {
   objectUrls.clear();
 }
 
-// --- UI sync ---------------------------------------------------------------
+// UI sync
 function updateSelectionSummary() {
   const selected = selectedPageIds.size;
   if (els.selectionSummary) els.selectionSummary.textContent = `${selected} selected`;
@@ -112,7 +111,7 @@ function setPageSelection(pageId, checked) {
   updateSelectionSummary();
 }
 
-// --- Zoom ------------------------------------------------------------------
+// Zoom
 function applyReaderWidth(px) {
   readerWidth = clamp(Number(px) || 980, Number(els.zoomRange.min), Number(els.zoomRange.max));
   document.documentElement.style.setProperty("--reader-width", `${readerWidth}px`);
@@ -121,7 +120,7 @@ function applyReaderWidth(px) {
   if (els.zoomIndicator) els.zoomIndicator.textContent = `${readerWidth}px`;
 }
 
-// --- Ordering --------------------------------------------------------------
+// Ordering
 function movePage(fromId, toId) {
   const from = pageOrder.indexOf(fromId);
   const to = pageOrder.indexOf(toId);
@@ -166,7 +165,7 @@ function findPageIdByOriginal(original) {
   return "";
 }
 
-// --- Downloads -------------------------------------------------------------
+// Downloads
 async function getCurrentSettings() {
   const stored = await getStorage(["mode", "lang"]);
   return {
@@ -468,7 +467,7 @@ async function downloadSelected(kind) {
   setStatus(`Downloaded ${selected.length} ${kind === "html" ? "HTML" : "image"} file(s).`);
 }
 
-// --- Rendering -------------------------------------------------------------
+// Rendering
 function renderEmpty() {
   els.pageList.replaceChildren();
   const empty = document.createElement("div");
@@ -592,7 +591,7 @@ function renderSession() {
   syncUi();
 }
 
-// --- Session lifecycle -----------------------------------------------------
+// Session lifecycle
 async function loadSessionIntoView(id) {
   currentSession = await loadLocalSession(id);
   pagesById.clear();
@@ -660,7 +659,7 @@ async function clearViewer() {
   setStatus("Viewer cleared.");
 }
 
-// --- Translation event handlers (from the content-script modules) ----------
+// Translation event handlers (from the content-script modules)
 function handleTranslatedImage(detail) {
   const pageId = findPageIdByOriginal(detail?.original);
   const page = pagesById.get(pageId);
@@ -685,7 +684,7 @@ function handleOverlayUpdated(detail) {
   setStatus(`Overlay ready for ${page.name}`);
 }
 
-// --- Event wiring ----------------------------------------------------------
+// Event wiring
 els.pageList.addEventListener("click", (event) => {
   const item = event.target.closest(".page-list-item");
   if (!item || event.target.closest('input[type="checkbox"]')) return;
@@ -812,7 +811,7 @@ window.addEventListener("textphantom:image-updated", (event) => handleTranslated
 window.addEventListener("textphantom:overlay-updated", (event) => handleOverlayUpdated(event.detail || {}));
 window.addEventListener("beforeunload", revokeObjectUrls);
 
-// --- Go --------------------------------------------------------------------
+// Go
 (async () => {
   applyReaderWidth(readerWidth);
   if (!sessionId) {

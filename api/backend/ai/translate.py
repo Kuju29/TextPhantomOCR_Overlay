@@ -1,6 +1,5 @@
 """High-level AI translation orchestration.
 
-STATUS: ACTIVE — in use in the current flow.
 
 This is the single entry point the rest of the backend uses to turn a block
 of marked source text into a marked translation.  It owns:
@@ -8,24 +7,26 @@ of marked source text into a marked translation.  It owns:
 - provider / model / base-url resolution,
 - prompt assembly,
 - dispatch to the correct client (Gemini / Anthropic / OpenAI-compatible),
-- HF rate-limit backoff,
-- response parsing + marker sanitisation.
+- HF account pacing,
+- lossless one-response decoding back to canonical internal markers.
 
-It does NOT own retry-on-missing-markers — that decision lives in the
-pipeline, which knows how many paragraphs were expected.
+It performs exactly one model generation. Provider-native JSON Schema is used
+where available; all other models receive the same JSON contract in the prompt.
+Incomplete output is rejected rather than repaired or retried.
 """
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from typing import Any, TypedDict
 
 from backend.ai import markers, parsing, prompts
+from backend.ai.errors import ModelOutputContractError
 from backend.ai.clients import anthropic as anthropic_client
 from backend.ai.clients import gemini as gemini_client
 from backend.ai import throttle
 from backend.ai.clients import openai_compat
-from backend.ai.config import PROVIDER_DEFAULTS
 from backend.ai.providers import (
     is_hf_provider,
     is_local_provider,
@@ -35,6 +36,7 @@ from backend.ai.providers import (
     resolve_provider,
 )
 from backend.lens.languages import normalize as normalize_lang
+from backend.security import assert_ai_base_url_allowed
 
 
 @dataclass
@@ -42,6 +44,11 @@ class AiConfig:
     """User-supplied AI settings for one translation request."""
 
     api_key: str
+    # True when ``api_key`` came from the caller, False when it fell back to
+    # the server's AI_API_KEY. This decides whether a caller-chosen base_url
+    # may be used at all — see backend/security.py. It defaults to False so a
+    # caller that forgets to set it gets the RESTRICTIVE behaviour.
+    user_key: bool = False
     model: str = "auto"
     provider: str = "auto"
     base_url: str = "auto"
@@ -91,6 +98,20 @@ class AiResult(TypedDict):
     meta: dict[str, Any]
 
 
+def resolve_generation_model(provider: str, requested_model: str) -> str:
+    """Resolve only an explicit ``auto`` instruction for a generation.
+
+    Alias migration remains available to the settings/resolve endpoint where
+    it is disclosed to the user. The generation path sends every explicit
+    model ID unchanged, so a retired or misspelled model fails visibly on its
+    sole provider attempt instead of being silently substituted.
+    """
+    requested = (requested_model or "").strip()
+    if not requested or requested.lower() == "auto":
+        return resolve_model(provider, "auto")
+    return requested
+
+
 def translate(
     original_text_full: str,
     target_lang: str,
@@ -103,7 +124,8 @@ def translate(
     """Translate ``original_text_full`` into ``target_lang`` using ``ai``.
 
     ``original_text_full`` carries ``<<TP_Pn>>`` markers; the return
-    value's ``aiTextFull`` is sanitised back into canonical marker form.
+    value's ``aiTextFull`` is decoded back into canonical marker form without
+    changing any translated value.
 
     ``reference_text_full`` is accepted but ignored — the model now sees only
     the source text.  Sending the Lens MT roughly doubled the input tokens
@@ -136,24 +158,22 @@ def translate(
         # Keyless request with a local base_url but no recognised provider name
         # → treat as Ollama (the most common local server).
         provider = "ollama"
-    model = resolve_model(provider, ai.model)
+    model = resolve_generation_model(provider, ai.model)
     base_url = resolve_base_url(provider, ai.base_url)
 
-    # The HF fallback path should only kick in when the user did not pin a model.
-    model_was_auto = (ai.model or "auto").strip().lower() in ("", "auto")
+    # Refuse to send the SERVER's key to an endpoint the caller picked. This is
+    # the last gate before the key reaches an Authorization header, so it runs
+    # on the RESOLVED url — a payload that hides the target behind an alias
+    # cannot slip past it.
+    assert_ai_base_url_allowed(provider, base_url, user_key=bool(getattr(ai, "user_key", False)))
 
     # Local servers (Ollama / LM Studio / …) load whatever model the USER has
     # installed; our default model name is only a placeholder.  When the user
-    # didn't pin a real model (auto / empty / the "local-model" placeholder /
-    # the provider's own default), ask the server which models it actually has
+    # explicitly selected auto/empty, ask the server which models it actually has
     # and use the first one — so the request matches an installed model instead
-    # of 404-ing on a name the user doesn't have.
+    # of 404-ing on a placeholder. Every explicit model ID remains immutable.
     if is_local_provider(provider):
-        _placeholder = {
-            "auto", "", "local-model",
-            str((PROVIDER_DEFAULTS.get(provider) or {}).get("model", "")).strip().lower(),
-        }
-        if str(ai.model or "auto").strip().lower() in _placeholder:
+        if str(ai.model or "auto").strip().lower() in ("", "auto"):
             try:
                 installed = openai_compat_models(api_key or "local", base_url)
             except Exception:
@@ -173,6 +193,10 @@ def translate(
     # Frozen batches: the brief already updated the series memory, so the
     # per-page <<TP_MEMO>> emission is skipped (shorter, cheaper output) while
     # the character sheet itself IS still injected.
+    want_memo = char_memory and not context_frozen
+    response_schema = markers.translation_schema(
+        original_text_full, want_memo=want_memo
+    )
     system_static, system_dynamic = prompts.build_system_split(
         target_lang, ai.prompt_editable, is_retry=is_retry,
         glossary=getattr(ai, "glossary", None),
@@ -180,10 +204,11 @@ def translate(
             getattr(ai, "characters", None) if (char_memory or context_frozen) else None
         ),
         has_image=bool(image_b64),
-        want_memo=char_memory and not context_frozen,
+        want_memo=want_memo,
         series_state=str(getattr(ai, "series_state", "") or ""),
         speakers=getattr(ai, "speakers", None),
         prev_context=getattr(ai, "prev_context", None),
+        structured_output=True,
     )
     system_text = "\n\n".join(p for p in (system_static, system_dynamic) if p)
     user_parts = prompts.build_user_parts(original_text_full)
@@ -199,31 +224,54 @@ def translate(
             api_key, model, system_text, user_parts,
             image_b64=image_b64, image_mime=image_mime,
             thinking=str(getattr(ai, "thinking", "") or ""),
+            response_schema=response_schema,
         )
     elif provider == "anthropic":
         result = anthropic_client.generate(
             api_key, model, system_text, user_parts,
             image_b64=image_b64, image_mime=image_mime,
             system_static=system_static, system_dynamic=system_dynamic,
+            response_schema=response_schema,
         )
     elif is_hf_provider(provider, base_url):
         result = throttle.generate_with_backoff(
             api_key, base_url, model, system_text, user_parts,
-            allow_hf_fallback=model_was_auto,
+            allow_hf_fallback=False,
             image_b64=image_b64, image_mime=image_mime,
+            response_schema=response_schema,
         )
     else:
         result = openai_compat.generate(
             api_key, base_url, model, system_text, user_parts,
             allow_hf_fallback=False,
             image_b64=image_b64, image_mime=image_mime,
+            response_schema=response_schema,
         )
     used_model = result.used_model
 
     # Split off the optional <<TP_MEMO>> character-notes block BEFORE marker
     # sanitisation so it can never leak into the rendered translation.
-    parsed_text, memo = markers.split_memo(parsing.parse_text(result.text))
-    ai_text_full = markers.sanitize(parsed_text)
+    ids = markers.expected_ids(original_text_full)
+    if not ids:
+        raise ValueError("AI input requires the exact marker sequence P0..Pn")
+    # One deterministic decoder handles the SAME provider response. It accepts
+    # only shapes whose IDs and values can be recovered without guessing or
+    # editing translated content; structural failures are terminal.
+    try:
+        decoded = markers.decode_translation_response(result.text, ids)
+    except ModelOutputContractError as exc:
+        # Structural diagnostics only: enough to identify the exact broken
+        # contract without writing translated dialogue into TP_TRACE.
+        raw_bytes = str(result.text or "").encode("utf-8")
+        exc.structural_details.setdefault("responseChars", len(str(result.text or "")))
+        exc.structural_details.setdefault(
+            "responseSha256", hashlib.sha256(raw_bytes).hexdigest()
+        )
+        exc.structural_details.setdefault("resolvedProvider", provider)
+        exc.structural_details.setdefault("resolvedModel", used_model)
+        raise
+    ai_text_full = decoded.ai_text_full
+    memo = decoded.memo if want_memo else ""
     characters = parsing.parse_character_memo(memo) if memo else []
 
     meta: dict[str, Any] = {
@@ -233,6 +281,11 @@ def translate(
         "target_lang": normalize_lang(target_lang),
         # NO-SILENT-FALLBACK: which flow actually ran, visible in every log.
         "ai_flow": "brief_frozen" if context_frozen else "per_page",
+        "output_contract": decoded.response_shape,
+        "response_shape": decoded.response_shape,
+        "accepted_losslessly": decoded.accepted_losslessly,
+        "content_modified": decoded.content_modified,
+        "omitted_ids": list(decoded.missing_ids),
     }
     if characters:
         meta["characters"] = characters

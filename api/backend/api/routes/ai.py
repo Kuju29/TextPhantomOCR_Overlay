@@ -1,6 +1,5 @@
 """AI configuration endpoints used by the extension's settings UI.
 
-STATUS: ACTIVE — in use in the current flow.
 
 ``/ai/resolve``        — given an API key (and optional provider/model),
                          return the resolved provider + selectable models.
@@ -12,7 +11,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Response
 
 from backend.ai import resolve as ai_resolve
 from backend.log import event
@@ -55,6 +54,11 @@ async def resolve(payload: dict[str, Any]) -> dict:
 
 
 @router.get("/ai/prompt/default")
-async def prompt_default(lang: str = "en") -> dict:
+async def prompt_default(
+    response: Response, lang: str = "en", want_memo: bool = True
+) -> dict:
     """Return the default editable prompt + system text for ``lang``."""
-    return ai_resolve.prompt_default(lang)
+    # "Reset" must mean the API's current policy, not a browser/proxy copy
+    # retained from an earlier deployment.
+    response.headers["Cache-Control"] = "no-store"
+    return ai_resolve.prompt_default(lang, want_memo=want_memo)

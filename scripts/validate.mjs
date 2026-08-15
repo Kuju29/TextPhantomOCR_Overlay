@@ -105,6 +105,29 @@ for (const target of targets) {
     );
   }
 
+  // Every web-accessible resource must resolve. A missing one is invisible at
+  // load time and only fails when the page tries to import the renderer.
+  for (const rule of manifest.web_accessible_resources || []) {
+    for (const pattern of rule.resources || []) {
+      if (pattern.includes("*")) {
+        const dir = path.join(root, path.dirname(pattern));
+        const suffix = path.basename(pattern).replace("*", "");
+        let matched = [];
+        try {
+          matched = (await readdir(dir)).filter((name) => name.endsWith(suffix));
+        } catch {
+          matched = [];
+        }
+        assert(matched.length > 0, `${target}: web_accessible_resources ${pattern} matches nothing`);
+      } else {
+        assert(
+          await exists(path.join(root, pattern)),
+          `${target}: web_accessible_resources ${pattern} is missing`,
+        );
+      }
+    }
+  }
+
   const files = await walk(root);
   for (const file of files) {
     const relative = path.relative(root, file).replaceAll("\\", "/");

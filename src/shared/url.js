@@ -1,7 +1,6 @@
 /**
  * URL helpers for the API base address.
  *
- * STATUS: ACTIVE — in use in the current flow.
  */
 
 /**
@@ -26,17 +25,6 @@ export function normalizeUrl(raw) {
   } catch {
     return url.replace(/\/+$/, "");
   }
-}
-
-/**
- * Turn an HTTP(S) base into the matching WebSocket `/ws` endpoint.
- * @param {string} httpBase
- * @returns {string}
- */
-export function toWebSocketUrl(httpBase) {
-  const base = normalizeUrl(httpBase);
-  if (!base) return "";
-  return base.replace(/^http/i, "ws") + "/ws";
 }
 
 /** Join an API base with a path (base must already be normalised). */

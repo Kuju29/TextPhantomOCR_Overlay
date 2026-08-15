@@ -1,22 +1,10 @@
-/**
- *
- * STATUS: ACTIVE — in use in the current flow.
- * The content script's `chrome.runtime.onMessage` router.
- *
- * Handles control messages (ping / keep-alive / toast) and the four real
- * commands from the service worker:
- * - GET_IMAGES                       → list translate-worthy images
- * - GET_CONTEXT_IMAGE_PAYLOAD        → payload for the right-clicked image
- * - REPLACE_IMAGE                    → swap an image's source
- * - OVERLAY_HTML                     → apply an HTML overlay
- * plus RESOLVE_AND_REPLACE_MANGADEX_BLOB and IMAGE_ERROR.
- */
+// Routes runtime messages from the service worker to the content-script handlers.
 
 (function () {
   const TP = window.__TP;
   if (!TP || TP.bail) return;
 
-  /** Collect images for a GET_IMAGES request (with the MangaDex fast path). */
+  // Collects the payloads for a GET_IMAGES request, including the MangaDex path.
   async function collectImages(mode, lang) {
     TP.removeLazyScriptsAndForceSrc();
     TP.normalizeLazyImages();
@@ -25,13 +13,8 @@
       return TP.collectImagesForScan(mode, lang, "page_scan");
     }
 
-    // MangaDex: prefer the chapter's at-home URL list, skip already-cached pages.
     TP.showToast("TextPhantom: loading MangaDex pages…", 2600);
 
-    // Dedicated site adapter (content/site-mangadex.js): exact alt-filename
-    // mapping + image bytes fetched via the site's own API in the page
-    // context. Falls through to the legacy path if the adapter is missing
-    // or returns nothing.
     if (typeof TP.mdSiteCollect === "function") {
       const viaAdapter = await TP.mdSiteCollect(mode, lang).catch(() => null);
       if (Array.isArray(viaAdapter) && viaAdapter.length) return viaAdapter;
@@ -53,7 +36,6 @@
     const seen = new Set();
     const out = [];
 
-    // Positions of any page images currently in the DOM (for nicer metadata).
     const posBySrc = new Map();
     TP.getMangaDexPageImagesInDOM().forEach((img) => {
       const src = TP.normUrl(TP.getBestImgUrl(img));
@@ -102,8 +84,14 @@
     (async () => {
       const type = String(msg?.type || "");
 
-      // --- Control messages (no settings needed) --------------------------
       if (type === "TP_PING") return sendResponse({ ok: true });
+      if (type === "TP_DIAGNOSTICS_STATE") {
+        const detail = msg?.detail === "full" ? "full" : msg?.enabled ? "compact" : "off";
+        TP.setLogLevel?.(msg?.consoleLevel || "warn");
+        TP.setTracingEnabled?.(Boolean(msg?.enabled), detail);
+        const wrapped = detail === "full" ? (TP.installTrace?.() || 0) : 0;
+        return sendResponse({ ok: true, detail, consoleLevel: TP.getLogLevel?.() || "warn", wrapped });
+      }
       if (type === "TP_KEEPALIVE_START") {
         TP.keepAlive.start(msg?.ms);
         return sendResponse({ ok: true });
@@ -116,7 +104,7 @@
         TP.showToast(msg?.text || msg?.message || "", msg?.ms || 1600);
         return sendResponse({ ok: true });
       }
-      if (type === "WS_STATUS_UPDATE" || type === "API_STATUS_UPDATE") {
+      if (type === "API_STATUS_UPDATE") {
         return sendResponse({ ok: true });
       }
       if (type === "TP_BULK_INSERT") {
@@ -126,7 +114,6 @@
 
       const { mode, lang } = await TP.getSettings();
 
-      // --- GET_IMAGES -----------------------------------------------------
       if (type === "GET_IMAGES") {
         const resp = await collectImages(mode, lang);
         const items = Array.isArray(resp) ? resp : Array.isArray(resp?.items) ? resp.items : [];
@@ -135,44 +122,37 @@
         return sendResponse({ ok: true, items, stats });
       }
 
-      // --- GET_CONTEXT_IMAGE_PAYLOAD --------------------------------------
       if (type === "GET_CONTEXT_IMAGE_PAYLOAD") {
-        const lrc = TP.getLastRightClick();
-        const img = lrc.img && lrc.img.isConnected ? lrc.img : null;
+        const img = TP.getFreshRightClickImageForTarget?.({
+          srcUrl: msg?.srcUrl,
+          clickedSrcUrl: msg?.clickedSrcUrl,
+        });
         const payload = img
           ? await TP.buildPayloadFromImage(img, mode, lang, "img_one", "context_menu_single", true)
           : null;
         return sendResponse({ ok: Boolean(payload), payload });
       }
 
-      // --- REPLACE_IMAGE --------------------------------------------------
       if (type === "REPLACE_IMAGE") {
         const r = await TP.applyInsertMessage?.(msg);
         return sendResponse(r || { ok: false, error: "replace unavailable" });
       }
 
-      // --- RESOLVE_AND_REPLACE_MANGADEX_BLOB ------------------------------
       if (type === "RESOLVE_AND_REPLACE_MANGADEX_BLOB") {
         const resolved = await TP.resolveMangaDexOriginalForBlob(msg.blobUrl);
         return sendResponse({ resolved });
       }
 
-      // --- IMAGE_ERROR ----------------------------------------------------
       if (type === "IMAGE_ERROR") {
         const r = await TP.applyInsertMessage?.(msg);
         return sendResponse(r || { ok: true });
       }
 
-      // --- OVERLAY_HTML ---------------------------------------------------
       if (type === "OVERLAY_HTML") {
         const r = await TP.applyInsertMessage?.(msg);
         return sendResponse(r || { ok: false, error: "overlay unavailable" });
       }
 
-      // --- TP_FETCH_IMAGE (CDN 403 fallback) ---------------------------------
-      // SW fetch fails with 403 on hotlink-protected CDNs because its Origin
-      // is chrome-extension://... . Content scripts run in the page origin so
-      // the CDN sees the correct Referer + cookies and allows the request.
       if (type === "TP_FETCH_IMAGE") {
         try {
           const url = String(msg?.url || "").trim();
@@ -184,7 +164,6 @@
           const ab = await res.arrayBuffer();
           const bytes = new Uint8Array(ab);
           if (bytes.length < 64) return sendResponse({ ok: false, error: "response too small" });
-          // base64-encode in 32 KB chunks to avoid call-stack overflow
           let bin = "";
           const CHUNK = 0x8000;
           for (let i = 0; i < bytes.length; i += CHUNK)
@@ -197,6 +176,6 @@
 
       sendResponse({ ok: true, ignored: true });
     })();
-    return true; // keep the message channel open for the async response
+    return true;
   });
 })();

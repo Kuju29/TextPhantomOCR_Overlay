@@ -1,27 +1,12 @@
-/**
- *
- * STATUS: ACTIVE — in use in the current flow.
- * MangaDex-specific content-script logic.
- *
- * MangaDex is a single-page reader that serves pages as blob: URLs whose
- * identity changes. To translate reliably we:
- * - map each `<img>` to a stable `md:` key (data/hash/file path from the
- *   chapter's at-home URL list),
- * - keep a parallel set of overlays keyed by `md:` key (so they survive blob
- *   churn),
- * - hydrate cached results from the service worker when a chapter loads,
- * - remember "pending" applies for images that aren't in the DOM yet.
- */
+// MangaDex reader support: stable page keys, a key-based overlay set, and cached-result hydration.
 
 (function () {
   const TP = window.__TP;
   if (!TP || TP.bail) return;
 
-  // --- Host / URL helpers --------------------------------------------------
-
   const isMangaDexHost = () => /(^|\.)mangadex\.org$/i.test(String(location.hostname || ""));
 
-  /** Build a stable `md:data/hash/file` key from any at-home image URL. */
+  // Builds a stable md:data/hash/file key from any at-home image URL.
   function mdKeyFromUrl(u) {
     const s = TP.normUrl(u);
     if (!s) return "";
@@ -46,7 +31,7 @@
     return m ? m[1] : "";
   }
 
-  /** Best-effort current page index from the URL (path / query / hash). */
+  // Returns the current page index taken from the URL path, query or hash.
   function getMangaDexPageIndexFromUrl() {
     const parts = String(location.pathname || "").split("/").filter(Boolean);
     const ci = parts.indexOf("chapter");
@@ -58,15 +43,11 @@
       const q = qs.get("page") || qs.get("p");
       if (q && /^\d+$/.test(q)) return Math.max(0, Number(q) - 1);
     } catch {
-      /* ignore */
     }
     const hm = String(location.hash || "").match(/(?:^|[?#&])page=(\d+)/i);
     return hm ? Math.max(0, Number(hm[1]) - 1) : null;
   }
 
-  // --- "Pending apply" memory ---------------------------------------------
-  // Results that arrive before their <img> exists in the DOM are parked here,
-  // keyed by md key, and applied by `mdApplyOriginalToImg` once the image maps.
   const mdPendingByOriginal = new Map();
 
   function mdPendingTrim(maxSize = 80) {
@@ -77,6 +58,7 @@
     for (let i = 0; i < items.length - maxSize; i++) mdPendingByOriginal.delete(items[i][0]);
   }
 
+  // Parks a result for an image that is not mapped in the DOM yet.
   function mdRememberPending(original, patch) {
     const key = mdKeyFromUrl(original) || TP.normUrl(original);
     if (!key) return;
@@ -94,11 +76,22 @@
     return v || null;
   }
 
-  // --- Chapter URL list (MangaDex at-home API) ----------------------------
+  // Looks an md key back up in the chapter list to recover its at-home URL.
+  function mdUrlFromKey(key) {
+    const wanted = String(key || "");
+    if (!wanted) return "";
+    const urls = mdCache?.urls;
+    if (!Array.isArray(urls)) return "";
+    for (const u of urls) {
+      if (mdKeyFromUrl(u) === wanted) return TP.normUrl(u);
+    }
+    return "";
+  }
+
   const MD_CACHE_TTL_MS = 180000;
   let mdCache = null;
 
-  /** Fetch (and cache) the ordered image URL list for the current chapter. */
+  // Fetches and caches the ordered image URL list for the current chapter.
   async function fetchMangaDexChapterUrls() {
     if (!isMangaDexHost()) return null;
     const chapterId = getMangaDexChapterId();
@@ -149,13 +142,11 @@
     }
   }
 
-  // --- Service-worker result cache ----------------------------------------
-
-  /** Ask the SW for cached results for a set of md keys. */
+  // Asks the service worker for cached results for a set of md keys.
   const mdCacheGet = (keys, includeNewImg = false, lang = "", mode = "", source = "") =>
     TP.sendBg({ type: "TP_MD_CACHE_GET", keys, includeNewImg: !!includeNewImg, lang, mode, source });
 
-  /** Resolve just the cached "new image" URL for one md key. */
+  // Returns the cached replacement-image URL for one md key.
   async function mdCacheGetNewImg(key, lang, mode, source = "") {
     const resp = await mdCacheGet([key], true, lang, mode, source);
     const rec = resp?.items?.[key] || null;
@@ -167,7 +158,7 @@
     );
   }
 
-  /** Apply a cached "new image" to an md-keyed image (overlay or in-place). */
+  // Applies a cached replacement image to an md-keyed image, as an overlay or in place.
   function mdApplyCachedNewImg(originalUrl, key, isTextMode, imgElement, lang, mode, source = "") {
     mdCacheGetNewImg(key, lang, mode, source).then((newSrc) => {
       if (!newSrc) return;
@@ -190,7 +181,7 @@
           })();
         rec.isTextMode = true;
         TP.updateCleanLayer(rec, imgElement, newSrc);
-        scheduleMangaDexOverlayUpdate();
+        scheduleMangaDexOverlayUpdate(mdKey);
         return;
       }
       TP.replaceImageInDOM(originalUrl, newSrc).then((applied) => {
@@ -207,7 +198,7 @@
     });
   }
 
-  /** On chapter load, render anything the SW already has cached. */
+  // Renders every result the service worker already has cached for this chapter.
   async function hydrateMangaDexFromCache() {
     if (!isMangaDexHost() || !TP.isTop) return null;
 
@@ -232,7 +223,9 @@
 
       if (rec.result) {
         const img = TP.findTargetImage(p.url);
-        if (img) TP.applyHtmlOverlay(img, rec.result, source, isText, p.url);
+        if (img) void TP.applyHtmlOverlay(img, rec.result, source, isText, p.url).catch((e) =>
+          TP.log.warn("cached overlay render failed", e?.message || String(e)),
+        );
         else mdRememberPending(p.url, { overlay: { result: rec.result, source, isTextMode: isText } });
       }
 
@@ -256,8 +249,7 @@
     return { pairs, items };
   }
 
-  // --- DOM image ↔ chapter-index mapping ----------------------------------
-
+  // Returns true when an image looks like a reader page rather than site furniture.
   function isProbableMangaDexPageImage(img) {
     if (!img || !img.getBoundingClientRect) return false;
     const u = String(TP.getBestImgUrl(img) || "");
@@ -275,7 +267,7 @@
     return imgs.filter(isProbableMangaDexPageImage);
   }
 
-  /** Guess a page index for an image from alt text / data attributes / URL. */
+  // Infers an image's page index from its alt text, data attributes or URL.
   function inferMangaDexPageIndexForImg(img) {
     const alt = String(img?.getAttribute?.("alt") || img?.getAttribute?.("aria-label") || "");
     const patterns = [/^\s*(\d+)\s*[-_]/, /(?:^|\D)(\d+)\s*\/\s*(\d+)/, /page\s*(\d+)/i];
@@ -304,18 +296,36 @@
     return null;
   }
 
-  /**
-   * Flush any result that arrived BEFORE this image existed / was mapped.
-   * Called from both mapping paths (site adapter + legacy index inference) —
-   * whichever stamps an image must also deliver its parked results, or a
-   * batch run in page-by-page reading mode never renders anything.
-   */
+  // Applies any result parked for this key now that its image is mapped.
   function mdFlushPendingFor(img, key, url) {
     if (!img || !key) return;
+
+    const target = TP.normUrl(url) || mdUrlFromKey(key);
+    if (!target) {
+      TP.log.warn("md pending kept: no URL to apply it against", { key });
+      return;
+    }
+
     const pending = mdTakePending(key);
     if (!pending) return;
     TP.log.info("md pending flushed", { key });
-    if (pending.newSrc) TP.replaceImageInDOM(url, pending.newSrc).catch(() => {});
+    if (pending.newSrc) {
+      TP.replaceImageInDOM(target, pending.newSrc)
+        .then((applied) => {
+          if (!applied) {
+            mdRememberPending(target, { newSrc: pending.newSrc });
+            TP.log.warn("md pending re-parked: image vanished during apply", { key });
+          }
+        })
+        .catch((e) => {
+          mdRememberPending(target, { newSrc: pending.newSrc });
+          TP.log.warn("md pending re-parked after an error", {
+            key,
+            error: e?.message || String(e),
+          });
+        });
+    }
+    url = target;
     if (pending.cleanSrc) {
       const rec =
         mdHtmlOverlaysByKey.get(key) ||
@@ -333,13 +343,18 @@
         })();
       rec.isTextMode = true;
       TP.updateCleanLayer(rec, img, pending.cleanSrc);
-      scheduleMangaDexOverlayUpdate();
+      scheduleMangaDexOverlayUpdate(key);
     }
     if (pending.overlay) {
       try {
-        TP.applyHtmlOverlay(img, pending.overlay.result, pending.overlay.source, pending.overlay.isTextMode, url);
+        void TP.applyHtmlOverlay(
+          img,
+          pending.overlay.result,
+          pending.overlay.source,
+          pending.overlay.isTextMode,
+          url,
+        ).catch((e) => TP.log.warn("pending overlay render failed", e?.message || String(e)));
       } catch {
-        /* ignore */
       }
     }
     if (pending.needNewImg) {
@@ -355,7 +370,7 @@
     }
   }
 
-  /** Stamp an image with its resolved at-home URL/key and flush pending applies. */
+  // Stamps an image with its resolved at-home URL and key, then flushes parked results.
   function mdApplyOriginalToImg(img, idx, urls) {
     if (!img || !Array.isArray(urls) || idx == null || idx < 0 || idx >= urls.length) return;
     const url = TP.normUrl(urls[idx]);
@@ -369,22 +384,16 @@
     mdFlushPendingFor(img, key, url);
   }
 
-  /** Map every MangaDex page image in the DOM to its chapter index. */
+  // Maps every MangaDex page image in the DOM to its chapter page.
   async function ensureMangaDexDomMapping() {
     if (!isMangaDexHost()) return;
 
-    // SPA chapter switch? Clear the previous chapter's overlays/stamps first
-    // so nothing below re-attaches stale results to reused elements.
     mdCheckChapterChange();
 
-    // Site adapter first: exact alt-to-filename mapping (the reader sets
-    // img.alt to the at-home filename). The legacy index inference below
-    // stays as a fallback for any image the adapter could not match.
     if (typeof TP.mdSiteMapDom === "function") {
       try {
         await TP.mdSiteMapDom();
       } catch {
-        /* fall through to legacy inference */
       }
     }
 
@@ -392,8 +401,6 @@
     for (const img of getMangaDexPageImagesInDOM()) {
       const key = String(img.dataset.tpOriginalKey || "");
       if (key) {
-        // Mapped (by the adapter or earlier) — still flush parked results so
-        // a page that appears AFTER its translation arrived gets rendered.
         mdFlushPendingFor(img, key, TP.normUrl(img.dataset.tpOriginal || ""));
         continue;
       }
@@ -417,7 +424,7 @@
     }, 60);
   }
 
-  /** Resolve a blob: URL to its real at-home URL (for the context menu). */
+  // Resolves a blob URL shown in the reader to its real at-home URL.
   async function resolveMangaDexOriginalForBlob(blobUrl) {
     if (!isMangaDexHost() || !blobUrl?.startsWith("blob:")) return null;
     scheduleMangaDexMapping();
@@ -446,17 +453,15 @@
     return null;
   }
 
-  // --- MangaDex overlay set ------------------------------------------------
-  // mdOverlaysByKey:   md key -> { el, img, blobUrl, original }  (replaced <img>)
-  // mdHtmlOverlaysByKey: md key -> { host, scope, img, baseW, baseH, kind }
   const mdOverlaysByKey = new Map();
   const mdHtmlOverlaysByKey = new Map();
   let mdOverlayRaf = 0;
+  let mdOverlayGlobalPending = false;
+  const mdOverlayPendingKeys = new Set();
 
-  // Overlay font scale (the popup's Display slider). overlay.js owns the
-  // setting and forwards every change here, because MangaDex overlays live in
-  // their own map — without this hook the slider has no effect on MangaDex.
   let mdFontScale = 1;
+
+  // Applies a font scale to every MangaDex overlay scope; overlay.js owns the setting.
   function mdApplyFontScaleAll(scale) {
     const s = Number(scale);
     if (Number.isFinite(s) && s > 0) mdFontScale = s;
@@ -465,25 +470,18 @@
     }
   }
 
-  // --- Chapter-change cleanup ----------------------------------------------
-  // MangaDex is an SPA: switching chapters swaps blob srcs but often REUSES
-  // the same <img> elements and .md--page containers. Without cleanup the
-  // previous chapter's overlays keep tracking those reused elements (their
-  // stale data-tp-* keys still match) and render the old translation on top
-  // of the new chapter until the user presses F5.
   let mdCurrentChapterId = getMangaDexChapterId();
 
+  // Removes every MangaDex overlay and releases the blob URLs they hold.
   function mdDestroyAllOverlays() {
     for (const rec of mdOverlaysByKey.values()) {
       try {
         if (rec?.blobUrl?.startsWith("blob:")) URL.revokeObjectURL(rec.blobUrl);
       } catch {
-        /* already revoked */
       }
       try {
         rec?.el?.remove();
       } catch {
-        /* detached */
       }
     }
     mdOverlaysByKey.clear();
@@ -491,13 +489,12 @@
       try {
         rec?.host?.remove();
       } catch {
-        /* detached */
       }
     }
     mdHtmlOverlaysByKey.clear();
   }
 
-  /** Drop stale data-tp-* stamps so reused <img>s get remapped cleanly. */
+  // Drops stale data-tp-* stamps so reused images are remapped cleanly.
   function mdClearImgStamps() {
     for (const img of Array.from(document.images || [])) {
       const ds = img?.dataset;
@@ -510,27 +507,15 @@
     }
   }
 
-  /**
-   * Detect chapter navigation and wipe every per-chapter artifact: overlays,
-   * parked results, the URL-list cache and stale <img> stamps. Cached
-   * translations for the NEW chapter re-render via the delayed hydrate, so
-   * revisiting a translated chapter needs no F5.
-   * @returns {boolean} true when a chapter change was handled
-   */
+  // Detects chapter navigation and clears every per-chapter artifact, returning true when it did.
   function mdCheckChapterChange() {
     const id = getMangaDexChapterId();
     if (!id || id === mdCurrentChapterId) return false;
     TP.log.info("md chapter changed", { from: mdCurrentChapterId, to: id });
-    // SPA navigation never reloads the page, so the SW's tab-level cancel
-    // (keep-alive disconnect / tabs.onUpdated) never fires for MangaDex.
-    // Tell it explicitly: the OLD chapter's queued jobs are dropped (client +
-    // server) so the new chapter isn't stuck waiting behind them. Jobs already
-    // running on the server finish and land in its result cache.
     try {
       const p = TP.sendBg({ type: "TP_MD_CHAPTER_CHANGED", from: mdCurrentChapterId, to: id });
       p?.catch?.(() => {});
     } catch {
-      /* best-effort */
     }
     mdCurrentChapterId = id;
     mdCache = null;
@@ -543,14 +528,7 @@
     return true;
   }
 
-  /**
-   * True when an <img> can NOT belong to `key`. The reader sets img.alt to the
-   * exact at-home filename of the CURRENT page, and md keys end with that
-   * filename (`md:data/<hash>/<file>`). Reused elements from another chapter
-   * keep stale data-tp-* stamps and unmappable blob: srcs, but their alt is
-   * already updated — so an alt/filename mismatch reliably marks "not ours"
-   * and prevents a previous chapter's overlay from ghosting on top.
-   */
+  // Returns true when an image cannot belong to a key; the reader's img alt is the page filename.
   function mdImgConflictsWithKey(img, key) {
     const file = String(key || "").split("/").pop();
     const alt = String(img?.getAttribute?.("alt") || "").trim();
@@ -569,12 +547,12 @@
   const mdGetKeyForImg = (img) =>
     String(img?.dataset?.tpOriginalKey || "") || mdKeyFromUrl(String(img?.dataset?.tpOriginal || ""));
 
-  /** Re-position every MangaDex overlay (called from rAF). */
-  function updateMangaDexOverlays() {
+  // Re-positions MangaDex overlays, optionally restricted to a set of keys.
+  function updateMangaDexOverlays(onlyKeys = null) {
     if (!mdOverlaysByKey.size && !mdHtmlOverlaysByKey.size) return;
 
-    // Replaced-image overlays (non-text mode).
     for (const [key, rec] of mdOverlaysByKey.entries()) {
+      if (onlyKeys && !onlyKeys.has(key)) continue;
       const el = rec?.el;
       if (!el) {
         mdOverlaysByKey.delete(key);
@@ -582,36 +560,31 @@
       }
       let img = rec.img;
       if (img && img.isConnected) {
-        // The reader reuses <img> elements across chapters — if this one was
-        // re-stamped with a different key OR its alt (the current page's real
-        // filename) no longer matches our key, it no longer belongs to us.
         const dsKey = String(img.dataset.tpOriginalKey || "");
         if ((dsKey && dsKey !== key) || mdImgConflictsWithKey(img, key)) img = null;
       }
       if (!img || !img.isConnected) img = findMangaDexImgByKey(key);
       if (!img) {
-        el.style.display = "none";
+        TP.setOverlayStyleIfChanged(el, "display", "none");
         rec.img = null;
         continue;
       }
       const r = img.getBoundingClientRect();
       if (r.width < 2 || r.height < 2) {
-        el.style.display = "none";
+        TP.setOverlayStyleIfChanged(el, "display", "none");
         rec.img = img;
         continue;
       }
       rec.img = img;
-      Object.assign(el.style, {
-        display: "block",
-        left: `${r.left + window.scrollX}px`,
-        top: `${r.top + window.scrollY}px`,
-        width: `${r.width}px`,
-        height: `${r.height}px`,
-      });
+      TP.setOverlayStyleIfChanged(el, "display", "block");
+      TP.setOverlayStyleIfChanged(el, "left", `${r.left + window.scrollX}px`);
+      TP.setOverlayStyleIfChanged(el, "top", `${r.top + window.scrollY}px`);
+      TP.setOverlayStyleIfChanged(el, "width", `${r.width}px`);
+      TP.setOverlayStyleIfChanged(el, "height", `${r.height}px`);
     }
 
-    // HTML overlays (text mode).
     for (const [key, rec] of mdHtmlOverlaysByKey.entries()) {
+      if (onlyKeys && !onlyKeys.has(key)) continue;
       const { host, scope } = rec || {};
       if (!host || !scope) {
         mdHtmlOverlaysByKey.delete(key);
@@ -619,50 +592,47 @@
       }
       let img = rec.img;
       if (img && img.isConnected) {
-        // Same reuse guard as above: a re-stamped element (or one whose alt
-        // filename no longer matches) belongs to another page/chapter now —
-        // never draw this overlay on top of it.
         const dsKey = String(img.dataset.tpOriginalKey || "");
         if ((dsKey && dsKey !== key) || mdImgConflictsWithKey(img, key)) img = null;
       }
       if (!img || !img.isConnected) img = findMangaDexImgByKey(key);
       if (!img) {
-        host.style.display = "none";
+        TP.setOverlayStyleIfChanged(host, "display", "none");
         rec.img = null;
         continue;
       }
       const curKey = mdKeyFromUrl(TP.getBestImgUrl(img));
       if (curKey && curKey !== key) {
-        host.style.display = "none";
+        TP.setOverlayStyleIfChanged(host, "display", "none");
         rec.img = null;
         continue;
       }
       const parent = TP.ensureOverlayHostMountedNearImage(rec, img);
       if (!parent) {
-        host.style.display = "none";
+        TP.setOverlayStyleIfChanged(host, "display", "none");
         rec.img = img;
         continue;
       }
       const { r, left, top } = TP.getOverlayBoxFromParent(img, parent);
       if (r.width < 2 || r.height < 2) {
-        host.style.display = "none";
+        TP.setOverlayStyleIfChanged(host, "display", "none");
         rec.img = img;
         continue;
       }
       rec.img = img;
-      host.style.display = "block";
-      host.style.setProperty("left", `${left}px`, "important");
-      host.style.setProperty("top", `${top}px`, "important");
-      host.style.setProperty("width", `${r.width}px`, "important");
-      host.style.setProperty("height", `${r.height}px`, "important");
+      TP.setOverlayStyleIfChanged(host, "display", "block");
+      TP.setOverlayStyleIfChanged(host, "left", `${left}px`, "important");
+      TP.setOverlayStyleIfChanged(host, "top", `${top}px`, "important");
+      TP.setOverlayStyleIfChanged(host, "width", `${r.width}px`, "important");
+      TP.setOverlayStyleIfChanged(host, "height", `${r.height}px`, "important");
 
       if (rec.kind === "badge") {
-        scope.style.width = `${r.width}px`;
-        scope.style.height = `${r.height}px`;
-        scope.style.transform = "";
-        scope.style.transformOrigin = "0 0";
-        host.style.transform = "";
-        host.style.transformOrigin = "";
+        TP.setOverlayStyleIfChanged(scope, "width", `${r.width}px`);
+        TP.setOverlayStyleIfChanged(scope, "height", `${r.height}px`);
+        TP.setOverlayStyleIfChanged(scope, "transform", "");
+        TP.setOverlayStyleIfChanged(scope, "transform-origin", "0 0");
+        TP.setOverlayStyleIfChanged(host, "transform", "");
+        TP.setOverlayStyleIfChanged(host, "transform-origin", "");
         continue;
       }
 
@@ -672,25 +642,38 @@
         rec.baseH,
         true,
       );
-      scope.style.width = `${nw}px`;
-      scope.style.height = `${nh}px`;
-      scope.style.transform = `translate(${offX}px, ${offY}px) scale(${sx}, ${sy})`;
-      scope.style.transformOrigin = "0 0";
+      TP.setOverlayStyleIfChanged(scope, "width", `${nw}px`);
+      TP.setOverlayStyleIfChanged(scope, "height", `${nh}px`);
+      TP.setOverlayStyleIfChanged(
+        scope,
+        "transform",
+        `translate(${offX}px, ${offY}px) scale(${sx}, ${sy})`,
+      );
+      TP.setOverlayStyleIfChanged(scope, "transform-origin", "0 0");
       if (transform && transform !== "none") {
-        host.style.transform = transform;
-        host.style.transformOrigin = transformOrigin || "0 0";
+        TP.setOverlayStyleIfChanged(host, "transform", transform);
+        TP.setOverlayStyleIfChanged(host, "transform-origin", transformOrigin || "0 0");
       } else {
-        host.style.transform = "";
-        host.style.transformOrigin = "";
+        TP.setOverlayStyleIfChanged(host, "transform", "");
+        TP.setOverlayStyleIfChanged(host, "transform-origin", "");
       }
     }
   }
 
-  function scheduleMangaDexOverlayUpdate() {
+  function scheduleMangaDexOverlayUpdate(key = "") {
+    const targetKey = typeof key === "string" ? key : "";
+    if (targetKey) mdOverlayPendingKeys.add(targetKey);
+    else mdOverlayGlobalPending = true;
+
     if (mdOverlayRaf) return;
-    mdOverlayRaf = requestAnimationFrame(() => {
+    mdOverlayRaf = TP.onNextFrame(() => {
       mdOverlayRaf = 0;
-      updateMangaDexOverlays();
+      const updateAll = mdOverlayGlobalPending;
+      const keys = new Set(mdOverlayPendingKeys);
+      mdOverlayGlobalPending = false;
+      mdOverlayPendingKeys.clear();
+      if (updateAll) updateMangaDexOverlays();
+      else if (keys.size) updateMangaDexOverlays(keys);
     });
   }
   const mdScheduleUpdate = scheduleMangaDexOverlayUpdate;
@@ -700,19 +683,23 @@
     window.__tpMdOverlayListeners = true;
     window.addEventListener("scroll", scheduleMangaDexOverlayUpdate, { passive: true });
     window.addEventListener("resize", scheduleMangaDexOverlayUpdate, { passive: true });
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") scheduleMangaDexOverlayUpdate();
+    }, { passive: true });
     try {
-      new MutationObserver(() => scheduleMangaDexOverlayUpdate()).observe(document.documentElement, {
+      new MutationObserver((records) => {
+        if (TP.overlayMutationsNeedUpdate(records)) scheduleMangaDexOverlayUpdate();
+      }).observe(document.documentElement, {
         subtree: true,
         childList: true,
         attributes: true,
         attributeFilter: ["src", "srcset", "data-src", "data-srcset", "style", "class"],
       });
     } catch {
-      /* unsupported */
     }
   }
 
-  /** Get or create a MangaDex HTML overlay record. */
+  // Returns the MangaDex HTML overlay record for a key, creating it if needed.
   function upsertMangaDexHtmlOverlay(mdKey, img, baseW, baseH, kind) {
     let rec = mdHtmlOverlaysByKey.get(mdKey);
     if (!rec) {
@@ -723,8 +710,6 @@
       host.style.display = "none";
       const scope = document.createElement("div");
       scope.className = "tp-ol-scope";
-      // Seed the font-scale variable so a new overlay respects the slider
-      // immediately (every .tp-line reads calc(var(--tp-font-scale,1) * Npx)).
       scope.style.setProperty("--tp-font-scale", String(mdFontScale));
       host.appendChild(scope);
       rec = { host, scope, img: null, baseW: 1, baseH: 1, kind: "html" };
@@ -745,7 +730,7 @@
     if (rec?.host) rec.host.style.display = "none";
   }
 
-  /** Replace a MangaDex image by overlaying a translated `<img>` on top of it. */
+  // Replaces a MangaDex image by overlaying the translated image on top of it.
   async function replaceMangaDexImageWithOverlay(original, newSrc) {
     const mdKey = mdKeyFromUrl(original);
     if (!mdKey) return 0;
@@ -764,6 +749,7 @@
     let rec = mdOverlaysByKey.get(mdKey);
     if (!rec) {
       const el = document.createElement("img");
+      el.className = "tp-md-image-overlay";
       el.decoding = "sync";
       el.loading = "eager";
       Object.assign(el.style, {
@@ -808,17 +794,15 @@
       try {
         URL.revokeObjectURL(rec.blobUrl);
       } catch {
-        /* already revoked */
       }
     }
     rec.blobUrl = typeof nextSrc === "string" && nextSrc.startsWith("blob:") ? nextSrc : "";
     rec.el.src = nextSrc;
 
-    scheduleMangaDexOverlayUpdate();
+    scheduleMangaDexOverlayUpdate(mdKey);
     return 1;
   }
 
-  // --- MangaDex SPA observers ---------------------------------------------
   if (isMangaDexHost() && TP.isTop) {
     scheduleMangaDexMapping();
     try {
@@ -830,8 +814,6 @@
       });
       const onNav = () => {
         mdCache = null;
-        // Immediate cleanup on chapter switch — do not wait for the 60ms
-        // mapping debounce, or old overlays flash over the new chapter.
         mdCheckChapterChange();
         scheduleMangaDexMapping();
       };
@@ -849,24 +831,9 @@
         }
       }
     } catch {
-      /* observer/history patch unsupported */
     }
   }
 
-  // Live source/mode/lang switch: the popup writes the new value to storage, so
-  // re-render from the source-scoped cache. hydrate replaces each image's
-  // overlay in place with the newly selected source's cached result.
-  //
-  // IMPORTANT: do NOT clear the data-tp-* stamps here. On MangaDex the <img>
-  // src is a blob: URL, so those stamps are the ONLY way findTargetImage() can
-  // match a page/AI result back to its <img>. Clearing them mid-chapter makes
-  // hydrate (and any in-flight result, e.g. slow AI) unable to find the image,
-  // which wipes the overlay entirely. Stamp clearing belongs to chapter change.
-  //
-  // Because the cache is now source-scoped, hydrate only repaints images that
-  // actually have a cached result for the NEW source; images without one keep
-  // their current overlay until the user re-runs the translation — never a
-  // different source's text, and never a blank page.
   try {
     let mdSwitchTimer = 0;
     chrome.storage.onChanged?.addListener((changes, area) => {
@@ -879,7 +846,6 @@
       }, 150);
     });
   } catch {
-    /* storage.onChanged unavailable */
   }
 
   Object.assign(TP, {
