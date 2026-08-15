@@ -51,6 +51,10 @@ pyinstaller --noconfirm --clean --onefile --windowed ^
   --collect-submodules starlette ^
   --collect-submodules pydantic ^
   --collect-submodules anyio ^
+  --hidden-import multipart ^
+  --hidden-import multipart.multipart ^
+  --hidden-import python_multipart ^
+  --hidden-import python_multipart.multipart ^
   --hidden-import h11 ^
   --hidden-import httptools ^
   --hidden-import websockets ^

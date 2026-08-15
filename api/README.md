@@ -9,7 +9,7 @@ app_port: 7860
 
 TextPhantom OCR Overlay API
 
-ผังรวมทั้ง 4 โหมด
+runs: Extension
 
 ```mermaid
 flowchart TD
@@ -100,4 +100,51 @@ FID -->|"ไม่ได้"| STOP
 FID -->|"ได้"| R
 R --> H
 H --> I
+```
+
+runs: API server
+
+```mermaid
+flowchart TD
+
+subgraph EXT["ส่วนขยาย"]
+    A["อ่านภาพ"]
+    PAY["payload: render.background=image<br/>render.lensDocument=false<br/>engine=api"]
+    INS["sanitise แล้วแทรก markup ของเซิร์ฟเวอร์<br/>reportRoute('server')"]
+end
+
+subgraph API["API — pipeline.py คำขอเดียวจบ"]
+    V1["POST /v1/translate"]
+    L["fetch_lens_data() อัปโหลด Lens"]
+    TREE["decode_tree() original + translated"]
+    DEC{"ต้องใช้ ONNX ไหม"}
+    ON["textblocks_pass.detect_blocks_with_second_look()<br/>โมดูลเดียวกับที่ /v1/groups ใช้<br/>รอบแรก → มุมมองที่สอง → กู้คอลัมน์"]
+    AICALL["เรียกผู้ให้บริการ AI ผ่าน rate gate<br/>เฉพาะ source=ai"]
+    ER["erase_text_with_boxes()"]
+    RESTORE["restore_token_regions():<br/>คืนพิกเซลของ unit ที่ AI ไม่ตอบ<br/>แล้ว encode ใหม่"]
+    FIT["fit_tree_font_sizes()"]
+    RENDER["render_tree_overlay() → originalhtml / translatedhtml / aihtml"]
+    PNG["เข้ารหัสภาพพื้นหลังเป็น data URI"]
+end
+
+subgraph LENS["Google Lens"]
+    C["OCR + Lens Translation"]
+end
+
+A --> PAY
+PAY --> V1
+V1 --> L
+L --> C
+C --> L
+L --> TREE
+TREE --> DEC
+DEC -->|"ใช่"| ON
+DEC -->|"ไม่"| AICALL
+ON --> AICALL
+AICALL --> ER
+ER --> FIT
+FIT --> RENDER
+RENDER --> PNG
+PNG --> RESTORE
+RESTORE --> INS
 ```

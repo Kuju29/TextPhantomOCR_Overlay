@@ -47,6 +47,27 @@ function manifestToNpmVersion(v) {
   }
 }
 
+// --- The API's copy of the version -----------------------------------------
+// The Docker image copies only `api/`, so `platform/base.json` and
+// `package.json` are not there to read at runtime and `api/Dockerfile` copies
+// this file instead. It is generated here rather than hand-maintained: a second
+// place to type the version is a second place for it to be wrong, and a missing
+// file fails the image build (observed 2026-08-15: "COPY build-manifest.json
+// ... not found").
+{
+  const manifestPath = path.join(projectRoot, "api", "build-manifest.json");
+  const desired = `${JSON.stringify({ schema: "tp.build-manifest/1", version }, null, 2)}\n`;
+  let current = "";
+  try {
+    current = await readFile(manifestPath, "utf8");
+  } catch {
+  }
+  if (current !== desired) {
+    await writeFile(manifestPath, desired);
+    console.log(`Wrote api/build-manifest.json -> ${version}`);
+  }
+}
+
 const targets = [
   {
     id: "chrome",
