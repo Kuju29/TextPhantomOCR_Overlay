@@ -1,5 +1,3 @@
-[![GitHub Sponsors](https://img.shields.io/badge/Sponsor-GitHub-pink?logo=githubsponsors)](https://github.com/sponsors/Kuju29)
-
 *Note: ถ้าท่านไหนอยากใช้ api ส่วนตัวดูได้ที่ [How to online API](https://www.youtube.com/watch?v=NMHwaI8mn4c) หรือใช่ [exe](https://github.com/Kuju29/TextPhantomOCR_Overlay/releases) รันเองในเครื่อง*
 
 ![Desktop2026 02 06-08 11 52 01-ezgif com-video-to-gif-converter](https://github.com/user-attachments/assets/43cc9a1e-eb79-46f0-b4a1-08ca9bcd49f5)
@@ -102,3 +100,6 @@ When creating your Hugging Face API key, make sure the following permissions are
   <br><br>
   <img src="https://github.com/user-attachments/assets/92427293-8ec7-40c3-b797-a2b27fedb8a6" width="100%" alt="Example 3" />
 </p>
+
+
+my website [https://kuju29.github.io/](https://kuju29.github.io/)
