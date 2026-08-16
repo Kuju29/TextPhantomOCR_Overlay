@@ -1,4 +1,4 @@
-// Probes and caches what the configured API build can do.
+// Probes and caches what the configured API server can do.
 
 import { API_PATHS } from "../shared/constants.js";
 import { createLogger } from "../shared/logger.js";
@@ -24,6 +24,9 @@ function legacyCapabilities(reason) {
     diagnostics: "normal",
     consoleLevel: "warn",
     logFile: null,
+    capacity: null,
+    capacityAi: null,
+    adaptive: null,
     reason,
   };
 }
@@ -46,7 +49,6 @@ function parse(data) {
     : diagnostics === "deep" ? "debug" : diagnostics === "activity" ? "info" : "warn";
   return {
     apiVersion: String(data?.apiVersion || ""),
-    build: String(data?.build || ""),
     syncTranslate: features.syncTranslate === true,
     clientBackground: features.clientBackground === true,
     // Tracing is switched on by the server only; the extension has no setting of its own.
@@ -61,6 +63,8 @@ function parse(data) {
     logFile: typeof features.logFile === "boolean" ? features.logFile : null,
     schemas: Array.isArray(data?.schemas) ? data.schemas : [],
     capacity: data?.capacity && typeof data.capacity === "object" ? data.capacity : null,
+    capacityAi: data?.capacityAi && typeof data.capacityAi === "object" ? data.capacityAi : null,
+    adaptive: data?.adaptive && typeof data.adaptive === "object" ? data.adaptive : null,
     reason: "",
   };
 }
@@ -100,7 +104,7 @@ export async function getCapabilities(base) {
 
   cache.set(key, { at: Date.now(), caps });
   if (caps.syncTranslate) {
-    log.info("api supports the sync path", { build: caps.build, api: caps.apiVersion });
+    log.info("api supports the sync path", { api: caps.apiVersion });
   } else {
     log.warn("api does NOT support the sync path — legacy submit+poll is available only to allowed routes", {
       reason: caps.reason,

@@ -94,7 +94,6 @@ _SESSION_STARTED = datetime.now(_TZ)
 _SESSION_STAMP = _SESSION_STARTED.strftime("%Y%m%d-%H%M%S")
 _session_path: Path | None = None
 _session_id = _SESSION_STAMP
-_session_build = ""
 _header_paths: set[Path] = set()
 _active_day = _SESSION_STARTED.strftime("%Y%m%d")
 _PATH_LOCK = threading.Lock()
@@ -333,7 +332,6 @@ def _session_header(target: Path, retention_deleted: int = 0) -> dict[str, Any]:
             "startedAt": started_at(),
             "fileStartedAt": datetime.now(_TZ).isoformat(timespec="seconds"),
             "mode": _MODE,
-            "build": _session_build,
             "pid": os.getpid(),
             "file": target.name,
             "naming": _NAMING,
@@ -381,12 +379,10 @@ def _ensure_session_header() -> Path | None:
         return None
 
 
-def start_session(build: str = "") -> None:
+def start_session() -> None:
     """Write one self-describing first record for this API process."""
-    global _session_build
     if not _ENABLED:
         return
-    _session_build = str(build or "")
     _ensure_session_header()
 
 

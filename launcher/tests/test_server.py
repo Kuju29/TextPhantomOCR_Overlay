@@ -123,8 +123,8 @@ except Exception as exc:
 
 print("\n== log capture ==")
 lines = [ln for _lvl, ln in bus.drain(9999)]
-check("startup line captured", any("starting build=" in ln for ln in lines),
-      next((ln for ln in lines if "starting build=" in ln), ""))
+check("startup line captured", any("[TextPhantom][api] starting workers=" in ln for ln in lines),
+      next((ln for ln in lines if "[TextPhantom][api] starting workers=" in ln), ""))
 check("uvicorn logging captured", any("Uvicorn running" in ln or "Started server" in ln
                                       for ln in lines),
       next((ln for ln in lines if "Uvicorn" in ln), ""))

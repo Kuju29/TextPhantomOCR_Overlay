@@ -199,7 +199,7 @@ def client(records: list[dict[str, Any]]) -> int:
     return written
 
 
-def startup_banner(build: str) -> None:
+def startup_banner() -> None:
     """Mark where a run begins, so a file covering several runs stays readable."""
     if not _ENABLED:
         return
@@ -210,7 +210,6 @@ def startup_banner(build: str) -> None:
             "side": "api",
             "tag": "boot",
             "ok": True,
-            "build": build,
             "logDir": str(_ROOT),
             "keepDays": _KEEP_DAYS,
         },

@@ -116,7 +116,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return true;
 
     case "GET_API_STATUS":
-      sendResponse({ ok: healthCache.ok, ts: healthCache.ts, build: healthCache.build });
+      sendResponse({ ok: healthCache.ok, ts: healthCache.ts });
       return true;
 
     case "API_URL_CHANGED":

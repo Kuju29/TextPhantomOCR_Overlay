@@ -72,9 +72,9 @@ async def lifespan(app: FastAPI):
     queue = JobQueue(process_payload)
     queue.start()
     app.state.job_queue = queue
-    print(f"[TextPhantom][api] starting build={settings.build_id} workers={settings.max_workers} direct_workers={getattr(queue, '_direct_workers', '?')} ai_workers={getattr(queue, '_ai_workers', '?')}", flush=True)
+    print(f"[TextPhantom][api] starting workers={settings.max_workers} direct_workers={getattr(queue, '_direct_workers', '?')} ai_workers={getattr(queue, '_ai_workers', '?')}", flush=True)
 
-    logfile.startup_banner(settings.build_id)
+    logfile.startup_banner()
     # Printing a path that is never written to is how someone ends up grepping
     # an empty folder for an hour. Say which of the two states this run is in.
     if logfile.is_enabled():
@@ -227,7 +227,7 @@ app.include_router(logs.router)
 # This must precede trace_install.install(). In full mode the installer wraps
 # live functions, and no wrapper record is allowed to become line one of a file
 # whose build/session identity has not been stated yet.
-trace.start_session(settings.build_id)
+trace.start_session()
 
 # Function tracing, installed LAST so every module is imported and every router
 # is bound before anything is wrapped. No-op unless TP_TRACE=1.

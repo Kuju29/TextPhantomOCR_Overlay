@@ -5,7 +5,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import re
 
 import httpx
 
@@ -33,6 +35,44 @@ except ValueError:
     _THINKING_BUDGET = 0
 
 _THINKING_OFF_MODES = ("off", "fast", "none", "0", "false", "no")
+
+
+_SECRET_QUERY_RE = re.compile(
+    r"([?&](?:api[_-]?key|apikey|key|token|access[_-]?token|auth|authorization|password|secret)=)([^&#\s]+)",
+    re.IGNORECASE,
+)
+_SECRET_ASSIGN_RE = re.compile(
+    r"\b(api[_-]?key|apikey|access[_-]?token|token|secret|password|authorization|cookie)(\s*[:=]\s*)([^\s,;&]+)",
+    re.IGNORECASE,
+)
+_GOOGLE_KEY_RE = re.compile(r"\bAIza[0-9A-Za-z_-]{20,}\b")
+_BEARER_RE = re.compile(r"\bBearer\s+[A-Za-z0-9._~+\-/=]{6,}", re.IGNORECASE)
+
+
+def _safe_provider_error(response_body: str) -> tuple[str, str, str]:
+    """Return only Gemini error code/status/message with credentials removed."""
+    code = ""
+    status = ""
+    message = ""
+    try:
+        document = json.loads(response_body or "{}")
+        error = document.get("error") if isinstance(document, dict) else None
+        if isinstance(error, dict):
+            code = str(error.get("code") or "").strip()
+            status = str(error.get("status") or "").strip()
+            message = str(error.get("message") or "").strip()
+    except (TypeError, ValueError):
+        pass
+
+    if message:
+        message = _SECRET_QUERY_RE.sub(lambda m: f"{m.group(1)}<redacted>", message)
+        message = _SECRET_ASSIGN_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}<redacted>", message)
+        message = _GOOGLE_KEY_RE.sub("<redacted>", message)
+        message = _BEARER_RE.sub("Bearer <redacted>", message)
+        message = message.replace("\r", " ").replace("\n", " ")
+        if len(message) > 800:
+            message = message[:800] + "…"
+    return code, status, message
 
 
 def _thinking_config_for(model: str, mode: str = "") -> dict | None:
@@ -85,6 +125,25 @@ def _uses_response_format(model: str) -> bool:
     return _supports_native_schema(model) and (model or "").strip().lower().startswith(
         "gemini-3"
     )
+
+
+def _accepts_sampling_parameters(model: str) -> bool:
+    """Whether ``temperature`` is safe for this Gemini model generation.
+
+    Google deprecated sampling parameters starting with Gemini 3.5/3.6 and
+    future generations may reject them with HTTP 400.  Exact older model ids
+    keep the user's configured temperature; moving ``*-latest`` aliases omit
+    it so a hot-swap cannot suddenly invalidate the request.
+    """
+    m = (model or "").strip().lower()
+    if "latest" in m:
+        return False
+    match = re.match(r"^gemini-(\d+)(?:\.(\d+))?", m)
+    if not match:
+        return True
+    major = int(match.group(1))
+    minor = int(match.group(2) or 0)
+    return (major, minor) < (3, 5)
 
 
 _LEGACY_SCHEMA_KEYS = frozenset(
@@ -170,11 +229,12 @@ def generate(
         "systemInstruction": {"parts": [{"text": system_text}]},
         "contents": [{"role": "user", "parts": parts}],
         "generationConfig": {
-            "temperature": ai_config.TEMPERATURE,
             "maxOutputTokens": ai_config.MAX_TOKENS,
             "responseMimeType": "text/plain",
         },
     }
+    if _accepts_sampling_parameters(model):
+        payload["generationConfig"]["temperature"] = ai_config.TEMPERATURE
     use_schema = bool(response_schema) and _supports_native_schema(model)
     if use_schema:
         if _uses_response_format(model):
@@ -204,12 +264,22 @@ def generate(
     try:
         r.raise_for_status()
     except httpx.HTTPStatusError as e:
-        # Never expose the response body: some gateways echo request content.
-        # Length + digest are enough to correlate identical provider failures.
+        # Do not dump the raw body: gateways can echo request content. Extract
+        # only Google's structured error fields and redact credential-shaped
+        # values, while retaining length/hash to correlate repeated failures.
         response_body = r.text or ""
         response_sha256 = hashlib.sha256(response_body.encode("utf-8")).hexdigest()
+        provider_code, provider_status, provider_message = _safe_provider_error(response_body)
+        safe_fields = []
+        if provider_code:
+            safe_fields.append(f"error.code={provider_code}")
+        if provider_status:
+            safe_fields.append(f"error.status={provider_status}")
+        if provider_message:
+            safe_fields.append(f"error.message={provider_message}")
+        safe_detail = ", ".join(safe_fields) or "error.message=<unavailable>"
         raise RuntimeError(
-            f"Gemini HTTP {r.status_code} (model={model}, attempts=1, "
+            f"Gemini HTTP {r.status_code} (model={model}, attempts=1, {safe_detail}, "
             f"responseBodyChars={len(response_body)}, "
             f"responseBodySha256={response_sha256})"
         ) from e

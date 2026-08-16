@@ -1,12 +1,9 @@
-"""Liveness / build-info endpoints.
-
-"""
+"""Liveness / compatibility endpoints."""
 
 from __future__ import annotations
 
 from fastapi import APIRouter
 
-from backend.config import settings
 
 router = APIRouter()
 
@@ -14,10 +11,10 @@ router = APIRouter()
 @router.get("/health")
 async def health() -> dict:
     """Simple liveness probe."""
-    return {"ok": True, "build": settings.build_id}
+    return {"ok": True}
 
 
 @router.get("/version")
 async def version() -> dict:
-    """Build identifier — handy for confirming a deploy went out."""
-    return {"ok": True, "build": settings.build_id, "core": "backend.rewrite"}
+    """Compatibility marker retained for launchers; no release number is tracked."""
+    return {"ok": True, "core": "backend.rewrite"}

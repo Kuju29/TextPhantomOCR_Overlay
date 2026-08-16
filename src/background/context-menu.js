@@ -7,7 +7,7 @@ import { resolveSeriesKey, refineSeriesKeyWithTitle } from "../shared/series.js"
 import { getApiBase } from "./api.js";
 import { getSeriesMemory, selectPromptMemory } from "./series-memory.js";
 import { ensureBatch, batchUpdateToast } from "./batches.js";
-import { fetchImageDataUriFromUrl } from "./images.js";
+import { fetchImageDataUriFromTab } from "./images.js";
 import { describeLimits } from "./job-queue.js";
 import { imageKeyFromPayload } from "./job-keys.js";
 import { enqueue, setCurrentBatchId } from "./jobs.js";
@@ -207,7 +207,7 @@ async function handleTranslateOne(menuInfo, tab, ctx) {
 
   if (!payload.imageDataUri && String(sourceUrl || "").startsWith("blob:")) {
     try {
-      payload.imageDataUri = await fetchImageDataUriFromUrl(sourceUrl, tab?.url || null);
+      payload.imageDataUri = await fetchImageDataUriFromTab(tab.id, sourceUrl, frameId || 0);
     } catch (e) {
       log.warn("blob datauri fetch failed", e?.message || String(e));
     }

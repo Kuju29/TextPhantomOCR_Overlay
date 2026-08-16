@@ -153,5 +153,4 @@ async def where() -> dict:
         "files": sorted(p.name for p in logfile.log_dir().glob("*.log"))
         if logfile.log_dir().exists()
         else [],
-        "build": settings.build_id,
     }

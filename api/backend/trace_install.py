@@ -76,7 +76,6 @@ MODULES: tuple[str, ...] = (
     "backend.render.build_ai_tree",
     "backend.render.bubble",
     "backend.render.colors",
-    "backend.render.curve",
     "backend.render.erase",
     "backend.render.erase_boxes",
     "backend.render.font_config",

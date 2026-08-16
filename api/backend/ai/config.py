@@ -122,14 +122,17 @@ MODEL_ALIASES: Final[dict[str, dict[str, str]]] = {
         "flash-lite":   "gemini-2.5-flash-lite",
         "flash":        "gemini-2.5-flash",
         "pro":          "gemini-2.5-pro",
-        "3-flash":      "gemini-3-flash-preview",
-        "3-pro":        "gemini-3-pro-preview",
-        "3-pro-image":  "gemini-3-pro-image-preview",
+        "3-flash":      "gemini-3.6-flash",
+        "3-pro":        "gemini-3.1-pro-preview",
+        "3-pro-image":  "gemini-3-pro-image",
         "flash-image":  "gemini-2.5-flash-image",
         # Retired models → remap to the current equivalent so an old stored
         # selection keeps working instead of returning HTTP 404.
-        "gemini-2.0-flash-lite": "gemini-2.5-flash-lite",
-        "gemini-2.0-flash":      "gemini-2.5-flash",
+        "gemini-3-pro-preview":       "gemini-3.1-pro-preview",
+        "gemini-3-pro-image-preview": "gemini-3-pro-image",
+        "gemini-3-flash-preview":     "gemini-3.6-flash",
+        "gemini-2.0-flash-lite":     "gemini-3.1-flash-lite",
+        "gemini-2.0-flash":          "gemini-3.6-flash",
         "gemini-1.5-flash":      "gemini-2.5-flash",
         "gemini-1.5-flash-8b":   "gemini-2.5-flash-lite",
         "gemini-1.5-pro":        "gemini-2.5-pro",
@@ -139,15 +142,17 @@ MODEL_ALIASES: Final[dict[str, dict[str, str]]] = {
 
 # Hard-coded model fallbacks used by /ai/resolve when the live endpoint
 # enumeration returns nothing useful.
-# Live Gemini models as of the official docs (2026-06-01). 2.0-* were shut
-# down 2026-06-01 and gemini-3-pro-preview was shut down, so they are NOT
-# listed here. ``gemini-flash-latest`` is an auto-updating alias kept last as a
-# self-healing safety net.
+# Conservative Gemini fallback list aligned with the current official model/deprecation tables.
+# Retired preview ids are remapped above instead of being offered here.
+# ``gemini-flash-latest`` stays last as an auto-updating safety net.
 GEMINI_FALLBACK_MODELS: Final[list[str]] = [
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.5-flash",
+    "gemini-3.1-pro-preview",
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
     "gemini-2.5-pro",
-    "gemini-3-flash-preview",
     "gemini-flash-latest",
 ]
 

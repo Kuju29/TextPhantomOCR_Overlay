@@ -40,7 +40,6 @@ async def warmup(lang: str | None = None) -> dict:
     result = run_warmup(lang or settings.warmup_lang)
     return {
         "ok": True,
-        "build": settings.build_id,
         "dt_ms": round((time.perf_counter() - t0) * 1000, 1),
         "result": result,
     }

@@ -2,17 +2,10 @@
 // root: `node scripts/dev/check-docker-context.mjs`
 //
 // Every `COPY` in api/Dockerfile is resolved against the build context (api/).
-// A missing source is not a warning at build time, it is a hard failure:
+// A missing source is a hard Docker build failure, so this optional dev tool
+// checks only the COPY sources that the current Dockerfile actually uses.
 //
-//   ERROR: failed to calculate checksum of ref ...: "/build-manifest.json": not found
-//
-// which is what stopped the Hugging Face build on 2026-08-15. Docker cannot use
-// a cached layer for a COPY whose source is gone either, because the checksum
-// it caches on is computed from that source — so "it built last time" proves
-// nothing about the next build.
-//
-// Not part of `npm run build`: the working folder on your machine is not the
-// git checkout, so a file can be absent here and present in the repo.
+// Not part of `npm run build`: it has no release/version responsibilities.
 import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";

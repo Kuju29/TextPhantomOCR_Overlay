@@ -159,16 +159,21 @@
           if (!url) return sendResponse({ ok: false, error: "no url" });
           const res = await fetch(url, { credentials: "include", redirect: "follow" });
           if (!res.ok) return sendResponse({ ok: false, error: `HTTP ${res.status}` });
-          const mime =
-            String(res.headers.get("content-type") || "").split(";")[0].trim() || "image/jpeg";
+          const mime = String(res.headers.get("content-type") || "").split(";")[0].trim();
+          if (mime && !mime.toLowerCase().startsWith("image/")) {
+            return sendResponse({ ok: false, error: `Not an image: ${mime}` });
+          }
           const ab = await res.arrayBuffer();
           const bytes = new Uint8Array(ab);
-          if (bytes.length < 64) return sendResponse({ ok: false, error: "response too small" });
+          if (bytes.length < 64) return sendResponse({ ok: false, error: "Image too small" });
+          if (bytes.length > 25 * 1024 * 1024) {
+            return sendResponse({ ok: false, error: "Image too large" });
+          }
           let bin = "";
           const CHUNK = 0x8000;
           for (let i = 0; i < bytes.length; i += CHUNK)
             bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
-          return sendResponse({ ok: true, dataUri: `data:${mime};base64,${btoa(bin)}` });
+          return sendResponse({ ok: true, dataUri: `data:${mime || "image/jpeg"};base64,${btoa(bin)}` });
         } catch (e) {
           return sendResponse({ ok: false, error: e?.message || String(e) });
         }

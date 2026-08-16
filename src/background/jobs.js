@@ -559,8 +559,7 @@ async function idempotencyKeyForPayload(payload) {
 
 // Registrable domains whose images must be fetched in the browser; seeded with CDNs that reject datacenter IPs.
 const dataUriDomains = new Set([
-  "mangadex.network",
-  "mangadex.org",
+  "uploads.mangadex.org",
 ]);
 
 // Returns the hostname of a URL, or "" when unparseable.
@@ -572,12 +571,11 @@ function hostOf(u) {
   }
 }
 
-// Returns the last two labels of a URL's hostname, the key used for domain memory.
+// Exact hostname is the domain-memory key.  Collapsing to the last two labels
+// is unsafe for public suffixes such as co.uk and can make an unrelated site
+// inherit another host's anti-hotlink workaround.
 function domainKeyOf(u) {
-  const host = hostOf(u);
-  if (!host) return "";
-  const labels = host.split(".").filter(Boolean);
-  return labels.length <= 2 ? host : labels.slice(-2).join(".");
+  return hostOf(u).toLowerCase();
 }
 
 // Records that this image's domain needs browser-side bytes.
@@ -692,10 +690,13 @@ async function processJobInner(payload, tabId, frameId = 0) {
       payload.imageDataUri = cached;
     } else {
       const tPrefetch = Date.now();
+      const browserOnlySrc = /^(?:blob:|file:|chrome-extension:|moz-extension:)/i.test(src);
       try {
         const du = src.startsWith("data:")
           ? src
-          : await fetchImageDataUriFromUrl(src, pageUrl || "");
+          : browserOnlySrc
+            ? await fetchImageDataUriFromTab(tabId, src, frameId || 0)
+            : await fetchImageDataUriFromUrl(src, pageUrl || "");
         if (du) {
           log.info("datauri prefetch ok", {
             ms: Date.now() - tPrefetch,
@@ -713,7 +714,7 @@ async function processJobInner(payload, tabId, frameId = 0) {
         }
       } catch (e) {
         let errMsg = e?.message || String(e);
-        if (/\bHTTP 403\b/i.test(errMsg) && tabId) {
+        if (!browserOnlySrc && /\bHTTP 403\b/i.test(errMsg) && tabId) {
           try {
             const du = await fetchImageDataUriFromTab(tabId, src, frameId || 0);
             if (du) {
@@ -738,7 +739,10 @@ async function processJobInner(payload, tabId, frameId = 0) {
           }
         }
         if (errMsg) {
-          const cls = classifyJobError(errMsg);
+          // blob:/file:/extension URLs are meaningful only inside the browser.
+          // If the owning tab cannot provide bytes, sending that URL to the
+          // server can only produce a guaranteed 400 and must never happen.
+          const cls = browserOnlySrc ? { permanent: true } : classifyJobError(errMsg);
           log.warn("datauri prefetch failed", { err: errMsg, permanent: cls.permanent });
           if (cls.permanent) {
             if (payload?.metadata?.image_id) pendingByImage.delete(payload.metadata.image_id);
@@ -1664,6 +1668,7 @@ async function runSyncTranslate(
     return;
   }
 
+  let browserImageFallbackUsed = false;
   for (let attempt = 0; ; attempt++) {
     const serverPayload = payloadForFullServer(payload);
     const outbound = serverPayload;
@@ -1737,6 +1742,63 @@ async function runSyncTranslate(
 
       const retryAfterMs = Number(e?.retryAfterMs) || 0;
       const status = Number(e?.status) || 0;
+      const failedStage = String(e?.failedStage || "");
+
+      // Server-side URL downloads can be rejected by anti-hotlink/CDN rules
+      // even while the page is visibly displaying the image. Recover only when
+      // the server explicitly says it failed before Lens/AI at image_fetch.
+      // This is NOT an AI retry: the first request never reached OCR/model work.
+      if (
+        !browserImageFallbackUsed &&
+        failedStage === "image_fetch" &&
+        !payload.imageDataUri &&
+        /^https?:/i.test(String(payload?.src || ""))
+      ) {
+        browserImageFallbackUsed = true;
+        if (slotHeld) {
+          releaseFailed(requestLane);
+          slotHeld = false;
+        }
+        const src = String(payload.src || "").trim();
+        let browserFetchError = "";
+        try {
+          let du = "";
+          if (tabId) {
+            try {
+              du = await fetchImageDataUriFromTab(tabId, src, frameId || 0);
+            } catch (tabError) {
+              browserFetchError = tabError?.message || String(tabError);
+            }
+          }
+          if (!du) {
+            // Still browser-side (extension service worker / user's IP). Useful
+            // when the CDN blocks datacenter IPs but does not require page cookies.
+            du = await fetchImageDataUriFromUrl(src, payload?.context?.page_url || "");
+          }
+          if (du) {
+            payload.imageDataUri = du;
+            const key = normImgSrc(src);
+            if (key) setCachedDataUri(key, du);
+            markDomainNeedsDataUri(src);
+            payload = withPipelineStage(payload, "server_image_fetch_browser_fallback");
+            log.info("server image fetch failed; recovered bytes in browser", {
+              src: src.slice(0, 180),
+              kb: Math.round(du.length / 1024),
+              tabFallbackError: browserFetchError || "",
+            });
+            await wf.lensDegraded(workflowId, "server image fetch failed; browser supplied bytes");
+            continue;
+          }
+        } catch (browserError) {
+          browserFetchError = browserError?.message || String(browserError);
+        }
+        log.warn("browser image fallback failed", {
+          src: src.slice(0, 180),
+          failedStage,
+          error: browserFetchError || "browser returned no image bytes",
+        });
+      }
+
       // Backpressure is a response contract, not the presence of an optional
       // Retry-After header. A bare 429/503 must narrow the lane as well.
       const isBusy = status === 429 || status === 503 || retryAfterMs > 0;

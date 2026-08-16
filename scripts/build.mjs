@@ -47,27 +47,6 @@ function manifestToNpmVersion(v) {
   }
 }
 
-// --- The API's copy of the version -----------------------------------------
-// The Docker image copies only `api/`, so `platform/base.json` and
-// `package.json` are not there to read at runtime and `api/Dockerfile` copies
-// this file instead. It is generated here rather than hand-maintained: a second
-// place to type the version is a second place for it to be wrong, and a missing
-// file fails the image build (observed 2026-08-15: "COPY build-manifest.json
-// ... not found").
-{
-  const manifestPath = path.join(projectRoot, "api", "build-manifest.json");
-  const desired = `${JSON.stringify({ schema: "tp.build-manifest/1", version }, null, 2)}\n`;
-  let current = "";
-  try {
-    current = await readFile(manifestPath, "utf8");
-  } catch {
-  }
-  if (current !== desired) {
-    await writeFile(manifestPath, desired);
-    console.log(`Wrote api/build-manifest.json -> ${version}`);
-  }
-}
-
 const targets = [
   {
     id: "chrome",
@@ -257,8 +236,27 @@ for (const target of targets) {
 }
 
 const sourceEntries = [];
-for (const directory of ["src", "platform", "scripts"]) {
-  for (const file of await walkFiles(path.join(projectRoot, directory), directory)) {
+const SOURCE_SKIP_DIRS = new Set([
+  ".git", ".pytest_cache", ".ruff_cache", ".venv", "venv",
+  "__pycache__", "build", "dist", "models",
+]);
+async function walkSourceFiles(root, prefix = "") {
+  const entries = await readdir(root, { withFileTypes: true });
+  const files = [];
+  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    if (entry.isDirectory() && SOURCE_SKIP_DIRS.has(entry.name)) continue;
+    const absolute = path.join(root, entry.name);
+    const relative = path.posix.join(prefix, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...(await walkSourceFiles(absolute, relative)));
+    } else if (entry.isFile() && !entry.name.endsWith(".pyc")) {
+      files.push({ absolute, relative });
+    }
+  }
+  return files;
+}
+for (const directory of ["src", "platform", "scripts", "api", "launcher"]) {
+  for (const file of await walkSourceFiles(path.join(projectRoot, directory), directory)) {
     sourceEntries.push({ absolute: file.absolute, name: file.relative });
   }
 }

@@ -1287,20 +1287,28 @@ def read_default_prompt(api_dir: Path, lang: str) -> str:
     if not prompts_file.is_file():
         raise FileNotFoundError(f"{prompts_file} not found — fetch the API first")
     text = prompts_file.read_text(encoding="utf-8", errors="replace")
-    # Parse the module and read the LANG_STYLE literal — no import, no
-    # execution, so this works whether or not the server is running.
+    # Parse literals only — no import/execution — so this works whether or not
+    # the server is running. Thai's production default is intentionally kept
+    # in THAI_STYLE_COMPACT rather than duplicated inside LANG_STYLE.
     table: dict[str, str] | None = None
+    thai_default: str | None = None
     for node in ast.parse(text).body:
         names: list[str] = []
         if isinstance(node, ast.Assign):
             names = [t.id for t in node.targets if isinstance(t, ast.Name)]
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
             names = [node.target.id]
-        if "LANG_STYLE" in names and node.value is not None:
-            table = ast.literal_eval(node.value)
-            break
+        value = getattr(node, "value", None)
+        if value is None:
+            continue
+        if "LANG_STYLE" in names:
+            table = ast.literal_eval(value)
+        if "THAI_STYLE_COMPACT" in names:
+            thai_default = str(ast.literal_eval(value)).strip()
     if not isinstance(table, dict):
         raise ValueError("LANG_STYLE not found in prompts.py")
+    if lang == "th" and thai_default:
+        return thai_default
     if lang in table:
         return str(table[lang]).strip()
     if "default" in table:

@@ -204,6 +204,15 @@ export async function translateViaSyncRest(base, payload, { onSlow, onSent, sign
     const err = new Error(`Translate failed: HTTP ${res.status}${body ? ` - ${body}` : ""}`);
     err.status = res.status;
     err.retryAfterMs = res.status === 503 || res.status === 429 ? retryAfterMs || 2000 : 0;
+    try {
+      const parsed = JSON.parse(body);
+      const detail = parsed?.detail && typeof parsed.detail === "object" ? parsed.detail : parsed;
+      err.code = String(detail?.code || "");
+      err.failedStage = String(detail?.failedStage || "");
+      err.retryable = detail?.retryable === true;
+      err.traceId = String(detail?.traceId || "");
+    } catch {
+    }
     throw err;
   }
 

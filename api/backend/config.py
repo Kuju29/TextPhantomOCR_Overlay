@@ -7,10 +7,8 @@ should call :func:`reload` (useful in tests).
 
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Final
 
 
@@ -52,31 +50,6 @@ def _access_log_default() -> str:
     if explicit is not None:
         return (explicit or "summary").strip().lower()
     return "summary" if _diagnostics_profile() in {"activity", "deep"} else "errors"
-
-
-def _release_build_id(*, api_root: Path | None = None) -> str:
-    """Read build identity from the release tree or its staged API manifest."""
-    explicit = _env_str("TP_BUILD_ID")
-    if explicit:
-        return explicit
-    resolved_api_root = api_root or Path(__file__).resolve().parents[1]
-    extension_root = resolved_api_root.parent
-    candidates = (
-        extension_root / "platform" / "base.json",
-        resolved_api_root / "build-manifest.json",
-        extension_root / "package.json",
-    )
-    for candidate in candidates:
-        try:
-            document = json.loads(candidate.read_text(encoding="utf-8"))
-            if candidate.name == "build-manifest.json" and document.get("schema") != "tp.build-manifest/1":
-                continue
-            value = str(document.get("version") or "").strip()
-        except (OSError, ValueError, TypeError):
-            continue
-        if value:
-            return value
-    return "unknown"
 
 
 @dataclass(frozen=True)
@@ -352,9 +325,6 @@ class Settings:
     access_log_mode: str = field(
         default_factory=_access_log_default
     )
-
-    # Build metadata ---------------------------------------------------------
-    build_id: str = field(default_factory=_release_build_id)
 
 
 # Module-level singleton.  Import this from anywhere as ``from backend.config import settings``.

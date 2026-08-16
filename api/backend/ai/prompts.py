@@ -163,7 +163,10 @@ def lang_style(lang: str) -> str:
     """Return the style snippet for ``lang``, falling back to the default."""
     code = _normalize_lang(lang)
     if code == "th":
-        return THAI_STYLE_COMPACT.strip()
+        # Launcher/runtime overrides are stored in LANG_STYLE just like every
+        # other language.  The compact built-in remains the fallback when no
+        # Thai override has been supplied.
+        return (LANG_STYLE.get("th") or THAI_STYLE_COMPACT).strip()
     return (LANG_STYLE.get(code) or LANG_STYLE["default"]).strip()
 
 

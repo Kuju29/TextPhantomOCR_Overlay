@@ -13,7 +13,7 @@ const WARMUP_TTL_MS = 20 * 60 * 1000;
 const warmupByBase = new Map();
 
 // Last known `/health` result, read by the popup's GET_API_STATUS query.
-export const healthCache = { ok: false, ts: 0, build: "" };
+export const healthCache = { ok: false, ts: 0 };
 
 // Pings `/warmup` for a base URL, throttled to once per WARMUP_TTL_MS.
 export async function warmupApi(base) {

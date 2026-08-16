@@ -24,8 +24,7 @@ Tree shape::
 
 Each paragraph's geometry is a *polyline*: items carry their own straight
 baseline, so a curved line of text is approximated by several items at
-slightly different angles.  This is why curve handling (see
-``backend.render.curve``) reconstructs curvature from neighbouring items.
+slightly different angles.  Neighbouring item baselines already preserve that local curvature for downstream layout.
 """
 
 from __future__ import annotations

@@ -124,7 +124,6 @@ async def capabilities(request: Request) -> dict:
     return {
         "ok": True,
         "apiVersion": API_VERSION,
-        "build": settings.build_id,
         "schemas": SCHEMAS,
         "features": {
             "syncTranslate": True,
@@ -342,7 +341,8 @@ async def translate_sync(payload: dict[str, Any], request: Request) -> dict:
         raise HTTPException(
             status_code=mapped.status,
             detail={"code": mapped.code, "message": mapped.message,
-                    "retryable": mapped.retryable, "traceId": trace_id},
+                    "retryable": mapped.retryable, "traceId": trace_id,
+                    "failedStage": failed_stage or "unknown"},
             headers=headers,
         ) from exc
     if paced:
