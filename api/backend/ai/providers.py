@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import os
 import time
+from typing import TypedDict
 
 import httpx
 
@@ -29,6 +30,32 @@ LOCAL_LIST_TIMEOUT_SEC: float = 3.0
 # Cache for hf_router_models: sha1(key|base_url) -> {"ts": float, "models": [...]}.
 _HF_MODELS_CACHE: dict[str, dict] = {}
 _HF_MODELS_TTL_SEC = 3600
+
+
+class ModelListResult(TypedDict):
+    """Detailed result from a provider model-list request.
+
+    ``status`` is one of: valid, invalid_key, unreachable, error, missing.
+    The old list-only helpers remain as wrappers so generation code stays
+    backward compatible while the settings UI can distinguish authentication
+    failures from network failures and empty lists.
+    """
+
+    models: list[str]
+    status: str
+    http_status: int
+    error: str
+
+
+def _model_list_result(
+    *, models: list[str] | None = None, status: str, http_status: int = 0, error: str = ""
+) -> ModelListResult:
+    return ModelListResult(
+        models=list(models or []),
+        status=status,
+        http_status=int(http_status or 0),
+        error=(error or "")[:240],
+    )
 
 # Environment variables checked, in order, when no explicit key is supplied.
 _AI_KEY_ENV_NAMES = (
@@ -176,29 +203,47 @@ def pick_hf_fallback_model(models: list[str]) -> str:
     return models[0]
 
 
-def openai_compat_models(
+def openai_compat_models_status(
     api_key: str, base_url: str, timeout_sec: float = LIST_TIMEOUT_SEC
-) -> list[str]:
-    """Enumerate models from any OpenAI-compatible ``/models`` endpoint.
+) -> ModelListResult:
+    """Enumerate an OpenAI-compatible ``/models`` endpoint with auth status.
 
-    Returns an empty list on any error — callers fall back to static defaults.
+    401/403 are reported as ``invalid_key`` instead of being collapsed into an
+    empty list. Network failures are ``unreachable``; other HTTP failures are
+    ``error``. This lets the popup tell the truth instead of showing a static
+    fallback as if the credential had been verified.
     """
     if not api_key or not base_url:
-        return []
+        return _model_list_result(status="missing")
     url = base_url.rstrip("/") + "/models"
     try:
         with httpx.Client(timeout=timeout_sec) as client:
             r = client.get(url, headers={"Authorization": f"Bearer {api_key}"})
-            r.raise_for_status()
-            data = r.json()
-    except Exception:
-        return []
+    except httpx.RequestError as exc:
+        return _model_list_result(status="unreachable", error=type(exc).__name__)
+
+    if r.status_code in (401, 403):
+        return _model_list_result(status="invalid_key", http_status=r.status_code)
+    if not r.is_success:
+        return _model_list_result(status="error", http_status=r.status_code)
+    try:
+        data = r.json()
+    except ValueError:
+        return _model_list_result(status="error", http_status=r.status_code, error="invalid_json")
+
     models: list[str] = []
     for m in data.get("data") or []:
         mid = m.get("id") if isinstance(m, dict) else None
         if isinstance(mid, str) and mid.strip():
             models.append(mid.strip())
-    return models
+    return _model_list_result(models=models, status="valid", http_status=r.status_code)
+
+
+def openai_compat_models(
+    api_key: str, base_url: str, timeout_sec: float = LIST_TIMEOUT_SEC
+) -> list[str]:
+    """Backward-compatible list-only wrapper used by generation code."""
+    return openai_compat_models_status(api_key, base_url, timeout_sec)["models"]
 
 
 # Model-name fragments that can never do text translation (or are retired but
@@ -237,24 +282,25 @@ def _gemini_model_usable(model_id: str) -> bool:
     return True
 
 
-def gemini_models(api_key: str) -> list[str]:
-    """Enumerate Gemini models that support ``generateContent``.
-
-    Filters out retired names (per ``MODEL_ALIASES``) and non-translation
-    model families (TTS / image / computer-use / research / embeddings), so
-    the client's model picker only lists models that will actually answer a
-    translation prompt.
-    """
+def gemini_models_status(api_key: str) -> ModelListResult:
+    """Enumerate Gemini ``generateContent`` models and preserve auth status."""
     if not api_key:
-        return []
+        return _model_list_result(status="missing")
     url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
     try:
         with httpx.Client(timeout=LIST_TIMEOUT_SEC) as client:
             r = client.get(url)
-            r.raise_for_status()
-            data = r.json()
-    except Exception:
-        return []
+    except httpx.RequestError as exc:
+        return _model_list_result(status="unreachable", error=type(exc).__name__)
+    if r.status_code in (401, 403):
+        return _model_list_result(status="invalid_key", http_status=r.status_code)
+    if not r.is_success:
+        return _model_list_result(status="error", http_status=r.status_code)
+    try:
+        data = r.json()
+    except ValueError:
+        return _model_list_result(status="error", http_status=r.status_code, error="invalid_json")
+
     models: list[str] = []
     for m in data.get("models") or []:
         if not isinstance(m, dict):
@@ -266,7 +312,42 @@ def gemini_models(api_key: str) -> list[str]:
         model_id = name.split("/", 1)[1]
         if _gemini_model_usable(model_id):
             models.append(model_id)
-    return models
+    return _model_list_result(models=models, status="valid", http_status=r.status_code)
+
+
+def gemini_models(api_key: str) -> list[str]:
+    """Backward-compatible list-only wrapper."""
+    return gemini_models_status(api_key)["models"]
+
+
+def anthropic_models_status(api_key: str) -> ModelListResult:
+    """List Claude models available to this API key via Anthropic's Models API."""
+    if not api_key:
+        return _model_list_result(status="missing")
+    url = "https://api.anthropic.com/v1/models"
+    headers = {
+        "x-api-key": api_key,
+        "anthropic-version": "2023-06-01",
+    }
+    try:
+        with httpx.Client(timeout=LIST_TIMEOUT_SEC) as client:
+            r = client.get(url, headers=headers)
+    except httpx.RequestError as exc:
+        return _model_list_result(status="unreachable", error=type(exc).__name__)
+    if r.status_code in (401, 403):
+        return _model_list_result(status="invalid_key", http_status=r.status_code)
+    if not r.is_success:
+        return _model_list_result(status="error", http_status=r.status_code)
+    try:
+        data = r.json()
+    except ValueError:
+        return _model_list_result(status="error", http_status=r.status_code, error="invalid_json")
+    models = [
+        str(item.get("id") or "").strip()
+        for item in (data.get("data") or [])
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    ]
+    return _model_list_result(models=models, status="valid", http_status=r.status_code)
 
 
 # Non-chat fragments common across OpenAI-compatible providers: their /models

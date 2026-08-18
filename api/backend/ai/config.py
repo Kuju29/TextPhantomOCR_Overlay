@@ -46,6 +46,31 @@ LOCAL_PROVIDERS: Final[frozenset[str]] = frozenset({
 })
 
 
+# Transport actually implemented by TextPhantom for each provider. The settings
+# endpoint reports this to the popup so "provider exists in the UI" and
+# "backend can really call it" cannot drift apart silently.
+PROVIDER_PROTOCOLS: Final[dict[str, str]] = {
+    "gemini": "gemini_generate_content",
+    "anthropic": "anthropic_messages",
+    "huggingface": "openai_chat_completions",
+    "openai": "openai_chat_completions",
+    "openrouter": "openai_chat_completions",
+    "featherless": "openai_chat_completions",
+    "groq": "openai_chat_completions",
+    "together": "openai_chat_completions",
+    "deepseek": "openai_chat_completions",
+    "ollama": "openai_chat_completions",
+    "lmstudio": "openai_chat_completions",
+    "localai": "openai_chat_completions",
+    "jan": "openai_chat_completions",
+    "textgen": "openai_chat_completions",
+    "koboldcpp": "openai_chat_completions",
+    "vllm": "openai_chat_completions",
+    "llamafile": "openai_chat_completions",
+    "gpt4all": "openai_chat_completions",
+}
+
+
 class RatePolicy(TypedDict):
     rpm: float       # requests-per-minute this provider STARTS at, before adaptation
     burst: int       # how many requests may fire back-to-back before pacing kicks in

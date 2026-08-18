@@ -30,6 +30,7 @@ export const API_PATHS = {
   // Service 3: text units only. The image/tree stays in the extension.
   AI_TRANSLATE_V1: "/v1/ai/translate",
   AI_RESOLVE: "/ai/resolve",
+  AI_PROBE: "/ai/probe",
   AI_PROMPT_DEFAULT: "/ai/prompt/default",
 };
 

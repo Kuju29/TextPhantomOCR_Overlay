@@ -11,7 +11,8 @@ import { API_PATHS } from "../shared/constants.js";
 import { normalizeAiModel, normalizePrompt } from "../shared/prompt.js";
 
 export const HEALTH_TIMEOUT_MS = 5000;
-export const AI_META_TIMEOUT_MS = 8000;
+export const AI_META_TIMEOUT_MS = 12000;
+export const AI_PROBE_TIMEOUT_MS = 18000;
 export const PROMPT_TIMEOUT_MS = 8000;
 export const WARMUP_TIMEOUT_MS = 2500;
 export const RETRY_DELAYS_MS = [600, 1200, 2500, 5000];

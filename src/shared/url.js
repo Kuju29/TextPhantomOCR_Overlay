@@ -23,7 +23,7 @@ export function normalizeUrl(raw) {
     }
     return u.toString().replace(/\/+$/, "");
   } catch {
-    return url.replace(/\/+$/, "");
+    return "";
   }
 }
 

@@ -64,6 +64,7 @@ import {
   fetchDefaultPrompt,
   HEALTH_TIMEOUT_MS,
   AI_META_TIMEOUT_MS,
+  AI_PROBE_TIMEOUT_MS,
   RETRY_DELAYS_MS,
 } from "./api.js";
 
@@ -76,6 +77,9 @@ const state = {
   metaCache: null,
   modelDirty: false,
   aiMetaSeq: 0,
+  aiProbeSeq: 0,
+  lastAiResolve: null,
+  lastAiProbe: null,
   promptSeq: 0,
   lastResolvedProvider: "",
   lastResolvedKey: "",
@@ -244,87 +248,224 @@ async function refreshMeta(baseUrl) {
     }
     if (Object.keys(patch).length) await setStorage(patch);
     toggleUi();
+    if (canUseAiUi()) refreshAiMeta({ probeAfter: true });
   } catch {
     /* meta is optional */
   }
 }
 
-/** When AI is selected but no key is available, hide the AI sub-UI. */
+/**
+ * Provider/model discovery is allowed even before a cloud key exists.
+ * Auto used to be an accidental gate here; now it only means "detect/select
+ * automatically" and never controls whether the model picker may refresh.
+ */
 function ensureAiAvailableOrFallback() {
   if (!canUseAiUi()) return true;
-  const hasKey = (els.aiKey.value || "").trim().length > 0;
-  if (hasKey || state.metaCache?.has_env_ai_key) return true;
   toggleUi();
-  return false;
+  return true;
+}
+
+function protocolLabel(protocol) {
+  const p = String(protocol || "");
+  if (p === "gemini_generate_content") return "Gemini generateContent";
+  if (p === "anthropic_messages") return "Anthropic Messages";
+  if (p === "openai_chat_completions") return "OpenAI-compatible Chat Completions";
+  return p || "unknown transport";
+}
+
+/** Render server-verified key/model/backend state without conflating fallback data with success. */
+function renderAiVerificationMessages() {
+  if (!canUseAiUi()) return;
+  const data = state.lastAiResolve;
+  if (!data) return;
+
+  const provider = String(data.provider || els.aiProvider?.value || "auto").trim();
+  const providerName = providerLabel(provider || "auto");
+  const protocol = protocolLabel(data.provider_protocol);
+
+  // The API refused to talk to this endpoint with the credential it has. Name
+  // the actual problem instead of letting it read as "server unreachable".
+  if (data.error === "unsafe_base_url") {
+    setFieldMessage(els.aiProviderWrap, "", "");
+    setFieldMessage(
+      els.aiModelWrap,
+      "error",
+      "✕ The TextPhantom API refuses this AI endpoint without your own API key — enter your key, or clear the custom endpoint",
+    );
+    return;
+  }
+
+  if (data.backend_supported === false) {
+    setFieldMessage(els.aiProviderWrap, "error", `✕ ${providerName} is not implemented by this TextPhantom API build`);
+  } else {
+    setFieldMessage(els.aiProviderWrap, "", "");
+  }
+
+  // Remote verification supersedes the prefix-only validator once a resolve
+  // request has actually reached the provider's model endpoint.
+  if (els.aiKeyWrap?.style.display !== "none") {
+    if (data.key_status === "valid") {
+      setFieldMessage(els.aiKeyWrap, "info", `✓ Live ${providerName} model list loaded — selected model will be verified by a real test call`);
+    } else if (data.key_status === "invalid") {
+      const code = Number(data.models_http_status || 0);
+      setFieldMessage(
+        els.aiKeyWrap,
+        "error",
+        `✕ ${providerName} rejected this API key${code ? ` (HTTP ${code})` : ""}`,
+      );
+    } else if (data.key_status === "missing") {
+      setFieldMessage(els.aiKeyWrap, "warn", "⚠ No API key yet — showing known models only; live availability is not verified");
+    } else if (data.key_status === "unverified") {
+      setFieldMessage(els.aiKeyWrap, "warn", `⚠ Could not verify the key with ${providerName} right now`);
+    }
+  }
+
+  let modelType = "info";
+  let modelText = "";
+  if (data.backend_supported === false) {
+    modelType = "error";
+    modelText = "✕ Backend transport is not implemented for this provider";
+  } else if (data.key_status === "invalid") {
+    modelType = "warn";
+    modelText = `⚠ Showing known fallback models only — key was rejected • Backend: ${protocol}`;
+  } else if (data.models_source === "live" && data.models_verified) {
+    const count = Array.isArray(data.models) ? data.models.length : 0;
+    modelText = `✓ ${count} live model${count === 1 ? "" : "s"} from ${providerName} • Backend: ${protocol}`;
+    if (data.model_status === "unavailable") {
+      modelType = "error";
+      modelText = `✕ Selected model is not in this key's live model list • Backend: ${protocol}`;
+    }
+  } else {
+    modelType = "warn";
+    if (data.key_status === "missing") {
+      modelText = `⚠ Known models (not verified) — add a key to load the live ${providerName} list • Backend: ${protocol}`;
+    } else {
+      modelText = `⚠ Live model list unavailable — showing known fallback models • Backend: ${protocol}`;
+    }
+  }
+
+  const probe = state.lastAiProbe;
+  const currentModel = (els.aiModel?.value || "auto").trim() || "auto";
+  const concreteModel = currentModel === "auto" ? String(data.model || "") : currentModel;
+  const probeMatches = Boolean(
+    probe &&
+      String(probe.provider || "") === provider &&
+      String(probe.model || "") === concreteModel,
+  );
+  if (probeMatches) {
+    if (probe.status === "checking") {
+      modelText += " • ⏳ Testing selected model…";
+    } else if (probe.status === "passed") {
+      modelType = "info";
+      modelText += ` • ✓ Real test call passed${probe.cached ? " (cached)" : ""}`;
+      if (els.aiKeyWrap?.style.display !== "none") {
+        setFieldMessage(els.aiKeyWrap, "info", `✓ API key + selected model verified by a real ${providerName} test call`);
+      }
+    } else if (probe.status === "invalid_key") {
+      modelType = "error";
+      modelText += " • ✕ Test call rejected the API key";
+      if (els.aiKeyWrap?.style.display !== "none") {
+        setFieldMessage(els.aiKeyWrap, "error", `✕ ${providerName} rejected this API key during the real model test`);
+      }
+    } else if (probe.status === "model_unavailable") {
+      modelType = "error";
+      modelText += " • ✕ Real test says this model is unavailable";
+    } else if (probe.status === "rate_limited") {
+      modelType = "warn";
+      modelText += " • ⚠ Test reached the provider but was rate-limited (HTTP 429)";
+    } else if (probe.status === "rejected") {
+      modelType = "error";
+      modelText += ` • ✕ Provider rejected the real test${probe.http_status ? ` (HTTP ${probe.http_status})` : ""}`;
+    } else if (probe.status === "unreachable") {
+      modelType = "warn";
+      modelText += " • ⚠ Real test could not reach the provider";
+    } else if (probe.status) {
+      modelType = "warn";
+      modelText += ` • ⚠ Real test: ${probe.status}`;
+    }
+  }
+
+  setFieldMessage(els.aiModelWrap, modelType, modelText);
+}
+
+/** Run one tiny real generation request for the concrete selected/resolved model. */
+async function probeSelectedModel() {
+  if (!canUseAiUi()) return;
+  const base = normalizeUrl(els.apiUrl.value);
+  const resolved = state.lastAiResolve;
+  if (!base || !resolved?.backend_supported) return;
+  if (!["valid", "unverified", "not_required"].includes(String(resolved.key_status || ""))) return;
+
+  const selectedModel = (els.aiModel.value || "auto").trim() || "auto";
+  const concreteModel = selectedModel === "auto" ? String(resolved.model || "").trim() : selectedModel;
+  if (!concreteModel || concreteModel === "auto") return;
+
+  const provider = String(resolved.provider || els.aiProvider?.value || "auto").trim();
+  const aiKey = (els.aiKey.value || "").trim();
+  const selectedBaseUrl = (els.aiBaseUrl?.value || "").trim();
+  const seq = ++state.aiProbeSeq;
+  state.lastAiProbe = { provider, model: concreteModel, status: "checking", cached: false };
+  renderAiVerificationMessages();
+
+  try {
+    const data = await fetchJson(
+      `${base}${API_PATHS.AI_PROBE}`,
+      { api_key: aiKey, model: concreteModel, provider, base_url: selectedBaseUrl },
+      AI_PROBE_TIMEOUT_MS,
+    );
+    if (seq !== state.aiProbeSeq) return;
+    state.lastAiProbe = data || { provider, model: concreteModel, status: "probe_failed" };
+    renderAiVerificationMessages();
+  } catch {
+    if (seq !== state.aiProbeSeq) return;
+    state.lastAiProbe = { provider, model: concreteModel, status: "unreachable", cached: false };
+    renderAiVerificationMessages();
+  }
 }
 
 // AI meta (provider / model resolution)
-async function refreshAiMeta() {
+async function refreshAiMeta({ probeAfter = false } = {}) {
   if ((els.mode.value || "lens_text") !== "lens_text") return;
-  if (!ensureAiAvailableOrFallback()) return;
 
   const base = normalizeUrl(els.apiUrl.value);
   if (!base) return;
   if ((els.sources.value || "").trim() !== "ai") {
     setModelOptions([], { keepValue: "auto" });
+    state.lastAiResolve = null;
+    state.lastAiProbe = null;
     return;
   }
 
   const seq = ++state.aiMetaSeq;
-  try {
-    const lang = els.lang.value || "en";
-    const aiKey = (els.aiKey.value || "").trim();
-    const currentModel = (els.aiModel.value || "").trim() || state.desiredAiModel || "auto";
+  const lang = els.lang.value || "en";
+  const aiKey = (els.aiKey.value || "").trim();
+  const currentModel = (els.aiModel.value || "").trim() || state.desiredAiModel || "auto";
+  const selectedProvider = (els.aiProvider?.value || "auto").trim();
+  const selectedBaseUrl = (els.aiBaseUrl?.value || "").trim();
 
-    const selectedProvider = (els.aiProvider?.value || "auto").trim();
-    const selectedBaseUrl = (els.aiBaseUrl?.value || "").trim();
+  state.lastAiProbe = null;
+  setFieldMessage(els.aiModelWrap, "info", "⏳ Loading models for this provider…");
+
+  try {
     const data = await fetchJson(
       `${base}${API_PATHS.AI_RESOLVE}`,
       { api_key: aiKey, model: currentModel, lang, provider: selectedProvider, base_url: selectedBaseUrl },
       AI_META_TIMEOUT_MS,
     );
     if (seq !== state.aiMetaSeq) return;
+    state.lastAiResolve = data || null;
 
-    if (!data?.ok) {
-      // Server couldn't resolve the provider/model list. Keep the user's
-      // choice, but say so instead of silently pretending it resolved.
-      setModelOptions([], { keepValue: currentModel, strict: false });
-      setFieldMessage(
-        els.aiModelWrap,
-        "warn",
-        "⚠ Couldn’t fetch the model list — keeping your selection (check key/provider/endpoint)",
-      );
-      toggleUi();
-      return;
-    }
-    setFieldMessage(els.aiModelWrap, "", "");
-
-    const provider = String(data.provider || "").trim();
-    const providerChanged = Boolean(
-      state.lastResolvedProvider &&
-        provider &&
-        provider !== state.lastResolvedProvider &&
-        aiKey !== state.lastResolvedKey,
-    );
-    if (provider) state.lastResolvedProvider = provider;
-    state.lastResolvedKey = aiKey;
-
-    const models = Array.isArray(data.models) ? data.models : [];
+    // Even an authentication failure can carry a clearly-labelled fallback
+    // list. Render it, but never call it verified.
+    const models = Array.isArray(data?.models) ? data.models : [];
     let preferred =
       (state.modelDirty ? (els.aiModel.value || "").trim() : (state.desiredAiModel || "").trim()) ||
       currentModel ||
       "auto";
-    // When the user has explicitly pinned a model, never drop it just because
-    // the /ai/resolve model list happens to omit it (some providers don't
-    // enumerate every model). Keep it as a selectable option so it survives —
-    // otherwise the selection silently resets to "auto" on each refresh.
     let userPinned = Boolean(preferred && preferred !== "auto");
-    // EXCEPTION: the server says this exact model was retired/replaced (e.g.
-    // a stored gemini-2.0-flash after Google shut the 2.0 family down). Adopt
-    // the replacement so the UI shows what actually runs, and tell the user
-    // instead of silently answering with a different model.
-    const requestedModel = String(data.requested_model || "").trim();
-    const remapped = Boolean(data.model_remapped) && requestedModel && requestedModel === preferred && data.model;
+
+    const requestedModel = String(data?.requested_model || "").trim();
+    const remapped = Boolean(data?.model_remapped) && requestedModel && requestedModel === preferred && data?.model;
     if (remapped) {
       preferred = String(data.model).trim();
       userPinned = true;
@@ -335,12 +476,14 @@ async function refreshAiMeta() {
     const optionValues = [...els.aiModel.options].map((o) => o.value);
     let nextModel = (els.aiModel.value || "").trim() || "auto";
     if (!optionValues.includes(nextModel) || nextModel === "") {
-      const suggested = String(data.model || "").trim();
+      const suggested = String(data?.model || "").trim();
       nextModel = suggested && optionValues.includes(suggested) ? suggested : "auto";
-    } else if (providerChanged && nextModel !== "auto" && !optionValues.includes(nextModel)) {
-      nextModel = "auto";
     }
     if ((els.aiModel.value || "").trim() !== nextModel) els.aiModel.value = nextModel;
+
+    const provider = String(data?.provider || "").trim();
+    if (provider) state.lastResolvedProvider = provider;
+    state.lastResolvedKey = aiKey;
 
     if (nextModel !== currentModel) {
       state.desiredAiModel = nextModel;
@@ -348,21 +491,26 @@ async function refreshAiMeta() {
     } else {
       await setStorage({ aiKey });
     }
+
     toggleUi();
+    renderAiVerificationMessages();
+
+    if (probeAfter && data?.backend_supported && ["valid", "unverified", "not_required"].includes(String(data?.key_status || ""))) {
+      void probeSelectedModel();
+    }
   } catch {
-    // Network/timeout reaching /ai/resolve — surface it (the model list may be
-    // stale) rather than failing silently.
     if (seq === state.aiMetaSeq) {
-      setFieldMessage(els.aiModelWrap, "warn", "⚠ Couldn’t reach the server to fetch models — keeping your selection");
+      state.lastAiResolve = null;
+      setFieldMessage(els.aiModelWrap, "warn", "⚠ Couldn’t reach the TextPhantom API to fetch models — keeping your selection");
     }
   }
 }
 
-function scheduleResolveAiMeta({ immediate = false } = {}) {
+function scheduleResolveAiMeta({ immediate = false, probeAfter = false } = {}) {
   clearTimeout(aiResolveDebounce);
   const run = () => {
     if ((els.mode.value || "lens_text") === "lens_text" && (els.sources.value || "").trim() === "ai") {
-      refreshAiMeta();
+      refreshAiMeta({ probeAfter });
     }
   };
   if (immediate) run();
@@ -698,7 +846,10 @@ function scheduleSaveAi() {
     broadcast({ type: "AI_SETTINGS_CHANGED" });
     state.modelDirty = true;
     toggleUi();
-    if ((els.sources.value || "").trim() === "ai") refreshAiMeta();
+    renderAiVerificationMessages();
+    // Provider/model discovery is scheduled by the specific key/provider/model
+    // event that changed it. Prompt edits also use this saver and must not
+    // accidentally clear a completed model probe by refreshing AI metadata.
   }, 400);
 }
 
@@ -735,6 +886,9 @@ async function loadSettings() {
     "lang",
     "sources",
     "customApiUrl",
+    "apiUrlDefault",
+    "apiUrlReset",
+    "apiDefaultsFetchedAt",
     "aiKey",
     "aiModel",
     "aiProvider",
@@ -777,9 +931,23 @@ async function loadSettings() {
   els.sources.value = state.desiredSources;
 
   const storedCustom = String(stored.customApiUrl || "");
-  state.lastSavedApiUrl = storedCustom;
-  els.apiUrl.value = storedCustom;
-  if (storedCustom) state.userInteractedApi = true;
+  const storedCustomNorm = normalizeUrl(storedCustom);
+  const cachedDefaultApiUrl = normalizeUrl(stored.apiUrlDefault || "");
+  const cachedResetApiUrl = normalizeUrl(stored.apiUrlReset || "");
+
+  // Hydrate the cached remote-managed API URL before the first paint that uses
+  // this field. Reset intentionally keeps customApiUrl empty so future remote
+  // changes can still flow through; therefore reopening the popup must render
+  // the cached default immediately instead of waiting for ensureApiDefaults()
+  // to complete another async round-trip.
+  state.apiDefaults = {
+    defaultApiUrl: cachedDefaultApiUrl,
+    resetApiUrl: cachedResetApiUrl,
+    fetchedAt: Number(stored.apiDefaultsFetchedAt) || 0,
+  };
+  state.lastSavedApiUrl = storedCustomNorm;
+  els.apiUrl.value = storedCustomNorm || cachedDefaultApiUrl || cachedResetApiUrl || "";
+  if (storedCustomNorm) state.userInteractedApi = true;
 
   // Prompt map (migrate the legacy shape if needed).
   const migration = migratePromptMap(
@@ -793,8 +961,18 @@ async function loadSettings() {
   // Restore AI provider + local endpoint + translation memory.
   if (els.aiProvider) els.aiProvider.value = String(stored.aiProvider || "auto");
   if (els.aiBaseUrl) {
-    els.aiBaseUrl.value = String(stored.aiBaseUrl || "");
-    if (!els.aiBaseUrl.value) els.aiBaseUrl.value = defaultEndpointFor(els.aiProvider?.value || "auto");
+    const storedProvider = String(els.aiProvider?.value || "auto");
+    const storedBaseUrl = String(stored.aiBaseUrl || "");
+    // Drop a local default that an earlier session left behind on a cloud
+    // provider: it is invisible here (the endpoint row is local-only) yet it
+    // is still sent to /ai/resolve, which then refuses the request.
+    const staleLocalDefault =
+      storedProvider !== "auto" &&
+      !defaultEndpointFor(storedProvider) &&
+      Object.values(LOCAL_ENDPOINTS).includes(storedBaseUrl.trim());
+    els.aiBaseUrl.value = staleLocalDefault ? "" : storedBaseUrl;
+    if (staleLocalDefault) void setStorage({ aiBaseUrl: "" });
+    if (!els.aiBaseUrl.value) els.aiBaseUrl.value = defaultEndpointFor(storedProvider);
   }
   void refreshSeriesMemory();
   if (els.aiMemoryMode) {
@@ -869,7 +1047,6 @@ async function loadSettings() {
     .then(async (d) => {
       state.apiDefaults = d || state.apiDefaults;
       const def = normalizeUrl(state.apiDefaults.defaultApiUrl || "");
-      const storedCustomNorm = normalizeUrl(storedCustom);
 
       if (storedCustomNorm && isRemoteDefaultApiUrl(storedCustomNorm)) {
         await setStorage({ customApiUrl: "" });
@@ -881,7 +1058,16 @@ async function loadSettings() {
       }
 
       if (storedCustomNorm) return;
-      if (def && !normalizeUrl(els.apiUrl.value)) {
+
+      // If the cached default was already painted above, a background refresh
+      // may still discover that the remote-managed URL changed. Replace only a
+      // value that is still one of the cached managed URLs (or empty); never
+      // overwrite text the user started typing while the refresh was running.
+      if (state.pendingApiSave || state.userInteractedApi) return;
+      const current = normalizeUrl(els.apiUrl.value);
+      const wasCachedManaged =
+        !current || current === cachedDefaultApiUrl || current === cachedResetApiUrl;
+      if (def && wasCachedManaged && current !== def) {
         els.apiUrl.value = def;
         checkHealth(def);
       }
@@ -890,7 +1076,7 @@ async function loadSettings() {
 
   if (canUseAiUi()) {
     applyPromptForLang(state.desiredLang);
-    refreshAiMeta();
+    refreshAiMeta({ probeAfter: true });
   }
 
   sendRuntimeMessage({ type: "GET_API_STATUS" }).then((resp) => {
@@ -1020,7 +1206,7 @@ els.sources.addEventListener("change", async () => {
   await setStorage({ sources: state.desiredSources });
   toggleUi();
   if (ok) await applyPromptForLang(state.desiredLang);
-  refreshAiMeta();
+  refreshAiMeta({ probeAfter: true });
   broadcast({ type: "AI_SETTINGS_CHANGED" });
 });
 
@@ -1033,6 +1219,8 @@ els.apiUrl.addEventListener("blur", (e) => scheduleSaveApi(e.target.value));
 
 els.aiKey.addEventListener("input", () => {
   state.modelDirty = false;
+  state.lastAiResolve = null;
+  state.lastAiProbe = null;
   validateAiKey();
   scheduleSaveAi();
   scheduleResolveAiMeta();
@@ -1040,18 +1228,29 @@ els.aiKey.addEventListener("input", () => {
 els.aiKey.addEventListener("blur", () => {
   validateAiKey();
   scheduleSaveAi();
-  scheduleResolveAiMeta({ immediate: true });
+  scheduleResolveAiMeta({ immediate: true, probeAfter: true });
 });
 
 els.aiProvider?.addEventListener("change", async () => {
   const provider = (els.aiProvider.value || "auto").trim();
+  state.lastAiResolve = null;
+  state.lastAiProbe = null;
   // Pre-fill the local endpoint when a local provider is picked and the field
   // is empty (or still holds another provider's default).
   const def = defaultEndpointFor(provider);
-  if (def && els.aiBaseUrl) {
+  if (els.aiBaseUrl) {
     const cur = (els.aiBaseUrl.value || "").trim();
     const isAnyDefault = Object.values(LOCAL_ENDPOINTS).includes(cur);
-    if (!cur || isAnyDefault) els.aiBaseUrl.value = def;
+    if (def) {
+      if (!cur || isAnyDefault) els.aiBaseUrl.value = def;
+    } else if (isAnyDefault && provider !== "auto") {
+      // Switching to a CLOUD provider: a local default left in the (now
+      // hidden) endpoint field is still sent to /ai/resolve, where it reads as
+      // "send this provider's key to localhost" and the request is refused.
+      // Only a value this popup filled in is cleared; a URL the user typed
+      // themselves is theirs to keep.
+      els.aiBaseUrl.value = "";
+    }
   }
   await setStorage({ aiProvider: provider, aiBaseUrl: (els.aiBaseUrl?.value || "").trim() });
   toggleUi();
@@ -1059,10 +1258,12 @@ els.aiProvider?.addEventListener("change", async () => {
   updateRatePresetHint();
   // The key that was fine a moment ago may now belong to a different provider.
   validateAiKey();
-  scheduleResolveAiMeta({ immediate: true });
+  scheduleResolveAiMeta({ immediate: true, probeAfter: true });
 });
 
 els.aiBaseUrl?.addEventListener("input", () => {
+  state.lastAiResolve = null;
+  state.lastAiProbe = null;
   clearTimeout(aiDebounce);
   aiDebounce = setTimeout(async () => {
     await setStorage({ aiBaseUrl: (els.aiBaseUrl.value || "").trim() });
@@ -1071,7 +1272,7 @@ els.aiBaseUrl?.addEventListener("input", () => {
 });
 els.aiBaseUrl?.addEventListener("blur", async () => {
   await setStorage({ aiBaseUrl: (els.aiBaseUrl.value || "").trim() });
-  scheduleResolveAiMeta({ immediate: true });
+  scheduleResolveAiMeta({ immediate: true, probeAfter: true });
 });
 
 els.aiCharactersClear?.addEventListener("click", async () => {
@@ -1221,8 +1422,10 @@ els.aiModel.addEventListener("change", async () => {
   state.desiredAiModel = normalizeAiModel(els.aiModel.value || prevModel);
   if (canUseAiUi()) await flushPromptForLang(state.desiredLang, prevModel);
   state.modelDirty = true;
+  state.lastAiProbe = null;
   await applyPromptForLang(state.desiredLang);
   scheduleSaveAi();
+  refreshAiMeta({ probeAfter: true });
 });
 
 els.aiPrompt.addEventListener("input", () => {

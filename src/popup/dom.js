@@ -278,10 +278,12 @@ export function toggleUi({ hasEnvKey }) {
   if (els.aiEndpointWrap) els.aiEndpointWrap.style.display = showAi && local ? "" : "none";
   if (els.aiKeyWrap) els.aiKeyWrap.style.display = showAi && !local ? "" : "none";
 
-  // Model / style / memory are available once the engine is usable: a local
-  // provider is always usable; a cloud provider needs a key (or env key).
+  // Model discovery is independent from the Auto/key gate. The model picker is
+  // always visible for Source=AI so selecting a Provider immediately shows its
+  // known models; a valid key then upgrades that list to the provider's LIVE
+  // models. The remaining controls still require a usable engine.
   const canConfigureAi = local || (els.aiKey.value || "").trim().length > 0 || hasEnvKey;
-  els.aiModelWrap.style.display = showAi && canConfigureAi ? "" : "none";
+  els.aiModelWrap.style.display = showAi ? "" : "none";
   if (els.aiThinkingWrap) els.aiThinkingWrap.style.display = showAi && canConfigureAi ? "" : "none";
   els.aiPromptWrap.style.display = showAi && canConfigureAi ? "" : "none";
   if (els.aiCharactersWrap) els.aiCharactersWrap.style.display = showAi && canConfigureAi ? "" : "none";
