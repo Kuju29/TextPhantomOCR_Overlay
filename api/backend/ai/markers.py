@@ -97,9 +97,14 @@ def translation_schema(marked_text: str, *, want_memo: bool = False) -> dict:
                         "text": {
                             "type": "string",
                             "description": (
-                                "The complete translation of that one unit. If and only if the "
-                                "unit cannot be translated, return an empty string here — never "
-                                "drop the entry and never substitute the source text."
+                                "The complete translation of that one unit. Onomatopoeia, sound "
+                                "effects, laughter, gasps, single interjections and one- or "
+                                "two-character utterances DO have translations: write them in the "
+                                "target script. An empty string is reserved for a unit with no "
+                                "linguistic content at all, and every empty string leaves the "
+                                "untranslated source visible on the page — never use it to skip a "
+                                "unit that is merely short, unusual or hard. Never drop the entry "
+                                "and never substitute the source text."
                             ),
                         },
                     },

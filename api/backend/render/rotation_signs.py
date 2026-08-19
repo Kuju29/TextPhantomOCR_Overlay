@@ -2,6 +2,8 @@
 
 import copy
 
+from backend.render.region import box_rotation_deg
+
 VERTICAL_TILT_DEG = 78.0
 
 
@@ -37,10 +39,13 @@ def normalize_group_rotation_signs(
             for item in para.get("items") or []:
                 if not isinstance(item, dict) or not str(item.get("text") or "").strip():
                     continue
-                box = item.get("box") or {}
+                # Read with the documented key precedence. The old
+                # `rotation_deg or rotation_deg_css or 0.0` chain answers with
+                # the css key whenever rotation_deg is exactly 0, so an upright
+                # item could be pulled into the flip candidates.
                 try:
-                    rot = float(box.get("rotation_deg") or box.get("rotation_deg_css") or 0.0)
-                except (TypeError, ValueError):
+                    rot = box_rotation_deg(item.get("box"))
+                except ValueError:
                     rot = 0.0
                 if abs(rot) > VERTICAL_TILT_DEG:
                     candidates.append((item, rot))

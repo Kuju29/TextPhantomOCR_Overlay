@@ -42,7 +42,7 @@ function makeLane(key) {
     backpressured: false,
     recoverySuccesses: 0,
     unlimited: false,
-    stats: { ok: 0, rejected: 0, failed: 0, backoffs: 0, ceilingHits: 0 },
+    stats: { ok: 0, rejected: 0, failed: 0, backoffs: 0, ceilingHits: 0, gated: 0 },
   };
 }
 
@@ -174,6 +174,35 @@ export function releaseRejected(key, retryAfterMs = 0) {
   l.backpressured = true;
   l.recoverySuccesses = 0;
   l.stats.backoffs++;
+  const pause = Number(retryAfterMs) || 0;
+  if (pause > 0) l.pausedUntil = Math.max(l.pausedUntil, Date.now() + pause);
+  pump(l);
+}
+
+// Returns a slot after the API's own rate gate refused a token: waits out the
+// gate's advertised delay WITHOUT narrowing the window.
+//
+// A provider 429 and a rate-gate 429 arrive as the same status code and mean
+// opposite things. The provider is complaining about CONCURRENCY, and halving
+// the window is the right answer. The gate is reporting that this API key's
+// token bucket is empty, which is a RATE, and no window is narrow enough to
+// make a bucket refill faster — the delay it hands back already is the answer.
+//
+// Treating them alike cost more than the extra latency. `releaseRejected` also
+// sets `backpressured`, which then needs four clean round trips to clear, so a
+// batch big enough to saturate the gate drove its own window down to 1 and
+// stayed there; the server-side gate then saw too little clean traffic to earn
+// a rate increase, and both sides settled at the slowest rate either could
+// justify. Measured on trace-20260819-191505: 330 s of 478 s of AI time spent
+// waiting for tokens, with the server otherwise idle 88% of the session.
+export function releaseGated(key, retryAfterMs = 0) {
+  const l = lane(key);
+  l.running = Math.max(0, l.running - 1);
+  l.stats.gated++;
+  if (l.unlimited) return;
+  // The lane pause IS the throttle, and it is lane-wide on purpose: the bucket
+  // belongs to the API key, so every request on this lane faces the same empty
+  // bucket. Nothing else changes — not the window, not the backpressure flag.
   const pause = Number(retryAfterMs) || 0;
   if (pause > 0) l.pausedUntil = Math.max(l.pausedUntil, Date.now() + pause);
   pump(l);

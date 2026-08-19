@@ -291,37 +291,68 @@ function expandDirectionChangeCanvas(block, sourceDirection, targetDirection, pe
   let width = (block.widthPct / 100) * imgW;
   let height = (block.heightPct / 100) * imgH;
   const area = width * height;
-  const margin = 2;
+  // Every neighbour gets HALF the whitespace between the two blocks, and no
+  // block ever shrinks below its own ink.
+  //
+  // The previous rule clamped only against a peer whose far edge already
+  // cleared this block (`px2 <= left && px2 > nextLeft`), which is false for
+  // the common case — a peer sitting a whole column of whitespace away — so
+  // two neighbouring bubbles both expanded into the SAME gap and their
+  // translations were drawn through each other. It then recomputed the width
+  // as `max(width, nextRight - nextLeft)` while assigning `left = nextLeft`,
+  // so a block squeezed from both sides kept its original width and simply
+  // slid sideways, out of its own bubble.
+  //
+  // Splitting the gap is stable without ordering the entries: A stops at the
+  // midpoint between A and B, and B stops at the same midpoint, so the two
+  // canvases meet and never overlap however the list is traversed.
   if (targetDirection === "h" && height > width) {
     const ideal = Math.max(width, Math.sqrt(area * 1.5));
-    let nextLeft = Math.max(0, left + width / 2 - ideal / 2);
-    let nextRight = Math.min(imgW, left + width / 2 + ideal / 2);
+    const inkLeft = left;
+    const inkRight = left + width;
+    const centre = left + width / 2;
+    let nextLeft = Math.max(0, centre - ideal / 2);
+    let nextRight = Math.min(imgW, centre + ideal / 2);
     for (const peer of peers) {
       const px1 = (peer.leftPct / 100) * imgW;
       const py1 = (peer.topPct / 100) * imgH;
       const px2 = ((peer.leftPct + peer.widthPct) / 100) * imgW;
       const py2 = ((peer.topPct + peer.heightPct) / 100) * imgH;
       if (py2 <= top || py1 >= top + height) continue;
-      if (px2 <= left && px2 > nextLeft) nextLeft = px2 + margin;
-      if (px1 >= left + width && px1 < nextRight) nextRight = px1 - margin;
+      if (px2 <= inkLeft) nextLeft = Math.max(nextLeft, (px2 + inkLeft) / 2);
+      else if (px1 >= inkRight) nextRight = Math.min(nextRight, (px1 + inkRight) / 2);
+      else {
+        // The peer's ink already shares this block's x range: no amount of
+        // expansion avoids it, so do not expand towards it at all.
+        nextLeft = Math.max(nextLeft, inkLeft);
+        nextRight = Math.min(nextRight, inkRight);
+      }
     }
-    left = nextLeft;
-    width = Math.max(width, nextRight - nextLeft);
+    // Expansion is a convenience; the source extent is the truth.
+    left = Math.min(nextLeft, inkLeft);
+    width = Math.max(nextRight, inkRight) - left;
   } else if (targetDirection === "v" && width > height) {
     const ideal = Math.max(height, Math.sqrt(area / 1.5));
-    let nextTop = Math.max(0, top + height / 2 - ideal / 2);
-    let nextBottom = Math.min(imgH, top + height / 2 + ideal / 2);
+    const inkTop = top;
+    const inkBottom = top + height;
+    const centre = top + height / 2;
+    let nextTop = Math.max(0, centre - ideal / 2);
+    let nextBottom = Math.min(imgH, centre + ideal / 2);
     for (const peer of peers) {
       const px1 = (peer.leftPct / 100) * imgW;
       const py1 = (peer.topPct / 100) * imgH;
       const px2 = ((peer.leftPct + peer.widthPct) / 100) * imgW;
       const py2 = ((peer.topPct + peer.heightPct) / 100) * imgH;
       if (px2 <= left || px1 >= left + width) continue;
-      if (py2 <= top && py2 > nextTop) nextTop = py2 + margin;
-      if (py1 >= top + height && py1 < nextBottom) nextBottom = py1 - margin;
+      if (py2 <= inkTop) nextTop = Math.max(nextTop, (py2 + inkTop) / 2);
+      else if (py1 >= inkBottom) nextBottom = Math.min(nextBottom, (py1 + inkBottom) / 2);
+      else {
+        nextTop = Math.max(nextTop, inkTop);
+        nextBottom = Math.min(nextBottom, inkBottom);
+      }
     }
-    top = nextTop;
-    height = Math.max(height, nextBottom - nextTop);
+    top = Math.min(nextTop, inkTop);
+    height = Math.max(nextBottom, inkBottom) - top;
   }
   return {
     leftPct: (left / imgW) * 100,
@@ -405,6 +436,61 @@ function buildAiLineLayout(entry, entries, imgW, imgH, language) {
     };
     return { geometry, text, fontPx };
   });
+}
+
+/**
+ * Count AI bubbles whose drawn canvases land on top of one another.
+ *
+ * Two translations stacked in the same spot is the loudest way this layer can
+ * fail, and it is invisible in every other signal: the report says two
+ * paragraphs and two lines, exactly as it would for a good page. It is not a
+ * renderer fault and the renderer must not "fix" it by moving a bubble
+ * somewhere the source text is not — when two groups' SOURCE columns overlap,
+ * grouping spliced a region and there is no honest second place to draw. So
+ * this names the pairs and leaves the drawing alone.
+ */
+function reportAiBlockCollisions(aiLayouts, report) {
+  const boxes = [];
+  for (const [leaderId, layout] of aiLayouts) {
+    for (const line of layout.lines || []) {
+      const g = line.geometry;
+      if (!g) continue;
+      boxes.push({
+        leaderId,
+        left: g.leftPct,
+        top: g.topPct,
+        right: g.leftPct + g.widthPct,
+        bottom: g.topPct + g.heightPct,
+      });
+    }
+  }
+  const seen = new Set();
+  for (let i = 0; i < boxes.length; i++) {
+    for (let j = i + 1; j < boxes.length; j++) {
+      const a = boxes[i];
+      const b = boxes[j];
+      if (a.leaderId === b.leaderId) continue;
+      const ix = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+      const iy = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+      if (!(ix > 0) || !(iy > 0)) continue;
+      const smaller = Math.min(
+        (a.right - a.left) * (a.bottom - a.top),
+        (b.right - b.left) * (b.bottom - b.top),
+      );
+      // A hairline touch between neighbouring bubbles is normal. Correctly
+      // grouped bubbles score exactly 0 here — their source columns are
+      // disjoint and the expansion splits the gap between them — so the bar
+      // only has to clear rounding noise, not judge how bad the collision
+      // looks. A spliced pair scores 15-100%. (Everything here is in percent
+      // of the page, so this is a ratio and not an area in pixels.)
+      if (!(smaller > 0) || (ix * iy) / smaller < 0.05) continue;
+      const key = [a.leaderId, b.leaderId].sort().join("|");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      report.aiBlocksOverlappingIds.push(key);
+    }
+  }
+  report.aiBlocksOverlapping = report.aiBlocksOverlappingIds.length;
 }
 
 function verticalOriginalGeometries(item, imgW, imgH) {
@@ -571,6 +657,13 @@ export function renderOverlay(
     coveredByGroup: 0,
     // Bubbles drawn as one string across several columns.
     groupsDrawn: 0,
+    // Pairs of AI bubbles whose canvases still land on top of each other.
+    // The renderer cannot fix this — two groups whose SOURCE columns overlap
+    // have no two places to go — but two translations stacked in one spot is
+    // the most visible failure this layer has, so it is counted rather than
+    // drawn in silence. A non-zero count means grouping spliced a region.
+    aiBlocksOverlapping: 0,
+    aiBlocksOverlappingIds: [],
   };
 
   if (!(imgW > 0) || !(imgH > 0)) {
@@ -646,6 +739,7 @@ export function renderOverlay(
       const lines = buildAiLineLayout(entry, entries, imgW, imgH, targetLanguage);
       if (lines.length) aiLayouts.set(entry.leaderId, { ...entry, lines });
     }
+    reportAiBlockCollisions(aiLayouts, report);
   }
 
   // OFF keeps Lens boxes, but presentation rotation is normalised on a local

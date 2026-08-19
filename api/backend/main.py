@@ -31,6 +31,7 @@ from backend.api.routes import (
     translate_v1,
 )
 from backend import logfile, trace, trace_install
+from backend.ai.rategate import rate_gate
 from backend.jobs.admission import AdmissionGate
 from backend.config import settings
 from backend.jobs.pipeline import process_payload
@@ -73,6 +74,31 @@ async def lifespan(app: FastAPI):
     queue.start()
     app.state.job_queue = queue
     print(f"[TextPhantom][api] starting workers={settings.max_workers} direct_workers={getattr(queue, '_direct_workers', '?')} ai_workers={getattr(queue, '_ai_workers', '?')}", flush=True)
+
+    # Whether the AI pacing cache survived this boot, said at boot.
+    #
+    # This is the difference between a first chapter that runs at the rate the
+    # key was already known to sustain and one that re-learns from the free-tier
+    # starting number — 19 pages/min against 50 on the measured run. A read-only
+    # filesystem turns it off completely and the only other symptom is that the
+    # ramp comes back, so the state is printed either way.
+    _rate_state = rate_gate.persistence()
+    if not _rate_state["enabled"]:
+        print("[TextPhantom][api] AI rate memory OFF (TP_RATE_STATE=0)", flush=True)
+    elif _rate_state["error"]:
+        print(
+            f"[TextPhantom][api] AI rate memory UNAVAILABLE at {_rate_state['path']}: "
+            f"{_rate_state['error']} — every restart will re-learn each key's rate. "
+            "Point TP_RATE_STATE_FILE at a writable path (on Hugging Face, enable "
+            "persistent storage and use /data).",
+            flush=True,
+        )
+    else:
+        print(
+            f"[TextPhantom][api] AI rate memory -> {_rate_state['path']} "
+            f"({_rate_state['restored']} key(s) restored)",
+            flush=True,
+        )
 
     logfile.startup_banner()
     # Printing a path that is never written to is how someone ends up grepping

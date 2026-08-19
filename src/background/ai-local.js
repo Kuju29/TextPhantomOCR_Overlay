@@ -177,7 +177,14 @@ export async function translateUnits(
       translations: result.translations.length,
       missing: Array.isArray(result.missing) ? result.missing.length : 0,
       missingIds: Array.isArray(result.missing) ? result.missing.map(String) : [],
+      // Two different failures, kept apart. `omittedIds` = the answer never
+      // mentioned that id, so the output contract broke. `declinedIds` = the
+      // entry WAS there carrying an empty string, so the contract held and the
+      // model used the "nothing to translate" escape hatch. Both leave the
+      // source text visible on the page; only one of them is a protocol fault,
+      // and a trace that cannot tell them apart sends you to the wrong file.
       omittedIds: Array.isArray(result?.meta?.omittedIds) ? result.meta.omittedIds.map(String) : [],
+      declinedIds: Array.isArray(result?.meta?.declinedIds) ? result.meta.declinedIds.map(String) : [],
       responseShape: String(result?.meta?.responseShape || ""),
       replayed: Boolean(result.replayed),
       promptVersion: String(result?.meta?.promptVersion || ""),

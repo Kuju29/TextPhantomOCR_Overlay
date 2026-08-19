@@ -211,6 +211,12 @@ export async function translateViaSyncRest(base, payload, { onSlow, onSent, sign
       err.failedStage = String(detail?.failedStage || "");
       err.retryable = detail?.retryable === true;
       err.traceId = String(detail?.traceId || "");
+      // Prefer the body's figure over the header's. `Retry-After` is whole
+      // seconds, and the rate gate computes the real wait from the queue in
+      // front of this request — rounding 1.4 s up to 2 s across a batch adds
+      // up, and rounding 22 s down to a header the proxy may strip loses it.
+      const preciseMs = Number(detail?.retryAfterMs);
+      if (Number.isFinite(preciseMs) && preciseMs > 0) err.retryAfterMs = preciseMs;
     } catch {
     }
     throw err;

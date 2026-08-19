@@ -323,12 +323,22 @@ class JobQueue:
             return True
         except (RateGateTimeout, RateGateRejected) as exc:
             prev = dict(self._jobs.get(job_id) or {})
+            # Same distinction the sync route now makes: this is THIS gate
+            # saying "your key's tokens are spoken for", not the provider saying
+            # "you are sending too fast". The code and the computed wait travel
+            # with the job so a poller can pace instead of guessing at five
+            # seconds — which, with a queue in front of it, is a guess that
+            # brings every rejected job back at the same moment.
+            retry_after = rate_gate.retry_after_sec(provider, model, api_key)
             await self._set_job(
                 job_id,
                 {**prev, "status": "error", "result": f"rate limited: {exc}",
+                 "code": "rate_gate_busy",
+                 "retry_after_ms": int(retry_after * 1000),
                  "ts": time.time(), "queue_kind": self.AI},
             )
             event("translate.ratelimited", {"job_id": job_id, "provider": provider,
+                                            "retry_after_ms": int(retry_after * 1000),
                                             "error": str(exc)[:160]}, ok=False)
             _trace_ai_terminal(payload, job_id, "rate_gate", exc=exc, attempts=0)
             return False

@@ -468,8 +468,13 @@ def build_system_split(
             "For every input <<TP_Pn>>, return exactly one translations entry whose id is Pn and whose text "
             "is that unit's complete translation. Keep entries in exact input order.",
             "Never omit, duplicate, combine, renumber or reorder an entry. Never put two units in one text.",
-            'If one unit genuinely cannot be translated, still return its entry with "text": "" — an empty '
-            "string is the only permitted way to signal failure. Never drop the entry, never copy the source "
+            "A short unit is still a unit. Onomatopoeia, sound effects, laughter, gasps, single "
+            "interjections and one- or two-character utterances must be written in the target script, "
+            "never left out and never passed through unchanged.",
+            'If one unit genuinely has no linguistic content to carry over, still return its entry with '
+            '"text": "" — an empty string is the only permitted way to signal that. It is NOT a way to '
+            "skip a unit that is merely short, unusual or hard, and every empty string leaves the "
+            "untranslated source visible on the page. Never drop the entry, never copy the source "
             "text into it, and never write a note, an apology or a placeholder there.",
             "Do not return markdown, commentary, paragraph markers or keys not present in the schema.",
             "If the target is Thai, Japanese, Chinese or Korean, do NOT insert spaces between "

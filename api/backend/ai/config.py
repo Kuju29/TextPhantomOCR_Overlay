@@ -104,12 +104,34 @@ RATE_POLICY_DEFAULTS: Final[dict[str, RatePolicy]] = {
 # Adaptive gate shape. Additive increase after a clean streak, multiplicative
 # decrease on a provider 429 — the same discipline the extension's lane uses, so
 # the two sides converge instead of fighting.
+#
+# The streak is the CEILING on how much evidence a step needs, not a fixed
+# count. A fixed count is the wrong unit: 8 clean calls is 8 seconds of
+# evidence at 60 rpm and 40 seconds at 12 rpm, so the slowest bucket — the one
+# whose user is actually waiting — was made to prove itself five times harder
+# than a fast one. `RATE_ADAPT_OK_WINDOW_SEC` turns it into a duration, and the
+# streak follows from the rate: ceil(rpm * window / 60), clamped to
+# [RATE_ADAPT_OK_STREAK_MIN, RATE_ADAPT_OK_STREAK].
+#
+# Measured on trace-20260819-191505 (86 pages, gemini free-tier policy): the
+# old fixed streak spent 330 s of the batch's 478 s of AI time asleep on this
+# gate, and only reached 54 rpm on the fourth chapter.
 RATE_ADAPT_OK_STREAK: Final[int] = 8
+RATE_ADAPT_OK_STREAK_MIN: Final[int] = 2
+RATE_ADAPT_OK_WINDOW_SEC: Final[float] = 10.0
 RATE_ADAPT_STEP_RPM: Final[float] = 6.0
 RATE_ADAPT_BACKOFF: Final[float] = 0.5
-# A bucket that has not been touched for this long forgets what it learned and
-# returns to the provider's safe starting rpm.
+# A bucket that has not been touched for this long has stale evidence, so it
+# gives some of the learned rate back — it does NOT return to the starting rpm.
+#
+# Resetting all the way to the start was too expensive to be right. The cost of
+# keeping a rate that is now too high is ONE provider 429, which
+# `report_rate_limited` already halves on the same round trip; the cost of
+# resetting was the entire ramp again — 40+ seconds of pacing for every lunch
+# break. Decaying halves the evidence per idle window instead, with the
+# provider's safe starting rpm as the floor.
 RATE_ADAPT_IDLE_RESET_SEC: Final[float] = 900.0
+RATE_ADAPT_IDLE_DECAY: Final[float] = 0.5
 
 
 PROVIDER_ALIASES: Final[dict[str, str]] = {

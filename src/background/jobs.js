@@ -77,6 +77,7 @@ import {
   acquire,
   releaseSuccess,
   releaseRejected,
+  releaseGated,
   releaseFailed,
   laneKeyFor,
   describe as describeLane,
@@ -86,6 +87,15 @@ import {
 } from "./scheduler.js";
 
 const log = createLogger("SW.jobs");
+
+// Whether a 429 came from the API's per-key AI rate gate rather than from the
+// provider or from server overload. Read from the response body's `code`, not
+// guessed from the status: the three arrive as the same 429 and only one of
+// them means "narrow your concurrency".
+function isRateGateBusy(error) {
+  const code = String(error?.code || "");
+  return code === "rate_gate_busy" || code === "local_rate_gate_busy";
+}
 
 const MAX_FIRST_TRY_RETRIES = 2;
 const FIRST_TRY_GAP_MS = 3000;
@@ -1343,6 +1353,16 @@ async function runLocalAi(
     return { id, paragraphIds: (unit?.paragraphIds || []).map(String) };
   });
   const translatedCount = sendable.length - missingUnitIds.length;
+  // `outcome.missing` is the SERVER's list of units with no usable text — the
+  // same set as `missingUnitIds`. Logging it under `omittedByProvider` named
+  // the effect after a cause it had not established, and made every partial
+  // page read as a broken output contract. The provider's own two answers come
+  // from meta: `omittedIds` (the entry was never returned) and `declinedIds`
+  // (the entry came back holding an empty string).
+  const omittedByProvider = Array.isArray(outcome?.meta?.omittedIds)
+    ? outcome.meta.omittedIds.map(String) : [];
+  const declinedByProvider = Array.isArray(outcome?.meta?.declinedIds)
+    ? outcome.meta.declinedIds.map(String) : [];
   if (missingUnitIds.length) {
     const traceId = String(payload?.context?.tp_trace || getTrace() || "");
     // A partial answer is drawn as far as it goes; the units the model skipped are named, not filled.
@@ -1353,7 +1373,8 @@ async function runLocalAi(
       missing: missingUnitIds.length,
       missingUnitIds,
       missingUnits,
-      omittedByProvider: Array.isArray(outcome?.missing) ? outcome.missing.map(String) : [],
+      omittedByProvider,
+      declinedByProvider,
     });
     traceNote("background/jobs.js", "imageStage", {
       stage: "ai",
@@ -1368,7 +1389,8 @@ async function runLocalAi(
         const unit = sendable.find((u) => u.id === id);
         return { id, chars: String(unit?.text || "").length };
       }),
-      omittedByProvider: Array.isArray(outcome?.missing) ? outcome.missing.map(String) : [],
+      omittedByProvider,
+      declinedByProvider,
       passthroughUnits: passthrough.length,
       automaticContentRetry: false,
     }, traceId);
@@ -1426,9 +1448,19 @@ async function runLocalAi(
       translated: report.translated,
       missing: report.missing.map(String),
       missingUnits,
+      omitted: omittedByProvider,
+      declined: declinedByProvider,
     };
+    // Say WHICH failure it was. "Unanswered" covers two causes with two
+    // different fixes, and the page looks identical either way.
+    const cause = declinedByProvider.length && !omittedByProvider.length
+      ? "the model returned them empty"
+      : omittedByProvider.length && !declinedByProvider.length
+        ? "the model did not return them at all"
+        : "the model returned some empty and left others out";
     result.warnings = [...(Array.isArray(result.warnings) ? result.warnings : []),
-      `AI left ${report.missing.length} translation unit(s) unanswered: ${report.missing.join(", ")}`];
+      `AI left ${report.missing.length} translation unit(s) unanswered (${cause}): ` +
+      `${report.missing.join(", ")}`];
   }
   return classifyAiTranslationReport(report);
 }
@@ -1489,12 +1521,18 @@ async function runLocalAiInLane(base, payload, result, plan, batchId, signal, on
   } catch (e) {
     const status = Number(e?.status) || 0;
     const backpressure = status === 429 || status === 503;
-    if (backpressure) releaseRejected(key, Number(e?.retryAfterMs) || 0);
+    // `rate_gate_busy` is the API's own pacing, not the provider's or the
+    // server's. It says "this key has no token free yet" and hands back the
+    // wait it computed; narrowing the lane on top of that only makes the batch
+    // slower, and used to trap the lane at window 1 for the rest of the run.
+    const gated = isRateGateBusy(e);
+    if (gated) releaseGated(key, Number(e?.retryAfterMs) || 0);
+    else if (backpressure) releaseRejected(key, Number(e?.retryAfterMs) || 0);
     else releaseFailed(key);
     traceNote("background/jobs.js", "imageStage", {
       stage: "ai", state: "failed", route: "extension", imageId,
       queueWaitMs, providerMs: Date.now() - started,
-      status, backpressure, retryAfterMs: Number(e?.retryAfterMs) || 0,
+      status, backpressure, gated, retryAfterMs: Number(e?.retryAfterMs) || 0,
       error: e?.message || String(e),
     }, traceId);
     throw e;
@@ -1800,16 +1838,26 @@ async function runSyncTranslate(
       }
 
       // Backpressure is a response contract, not the presence of an optional
-      // Retry-After header. A bare 429/503 must narrow the lane as well.
+      // Retry-After header. A bare 429/503 must narrow the lane as well —
+      // unless it came from the API's own rate gate, which is pacing this API
+      // key rather than protecting the server, and hands back the exact wait.
       const isBusy = status === 429 || status === 503 || retryAfterMs > 0;
+      const gated = isRateGateBusy(e);
 
       if (isBusy) {
-        if (slotHeld) releaseRejected(requestLane, retryAfterMs);
+        if (slotHeld) {
+          if (gated) releaseGated(requestLane, retryAfterMs);
+          else releaseRejected(requestLane, retryAfterMs);
+        }
         if (attempt < SYNC_BUSY_RETRIES) {
-          log.info("server busy; the image stays with us", {
-            laneKey: requestLane, attempt: attempt + 1, retryAfterMs,
-          });
-          const why = `server busy (retry-after ${retryAfterMs}ms)`;
+          log.info(
+            gated ? "this API key is out of tokens; the image waits its turn"
+                  : "server busy; the image stays with us",
+            { laneKey: requestLane, attempt: attempt + 1, retryAfterMs, gated },
+          );
+          const why = gated
+            ? `AI key paced by the server's rate gate (wait ${retryAfterMs}ms)`
+            : `server busy (retry-after ${retryAfterMs}ms)`;
           if (lensDone) await wf.aiDegraded(workflowId, why);
           else await wf.lensDegraded(workflowId, why);
           continue;

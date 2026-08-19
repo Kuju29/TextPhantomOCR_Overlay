@@ -241,7 +241,29 @@
           : `${unitsMissing} of ${unitsMissing + Number(partial?.translated || 0)} unanswered`,
         paragraphs: unanswered.length,
         unitIds: Array.isArray(partial?.missing) ? partial.missing : undefined,
+        // Which of the two ways the model failed to answer. They look
+        // identical on the page and need different fixes: an empty entry is
+        // the output contract's escape hatch being over-used (a prompt
+        // problem), a missing entry is the contract breaking (a provider
+        // problem).
+        returnedEmpty: Array.isArray(partial?.declined) && partial.declined.length
+          ? partial.declined : undefined,
+        notReturned: Array.isArray(partial?.omitted) && partial.omitted.length
+          ? partial.omitted : undefined,
         ids: unanswered,
+      });
+    }
+    if (report.aiBlocksOverlapping) {
+      // Two translations drawn through each other. The renderer cannot place
+      // them apart — their SOURCE columns overlap, so grouping handed it one
+      // region split into sets that share a bounding box (the signature of two
+      // speech balloons offset diagonally inside one detected region). Named
+      // here because nothing else in the report distinguishes it from a page
+      // that came out clean.
+      TP.log.warn("overlay: AI bubbles were drawn on top of each other; grouping spliced a region", {
+        source,
+        pairs: report.aiBlocksOverlapping,
+        ids: report.aiBlocksOverlappingIds,
       });
     }
     if (structural.length) {

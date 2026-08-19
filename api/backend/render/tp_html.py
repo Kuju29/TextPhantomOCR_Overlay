@@ -34,9 +34,11 @@ from typing import Any, Final
 from backend.lens.tree import iter_paragraphs
 from backend.render.groups import group_is_ruby_only
 from backend.render.region import (
+    box_rotation_deg,
     compute_region_geometry,
     fit_render_box,
     is_rtl,
+    orientation_mean_deg,
     resolve_text_direction,
 )
 from backend.render.text_utils import contains_rtl
@@ -560,20 +562,25 @@ def _bubble_group_key(para: dict) -> tuple[float, ...] | None:
 def _para_rotation(para: dict) -> float:
     """Representative baseline rotation (degrees) for a paragraph.
 
-    The mean of its items' ``rotation_deg``.  Note: for *near-vertical*
-    text the sign of this value is unstable — a column tilting a hair
-    left decodes as ``-90°`` and a hair right as ``+90°`` even inside one
-    bubble — so rotation is used only to pick the *perpendicular axis*
-    for :func:`_perpendicular_gap` (which is sign-insensitive), never as
-    a grouping signal on its own.
+    The ORIENTATION mean of its items' ``rotation_deg`` — angles on a 180°
+    circle, not numbers on a line.  The arithmetic mean this used to take
+    answered ``-30°`` for a paragraph of two level items plus one column Lens
+    decoded at ``-90°``: an angle no line in the paragraph is drawn at, which
+    this renderer then applied to the whole block as a CSS ``rotate()`` and
+    tipped level Thai onto a diagonal.
+
+    Note: for *near-vertical* text the sign of this value is unstable — a
+    column tilting a hair left decodes as ``-90°`` and a hair right as
+    ``+90°`` even inside one bubble — so rotation is used only to pick the
+    *perpendicular axis* for :func:`_perpendicular_gap` (which is
+    sign-insensitive), never as a grouping signal on its own.
     """
-    rots: list[float] = []
-    for it in para.get("items") or []:
-        if not str(it.get("text") or "").strip():
-            continue
-        box = it.get("box") or {}
-        rots.append(float(box.get("rotation_deg") or box.get("rotation_deg_css") or 0.0))
-    return sum(rots) / len(rots) if rots else 0.0
+    rots = [
+        box_rotation_deg(it.get("box"))
+        for it in para.get("items") or []
+        if str(it.get("text") or "").strip()
+    ]
+    return orientation_mean_deg(rots) if rots else 0.0
 
 
 def _para_centroid(para: dict, img_w: int, img_h: int) -> tuple[float, float] | None:

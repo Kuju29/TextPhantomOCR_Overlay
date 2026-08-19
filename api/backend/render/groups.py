@@ -15,7 +15,12 @@ import math
 import unicodedata
 from typing import Any
 
-from backend.render.region import classify_item_axis, paragraph_reading_axis
+from backend.render.region import (
+    box_rotation_deg,
+    classify_item_axis,
+    orientation_mean_deg,
+    paragraph_reading_axis,
+)
 
 
 # Constants
@@ -68,15 +73,20 @@ def _bubble_key(para: dict) -> tuple[float, ...] | None:
 
 
 def _para_rotation(para: dict) -> float:
-    """Mean baseline rotation across the paragraph's items (degrees)."""
-    rots: list[float] = []
-    for it in para.get("items") or []:
-        if not str(it.get("text") or "").strip():
-            continue
-        box = it.get("box") or {}
-        r = float(box.get("rotation_deg") or box.get("rotation_deg_css") or 0.0)
-        rots.append(r)
-    return sum(rots) / len(rots) if rots else 0.0
+    """Representative baseline rotation across the paragraph's items (degrees).
+
+    Orientation mean, not arithmetic mean: see
+    :func:`backend.render.region.orientation_mean_deg`. ``box_rotation_deg``
+    reads the two rotation keys with the documented precedence instead of the
+    ``a or b or 0.0`` chain, which answers with the OTHER key on a rotation of
+    exactly 0.
+    """
+    rots = [
+        box_rotation_deg(it.get("box"))
+        for it in para.get("items") or []
+        if str(it.get("text") or "").strip()
+    ]
+    return orientation_mean_deg(rots) if rots else 0.0
 
 
 def _para_centroid(
@@ -510,6 +520,80 @@ def _should_merge(
     return not _ink_barrier_between(base_img, ra, rb)
 
 
+# Columns of ONE vertical utterance share nearly their whole vertical extent.
+# Two balloons in a diagonal pair share almost none of it.  0.35 is well below
+# the ~0.9+ a real bubble scores (even a strongly staircased one) and well above
+# the 0.0-0.1 a diagonal pair scores.
+_BAND_OVERLAP_RATIO: float = 0.35
+
+
+def _split_vertical_run_into_bands(run: list[dict]) -> list[list[dict]]:
+    """Split a vertical run into bands that actually share a vertical span.
+
+    :func:`_split_vertical_run_at_gap_jumps` reads a run as a 1-D right-to-left
+    sequence, because the columns of ONE utterance are laid out that way.  Two
+    balloons stacked DIAGONALLY in one panel break that assumption: the lower-
+    left balloon's rightmost column sits to the RIGHT of the upper-right
+    balloon's leftmost column, so ordering by centroid x alone interleaves the
+    two.  Every set then cut out of that interleaved sequence mixes columns
+    from both balloons — the model is handed a spliced sentence
+    (``暴走する同じだ``), and each set's bounding box spans BOTH balloons, so
+    the translations are drawn stacked on top of each other in the gap between
+    them.  That is the "two groups merged and overlapping" symptom.
+
+    Columns of one utterance start on one top line and end within a line or two
+    of each other, so they overlap almost completely in y.  So: connect two
+    columns whose y-intervals overlap by at least ``_BAND_OVERLAP_RATIO`` of
+    the shorter one, and keep each connected component together.  Union-find,
+    so a staircased or curved bubble whose NEIGHBOURING columns each overlap
+    stays one band even when its first and last column do not.
+
+    This can only ever SPLIT a run, never merge one, and it runs BEFORE the
+    gap-jump splitter so that splitter still sees a plain 1-D sequence.  Input
+    order is preserved inside every band.
+    """
+    if len(run) < 2:
+        return [run]
+    rects = [_para_xyxy(p) for p in run]
+    if any(r is None for r in rects):
+        return [run]  # same refusal as the gap splitter: no bounds, no evidence
+
+    n = len(run)
+    parent = list(range(n))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            _, ay1, _, ay2 = rects[i]
+            _, by1, _, by2 = rects[j]
+            shorter = min(ay2 - ay1, by2 - by1)
+            if shorter <= 0:
+                continue
+            overlap = max(0.0, min(ay2, by2) - max(ay1, by1))
+            if overlap / shorter >= _BAND_OVERLAP_RATIO:
+                ri, rj = find(i), find(j)
+                if ri != rj:
+                    parent[max(ri, rj)] = min(ri, rj)
+
+    bands: dict[int, list[dict]] = {}
+    for i in range(n):
+        bands.setdefault(find(i), []).append(run[i])
+    # Reading order between bands: topmost first, then rightmost — the same
+    # order `group_paragraphs_into_bubbles` applies to whole runs.
+    return sorted(
+        bands.values(),
+        key=lambda band: (
+            min(_para_xyxy(p)[1] for p in band),
+            -max(_para_xyxy(p)[2] for p in band),
+        ),
+    )
+
+
 def _split_vertical_run_at_gap_jumps(
     run: list[dict], img_h: int, tb_authority: bool = False
 ) -> list[list[dict]]:
@@ -639,16 +723,19 @@ def _merge_paragraphs(
 
         ordered_members = sorted(members, key=_key)
         if axis == "v" and len(ordered_members) > 1:
-            # Two-level contract: the model (or geometric merge) decides the
-            # REGION a column belongs to; this splitter then divides each
-            # region into TEXT SETS. The detector's blocks are bubble/region
-            # granularity — a region holding two utterances must still split,
-            # under model authority as well.
-            runs.extend(
-                _split_vertical_run_at_gap_jumps(
-                    ordered_members, img_h, tb_authority
+            # Three-level contract: the model (or geometric merge) decides the
+            # REGION a column belongs to; the band pass divides a region into
+            # the vertical spans that can possibly be one utterance; the
+            # gap-jump splitter then divides each band into TEXT SETS. The
+            # detector's blocks are bubble/region granularity — a region
+            # holding two utterances must still split, under model authority as
+            # well. The band pass has to come first because the gap-jump
+            # splitter reads its input as a 1-D right-to-left sequence, which
+            # two diagonally offset balloons interleave.
+            for band in _split_vertical_run_into_bands(ordered_members):
+                runs.extend(
+                    _split_vertical_run_at_gap_jumps(band, img_h, tb_authority)
                 )
-            )
         else:
             runs.append(ordered_members)
 
@@ -749,11 +836,10 @@ def _build_group(
     text_full = sep.join(all_fragments).strip()
 
     text_items = [it for it in items if str(it.get("text") or "").strip()]
-    item_rots = [
-        float((it.get("box") or {}).get("rotation_deg")
-               or (it.get("box") or {}).get("rotation_deg_css") or 0.0)
-        for it in text_items
-    ]
+    # `box_rotation_deg`, not `rotation_deg or rotation_deg_css or 0.0`: that
+    # chain falls through on a rotation of exactly 0 and answers with the other
+    # key. See the note on `box_rotation_deg` in render/region.py.
+    item_rots = [box_rotation_deg(it.get("box")) for it in text_items]
     med_abs_rot = (
         sorted(abs(r) for r in item_rots)[len(item_rots) // 2]
         if item_rots else 0.0
@@ -775,7 +861,12 @@ def _build_group(
         sign = 1.0 if sum(item_rots) >= 0 else -1.0
         avg_rot = sign * med_abs_rot
     else:
-        avg_rot = sum(item_rots) / len(item_rots)
+        # Orientation mean, not arithmetic mean. One column Lens decoded at
+        # -90 deg inside an otherwise level group used to drag the group's
+        # angle to something like -18 deg -- an angle nothing in the group is
+        # drawn at -- and the renderer then tipped the whole translated block
+        # onto that diagonal.
+        avg_rot = orientation_mean_deg(item_rots)
 
     font_size_px = _median_font_px(paras, img_h)
 

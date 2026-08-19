@@ -211,8 +211,9 @@ def classify_item_axis(item: dict, tilt_tol: float = 12.0) -> str:
 def paragraph_reading_axis(items: list[dict], tilt_tol: float = 12.0) -> str:
     """Majority reading axis of a paragraph's text items.
 
-    Tilted items are excluded from the vote. Returns "h", "v" or "tilted"
-    (the last only when every text item is tilted).
+    Returns "h", "v" or "tilted". Tilted items stay out of the h/v vote so
+    ordinary rotation noise cannot flip a paragraph, but a tilted MAJORITY is
+    the paragraph's own answer.
     """
     n_h = n_v = n_t = 0
     for it in items or []:
@@ -225,8 +226,20 @@ def paragraph_reading_axis(items: list[dict], tilt_tol: float = 12.0) -> str:
             n_h += 1
         else:
             n_t += 1
+    total = n_h + n_v + n_t
+    if not total:
+        return "h"
+    # Excluding tilted items from the vote used to mean discarding them
+    # ENTIRELY: a paragraph of 5 tilted items plus 1 upright one answered "h",
+    # and a visibly slanted label was then handled as a row of level text --
+    # eligible for the vertical merge path, and drawn with an averaged angle
+    # that follows no baseline it owns. A tilted majority now answers
+    # "tilted"; below a majority the h/v vote decides exactly as before, so
+    # nothing that reads "h" or "v" on genuine rotation noise changes.
+    if n_t * 2 > total:
+        return "tilted"
     if n_h == 0 and n_v == 0:
-        return "tilted" if n_t else "h"
+        return "tilted"
     return "v" if n_v >= n_h else "h"
 
 
@@ -239,6 +252,20 @@ def _circular_mean_deg(angles: list[float]) -> float:
     if abs(xs) < 1e-9 and abs(ys) < 1e-9:
         return 0.0
     return math.degrees(math.atan2(ys, xs)) / 2.0
+
+
+def orientation_mean_deg(angles: list[float]) -> float:
+    """Representative orientation of a set of text baselines, in degrees.
+
+    Text orientation lives on a 180deg circle, so the ARITHMETIC mean of a
+    signed rotation list is not an orientation: averaging ``[-90, 0, 90]``
+    gives 0deg, and averaging ``[0, 0, -90]`` gives -30deg -- an angle no line
+    on the page is drawn at, which then gets applied to the whole block as a
+    CSS ``rotate()`` and tips level text onto a diagonal. This folds the
+    angles onto the circle they actually live on, so a mixed set answers with
+    the direction the ink really points.
+    """
+    return _circular_mean_deg(list(angles or []))
 
 
 def _decompose_rotation(rot_deg: float) -> tuple[float, bool]:

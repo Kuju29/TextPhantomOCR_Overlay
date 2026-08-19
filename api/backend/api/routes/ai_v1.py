@@ -33,6 +33,7 @@ import hashlib
 import asyncio
 import base64
 import io
+import math
 import re
 import threading
 import time
@@ -307,7 +308,7 @@ async def ai_translate_v1(
             "requestedModel": config.model,
             "resolvedProvider": resolved_provider,
             "resolvedModel": resolved_model,
-            "outputContractRequested": "one_shot_envelope_v2",
+            "outputContractRequested": "one_shot_envelope_v3",
             "automaticContentRetry": False,
             "automaticTransportRetry": False,
             "modelFallback": False,
@@ -363,6 +364,15 @@ async def ai_translate_v1(
     # be fair to. Verified server-side: the header alone is not enough.
     unlimited = wants_unlimited(request)
     rate_wait_started = time.perf_counter()
+    # What this key looked like at the moment this request joined the queue.
+    # The snapshot taken at the END of the call reports the state AFTER the
+    # queue drained, so a page that waited 22 s behind 30 others reported
+    # "waiting: 0" and the wait had to be inferred from arithmetic.
+    rate_entry = (
+        rate_gate.snapshot(resolved_provider, config.model, config.api_key)
+        if rate["enabled"] and not unlimited
+        else {}
+    )
     if rate["enabled"] and not unlimited:
         try:
             await rate_gate.acquire(
@@ -377,12 +387,40 @@ async def ai_translate_v1(
                 burst_override=rate["burst"] or None,
             )
         except (RateGateTimeout, RateGateRejected) as exc:
+            # A 429 from THIS gate is not the same event as a 429 from the
+            # provider, and the client must be able to tell them apart.
+            #
+            # A provider 429 means "you are sending too much at once" — the
+            # client should narrow its concurrency window. A gate 429 means
+            # "this key's tokens are spoken for; come back when one frees" —
+            # the concurrency window is not the problem and narrowing it makes
+            # the batch slower without making the bucket refill faster. The
+            # client used to treat both the same and halve its lane, which fed
+            # back into the gate never seeing enough clean traffic to speed up.
+            #
+            # `Retry-After` is computed from the queue in front of this request
+            # rather than a flat 5 s, so thirty rejected pages do not all come
+            # back at the same moment to be rejected again.
+            retry_after = rate_gate.retry_after_sec(
+                resolved_provider, config.model, config.api_key
+            )
             trace_failure(
                 "rate_gate", exc, 429,
                 units=len(units), requestedProvider=config.provider,
                 requestedModel=config.model, providerAttempts=0,
+                rateOnEntry=rate_entry, retryAfterSec=round(retry_after, 2),
             )
-            raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": "5"}) from exc
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "code": "rate_gate_busy",
+                    "message": str(exc),
+                    "retryAfterMs": int(retry_after * 1000),
+                    "rpm": rate_entry.get("rpm", 0),
+                    "waiting": rate_entry.get("waiting", 0),
+                },
+                headers={"Retry-After": str(max(1, math.ceil(retry_after)))},
+            ) from exc
     rate_wait_ms = round((time.perf_counter() - rate_wait_started) * 1000, 1)
     if cancellation.is_cancelled(payload):
         exc = RuntimeError("batch was cancelled while waiting for AI pacing")
@@ -471,7 +509,7 @@ async def ai_translate_v1(
             requestedModel=config.model,
             resolvedProvider=structural.get("resolvedProvider", resolved_provider),
             resolvedModel=structural.get("resolvedModel", resolved_model),
-            outputContractRequested="one_shot_envelope_v2",
+            outputContractRequested="one_shot_envelope_v3",
             structuralDetails=structural,
             providerAttempts=1,
             providerHttpStatuses=[200],
@@ -520,7 +558,7 @@ async def ai_translate_v1(
             },
             requested={"provider": config.provider, "model": config.model},
             resolved={"provider": resolved_provider, "model": resolved_model},
-            outputContractRequested="one_shot_envelope_v2",
+            outputContractRequested="one_shot_envelope_v3",
             providerAttempts=1,
         )
         # Provider clients deliberately omit response bodies from exceptions;
@@ -548,8 +586,26 @@ async def ai_translate_v1(
     extracted_pair = markers.extract_paragraphs(text_full, len(units))
     extracted: list[str] = list(extracted_pair[0]) if extracted_pair else []
 
+    # Two different things end up in `missing`, and they have different causes
+    # and different fixes:
+    #
+    #   OMITTED  — the entry for that id is not in the answer at all. The
+    #              output contract broke; the marker protocol lost a unit.
+    #   DECLINED — the entry IS there and its text is the empty string. The
+    #              contract held; the model used the "cannot be translated"
+    #              escape hatch, which it reaches for on short interjections
+    #              and SFX far more readily than the prompt intends.
+    #
+    # Both leave the source pixels on the page, which reads to the user as
+    # "I asked for Thai and got Japanese". Telling them apart is what makes
+    # that diagnosable: an omission is a protocol/provider problem, a decline
+    # is a prompt problem. `omitted_ids` comes from the decoder, which alone
+    # knows which ids were absent before alignment filled them with "".
+    result_meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
+    omitted_from_answer = {str(item) for item in (result_meta.get("omitted_ids") or [])}
     translations: list[dict[str, str]] = []
     missing: list[str] = []
+    declined: list[str] = []
     passthrough: list[str] = []
     for index, unit in enumerate(units):
         text = markers.normalize_unit_text(extracted[index] if index < len(extracted) else "")
@@ -569,6 +625,8 @@ async def ai_translate_v1(
             # Structurally present but empty text remains observable. The
             # client treats this image as terminal; no automatic AI retry.
             missing.append(unit["id"])
+            if f"P{index}" not in omitted_from_answer:
+                declined.append(unit["id"])
 
     glossary_delta: list[dict[str, str]] = []
     for unit, translated in zip(units, extracted):
@@ -608,6 +666,9 @@ async def ai_translate_v1(
             "acceptedLosslessly": bool(meta.get("accepted_losslessly", False)),
             "contentModified": bool(meta.get("content_modified", False)),
             "omittedIds": list(meta.get("omitted_ids") or []),
+            # Units whose entry arrived with an empty string. `missing` minus
+            # `declinedIds` is the set the answer never mentioned.
+            "declinedIds": declined,
             "rate": (
                 {"gated": False, "adaptive": False, "unlimited": True, "rpm": 0, "burst": 0}
                 if unlimited
@@ -637,6 +698,7 @@ async def ai_translate_v1(
             "missing": len(missing),
             "missing_ids": missing,
             "omitted_ids": body["meta"]["omittedIds"],
+            "declined_ids": declined,
             "provider": body["meta"]["provider"],
             "model": body["meta"]["model"],
             "dt_ms": body["meta"]["dt_ms"],
@@ -647,10 +709,27 @@ async def ai_translate_v1(
         },
         ok=not missing,
     )
+    # Name the thing this request actually spent its life on. Every number
+    # needed for this was already in the trace, but only as three separate
+    # durations that a reader had to compare by hand — so "the page was slow"
+    # and "the page was queued behind its own API key" looked identical.
+    waits = {
+        "rate_gate": float(rate_wait_ms),
+        "provider": float(body["meta"]["providerMs"] or 0.0),
+        "admission": float(admission_wait_ms),
+    }
+    dominant_wait = max(waits, key=lambda k: waits[k]) if max(waits.values()) > 0 else "none"
     trace.write(
         "api", "api/routes/ai_v1.py", "ai_translate_v1", "<-",
         {"translated": len(translations), "missing": len(missing),
+         "dominantWait": dominant_wait,
+         # Queue state when this request JOINED, not after it drained.
+         "rateRpmOnEntry": rate_entry.get("rpm", 0),
+         "rateQueueDepthOnEntry": rate_entry.get("waiting", 0),
+         "rateOkStreakOnEntry": rate_entry.get("okStreak", 0),
+         "rateOkStreakTarget": rate_entry.get("okStreakTarget", 0),
          "missingIds": missing, "omittedIds": body["meta"]["omittedIds"],
+         "declinedIds": declined,
          "passthroughIds": passthrough,
          "provider": body["meta"]["provider"], "model": body["meta"]["model"],
          "dt_ms": body["meta"]["dt_ms"],

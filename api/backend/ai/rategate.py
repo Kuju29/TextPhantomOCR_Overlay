@@ -40,9 +40,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
+import math
 import os
+import tempfile
 import time
 from collections import OrderedDict, deque
+from pathlib import Path
 
 from backend.ai import config as ai_config
 from backend.ai.providers import canonical_provider, is_local_provider, resolve_model
@@ -81,6 +85,53 @@ def _env_int(name: str, default: int) -> int:
 # and no pending refill timer) are ever evicted; an evicted bucket simply starts
 # full again next time, which is the correct state for one that was quiet.
 _MAX_BUCKETS = _env_int("TP_RATE_MAX_BUCKETS", 512)
+
+
+# --- learned-rate persistence -------------------------------------------------
+#
+# What a bucket learns is the only expensive thing in this module: reaching a
+# usable rate from the free-tier starting number costs ~64 clean calls, and
+# until 2026-08-19 every one of those calls was paid again on the next process
+# start. On a Hugging Face Space — which restarts whenever it wakes from sleep —
+# that meant the ramp was paid on essentially every session, and the measured
+# result was 19 pages/min on the first chapter against 50 on the fourth.
+#
+# So the rate is written to a small JSON file keyed by the SAME hashed bucket
+# key used in memory (provider|model|sha1(key)[:12]) — the API key itself is
+# never written. Nothing else is persisted: tokens, waiters and timers are all
+# in-flight state that must start clean.
+#
+# This is a cache, not a source of truth. A restored rate that is now too high
+# costs exactly one provider 429, which `report_rate_limited` halves on the same
+# round trip. A restore that fails is REPORTED (see `persistence()`), never
+# silently skipped, because "the ramp is back" with no explanation is the
+# hardest version of this bug to find.
+_STATE_TTL_SEC = _env_float("TP_RATE_STATE_TTL_SEC", 7 * 24 * 3600.0)
+_STATE_SAVE_MIN_INTERVAL_SEC = _env_float("TP_RATE_STATE_SAVE_SEC", 30.0)
+_STATE_SCHEMA = "tp.rategate.state/1"
+
+
+def _state_path() -> Path | None:
+    """Where the learned rates live, or None when persistence is switched off.
+
+    Order matters and is about WRITABILITY, not preference. A Docker Space runs
+    the app as a non-root user against a root-owned image, so the checkout is
+    usually read-only; `/data` is the only mount that survives a restart, and
+    the temp dir at least survives an in-container reload.
+    """
+    raw = os.environ.get("TP_RATE_STATE_FILE", "").strip()
+    if raw:
+        return Path(raw)
+    if _env_int("TP_RATE_STATE", 1) == 0:
+        return None
+    for candidate in (
+        Path("/data") / "textphantom",                      # HF persistent storage
+        Path(__file__).resolve().parents[2] / "state",      # local install
+    ):
+        parent = candidate if candidate.is_dir() else candidate.parent
+        if parent.is_dir() and os.access(parent, os.W_OK):
+            return candidate / "rate-gate.json"
+    return Path(tempfile.gettempdir()) / "textphantom-rate-gate.json"
 
 
 class _Waiter:
@@ -136,6 +187,29 @@ class _Bucket:
         self.capacity = float(max(1, burst))
         self.tokens = min(self.tokens, self.capacity)
 
+    # How long a request arriving NOW would have to wait, in seconds.
+    #
+    # This is the number the caller owes a rejected client: not a flat guess,
+    # but the queue in front of it divided by the rate it drains at. A flat
+    # "Retry-After: 5" on a bucket with 30 queued jobs at 12 rpm sends every one
+    # of them back in five seconds to be rejected again.
+    def eta_sec(self) -> float:
+        self.refill()
+        if self.rate <= 0:
+            return 0.0
+        need = (len(self.jobset) + 1) - self.tokens
+        return max(0.0, need) / self.rate
+
+    # Clean calls required before the rate may step up (see RATE_ADAPT_* notes).
+    def ok_streak_target(self) -> int:
+        if self.rate <= 0:
+            return ai_config.RATE_ADAPT_OK_STREAK
+        per_window = math.ceil(self.rate * ai_config.RATE_ADAPT_OK_WINDOW_SEC)
+        return max(
+            ai_config.RATE_ADAPT_OK_STREAK_MIN,
+            min(ai_config.RATE_ADAPT_OK_STREAK, per_window),
+        )
+
 
 class RateGate:
     """Process-wide singleton coordinating all AI provider pacing."""
@@ -144,6 +218,96 @@ class RateGate:
         self._buckets: dict[str, _Bucket] = {}
         # job_id -> _Waiter, for O(1) cancellation by job id.
         self._waiters: dict[str, _Waiter] = {}
+        # Learned rates read from disk, applied when a bucket is first created.
+        self._restored: dict[str, float] | None = None
+        self._state_error: str = ""
+        self._state_loaded_count: int = 0
+        self._state_saved_at: float = 0.0
+        self._state_dirty: bool = False
+
+    # --- learned-rate persistence -------------------------------------------
+    def _load_state(self) -> dict[str, float]:
+        """Read the saved rates once per process. Never raises."""
+        if self._restored is not None:
+            return self._restored
+        self._restored = {}
+        path = _state_path()
+        if path is None:
+            self._state_error = "disabled by TP_RATE_STATE=0"
+            return self._restored
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return self._restored  # first run on this machine; not an error
+        except (OSError, ValueError) as exc:
+            self._state_error = f"{type(exc).__name__}: {exc}"
+            return self._restored
+        if not isinstance(raw, dict) or raw.get("schema") != _STATE_SCHEMA:
+            self._state_error = "unrecognised state file; ignoring it"
+            return self._restored
+        now = time.time()
+        for key, entry in (raw.get("buckets") or {}).items():
+            if not isinstance(entry, dict):
+                continue
+            try:
+                rpm = float(entry.get("rpm") or 0.0)
+                seen = float(entry.get("at") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            # Evidence has a shelf life. Past the TTL the key may have changed
+            # tier, been rotated, or moved to another quota entirely.
+            if rpm > 0 and 0 < seen and (now - seen) <= _STATE_TTL_SEC:
+                self._restored[str(key)] = rpm
+        self._state_loaded_count = len(self._restored)
+        return self._restored
+
+    def _save_state(self, *, force: bool = False) -> None:
+        """Write the learned rates, at most once per interval. Never raises."""
+        if not self._state_dirty and not force:
+            return
+        now = time.monotonic()
+        if not force and (now - self._state_saved_at) < _STATE_SAVE_MIN_INTERVAL_SEC:
+            return
+        path = _state_path()
+        if path is None:
+            return
+        self._state_saved_at = now
+        self._state_dirty = False
+        wall = time.time()
+        payload = {
+            "schema": _STATE_SCHEMA,
+            "at": wall,
+            "buckets": {
+                key: {"rpm": round(bucket.rpm, 3), "at": wall}
+                # A pinned bucket is the user's number, not something learned;
+                # persisting it would resurrect a setting they since changed.
+                for key, bucket in self._buckets.items()
+                if not bucket.pinned and bucket.rpm > 0
+            },
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload), encoding="utf-8")
+            tmp.replace(path)  # atomic: a torn file would read as "no evidence"
+            self._state_error = ""
+        except OSError as exc:
+            self._state_error = f"{type(exc).__name__}: {exc}"
+
+    def persistence(self) -> dict:
+        """What the learned-rate cache is doing, for /v1/capabilities and logs.
+
+        Reported rather than assumed: a read-only filesystem turns this feature
+        off completely, and the only symptom is that the ramp comes back.
+        """
+        path = _state_path()
+        self._load_state()
+        return {
+            "path": str(path) if path else "",
+            "enabled": bool(path),
+            "restored": self._state_loaded_count,
+            "error": self._state_error,
+        }
 
     # --- policy ------------------------------------------------------------
     @staticmethod
@@ -294,12 +458,27 @@ class RateGate:
         bucket = self._buckets.get(key)
         now = time.monotonic()
         if bucket is not None and (now - bucket.touched) > ai_config.RATE_ADAPT_IDLE_RESET_SEC:
-            # A quota that has been quiet for this long is no longer evidence.
-            bucket.set_rpm(start_rpm)
+            # A quota that has been quiet for this long is weaker evidence, not
+            # no evidence. Give back one idle window's worth and keep the rest:
+            # being wrong here costs a single 429 that halves the rate anyway,
+            # while resetting to the start cost the whole ramp after every
+            # break the user took.
+            idle_windows = int(
+                (now - bucket.touched) // max(1.0, ai_config.RATE_ADAPT_IDLE_RESET_SEC)
+            )
+            decayed = bucket.rpm * (ai_config.RATE_ADAPT_IDLE_DECAY ** max(1, idle_windows))
+            bucket.set_rpm(max(start_rpm, decayed))
             bucket.ok_streak = 0
         if bucket is None:
             self._prune_buckets()
-            bucket = _Bucket(burst, start_rpm / 60.0)
+            # Start from what this key was last known to sustain. Only the RATE
+            # is restored — tokens start full either way, so a restored bucket
+            # still fires its burst immediately and still halves on a 429.
+            restored = 0.0 if pinned else self._load_state().get(key, 0.0)
+            seed = start_rpm
+            if restored > 0:
+                seed = min(max(restored, rpm_min), rpm_max)
+            bucket = _Bucket(burst, seed / 60.0)
             self._buckets[key] = bucket
         bucket.touched = now
         bucket.rpm_start = start_rpm
@@ -328,11 +507,13 @@ class RateGate:
         if bucket is None or bucket.pinned or not self.adaptive_enabled():
             return
         bucket.ok_streak += 1
-        if bucket.ok_streak < ai_config.RATE_ADAPT_OK_STREAK:
+        if bucket.ok_streak < bucket.ok_streak_target():
             return
         bucket.ok_streak = 0
         if bucket.rpm < bucket.rpm_max:
             bucket.set_rpm(min(bucket.rpm_max, bucket.rpm + ai_config.RATE_ADAPT_STEP_RPM))
+            self._state_dirty = True
+        self._save_state()
 
     # The provider itself said no. Halve the sustained rate immediately and, when
     # it told us how long to wait, spend that time before handing out a token.
@@ -345,6 +526,11 @@ class RateGate:
         bucket.ok_streak = 0
         if not bucket.pinned and self.adaptive_enabled():
             bucket.set_rpm(max(bucket.rpm_min, bucket.rpm * ai_config.RATE_ADAPT_BACKOFF))
+            # Persist the DECREASE straight away. A rate we learned was too high
+            # is the one piece of evidence worth surviving a crash: replaying it
+            # after a restart is another round of 429s at the user's expense.
+            self._state_dirty = True
+            self._save_state(force=True)
         wait = max(0.0, float(retry_after_sec))
         if wait > 0:
             bucket.refill()
@@ -374,7 +560,24 @@ class RateGate:
             "rpmMax": round(bucket.rpm_max, 2),
             "tokens": round(bucket.tokens, 2),
             "waiting": len(bucket.jobset),
+            # How many clean calls this bucket still owes before it may speed
+            # up, and how long a request arriving now would queue. Both were
+            # previously only derivable by re-implementing the maths.
+            "okStreak": int(bucket.ok_streak),
+            "okStreakTarget": bucket.ok_streak_target(),
+            "etaSec": round(bucket.eta_sec(), 2),
         }
+
+    def retry_after_sec(self, provider: str, model: str, api_key: str) -> float:
+        """Seconds a rejected caller should actually wait, from the bucket.
+
+        A flat number here is worse than none: told to come back in 5 s, thirty
+        queued pages all come back in 5 s and are all rejected again.
+        """
+        bucket = self._lookup(provider, model, api_key)
+        if bucket is None:
+            return 1.0
+        return max(1.0, min(60.0, bucket.eta_sec()))
 
     def cancel_jobs(self, job_ids) -> int:
         """Cancel any waiting acquire() for these job ids. Returns count hit."""
@@ -395,6 +598,7 @@ class RateGate:
         return {
             "buckets": len(self._buckets),
             "waiting": len(self._waiters),
+            "persistence": self.persistence(),
         }
 
     # --- internals ---------------------------------------------------------
