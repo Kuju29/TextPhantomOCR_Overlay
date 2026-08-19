@@ -26,7 +26,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 #
 #   nano  (default) .../onnx/yolo26n.onnx  — mAP50 0.947, 2-3x faster on CPU
 #   small           .../onnx/yolo26s.onnx  — mAP50 0.961
-ARG TP_TEXTBLOCK_MODEL_URL=https://huggingface.co/Kiuyha/Manga-Bubble-YOLO/resolve/main/onnx/yolo26n.onnx
+ARG TP_TEXTBLOCK_MODEL_URL=https://huggingface.co/Kiuyha/Manga-Bubble-YOLO/resolve/main/onnx/yolo26s.onnx
 RUN mkdir -p models \
   && MODEL_URL="${TP_TEXTBLOCK_MODEL_URL}" python -c "import urllib.request, os; url = os.environ['MODEL_URL']; print('baking text-block model from', url); urllib.request.urlretrieve(url, 'models/manga-bubble-yolo.onnx'); s = os.path.getsize('models/manga-bubble-yolo.onnx'); assert s > 1000000, s; print('text-block model baked into image:', s, 'bytes')"
 
