@@ -82,6 +82,7 @@ _vertical_with_bounds = textblocks_pass.vertical_with_bounds
 _clear_block_stamps = textblocks_pass.clear_block_stamps
 _conservative_block_neighbor = textblocks_pass.conservative_block_neighbor
 _recover_unstamped_vertical = textblocks_pass.recover_unstamped_vertical
+_apply_geometry_fallback_vertical = textblocks_pass.apply_geometry_fallback_vertical
 MAX_FORCED_RETRY_ROIS = textblocks_pass.MAX_FORCED_RETRY_ROIS
 
 
@@ -189,6 +190,9 @@ def _coverage(tree: dict, recovered: list[int] | None = None) -> dict[str, Any]:
     ]
     vertical_with_bounds = [para for para in vertical if _para_rect(para) is not None]
     stamped = [para for para in vertical if para.get("_tb_block") is not None]
+    geometry_stamped = [
+        para for para in stamped if para.get("_tb_source") == "geometry_fallback"
+    ]
     uncovered = [
         int(para.get("para_index", -1))
         for para in vertical
@@ -200,8 +204,11 @@ def _coverage(tree: dict, recovered: list[int] | None = None) -> dict[str, Any]:
         "vertical": total,
         "verticalWithBounds": len(vertical_with_bounds),
         "stampedVertical": len(stamped),
-        "modelStampedVertical": max(0, len(stamped) - recovered_count),
+        "modelStampedVertical": max(
+            0, len(stamped) - recovered_count - len(geometry_stamped)
+        ),
         "recoveredVertical": recovered_count,
+        "geometryFallbackVertical": len(geometry_stamped),
         "uncoveredVertical": len(uncovered),
         "uncoveredParaIndices": uncovered,
         "ratio": round(len(stamped) / total, 4) if total else 1.0,
@@ -219,6 +226,15 @@ def _merge_verdict(
         "indices": uncovered_indices,
         "disposition": "none" if not uncovered_indices else "fragment_risk",
     }
+    if coverage["complete"] and coverage.get("geometryFallbackVertical", 0) > 0:
+        return {
+            "applied": True, "usable": True, "outcome": "geometry_fallback",
+            "authority": "geometry_fallback", "uncovered": uncovered,
+            "reason": (
+                "ONNX produced no usable paragraph grouping; conservative Lens "
+                "geometry resolved every vertical paragraph without ambiguity"
+            ),
+        }
     if coverage["complete"] and coverage["modelStampedVertical"] > 0:
         authority = "model+recovery" if coverage["recoveredVertical"] else "model"
         return {
@@ -411,7 +427,7 @@ async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict:
                     **kwargs,
                 )
 
-            def _run() -> tuple[list, int, int, int, list[int], list, dict]:
+            def _run() -> tuple[list, int, int, int, list[int], dict, list, dict]:
                 with trace.scope(trace_id):
                     # The detector serialises itself on its own session lock, so
                     # the CPU gate is taken around it for the same reason the
@@ -516,10 +532,16 @@ async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict:
                                 "reason": "already_individual_no_blocks",
                             })
                         recovered = _recover_unstamped_vertical(tree)
-                        # `tb_authority=True`: the detector is the SOLE decision
-                        # maker for vertical grouping. No geometric rule may
-                        # override it — mixed decision paths made a bad group
-                        # impossible to attribute to a rule.
+                        geometry_fallback = _apply_geometry_fallback_vertical(
+                            tree, image=image
+                        )
+                        # `tb_authority=True`: ONNX remains primary authority.
+                        # When it produced zero usable stamps, the conservative
+                        # geometry fallback above may synthesize block ids only
+                        # if every vertical relation is decisive. Ambiguity still
+                        # leaves paragraphs unstamped and produces the old stop.
+                        # The fallback never overrides a model stamp; it is a
+                        # zero-hit-only authority with its own trace metadata.
                         #
                         # `base_img` is deliberately NOT passed. The only rule
                         # that reads pixels (`_ink_barrier_between`) lives in
@@ -531,14 +553,16 @@ async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict:
                         )
                         return (
                             blocks, stamped, initial_stamped,
-                            initial_vertical_stamped, recovered, groups, retry_meta,
+                            initial_vertical_stamped, recovered, geometry_fallback,
+                            groups, retry_meta,
                         )
                     finally:
                         _CPU_GATE.release()
 
             (
                 blocks, stamped, initial_stamped,
-                initial_vertical_stamped, recovered, groups, retry_meta,
+                initial_vertical_stamped, recovered, geometry_fallback,
+                groups, retry_meta,
             ) = await asyncio.get_running_loop().run_in_executor(
                 request.app.state.cpu_executor, _run
             )
@@ -599,6 +623,17 @@ async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict:
             f"conservative geometry recovery attached {len(recovered)} vertical paragraph(s) "
             "to one unambiguous neighbouring model block"
         )
+    if geometry_fallback.get("applied"):
+        warnings.append(
+            "ONNX produced no usable grouping stamps; conservative Lens geometry "
+            f"resolved {coverage.get('geometryFallbackVertical', 0)} vertical paragraph(s) "
+            f"into {len(geometry_fallback.get('groups') or [])} safe group(s)"
+        )
+    elif geometry_fallback.get("attempted") and geometry_fallback.get("reason") == "ambiguous_geometry":
+        warnings.append(
+            "geometry fallback refused to guess because at least one vertical "
+            "paragraph pair remained ambiguous"
+        )
     if initial_vertical_stamped < coverage["verticalWithBounds"]:
         # Keep the raw detector count separate from conservative recovery so
         # diagnostics can tell which path covered each paragraph.
@@ -648,6 +683,7 @@ async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict:
             "infer_ms": timings.get("infer_ms", 0.0),
             "total_ms": total_ms,
             "retry": retry_meta,
+            "geometryFallback": geometry_fallback,
             "imageArtifact": artifact_outcome,
             "artifactMetrics": image_artifacts.stats(),
         },
@@ -683,6 +719,7 @@ async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict:
             "inferMs": timings.get("infer_ms", 0.0),
             "total_ms": total_ms,
             "retry": retry_meta,
+            "geometryFallback": geometry_fallback,
             "imageArtifact": artifact_outcome,
             "artifactMetrics": image_artifacts.stats(),
         },
@@ -710,6 +747,7 @@ async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict:
         "inferMs": timings.get("infer_ms"),
         "totalMs": total_ms,
         "retry": retry_meta,
+        "geometryFallback": geometry_fallback,
         "imageArtifact": artifact_outcome,
     }
     if warnings:

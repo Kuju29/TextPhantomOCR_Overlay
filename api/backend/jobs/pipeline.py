@@ -48,7 +48,10 @@ from backend.lens.tree import (
 from backend.log import dbg, event
 from backend.render.bubble import attach_bubble_bounds, detect_bubble_bounds_combined
 from backend.render.colors import region_is_dark
-from backend.render.textblocks_pass import detect_blocks_with_second_look
+from backend.render.textblocks_pass import (
+    copy_geometry_fallback_stamps,
+    detect_blocks_with_second_look,
+)
 from backend.render.textblocks import (
     annotate_paragraph_blocks,
     attach_block_bounds_to_groups,
@@ -1141,6 +1144,10 @@ def process_image(
         stages["blocks_initial_outcome"] = str(_tb_pass.get("initialOutcome") or "")
         stages["blocks_stamped"] = int(_tb_pass.get("stamped") or 0)
         stages["blocks_recovered"] = len(_tb_pass.get("recovered") or [])
+        _geom_fb = _tb_pass.get("geometryFallback") or {}
+        stages["blocks_geometry_fallback"] = bool(_geom_fb.get("applied"))
+        stages["blocks_geometry_groups"] = len(_geom_fb.get("groups") or [])
+        stages["blocks_geometry_ambiguous"] = len(_geom_fb.get("ambiguousPairs") or [])
         stages["blocks_load_ms"] = float(_tb_timings.get("load_ms", 0.0))
         stages["blocks_lock_ms"] = float(_tb_timings.get("lock_ms", 0.0))
         stages["blocks_infer_ms"] = float(_tb_timings.get("infer_ms", 0.0))
@@ -1332,6 +1339,17 @@ def process_image(
     if tb_authority:
         annotate_paragraph_blocks(original_tree, text_blocks)
         annotate_paragraph_blocks(translated_tree, text_blocks)
+        # A zero-model-hit pass may have resolved the source Lens layer with the
+        # conservative geometry fallback. Original and translated Lens trees
+        # share para_index/geometry, so mirror those synthetic block ids into the
+        # other layer before both trees are grouped. This keeps API-server and
+        # Extension engines on the same grouping contract without any extension
+        # change.
+        _geom_source = _roi_tree if isinstance(_roi_tree, dict) else original_tree
+        _geom_copied = 0
+        _geom_copied += copy_geometry_fallback_stamps(_geom_source, original_tree)
+        _geom_copied += copy_geometry_fallback_stamps(_geom_source, translated_tree)
+        stages["blocks_geometry_copied"] = _geom_copied
         # Observability: expose what the model saw. Debug dumps of the
         # trees then show the detected regions next to each paragraph's
         # _tb_block assignment, so grouping decisions can be audited.

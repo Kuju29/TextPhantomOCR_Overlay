@@ -81,7 +81,8 @@ async def lifespan(app: FastAPI):
         "[TextPhantom][api] CPU runtime "
         f"host={_cpu['host']} affinity={_cpu['affinity']} quota={_cpu['quota']} "
         f"effective={_cpu['effective']} onnx_public={getattr(app.state, 'cpu_executor_workers', '?')} "
-        f"textblock_pool_requested={settings.textblock_pool_size}",
+        f"textblock_pool_requested={settings.textblock_pool_size} "
+        f"geometry_fallback={'on' if settings.textblock_geometry_fallback else 'off'}",
         flush=True,
     )
 

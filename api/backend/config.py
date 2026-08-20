@@ -281,6 +281,18 @@ class Settings:
         # paths must not pay for a multi-session ONNX pool on small HF CPUs.
         default_factory=lambda: max(1, _env_int("TP_TEXTBLOCK_POOL_SIZE", 1))
     )
+    # Conservative Lens-geometry fallback for pages where ONNX produced no
+    # usable paragraph stamps. This never overrides a model decision. It only
+    # resolves a zero-hit page when every vertical paragraph relation is either
+    # strongly same-unit or provably separate; any ambiguous pair keeps the old
+    # explicit grouping failure. Useful for sparse manga pages with one short
+    # vertical utterance per bubble, a common false-negative shape for YOLO.
+    textblock_geometry_fallback: bool = field(
+        default_factory=lambda: _env_bool("TP_TEXTBLOCK_GEOMETRY_FALLBACK", True)
+    )
+    textblock_geometry_fallback_max_paragraphs: int = field(
+        default_factory=lambda: max(1, _env_int("TP_TEXTBLOCK_GEOMETRY_FALLBACK_MAX_PARAGRAPHS", 48))
+    )
 
     # Vertical ROI cropping for the text-block model -------------------------
     # When a page has vertical text, the detector can be run on crops of just
