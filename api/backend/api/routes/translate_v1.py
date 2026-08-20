@@ -181,7 +181,12 @@ async def capabilities(request: Request) -> dict:
             "enabled": bool(getattr(request.app.state, "adaptive_gates", False)),
             "lens": _gate(request).adaptive_state(),
             "ai": _gate(request, "ai").adaptive_state(),
-            "onnx": request.app.state.cpu_admission_gate.adaptive_state(),
+            "onnx": {
+                **request.app.state.cpu_admission_gate.adaptive_state(),
+                "executorWorkers": int(getattr(request.app.state, "cpu_executor_workers", 1)),
+                "cpu": getattr(request.app.state, "cpu_runtime_info", None),
+                "requestedPoolSessions": int(getattr(settings, "textblock_pool_size", 1)),
+            },
             "rateGate": rate_gate.enabled() and rate_gate.adaptive_enabled(),
         },
     }
@@ -304,6 +309,25 @@ async def translate_sync(payload: dict[str, Any], request: Request) -> dict:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
+        if (type(exc).__name__ == "TextBlockBusy"
+                and type(exc).__module__ == "backend.render.textblocks"):
+            retry_after = max(1, int(getattr(exc, "retry_after_sec", 1) or 1))
+            trace.write(
+                "api", "api/routes/translate_v1.py", "translate_sync", "!!",
+                {"failureKind": "server_busy", "httpStatus": 503,
+                 "failedStage": "onnx", "retryable": True,
+                 "generationAttempts": 0},
+                trace_id=trace_id,
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "server_busy",
+                        "message": "text-block detector is busy",
+                        "retryable": True, "retryAfterMs": retry_after * 1000,
+                        "generationAttempts": 0, "traceId": trace_id,
+                        "failedStage": "onnx"},
+                headers={"Retry-After": str(retry_after)},
+            ) from exc
         if (type(exc).__name__ == "LensSessionError"
                 and type(exc).__module__ == "backend.lens.client"):
             # Upstream session exhaustion is neither a provider failure nor an

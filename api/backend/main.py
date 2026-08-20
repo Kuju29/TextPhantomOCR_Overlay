@@ -39,6 +39,7 @@ from backend.jobs.pipeline import process_payload
 from backend.jobs.queue import JobQueue
 from backend.lens import cookie as lens_cookie
 from backend.log import event
+from backend.utils.cpu_runtime import cpu_runtime_info, effective_cpu_count
 from backend.warmup import warmup as run_warmup
 
 
@@ -75,6 +76,14 @@ async def lifespan(app: FastAPI):
     queue.start()
     app.state.job_queue = queue
     print(f"[TextPhantom][api] starting workers={settings.max_workers} direct_workers={getattr(queue, '_direct_workers', '?')} ai_workers={getattr(queue, '_ai_workers', '?')} ai_http_threads={settings.ai_thread_workers}", flush=True)
+    _cpu = cpu_runtime_info()
+    print(
+        "[TextPhantom][api] CPU runtime "
+        f"host={_cpu['host']} affinity={_cpu['affinity']} quota={_cpu['quota']} "
+        f"effective={_cpu['effective']} onnx_public={getattr(app.state, 'cpu_executor_workers', '?')} "
+        f"textblock_pool_requested={settings.textblock_pool_size}",
+        flush=True,
+    )
 
     # Whether the AI pacing cache survived this boot, said at boot.
     #
@@ -242,8 +251,19 @@ app.state.ai_executor_workers = _AI_THREADS
 # finished request serialises its reply.
 # ONNX is bounded by real cores, so its ceiling is cores-derived, not a multiple
 # of the starting size: growing past the CPU only moves the wait behind _CPU_GATE.
+_CPU_RUNTIME = cpu_runtime_info()
+_EFFECTIVE_CPU = max(1, effective_cpu_count())
 _CPU_CONFIGURED = settings.sync_cpu_max_concurrency or settings.cpu_concurrency
-_CPU_LIMIT = max(1, min(_CPU_CONFIGURED, settings.cpu_concurrency))
+# Public detector concurrency must match BOTH quota-visible CPU capacity and
+# the number of real ONNX sessions.  Admitting two /v1/groups requests in
+# front of one model session only creates a hidden lock queue.
+_CPU_LIMIT = max(1, min(
+    _CPU_CONFIGURED,
+    settings.cpu_concurrency,
+    _EFFECTIVE_CPU,
+    max(1, settings.textblock_pool_size),
+))
+app.state.cpu_runtime_info = _CPU_RUNTIME
 # Detector work is CPU-bound and already protected by _CPU_GATE. A dedicated
 # executor with the same public capacity prevents Lens/AI network waits from
 # occupying its workers and prevents /v1/groups from hiding behind the default
@@ -256,8 +276,8 @@ app.state.cpu_executor = ThreadPoolExecutor(
 app.state.cpu_executor_workers = _CPU_LIMIT
 app.state.cpu_admission_gate = AdmissionGate(
     _CPU_LIMIT,
-    max_waiters=settings.sync_max_waiters,
-    max_wait_sec=settings.sync_max_wait_sec,
+    max_waiters=settings.sync_cpu_max_waiters,
+    max_wait_sec=settings.sync_cpu_max_wait_sec,
     adaptive=False,
     limit_min=_CPU_LIMIT,
     limit_max=_CPU_LIMIT,

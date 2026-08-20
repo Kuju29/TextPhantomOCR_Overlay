@@ -53,6 +53,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 
 from backend import trace
+from backend.config import settings
 from backend.jobs.admission import AdmissionRejected, identity_of
 from backend.log import event
 from backend.lens.tree import iter_paragraphs
@@ -322,6 +323,7 @@ async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict:
         annotate_paragraph_blocks,
         available as textblocks_available,
         dedupe_text_blocks,
+        TextBlockBusy,
         detect_text_blocks_in_rois,
     )
     from backend.utils.images import b64_to_bytes
@@ -391,9 +393,23 @@ async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict:
     # queue somewhere nobody can see it.
     gate = request.app.state.cpu_admission_gate
     timings: dict = {}
+    admission_started = time.perf_counter()
     try:
         async with gate.slot(identity):
+            timings["admission_wait_ms"] = round(
+                (time.perf_counter() - admission_started) * 1000, 1
+            )
             import asyncio
+
+            # Public Extension-mode grouping has a durable caller queue.  If an
+            # API-server pipeline currently owns the shared ONNX session, do
+            # not hide tens of seconds of waiting inside this HF request.
+            def _public_detector(image_arg, rois_arg, timings=None, **kwargs):
+                return detect_text_blocks_in_rois(
+                    image_arg, rois_arg, timings=timings,
+                    session_wait_sec=settings.sync_cpu_session_wait_sec,
+                    **kwargs,
+                )
 
             def _run() -> tuple[list, int, int, int, list[int], list, dict]:
                 with trace.scope(trace_id):
@@ -401,11 +417,15 @@ async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict:
                     # the CPU gate is taken around it for the same reason the
                     # pipeline takes it: to keep this from starving other jobs'
                     # erase/render work on a 2-vCPU box.
+                    _cpu_wait = time.perf_counter()
                     _CPU_GATE.acquire()
+                    timings["cpu_gate_wait_ms"] = round(
+                        (time.perf_counter() - _cpu_wait) * 1000, 1
+                    )
                     try:
                         _clear_block_stamps(tree)
                         rois = build_vertical_rois(tree, width, height)
-                        blocks = detect_text_blocks_in_rois(image, rois, timings=timings)
+                        blocks = _public_detector(image, rois, timings=timings)
                         stamped = annotate_paragraph_blocks(tree, blocks)
                         initial_stamped = stamped
                         initial_vertical_stamped = _coverage(tree)["stampedVertical"]
@@ -452,7 +472,7 @@ async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict:
                             # selects a full-page view; it never repeats those
                             # crops and expects their geometry to change.
                             retry_blocks = _detect_retry_blocks(
-                                detect_text_blocks_in_rois, image, retry_rois,
+                                _public_detector, image, retry_rois,
                                 retry_strategy, retry_timings,
                             )
                             retry_meta = {
@@ -469,7 +489,14 @@ async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict:
                                     "no_blocks"
                                 ),
                                 "inferMs": retry_timings.get("infer_ms"),
+                                "lockMs": retry_timings.get("lock_ms"),
+                                "loadMs": retry_timings.get("load_ms"),
                             }
+                            for _key in ("load_ms", "lock_ms", "infer_ms"):
+                                timings[_key] = round(
+                                    float(timings.get(_key) or 0.0)
+                                    + float(retry_timings.get(_key) or 0.0), 1
+                                )
                             if retry_blocks:
                                 # For the alternate full-page view, prefer its
                                 # geometry when dedupe sees a near-duplicate of
@@ -515,8 +542,22 @@ async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict:
             ) = await asyncio.get_running_loop().run_in_executor(
                 request.app.state.cpu_executor, _run
             )
+    except TextBlockBusy as exc:
+        event(
+            "v1.groups.busy",
+            {"identity": identity, "reason": "detector_session", **timings},
+            ok=False,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "server_busy", "stage": "onnx",
+                    "message": "text-block detector is busy", "retryable": True,
+                    "retryAfterMs": int(exc.retry_after_sec * 1000),
+                    "generationAttempts": 0},
+            headers={"Retry-After": str(exc.retry_after_sec)},
+        ) from exc
     except AdmissionRejected as exc:
-        event("v1.groups.busy", {"identity": identity}, ok=False)
+        event("v1.groups.busy", {"identity": identity, "reason": "admission"}, ok=False)
         raise HTTPException(
             status_code=503,
             detail={"code": "server_busy", "stage": "onnx",
@@ -600,7 +641,11 @@ async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict:
             "roi_reason": timings.get("roi_reason"),
             "roi_candidates": timings.get("roi_candidates"),
             "roi_calls": timings.get("roi_calls"),
-            "infer_ms": timings.get("infer_ms"),
+            "admission_wait_ms": timings.get("admission_wait_ms", 0.0),
+            "cpu_gate_wait_ms": timings.get("cpu_gate_wait_ms", 0.0),
+            "model_load_ms": timings.get("load_ms", 0.0),
+            "session_wait_ms": timings.get("lock_ms", 0.0),
+            "infer_ms": timings.get("infer_ms", 0.0),
             "total_ms": total_ms,
             "retry": retry_meta,
             "imageArtifact": artifact_outcome,
@@ -631,6 +676,11 @@ async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict:
             "roiReason": timings.get("roi_reason"),
             "roiCandidates": timings.get("roi_candidates"),
             "roiCalls": timings.get("roi_calls"),
+            "admissionWaitMs": timings.get("admission_wait_ms", 0.0),
+            "cpuGateWaitMs": timings.get("cpu_gate_wait_ms", 0.0),
+            "modelLoadMs": timings.get("load_ms", 0.0),
+            "sessionWaitMs": timings.get("lock_ms", 0.0),
+            "inferMs": timings.get("infer_ms", 0.0),
             "total_ms": total_ms,
             "retry": retry_meta,
             "imageArtifact": artifact_outcome,

@@ -77,6 +77,7 @@ from backend.render.tp_html import (
     overlay_css,
     render_tree_overlay,
 )
+from backend.utils.cpu_runtime import effective_cpu_count
 from backend.utils.images import (
     bytes_to_data_uri,
     data_uri_to_bytes,
@@ -248,7 +249,9 @@ def _encode_bg_data_uri(img: Image.Image) -> str:
 # render / PNG) at once. Without the gate, a 14-image burst inflated those
 # stage times 3-10x from GIL contention; with too few workers, the Lens waits
 # serialized instead. I/O parallel + CPU gated gets both right.
-_CPU_GATE = threading.Semaphore(max(1, settings.cpu_concurrency))
+_CPU_GATE = threading.Semaphore(
+    max(1, min(settings.cpu_concurrency, effective_cpu_count()))
+)
 
 # Warn LOUDLY (once per process) when the text-block model could not be used:
 # vertical grouping then runs on the geometric fallback, and anyone debugging

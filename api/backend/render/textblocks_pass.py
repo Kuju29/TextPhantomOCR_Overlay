@@ -197,6 +197,16 @@ def detect_blocks_with_second_look(
         meta["blocks"] = len(retry_blocks)
         meta["detectorReason"] = retry_timings.get("roi_reason", "")
         meta["inferMs"] = retry_timings.get("infer_ms")
+        meta["lockMs"] = retry_timings.get("lock_ms")
+        meta["loadMs"] = retry_timings.get("load_ms")
+        # The pipeline perf object is meant to describe the WHOLE detector pass.
+        # The previous code reported only first-pass lock/infer time, so a page
+        # whose retry spent 8 seconds waiting looked mysteriously slow outside
+        # every named stage. Fold retry timing into the caller's totals.
+        for _key in ("load_ms", "lock_ms", "infer_ms"):
+            timings[_key] = round(
+                float(timings.get(_key) or 0.0) + float(retry_timings.get(_key) or 0.0), 1
+            )
         if retry_blocks:
             # For the alternate full-page view, prefer its geometry when dedupe
             # sees a near-duplicate of the unqualified crop box. Otherwise the

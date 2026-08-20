@@ -93,3 +93,18 @@ console.log("audit regression test passed");
 }
 
 console.log("provider/model live-verification regression checks passed");
+
+// Hugging Face Docker Spaces Dev Mode compatibility.
+{
+  const dockerfile = await read("api/Dockerfile");
+  for (const pkg of ["bash", "curl", "wget", "procps", "git", "git-lfs"]) {
+    assert.match(dockerfile, new RegExp(`\\b${pkg.replace("-", "\\-")}\\b`), `Dockerfile missing Dev Mode package ${pkg}`);
+  }
+  assert.match(dockerfile, /useradd -m -u 1000/);
+  assert.match(dockerfile, /chown -R 1000:1000 \/app/);
+  assert.match(dockerfile, /ENV HOME=\/home\/user/);
+  assert.match(dockerfile, /USER 1000/);
+  assert.match(dockerfile, /^CMD /m);
+}
+
+console.log("HF Spaces Dev Mode Docker regression checks passed");

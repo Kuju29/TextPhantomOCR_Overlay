@@ -119,6 +119,23 @@ class Settings:
     sync_cpu_max_concurrency: int = field(
         default_factory=lambda: max(0, _env_int("TP_SYNC_CPU_MAX_CONCURRENCY", 0))
     )
+    # Detector-only requests are already held durably by the browser.  Do not
+    # keep a second hidden ONNX backlog in the shared HF process: when the one
+    # real detector slot is occupied, return structured server_busy and let the
+    # owner retry with jitter.  Lens keeps its small jitter queue separately.
+    sync_cpu_max_waiters: int = field(
+        default_factory=lambda: max(0, _env_int("TP_SYNC_CPU_MAX_WAITERS", 0))
+    )
+    sync_cpu_max_wait_sec: float = field(
+        default_factory=lambda: max(0.0, _env_float("TP_SYNC_CPU_MAX_WAIT_SEC", 0.0))
+    )
+    # After public ONNX admission succeeds, an API-server pipeline may still be
+    # holding the shared model session.  Public /v1/groups waits only briefly
+    # for that lease before returning server_busy; this prevents one heavy API
+    # pipeline from making Extension mode appear frozen.
+    sync_cpu_session_wait_sec: float = field(
+        default_factory=lambda: max(0.0, _env_float("TP_SYNC_CPU_SESSION_WAIT_SEC", 0.25))
+    )
     sync_max_waiters: int = field(
         default_factory=lambda: max(0, _env_int("TP_SYNC_MAX_WAITERS", 8))
     )

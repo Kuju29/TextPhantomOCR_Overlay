@@ -37,6 +37,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 
 from backend import trace
+from backend.config import settings
 from backend.jobs.admission import AdmissionRejected, identity_of
 from backend.log import event
 
@@ -100,6 +101,7 @@ async def detect_blocks(payload: dict[str, Any], request: Request) -> dict:
     from backend.jobs.pipeline import _CPU_GATE
     from backend.render.textblocks import (
         available as textblocks_available,
+        TextBlockBusy,
         detect_text_blocks,
         detect_text_blocks_in_rois,
     )
@@ -155,29 +157,49 @@ async def detect_blocks(payload: dict[str, Any], request: Request) -> dict:
     # lane whose work is network sleep.
     gate = request.app.state.cpu_admission_gate
     timings: dict = {}
+    admission_started = time.perf_counter()
     try:
         async with gate.slot(identity):
+            timings["admission_wait_ms"] = round(
+                (time.perf_counter() - admission_started) * 1000, 1
+            )
             import asyncio
 
             def _run() -> list:
                 with trace.scope(trace_id):
-                    # The detector serialises itself on its own session lock, so
-                    # the CPU gate is taken around it for the same reason the
-                    # pipeline takes it: to keep this from starving other jobs'
-                    # erase/render work on a 2-vCPU box.
+                    _cpu_wait = time.perf_counter()
                     _CPU_GATE.acquire()
+                    timings["cpu_gate_wait_ms"] = round(
+                        (time.perf_counter() - _cpu_wait) * 1000, 1
+                    )
                     try:
                         if rois:
-                            return detect_text_blocks_in_rois(image, rois, timings=timings)
-                        return detect_text_blocks(image, timings=timings)
+                            return detect_text_blocks_in_rois(
+                                image, rois, timings=timings,
+                                session_wait_sec=settings.sync_cpu_session_wait_sec,
+                            )
+                        return detect_text_blocks(
+                            image, timings=timings,
+                            session_wait_sec=settings.sync_cpu_session_wait_sec,
+                        )
                     finally:
                         _CPU_GATE.release()
 
             boxes = await asyncio.get_running_loop().run_in_executor(
                 request.app.state.cpu_executor, _run
             )
+    except TextBlockBusy as exc:
+        event("v1.blocks.busy", {"identity": identity, "reason": "detector_session", **timings}, ok=False)
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "server_busy", "stage": "onnx",
+                    "message": "text-block detector is busy", "retryable": True,
+                    "retryAfterMs": int(exc.retry_after_sec * 1000),
+                    "generationAttempts": 0},
+            headers={"Retry-After": str(exc.retry_after_sec)},
+        ) from exc
     except AdmissionRejected as exc:
-        event("v1.blocks.busy", {"identity": identity}, ok=False)
+        event("v1.blocks.busy", {"identity": identity, "reason": "admission"}, ok=False)
         raise HTTPException(
             status_code=503,
             detail={"code": "server_busy", "stage": "onnx",
@@ -196,7 +218,11 @@ async def detect_blocks(payload: dict[str, Any], request: Request) -> dict:
             "blocks": len(normalised),
             "rois": len(rois),
             "roi_reason": str(timings.get("roi_reason") or ""),
-            "infer_ms": timings.get("infer_ms"),
+            "admission_wait_ms": timings.get("admission_wait_ms", 0.0),
+            "cpu_gate_wait_ms": timings.get("cpu_gate_wait_ms", 0.0),
+            "model_load_ms": timings.get("load_ms", 0.0),
+            "session_wait_ms": timings.get("lock_ms", 0.0),
+            "infer_ms": timings.get("infer_ms", 0.0),
             "total_ms": total_ms,
         },
     )
@@ -205,7 +231,13 @@ async def detect_blocks(payload: dict[str, Any], request: Request) -> dict:
         "api/routes/blocks_v1.py",
         "detect_blocks",
         "<-",
-        {"blocks": len(normalised), "rois": len(rois), "total_ms": total_ms},
+        {"blocks": len(normalised), "rois": len(rois),
+         "admissionWaitMs": timings.get("admission_wait_ms", 0.0),
+         "cpuGateWaitMs": timings.get("cpu_gate_wait_ms", 0.0),
+         "modelLoadMs": timings.get("load_ms", 0.0),
+         "sessionWaitMs": timings.get("lock_ms", 0.0),
+         "inferMs": timings.get("infer_ms", 0.0),
+         "total_ms": total_ms},
         trace_id=trace_id,
     )
 

@@ -21,6 +21,7 @@ behaviour is byte-identical to the system without this module.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import queue as _queue_mod
 import threading
@@ -33,6 +34,7 @@ from PIL import Image
 from backend.render.groups import canvas_is_oversized
 
 from backend.config import settings
+from backend.utils.cpu_runtime import cpu_runtime_info, effective_cpu_count
 from backend.log import dbg, event
 
 Box = tuple[float, float, float, float]
@@ -91,7 +93,7 @@ def _download_model() -> bool:
 
 
 def _init_pool() -> None:
-    """Load pool_size ONNX sessions into _pool. Called once, under _init_lock."""
+    """Load the ONNX session pool once, sized to the *container* CPU quota."""
     global _pool_count, _pool_ready, _session_failed, _next_download_retry
 
     path = model_path()
@@ -113,16 +115,16 @@ def _init_pool() -> None:
     try:
         import onnxruntime as ort
 
-        n = max(1, settings.textblock_pool_size)
-        # Divide CPU threads evenly across sessions so concurrent inference
-        # does not over-subscribe the machine.  On a 2-vCPU HF Space with
-        # n=1 this leaves 2 threads for the single session (the proven-fast
-        # path).  With n>1 each session gets floor(cpu_count/n) >= 1 thread.
-        cpu_count = os.cpu_count() or 2
-        threads_per_session = max(1, cpu_count // n)
+        cpu = cpu_runtime_info()
+        effective = max(1, int(cpu["effective"]))
+        requested = max(1, settings.textblock_pool_size)
+        # More ONNX sessions than quota-visible CPUs cannot increase throughput;
+        # each session owns a native thread pool and only creates contention.
+        n = max(1, min(requested, effective))
+        threads_per_session = max(1, effective // n)
         opts = ort.SessionOptions()
         opts.intra_op_num_threads = threads_per_session
-        opts.inter_op_num_threads = 1  # sequential graph operators; parallel handled above
+        opts.inter_op_num_threads = 1
         for _ in range(n):
             sess = ort.InferenceSession(
                 path, sess_options=opts, providers=["CPUExecutionProvider"]
@@ -131,7 +133,13 @@ def _init_pool() -> None:
         _pool_count = n
         event(
             "textblocks.model.loaded",
-            {"path": path, "sessions": n, "threads_each": threads_per_session},
+            {
+                "path": path,
+                "sessions": n,
+                "requested_sessions": requested,
+                "threads_each": threads_per_session,
+                "cpu": cpu,
+            },
         )
     except Exception as e:  # noqa: BLE001
         _session_failed = True
@@ -161,60 +169,87 @@ def available() -> bool:
     return not _session_failed and _pool_count > 0
 
 
-def detect_text_blocks(img: Image.Image, timings: dict | None = None) -> list[Box]:
-    """Detect text-block boxes on a page. Returns [] when the model is off.
+def runtime_info() -> dict[str, Any]:
+    """Small diagnostic snapshot; safe to expose through capabilities/trace."""
+    cpu = cpu_runtime_info()
+    return {
+        "poolReady": bool(_pool_ready),
+        "poolSessions": int(_pool_count),
+        "requestedSessions": max(1, int(settings.textblock_pool_size)),
+        "effectiveCpu": int(cpu["effective"]),
+        "cpu": cpu,
+    }
 
-    Preprocess mirrors the model card: plain resize to 1280x1280, RGB,
-    CHW, /255.  Output boxes are mapped back with the inverse scale.
 
-    ``timings`` (optional) is filled with ``lock_ms`` (time waiting for a
-    free session from the pool) and ``infer_ms`` (this job's own inference).
-    With pool_size=4, max wait ≈ (pool_size−1)xinfer_ms instead of
-    (workers−1)xinfer_ms.
+class TextBlockBusy(RuntimeError):
+    """The shared detector session is occupied; no model generation occurred."""
+
+    def __init__(self, wait_sec: float) -> None:
+        self.retry_after_sec = max(0.25, float(wait_sec or 0.25))
+        super().__init__("text-block detector is busy")
+
+
+@contextlib.contextmanager
+def _session_lease(timings: dict | None = None, *, wait_sec: float = 60.0):
+    """Lease one ONNX session for a whole detector pass.
+
+    A ROI plan may contain several crops.  The old implementation returned the
+    session after every crop, allowing another request to cut in between crops;
+    a three-crop page could therefore spend most of its wall time repeatedly
+    waiting for the same single HF session.  One lease per pass keeps the cost
+    predictable and makes ``lock_ms`` mean one visible wait.
     """
-    # Model load is measured separately: on a cold process this is seconds of
-    # work that used to vanish into the caller's blocks_ms with no matching
-    # lock/infer time, which reads as "inference was mysteriously slow once".
     _t_load = time.perf_counter()
     _ensure_pool()
     load_ms = round((time.perf_counter() - _t_load) * 1000, 1)
     if timings is not None:
-        timings["load_ms"] = timings.get("load_ms", 0.0) + load_ms
+        timings["load_ms"] = round(timings.get("load_ms", 0.0) + load_ms, 1)
     if _session_failed or _pool_count == 0:
+        yield None
+        return
+
+    t_wait = time.perf_counter()
+    try:
+        session = _pool.get(timeout=max(0.0, float(wait_sec)))
+    except _queue_mod.Empty as exc:
+        waited_ms = round((time.perf_counter() - t_wait) * 1000, 1)
+        if timings is not None:
+            timings["lock_ms"] = round(timings.get("lock_ms", 0.0) + waited_ms, 1)
+            timings["busy"] = True
+        event("textblocks.pool_busy", {"wait_ms": waited_ms}, ok=False)
+        raise TextBlockBusy(wait_sec) from exc
+
+    waited_ms = round((time.perf_counter() - t_wait) * 1000, 1)
+    if timings is not None:
+        timings["lock_ms"] = round(timings.get("lock_ms", 0.0) + waited_ms, 1)
+    try:
+        yield session
+    finally:
+        _pool.put(session)
+
+
+def _detect_with_session(
+    img: Image.Image, session: Any, timings: dict | None = None
+) -> list[Box]:
+    """Run one ONNX inference using a caller-owned session lease."""
+    if session is None:
         return []
     try:
         t0 = time.perf_counter()
         W, H = img.size
         rgb = img.convert("RGB").resize((_INPUT_SIZE, _INPUT_SIZE), Image.BILINEAR)
         arr = np.asarray(rgb, dtype=np.float32) / 255.0
-        arr = np.expand_dims(arr.transpose(2, 0, 1), 0)  # 1x3xHxW
-
-        # Grab a session from the pool (blocks until one is free).
-        t_wait = time.perf_counter()
-        try:
-            session = _pool.get(timeout=60.0)
-        except _queue_mod.Empty:
-            event("textblocks.pool_timeout", {}, ok=False)
-            return []
+        arr = np.expand_dims(arr.transpose(2, 0, 1), 0)
         t_infer = time.perf_counter()
-        try:
-            input_name = session.get_inputs()[0].name
-            out = session.run(None, {input_name: arr})[0]
-        finally:
-            _pool.put(session)  # always return, even on exception
+        input_name = session.get_inputs()[0].name
+        out = session.run(None, {input_name: arr})[0]
         if timings is not None:
-            # Accumulate: the ROI path calls this once per crop, and a caller
-            # reading "how long did detection take" must see the total, not the
-            # last crop's slice.
-            timings["lock_ms"] = round(
-                timings.get("lock_ms", 0.0) + (t_infer - t_wait) * 1000, 1
-            )
             timings["infer_ms"] = round(
                 timings.get("infer_ms", 0.0) + (time.perf_counter() - t_infer) * 1000, 1
             )
 
         det = np.asarray(out)
-        det = det.reshape(-1, det.shape[-1])  # (300, 6)
+        det = det.reshape(-1, det.shape[-1])
         sx, sy = W / float(_INPUT_SIZE), H / float(_INPUT_SIZE)
         boxes: list[Box] = []
         for row in det:
@@ -230,9 +265,23 @@ def detect_text_blocks(img: Image.Image, timings: dict | None = None) -> list[Bo
             "ms": round((time.perf_counter() - t0) * 1000, 1),
         })
         return boxes
-    except Exception as e:  # noqa: BLE001 - never break the pipeline
+    except Exception as e:  # noqa: BLE001 - detector failure is not API-fatal
         event("textblocks.detect_failed", {"error": str(e)[:200]}, ok=False)
         return []
+
+
+def detect_text_blocks(
+    img: Image.Image,
+    timings: dict | None = None,
+    *,
+    session: Any = None,
+    session_wait_sec: float = 60.0,
+) -> list[Box]:
+    """Detect text blocks on one image; optionally reuse a caller-owned lease."""
+    if session is not None:
+        return _detect_with_session(img, session, timings)
+    with _session_lease(timings, wait_sec=session_wait_sec) as leased:
+        return _detect_with_session(img, leased, timings)
 
 
 # --- ROI (cropped) detection ------------------------------------------------
@@ -311,14 +360,14 @@ def detect_text_blocks_in_rois(
     *,
     force_individual: bool = False,
     max_calls: int = 0,
+    session: Any = None,
+    session_wait_sec: float = 60.0,
 ) -> list[Box]:
-    """Detect text blocks by running the model on cropped regions.
+    """Detect text blocks over one ROI plan while holding one ONNX lease.
 
-    Falls back to a full-page detection whenever :func:`_roi_plan` says the
-    crops are not worth it, so the caller always gets a usable result. The
-    decision is written into ``timings["roi_reason"]`` — it is never silent,
-    because "ROI was enabled but the full page ran" is exactly the kind of
-    thing that makes a benchmark meaningless.
+    Holding the lease for the whole plan is intentional.  On a one-session HF
+    Space, releasing it between crop 1/2/3 lets other pages interleave and turns
+    a few seconds of inference into tens of seconds of lock wait.
     """
     W, H = img.size
     candidates = list(rois or [])
@@ -332,24 +381,29 @@ def detect_text_blocks_in_rois(
         timings["roi_reason"] = reason
         timings["roi_candidates"] = len(rois or [])
         timings["roi_calls"] = len(plan)
-    if not plan:
-        return detect_text_blocks(img, timings=timings)
 
-    boxes: list[Box] = []
-    for r in plan:
-        x1 = max(0, int(r[0]))
-        y1 = max(0, int(r[1]))
-        x2 = min(W, int(round(r[2])))
-        y2 = min(H, int(round(r[3])))
-        if x2 - x1 < 8 or y2 - y1 < 8:
-            continue
-        crop = img.crop((x1, y1, x2, y2))
-        for b in detect_text_blocks(crop, timings=timings):
-            # Crop-local pixels -> page pixels.
-            boxes.append((b[0] + x1, b[1] + y1, b[2] + x1, b[3] + y1))
-    merged = dedupe_text_blocks(boxes)
-    dbg("textblocks.roi", {"crops": len(plan), "boxes": len(merged), "reason": reason})
-    return merged
+    def _run(leased: Any) -> list[Box]:
+        if not plan:
+            return detect_text_blocks(img, timings=timings, session=leased)
+        boxes: list[Box] = []
+        for r in plan:
+            x1 = max(0, int(r[0]))
+            y1 = max(0, int(r[1]))
+            x2 = min(W, int(round(r[2])))
+            y2 = min(H, int(round(r[3])))
+            if x2 - x1 < 8 or y2 - y1 < 8:
+                continue
+            crop = img.crop((x1, y1, x2, y2))
+            for b in detect_text_blocks(crop, timings=timings, session=leased):
+                boxes.append((b[0] + x1, b[1] + y1, b[2] + x1, b[3] + y1))
+        merged = dedupe_text_blocks(boxes)
+        dbg("textblocks.roi", {"crops": len(plan), "boxes": len(merged), "reason": reason})
+        return merged
+
+    if session is not None:
+        return _run(session)
+    with _session_lease(timings, wait_sec=session_wait_sec) as leased:
+        return _run(leased)
 
 
 def attach_block_bounds_to_groups(
