@@ -83,13 +83,13 @@ export const UPLOAD_FORMATS = ["webp", "png", "jpeg"];
 export const DEFAULT_RELAYOUT_TRANSLATED = true;
 
 /**
- * AI rate-limit pacing. ON by default because a multi-image batch fired at
- * full speed trips a provider's requests-per-minute limit and most of the
- * page errors out at once. Users who translate a few pages at a time can turn
- * it off and skip the pacing wait entirely.
- * 0 = use the server's per-provider policy for this provider.
+ * Manual AI requests-per-minute pacing is OFF by default. Auto/provider-managed
+ * mode has no TextPhantom RPM cap; the adaptive concurrency lane reacts to the
+ * provider's real 429/503 backpressure. RPM/burst are only used when the user
+ * deliberately enables a profile or custom limit; Burst then also becomes the
+ * user's explicit client-concurrency ceiling for that AI key.
  */
-export const DEFAULT_RATE_LIMIT_ENABLED = true;
+export const DEFAULT_RATE_LIMIT_ENABLED = false;
 export const DEFAULT_RATE_RPM = 0;
 export const DEFAULT_RATE_BURST = 0;
 
@@ -105,10 +105,9 @@ export const RATE_BURST_MIN = 1;
 export const RATE_BURST_MAX = 60;
 
 /**
- * What the server uses for each provider when the boxes are left empty —
- * mirrors RATE_POLICY_DEFAULTS in api/backend/ai/config.py. Shown in the popup
- * so a user can see a sane reference before typing their own numbers.
- * Values are sized for each provider's FREE tier.
+ * Optional manual pacing presets. Auto/empty does NOT apply these values;
+ * TextPhantom lets the provider enforce its real quota and adapts to actual
+ * backpressure. These are only references for users who deliberately opt in.
  * @type {Record<string, {rpm:number, burst:number, note?:string}>}
  */
 export const RATE_PRESETS = {

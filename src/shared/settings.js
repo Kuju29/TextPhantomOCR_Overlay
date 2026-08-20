@@ -180,7 +180,7 @@ export async function readFullSettings() {
     maxConcurrency: Number.isFinite(Number(it.maxConcurrency)) ? Number(it.maxConcurrency) : DEFAULT_MAX_CONCURRENCY,
     aiKey: typeof it.aiKey === "string" ? it.aiKey : "",
     aiModel,
-    aiProvider: typeof it.aiProvider === "string" ? it.aiProvider : "auto",
+    aiProvider: typeof it.aiProvider === "string" ? it.aiProvider : "",
     aiBaseUrl: typeof it.aiBaseUrl === "string" ? it.aiBaseUrl : "",
     aiGlossary: Array.isArray(it.aiGlossary) ? it.aiGlossary : [],
     aiCharMemory: it.aiCharMemory === true, // legacy boolean (Full == true)
@@ -214,7 +214,7 @@ export async function readFullSettings() {
     aiPrompt,
     // Orientation relayout for the Translated overlay. Default ON.
     relayoutTranslated: readBool(it.relayoutTranslated, DEFAULT_RELAYOUT_TRANSLATED),
-    // AI rate-limit pacing. 0 for rpm/burst = use the server's provider policy.
+    // Optional AI pacing. 0 for rpm/burst = provider-managed; no TextPhantom RPM cap.
     rateLimitEnabled: readBool(it.rateLimitEnabled, DEFAULT_RATE_LIMIT_ENABLED),
     // Opt-in, default off: pacing only comes off when the user says the runtime
     // is their own machine, because only they know that.

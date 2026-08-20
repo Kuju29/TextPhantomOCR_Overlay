@@ -31,6 +31,7 @@ from backend.ai.providers import (
     is_hf_provider,
     is_local_provider,
     openai_compat_models,
+    provider_key_mismatch,
     resolve_base_url,
     resolve_model,
     resolve_provider,
@@ -154,6 +155,13 @@ def translate(
         raise ValueError("AI api_key is required")
 
     provider = resolve_provider(ai.provider, api_key)
+    if not provider and api_key:
+        raise ValueError("AI provider must be selected explicitly for this API key")
+    mismatched_provider = provider_key_mismatch(provider, api_key) if api_key else ""
+    if mismatched_provider:
+        raise ValueError(
+            f"AI provider/key mismatch: selected {provider}, key belongs to {mismatched_provider}"
+        )
     if not api_key and _looks_local and provider in ("", "auto", "openai"):
         # Keyless request with a local base_url but no recognised provider name
         # → treat as Ollama (the most common local server).

@@ -279,19 +279,24 @@ async def lens_raw(
         # has nobody to be fair to. Google Lens is still remote and is still
         # paced by the extension's own lane.
         if wants_unlimited(request):
-            width, height, data = await asyncio.to_thread(
-                _fetch_raw_sync, raw, target_lang, tp_trace
+            loop = asyncio.get_running_loop()
+            width, height, data = await loop.run_in_executor(
+                request.app.state.lens_executor, _fetch_raw_sync, raw, target_lang, tp_trace
             )
         else:
             async with request.app.state.admission_gate.slot(identity):
-                width, height, data = await asyncio.to_thread(
-                    _fetch_raw_sync, raw, target_lang, tp_trace
+                loop = asyncio.get_running_loop()
+                width, height, data = await loop.run_in_executor(
+                    request.app.state.lens_executor, _fetch_raw_sync, raw, target_lang, tp_trace
                 )
     except AdmissionRejected as exc:
         event("v1.lens.raw.busy", {"identity": identity}, ok=False)
         raise HTTPException(
             status_code=503,
-            detail=str(exc),
+            detail={"code": "server_busy", "stage": "lens",
+                    "message": str(exc), "retryable": True,
+                    "retryAfterMs": int(exc.retry_after_sec * 1000),
+                    "traceId": tp_trace},
             headers={"Retry-After": str(exc.retry_after_sec)},
         ) from exc
     except Exception as exc:  # noqa: BLE001
@@ -400,14 +405,17 @@ async def lens_fallback(
     identity = _lens_identity(tp_tab_session)
     try:
         async with request.app.state.admission_gate.slot(identity):
-            document, _, _ = await asyncio.to_thread(
-                _fetch_fallback_sync, raw, target_lang
+            loop = asyncio.get_running_loop()
+            document, _, _ = await loop.run_in_executor(
+                request.app.state.lens_executor, _fetch_fallback_sync, raw, target_lang
             )
     except AdmissionRejected as exc:
         event("v1.lens.fallback.busy", {"identity": identity}, ok=False)
         raise HTTPException(
             status_code=503,
-            detail=str(exc),
+            detail={"code": "server_busy", "stage": "lens",
+                    "message": str(exc), "retryable": True,
+                    "retryAfterMs": int(exc.retry_after_sec * 1000)},
             headers={"Retry-After": str(exc.retry_after_sec)},
         ) from exc
     except Exception as exc:  # noqa: BLE001

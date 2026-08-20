@@ -210,6 +210,7 @@ export async function translateViaSyncRest(base, payload, { onSlow, onSent, sign
       err.code = String(detail?.code || "");
       err.failedStage = String(detail?.failedStage || "");
       err.retryable = detail?.retryable === true;
+      err.generationAttempts = Number(detail?.generationAttempts || 0);
       err.traceId = String(detail?.traceId || "");
       // Prefer the body's figure over the header's. `Retry-After` is whole
       // seconds, and the rate gate computes the real wait from the queue in
@@ -269,9 +270,21 @@ export async function fetchLensRawViaRest(
     signal,
   });
   if (!res.ok) {
+    const retryAfterMs = noteRetryAfter(res);
     const body = await readLimitedText(res);
     const err = new Error(`Lens upload failed: HTTP ${res.status}${body ? ` - ${body}` : ""}`);
     err.status = res.status;
+    err.retryAfterMs = res.status === 429 || res.status === 503 ? retryAfterMs || 1000 : 0;
+    try {
+      const parsed = JSON.parse(body);
+      const detail = parsed?.detail && typeof parsed.detail === "object" ? parsed.detail : parsed;
+      err.code = String(detail?.code || "");
+      err.retryable = detail?.retryable === true;
+      const preciseMs = Number(detail?.retryAfterMs);
+      if (Number.isFinite(preciseMs) && preciseMs > 0) err.retryAfterMs = preciseMs;
+    } catch {
+      err.code = "";
+    }
     err.permanent = res.status >= 400 && res.status < 500 && res.status !== 429;
     throw err;
   }
@@ -294,16 +307,22 @@ export async function groupParagraphsViaRest(base, {
     body: JSON.stringify({ ...imageInput, tree, context }),
   });
   if (!res.ok) {
+    const retryAfterMs = noteRetryAfter(res);
     const body = await readLimitedText(res);
     const err = new Error(`Grouping failed: HTTP ${res.status}${body ? ` - ${body}` : ""}`);
     err.status = res.status;
+    err.retryAfterMs = res.status === 429 || res.status === 503 ? retryAfterMs || 1000 : 0;
     try {
       const parsed = JSON.parse(body);
-      err.code = String(parsed?.detail?.code || parsed?.code || "");
+      const detail = parsed?.detail && typeof parsed.detail === "object" ? parsed.detail : parsed;
+      err.code = String(detail?.code || "");
+      err.retryable = detail?.retryable === true;
+      const preciseMs = Number(detail?.retryAfterMs);
+      if (Number.isFinite(preciseMs) && preciseMs > 0) err.retryAfterMs = preciseMs;
     } catch {
       err.code = "";
     }
-    err.permanent = res.status >= 400 && res.status < 500;
+    err.permanent = res.status >= 400 && res.status < 500 && res.status !== 429;
     throw err;
   }
   return readJson(res, "Grouping failed");

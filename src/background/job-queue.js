@@ -15,6 +15,7 @@ let pendingServerIncrease = 0;
 let pendingServerConfirmations = 0;
 
 let running = 0;
+let laneManagedRunning = 0;
 const queue = [];
 
 function clampInteger(value, low, high) {
@@ -65,9 +66,30 @@ function pump() {
 
 // Optional admission guards preserve addTask(fn) compatibility while allowing
 // callers to cancel or reject stale work before it starts.
-export function addTask(fn, { signal = null, shouldStart = null } = {}) {
+export function addTask(fn, { signal = null, shouldStart = null, laneManaged = false } = {}) {
   if (typeof fn !== "function") throw new TypeError("addTask requires a function");
-  queue.push({ fn, signal, shouldStart });
+  const task = { fn, signal, shouldStart, laneManaged: Boolean(laneManaged) };
+
+  // Extension-first jobs already acquire separate Lens / AI / server capacity
+  // lanes inside processJob. Counting the whole image as a top-level slot until
+  // its AI call returns creates head-of-line blocking: 24 images waiting for AI
+  // prevent image 25 from even starting Lens. Start those orchestration promises
+  // immediately and let the actual resource lanes do the limiting. The API-engine
+  // path still uses the bounded top-level queue because the server owns that full
+  // pipeline and does not expose each internal stage to the extension.
+  if (task.laneManaged) {
+    if (skipTask(task)) return;
+    laneManagedRunning++;
+    Promise.resolve()
+      .then(task.fn)
+      .catch((e) => console.error("[SW.queue] lane-managed task error", e))
+      .finally(() => {
+        laneManagedRunning = Math.max(0, laneManagedRunning - 1);
+      });
+    return;
+  }
+
+  queue.push(task);
   pump();
 }
 
@@ -122,6 +144,7 @@ export function describeLimits() {
     server: serverMaxConcurrency,
     effective: effectiveMax(),
     running,
+    laneManagedRunning,
     queued: queue.length,
   };
 }

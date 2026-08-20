@@ -104,7 +104,7 @@
             <div class="field" id="ai-provider-wrap">
               <label for="ai-provider">Provider</label>
               <select id="ai-provider" aria-label="AI provider">
-                <option value="auto">Auto (detect from key)</option>
+                <option value="" disabled selected>Select provider…</option>
                 <optgroup label="Cloud (needs API key)">
                   <option value="gemini">Google Gemini</option>
                   <option value="openai">OpenAI</option>
@@ -252,13 +252,13 @@
             <!-- Rate limit: pace requests to the user's own model quota. -->
             <div class="field" id="ai-rate-wrap" style="display: none">
               <label class="label-row" style="cursor: pointer">
-                <span>Keep AI requests within my quota</span>
+                <span>Use a manual AI request-rate cap</span>
                 <input type="checkbox" id="rate-limit-enabled" />
               </label>
               <label class="rate-field">
                 <span>Speed profile</span>
                 <select id="rate-profile">
-                  <option value="auto">Automatic (recommended)</option>
+                  <option value="auto">Provider managed (recommended)</option>
                   <option value="stable">Stable</option>
                   <option value="balanced">Balanced</option>
                   <option value="fast">Fast</option>
@@ -277,13 +277,13 @@
               </div>
               <div id="rate-preset-hint" class="hint rate-preset" aria-live="polite"></div>
               <div class="hint">
-                <strong>Automatic</strong> learns your key's real speed. It starts at a rate that is safe for a free tier, speeds up while your provider keeps accepting the traffic, and halves the moment the provider answers 429. Pacing is tracked per API key, so one key slowing down never slows another.<br />
-                Open <strong>Custom</strong> only to pin an exact number. A pinned number is obeyed as written and never adjusted.<br />
+                <strong>Provider managed</strong> applies no TextPhantom requests-per-minute cap. A fresh key starts at the server's real active AI capacity, and only a real provider 429/503 reduces the learned speed for this provider/model/key. Shared-server busy responses stay in your browser with backoff instead of becoming a hidden server queue.<br />
+                Turn this switch on only when you deliberately want TextPhantom to pace a known quota. <strong>Stable / Balanced / Fast</strong> are reference presets; <strong>Custom</strong> pins your exact values.<br />
                 <strong>Requests / min:</strong> copy it from your provider's rate-limit page. It is per API key, not per page.<br />
-                <strong>Burst:</strong> how many may fire back-to-back before pacing starts. A quarter of your RPM is a good rule.<br />
-                Pinning a number HIGHER than your real quota does not make translation faster — the provider answers 429 and those pages fail. Automatic finds that ceiling for you instead.
+                <strong>Burst:</strong> when manual pacing is enabled, this is also the maximum AI concurrency for this key (and the token-bucket burst).
+                Setting a number higher than the provider really allows cannot increase throughput; the provider will return backpressure and the lane will reduce concurrency.
               </div>
-              <div class="hint">Turning the switch off removes pacing entirely: fine for a few pages, likely to fail on a 20-page chapter.</div>
+              <div class="hint">Off is the recommended default: TextPhantom does not impose an RPM cap; it fills real server capacity quickly, learns per-key provider capacity, and backs off only from real provider feedback.</div>
             </div>
           </section>
         </section>

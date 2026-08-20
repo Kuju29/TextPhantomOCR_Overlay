@@ -71,6 +71,27 @@ releaseBlocker();
 await waitUntil(() => describeLimits().running === 0 && describeLimits().queued === 0);
 assert.equal(started, 0, "cancelled/stale queued tasks must not start");
 
+
+// Extension-first orchestration is NOT held behind the top-level image cap.
+// Its Lens/AI lanes are the actual resource governors, so an image waiting on
+// AI cannot prevent later images from starting their Lens stage.
+setMaxConcurrency(1);
+let releaseLaneManaged;
+const laneManagedBlocker = new Promise((resolve) => { releaseLaneManaged = resolve; });
+let laneManagedStarted = 0;
+for (let i = 0; i < 20; i++) {
+  addTask(async () => {
+    laneManagedStarted++;
+    await laneManagedBlocker;
+  }, { laneManaged: true });
+}
+await waitUntil(() => laneManagedStarted === 20);
+assert.equal(describeLimits().running, 0,
+  "lane-managed extension work must not consume the bounded API-engine slots");
+assert.equal(describeLimits().laneManagedRunning, 20);
+releaseLaneManaged();
+await waitUntil(() => describeLimits().laneManagedRunning === 0);
+
 // Behavioural cancellation race: with the only slot blocked, cancelling the
 // existing batch must keep its queued server work at zero after the slot frees.
 let releaseBatchBlocker;
@@ -89,8 +110,8 @@ assert.equal(serverRouteCalls, 0, "a CANCEL_BATCH race must not start its server
 // Integration guard: production enqueue must actually pass the pre-start
 // session predicate; testing only the queue primitive would miss broken wiring.
 const jobsSource = await readFile(new URL("../src/background/jobs.js", import.meta.url), "utf8");
-assert.match(jobsSource, /\{ shouldStart: isAdmissible \}/,
-  "production enqueue must wire session+batch cancellation into admission");
+assert.match(jobsSource, /shouldStart: isAdmissible[\s\S]*laneManaged: payload\?\.engine !== "api"/,
+  "runs:Extension enqueue must bypass the top-level image slot and rely on resource lanes");
 assert.match(jobsSource, /getBatch\(batchId\)\?\.cancelled\) return/,
   "processJob must defensively stop a cancelled batch before workflow/server work");
 const beginRecheck = jobsSource.indexOf("if (await stopIfBatchWasCancelled()) return;",

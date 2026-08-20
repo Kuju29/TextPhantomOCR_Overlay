@@ -20,6 +20,7 @@ from backend.ai.providers import (
     canonical_provider,
     detect_provider_from_key,
     is_local_provider,
+    provider_key_mismatch,
     resolve_base_url,
     resolve_model,
 )
@@ -49,8 +50,10 @@ def _cache_key(provider: str, model: str, base_url: str, api_key: str) -> str:
 
 
 def _classify_status(code: int) -> str:
-    if code in (401, 403):
+    if code == 401:
         return "invalid_key"
+    if code == 403:
+        return "model_access_denied"
     if code == 404:
         return "model_unavailable"
     if code == 429:
@@ -118,6 +121,12 @@ def probe(payload: dict[str, Any]) -> ProbeResult:
     if provider in ("", "auto"):
         if candidate_key:
             provider = detect_provider_from_key(candidate_key)
+            if not provider:
+                return ProbeResult(
+                    ok=False, provider="", model="", backend_supported=False,
+                    provider_protocol="", status="ambiguous_provider",
+                    http_status=0, cached=False,
+                )
         elif looks_local:
             provider = "ollama"
         else:
@@ -163,6 +172,14 @@ def probe(payload: dict[str, Any]) -> ProbeResult:
         )
     if local and not api_key:
         api_key = "local"
+
+    mismatched_provider = provider_key_mismatch(provider, api_key) if not local else ""
+    if mismatched_provider:
+        return ProbeResult(
+            ok=False, provider=provider, model="", backend_supported=True,
+            provider_protocol=protocol, status="provider_key_mismatch",
+            http_status=0, cached=False, error=f"key belongs to {mismatched_provider}",
+        )
 
     model = resolve_model(provider, str(payload.get("model") or "auto"))
     base_url = resolve_base_url(provider, str(payload.get("base_url") or "auto"))

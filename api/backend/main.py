@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -73,7 +74,7 @@ async def lifespan(app: FastAPI):
     queue = JobQueue(process_payload)
     queue.start()
     app.state.job_queue = queue
-    print(f"[TextPhantom][api] starting workers={settings.max_workers} direct_workers={getattr(queue, '_direct_workers', '?')} ai_workers={getattr(queue, '_ai_workers', '?')}", flush=True)
+    print(f"[TextPhantom][api] starting workers={settings.max_workers} direct_workers={getattr(queue, '_direct_workers', '?')} ai_workers={getattr(queue, '_ai_workers', '?')} ai_http_threads={settings.ai_thread_workers}", flush=True)
 
     # Whether the AI pacing cache survived this boot, said at boot.
     #
@@ -82,23 +83,30 @@ async def lifespan(app: FastAPI):
     # starting number — 19 pages/min against 50 on the measured run. A read-only
     # filesystem turns it off completely and the only other symptom is that the
     # ramp comes back, so the state is printed either way.
-    _rate_state = rate_gate.persistence()
-    if not _rate_state["enabled"]:
-        print("[TextPhantom][api] AI rate memory OFF (TP_RATE_STATE=0)", flush=True)
-    elif _rate_state["error"]:
+    if not settings.rate_gate_enabled:
         print(
-            f"[TextPhantom][api] AI rate memory UNAVAILABLE at {_rate_state['path']}: "
-            f"{_rate_state['error']} — every restart will re-learn each key's rate. "
-            "Point TP_RATE_STATE_FILE at a writable path (on Hugging Face, enable "
-            "persistent storage and use /data).",
+            "[TextPhantom][api] proactive AI RPM gate OFF — provider quota/backpressure is authoritative; "
+            "set TP_RATE_GATE=1 or send an explicit rate profile to enable pacing",
             flush=True,
         )
     else:
-        print(
-            f"[TextPhantom][api] AI rate memory -> {_rate_state['path']} "
-            f"({_rate_state['restored']} key(s) restored)",
-            flush=True,
-        )
+        _rate_state = rate_gate.persistence()
+        if not _rate_state["enabled"]:
+            print("[TextPhantom][api] AI rate memory OFF (TP_RATE_STATE=0)", flush=True)
+        elif _rate_state["error"]:
+            print(
+                f"[TextPhantom][api] AI rate memory UNAVAILABLE at {_rate_state['path']}: "
+                f"{_rate_state['error']} — every restart will re-learn each key's rate. "
+                "Point TP_RATE_STATE_FILE at a writable path (on Hugging Face, enable "
+                "persistent storage and use /data).",
+                flush=True,
+            )
+        else:
+            print(
+                f"[TextPhantom][api] AI rate memory -> {_rate_state['path']} "
+                f"({_rate_state['restored']} key(s) restored)",
+                flush=True,
+            )
 
     logfile.startup_banner()
     # Printing a path that is never written to is how someone ends up grepping
@@ -160,38 +168,66 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="TextPhantom OCR API", version="2.0", lifespan=lifespan)
 
+# Provider SDKs are synchronous. Give them their own executor instead of the
+# process-wide asyncio default pool that Lens, ONNX, warmup and miscellaneous
+# to_thread() work also use. Most importantly, the AI admission gate below is
+# never allowed to exceed this worker count, so submitting an admitted AI call
+# can start immediately rather than disappearing into ThreadPoolExecutor's FIFO
+# backlog behind another user's requests.
+_AI_THREADS = max(1, int(settings.ai_thread_workers))
+app.state.ai_executor = ThreadPoolExecutor(
+    max_workers=_AI_THREADS,
+    thread_name_prefix="tp-ai-http",
+)
+
 # /v1/translate runs without a queue: a bounded gate, and a 503 when it is full.
 # Built HERE rather than in the lifespan on purpose — `/v1/capabilities` reads
 # it, and a capabilities probe that arrives before startup finished (or under an
 # ASGI runner that skips lifespan) would otherwise 500 on a missing attribute.
 # The legacy JobQueue still starts in the lifespan; it needs a running loop.
-# TP_ADAPTIVE=0 pins every gate at its configured size. On (the default) each
-# gate grows by one slot after a clean streak while it is actually saturated, and
-# halves the moment a job's run time cliffs past 2.5x the rolling average.
+# TP_ADAPTIVE remains available to legacy/internal gates, but public Lens/AI/ONNX
+# admission is pinned to real executor capacity in this build. Provider/client
+# feedback controls request pacing; server latency must not manufacture capacity.
 _ADAPTIVE = str(os.environ.get("TP_ADAPTIVE", "1")).strip().lower() not in ("0", "false", "no", "off")
-_LENS_LIMIT = settings.sync_max_concurrency or settings.max_workers
+_LENS_LIMIT = max(1, settings.sync_max_concurrency or settings.max_workers)
 app.state.adaptive_gates = _ADAPTIVE
+# Lens is synchronous remote I/O. Keep its executor and admission limit exactly
+# aligned so an admitted upload can start immediately instead of entering an
+# invisible ThreadPoolExecutor FIFO. User-configured TP_SYNC_MAX_CONCURRENCY /
+# SERVER_MAX_WORKERS still define the size; we only make the implementation
+# honour that value literally.
+app.state.lens_executor = ThreadPoolExecutor(
+    max_workers=_LENS_LIMIT,
+    thread_name_prefix="tp-lens-http",
+)
+app.state.lens_executor_workers = _LENS_LIMIT
 app.state.admission_gate = AdmissionGate(
     _LENS_LIMIT,
     max_waiters=settings.sync_max_waiters,
     max_wait_sec=settings.sync_max_wait_sec,
-    adaptive=_ADAPTIVE,
-    limit_min=max(2, _LENS_LIMIT // 4),
-    limit_max=max(_LENS_LIMIT, _LENS_LIMIT * 4),
+    adaptive=False,
+    limit_min=_LENS_LIMIT,
+    limit_max=_LENS_LIMIT,
 )
 # A SECOND lane, for jobs whose time is spent waiting on an AI provider rather
 # than computing. Two gates, not one wider gate: a single pool means an image
 # asleep on Gemini's socket is holding a slot that the next image's Lens upload
 # needs, and the two have nothing to do with each other.
-_AI_LIMIT = settings.sync_ai_max_concurrency or settings.max_workers
+_AI_CONFIGURED = settings.sync_ai_max_concurrency or _AI_THREADS
+_AI_LIMIT = max(1, min(_AI_CONFIGURED, _AI_THREADS))
 app.state.ai_admission_gate = AdmissionGate(
     _AI_LIMIT,
-    max_waiters=settings.sync_max_waiters,
-    max_wait_sec=settings.sync_max_wait_sec,
-    adaptive=_ADAPTIVE,
-    limit_min=max(2, _AI_LIMIT // 4),
-    limit_max=max(_AI_LIMIT, _AI_LIMIT * 4),
+    max_waiters=settings.sync_ai_max_waiters,
+    max_wait_sec=settings.sync_ai_max_wait_sec,
+    # Provider latency is NOT evidence of server overload. The old adaptive gate
+    # halved AI capacity when Gemini/HF got slower, even though CPU was idle.
+    # Provider 429/503 is already handled per API-key by the extension lane, so
+    # this gate stays pinned to the real executor capacity.
+    adaptive=False,
+    limit_min=_AI_LIMIT,
+    limit_max=_AI_LIMIT,
 )
+app.state.ai_executor_workers = _AI_THREADS
 # A THIRD lane, for the detector-only calls (`/v1/groups`, `/v1/blocks`).
 #
 # Same argument as the AI lane, pointing the other way. ONNX is ~445 ms of pure
@@ -206,14 +242,37 @@ app.state.ai_admission_gate = AdmissionGate(
 # finished request serialises its reply.
 # ONNX is bounded by real cores, so its ceiling is cores-derived, not a multiple
 # of the starting size: growing past the CPU only moves the wait behind _CPU_GATE.
-_CPU_LIMIT = settings.sync_cpu_max_concurrency or (settings.cpu_concurrency + 2)
+_CPU_CONFIGURED = settings.sync_cpu_max_concurrency or settings.cpu_concurrency
+_CPU_LIMIT = max(1, min(_CPU_CONFIGURED, settings.cpu_concurrency))
+# Detector work is CPU-bound and already protected by _CPU_GATE. A dedicated
+# executor with the same public capacity prevents Lens/AI network waits from
+# occupying its workers and prevents /v1/groups from hiding behind the default
+# asyncio executor. Keep it pinned: more admitted ONNX calls than real workers
+# are just a queue in another place.
+app.state.cpu_executor = ThreadPoolExecutor(
+    max_workers=_CPU_LIMIT,
+    thread_name_prefix="tp-onnx",
+)
+app.state.cpu_executor_workers = _CPU_LIMIT
 app.state.cpu_admission_gate = AdmissionGate(
     _CPU_LIMIT,
     max_waiters=settings.sync_max_waiters,
     max_wait_sec=settings.sync_max_wait_sec,
-    adaptive=_ADAPTIVE,
-    limit_min=1,
-    limit_max=max(_CPU_LIMIT, (os.cpu_count() or 2) * 2),
+    adaptive=False,
+    limit_min=_CPU_LIMIT,
+    limit_max=_CPU_LIMIT,
+)
+
+# The full API-server engine owns a whole image pipeline on one worker. Give
+# each admission lane a matching executor so /v1/translate cannot recreate the
+# hidden shared-default-pool queue that the extension-first route eliminated.
+app.state.pipeline_lens_executor = ThreadPoolExecutor(
+    max_workers=_LENS_LIMIT,
+    thread_name_prefix="tp-pipeline-lens",
+)
+app.state.pipeline_ai_executor = ThreadPoolExecutor(
+    max_workers=_AI_LIMIT,
+    thread_name_prefix="tp-pipeline-ai",
 )
 
 

@@ -86,7 +86,7 @@ async function buildAiPayload(mode, source, settings, seriesKey) {
     api_key: settings.aiKey || "",
     on_device: settings.aiOnDevice === true,
     model: settings.aiModel || "auto",
-    provider: settings.aiProvider || "auto",
+    provider: settings.aiProvider || "",
     base_url: settings.aiBaseUrl || "auto",
     prompt: settings.aiPrompt || "",
     glossary: useGlossary ? memory.glossary : [],
@@ -113,15 +113,22 @@ function aiIsUnlimitedLocal(settings) {
   );
 }
 
-// Builds the `rate` sub-object from the user's AI rate-limit settings, where 0 means the server's own policy.
+// Builds optional user-pinned pacing. Empty/Auto means NO TextPhantom RPM
+// throttle: the provider's real quota is authoritative and actual 429/503
+// responses drive the adaptive concurrency lane.
 function buildRatePayload(mode, source, settings) {
   if (mode !== "lens_text" || source !== "ai") return null;
-  // A runtime on the user's own machine has no per-minute quota to respect.
   if (aiIsUnlimitedLocal(settings)) return { enabled: false, rpm: 0, burst: 0, unlimited: true };
+  const configuredRpm = Number(settings.rateRpm) > 0 ? Number(settings.rateRpm) : 0;
+  const configuredBurst = Number(settings.rateBurst) > 0 ? Number(settings.rateBurst) : 0;
+  const enabled = settings.rateLimitEnabled === true && (configuredRpm > 0 || configuredBurst > 0);
+  // Stored values are preferences, not active limits. If the user turns the
+  // switch OFF, do not let yesterday's RPM/Burst silently seed today's
+  // scheduler window or server rate gate.
   return {
-    enabled: settings.rateLimitEnabled !== false,
-    rpm: Number(settings.rateRpm) > 0 ? Number(settings.rateRpm) : 0,
-    burst: Number(settings.rateBurst) > 0 ? Number(settings.rateBurst) : 0,
+    enabled,
+    rpm: enabled ? configuredRpm : 0,
+    burst: enabled ? configuredBurst : 0,
   };
 }
 

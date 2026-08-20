@@ -9,8 +9,8 @@ The settings UI intentionally separates three questions:
 2. Is the supplied key accepted by the provider?
 3. Is the selected model present in the provider's live model list?
 
-A static fallback is still useful while no key is present or a provider is
-temporarily unreachable, but it is never reported as verified.
+The selectable model list is live-only: if the provider/key cannot enumerate a
+model, the popup must not promise that model will work.
 """
 
 from __future__ import annotations
@@ -20,8 +20,6 @@ from typing import Any, TypedDict
 
 from backend.ai import prompts
 from backend.ai.config import (
-    GEMINI_FALLBACK_MODELS,
-    HF_FALLBACK_MODELS,
     PROVIDER_DEFAULTS,
     PROVIDER_PROTOCOLS,
 )
@@ -33,6 +31,7 @@ from backend.ai.providers import (
     gemini_models_status,
     is_local_provider,
     openai_compat_models_status,
+    provider_key_mismatch,
     resolve_base_url,
     resolve_model,
 )
@@ -83,21 +82,10 @@ def _dedupe_sorted(models: list[str]) -> list[str]:
     )
 
 
-def _fallback_models(provider: str) -> list[str]:
-    if provider == "gemini":
-        return list(GEMINI_FALLBACK_MODELS)
-    if provider == "huggingface":
-        return list(HF_FALLBACK_MODELS)
-    preset_model = str(PROVIDER_DEFAULTS.get(provider, {}).get("model", "") or "")
-    return [preset_model] if preset_model else []
-
-
 def _enumerate_models_detailed(provider: str, api_key: str, base_url: str) -> EnumerationResult:
-    """Return a live model list plus authentication/network status.
+    """Return only a live model list plus authentication/network status.
 
-    Static models are supplied only when a live list is unavailable. The
-    caller can therefore keep the picker useful without mistaking fallback
-    data for a verified credential/model list.
+    Static/fallback IDs are intentionally excluded from the selectable list.
     """
     local = is_local_provider(provider)
 
@@ -116,6 +104,7 @@ def _enumerate_models_detailed(provider: str, api_key: str, base_url: str) -> En
             key_for_list,
             base_url,
             timeout_sec=LOCAL_LIST_TIMEOUT_SEC if local else LIST_TIMEOUT_SEC,
+            provider=provider,
         )
         if live["status"] == "valid":
             live["models"] = filter_chat_models(provider, live["models"])
@@ -131,9 +120,11 @@ def _enumerate_models_detailed(provider: str, api_key: str, base_url: str) -> En
             error=live["error"],
         )
 
+    # Do not put guessed/static models in the picker. A cloud model appears only
+    # after the selected provider/key (or server-owned key) returned it live.
     return EnumerationResult(
-        models=_dedupe_sorted(_fallback_models(provider)),
-        source="fallback",
+        models=[],
+        source="none",
         verified=False,
         status=live["status"],
         http_status=live["http_status"],
@@ -163,6 +154,25 @@ def resolve(payload: dict[str, Any]) -> ResolveResult:
     if provider in ("", "auto"):
         if candidate_key:
             provider = detect_provider_from_key(candidate_key)
+            if not provider:
+                return ResolveResult(
+                    ok=False,
+                    error="ambiguous_provider",
+                    provider="",
+                    default_model="",
+                    model="",
+                    models=[],
+                    lang=lang,
+                    prompt_editable_default=style_default,
+                    backend_supported=False,
+                    provider_protocol="",
+                    key_status="unverified",
+                    key_source=key_source,
+                    key_verified=False,
+                    models_source="none",
+                    models_verified=False,
+                    model_status="unverified",
+                )
         elif looks_local:
             provider = "ollama"
         else:
@@ -194,6 +204,28 @@ def resolve(payload: dict[str, Any]) -> ResolveResult:
     local = is_local_provider(provider)
     api_key = supplied_key or ("" if local else server_key)
     key_source = "user" if supplied_key else ("env" if api_key else "none")
+
+    mismatched_provider = provider_key_mismatch(provider, api_key) if api_key else ""
+    if mismatched_provider:
+        return ResolveResult(
+            ok=False,
+            error="provider_key_mismatch",
+            provider=provider,
+            default_model="",
+            model="",
+            models=[],
+            lang=lang,
+            prompt_editable_default=style_default,
+            backend_supported=True,
+            provider_protocol=str(PROVIDER_PROTOCOLS.get(provider) or ""),
+            key_status="mismatch",
+            key_source=key_source,
+            key_verified=False,
+            models_source="none",
+            models_verified=False,
+            models_error=f"key belongs to {mismatched_provider}",
+            model_status="unverified",
+        )
 
     protocol = str(PROVIDER_PROTOCOLS.get(provider) or "")
     backend_supported = bool(provider in PROVIDER_DEFAULTS and protocol)
@@ -252,6 +284,9 @@ def resolve(payload: dict[str, Any]) -> ResolveResult:
     elif list_status == "invalid_key":
         key_status = "invalid"
         key_verified = False
+    elif list_status == "forbidden":
+        key_status = "forbidden"
+        key_verified = False
     else:
         key_status = "unverified"
         key_verified = False
@@ -272,11 +307,14 @@ def resolve(payload: dict[str, Any]) -> ResolveResult:
     else:
         model_status = "unverified"
 
-    # Authentication failure is a real failure even though we still return the
-    # fallback list for UI continuity. This is the key change that prevents a
-    # 401/403 from looking like a successful resolution.
-    ok = key_status != "invalid"
-    error = "invalid_api_key" if key_status == "invalid" else ""
+    # Authentication/plan failure is a real failure and never unlocks an
+    # unverified fallback model list.
+    ok = key_status not in ("invalid", "forbidden")
+    error = (
+        "invalid_api_key" if key_status == "invalid"
+        else "provider_access_forbidden" if key_status == "forbidden"
+        else ""
+    )
 
     return ResolveResult(
         ok=ok,

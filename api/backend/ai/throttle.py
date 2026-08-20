@@ -1,30 +1,22 @@
 """Rate-limit handling for the Hugging Face router.
 
 
-Free HF inference is aggressively rate-limited.  This module wraps the
-OpenAI-compatible client with:
+Optional Hugging Face account pacing around the OpenAI-compatible client.
 
-- a concurrency semaphore (``HF_AI_MAX_CONCURRENCY``),
-- a minimum spacing between calls (``HF_AI_MIN_INTERVAL_SEC``),
-- exactly one provider attempt after acquiring that account's rate gate.
+By default TextPhantom imposes NO HF-specific concurrency or spacing limit; the
+provider's real 429/503 response is authoritative and the browser adapts to it.
+Operators who know an account's quota can opt in with ``HF_AI_MAX_CONCURRENCY``
+and/or ``HF_AI_MIN_INTERVAL_SEC``. There is still exactly one provider attempt.
 
 Non-HF providers bypass all of this.
 
 Per key, not per server
 -----------------------
-The limit being respected here belongs to a Hugging Face ACCOUNT, and every
-request carries its own key. A single process-wide semaphore therefore made
-users wait for each other's quota: measured 2026-08-07, four requests holding
-four different keys against a 0.5s provider call took 2.90s instead of 0.5s —
-``HF_AI_MAX_CONCURRENCY`` defaults to 1, so the whole server ran one HF call at
-a time no matter how many people were using it. With a real 5.2s translate call
-that is ~11 pages per minute for every HF user combined.
-
-So the semaphore and the spacing clock are now kept per key. Two users never
-block each other; users sharing one key still queue together, which is the
-behaviour the account limit actually asks for. The table is bounded and evicts
-the least recently used key — an unbounded map keyed by a secret is a memory
-leak that also keeps secrets alive.
+When optional pacing is configured it belongs to a Hugging Face ACCOUNT, and
+every request carries its own key. A single process-wide semaphore made users
+wait for each other's quota, so configured gates remain per key. Two users never
+block each other; users sharing one key share only the explicit account cap.
+The table is bounded and keyed by a hash rather than the secret itself.
 """
 
 from __future__ import annotations
@@ -50,7 +42,7 @@ class _KeyGate:
     __slots__ = ("semaphore", "interval_lock", "last_call_ts")
 
     def __init__(self, concurrency: int) -> None:
-        self.semaphore = Semaphore(max(1, concurrency))
+        self.semaphore = Semaphore(max(1, concurrency)) if concurrency > 0 else None
         self.interval_lock = Lock()
         self.last_call_ts = 0.0
 
@@ -122,7 +114,8 @@ def generate_with_backoff(
     caller can see the failure without hidden token use, delay, or model swap.
     """
     gate = _gate_for(api_key)
-    with gate.semaphore:
+
+    def _call() -> ChatResult:
         _wait_for_interval(gate)
         return openai_compat.generate(
             api_key,
@@ -135,3 +128,8 @@ def generate_with_backoff(
             image_mime=image_mime,
             response_schema=response_schema,
         )
+
+    if gate.semaphore is None:
+        return _call()
+    with gate.semaphore:
+        return _call()

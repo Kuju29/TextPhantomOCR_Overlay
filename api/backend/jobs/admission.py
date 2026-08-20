@@ -156,10 +156,9 @@ class AdmissionGate:
         self._adapt_events = {"grew": 0, "shrank": 0}
         self._max_waiters = max(0, int(max_waiters))
         self._max_wait_sec = max(0.0, float(max_wait_sec))
-        # Never more requests waiting than one full server plus the jitter
-        # allowance, no matter how many identities show up. A waiter costs a
-        # future and nothing else, but "costs almost nothing" is how a queue
-        # grows back.
+        # Waiting is a small fairness/jitter cushion, not a second server full
+        # of future work. `max_waiters` is therefore a literal GLOBAL queue cap.
+        # A waiter is cheap, but "cheap" queues are exactly how backlog grows.
         self._running = 0
         self._waiting = 0
         # identity -> how many of its jobs are running / queued right now.
@@ -177,7 +176,7 @@ class AdmissionGate:
 
     @property
     def _hard_waiting_cap(self) -> int:
-        return self._limit + self._max_waiters
+        return self._max_waiters
 
     def _active_identities(self) -> int:
         """Distinct identities with work running or queued. At least one."""
@@ -316,6 +315,15 @@ class AdmissionGate:
         if self._may_run(identity):
             self._take(identity)
             return
+
+        # Some lanes (notably public AI) deliberately keep ALL deferred work
+        # in the caller's browser. max_waiters=0 must therefore mean exactly
+        # zero, not "one per identity" through _waiting_share()'s floor.
+        if self._max_waiters <= 0:
+            raise AdmissionRejected(
+                f"server at capacity ({self._running}/{self._limit} running; no server wait queue)",
+                1,
+            )
 
         # Two ceilings, and they answer different questions.
         #

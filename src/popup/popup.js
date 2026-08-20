@@ -85,7 +85,7 @@ const state = {
   lastResolvedKey: "",
   desiredLang: "en",
   desiredSources: "translated",
-  desiredAiModel: "auto",
+  desiredAiModel: "",
   aiPromptByLang: {},
   seriesKey: "default",
   seriesMemory: { glossary: [], characters: [] },
@@ -255,9 +255,8 @@ async function refreshMeta(baseUrl) {
 }
 
 /**
- * Provider/model discovery is allowed even before a cloud key exists.
- * Auto used to be an accidental gate here; now it only means "detect/select
- * automatically" and never controls whether the model picker may refresh.
+ * Provider/model discovery requires an explicit provider in new UI builds.
+ * Legacy `auto` settings are migrated only when the key prefix is unambiguous.
  */
 function ensureAiAvailableOrFallback() {
   if (!canUseAiUi()) return true;
@@ -279,12 +278,18 @@ function renderAiVerificationMessages() {
   const data = state.lastAiResolve;
   if (!data) return;
 
-  const provider = String(data.provider || els.aiProvider?.value || "auto").trim();
-  const providerName = providerLabel(provider || "auto");
+  const provider = String(data.provider || els.aiProvider?.value || "").trim();
+  const providerName = providerLabel(provider || "provider");
   const protocol = protocolLabel(data.provider_protocol);
 
   // The API refused to talk to this endpoint with the credential it has. Name
   // the actual problem instead of letting it read as "server unreachable".
+  if (data.error === "provider_key_mismatch") {
+    setFieldMessage(els.aiProviderWrap, "error", `✕ The API key belongs to a different provider — select the company that issued this key`);
+    setFieldMessage(els.aiModelWrap, "error", "✕ Model list was not requested, so the key was not sent to the wrong provider");
+    return;
+  }
+
   if (data.error === "unsafe_base_url") {
     setFieldMessage(els.aiProviderWrap, "", "");
     setFieldMessage(
@@ -313,8 +318,11 @@ function renderAiVerificationMessages() {
         "error",
         `✕ ${providerName} rejected this API key${code ? ` (HTTP ${code})` : ""}`,
       );
+    } else if (data.key_status === "forbidden") {
+      const code = Number(data.models_http_status || 0);
+      setFieldMessage(els.aiKeyWrap, "error", `✕ ${providerName} accepted the request but denied account/model access${code ? ` (HTTP ${code})` : ""}`);
     } else if (data.key_status === "missing") {
-      setFieldMessage(els.aiKeyWrap, "warn", "⚠ No API key yet — showing known models only; live availability is not verified");
+      setFieldMessage(els.aiKeyWrap, "warn", "⚠ Enter an API key to load models available to this account");
     } else if (data.key_status === "unverified") {
       setFieldMessage(els.aiKeyWrap, "warn", `⚠ Could not verify the key with ${providerName} right now`);
     }
@@ -326,8 +334,11 @@ function renderAiVerificationMessages() {
     modelType = "error";
     modelText = "✕ Backend transport is not implemented for this provider";
   } else if (data.key_status === "invalid") {
-    modelType = "warn";
-    modelText = `⚠ Showing known fallback models only — key was rejected • Backend: ${protocol}`;
+    modelType = "error";
+    modelText = `✕ No models loaded — API key was rejected • Backend: ${protocol}`;
+  } else if (data.key_status === "forbidden") {
+    modelType = "error";
+    modelText = `✕ No models loaded — account/plan access was denied • Backend: ${protocol}`;
   } else if (data.models_source === "live" && data.models_verified) {
     const count = Array.isArray(data.models) ? data.models.length : 0;
     modelText = `✓ ${count} live model${count === 1 ? "" : "s"} from ${providerName} • Backend: ${protocol}`;
@@ -338,15 +349,15 @@ function renderAiVerificationMessages() {
   } else {
     modelType = "warn";
     if (data.key_status === "missing") {
-      modelText = `⚠ Known models (not verified) — add a key to load the live ${providerName} list • Backend: ${protocol}`;
+      modelText = `⚠ No models shown until a live ${providerName} list is verified • Backend: ${protocol}`;
     } else {
-      modelText = `⚠ Live model list unavailable — showing known fallback models • Backend: ${protocol}`;
+      modelText = `⚠ Live model list unavailable — keeping the saved model internally but not offering unverified choices • Backend: ${protocol}`;
     }
   }
 
   const probe = state.lastAiProbe;
-  const currentModel = (els.aiModel?.value || "auto").trim() || "auto";
-  const concreteModel = currentModel === "auto" ? String(data.model || "") : currentModel;
+  const currentModel = (els.aiModel?.value || "").trim();
+  const concreteModel = currentModel;
   const probeMatches = Boolean(
     probe &&
       String(probe.provider || "") === provider &&
@@ -367,6 +378,12 @@ function renderAiVerificationMessages() {
       if (els.aiKeyWrap?.style.display !== "none") {
         setFieldMessage(els.aiKeyWrap, "error", `✕ ${providerName} rejected this API key during the real model test`);
       }
+    } else if (probe.status === "provider_key_mismatch") {
+      modelType = "error";
+      modelText += " • ✕ Provider/key mismatch; request was blocked before contacting the provider";
+    } else if (probe.status === "model_access_denied") {
+      modelType = "error";
+      modelText += " • ✕ API key is valid, but this account/plan cannot use the selected model";
     } else if (probe.status === "model_unavailable") {
       modelType = "error";
       modelText += " • ✕ Real test says this model is unavailable";
@@ -396,11 +413,10 @@ async function probeSelectedModel() {
   if (!base || !resolved?.backend_supported) return;
   if (!["valid", "unverified", "not_required"].includes(String(resolved.key_status || ""))) return;
 
-  const selectedModel = (els.aiModel.value || "auto").trim() || "auto";
-  const concreteModel = selectedModel === "auto" ? String(resolved.model || "").trim() : selectedModel;
-  if (!concreteModel || concreteModel === "auto") return;
+  const concreteModel = (els.aiModel.value || "").trim();
+  if (!concreteModel) return;
 
-  const provider = String(resolved.provider || els.aiProvider?.value || "auto").trim();
+  const provider = String(resolved.provider || els.aiProvider?.value || "").trim();
   const aiKey = (els.aiKey.value || "").trim();
   const selectedBaseUrl = (els.aiBaseUrl?.value || "").trim();
   const seq = ++state.aiProbeSeq;
@@ -430,7 +446,7 @@ async function refreshAiMeta({ probeAfter = false } = {}) {
   const base = normalizeUrl(els.apiUrl.value);
   if (!base) return;
   if ((els.sources.value || "").trim() !== "ai") {
-    setModelOptions([], { keepValue: "auto" });
+    setModelOptions([], { placeholder: "Select model…" });
     state.lastAiResolve = null;
     state.lastAiProbe = null;
     return;
@@ -440,8 +456,16 @@ async function refreshAiMeta({ probeAfter = false } = {}) {
   const lang = els.lang.value || "en";
   const aiKey = (els.aiKey.value || "").trim();
   const currentModel = (els.aiModel.value || "").trim() || state.desiredAiModel || "auto";
-  const selectedProvider = (els.aiProvider?.value || "auto").trim();
+  const selectedProvider = (els.aiProvider?.value || "").trim();
   const selectedBaseUrl = (els.aiBaseUrl?.value || "").trim();
+
+  if (!selectedProvider) {
+    setModelOptions([], { placeholder: "Select a provider first" });
+    state.lastAiResolve = null;
+    state.lastAiProbe = null;
+    setFieldMessage(els.aiProviderWrap, "warn", "⚠ Select the company that issued this API key");
+    return;
+  }
 
   state.lastAiProbe = null;
   setFieldMessage(els.aiModelWrap, "info", "⏳ Loading models for this provider…");
@@ -455,37 +479,31 @@ async function refreshAiMeta({ probeAfter = false } = {}) {
     if (seq !== state.aiMetaSeq) return;
     state.lastAiResolve = data || null;
 
-    // Even an authentication failure can carry a clearly-labelled fallback
-    // list. Render it, but never call it verified.
-    const models = Array.isArray(data?.models) ? data.models : [];
+    // Only a live, verified provider list becomes selectable. Static fallbacks
+    // are intentionally excluded from /ai/resolve in this build.
+    const models = data?.models_verified && Array.isArray(data?.models) ? data.models : [];
     let preferred =
       (state.modelDirty ? (els.aiModel.value || "").trim() : (state.desiredAiModel || "").trim()) ||
-      currentModel ||
-      "auto";
-    let userPinned = Boolean(preferred && preferred !== "auto");
+      currentModel;
 
     const requestedModel = String(data?.requested_model || "").trim();
     const remapped = Boolean(data?.model_remapped) && requestedModel && requestedModel === preferred && data?.model;
     if (remapped) {
       preferred = String(data.model).trim();
-      userPinned = true;
-      setEmojiStatus("ok", `Model ${requestedModel} was retired → using ${preferred}`);
+      setEmojiStatus("ok", `Model ${requestedModel} was retired/unavailable → using ${preferred}`);
     }
-    setModelOptions(models, { keepValue: preferred, strict: !userPinned });
+    setModelOptions(models, {
+      keepValue: preferred || String(data?.model || "").trim(),
+      placeholder: data?.key_status === "missing" ? "Enter API key to load models" : "No verified models available",
+    });
 
-    const optionValues = [...els.aiModel.options].map((o) => o.value);
-    let nextModel = (els.aiModel.value || "").trim() || "auto";
-    if (!optionValues.includes(nextModel) || nextModel === "") {
-      const suggested = String(data?.model || "").trim();
-      nextModel = suggested && optionValues.includes(suggested) ? suggested : "auto";
-    }
-    if ((els.aiModel.value || "").trim() !== nextModel) els.aiModel.value = nextModel;
+    const nextModel = (els.aiModel.value || "").trim();
 
     const provider = String(data?.provider || "").trim();
     if (provider) state.lastResolvedProvider = provider;
     state.lastResolvedKey = aiKey;
 
-    if (nextModel !== currentModel) {
+    if (nextModel && nextModel !== currentModel) {
       state.desiredAiModel = nextModel;
       await setStorage({ aiKey, aiModel: nextModel });
     } else {
@@ -668,6 +686,9 @@ const PROVIDER_LABELS = {
   deepseek: "DeepSeek",
   together: "Together",
   featherless: "Featherless",
+  ollama: "Ollama", lmstudio: "LM Studio", localai: "LocalAI", jan: "Jan",
+  textgen: "text-generation-webui", koboldcpp: "KoboldCpp", vllm: "vLLM",
+  llamafile: "llamafile", gpt4all: "GPT4All",
 };
 
 const providerLabel = (id) => PROVIDER_LABELS[id] || id;
@@ -696,21 +717,17 @@ function validateAiKey() {
     setFieldMessage(els.aiKeyWrap, "error", "The key contains whitespace — please double-check it");
     return;
   }
-  const provider = (els.aiProvider?.value || "auto").trim().toLowerCase();
+  const provider = (els.aiProvider?.value || "").trim().toLowerCase();
   const known = KNOWN_KEY_PREFIXES.some((p) => key.startsWith(p));
-  if (provider === "auto" && !known) {
-    setFieldMessage(
-      els.aiKeyWrap,
-      "warn",
-      "⚠ Key format looks unusual (usually starts with hf_/sk-/AIza/gsk_) — ignore if you use a custom gateway",
-    );
+  if (!provider) {
+    setFieldMessage(els.aiKeyWrap, "warn", "⚠ Select the provider that issued this key");
     return;
   }
   // A key whose prefix names a DIFFERENT provider is not a style question: the
   // request would be sent to the selected provider with a credential it cannot
   // accept, and the only symptom would be a 401 per image mid-batch.
   const keyProvider = providerFromKey(key);
-  if (provider !== "auto" && keyProvider && keyProvider !== provider) {
+  if (keyProvider && keyProvider !== provider) {
     setFieldMessage(
       els.aiKeyWrap,
       "error",
@@ -720,7 +737,7 @@ function validateAiKey() {
     return;
   }
   // The reverse case: an sk- key with a provider that does not use one.
-  if (provider !== "auto" && !keyProvider && key.startsWith("sk-") && !SK_STYLE_PROVIDERS.has(provider)) {
+  if (!keyProvider && key.startsWith("sk-") && !SK_STYLE_PROVIDERS.has(provider)) {
     setFieldMessage(
       els.aiKeyWrap,
       "error",
@@ -959,15 +976,21 @@ async function loadSettings() {
   const promptKey = makePromptKey(state.desiredLang, state.desiredAiModel);
   els.aiKey.value = String(stored.aiKey || "");
   // Restore AI provider + local endpoint + translation memory.
-  if (els.aiProvider) els.aiProvider.value = String(stored.aiProvider || "auto");
+  if (els.aiProvider) {
+    const storedProviderRaw = String(stored.aiProvider || "").trim().toLowerCase();
+    let migratedProvider = storedProviderRaw && storedProviderRaw !== "auto" ? storedProviderRaw : "";
+    if (!migratedProvider) migratedProvider = providerFromKey(String(stored.aiKey || "").trim());
+    els.aiProvider.value = migratedProvider;
+    if (migratedProvider !== storedProviderRaw) void setStorage({ aiProvider: migratedProvider });
+  }
   if (els.aiBaseUrl) {
-    const storedProvider = String(els.aiProvider?.value || "auto");
+    const storedProvider = String(els.aiProvider?.value || "");
     const storedBaseUrl = String(stored.aiBaseUrl || "");
     // Drop a local default that an earlier session left behind on a cloud
     // provider: it is invisible here (the endpoint row is local-only) yet it
     // is still sent to /ai/resolve, which then refuses the request.
     const staleLocalDefault =
-      storedProvider !== "auto" &&
+      Boolean(storedProvider) &&
       !defaultEndpointFor(storedProvider) &&
       Object.values(LOCAL_ENDPOINTS).includes(storedBaseUrl.trim());
     els.aiBaseUrl.value = staleLocalDefault ? "" : storedBaseUrl;
@@ -1015,8 +1038,7 @@ async function loadSettings() {
       ? stored.rateProfile
       : (Number(stored.rateRpm) > 0 || Number(stored.rateBurst) > 0 ? "custom" : "auto");
   }
-  // 0 means "use the server's policy for this provider" — show it as an empty
-  // box with the "Auto" placeholder rather than a literal 0 the user must clear.
+  // 0 means provider-managed (no TextPhantom RPM cap) — show it as an empty box.
   if (els.rateRpm) els.rateRpm.value = Number(stored.rateRpm) > 0 ? String(stored.rateRpm) : "";
   if (els.rateBurst) {
     els.rateBurst.value = Number(stored.rateBurst) > 0 ? String(stored.rateBurst) : "";
@@ -1024,10 +1046,7 @@ async function loadSettings() {
   updateRatePresetHint();
   // Keep the stored model selectable before the model list is fetched, so a
   // pinned model isn't briefly shown as "auto" on popup open.
-  setModelOptions([], {
-    keepValue: state.desiredAiModel,
-    strict: !(state.desiredAiModel && state.desiredAiModel !== "auto"),
-  });
+  setModelOptions([], { placeholder: "Loading verified models…" });
   // Direct lookup by language, no fallback: shown value == stored value, or empty.
   const prompt = Object.prototype.hasOwnProperty.call(state.aiPromptByLang, promptKey)
     ? String(state.aiPromptByLang[promptKey] || "")
@@ -1232,7 +1251,7 @@ els.aiKey.addEventListener("blur", () => {
 });
 
 els.aiProvider?.addEventListener("change", async () => {
-  const provider = (els.aiProvider.value || "auto").trim();
+  const provider = (els.aiProvider.value || "").trim();
   state.lastAiResolve = null;
   state.lastAiProbe = null;
   // Pre-fill the local endpoint when a local provider is picked and the field
@@ -1243,7 +1262,7 @@ els.aiProvider?.addEventListener("change", async () => {
     const isAnyDefault = Object.values(LOCAL_ENDPOINTS).includes(cur);
     if (def) {
       if (!cur || isAnyDefault) els.aiBaseUrl.value = def;
-    } else if (isAnyDefault && provider !== "auto") {
+    } else if (isAnyDefault && provider) {
       // Switching to a CLOUD provider: a local default left in the (now
       // hidden) endpoint field is still sent to /ai/resolve, where it reads as
       // "send this provider's key to localhost" and the request is refused.
@@ -1336,26 +1355,21 @@ els.rateProfile?.addEventListener("change", async () => {
   toggleUi();
 });
 
-/** The server-side rate policy for the currently selected provider. */
+/** Optional manual pacing reference for the currently selected provider. */
 function ratePresetForProvider() {
-  const provider = String(els.aiProvider?.value || "auto").trim().toLowerCase();
+  const provider = String(els.aiProvider?.value || "").trim().toLowerCase();
   return RATE_PRESETS[provider] || null;
 }
 
-/**
- * Show what the server would use if the boxes are left empty, so a user has a
- * concrete reference instead of guessing. Also warns when their own numbers are
- * far above that reference — the usual way people "tune" this and then wonder
- * why every page fails with 429.
- */
+/** Show an optional reference. Auto/empty never applies this number. */
 function updateRatePresetHint() {
   const el = els.ratePresetHint;
   if (!el) return;
   const preset = ratePresetForProvider();
   const p = preset || RATE_PRESET_DEFAULT;
   const label = preset
-    ? `Server default for this provider: ${p.rpm}/min, burst ${p.burst}`
-    : `Server default (unlisted provider): ${p.rpm}/min, burst ${p.burst}`;
+    ? `Manual reference for this provider: ${p.rpm}/min, burst ${p.burst}`
+    : `Manual reference for an unlisted provider: ${p.rpm}/min, burst ${p.burst}`;
   const note = preset?.note ? ` — ${preset.note}` : "";
 
   const rpm = Number(els.rateRpm?.value || 0);
@@ -1370,8 +1384,8 @@ function updateRatePresetHint() {
 /**
  * Persist one of the rate-limit number boxes.
  *
- * An empty box or an unparseable one means "no override" and is stored as 0 —
- * the server then applies its own per-provider policy. A number outside the
+ * An empty box or an unparseable one means "no manual cap" and is stored as 0.
+ * A number outside the
  * allowed range is CLAMPED and written back into the box, so the user can see
  * what was actually saved rather than believing a typo took effect.
  * @param {HTMLInputElement|null} el

@@ -5,6 +5,7 @@ const {
   acquire,
   releaseSuccess,
   releaseRejected,
+  releaseDeferred,
   releaseFailed,
   setLaneCeiling,
   setLaneCapacityHint,
@@ -57,12 +58,37 @@ reset();
     releaseSuccess(key, 7000);
   }
   const lane = describe(key);
-  assert.ok(before >= 4, `AI lane should start at 4 or more, got ${before}`);
+  assert.ok(before >= 8, `AI lane should start at 8 or more, got ${before}`);
   assert.ok(
-    lane.window > 4,
+    lane.window > 8,
     `AI window must widen on clean round trips (stuck at ${lane.window})`,
   );
   assert.ok(lane.window <= lane.maxWindow, "window must respect its ceiling");
+}
+
+// --- provider-managed startup uses real executable capacity immediately ----
+{
+  const key = "ai:gemini:m:fast-start";
+  setLaneCapacityHint(key, 24, 0);
+  assert.equal(Math.floor(describe(key).window), 24,
+    "fresh provider-managed AI must start at the server's real active capacity");
+  for (let i = 0; i < 8; i++) {
+    await acquire(key);
+    releaseSuccess(key, 9000);
+  }
+  assert.equal(Math.floor(describe(key).window), 24,
+    "clean round trips must keep the lane at real capacity");
+  await acquire(key);
+  releaseRejected(key, 0);
+  assert.equal(describe(key).slowStart, false,
+    "one provider 429/503 must permanently switch this lane to additive recovery");
+  const afterReject = describe(key).window;
+  for (let i = 0; i < 4; i++) {
+    await acquire(key);
+    releaseSuccess(key, 9000);
+  }
+  assert.ok(describe(key).window < afterReject + 1,
+    "recovery after backpressure must be additive, not a second fast-start burst");
 }
 
 // --- backpressure narrows it ----------------------------------------------
@@ -84,8 +110,8 @@ reset();
 reset();
 {
   const key = "ai:gemini:m:cancel";
-  const held = await Promise.all(Array.from({ length: 4 }, () => acquire(key)));
-  assert.equal(held.length, 4);
+  const held = await Promise.all(Array.from({ length: 8 }, () => acquire(key)));
+  assert.equal(held.length, 8);
   const ctrl = new AbortController();
   const waiting = acquire(key, ctrl.signal);
   await Promise.resolve();
@@ -93,8 +119,8 @@ reset();
   ctrl.abort();
   await assert.rejects(waiting, (error) => error?.name === "AbortError");
   assert.equal(describe(key).queued, 0);
-  assert.equal(describe(key).running, 4);
-  for (let i = 0; i < 4; i++) releaseSuccess(key, 8000);
+  assert.equal(describe(key).running, 8);
+  for (let i = 0; i < 8; i++) releaseSuccess(key, 8000);
   assert.equal(describe(key).running, 0);
 }
 
@@ -108,6 +134,21 @@ reset();
   await acquire(key);
   releaseFailed(key);
   assert.equal(describe(key).window, before, "a plain failure must not move the window");
+}
+
+// --- TextPhantom server capacity never teaches the provider lane to slow ----
+reset();
+{
+  const key = "ai:gemini:m:server-deferred";
+  setLaneCapacityHint(key, 24, 0);
+  await acquire(key);
+  const before = describe(key).window;
+  releaseDeferred(key, 1000);
+  const after = describe(key);
+  assert.equal(after.window, before, "server_busy must not narrow provider concurrency");
+  assert.equal(after.backpressured, false, "server_busy must not arm provider backoff");
+  assert.ok(after.pausedMs > 0, "server_busy should pause this browser lane briefly to avoid a 503 storm");
+  assert.equal(after.deferred, 1, "server deferrals are tracked separately");
 }
 
 // --- server RPM is telemetry, not a duplicate client throttle --------------
@@ -126,14 +167,14 @@ reset();
 {
   const key = "ai:gemini:m:burst";
   const pending = Array.from({ length: 24 }, () => acquire(key));
-  await Promise.resolve();
-  assert.equal(describe(key).running, 4, "first provider burst must admit four pages");
-  assert.equal(describe(key).queued, 20);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(describe(key).running, 8, "first provider burst must admit eight pages");
+  assert.equal(describe(key).queued, 16);
   setLaneCeiling(key, 12, 8000);
-  assert.ok(describe(key).effectiveMax >= 4, "server RPM must not collapse the burst");
+  assert.ok(describe(key).effectiveMax >= 8, "server RPM must not collapse the burst");
   for (let i = 0; i < 24; i++) releaseSuccess(key, i === 4 ? 23000 : 8000);
   await Promise.all(pending);
-  assert.ok(describe(key).window >= 4, "a slow outlier without 429/503 must not narrow the lane");
+  assert.ok(describe(key).window >= 8, "a slow outlier without provider backpressure must not narrow the lane");
 }
 
 // --- a slot ceiling clamps the effective maximum ---------------------------
@@ -146,26 +187,29 @@ reset();
   assert.equal(describe(key).ceiling, 0, "0 clears the ceiling");
 }
 
-// --- server AI capacity seeds a work-conserving bounded startup -------------
+// --- server AI capacity is a REAL ceiling, not an instruction to flood it ---
 reset();
 {
   const key = "ai:gemini:m:capacity";
-  assert.equal(setLaneCapacityHint(key, 24, 0), 24);
-  const jobs = Array.from({ length: 50 }, () => acquire(key));
-  await Promise.resolve();
-  assert.equal(describe(key).running, 24, "advertised capacity should be usable immediately");
-  assert.equal(describe(key).queued, 26);
-  for (let i = 0; i < 24; i++) releaseSuccess(key, 8000);
-  await Promise.resolve();
-  assert.equal(describe(key).queued, 2, "at least p90 should start within one provider wave");
-  for (let i = 0; i < 26; i++) releaseSuccess(key, 8000);
+  assert.equal(setLaneCapacityHint(key, 24, 0), 24,
+    "provider-managed mode should use executable server capacity immediately");
+  const jobs = Array.from({ length: 16 }, () => acquire(key));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(describe(key).running, 16, "ready pages should not wait below real server capacity");
+  assert.equal(describe(key).queued, 0);
+  for (let i = 0; i < 16; i++) releaseSuccess(key, 8000);
   await Promise.all(jobs);
   assert.equal(describe(key).running, 0);
+  assert.equal(Math.floor(describe(key).window), 24, "clean replies keep the full executable capacity");
 
   setLaneCapacityHint(key, 8, 0);
   assert.equal(describe(key).effectiveMax, 8, "a lower server hint clamps immediately");
-  setLaneCapacityHint(key, 16, 4);
-  assert.equal(describe(key).capacityTarget, 8, "explicit burst bounds startup to two bursts");
+  reset();
+  const pinned = "ai:gemini:m:pinned-burst";
+  setLaneCapacityHint(pinned, 16, 4);
+  assert.equal(describe(pinned).capacityTarget, 4, "an explicit user burst is a real concurrency ceiling");
+  assert.equal(describe(pinned).effectiveMax, 4);
+  assert.equal(Math.floor(describe(pinned).window), 4);
 }
 
 // --- repeated hints cannot erase explicit backpressure ----------------------
@@ -187,7 +231,7 @@ reset();
     previous = current;
   }
   assert.equal(describe(key).backpressured, false);
-  assert.ok(describe(key).window < 13, "clean streak must not jump directly from 12 to 24");
+  assert.ok(describe(key).window < 13, "clean recovery must not jump directly back to server capacity");
   for (let i = 0; i < 400 && describe(key).window < 23.9; i++) {
     await acquire(key);
     const before = describe(key).window;
@@ -219,4 +263,4 @@ reset();
 }
 
 reset();
-console.log("Scheduler test passed: AIMD widens, backpressure narrows, ceilings and unlimited hold.");
+console.log("Scheduler test passed: fast provider-driven AI widens, provider backpressure narrows, server deferral does not, and user ceilings hold.");

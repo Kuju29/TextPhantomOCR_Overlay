@@ -512,12 +512,16 @@ async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict:
             (
                 blocks, stamped, initial_stamped,
                 initial_vertical_stamped, recovered, groups, retry_meta,
-            ) = await asyncio.to_thread(_run)
+            ) = await asyncio.get_running_loop().run_in_executor(
+                request.app.state.cpu_executor, _run
+            )
     except AdmissionRejected as exc:
         event("v1.groups.busy", {"identity": identity}, ok=False)
         raise HTTPException(
             status_code=503,
-            detail=str(exc),
+            detail={"code": "server_busy", "stage": "onnx",
+                    "message": str(exc), "retryable": True,
+                    "retryAfterMs": int(exc.retry_after_sec * 1000)},
             headers={"Retry-After": str(exc.retry_after_sec)},
         ) from exc
 

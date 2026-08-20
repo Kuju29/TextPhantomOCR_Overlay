@@ -137,34 +137,113 @@
     return null;
   }
 
-  // Draws a red outline and a warning badge on an image that failed to translate.
+  const imageErrorBadges = new WeakMap();
+
+  // Converts technical terminal errors into short text a normal reader can
+  // report from a screenshot. The full diagnostic remains in the title.
+  function shortImageError(msg) {
+    const raw = String(msg || "Unknown error").trim();
+    const lower = raw.toLowerCase();
+    if (/onnx grouped nothing|grouping covered 0 of .*vertical|text grouping/.test(lower)) {
+      return "ONNX: text grouping failed";
+    }
+    if (/no text detected|no[_ -]?text|no translatable text|no[_ -]?translatable/.test(lower)) {
+      return "No text found";
+    }
+    if (/ai api_key is required|no ai key|missing_api_key|api key is required/.test(lower)) {
+      return "No AI key";
+    }
+    if (/provider\/key mismatch|provider.*key.*mismatch/.test(lower)) {
+      return "AI provider/key mismatch";
+    }
+    if (/invalid.*api.*key|unauthorized|http 401/.test(lower)) {
+      return "AI key invalid";
+    }
+    if (/model.*unavailable|model.*not found|http 404/.test(lower)) {
+      return "AI model unavailable";
+    }
+    if (/rate.?limit|provider_rate_limited|http 429/.test(lower)) {
+      return "AI provider rate limit";
+    }
+    if (/lens session|google lens|lens.*failed/.test(lower)) {
+      return "Lens OCR failed";
+    }
+    if (/incomplete|missing translation|missing_translation_units/.test(lower)) {
+      return "AI translation incomplete";
+    }
+    if (/overlay insert|dom replace|could not erase|renderer/.test(lower)) {
+      return "Could not place translation";
+    }
+    if (/timeout|timed out/.test(lower)) return "Request timed out";
+    if (/server busy|server_busy/.test(lower)) return "Server busy";
+    const compact = raw.replace(/\s+/g, " ");
+    return compact.length > 72 ? `${compact.slice(0, 69)}…` : compact;
+  }
+
+  // Removes a terminal marker when a later retry succeeds.
+  function clearImageError(img) {
+    if (!img) return;
+    const badge = imageErrorBadges.get(img);
+    if (badge) {
+      try { badge.remove(); } catch {}
+      imageErrorBadges.delete(img);
+    }
+    if (img.dataset?.lensError) delete img.dataset.lensError;
+    if (img.style) {
+      img.style.outline = String(img.dataset?.tpLensPrevOutline || "");
+    }
+    if (img.dataset?.tpLensPrevOutline !== undefined) delete img.dataset.tpLensPrevOutline;
+  }
+
+  // Draws a red outline and a readable warning badge on an image that failed
+  // to translate. Users should not need to inspect a title/HTML attribute to
+  // know why one page failed.
   function markImageError(original, msg) {
     if (!shouldShowReplaceError(original)) return;
 
     const img = findTargetImage(original);
-    if (!img || img.dataset.lensError) return;
+    if (!img) return;
 
     const cur = img.currentSrc || img.src || "";
     if (img.dataset.tpBlobUrl || cur.startsWith("blob:") || cur.startsWith("data:")) return;
 
+    const full = String(msg || "Unknown error");
+    const short = shortImageError(full);
+    let badge = imageErrorBadges.get(img);
+    if (!badge || !badge.isConnected) {
+      badge = document.createElement("div");
+      imageErrorBadges.set(img, badge);
+      document.body.appendChild(badge);
+    }
+    if (!img.dataset.lensError) img.dataset.tpLensPrevOutline = img.style.outline || "";
     img.style.outline = "3px solid red";
-
-    const badge = document.createElement("div");
-    badge.textContent = "⚠️";
-    badge.title = msg || "OCR error";
+    badge.textContent = `⚠️ ${short}`;
+    badge.title = full;
     const r = img.getBoundingClientRect();
     Object.assign(badge.style, {
       position: "absolute",
       left: `${r.left + window.scrollX + 4}px`,
       top: `${r.top + window.scrollY + 4}px`,
-      background: "rgba(255,255,255,0.9)",
-      padding: "2px 4px",
-      borderRadius: "4px",
+      maxWidth: "280px",
+      whiteSpace: "normal",
+      overflowWrap: "anywhere",
+      background: "rgba(255,255,255,0.94)",
+      color: "rgba(90,0,0,0.98)",
+      border: "1px solid rgba(180,0,0,0.55)",
+      padding: "4px 6px",
+      borderRadius: "5px",
+      fontFamily: "system-ui,sans-serif",
+      fontSize: "12px",
+      lineHeight: "1.25",
       zIndex: 9999,
+      boxShadow: "0 1px 4px rgba(0,0,0,0.25)",
     });
-    document.body.appendChild(badge);
     img.dataset.lensError = "1";
-    TP.log.info("markImageError", { original: TP.truncate(original), message: msg });
+    TP.log.info("markImageError", {
+      original: TP.truncate(original),
+      message: full,
+      visibleMessage: short,
+    });
   }
 
   // Drops the per-URL image indexes so a client-side route change cannot resolve a stale element.
@@ -185,5 +264,7 @@
     setLastRightClick,
     findTargetImage,
     markImageError,
+    clearImageError,
+    shortImageError,
   });
 })();

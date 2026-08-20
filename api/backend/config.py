@@ -92,8 +92,15 @@ class Settings:
     # meters per (provider, model, key) and is the limit that actually belongs
     # to something real. CPU is still protected by `TP_CPU_CONCURRENCY`, which
     # every path goes through regardless of lane.
+    # Synchronous provider SDKs run in a dedicated executor. Keep the public
+    # admission limit at or below the real thread count so there is never a
+    # second, invisible queue inside ThreadPoolExecutor. Public AI defaults to
+    # zero server-side waiters; rejected work remains in the user's browser.
+    ai_thread_workers: int = field(
+        default_factory=lambda: max(1, _env_int("TP_AI_THREAD_WORKERS", 24))
+    )
     sync_ai_max_concurrency: int = field(
-        default_factory=lambda: max(0, _env_int("TP_SYNC_AI_MAX_CONCURRENCY", 48))
+        default_factory=lambda: max(0, _env_int("TP_SYNC_AI_MAX_CONCURRENCY", 0))
     )
     # A THIRD lane, for the detector-only calls (`/v1/groups`, `/v1/blocks`).
     #
@@ -118,6 +125,16 @@ class Settings:
     sync_max_wait_sec: float = field(
         default_factory=lambda: max(0.0, _env_float("TP_SYNC_MAX_WAIT_SEC", 10.0))
     )
+    # AI is different from Lens/ONNX: its caller is already a durable browser
+    # queue, so keeping future work inside the shared HF process only creates
+    # cross-user backlog. Default to immediate admission or server_busy; an
+    # operator may explicitly opt back into a tiny server-side waiter pool.
+    sync_ai_max_waiters: int = field(
+        default_factory=lambda: max(0, _env_int("TP_SYNC_AI_MAX_WAITERS", 0))
+    )
+    sync_ai_max_wait_sec: float = field(
+        default_factory=lambda: max(0.0, _env_float("TP_SYNC_AI_MAX_WAIT_SEC", 10.0))
+    )
 
     # Split lane concurrency -------------------------------------------------
     # SERVER_MAX_WORKERS is the total processing budget. Lens-direct jobs are
@@ -132,8 +149,11 @@ class Settings:
     ai_result_cache_max: int = field(default_factory=lambda: _env_int("TP_AI_RESULT_CACHE_MAX", 128))
 
     # Hugging Face throttling ------------------------------------------------
-    hf_max_concurrency: int = field(default_factory=lambda: max(1, _env_int("HF_AI_MAX_CONCURRENCY", 1)))
-    hf_min_interval_sec: float = field(default_factory=lambda: max(0.0, _env_float("HF_AI_MIN_INTERVAL_SEC", 0.8)))
+    # No TextPhantom-imposed HF account throttle by default. HF's real 429/503
+    # is authoritative and the browser learns from it. Operators/users that know
+    # a specific account quota can still pin these env vars explicitly.
+    hf_max_concurrency: int = field(default_factory=lambda: max(0, _env_int("HF_AI_MAX_CONCURRENCY", 0)))
+    hf_min_interval_sec: float = field(default_factory=lambda: max(0.0, _env_float("HF_AI_MIN_INTERVAL_SEC", 0.0)))
     hf_max_retries: int = field(default_factory=lambda: max(1, _env_int("HF_AI_MAX_RETRIES", 3)))
     hf_retry_base_sec: float = field(default_factory=lambda: max(0.2, _env_float("HF_AI_RETRY_BASE_SEC", 2.0)))
 
@@ -146,6 +166,10 @@ class Settings:
     # never waits unbounded: a request that cannot get a slot within
     # ``rate_max_wait_sec`` is skipped fast and, past ``rate_max_waiters`` queued
     # per bucket, new requests are rejected immediately so the queue cannot bloat.
+    # The server retains the rate-gate capability for callers that explicitly
+    # opt into manual RPM/burst pacing. The current extension sends
+    # rate.enabled=false for Auto/provider-managed mode, so these provider-policy
+    # defaults are not an implicit limit on text.ai anymore.
     rate_gate_enabled: bool = field(default_factory=lambda: _env_bool("TP_RATE_GATE", True))
     rate_max_wait_sec: float = field(default_factory=lambda: max(1.0, _env_float("TP_RATE_MAX_WAIT_SEC", 75.0)))
     rate_max_waiters_per_bucket: int = field(default_factory=lambda: max(1, _env_int("TP_RATE_MAX_WAITERS", 40)))

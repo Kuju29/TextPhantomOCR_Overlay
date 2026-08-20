@@ -121,36 +121,62 @@ export async function translateUnits(
         automaticContentRetry: false,
         automaticTransportRetry: false,
         httpAttempts: 1,
-        generationAttempts: 1,
+        generationAttempts: 0,
+        providerAttempts: 0,
         modelFallback: false,
         schemaFallback: false,
       });
       throw error;
     }
     if (!res.ok) {
-      const detail = String(await res.text()).slice(0, 500);
-      const invalidModelOutput = detail.includes("invalid_model_output");
+      const rawText = String(await res.text()).slice(0, 4000);
+      let parsed = null;
+      try { parsed = rawText ? JSON.parse(rawText) : null; } catch { parsed = null; }
+      const detailObject = parsed && typeof parsed === "object"
+        ? (parsed.detail && typeof parsed.detail === "object" ? parsed.detail : parsed)
+        : null;
+      const detailText = detailObject
+        ? String(detailObject.message || detailObject.error || detailObject.code || rawText).slice(0, 500)
+        : rawText.slice(0, 500);
+      const code = String(detailObject?.code || detailObject?.error || "");
+      const providerAttempts = Number(detailObject?.providerAttempts || 0);
+      const generationAttempts = Number(
+        detailObject?.generationAttempts ?? providerAttempts
+      );
+      const invalidModelOutput = code === "invalid_model_output" || rawText.includes("invalid_model_output");
+      const headerRetryAfter = Number(res.headers.get("retry-after"));
+      const bodyRetryAfterMs = Number(detailObject?.retryAfterMs || 0);
+      const retryAfterMs = bodyRetryAfterMs > 0
+        ? bodyRetryAfterMs
+        : (Number.isFinite(headerRetryAfter) && headerRetryAfter > 0 ? headerRetryAfter * 1000 : 0);
       trace?.("text-only AI failed", {
         stage: "http",
         failureKind: invalidModelOutput ? "invalid_model_output" :
+          (code === "rate_gate_busy" || code === "local_rate_gate_busy" ? "rate_gate_busy" :
+          (code === "server_busy" ? "server_busy" :
+          (code === "provider_rate_limited" ? "provider_rate_limited" :
           (res.status === 429 ? "rate_limited" :
-          (res.status >= 500 ? "server_or_provider" : "request_rejected")),
+          (res.status >= 500 ? "server_or_provider" : "request_rejected"))))),
         status: res.status,
-        detail,
+        code,
+        detail: detailText,
+        retryAfterMs,
+        providerAttempts,
         ms: Math.round(performance.now() - started),
         automaticContentRetry: false,
         automaticTransportRetry: false,
         httpAttempts: 1,
         providerHttpStatuses: [res.status],
-        generationAttempts: 1,
+        generationAttempts,
         modelFallback: false,
         schemaFallback: false,
       });
-      const error = new Error(`Text-only AI failed: HTTP ${res.status}${detail ? ` - ${detail}` : ""}`);
+      const error = new Error(`Text-only AI failed: HTTP ${res.status}${detailText ? ` - ${detailText}` : ""}`);
       error.status = res.status;
-      // Retry-After is backpressure, not a failure detail: the lane narrows and pauses on it.
-      const retryAfter = Number(res.headers.get("retry-after"));
-      error.retryAfterMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 0;
+      error.code = code;
+      error.retryAfterMs = retryAfterMs;
+      error.providerAttempts = providerAttempts;
+      error.generationAttempts = generationAttempts;
       throw error;
     }
     const result = await res.json();

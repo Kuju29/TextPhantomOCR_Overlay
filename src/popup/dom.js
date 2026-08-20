@@ -117,36 +117,37 @@ export function orderLanguages(list, pinnedCodes = []) {
 }
 
 /**
- * Populate the AI-model `<select>` (always offers "auto" first).
+ * Populate the AI-model `<select>` from a VERIFIED live list.
+ * No `auto` or static fallback is offered: if the provider/key cannot enumerate
+ * a model, the user sees a disabled placeholder instead of a model that may fail.
  * @param {string[]} models
- * @param {{keepValue?:string, strict?:boolean}} opts
- *   strict=false keeps an unknown previous value as a selectable option.
+ * @param {{keepValue?:string, placeholder?:string}} opts
  */
-export function setModelOptions(models, { keepValue = "", strict = true } = {}) {
-  const prev = (keepValue || els.aiModel.value || "auto").trim() || "auto";
+export function setModelOptions(models, { keepValue = "", placeholder = "Select model…" } = {}) {
+  const prev = String(keepValue || els.aiModel.value || "").trim();
   els.aiModel.innerHTML = "";
 
-  const list = (Array.isArray(models) ? models : [])
-    .map((m) => String(m || ""))
-    .filter(Boolean)
-    .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }))
-    .map((m) => ({ id: m, name: m }));
+  const ids = [...new Set((Array.isArray(models) ? models : [])
+    .map((m) => String(m || "").trim())
+    .filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
 
-  const canKeep = prev && [...new Set(list.map((m) => m.id))].includes(prev);
-  // A user-pinned model missing from the enumerated list is kept as its own
-  // option — AND must stay selected. Selecting by `canKeep` alone reverted
-  // the <select> to "auto", which popup.js then persisted, silently wiping
-  // the user's model choice ("model always resets to auto" bug).
-  const pinned = !strict && prev && prev !== "auto" && !canKeep;
-  if (pinned) list.unshift({ id: prev, name: prev });
+  const ph = document.createElement("option");
+  ph.value = "";
+  ph.textContent = placeholder;
+  ph.disabled = true;
+  els.aiModel.appendChild(ph);
 
-  for (const it of [{ id: "auto", name: "auto" }, ...list]) {
+  for (const id of ids) {
     const opt = document.createElement("option");
-    opt.value = it.id;
-    opt.textContent = it.name;
+    opt.value = id;
+    opt.textContent = id;
     els.aiModel.appendChild(opt);
   }
-  els.aiModel.value = canKeep || pinned ? prev : "auto";
+
+  const next = ids.includes(prev) ? prev : (ids[0] || "");
+  els.aiModel.value = next;
+  els.aiModel.disabled = ids.length === 0;
 }
 
 /** Update the API-status emoji indicators (header + Custom API URL label). */
@@ -271,7 +272,7 @@ export function toggleUi({ hasEnvKey }) {
     }
   }
 
-  const provider = (els.aiProvider?.value || "auto").trim();
+  const provider = (els.aiProvider?.value || "").trim();
   const local = isLocalProvider(provider);
 
   // Local providers need an endpoint URL (no key); cloud providers need a key.

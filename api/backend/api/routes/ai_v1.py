@@ -245,6 +245,7 @@ async def ai_translate_v1(
     def trace_failure(stage: str, exc: BaseException, status: int, **details: Any) -> None:
         provider_status = re.search(r"\bHTTP\s+(\d{3})\b", str(exc), re.IGNORECASE)
         provider_attempts = int(details.pop("providerAttempts", 0) or 0)
+        generation_attempts = int(details.pop("generationAttempts", provider_attempts) or 0)
         trace.write(
             "api", "api/routes/ai_v1.py", "ai_translate_v1", "!!",
             {
@@ -256,7 +257,7 @@ async def ai_translate_v1(
                 "automaticContentRetry": False,
                 "automaticTransportRetry": False,
                 "providerAttempts": provider_attempts,
-                "generationAttempts": provider_attempts,
+                "generationAttempts": generation_attempts,
                 "providerHttpStatuses": (
                     [int(provider_status.group(1))] if provider_status else []
                 ),
@@ -292,6 +293,10 @@ async def ai_translate_v1(
         trace_failure("configuration", exc, 400, units=len(units))
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     resolved_provider = resolve_provider(config.provider, config.api_key)
+    if not resolved_provider and config.api_key:
+        exc = ValueError("AI provider must be selected explicitly for this API key")
+        trace_failure("configuration", exc, 400, units=len(units))
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     resolved_model = resolve_generation_model(resolved_provider, config.model)
     rate = _rate_options(payload)
     image_bytes = (len(config.image_b64) * 3) // 4 if config.image_b64 else 0
@@ -357,9 +362,9 @@ async def ai_translate_v1(
             )
             return replayed
 
-    # Pace the fast text-only route with the same provider/key policy as the
-    # legacy queue.  Admission limits concurrency; this gate limits sustained
-    # requests per minute, so both are required.
+    # Optional user-pinned RPM pacing. Auto/provider-managed requests arrive
+    # with rate.enabled=false and skip this gate entirely; the real provider
+    # response is then the source of truth for quota/backpressure.
     # A runtime on the caller's own machine has no quota and no other tenant to
     # be fair to. Verified server-side: the header alone is not enough.
     unlimited = wants_unlimited(request)
@@ -461,13 +466,15 @@ async def ai_translate_v1(
     admission_wait_ms = 0.0
     try:
         if unlimited:
-            result = await asyncio.to_thread(_run_ai)
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(request.app.state.ai_executor, _run_ai)
         else:
             async with request.app.state.ai_admission_gate.slot(identity):
                 admission_wait_ms = round(
                     (time.perf_counter() - admission_started) * 1000, 1
                 )
-                result = await asyncio.to_thread(_run_ai)
+                loop = asyncio.get_running_loop()
+                result = await loop.run_in_executor(request.app.state.ai_executor, _run_ai)
         # The provider accepted this call. A streak of these raises the sustained
         # rate for THIS key only, so a paid key stops being paced at the free rate.
         if rate["enabled"] and not unlimited:
@@ -483,7 +490,15 @@ async def ai_translate_v1(
         )
         raise HTTPException(
             status_code=503,
-            detail=str(exc),
+            detail={
+                "code": "server_busy",
+                "message": str(exc),
+                "retryAfterMs": int(exc.retry_after_sec * 1000),
+                "providerAttempts": 0,
+                "generationAttempts": 0,
+                "automaticContentRetry": False,
+                "automaticTransportRetry": False,
+            },
             headers={"Retry-After": str(exc.retry_after_sec)},
         ) from exc
     except SecurityError as exc:
@@ -539,14 +554,18 @@ async def ai_translate_v1(
         )
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # provider/network/output-contract failures
-        # The provider said no. Halve this key's sustained rate now rather than
-        # discovering the same limit again on the next page.
-        if rate["enabled"] and not unlimited and _ai_is_rate_limited(exc):
+        # A provider 429/503 is a rejected HTTP attempt, not a model generation.
+        # It is therefore safe for the extension to wait and re-submit the SAME
+        # idempotency key without violating the one-generation-per-image rule.
+        provider_limited = _ai_is_rate_limited(exc)
+        provider_retry_sec = _ai_retry_after_sec(exc) if provider_limited else 0.0
+        if rate["enabled"] and not unlimited and provider_limited:
             rate_gate.report_rate_limited(
                 resolved_provider, config.model, config.api_key,
-                retry_after_sec=_ai_retry_after_sec(exc),
+                retry_after_sec=provider_retry_sec,
             )
         kind = _ai_failure_kind(exc)
+        generation_attempts = 0 if provider_limited else 1
         trace_failure(
             "provider_or_output_contract", exc, 502,
             units=len(units), chars=sum(len(unit["text"]) for unit in units),
@@ -560,14 +579,24 @@ async def ai_translate_v1(
             resolved={"provider": resolved_provider, "model": resolved_model},
             outputContractRequested="one_shot_envelope_v3",
             providerAttempts=1,
+            generationAttempts=generation_attempts,
         )
-        # Provider clients deliberately omit response bodies from exceptions;
-        # the page receives only this stable reason and TP_TRACE keeps safe
-        # status/model/attempt metadata without translated content.
-        raise HTTPException(
-            status_code=502,
-            detail=f"AI translation failed ({kind}); inspect TP_TRACE for details",
-        ) from exc
+        detail = {
+            "code": "provider_rate_limited" if provider_limited else "provider_failed",
+            "message": f"AI translation failed ({kind}); inspect TP_TRACE for details",
+            "providerAttempts": 1,
+            "generationAttempts": generation_attempts,
+            "automaticContentRetry": False,
+            "automaticTransportRetry": False,
+            "modelFallback": False,
+            "schemaFallback": False,
+        }
+        headers = None
+        if provider_limited:
+            retry_sec = max(1.0, float(provider_retry_sec or 1.0))
+            detail["retryAfterMs"] = int(retry_sec * 1000)
+            headers = {"Retry-After": str(max(1, math.ceil(retry_sec)))}
+        raise HTTPException(status_code=502, detail=detail, headers=headers) from exc
 
     text_full = str(result.get("aiTextFull") or "")
     if cancellation.is_cancelled(payload):
@@ -672,7 +701,10 @@ async def ai_translate_v1(
             "rate": (
                 {"gated": False, "adaptive": False, "unlimited": True, "rpm": 0, "burst": 0}
                 if unlimited
-                else rate_gate.snapshot(resolved_provider, config.model, config.api_key)
+                else ({"gated": False, "adaptive": False, "pinned": False,
+                       "rpm": 0, "burst": 0, "waiting": 0}
+                      if not rate["enabled"]
+                      else rate_gate.snapshot(resolved_provider, config.model, config.api_key))
             ),
             "providerAttempts": 1,
             "generationAttempts": 1,

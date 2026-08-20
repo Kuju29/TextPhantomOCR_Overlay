@@ -173,12 +173,16 @@ async def detect_blocks(payload: dict[str, Any], request: Request) -> dict:
                     finally:
                         _CPU_GATE.release()
 
-            boxes = await asyncio.to_thread(_run)
+            boxes = await asyncio.get_running_loop().run_in_executor(
+                request.app.state.cpu_executor, _run
+            )
     except AdmissionRejected as exc:
         event("v1.blocks.busy", {"identity": identity}, ok=False)
         raise HTTPException(
             status_code=503,
-            detail=str(exc),
+            detail={"code": "server_busy", "stage": "onnx",
+                    "message": str(exc), "retryable": True,
+                    "retryAfterMs": int(exc.retry_after_sec * 1000)},
             headers={"Retry-After": str(exc.retry_after_sec)},
         ) from exc
 

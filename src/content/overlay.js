@@ -628,6 +628,7 @@
   // Clears the identity stamps that make a recycled <img> report the previous route's URL.
   function clearImageStamps() {
     for (const img of Array.from(document.images || [])) {
+      TP.clearImageError?.(img);
       delete img.dataset.tpOriginal;
       delete img.dataset.tpOriginalKey;
       delete img.dataset.tpBlobUrl;
@@ -726,8 +727,37 @@
     setTimeout(schedule, 50);
   }
 
+  // Reads a skip/status reason regardless of which engine produced it.
+  function resultStatusReason(result) {
+    return String(
+      result?.meta?.skipped_reason ||
+      result?.metadata?.skipped_reason ||
+      result?.Ai?.meta?.skipped_reason ||
+      result?.ai?.meta?.skipped_reason ||
+      result?.translated?.meta?.skipped_reason ||
+      result?.original?.meta?.skipped_reason ||
+      result?.Ai?.meta?.reason ||
+      result?.ai?.meta?.reason ||
+      ""
+    ).trim().toLowerCase();
+  }
+
+  function statusBadgeLabel(reason) {
+    if (/no[_ -]?translatable/.test(reason)) return "No translatable text";
+    if (/no[_ -]?text/.test(reason)) return "No text";
+    if (/rate.?limit/.test(reason)) return "AI rate limit";
+    if (/missing.*key|no[_ -]?ai[_ -]?key/.test(reason)) return "No AI key";
+    if (/model/.test(reason) && /unavailable|missing|not[_ -]?found/.test(reason)) {
+      return "AI model unavailable";
+    }
+    return reason ? reason.replace(/[_-]+/g, " ").slice(0, 72) : "AI output unavailable";
+  }
+
   // Applies a translation result to an image as an HTML overlay and clean background layer.
   async function applyHtmlOverlay(imgElement, result, source, isTextMode, original = "") {
+    // A successful result or an intentional skip replaces any terminal marker
+    // from an earlier retry/pass.
+    TP.clearImageError?.(imgElement);
     const aiHtml = result?.Ai?.aihtml || result?.ai?.aihtml || "";
     const translatedHtml = result?.translated?.translatedhtml || result?.translatedhtml || "";
     const originalHtml = result?.original?.originalhtml || result?.originalhtml || "";
@@ -774,20 +804,25 @@
         })();
     if (!ops) return;
 
+    const statusReason = resultStatusReason(result);
+    if (isTextMode && req === "ai" && statusReason) {
+      const rec = ops.upsert("badge");
+      updateCleanLayer(rec, imgElement, newImgSrc);
+      if (localBg) await applyLocalBackground(rec, imgElement, result);
+      rec.scope.textContent = "";
+      rec.scope.appendChild(createOverlayBadge(statusBadgeLabel(statusReason)));
+      nudgeOverlay(imgElement, ops.schedule);
+      return;
+    }
+
     if (isTextMode && req === "ai" && !aiHtml && !wantsLocalRender(result)) {
       const rec = ops.upsert("badge");
       updateCleanLayer(rec, imgElement, newImgSrc);
       if (localBg) await applyLocalBackground(rec, imgElement, result);
       rec.scope.textContent = "";
-      const aiMeta = result?.Ai?.meta || {};
-      const reason = String(aiMeta.skipped_reason || aiMeta.reason || "").trim();
-      const label =
-        reason === "no_text"
-          ? "No text"
-          : reason === "rate_limited"
-            ? "Rate limit"
-            : "No AI key";
-      rec.scope.appendChild(createOverlayBadge(label));
+      // No explicit skip reason means this is genuinely an absent AI layer,
+      // not proof that an API key is missing.
+      rec.scope.appendChild(createOverlayBadge("AI output unavailable"));
       nudgeOverlay(imgElement, ops.schedule);
       return;
     }

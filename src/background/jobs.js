@@ -77,6 +77,7 @@ import {
   acquire,
   releaseSuccess,
   releaseRejected,
+  releaseDeferred,
   releaseGated,
   releaseFailed,
   laneKeyFor,
@@ -95,6 +96,62 @@ const log = createLogger("SW.jobs");
 function isRateGateBusy(error) {
   const code = String(error?.code || "");
   return code === "rate_gate_busy" || code === "local_rate_gate_busy";
+}
+
+// Lens/ONNX admission failures are safe to retry because the rejected request
+// never entered the stage. Keep that backlog in the browser that owns the page
+// instead of turning another user's burst into a permanent image error.
+function isStageBackpressure(error) {
+  const status = Number(error?.status) || 0;
+  if (status !== 429 && status !== 503) return false;
+  if (error?.permanent === true) return false;
+  const code = String(error?.code || "");
+  return error?.retryable === true || code === "server_busy" ||
+    code === "lens_session_unavailable" || !code;
+}
+
+// Runs one extension-owned server stage in its own lane. A rejected admission
+// releases the slot, observes Retry-After, and re-acquires later; it never holds
+// a Lens slot while ONNX waits or vice versa.
+async function runStageInLane(key, work, { signal = null, stage = "", imageId = "", traceId = "" } = {}) {
+  let accumulatedQueueWaitMs = 0;
+  let attempt = 0;
+  while (true) {
+    attempt++;
+    const granted = await acquire(key, signal);
+    accumulatedQueueWaitMs += Number(granted?.waitMs) || 0;
+    const started = Date.now();
+    try {
+      const value = await work();
+      releaseSuccess(key, Date.now() - started);
+      return value;
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        releaseFailed(key);
+        throw error;
+      }
+      if (!isStageBackpressure(error)) {
+        releaseFailed(key);
+        throw error;
+      }
+      const retryAfterMs = Math.max(50, Number(error?.retryAfterMs) || 1000);
+      const code = String(error?.code || "");
+      if (code === "server_busy" || Number(error?.status) === 429) {
+        releaseRejected(key, retryAfterMs);
+      } else {
+        // Session refresh / other temporary service conditions are time waits,
+        // not evidence that client concurrency itself was too high.
+        releaseGated(key, retryAfterMs);
+      }
+      traceNote("background/jobs.js", "imageStage", {
+        stage, state: "requeued", imageId, lane: key, attempt,
+        queueWaitMs: Number(granted?.waitMs) || 0, accumulatedQueueWaitMs,
+        status: Number(error?.status) || 0, code, retryAfterMs,
+        error: error?.message || String(error),
+      }, traceId);
+      await waitForRetry(retryAfterMs, signal);
+    }
+  }
 }
 
 const MAX_FIRST_TRY_RETRIES = 2;
@@ -213,22 +270,26 @@ function markNoTranslatableText(result, reason) {
   result.meta = { ...(result.meta || {}), skipped_reason: reason };
 }
 
-// Returns whether an overlay-less Lens text result counts as a skipped image rather than an error.
-function isTextNoOverlaySkippable(mode, source, result) {
-  if (String(mode || "") !== "lens_text") return false;
-  const src = String(source || "").toLowerCase();
-  const reason = String(
+// Returns the explicit reason an engine gave for intentionally producing no
+// text layer. Keep this shared by result handling and the visible page badge so
+// "no text" can never silently fall through to the old "No AI key" label.
+function textSkipReason(result) {
+  return String(
     result?.meta?.skipped_reason ||
       result?.metadata?.skipped_reason ||
-      // The API-server engine reports its skip under the AI layer, not the top
-      // level. Missing this key turned a clean "nothing to translate" into
-      // "API returned no overlay data" on that engine only.
       result?.Ai?.meta?.skipped_reason ||
       result?.ai?.meta?.skipped_reason ||
       result?.translated?.meta?.skipped_reason ||
       result?.original?.meta?.skipped_reason ||
       ""
-  ).toLowerCase();
+  ).trim().toLowerCase();
+}
+
+// Returns whether an overlay-less Lens text result counts as a skipped image rather than an error.
+function isTextNoOverlaySkippable(mode, source, result) {
+  if (String(mode || "") !== "lens_text") return false;
+  const src = String(source || "").toLowerCase();
+  const reason = textSkipReason(result);
   // AI is only skippable on an explicit reason: a silent empty AI result is still a failure.
   if (src === "ai") return /no[_ -]?text|no[_ -]?translatable[_ -]?text/.test(reason);
   return !reason || /no[_ -]?text|empty|no[_ -]?overlay|no[_ -]?paragraph/.test(reason);
@@ -289,6 +350,8 @@ export async function handleResult(jobId, result) {
   const hasHtml = Boolean(
     aiHtml || translatedHtml || originalHtml || result?.lensDocument?.paragraphs?.length,
   );
+  const skipReason = textSkipReason(result);
+  const shouldShowSkipBadge = mode === "lens_text" && Boolean(skipReason);
 
   const cacheKey = mdCacheKey(
     mdKeyFromUrl(imgUrl),
@@ -351,7 +414,7 @@ export async function handleResult(jobId, result) {
   }
 
   let overlayOk = null;
-  if (hasHtml) {
+  if (hasHtml || shouldShowSkipBadge) {
     overlayOk = await enqueueDomInsert(
       tabId,
       {
@@ -374,7 +437,7 @@ export async function handleResult(jobId, result) {
       if (isTextNoOverlaySkippable(mode, ctx.source || result?.source || "", result)) {
         const item = batch && imageKey ? batch.items.get(imageKey) : null;
         // An explicit reason is the extension's own verdict on decoded text; re-running Lens cannot change it.
-        const decided = Boolean(result?.meta?.skipped_reason);
+        const decided = Boolean(skipReason);
         if (!decided && item && Number(item.attempt || 1) < 2) {
           ok = false;
           errMsg = "No text detected (retrying)";
@@ -851,8 +914,11 @@ async function processJobInner(payload, tabId, frameId = 0) {
   if (lensSlots > 0) setLaneSlotCeiling("lens:direct", lensSlots);
   const aiSlots = Number(caps?.adaptive?.ai?.limit) || Number(caps?.capacityAi?.limit) || 0;
   if (aiSlots > 0 && payload?.mode === "lens_text" && payload?.source === "ai") {
-    setLaneCapacityHint(laneKeyFor(payload), aiSlots, Number(payload?.rate?.burst) || 0);
+    const activeBurst = payload?.rate?.enabled === true ? Number(payload?.rate?.burst) || 0 : 0;
+    setLaneCapacityHint(laneKeyFor(payload), aiSlots, activeBurst);
   }
+  const onnxSlots = Number(caps?.adaptive?.onnx?.limit) || 0;
+  if (onnxSlots > 0) setLaneSlotCeiling("onnx:groups", onnxSlots);
   await sendToTab(tabId, {
     type: "TP_DIAGNOSTICS_STATE",
     enabled: caps.trace,
@@ -962,7 +1028,7 @@ async function runLensDirectPath(base, payload, { tabId, frameId, signal = null,
     traceNote("background/jobs.js", "imageStage", {
       stage: "lens", state: "started", imageId: payload?.metadata?.image_id || "",
     }, stageTrace);
-    const answer = await fetchLensRawViaRest(base, {
+    const answer = await runStageInLane("lens:direct", () => fetchLensRawViaRest(base, {
       imageBytes: image.bytes,
       mime: image.mime,
       lang: payload.lang,
@@ -971,6 +1037,8 @@ async function runLensDirectPath(base, payload, { tabId, frameId, signal = null,
       batchId: String(payload?.metadata?.batch_id || ""),
       tabSession: String(payload?.context?.tp_tab_session || ""),
       apiUnlimited: payload?.limits?.apiUnlimited === true,
+    }), {
+      signal, stage: "lens", imageId: payload?.metadata?.image_id || "", traceId: stageTrace,
     });
     traceNote("background/jobs.js", "imageStage", {
       stage: "lens", state: "finished", imageId: payload?.metadata?.image_id || "",
@@ -1047,7 +1115,7 @@ async function runLensDirectPath(base, payload, { tabId, frameId, signal = null,
       traceNote("background/jobs.js", "imageStage", {
         stage: "onnx", state: "started", imageId: payload?.metadata?.image_id || "",
       }, stageTrace);
-      grouped = await groupParagraphsWithArtifactFallback(base, {
+      grouped = await runStageInLane("onnx:groups", () => groupParagraphsWithArtifactFallback(base, {
         imageDataUri: image.dataUri,
         imageArtifactToken,
         tree: decoded.trees.grouping,
@@ -1058,6 +1126,8 @@ async function runLensDirectPath(base, payload, { tabId, frameId, signal = null,
         },
         signal,
         apiUnlimited: payload?.limits?.apiUnlimited === true,
+      }), {
+        signal, stage: "onnx", imageId: payload?.metadata?.image_id || "", traceId: stageTrace,
       });
       traceNote("background/jobs.js", "imageStage", {
         stage: "onnx", state: "finished", imageId: payload?.metadata?.image_id || "",
@@ -1309,15 +1379,21 @@ async function runLocalAi(
     if (Array.isArray(delta.characters)) memoryCharacters.push(...delta.characters);
     if (Array.isArray(delta.glossary)) memoryGlossary.push(...delta.glossary);
   };
-  // From here on the model has been asked; a failure must not be re-generated.
-  onGenerationAttempt?.();
   try {
     outcome = await translate(sendable, operationBase);
+    if (Number(outcome?.meta?.generationAttempts || 0) > 0) onGenerationAttempt?.();
     collectMemoryDelta(outcome);
   } catch (e) {
+    // A request can fail BEFORE the model was ever called (server admission, an
+    // optional rate gate, cancellation). Preserve that distinction so the lane
+    // may safely re-submit the same idempotency key without spending another
+    // generation. Only mark a generation when the server explicitly says a
+    // model generation occurred.
+    if (Number(e?.generationAttempts || 0) > 0) onGenerationAttempt?.();
     log.warn("text-only AI failed", {
       route: plan.route,
       code: e?.code,
+      providerAttempts: Number(e?.providerAttempts || 0),
       error: e?.message || String(e),
       willRetryFullPipeline: false,
     });
@@ -1329,17 +1405,20 @@ async function runLocalAi(
       failureKind: e?.name === "AbortError" ? "cancelled" :
         (Number(e?.status) ? "http_or_provider" : "transport_or_output_contract"),
       status: Number(e?.status) || 0,
+      code: String(e?.code || ""),
+      providerAttempts: Number(e?.providerAttempts || 0),
       errorType: e?.name || "Error",
       error: e?.message || String(e),
       automaticContentRetry: false,
     }, traceId);
-    if (e?.name === "AbortError") throw e;
-    return { usable: false, complete: false, translated: 0, missing: [], reason: "AI request failed" };
+    throw e;
   }
 
   if (telemetry) {
     const m = outcome?.meta || {};
     telemetry.providerMs = Number(m.providerMs);
+    telemetry.serverTotalMs = Number(m.dt_ms);
+    telemetry.replayed = outcome?.replayed === true;
     telemetry.rateWaitMs = Number(m.rateWaitMs);
     telemetry.admissionWaitMs = Number(m.admissionWaitMs);
     telemetry.rate = m.rate && typeof m.rate === "object" ? m.rate : null;
@@ -1465,81 +1544,170 @@ async function runLocalAi(
   return classifyAiTranslationReport(report);
 }
 
-// Runs runLocalAi inside the payload's scheduler lane, tracing queue and provider timings.
+const PROVIDER_BACKPRESSURE_MAX_WAIT_MS = 90_000;
+
+// Abortable delay used only for safe no-generation orchestration retries.
+async function waitForRetry(ms, signal) {
+  const base = Math.max(0, Math.floor(Number(ms) || 0));
+  if (base <= 0) return;
+  // A small positive jitter prevents many browsers rejected by the same full HF
+  // worker pool from waking on the same millisecond and recreating the burst.
+  // Keep it small enough that it never becomes meaningful user-visible pacing.
+  const jitter = base >= 100 ? Math.floor(Math.random() * Math.min(500, base * 0.2)) : 0;
+  const delay = base + jitter;
+  await new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("The operation was aborted", "AbortError"));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener?.("abort", onAbort);
+      resolve();
+    }, delay);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener?.("abort", onAbort);
+      reject(new DOMException("The operation was aborted", "AbortError"));
+    };
+    signal?.addEventListener?.("abort", onAbort, { once: true });
+  });
+}
+
+// True only when the server says the model was NOT called. These are safe
+// orchestration retries with the same Idempotency-Key, not model retries.
+function isSafeNoGenerationBackpressure(error) {
+  if (Number(error?.generationAttempts || 0) !== 0) return false;
+  const code = String(error?.code || "");
+  return code === "rate_gate_busy" || code === "local_rate_gate_busy" ||
+    code === "server_busy" || code === "provider_rate_limited";
+}
+
+// Runs runLocalAi inside the payload's scheduler lane. Pre-provider admission
+// backpressure is re-queued indefinitely (until cancellation) with the SAME
+// operation id; a real provider/model attempt is never generated again here.
 async function runLocalAiInLane(base, payload, result, plan, batchId, signal, onGenerationAttempt = null) {
   const key = laneKeyFor(payload);
-  // The user declared this AI runtime to be their own machine: nothing to pace.
   const unlimited = payload?.limits?.aiUnlimited === true;
   setLaneUnlimited(key, unlimited);
   const traceId = String(payload?.context?.tp_trace || getTrace() || "");
   const imageId = String(payload?.metadata?.image_id || "");
-  traceNote("background/jobs.js", "imageStage", {
-    stage: "ai", state: "queued", route: "extension", imageId,
-  }, traceId);
-  const slot = await acquire(key, signal);
-  const queueWaitMs = Number(slot?.waitMs) || 0;
-  traceNote("background/jobs.js", "imageStage", {
-    stage: "ai", state: "started", route: "extension", imageId,
-    // `window` is how many may run right now; `maxWindow` is the cap it may
-    // grow to. Logging only the cap read as "24 in flight" when 4 were.
-    queueWaitMs, window: Number(slot?.window) || 0,
-    maxWindow: Number(slot?.maxWindow) || 0,
-    unlimited,
-  }, traceId);
-  const started = Date.now();
-  const telemetry = {};
-  try {
-    const done = await runLocalAi(
-      base, payload, result, plan, batchId, signal, telemetry, onGenerationAttempt,
-    );
-    const roundTripMs = Date.now() - started;
-    // Keep provider and server-wait timings distinct for diagnosis. Successful
-    // latency no longer narrows the lane; only explicit backpressure does.
-    const serverWaitMs =
-      (Number.isFinite(telemetry.rateWaitMs) ? telemetry.rateWaitMs : 0) +
-      (Number.isFinite(telemetry.admissionWaitMs) ? telemetry.admissionWaitMs : 0);
-    const providerMs = Number.isFinite(telemetry.providerMs) && telemetry.providerMs > 0
-      ? telemetry.providerMs
-      : Math.max(1, roundTripMs - serverWaitMs);
-    const latencySource = Number.isFinite(telemetry.providerMs) && telemetry.providerMs > 0
-      ? "server.providerMs"
-      : "roundTrip-minus-serverWait";
-    releaseSuccess(key, providerMs);
-    const rpmNow = Number(telemetry.rate?.rpm) || 0;
-    // RPM is already enforced by the API rate gate. The client retains AIMD
-    // for explicit backpressure and the server's capacity hint only.
-    const ceiling = Number(describeLane(key)?.effectiveMax) || 0;
+  let orchestrationAttempts = 0;
+  let accumulatedQueueWaitMs = 0;
+  let providerBackpressureSince = 0;
+
+  while (true) {
+    orchestrationAttempts++;
     traceNote("background/jobs.js", "imageStage", {
-      stage: "ai", state: "finished", route: "extension", imageId,
-      queueWaitMs, providerMs, roundTripMs, serverWaitMs, latencySource,
-      rpmNow, laneCeiling: ceiling,
-      usable: done?.usable === true,
-      complete: done?.complete === true,
-      missingUnitIds: Array.isArray(done?.missing) ? done.missing : [],
+      stage: "ai", state: "queued", route: "extension", imageId,
+      orchestrationAttempts,
     }, traceId);
-    return done;
-  } catch (e) {
-    const status = Number(e?.status) || 0;
-    const backpressure = status === 429 || status === 503;
-    // `rate_gate_busy` is the API's own pacing, not the provider's or the
-    // server's. It says "this key has no token free yet" and hands back the
-    // wait it computed; narrowing the lane on top of that only makes the batch
-    // slower, and used to trap the lane at window 1 for the rest of the run.
-    const gated = isRateGateBusy(e);
-    if (gated) releaseGated(key, Number(e?.retryAfterMs) || 0);
-    else if (backpressure) releaseRejected(key, Number(e?.retryAfterMs) || 0);
-    else releaseFailed(key);
+
+    const slot = await acquire(key, signal);
+    const queueWaitMs = Number(slot?.waitMs) || 0;
+    accumulatedQueueWaitMs += queueWaitMs;
     traceNote("background/jobs.js", "imageStage", {
-      stage: "ai", state: "failed", route: "extension", imageId,
-      queueWaitMs, providerMs: Date.now() - started,
-      status, backpressure, gated, retryAfterMs: Number(e?.retryAfterMs) || 0,
-      error: e?.message || String(e),
+      stage: "ai", state: "started", route: "extension", imageId,
+      queueWaitMs, accumulatedQueueWaitMs,
+      window: Number(slot?.window) || 0,
+      maxWindow: Number(slot?.maxWindow) || 0,
+      unlimited, orchestrationAttempts,
     }, traceId);
-    throw e;
+
+    const started = Date.now();
+    const telemetry = {};
+    try {
+      const done = await runLocalAi(
+        base, payload, result, plan, batchId, signal, telemetry, onGenerationAttempt,
+      );
+      const roundTripMs = Date.now() - started;
+      const serverWaitMs =
+        (Number.isFinite(telemetry.rateWaitMs) ? telemetry.rateWaitMs : 0) +
+        (Number.isFinite(telemetry.admissionWaitMs) ? telemetry.admissionWaitMs : 0);
+      const replayed = telemetry.replayed === true;
+      const reportedProviderMs = Number.isFinite(telemetry.providerMs) && telemetry.providerMs > 0
+        ? telemetry.providerMs : 0;
+      const providerMs = replayed
+        ? 0
+        : (reportedProviderMs > 0 ? reportedProviderMs : Math.max(1, roundTripMs - serverWaitMs));
+      const serverTotalMs = Number.isFinite(telemetry.serverTotalMs) && telemetry.serverTotalMs > 0
+        ? telemetry.serverTotalMs : 0;
+      const transportProxyMs = replayed || serverTotalMs <= 0
+        ? 0
+        : Math.max(0, roundTripMs - serverTotalMs);
+      const latencySource = replayed
+        ? "idempotent-replay"
+        : (reportedProviderMs > 0 ? "server.providerMs" : "roundTrip-minus-serverWait");
+      // A ledger replay did not call the provider now. Do not pollute the
+      // scheduler's latency telemetry with the original generation's duration.
+      releaseSuccess(key, replayed ? 0 : providerMs);
+      const rpmNow = Number(telemetry.rate?.rpm) || 0;
+      const ceiling = Number(describeLane(key)?.effectiveMax) || 0;
+      traceNote("background/jobs.js", "imageStage", {
+        stage: "ai", state: "finished", route: "extension", imageId,
+        queueWaitMs, accumulatedQueueWaitMs, providerMs, reportedProviderMs,
+        roundTripMs, serverWaitMs, serverTotalMs, transportProxyMs, replayed,
+        latencySource, rpmNow, laneCeiling: ceiling, orchestrationAttempts,
+        usable: done?.usable === true,
+        complete: done?.complete === true,
+        missingUnitIds: Array.isArray(done?.missing) ? done.missing : [],
+      }, traceId);
+      return done;
+    } catch (e) {
+      const status = Number(e?.status) || 0;
+      const code = String(e?.code || "");
+      const gated = isRateGateBusy(e);
+      const providerBackpressure = code === "provider_rate_limited";
+      const serverDeferred = code === "server_busy";
+      if (providerBackpressure && !providerBackpressureSince) providerBackpressureSince = Date.now();
+      if (!providerBackpressure) providerBackpressureSince = 0;
+      const providerBackpressureMs = providerBackpressureSince
+        ? Math.max(0, Date.now() - providerBackpressureSince)
+        : 0;
+      const providerBackpressureExpired = providerBackpressure &&
+        providerBackpressureMs >= PROVIDER_BACKPRESSURE_MAX_WAIT_MS;
+      const retryableBeforeProvider = isSafeNoGenerationBackpressure(e) && !providerBackpressureExpired;
+      const backpressure = status === 429 || status === 503 || providerBackpressure;
+      const retryAfterMs = Math.max(50, Number(e?.retryAfterMs) || 250);
+      // A full shared HF process should never become a hot 503 loop across many
+      // browsers. Keep the work client-side, preserve provider concurrency, and
+      // spread retries exponentially (capped) until a real server slot opens.
+      const serverRetryMs = serverDeferred
+        ? Math.min(5000, Math.max(retryAfterMs, 300 * (2 ** Math.min(4, orchestrationAttempts - 1))))
+        : retryAfterMs;
+
+      if (gated) releaseGated(key, retryAfterMs);
+      else if (providerBackpressure) releaseRejected(key, retryAfterMs);
+      else if (serverDeferred) releaseDeferred(key, serverRetryMs);
+      else if (backpressure) releaseRejected(key, retryAfterMs);
+      else releaseFailed(key);
+
+      if (providerBackpressureExpired) {
+        e.message = `${e?.message || "AI provider rate limited"} (provider backpressure persisted for ${Math.round(providerBackpressureMs / 1000)}s)`;
+      }
+
+      traceNote("background/jobs.js", "imageStage", {
+        stage: "ai",
+        state: retryableBeforeProvider ? "requeued" : "failed",
+        route: "extension", imageId,
+        queueWaitMs, accumulatedQueueWaitMs,
+        providerMs: Date.now() - started,
+        status, backpressure, gated, retryableBeforeProvider,
+        providerBackpressure, providerBackpressureMs, providerBackpressureExpired,
+        retryAfterMs, serverRetryMs, orchestrationAttempts,
+        code,
+        providerAttempts: Number(e?.providerAttempts || 0),
+        generationAttempts: Number(e?.generationAttempts || 0),
+        error: e?.message || String(e),
+      }, traceId);
+
+      if (!retryableBeforeProvider || signal?.aborted) throw e;
+      // The lane itself may already be paused until Retry-After. Shared-server
+      // pressure gets a progressively wider client-side retry delay so many
+      // browsers do not synchronize into a hot 503 loop.
+      await waitForRetry(serverDeferred ? serverRetryMs : retryAfterMs, signal);
+    }
   }
 }
-
-const SYNC_BUSY_RETRIES = 4;
 
 // Translates one image with `POST /v1/translate`, taking a scheduler slot and reporting how it was released.
 async function runSyncTranslate(
@@ -1598,18 +1766,9 @@ async function runSyncTranslate(
     try {
       const directPayload = payload;
       decline.reason = "";
-      const directLane = "lens:direct";
-      await acquire(directLane, lensCtrl.signal);
-      const directStarted = Date.now();
-      try {
-        direct = await runLensDirectPath(base, directPayload, {
-          tabId, frameId, signal: lensCtrl.signal, decline,
-        });
-        releaseSuccess(directLane, Date.now() - directStarted);
-      } catch (e) {
-        releaseFailed(directLane);
-        throw e;
-      }
+      direct = await runLensDirectPath(base, directPayload, {
+        tabId, frameId, signal: lensCtrl.signal, decline,
+      });
     } finally {
       endInFlight(jobId);
     }
@@ -1625,6 +1784,26 @@ async function runSyncTranslate(
           ...layoutDecision,
           route: plan.route,
         });
+
+        // Do not make an empty page wait behind real AI work. Lens has already
+        // supplied the authoritative units here, so zero translatable units is
+        // a terminal skip and needs neither a scheduler slot nor a provider call.
+        const preAiUnits = translationUnits(direct.lensDocument);
+        const hasTranslatableAiText = preAiUnits.some((unit) => unit?.translatable);
+        if (!preAiUnits.length || !hasTranslatableAiText) {
+          markNoTranslatableText(
+            direct,
+            preAiUnits.length ? "no_translatable_text" : "no_text",
+          );
+          traceNote("background/jobs.js", "imageStage", {
+            stage: "ai", state: "skipped", route: "extension", imageId: imageKey,
+            reason: direct.meta.skipped_reason, queueWaitMs: 0, providerMs: 0,
+          }, String(payload?.context?.tp_trace || ""));
+          await wf.textReady(workflowId);
+          await handleResult(jobId, direct);
+          return;
+        }
+
         const aiCtrl = beginInFlight(jobId, tabId);
         const aiRunning = runLocalAiInLane(
           base, payload, direct, plan, batchId, aiCtrl.signal,
@@ -1707,6 +1886,7 @@ async function runSyncTranslate(
   }
 
   let browserImageFallbackUsed = false;
+  let syncProviderBackpressureSince = 0;
   for (let attempt = 0; ; attempt++) {
     const serverPayload = payloadForFullServer(payload);
     const outbound = serverPayload;
@@ -1748,11 +1928,20 @@ async function runSyncTranslate(
         endInFlight(jobId);
       }
       const requestMs = Date.now() - requestStartedAt;
+      const serverProcessingMs = Number(result?.perf?.total_ms) || 0;
+      // On plain-http localhost Chrome normally exposes only a handful of
+      // HTTP/1.1 connections per origin. requestMs - serverProcessingMs makes
+      // that browser/proxy transport wait visible instead of misdiagnosing it
+      // as an API scheduler queue. On an HTTP/2 HF front door this should be
+      // close to ordinary network overhead.
+      const transportProxyMs = serverProcessingMs > 0
+        ? Math.max(0, requestMs - serverProcessingMs) : 0;
       releaseSuccess(requestLane, requestMs);
       slotHeld = false;
       traceNote("background/jobs.js", "imageStage", {
         stage: "ai", state: "finished", route: "api", imageId: serverImageId,
-        queueWaitMs, requestMs, totalElapsedMs: Date.now() - t0,
+        queueWaitMs, requestMs, serverProcessingMs, transportProxyMs,
+        totalElapsedMs: Date.now() - t0,
         laneCeiling: Number(describeLane(requestLane)?.effectiveMax) || 0,
       }, serverTraceId);
       if (!lensDone) {
@@ -1843,32 +2032,68 @@ async function runSyncTranslate(
       // key rather than protecting the server, and hands back the exact wait.
       const isBusy = status === 429 || status === 503 || retryAfterMs > 0;
       const gated = isRateGateBusy(e);
+      const code = String(e?.code || "");
+      const generationAttempts = Number(e?.generationAttempts || 0);
+      const safeDeferred = generationAttempts === 0 && (
+        code === "server_busy" || code === "local_rate_gate_busy" ||
+        code === "lens_session_unavailable" || code === "provider_rate_limited"
+      );
 
-      if (isBusy) {
+      if (isBusy && safeDeferred) {
+        const serverRetryMs = code === "server_busy"
+          ? Math.min(5000, Math.max(retryAfterMs, 300 * (2 ** Math.min(4, attempt))))
+          : retryAfterMs;
         if (slotHeld) {
           if (gated) releaseGated(requestLane, retryAfterMs);
-          else releaseRejected(requestLane, retryAfterMs);
+          else if (code === "provider_rate_limited") releaseRejected(requestLane, retryAfterMs);
+          else releaseDeferred(requestLane, serverRetryMs);
+          slotHeld = false;
         }
-        if (attempt < SYNC_BUSY_RETRIES) {
-          log.info(
-            gated ? "this API key is out of tokens; the image waits its turn"
-                  : "server busy; the image stays with us",
-            { laneKey: requestLane, attempt: attempt + 1, retryAfterMs, gated },
-          );
-          const why = gated
-            ? `AI key paced by the server's rate gate (wait ${retryAfterMs}ms)`
-            : `server busy (retry-after ${retryAfterMs}ms)`;
-          if (lensDone) await wf.aiDegraded(workflowId, why);
-          else await wf.lensDegraded(workflowId, why);
-          continue;
+
+        if (code === "provider_rate_limited") {
+          if (!syncProviderBackpressureSince) syncProviderBackpressureSince = Date.now();
+          if (Date.now() - syncProviderBackpressureSince >= PROVIDER_BACKPRESSURE_MAX_WAIT_MS) {
+            const msg = "AI provider stayed rate limited for 90s; the request was never generated.";
+            await wf.failed(workflowId, msg);
+            handleJobError(jobId, msg);
+            return;
+          }
+        } else {
+          syncProviderBackpressureSince = 0;
         }
-      } else {
-        if (slotHeld) releaseFailed(requestLane);
+
+        log.info(
+          gated ? "this API key is out of tokens; the image waits its turn"
+                : code === "lens_session_unavailable"
+                  ? "Lens session is refreshing; the image stays with us"
+                  : code === "provider_rate_limited"
+                    ? "AI provider rejected before generation; the image stays with us"
+                    : "server busy; the image stays with us",
+          { laneKey: requestLane, attempt: attempt + 1, retryAfterMs, serverRetryMs, gated, code, generationAttempts },
+        );
+        traceNote("background/jobs.js", "imageStage", {
+          stage: "ai", state: "requeued", route: "api", imageId: serverImageId,
+          queueWaitMs, status, retryAfterMs, serverRetryMs, code, generationAttempts, attempt: attempt + 1,
+        }, serverTraceId);
+        const why = gated
+          ? `AI key paced by the server's rate gate (wait ${retryAfterMs}ms)`
+          : `${code || "server busy"} (retry-after ${retryAfterMs}ms)`;
+        if (lensDone) await wf.aiDegraded(workflowId, why);
+        else await wf.lensDegraded(workflowId, why);
+        // Keep the rejected work in this browser. Shared-server pressure gets
+        // an exponential client-side retry delay; provider/rate signals keep
+        // their own advertised delay. Only a REAL provider rejection is allowed
+        // to reduce learned provider concurrency.
+        await waitForRetry(code === "server_busy" ? serverRetryMs : retryAfterMs, ctrl.signal);
+        continue;
       }
 
-      const msg = isBusy
-        ? `Server stayed busy after ${SYNC_BUSY_RETRIES + 1} attempts — try again shortly.`
-        : e?.message || String(e);
+      if (slotHeld) {
+        if (isBusy) releaseRejected(requestLane, retryAfterMs);
+        else releaseFailed(requestLane);
+      }
+
+      const msg = e?.message || String(e);
       await wf.failed(workflowId, msg);
       handleJobError(jobId, msg);
       return;
@@ -1949,7 +2174,13 @@ export function enqueue(payload, tabId, frameId = 0) {
   addTask(() => {
     if (!isAdmissible()) return;
     return processJob(payload, tabId, frameId);
-  }, { shouldStart: isAdmissible });
+  }, {
+    shouldStart: isAdmissible,
+    // In runs:Extension the image is only orchestration; Lens and AI each have
+    // their own scheduler lanes. Do not let an image waiting for AI consume the
+    // top-level slot that a later image needs in order to start Lens.
+    laneManaged: payload?.engine !== "api",
+  });
 }
 
 // Cancels every in-flight job for a tab, on the extension and on the server.

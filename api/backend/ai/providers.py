@@ -89,8 +89,9 @@ def read_key_from_env() -> str:
 def detect_provider_from_key(api_key: str) -> str:
     """Guess the provider from an API key's prefix.
 
-    Defaults to ``"openai"`` because most third-party gateways use the
-    OpenAI-compatible ``sk-...`` style key.
+    Returns an empty string for ambiguous ``sk-...`` keys. OpenAI, DeepSeek,
+    Together and Featherless can all use that shape, so guessing one of them
+    risks sending a valid credential to the wrong company.
     """
     k = (api_key or "").strip()
     if k.startswith("AIza"):
@@ -103,13 +104,28 @@ def detect_provider_from_key(api_key: str) -> str:
         return "anthropic"
     if k.startswith("gsk_"):
         return "groq"
-    return "openai"
+    return ""
 
 
 def canonical_provider(provider: str) -> str:
     """Map provider aliases (``hf`` -> ``huggingface`` etc.) to canonical form."""
     p = (provider or "").strip().lower()
     return PROVIDER_ALIASES.get(p, p)
+
+
+def provider_key_mismatch(provider: str, api_key: str) -> str:
+    """Return the clearly detected key provider when it conflicts with selection.
+
+    Ambiguous ``sk-...`` keys intentionally return no mismatch; an explicit
+    provider is the authority for those. Prefixes such as ``AIza``, ``hf_`` and
+    ``sk-or-`` are strong enough to prevent accidentally sending a credential
+    to the wrong company's endpoint.
+    """
+    selected = canonical_provider(provider or "")
+    detected = detect_provider_from_key(api_key)
+    if detected and selected and selected not in ("auto", detected):
+        return detected
+    return ""
 
 
 def is_local_provider(provider: str) -> bool:
@@ -204,26 +220,55 @@ def pick_hf_fallback_model(models: list[str]) -> str:
 
 
 def openai_compat_models_status(
-    api_key: str, base_url: str, timeout_sec: float = LIST_TIMEOUT_SEC
+    api_key: str,
+    base_url: str,
+    timeout_sec: float = LIST_TIMEOUT_SEC,
+    *,
+    provider: str = "",
 ) -> ModelListResult:
-    """Enumerate an OpenAI-compatible ``/models`` endpoint with auth status.
+    """Enumerate an OpenAI-compatible model endpoint with provider semantics.
 
-    401/403 are reported as ``invalid_key`` instead of being collapsed into an
-    empty list. Network failures are ``unreachable``; other HTTP failures are
-    ``error``. This lets the popup tell the truth instead of showing a static
-    fallback as if the credential had been verified.
+    The providers share Chat Completions but *not* identical Models APIs. Use
+    each provider's authoritative filtering when available so the popup does
+    not equate "present in a catalogue" with "usable for TextPhantom chat".
     """
+    prov = canonical_provider(provider or "")
     if not api_key or not base_url:
         return _model_list_result(status="missing")
-    url = base_url.rstrip("/") + "/models"
+
+    root = base_url.rstrip("/")
+    url = root + "/models"
+    params: dict[str, str | int] = {}
+    if prov == "openrouter":
+        # Key-scoped list: respects the user's provider preferences, privacy
+        # settings and guardrails. The public /models catalogue is broader.
+        url = root + "/models/user"
+    elif prov == "featherless":
+        # Featherless explicitly exposes whether a model is on the key's plan.
+        params = {
+            "available_on_current_plan": "true",
+            "conversational": "true",
+            "status": "active",
+            "per_page": 1000,
+        }
+
     try:
         with httpx.Client(timeout=timeout_sec) as client:
-            r = client.get(url, headers={"Authorization": f"Bearer {api_key}"})
+            r = client.get(
+                url,
+                headers={"Authorization": f"Bearer {api_key}"},
+                params=params or None,
+            )
     except httpx.RequestError as exc:
         return _model_list_result(status="unreachable", error=type(exc).__name__)
 
-    if r.status_code in (401, 403):
+    # 401 means the credential itself was rejected. 403 is deliberately kept
+    # distinct: several providers use it for plan/model/gate access, and calling
+    # a valid key "invalid" made troubleshooting impossible.
+    if r.status_code == 401:
         return _model_list_result(status="invalid_key", http_status=r.status_code)
+    if r.status_code == 403:
+        return _model_list_result(status="forbidden", http_status=r.status_code)
     if not r.is_success:
         return _model_list_result(status="error", http_status=r.status_code)
     try:
@@ -231,13 +276,43 @@ def openai_compat_models_status(
     except ValueError:
         return _model_list_result(status="error", http_status=r.status_code, error="invalid_json")
 
-    models: list[str] = []
-    for m in data.get("data") or []:
-        mid = m.get("id") if isinstance(m, dict) else None
-        if isinstance(mid, str) and mid.strip():
-            models.append(mid.strip())
-    return _model_list_result(models=models, status="valid", http_status=r.status_code)
+    # Together returns a top-level array; OpenAI-style providers return {data:[]}.
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        items = data.get("data") or []
+    else:
+        items = []
 
+    models: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        mid = str(item.get("id") or "").strip()
+        if not mid:
+            continue
+
+        if prov == "together":
+            # Together publishes the endpoint class in `type`; only `chat`
+            # models are guaranteed to support /v1/chat/completions.
+            if str(item.get("type") or "").strip().lower() != "chat":
+                continue
+        elif prov == "featherless":
+            if item.get("available_on_current_plan") is False:
+                continue
+            status = str(item.get("status") or "active").strip().lower()
+            if status and status != "active":
+                continue
+        elif prov in ("openrouter", "huggingface"):
+            architecture = item.get("architecture") or {}
+            outputs = architecture.get("output_modalities") if isinstance(architecture, dict) else None
+            if isinstance(outputs, list) and outputs and "text" not in {
+                str(x).strip().lower() for x in outputs
+            }:
+                continue
+
+        models.append(mid)
+    return _model_list_result(models=models, status="valid", http_status=r.status_code)
 
 def openai_compat_models(
     api_key: str, base_url: str, timeout_sec: float = LIST_TIMEOUT_SEC
@@ -286,14 +361,16 @@ def gemini_models_status(api_key: str) -> ModelListResult:
     """Enumerate Gemini ``generateContent`` models and preserve auth status."""
     if not api_key:
         return _model_list_result(status="missing")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}&pageSize=1000"
     try:
         with httpx.Client(timeout=LIST_TIMEOUT_SEC) as client:
             r = client.get(url)
     except httpx.RequestError as exc:
         return _model_list_result(status="unreachable", error=type(exc).__name__)
-    if r.status_code in (401, 403):
+    if r.status_code == 401:
         return _model_list_result(status="invalid_key", http_status=r.status_code)
+    if r.status_code == 403:
+        return _model_list_result(status="forbidden", http_status=r.status_code)
     if not r.is_success:
         return _model_list_result(status="error", http_status=r.status_code)
     try:
@@ -324,7 +401,7 @@ def anthropic_models_status(api_key: str) -> ModelListResult:
     """List Claude models available to this API key via Anthropic's Models API."""
     if not api_key:
         return _model_list_result(status="missing")
-    url = "https://api.anthropic.com/v1/models"
+    url = "https://api.anthropic.com/v1/models?limit=1000"
     headers = {
         "x-api-key": api_key,
         "anthropic-version": "2023-06-01",
@@ -334,8 +411,10 @@ def anthropic_models_status(api_key: str) -> ModelListResult:
             r = client.get(url, headers=headers)
     except httpx.RequestError as exc:
         return _model_list_result(status="unreachable", error=type(exc).__name__)
-    if r.status_code in (401, 403):
+    if r.status_code == 401:
         return _model_list_result(status="invalid_key", http_status=r.status_code)
+    if r.status_code == 403:
+        return _model_list_result(status="forbidden", http_status=r.status_code)
     if not r.is_success:
         return _model_list_result(status="error", http_status=r.status_code)
     try:
@@ -369,6 +448,14 @@ _GENERIC_EXCLUDE_FRAGMENTS: tuple[str, ...] = (
     "rerank",
 )
 
+_PROVIDER_EXCLUDE_FRAGMENTS: dict[str, tuple[str, ...]] = {
+    "openai": (
+        "chatgpt", "codex", "deep-research", "computer-use", "search-preview",
+        "sora", "babbage", "davinci",
+    ),
+    "groq": ("prompt-guard", "safeguard", "whisper", "orpheus"),
+}
+
 
 def filter_chat_models(provider: str, models: list[str]) -> list[str]:
     """Drop non-chat and retired entries from a provider's live model list.
@@ -388,8 +475,12 @@ def filter_chat_models(provider: str, models: list[str]) -> list[str]:
             continue
         if any(frag in m for frag in _GENERIC_EXCLUDE_FRAGMENTS):
             continue
+        if any(frag in m for frag in _PROVIDER_EXCLUDE_FRAGMENTS.get(prov, ())):
+            continue
         out.append(mid)
-    return out or models
+    # For cloud providers, an empty filtered list is safer than falling back to
+    # a catalogue containing audio/guard/image models that cannot translate.
+    return out
 
 
 def is_hf_provider(provider: str, base_url: str) -> bool:

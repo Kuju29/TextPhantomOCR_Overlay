@@ -170,7 +170,10 @@ async def capabilities(request: Request) -> dict:
         # Both lanes, because "the server is busy" now has two answers and a
         # client that cannot tell them apart will back off the wrong one.
         "capacity": stats.as_dict(),
-        "capacityAi": ai_stats.as_dict(),
+        "capacityAi": {
+            **ai_stats.as_dict(),
+            "executorWorkers": int(getattr(request.app.state, "ai_executor_workers", ai_stats.limit)),
+        },
         # What each lane is allowed RIGHT NOW and whether it may still move.
         # The extension reads this so both sides agree on how much work fits
         # instead of each guessing behind its own fixed number.
@@ -215,7 +218,7 @@ async def translate_sync(payload: dict[str, Any], request: Request) -> dict:
 
     def _run() -> dict[str, Any]:
         # Runs on a worker thread, so it must adopt the trace id itself — the
-        # thread-local does not cross `to_thread`.
+        # thread-local does not cross an executor boundary.
         with trace.scope(trace_id):
             return _process_payload(payload)
 
@@ -248,7 +251,8 @@ async def translate_sync(payload: dict[str, Any], request: Request) -> dict:
                 status_code=429,
                 detail={"code": "local_rate_gate_busy",
                         "message": "Local provider pacing has no capacity yet.",
-                        "retryable": True, "traceId": trace_id},
+                        "retryable": True, "retryAfterMs": 5000,
+                        "generationAttempts": 0, "traceId": trace_id},
                 headers={"Retry-After": "5"},
             ) from exc
         rate_wait_ms = round((time.perf_counter() - rate_started) * 1000, 1)
@@ -256,11 +260,14 @@ async def translate_sync(payload: dict[str, Any], request: Request) -> dict:
     try:
         # A local caller is this server's only tenant; the fairness gate has
         # nobody to be fair to. Verified against the peer address, not the header.
+        executor = (request.app.state.pipeline_ai_executor
+                    if lane == "ai" else request.app.state.pipeline_lens_executor)
+        loop = asyncio.get_running_loop()
         if wants_unlimited(request):
-            result = await asyncio.to_thread(_run)
+            result = await loop.run_in_executor(executor, _run)
         else:
             async with gate.slot(identity):
-                result = await asyncio.to_thread(_run)
+                result = await loop.run_in_executor(executor, _run)
     except asyncio.CancelledError as exc:
         event("v1.translate.cancelled", {"mode": mode, "source": source}, ok=False)
         trace.write(
@@ -283,7 +290,10 @@ async def translate_sync(payload: dict[str, Any], request: Request) -> dict:
         )
         raise HTTPException(
             status_code=503,
-            detail=str(exc),
+            detail={"code": "server_busy", "message": str(exc),
+                    "retryable": True,
+                    "retryAfterMs": int(exc.retry_after_sec * 1000),
+                    "generationAttempts": 0, "traceId": trace_id},
             headers={"Retry-After": str(exc.retry_after_sec)},
         ) from exc
     except SecurityError as exc:
@@ -308,7 +318,8 @@ async def translate_sync(payload: dict[str, Any], request: Request) -> dict:
                 status_code=503,
                 detail={"code": "lens_session_unavailable",
                         "message": "Google Lens rejected the refreshed server session.",
-                        "retryable": True, "traceId": trace_id},
+                        "retryable": True, "retryAfterMs": 30000,
+                        "generationAttempts": 0, "traceId": trace_id},
                 headers={"Retry-After": "30"},
             ) from exc
         mapped = _provider_http_failure(exc)
@@ -338,11 +349,13 @@ async def translate_sync(payload: dict[str, Any], request: Request) -> dict:
         )
         headers = ({"Retry-After": str(mapped.retry_after)}
                    if mapped.retry_after else None)
+        generation_attempts = 0 if mapped.code == "provider_rate_limited" else 1
         raise HTTPException(
             status_code=mapped.status,
             detail={"code": mapped.code, "message": mapped.message,
                     "retryable": mapped.retryable, "traceId": trace_id,
-                    "failedStage": failed_stage or "unknown"},
+                    "failedStage": failed_stage or "unknown",
+                    "generationAttempts": generation_attempts},
             headers=headers,
         ) from exc
     if paced:

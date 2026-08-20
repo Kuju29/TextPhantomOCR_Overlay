@@ -16,15 +16,15 @@ class ProviderDefaults(TypedDict):
 
 
 PROVIDER_DEFAULTS: Final[dict[str, ProviderDefaults]] = {
-    "gemini":      {"model": "gemini-2.5-flash",            "base_url": ""},
-    "openai":      {"model": "gpt-4o-mini",                 "base_url": "https://api.openai.com/v1"},
+    "gemini":      {"model": "gemini-3.6-flash",            "base_url": ""},
+    "openai":      {"model": "gpt-5.6-luna",                "base_url": "https://api.openai.com/v1"},
     "openrouter":  {"model": "openai/o4-mini",              "base_url": "https://openrouter.ai/api/v1"},
     "huggingface": {"model": "google/gemma-2-2b-it",        "base_url": "https://router.huggingface.co/v1"},
     "featherless": {"model": "Qwen/Qwen2.5-7B-Instruct",    "base_url": "https://api.featherless.ai/v1"},
     "groq":        {"model": "openai/gpt-oss-20b",          "base_url": "https://api.groq.com/openai/v1"},
     "together":    {"model": "openai/gpt-oss-20b",          "base_url": "https://api.together.xyz/v1"},
-    "deepseek":    {"model": "deepseek-chat",               "base_url": "https://api.deepseek.com/v1"},
-    "anthropic":   {"model": "claude-sonnet-4-20250514",    "base_url": "https://api.anthropic.com"},
+    "deepseek":    {"model": "deepseek-v4-flash",           "base_url": "https://api.deepseek.com/v1"},
+    "anthropic":   {"model": "claude-sonnet-5",             "base_url": "https://api.anthropic.com"},
     # Local, self-hosted LLM servers that speak the OpenAI /v1 dialect.
     # No API key required — base_url points at the user's own machine.
     "ollama":       {"model": "llama3.1",        "base_url": "http://localhost:11434/v1"},
@@ -184,33 +184,23 @@ MODEL_ALIASES: Final[dict[str, dict[str, str]]] = {
         "gemini-1.5-flash-8b":   "gemini-2.5-flash-lite",
         "gemini-1.5-pro":        "gemini-2.5-pro",
     },
+    "deepseek": {
+        # Retired 2026-07-24. Keep old saved selections working, but never
+        # offer the retired names in a live model picker.
+        "deepseek-chat": "deepseek-v4-flash",
+        "deepseek-reasoner": "deepseek-v4-flash",
+    },
+    "anthropic": {
+        # Retired 2026-06-15; Anthropic recommends Sonnet 4.6.
+        "claude-sonnet-4-20250514": "claude-sonnet-4-6",
+    },
 }
 
 
-# Hard-coded model fallbacks used by /ai/resolve when the live endpoint
-# enumeration returns nothing useful.
-# Conservative Gemini fallback list aligned with the current official model/deprecation tables.
-# Retired preview ids are remapped above instead of being offered here.
-# ``gemini-flash-latest`` stays last as an auto-updating safety net.
-GEMINI_FALLBACK_MODELS: Final[list[str]] = [
-    "gemini-3.6-flash",
-    "gemini-3.5-flash-lite",
-    "gemini-3.5-flash",
-    "gemini-3.1-pro-preview",
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
-    "gemini-2.5-pro",
-    "gemini-flash-latest",
-]
 
-
-HF_FALLBACK_MODELS: Final[list[str]] = [
-    "google/gemma-3-27b-it:featherless-a",
-    "google/gemma-3-27b-it",
-    "google/gemma-2-2b-it",
-    "google/gemma-2-9b-it",
-]
-
+# Model selection in the settings UI is live-only. Static model catalogues are
+# deliberately not kept here: stale fallback IDs previously made the dropdown
+# promise models that a user key/plan could not actually call.
 
 # Models whose name matches this pattern get the COMPACT prompt tier:
 # a short core-rule list + a full few-shot example instead of the long

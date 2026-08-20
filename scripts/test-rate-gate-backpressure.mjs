@@ -27,6 +27,7 @@ import {
   releaseFailed,
   releaseGated,
   releaseRejected,
+  releaseDeferred,
   releaseSuccess,
   reset,
 } from "../src/background/scheduler.js";
@@ -40,7 +41,7 @@ async function occupy(key, n) {
   return grants;
 }
 
-// --- a provider/server 429 still narrows the lane ----------------------------
+// --- a PROVIDER 429/503 still narrows the lane -------------------------------
 {
   reset();
   await occupy(LANE, 4);
@@ -48,9 +49,23 @@ async function occupy(key, n) {
   releaseRejected(LANE, 1000);
   const after = describeLane(LANE);
   assert.ok(after.window < before,
-    `a real backpressure 429 must halve the window (${before} -> ${after.window})`);
+    `a real provider backpressure must halve the window (${before} -> ${after.window})`);
   assert.equal(after.backpressured, true, "and must mark the lane backpressured");
   assert.ok(after.pausedMs > 0, "and must respect Retry-After");
+}
+
+// --- TextPhantom server_busy also does not -----------------------------------
+{
+  reset();
+  await occupy(LANE, 4);
+  const before = describeLane(LANE).window;
+  releaseDeferred(LANE, 1000);
+  const after = describeLane(LANE);
+  assert.equal(after.window, before,
+    `server admission deferral must leave provider capacity alone (${before} -> ${after.window})`);
+  assert.equal(after.backpressured, false);
+  assert.ok(after.pausedMs > 0, "server busy should pace retries without shrinking provider capacity");
+  assert.equal(after.deferred, 1);
 }
 
 // --- a rate-gate 429 does not ------------------------------------------------
@@ -118,17 +133,108 @@ async function occupy(key, n) {
     "jobs.js must classify the 429 before choosing how to release the slot");
   assert.match(jobs, /code === "rate_gate_busy"/,
     "the classifier must read the server's explicit code");
-  assert.match(jobs, /if \(gated\) releaseGated\(key, Number\(e\?\.retryAfterMs\) \|\| 0\);/,
+  assert.match(jobs, /if \(gated\) releaseGated\(key, retryAfterMs\);/,
     "the AI stage must use the paced release path");
-  assert.match(jobs, /if \(gated\) releaseGated\(requestLane, retryAfterMs\);/,
-    "the sync retry loop must use it too");
+  assert.match(jobs, /code === "provider_rate_limited"/,
+    "a provider throttle with zero generations must be safe to re-queue");
+  assert.match(jobs, /generationAttempts[^\n]*!== 0/,
+    "safe re-queue classification must be based on generation attempts, not HTTP attempts");
+  assert.match(jobs, /else if \(code === "provider_rate_limited"\) releaseRejected\(requestLane, retryAfterMs\);/,
+    "the sync retry loop must narrow only for real provider backpressure");
+  assert.match(jobs, /else releaseDeferred\(requestLane, serverRetryMs\);/,
+    "server_busy/lens refresh must stay in the browser without shrinking provider capacity");
+  assert.match(jobs, /generationAttempts === 0[\s\S]*code === "server_busy"/,
+    "the API-engine retry loop must only keep pre-generation backpressure in the browser");
+
+  const aiLocal = await readFile(new URL("../src/background/ai-local.js", import.meta.url), "utf8");
+  assert.match(aiLocal, /error\.code = code/,
+    "text-only AI must preserve the server's machine-readable backpressure code");
+  assert.match(aiLocal, /error\.generationAttempts = generationAttempts/,
+    "text-only AI must preserve whether a model generation actually happened");
+
+  const apiRoute = await readFile(new URL("../api/backend/api/routes/ai_v1.py", import.meta.url), "utf8");
+  assert.match(apiRoute, /run_in_executor\(request\.app\.state\.ai_executor, _run_ai\)/,
+    "text.ai must use the dedicated AI executor, never asyncio's shared default pool");
+  assert.match(apiRoute, /"code": "server_busy"/,
+    "admission backpressure must be structured and explicitly pre-provider");
+  assert.match(apiRoute, /"code": "provider_rate_limited" if provider_limited/,
+    "provider 429\/503 must be reported as a rejected HTTP attempt, not a generation");
+
+  const main = await readFile(new URL("../api/backend/main.py", import.meta.url), "utf8");
+  const config = await readFile(new URL("../api/backend/config.py", import.meta.url), "utf8");
+  const admission = await readFile(new URL("../api/backend/jobs/admission.py", import.meta.url), "utf8");
+  const hfThrottle = await readFile(new URL("../api/backend/ai/throttle.py", import.meta.url), "utf8");
+  assert.match(main, /_AI_LIMIT = max\(1, min\(_AI_CONFIGURED, _AI_THREADS\)\)/,
+    "AI admission must never exceed the real dedicated executor size");
+  assert.match(main, /max_waiters=settings\.sync_ai_max_waiters,[\s\S]*max_wait_sec=settings\.sync_ai_max_wait_sec/,
+    "AI admission must have its own no-backlog waiter settings");
+  assert.match(main, /adaptive=False,[\s\S]*limit_min=_AI_LIMIT,[\s\S]*limit_max=_AI_LIMIT/,
+    "AI admission must stay pinned to executor capacity; provider latency must not shrink it");
+  assert.match(config, /TP_SYNC_AI_MAX_WAITERS", 0/,
+    "AI server backlog must default to zero waiters");
+  assert.match(config, /TP_SYNC_AI_MAX_WAIT_SEC", 10\.0/,
+    "AI waiter timeout is only relevant if an operator explicitly enables waiters");
+  assert.match(admission, /if self\._max_waiters <= 0:[\s\S]*no server wait queue/,
+    "max_waiters=0 must reject immediately instead of secretly queuing one request per identity");
+  assert.match(admission, /def _hard_waiting_cap\(self\)[\s\S]*return self\._max_waiters/,
+    "max_waiters must be a literal global waiter cap, not limit + max_waiters");
+  assert.match(config, /HF_AI_MAX_CONCURRENCY", 0/,
+    "HF must not impose a hidden TextPhantom concurrency=1 default");
+  assert.match(config, /HF_AI_MIN_INTERVAL_SEC", 0\.0/,
+    "HF must not impose a hidden 0.8s spacing default");
+  assert.match(hfThrottle, /if gate\.semaphore is None:[\s\S]*return _call\(\)/,
+    "HF throttle must truly bypass its semaphore when no manual cap was configured");
 
   const transport = await readFile(new URL("../src/background/transport.js", import.meta.url), "utf8");
   assert.match(transport, /detail\?\.retryAfterMs/,
     "the precise wait in the body must win over the whole-second Retry-After header");
+  assert.match(transport, /Lens upload failed:[\s\S]*err\.retryAfterMs/,
+    "Lens admission backpressure must preserve Retry-After for browser-side requeue");
+  assert.match(transport, /Grouping failed:[\s\S]*err\.retryAfterMs/,
+    "ONNX admission backpressure must preserve Retry-After for browser-side requeue");
+
+  assert.match(jobs, /async function runStageInLane\(/,
+    "Lens and ONNX must each requeue rejected work in the extension");
+  assert.match(jobs, /runStageInLane\("lens:direct"/,
+    "Lens must own only the Lens lane, not the whole extension-first pipeline");
+  assert.match(jobs, /runStageInLane\("onnx:groups"/,
+    "vertical grouping must use a separate CPU lane");
+  assert.match(jobs, /state: "skipped"[\s\S]*queueWaitMs: 0, providerMs: 0/,
+    "pages with no translatable text must bypass the AI scheduler entirely");
+
+  const contextMenu = await readFile(new URL("../src/background/context-menu.js", import.meta.url), "utf8");
+  assert.match(contextMenu, /rpm: enabled \? configuredRpm : 0/,
+    "a stored RPM must be inert while the user's rate switch is off");
+  assert.match(contextMenu, /burst: enabled \? configuredBurst : 0/,
+    "a stored burst must be inert while the user's rate switch is off");
+
+  assert.match(main, /app\.state\.lens_executor = ThreadPoolExecutor\(/,
+    "Lens must have a dedicated executor");
+  assert.match(main, /app\.state\.cpu_executor = ThreadPoolExecutor\(/,
+    "ONNX must have a dedicated executor");
+  assert.match(main, /app\.state\.pipeline_ai_executor = ThreadPoolExecutor\(/,
+    "the API-server AI pipeline must not fall back to asyncio's shared executor");
+  assert.match(main, /app\.state\.pipeline_lens_executor = ThreadPoolExecutor\(/,
+    "the API-server Lens pipeline must not fall back to asyncio's shared executor");
+
+  const lensRoute = await readFile(new URL("../api/backend/api/routes/lens_v1.py", import.meta.url), "utf8");
+  assert.match(lensRoute, /run_in_executor\(\s*request\.app\.state\.lens_executor/,
+    "Lens raw must execute on its dedicated pool");
+  const groupsRoute = await readFile(new URL("../api/backend/api/routes/groups_v1.py", import.meta.url), "utf8");
+  assert.match(groupsRoute, /request\.app\.state\.cpu_executor/,
+    "groups must execute on its dedicated CPU pool");
+
+  const syncRoute = await readFile(new URL("../api/backend/api/routes/translate_v1.py", import.meta.url), "utf8");
+  assert.match(syncRoute, /pipeline_ai_executor[\s\S]*pipeline_lens_executor/,
+    "the API-server engine must choose a dedicated executor by lane");
+
+  assert.match(apiRoute, /if not rate\["enabled"\]/,
+    "disabled user pacing must take an explicit no-gate telemetry branch");
+  assert.match(apiRoute, /"gated": False/,
+    "disabled user pacing must report gated=false instead of stale adaptive RPM telemetry");
 }
 
 console.log(
-  "Rate-gate backpressure test passed: paced 429s wait without narrowing the lane, "
-  + "overload 429s still narrow it, and the two are told apart by code.",
+  "Rate-gate backpressure test passed: only provider backpressure narrows AI; "
+  + "server admission stays browser-side and manual rate pacing stays time-only.",
 );
