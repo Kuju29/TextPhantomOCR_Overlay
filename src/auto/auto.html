@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>TextPhantom Auto translate</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <link rel="stylesheet" href="../shared/theme.css" />
+    <link rel="stylesheet" href="auto.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <div class="brand">
+        <img class="brand-icon" src="../icons/48.png" alt="" />
+        <div>
+          <div class="brand-name">Auto translate</div>
+          <div class="brand-sub">Drop, paste or upload one image — it translates itself</div>
+        </div>
+      </div>
+
+      <div class="controls">
+        <label class="ctl">
+          <span>Mode</span>
+          <select id="auto-mode" aria-label="Mode"></select>
+        </label>
+        <label class="ctl" id="auto-source-wrap">
+          <span>Text</span>
+          <select id="auto-source" aria-label="Text overlay source"></select>
+        </label>
+        <label class="ctl">
+          <span>Language</span>
+          <select id="auto-lang" aria-label="Language"></select>
+        </label>
+        <div class="ctl zoom">
+          <span>Size</span>
+          <input id="auto-zoom" type="range" min="480" max="3200" step="20" value="1200" aria-label="Image width" />
+          <button type="button" id="auto-fit" class="btn" title="Fit the image to this window">Fit</button>
+        </div>
+        <button type="button" id="auto-change" class="btn">Change image</button>
+        <button type="button" id="auto-retranslate" class="btn">Re-translate</button>
+        <button type="button" id="auto-raw-toggle" class="btn" aria-pressed="false">Show raw data</button>
+      </div>
+    </header>
+
+    <div class="statusbar">
+      <span id="auto-status" class="status" role="status" aria-live="polite">Waiting for an image.</span>
+      <span id="auto-meta" class="status-meta"></span>
+    </div>
+
+    <main class="stage" id="auto-stage">
+      <!-- Empty state: the upload panel. -->
+      <section class="uploader" id="auto-uploader">
+        <h1>Search any image with TextPhantom</h1>
+        <div class="dropbox" id="auto-dropbox">
+          <div class="dropbox-icon" aria-hidden="true">🖼️</div>
+          <p class="dropbox-text">
+            Drag an image here, or
+            <button type="button" id="auto-upload" class="linkish">upload a file</button>
+            — or just press <kbd>Ctrl</kbd>+<kbd>V</kbd> to paste one.
+          </p>
+        </div>
+        <div class="or"><span>or</span></div>
+        <form class="urlrow" id="auto-url-form">
+          <input id="auto-url" type="text" inputmode="url" placeholder="Paste an image link" aria-label="Image link" />
+          <button type="submit" class="btn primary">Load</button>
+        </form>
+        <p class="uploader-note">
+          The image stays in this tab and in the pipeline you already use — the same Lens upload, the same
+          engine and the same AI settings as the popup. Only the mode, language, text source and size on this
+          page are its own.
+        </p>
+      </section>
+
+      <!-- Loaded state: the image plus its overlay. -->
+      <section class="canvas" id="auto-canvas" hidden>
+        <div class="image-wrap" id="auto-image-wrap">
+          <img id="auto-image" alt="" decoding="sync" draggable="false" />
+        </div>
+      </section>
+    </main>
+
+    <!-- Click-a-block helper, positioned over the picked bubble. -->
+    <div id="auto-pick" class="pick-bubble" hidden>
+      <span id="auto-pick-text" class="pick-text"></span>
+      <button type="button" id="auto-pick-copy" class="btn small">Copy</button>
+    </div>
+
+    <aside class="rawpanel" id="auto-raw" hidden aria-label="Raw data">
+      <div class="rawhead">
+        <div class="rawtabs" role="tablist">
+          <button type="button" class="rawtab" data-raw-tab="raw" role="tab" aria-selected="true">lens.raw</button>
+          <button type="button" class="rawtab" data-raw-tab="tree" role="tab" aria-selected="false">tree</button>
+        </div>
+        <div class="rawactions">
+          <button type="button" id="auto-raw-copy" class="btn small">Copy</button>
+          <button type="button" id="auto-raw-close" class="btn small">Hide</button>
+        </div>
+      </div>
+      <div class="rawnote" id="auto-raw-note"></div>
+      <pre class="rawbody" id="auto-raw-body"></pre>
+    </aside>
+
+    <div class="dropveil" id="auto-dropveil" hidden><span>Drop to translate</span></div>
+
+    <input id="auto-file" type="file" accept="image/*" hidden />
+
+    <!-- The content-script modules run here too, exactly as they do in the
+         local viewer: they own the overlay, the erase layer and the message
+         plumbing, so this page only has to choose an image and ask for it to
+         be translated. Loaded in the same order as the manifest's list. -->
+    <script src="../shared/compat.js"></script>
+    <script src="../content/namespace.js"></script>
+    <script src="../content/trace.js"></script>
+    <script src="../content/keepalive.js"></script>
+    <script src="../content/dom-utils.js"></script>
+    <script src="../content/image-finder.js"></script>
+    <script src="../content/target-key.js"></script>
+    <script src="../content/erase-canvas.js"></script>
+    <script src="../content/payload.js"></script>
+    <script src="../content/overlay.js"></script>
+    <!-- content/image-buttons.js is deliberately NOT loaded here. Its 🔍 button
+         translates with the SHARED settings, and on this page that would sit on
+         top of an image the page itself translates with its own mode/language —
+         two different answers from one picture. -->
+    <script src="../content/site-mangadex.js"></script>
+    <script src="../content/mangadex.js"></script>
+    <script src="../content/messaging.js"></script>
+    <script src="../content/index.js"></script>
+    <script type="module" src="auto.js"></script>
+  </body>
+</html>

@@ -156,6 +156,11 @@ button {
   color: var(--danger);
 }
 
+/* `hidden` has to beat any display rule an element also carries. */
+[hidden] {
+  display: none !important;
+}
+
 .sidebar-note {
   font-size: 12px;
   line-height: 1.45;

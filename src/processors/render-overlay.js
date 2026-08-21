@@ -537,8 +537,15 @@ export function paragraphBlock(geometries) {
   };
 }
 
-function makeLine(geometry, text, fontPx, onDark = false, extraClasses = []) {
+/**
+ * `paraId` is the LensDocument paragraph this line was drawn from, stamped as
+ * `data-tp-para`. Every line of one bubble carries the same value, which is
+ * what lets a reader select the whole bubble instead of a single visual row.
+ * It is descriptive only — nothing in the rendering reads it back.
+ */
+function makeLine(geometry, text, fontPx, onDark = false, extraClasses = [], paraId = "") {
   const div = document.createElement("div");
+  if (paraId) div.setAttribute?.("data-tp-para", String(paraId));
   const classes = ["tp-line"];
   // White ink with a dark halo, on a paragraph the server measured as sitting
   // on a dark background. The CSS for this has been here all along; what was
@@ -900,7 +907,7 @@ export function renderOverlay(
       if (rebuilt) {
         for (const row of rebuilt.lines) {
           const line = makeLine(
-            row.geometry, row.text, Math.max(MIN_FONT_PX, row.fontPx), rebuilt.onDark, ["bubble"],
+            row.geometry, row.text, Math.max(MIN_FONT_PX, row.fontPx), rebuilt.onDark, ["bubble"], paraId,
           );
           scope.appendChild(line);
           report.lines++;
@@ -927,7 +934,7 @@ export function renderOverlay(
         const fontPx = fitParagraphFontSizeHorizontal(
           rebuilt.block.widthPct, rebuilt.block.heightPct, rebuilt.text, imgW, imgH,
         );
-        const line = makeLine(rebuilt.block, rebuilt.text, Math.max(MIN_FONT_PX, fontPx), onDark);
+        const line = makeLine(rebuilt.block, rebuilt.text, Math.max(MIN_FONT_PX, fontPx), onDark, [], paraId);
         line.classList.add("bubble");
         scope.appendChild(line);
         report.paragraphs++;
@@ -1081,7 +1088,7 @@ export function renderOverlay(
         const fontPx =
           shared ?? fitOne(geometry.widthPct, geometry.heightPct, geometry.text, imgW, imgH);
         visibleParent.appendChild(
-          makeLine(geometry, geometry.text, Math.max(MIN_FONT_PX, fontPx), onDark),
+          makeLine(geometry, geometry.text, Math.max(MIN_FONT_PX, fontPx), onDark, [], paraId),
         );
         report.lines++;
       }
@@ -1125,7 +1132,7 @@ export function renderOverlay(
       : block.upright === true
         ? fitColumnFontSize(block.widthPct, block.heightPct, displayText, imgW, imgH)
         : fitItemFontSize(block.widthPct, block.heightPct, displayText, imgW, imgH);
-    const line = makeLine(block, displayText, Math.max(MIN_FONT_PX, fontPx), onDark);
+    const line = makeLine(block, displayText, Math.max(MIN_FONT_PX, fontPx), onDark, [], paraId);
     if (shouldWrap) line.classList.add("bubble");
     visibleParent.appendChild(line);
     report.lines++;

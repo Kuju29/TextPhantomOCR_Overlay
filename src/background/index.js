@@ -254,7 +254,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         srcUrl: String(msg?.srcUrl || "") || undefined,
         frameId: Number(sender?.frameId) || 0,
       };
-      onContextMenuClicked(menuInfo, tab)
+      // `overrides` lets one page translate with its own mode/language/source
+      // WITHOUT writing them into the shared settings every other page reads
+      // (the Auto translate tab does this). `debug` asks the extension route to
+      // keep the Lens material it would otherwise drop after decoding.
+      onContextMenuClicked(menuInfo, tab, {
+        overrides: msg?.overrides && typeof msg.overrides === "object" ? msg.overrides : null,
+        debug: msg?.debug && typeof msg.debug === "object" ? msg.debug : null,
+      })
         .then(() => sendResponse({ ok: true }))
         .catch((e) => sendResponse({ ok: false, error: e?.message || String(e) }));
       return true;

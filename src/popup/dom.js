@@ -67,6 +67,8 @@ export const els = {
   openLocalFolder: document.getElementById("open-local-folder"),
   localImagesInput: document.getElementById("local-images-input"),
   localFolderInput: document.getElementById("local-folder-input"),
+  openAutoTranslate: document.getElementById("open-auto-translate"),
+  localPickerMsg: document.getElementById("local-picker-msg"),
 };
 
 /**

@@ -293,14 +293,28 @@
           <div class="section-title">Local viewer</div>
           <div class="field">
             <div class="file-actions">
-              <button type="button" id="open-local-images" class="action-btn primary">Open image(s)</button>
-              <button type="button" id="open-local-folder" class="action-btn secondary">Open folder</button>
+              <button type="button" id="open-local-images" class="action-btn primary">Select a image</button>
+              <button type="button" id="open-local-folder" class="action-btn secondary">Select folder</button>
             </div>
             <div class="hint">
-              Opens your manga pages in a reader tab. Right-click a page to translate, then download the image (text baked in) or HTML.
+              <strong>Select a image</strong> takes any number of image files. <strong>Select folder</strong> takes every image sitting directly in the folder you pick — images inside its subfolders are not added.<br />
+              Both open your pages in a reader tab. Right-click a page to translate, then download the image (text baked in) or HTML.
             </div>
+            <div id="local-picker-msg" class="hint local-picker-msg" role="status" aria-live="polite"></div>
             <input id="local-images-input" type="file" accept="image/*" multiple hidden />
             <input id="local-folder-input" type="file" accept="image/*" multiple webkitdirectory hidden />
+          </div>
+
+          <div class="divider" role="separator"></div>
+          <div class="section-title">Auto translate</div>
+          <div class="field">
+            <div class="file-actions">
+              <button type="button" id="open-auto-translate" class="action-btn primary">Auto translate</button>
+            </div>
+            <div class="hint">
+              Opens a full-page tab where you drop, paste (Ctrl+V) or upload one image and it translates immediately. Dropping another image replaces it and translates again.<br />
+              That tab keeps its <strong>own</strong> mode / language / source, so experimenting there never changes the settings this popup uses for web pages.
+            </div>
           </div>
 
           <div class="divider" role="separator"></div>

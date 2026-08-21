@@ -127,8 +127,15 @@
           srcUrl: msg?.srcUrl,
           clickedSrcUrl: msg?.clickedSrcUrl,
         });
+        // The requester may be running this one image on its own mode/language
+        // (the Auto translate tab does). Build the payload for THAT mode:
+        // `render.lensDocument` and the background mode are decided here, and
+        // deciding them from the shared setting would describe a different job
+        // than the one that is about to run.
+        const wantMode = String(msg?.overrides?.mode || "").trim() || mode;
+        const wantLang = String(msg?.overrides?.lang || "").trim() || lang;
         const payload = img
-          ? await TP.buildPayloadFromImage(img, mode, lang, "img_one", "context_menu_single", true)
+          ? await TP.buildPayloadFromImage(img, wantMode, wantLang, "img_one", "context_menu_single", true)
           : null;
         return sendResponse({ ok: Boolean(payload), payload });
       }

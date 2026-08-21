@@ -42,6 +42,7 @@ import {
 } from "../shared/prompt.js";
 import {
   filterImageFiles,
+  pickImageDirectory,
   saveLocalSession,
   sortLocalPages,
   toLocalPageRecord,
@@ -871,15 +872,43 @@ function scheduleSaveAi() {
 }
 
 // Local viewer
+// Reports what the picker actually accepted. A pick that yields no image is a
+// real outcome the user has to see: an empty folder, a folder whose images all
+// sit one level deeper, or a non-image selection made through "All files".
+function reportLocalPick(text) {
+  if (els.localPickerMsg) els.localPickerMsg.textContent = String(text || "");
+}
+
 async function openLocalViewerFromFiles(fileList, sourceLabel) {
+  const picked = [...(fileList || [])];
   // Folder picker: only images DIRECTLY in the chosen folder (no subfolders).
-  const images = filterImageFiles(fileList, { topLevelOnly: sourceLabel === "folder" });
-  if (!images.length) return;
+  const topLevelOnly = sourceLabel === "folder";
+  const images = filterImageFiles(picked, { topLevelOnly });
+  if (!images.length) {
+    const deeper = topLevelOnly
+      ? filterImageFiles(picked, { topLevelOnly: false }).length
+      : 0;
+    reportLocalPick(
+      deeper
+        ? `No images directly in that folder. ${deeper} image(s) are in its subfolders, which this picker does not add.`
+        : `Nothing was added: none of the ${picked.length} selected file(s) are images.`,
+    );
+    return;
+  }
+  reportLocalPick(`Opening ${images.length} image(s)…`);
+  await openLocalViewerSession(
+    sortLocalPages(images.map((file, i) => toLocalPageRecord(file, i))),
+    sourceLabel,
+  );
+}
+
+/** Save the pages as a session and open the reader tab on them. */
+async function openLocalViewerSession(pages, sourceLabel) {
   const session = await saveLocalSession({
     id: crypto.randomUUID(),
     createdAt: Date.now(),
     title: sourceLabel,
-    pages: sortLocalPages(images.map((file, i) => toLocalPageRecord(file, i))),
+    pages,
   });
   await createTab({
     url: chrome.runtime.getURL(`viewer/viewer.html?sid=${encodeURIComponent(session.id)}`),
@@ -891,6 +920,58 @@ async function handleLocalPickerChange(input, sourceLabel) {
   const files = [...(input?.files || [])];
   if (input) input.value = "";
   await openLocalViewerFromFiles(files, sourceLabel);
+}
+
+/**
+ * Prefer a real directory handle. Unlike `webkitdirectory`, this path does not
+ * hand TextPhantom a recursive FileList: only direct child image handles are
+ * opened. Brave currently does not expose showDirectoryPicker(), so it falls
+ * back immediately to the existing folder input there.
+ */
+async function handleLocalFolderClick() {
+  reportLocalPick("");
+
+  // Keep the fallback click inside the original user gesture on Brave.
+  if (typeof globalThis.showDirectoryPicker !== "function") {
+    if (els.localFolderInput) els.localFolderInput.value = "";
+    els.localFolderInput?.click();
+    return;
+  }
+
+  reportLocalPick("Opening folder…");
+  const picked = await pickImageDirectory({ id: "textphantom-popup-images" });
+  if (picked.cancelled) {
+    reportLocalPick("");
+    return;
+  }
+  if (picked.error) {
+    reportLocalPick(`Could not read that folder: ${picked.error?.message || String(picked.error)}`);
+    return;
+  }
+
+  const result = picked.result;
+  if (!result?.files?.length) {
+    reportLocalPick(
+      `No images directly in “${result?.folderName || "that folder"}”.` +
+        `${result?.subfolders ? ` ${result.subfolders} subfolder(s) were not opened.` : ""}` +
+        `${result?.skipped ? ` ${result.skipped} non-image file(s) were ignored.` : ""}`,
+    );
+    return;
+  }
+
+  reportLocalPick(
+    `Opening ${result.files.length} image(s) from “${result.folderName || "folder"}”` +
+      `${result.skipped ? ` · ${result.skipped} non-image file(s) ignored` : ""}` +
+      `${result.subfolders ? ` · ${result.subfolders} subfolder(s) not opened` : ""}…`,
+  );
+  await openLocalViewerSession(
+    sortLocalPages(
+      result.files.map((file, i) =>
+        toLocalPageRecord(file, i, result.relativePaths?.[i] || ""),
+      ),
+    ),
+    "folder",
+  );
 }
 
 // Initial load
@@ -1501,12 +1582,18 @@ els.imgButtonsToggle?.addEventListener("change", async () => {
 });
 
 els.openLocalImages?.addEventListener("click", () => {
+  reportLocalPick("");
   if (els.localImagesInput) els.localImagesInput.value = "";
   els.localImagesInput?.click();
 });
 els.openLocalFolder?.addEventListener("click", () => {
-  if (els.localFolderInput) els.localFolderInput.value = "";
-  els.localFolderInput?.click();
+  void handleLocalFolderClick();
+});
+
+// Auto translate: its own full-page tab, with its own saved mode/language/source.
+els.openAutoTranslate?.addEventListener("click", async () => {
+  await createTab({ url: chrome.runtime.getURL("auto/auto.html") });
+  window.close();
 });
 els.localImagesInput?.addEventListener("change", () => handleLocalPickerChange(els.localImagesInput, "images"));
 els.localFolderInput?.addEventListener("change", () => handleLocalPickerChange(els.localFolderInput, "folder"));

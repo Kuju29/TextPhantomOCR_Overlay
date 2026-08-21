@@ -804,6 +804,27 @@
         })();
     if (!ops) return;
 
+    /**
+     * Tell a page that drives translation itself (the local viewer, the Auto
+     * translate tab) that this image is finished.
+     *
+     * Every exit announces, including the ones that draw a badge or nothing at
+     * all: "Lens found no text" is an answer, and a page that only hears about
+     * the successes waits for a message that is never coming.
+     * @param {boolean} drawn Whether translated text actually reached the page.
+     */
+    const announce = (drawn, note = "") => {
+      if (useMd) return;
+      TP.emitViewerEvent("textphantom:overlay-updated", {
+        original,
+        result,
+        mode: isTextMode ? "lens_text" : "lens_images",
+        source: req,
+        drawn: Boolean(drawn),
+        note: String(note || ""),
+      });
+    };
+
     const statusReason = resultStatusReason(result);
     if (isTextMode && req === "ai" && statusReason) {
       const rec = ops.upsert("badge");
@@ -812,6 +833,7 @@
       rec.scope.textContent = "";
       rec.scope.appendChild(createOverlayBadge(statusBadgeLabel(statusReason)));
       nudgeOverlay(imgElement, ops.schedule);
+      announce(false, statusBadgeLabel(statusReason));
       return;
     }
 
@@ -824,6 +846,7 @@
       // not proof that an API key is missing.
       rec.scope.appendChild(createOverlayBadge("AI output unavailable"));
       nudgeOverlay(imgElement, ops.schedule);
+      announce(false, "AI output unavailable");
       return;
     }
 
@@ -834,9 +857,11 @@
         if (localBg) await applyLocalBackground(rec, imgElement, result);
         rec.scope.textContent = "";
         nudgeOverlay(imgElement, ops.schedule);
+        announce(false, "no overlay text for this image");
         return;
       }
       ops.hide();
+      announce(false, "no overlay text for this image");
       return;
     }
 
@@ -913,15 +938,7 @@
       fillScope(rec.scope, html);
     }
     nudgeOverlay(imgElement, ops.schedule);
-
-    if (!useMd) {
-      TP.emitViewerEvent("textphantom:overlay-updated", {
-        original,
-        result,
-        mode: isTextMode ? "lens_text" : "lens_images",
-        source: req,
-      });
-    }
+    announce(true);
   }
 
 
@@ -932,9 +949,15 @@
 
   async function applyImageErrorMessage(msg) {
     const isNoOverlay = /no overlay data/i.test(String(msg?.message || ""));
+    const text = isNoOverlay ? "No text detected" : String(msg?.message || "");
+    // Pages that drive translation themselves (the local viewer, the Auto
+    // translate tab) have no context menu to watch and no toast in view.
+    // Without this event they would sit on "Translating…" forever whenever a
+    // job ends in an error instead of an overlay.
+    TP.emitViewerEvent("textphantom:image-error", { original: msg?.original, message: text });
     setTimeout(() => {
       if (TP.shouldShowReplaceError(msg?.original)) {
-        TP.markImageError(msg?.original, isNoOverlay ? "No text detected" : msg?.message);
+        TP.markImageError(msg?.original, text);
       }
     }, 1200);
     return { ok: true };

@@ -12,9 +12,13 @@
 
 import {
   deleteLocalSession,
+  dropEntriesFrom,
   filterImageFiles,
+  imagesFromDroppedEntries,
   isTopLevelRelativePath,
   loadLocalSession,
+  pagesFromDrop,
+  pickImageDirectory,
   saveLocalSession,
   sortLocalPages,
   toLocalPageRecord,
@@ -634,17 +638,130 @@ async function loadSessionIntoView(id) {
 }
 
 async function replaceSessionFromFiles(fileList, sourceLabel) {
+  const picked = [...(fileList || [])];
   // Folder picker: only images DIRECTLY in the chosen folder (no subfolders).
-  const files = filterImageFiles(fileList, { topLevelOnly: sourceLabel === "folder" });
-  if (!files.length) return;
+  const topLevelOnly = sourceLabel === "folder";
+  const files = filterImageFiles(picked, { topLevelOnly });
+  if (!files.length) {
+    // Say why the reader did not change. Doing nothing, silently, reads as a
+    // broken button.
+    const deeper = topLevelOnly ? filterImageFiles(picked, { topLevelOnly: false }).length : 0;
+    setStatus(
+      deeper
+        ? `No images directly in that folder. ${deeper} image(s) sit in its subfolders, which are not added.`
+        : `Nothing was added: none of the ${picked.length} selected file(s) are images.`,
+    );
+    return;
+  }
+  await replaceSessionFromPages(
+    sortLocalPages(files.map((file, i) => toLocalPageRecord(file, i))),
+    sourceLabel,
+  );
+}
+
+/** Save the pages as this viewer's session and reload onto them. */
+async function replaceSessionFromPages(pages, sourceLabel) {
   const next = await saveLocalSession({
     id: crypto.randomUUID(),
     createdAt: Date.now(),
     title: sourceLabel,
-    pages: sortLocalPages(files.map((file, i) => toLocalPageRecord(file, i))),
+    pages,
   });
   if (currentSession?.id) deleteLocalSession(currentSession.id).catch(() => {});
   location.href = `${location.pathname}?sid=${encodeURIComponent(next.id)}`;
+}
+
+/**
+ * Use a native directory handle when available. Only direct child image handles
+ * are opened; subfolders and non-image files are ignored without reading their
+ * contents. Brave currently lacks this API, so its click path uses the existing
+ * `webkitdirectory` fallback.
+ */
+async function replaceSessionFromNativeFolder() {
+  setStatus("Opening folder…");
+  const picked = await pickImageDirectory({ id: "textphantom-viewer-images" });
+  if (picked.cancelled) {
+    setStatus("Folder selection cancelled.");
+    return;
+  }
+  if (picked.error) {
+    setStatus(`Could not read that folder: ${picked.error?.message || String(picked.error)}`);
+    return;
+  }
+
+  const result = picked.result;
+  if (!result?.files?.length) {
+    setStatus(
+      `No images directly in “${result?.folderName || "that folder"}”.` +
+        `${result?.subfolders ? ` ${result.subfolders} subfolder(s) were not opened.` : ""}` +
+        `${result?.skipped ? ` ${result.skipped} non-image file(s) were ignored.` : ""}`,
+    );
+    return;
+  }
+
+  setStatus(
+    `Loading ${result.files.length} image(s) from “${result.folderName || "folder"}”` +
+      `${result.skipped ? ` · ${result.skipped} non-image file(s) ignored` : ""}` +
+      `${result.subfolders ? ` · ${result.subfolders} subfolder(s) not opened` : ""}…`,
+  );
+  await replaceSessionFromPages(
+    sortLocalPages(
+      result.files.map((file, i) =>
+        toLocalPageRecord(file, i, result.relativePaths?.[i] || ""),
+      ),
+    ),
+    "folder",
+  );
+}
+
+/**
+ * Load the images out of dropped folders.
+ *
+ * This is the folder selection that works in every Chromium browser, Brave
+ * included: the browser hands over the directory, only its top level is read,
+ * only images are taken, and nothing is uploaded or confirmed.
+ */
+async function replaceSessionFromDrop(entries, plainFiles) {
+  if (!entries.length) {
+    // No entries API: all that arrived is a flat file list.
+    const images = filterImageFiles(plainFiles);
+    if (!images.length) {
+      setStatus(`Nothing was added: none of the ${plainFiles.length} dropped file(s) are images.`);
+      return;
+    }
+    setStatus(`Loading ${images.length} dropped image(s)…`);
+    await replaceSessionFromPages(
+      sortLocalPages(images.map((file, i) => toLocalPageRecord(file, i))),
+      "images",
+    );
+    return;
+  }
+
+  setStatus("Reading the dropped folder…");
+  let drop;
+  try {
+    drop = await imagesFromDroppedEntries(entries);
+  } catch (error) {
+    setStatus(`Could not read what was dropped: ${error?.message || String(error)}`);
+    return;
+  }
+  if (!drop.files.length) {
+    setStatus(
+      drop.hadFolder
+        ? `No images directly in “${drop.folderNames.join(", ")}” (${drop.scanned} file(s) checked` +
+          `${drop.subfolders ? `, ${drop.subfolders} subfolder(s) not opened` : ""}).`
+        : `Nothing was added: none of the ${drop.scanned} dropped file(s) are images.`,
+    );
+    return;
+  }
+  setStatus(
+    `Loading ${drop.files.length} image(s)` +
+      `${drop.hadFolder ? ` from “${drop.folderNames.join(", ")}”` : ""}` +
+      `${drop.skipped ? ` · ${drop.skipped} non-image file(s) skipped` : ""}` +
+      `${drop.subfolders ? ` · ${drop.subfolders} subfolder(s) not opened` : ""}` +
+      `${drop.truncated ? " · WARNING: the folder listing stopped early, so this is not all of it" : ""}.`,
+  );
+  await replaceSessionFromPages(pagesFromDrop(drop), drop.hadFolder ? "folder" : "images");
 }
 
 async function clearViewer() {
@@ -676,12 +793,20 @@ function handleOverlayUpdated(detail) {
   const pageId = findPageIdByOriginal(detail?.original);
   const page = pagesById.get(pageId);
   if (!page) return;
-  page.overlayApplied = true;
+  // `drawn: false` means the job finished without putting any translated text
+  // on the page — Lens read no text, or the AI layer was unavailable. Marking
+  // that page "Overlay ready" would claim a translation that is not there.
+  const drawn = detail?.drawn !== false;
+  page.overlayApplied = drawn;
   const imageDataUri = String(detail?.result?.imageDataUri || "");
   if (imageDataUri.startsWith("data:")) page.translatedImageDataUri = imageDataUri;
   pagesById.set(pageId, page);
   syncPageUi(pageId);
-  setStatus(`Overlay ready for ${page.name}`);
+  setStatus(
+    drawn
+      ? `Overlay ready for ${page.name}`
+      : `Nothing drawn on ${page.name}${detail?.note ? ` — ${detail.note}` : ""}`,
+  );
 }
 
 // Event wiring
@@ -755,8 +880,30 @@ els.openImages?.addEventListener("click", () => {
   els.imagesInput?.click();
 });
 els.openFolder?.addEventListener("click", () => {
-  resetInput(els.folderInput);
-  els.folderInput?.click();
+  // Brave: fall back synchronously so the file chooser keeps the user gesture.
+  if (typeof globalThis.showDirectoryPicker !== "function") {
+    resetInput(els.folderInput);
+    els.folderInput?.click();
+    return;
+  }
+  void replaceSessionFromNativeFolder();
+});
+
+// Dropping a folder IS a folder selection, and the one that works everywhere.
+document.addEventListener("dragover", (event) => {
+  if (event.target.closest?.(".page-list-item")) return; // page reordering owns its own drags
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+});
+document.addEventListener("drop", (event) => {
+  if (dragPageId || event.target.closest?.(".page-list-item")) return;
+  event.preventDefault();
+  // Both reads must happen before this handler yields; the transfer is emptied
+  // as soon as it does.
+  const entries = dropEntriesFrom(event.dataTransfer);
+  const plainFiles = [...(event.dataTransfer?.files || [])];
+  if (!entries.length && !plainFiles.length) return;
+  void replaceSessionFromDrop(entries, plainFiles);
 });
 els.imagesInput?.addEventListener("change", async () => {
   const files = [...(els.imagesInput.files || [])];

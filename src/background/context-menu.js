@@ -44,6 +44,22 @@ function isAllowedFileSchemeAccess() {
 
 const isFileUrl = (u) => /^file:/i.test(String(u || ""));
 
+/**
+ * Read a caller-supplied mode/source override.
+ *
+ * Returns "" for anything that is not a real value, so the caller falls back to
+ * the user's own setting. A silent coercion to the default would run the job on
+ * a mode nobody chose — neither the user's setting nor the override.
+ */
+const overrideMode = (v) => {
+  const s = String(v || "").trim();
+  return s === "lens_images" || s === "lens_text" ? s : "";
+};
+const overrideSource = (v) => {
+  const s = String(v || "").trim().toLowerCase();
+  return s === "original" || s === "translated" || s === "ai" ? s : "";
+};
+
 let menusRebuilding = false;
 
 // Recreates the context-menu items, ignoring overlapping calls.
@@ -159,7 +175,7 @@ function buildMetadata({ existing, imageId, batchId, sourceUrl, stage }) {
 
 // Handles a click on `img_one` by building the clicked image's payload and enqueuing it.
 async function handleTranslateOne(menuInfo, tab, ctx) {
-  const { mode, lang, source, aiPayload, layoutPayload, ratePayload, limitsPayload, engineMode, tabSessionId, batchId, seriesKey } = ctx;
+  const { mode, lang, source, aiPayload, layoutPayload, ratePayload, limitsPayload, engineMode, tabSessionId, batchId, seriesKey, debug } = ctx;
   const frameId = Number(menuInfo.frameId) || 0;
   let originalUrl = menuInfo.srcUrl;
 
@@ -173,6 +189,11 @@ async function handleTranslateOne(menuInfo, tab, ctx) {
         type: "GET_CONTEXT_IMAGE_PAYLOAD",
         srcUrl: originalUrl || null,
         clickedSrcUrl: menuInfo.clickedSrcUrl || originalUrl || null,
+        // The content script picks `render.lensDocument` and the background
+        // mode from the mode it is handed, so a caller running on its own mode
+        // has to say so here as well: reading the shared setting would build
+        // the payload for the OTHER mode and then run it under this one.
+        overrides: { mode, lang },
       },
       frameId,
     );
@@ -201,6 +222,7 @@ async function handleTranslateOne(menuInfo, tab, ctx) {
     rate: ratePayload,
     limits: limitsPayload,
     engine: engineMode,
+    debug,
     context: {
       ...(payload?.context && typeof payload.context === "object" ? payload.context : {}),
       page_url: tab?.url || null,
@@ -370,8 +392,23 @@ async function handleTranslateAll(menuInfo, tab, ctx) {
   for (const pl of payloads) enqueue(pl, tab.id, imagesFrameId);
 }
 
-// Handles a context-menu click: reads settings, resolves the series key and dispatches to the single or all-images flow.
-export async function onContextMenuClicked(menuInfo, tab) {
+/**
+ * Handles a context-menu click: reads settings, resolves the series key and dispatches to the single or all-images flow.
+ *
+ * `options.overrides` runs ONE request on a caller-supplied mode/language/
+ * source instead of the shared settings, without writing them to storage —
+ * used by the Auto translate tab, which is deliberately independent of the
+ * popup. Everything else about the job (AI key, engine, pacing) still comes
+ * from the user's real settings, because those are not per-tab preferences.
+ * `options.debug.raw` asks the extension route to carry the Lens material it
+ * would otherwise drop once decoded.
+ *
+ * @param {object} menuInfo
+ * @param {object} tab
+ * @param {{overrides?: {mode?: string, lang?: string, source?: string}|null,
+ *          debug?: {raw?: boolean}|null}} [options]
+ */
+export async function onContextMenuClicked(menuInfo, tab, options = {}) {
   if (!tab?.id) return;
   log.info("menu click", menuInfo.menuItemId);
   try {
@@ -379,8 +416,16 @@ export async function onContextMenuClicked(menuInfo, tab) {
     const tabSessionId = ensureTabSession(tab.id, tab?.url || "");
 
     const settings = await readFullSettings();
-    const { mode, lang } = settings;
-    const source = mode === "lens_text" ? settings.sources || "translated" : "translated";
+    const overrides = options?.overrides && typeof options.overrides === "object" ? options.overrides : null;
+    const debug = options?.debug && typeof options.debug === "object" ? { raw: options.debug.raw === true } : null;
+    const mode = overrideMode(overrides?.mode) || settings.mode;
+    const lang = String(overrides?.lang || "").trim() || settings.lang;
+    const source = mode === "lens_text"
+      ? overrideSource(overrides?.source) || settings.sources || "translated"
+      : "translated";
+    if (overrides) {
+      log.info("running this request on caller-supplied settings", { mode, lang, source, raw: debug?.raw === true });
+    }
     const seriesKey = refineSeriesKeyWithTitle(
       await resolveSeriesKey(tab?.url || ""),
       tab?.title || "",
@@ -410,6 +455,7 @@ export async function onContextMenuClicked(menuInfo, tab) {
       tabSessionId,
       batchId,
       seriesKey,
+      debug,
     };
     sendToastToTab(
       tab.id,

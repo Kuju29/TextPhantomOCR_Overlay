@@ -1268,6 +1268,22 @@ async function runLensDirectPath(base, payload, { tabId, frameId, signal = null,
     originalTextFull: String(lens?.originalTextFull || ""),
     metadata: payload.metadata,
     perf: { path: "lens_raw" },
+    // Opt-in inspection material for a page that asked to see the two ends of
+    // this route: `lensRaw` is the answer from `/v1/lens/raw` exactly as it
+    // arrived (still-encoded paragraph blobs and all), `lensTrees` is what the
+    // decoder made of it. Both are heavy, so they travel only when the caller
+    // asked; every other job carries the result alone, as before.
+    ...(payload?.debug?.raw === true
+      ? {
+          debugLens: {
+            imageSize: lensImageSize,
+            raw: lens,
+            trees: decoded.trees,
+            groups: decoded.groups,
+            warnings: decoded.warnings,
+          },
+        }
+      : {}),
   };
 }
 
@@ -1289,8 +1305,12 @@ async function planLocalAi(payload) {
 
 // Returns a payload copy that asks the full server endpoint to render the background image.
 function payloadForFullServer(payload) {
+  // `debug` is an extension-side request for material the LOCAL route keeps
+  // after decoding. The API has no such field and never answers it, so it is
+  // dropped here rather than sent to a schema that did not ask for it.
+  const { debug: _debug, ...rest } = payload || {};
   return {
-    ...payload,
+    ...rest,
     render: {
       ...(payload?.render || {}),
       background: "image",

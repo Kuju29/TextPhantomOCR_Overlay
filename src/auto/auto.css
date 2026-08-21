@@ -1,0 +1,455 @@
+/* TextPhantom — Auto translate tab.
+   Draws from the shared tokens in ../shared/theme.css. */
+
+* {
+  box-sizing: border-box;
+}
+
+/*
+ * `hidden` has to beat the layout rules below.
+ *
+ * The browser hides [hidden] with a user-agent rule, and ANY author rule that
+ * sets `display` — `.dropveil { display: flex }`, `.rawpanel { display: flex }`,
+ * `.pick-bubble { display: flex }` — outranks it. Without this line the drop
+ * veil's dashed border framed the whole window permanently, the raw panel could
+ * not be closed, and the copy bar sat over the page from the moment it loaded.
+ */
+[hidden] {
+  display: none !important;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  background: var(--tp-bg);
+  color: var(--tp-text);
+  font-family: var(--tp-font);
+  font-size: 13px;
+  overflow: hidden;
+}
+
+/* ---------- top bar ---------- */
+
+.bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  flex-wrap: wrap;
+  padding: 10px 16px;
+  background: var(--tp-surface);
+  border-bottom: 1px solid var(--tp-line);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.brand-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+}
+
+.brand-name {
+  font-weight: 700;
+  letter-spacing: 0.2px;
+}
+
+.brand-sub {
+  color: var(--tp-muted);
+  font-size: 11px;
+}
+
+.controls {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.ctl {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--tp-muted);
+}
+
+.ctl.zoom {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.ctl select,
+.urlrow input {
+  appearance: none;
+  min-width: 148px;
+  padding: 7px 10px;
+  border-radius: var(--tp-radius-sm);
+  border: 1px solid var(--tp-line-2);
+  background: var(--tp-surface-2);
+  color: var(--tp-text);
+  font: inherit;
+}
+
+.ctl input[type="range"] {
+  width: 170px;
+  accent-color: var(--tp-accent);
+}
+
+.btn {
+  padding: 8px 12px;
+  border-radius: var(--tp-radius-sm);
+  border: 1px solid var(--tp-line-2);
+  background: var(--tp-surface-2);
+  color: var(--tp-text);
+  font: inherit;
+  cursor: pointer;
+  transition: border-color var(--tp-transition), transform var(--tp-transition);
+}
+
+.btn:hover {
+  border-color: var(--tp-accent-soft);
+}
+
+.btn:active {
+  transform: translateY(1px);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.btn.primary {
+  background: var(--tp-grad);
+  border-color: transparent;
+  color: #fff;
+  font-weight: 600;
+}
+
+.btn.small {
+  padding: 5px 9px;
+  font-size: 11px;
+}
+
+.btn[aria-pressed="true"] {
+  border-color: var(--tp-accent);
+  color: var(--tp-accent-soft);
+}
+
+/* ---------- status ---------- */
+
+.statusbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 7px 16px;
+  background: var(--tp-surface-2);
+  border-bottom: 1px solid var(--tp-line);
+  font-size: 12px;
+}
+
+.status.working {
+  color: var(--tp-accent-soft);
+}
+
+.status.ok {
+  color: var(--tp-ok);
+}
+
+.status.bad {
+  color: var(--tp-err);
+}
+
+.status-meta {
+  color: var(--tp-muted);
+  font-size: 11px;
+  margin-left: auto;
+  text-align: right;
+}
+
+/* ---------- stage ---------- */
+
+.stage {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 22px 16px 60px;
+}
+
+.uploader {
+  max-width: 720px;
+  margin: 4vh auto 0;
+  text-align: center;
+}
+
+.uploader h1 {
+  font-size: 22px;
+  font-weight: 600;
+  margin: 0 0 18px;
+}
+
+.dropbox {
+  border: 1px dashed var(--tp-line-2);
+  border-radius: var(--tp-radius);
+  background: var(--tp-surface);
+  padding: 46px 24px;
+  transition: border-color var(--tp-transition), background var(--tp-transition);
+}
+
+.dropbox.hot {
+  border-color: var(--tp-accent);
+  background: color-mix(in srgb, var(--tp-accent) 12%, var(--tp-surface));
+}
+
+.dropbox-icon {
+  font-size: 30px;
+  margin-bottom: 10px;
+}
+
+.dropbox-text {
+  margin: 0;
+  color: var(--tp-muted);
+  line-height: 1.7;
+}
+
+kbd {
+  padding: 1px 5px;
+  border-radius: 5px;
+  border: 1px solid var(--tp-line-2);
+  background: var(--tp-surface-2);
+  font-family: inherit;
+  font-size: 11px;
+}
+
+.linkish {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: var(--tp-accent-2);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.or {
+  position: relative;
+  margin: 20px 0;
+  color: var(--tp-muted);
+}
+
+.or::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  border-top: 1px solid var(--tp-line);
+}
+
+.or span {
+  position: relative;
+  padding: 0 10px;
+  background: var(--tp-bg);
+}
+
+.urlrow {
+  display: flex;
+  gap: 8px;
+}
+
+.urlrow input {
+  flex: 1 1 auto;
+  border-radius: 999px;
+  padding: 10px 16px;
+}
+
+.uploader-note {
+  margin: 22px 0 0;
+  color: var(--tp-muted);
+  font-size: 11px;
+  line-height: 1.7;
+}
+
+/* ---------- image + overlay ---------- */
+
+.canvas {
+  display: flex;
+  justify-content: center;
+}
+
+.image-wrap {
+  position: relative;
+  width: max-content;
+  max-width: 100%;
+  line-height: 0;
+}
+
+#auto-image {
+  display: block;
+  width: var(--auto-width, 1200px);
+  max-width: 100%;
+  height: auto;
+  /*
+   * The image itself must not be draggable. Selecting overlay text means
+   * dragging across the picture, and the browser reads a drag that starts on an
+   * <img> as "the user is dragging this image" — which dropped it back onto
+   * this page and started the whole translation again.
+   */
+  -webkit-user-drag: none;
+  user-select: none;
+}
+
+/*
+ * Overlay text is inert everywhere else on purpose: on a real web page it must
+ * never swallow a click meant for the page underneath. This tab is the one
+ * place where the overlay IS the content, so its lines take pointer events and
+ * become selectable. The overlay's own rules are `!important`, so these have to
+ * be both more specific and important to win.
+ */
+.tp-ol-root .tp-ol-scope .tp-line {
+  pointer-events: auto !important;
+  user-select: text !important;
+  -webkit-user-select: text !important;
+  cursor: text;
+}
+
+.tp-ol-root .tp-ol-scope .tp-line.tp-picked {
+  background: color-mix(in srgb, var(--tp-accent) 30%, transparent);
+  border-radius: 4px;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--tp-accent) 60%, transparent);
+}
+
+.tp-ol-root .tp-ol-scope .tp-line::selection {
+  background: color-mix(in srgb, var(--tp-accent-2) 55%, transparent);
+}
+
+/*
+ * Anchored to the bottom of the window rather than floated over the picked
+ * bubble. Floating it there covered the next line down, so the click that was
+ * meant for that line hit this box instead.
+ */
+.pick-bubble {
+  position: fixed;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(520px, 80vw);
+  padding: 7px 9px;
+  border-radius: var(--tp-radius-sm);
+  border: 1px solid var(--tp-line-2);
+  background: var(--tp-surface);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.45);
+}
+
+.pick-text {
+  max-height: 4.6em;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--tp-text);
+}
+
+/* ---------- raw data ---------- */
+
+.rawpanel {
+  flex: 0 0 auto;
+  max-height: 42vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--tp-surface);
+  border-top: 1px solid var(--tp-line);
+}
+
+.rawhead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--tp-line);
+}
+
+.rawtabs {
+  display: flex;
+  gap: 6px;
+}
+
+.rawtab {
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--tp-muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.rawtab[aria-selected="true"] {
+  border-color: var(--tp-line-2);
+  background: var(--tp-surface-2);
+  color: var(--tp-text);
+}
+
+.rawactions {
+  display: flex;
+  gap: 6px;
+}
+
+.rawnote {
+  padding: 8px 14px 0;
+  color: var(--tp-muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.rawnote:empty {
+  display: none;
+}
+
+.rawbody {
+  flex: 1 1 auto;
+  margin: 0;
+  padding: 10px 14px 14px;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--tp-text);
+}
+
+/* ---------- drag veil ---------- */
+
+.dropveil {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--tp-bg) 78%, transparent);
+  border: 3px dashed var(--tp-accent);
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--tp-text);
+  pointer-events: none;
+}
