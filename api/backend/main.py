@@ -14,11 +14,13 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
 from backend.api.middleware import access_log_middleware, configure_uvicorn_access_log
+from backend.api.errors import ERROR_SCHEMA, payload as error_payload, failure_event
 from backend.api.routes import (
     blocks_v1,
     ai,
@@ -177,6 +179,42 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="TextPhantom OCR API", version="2.0", lifespan=lifespan)
+
+
+@app.exception_handler(HTTPException)
+async def tp_http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    """Normalise legacy route errors while preserving status, headers and detail."""
+    if isinstance(exc.detail, dict) and exc.detail.get("schema") == ERROR_SCHEMA:
+        detail = exc.detail
+    else:
+        legacy = exc.detail if isinstance(exc.detail, dict) else {}
+        message = str(legacy.get("message") or exc.detail or "Request failed")
+        status = int(exc.status_code)
+        detail = error_payload(
+            code=str(legacy.get("code") or (
+                "invalid_request" if status < 500 else "service_unavailable"
+            )),
+            message=message,
+            user_message=str(legacy.get("userMessage") or message),
+            origin="client" if status < 500 else "api",
+            stage=str(legacy.get("stage") or request.url.path.strip("/").replace("/", "_") or "http"),
+            category="input" if status < 500 else "service",
+            retryable=bool(legacy.get("retryable", status in (429, 502, 503, 504))),
+            http_status=status,
+            trace_id=str(legacy.get("traceId") or ""),
+            upstream_status=legacy.get("upstreamStatus"),
+            extra={k: v for k, v in legacy.items() if k not in {
+                "schema", "code", "message", "userMessage", "origin", "stage",
+                "failedStage", "category", "retryable", "httpStatus", "traceId",
+                "upstreamStatus",
+            }},
+        )
+        failure_event(request.url.path, detail)
+    headers = dict(exc.headers or {})
+    # Internal marker used only to prevent the access middleware from emitting
+    # a second, cause-less "Bad Gateway" line for this already-classified error.
+    headers["X-TP-Error-Schema"] = ERROR_SCHEMA
+    return JSONResponse(status_code=exc.status_code, content={"detail": detail}, headers=headers)
 
 # Provider SDKs are synchronous. Give them their own executor instead of the
 # process-wide asyncio default pool that Lens, ONNX, warmup and miscellaneous

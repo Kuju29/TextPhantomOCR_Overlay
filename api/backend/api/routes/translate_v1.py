@@ -36,6 +36,7 @@ from backend.ai.failure_reason import provider_http_failure as _provider_http_fa
 from backend.ai.providers import resolve_provider
 from backend.ai.rategate import rate_gate, RateGateRejected, RateGateTimeout
 from backend.api.local_client import wants_unlimited
+from backend.api.errors import payload as error_payload, failure_event, provider_status
 from backend.jobs.admission import AdmissionGate, AdmissionRejected, identity_of
 from backend.log import event
 from backend.security import SecurityError
@@ -216,6 +217,11 @@ async def translate_sync(payload: dict[str, Any], request: Request) -> dict:
                    .get("tp_trace") or "")
     if not trace_id:
         trace_id = f"srv-{time.time_ns():x}"
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    correlation = {
+        "batchId": metadata.get("batch_id") or payload.get("batch_id"),
+        "imageId": metadata.get("image_id") or payload.get("image_id"),
+    }
     trace.write("api", "api/routes/translate_v1.py", "translate_sync", "->",
                 {"mode": mode, "source": source, "lane": lane, "identity": identity,
                  "hasImage": bool(payload.get("imageDataUri")), "src": payload.get("src")},
@@ -288,17 +294,19 @@ async def translate_sync(payload: dict[str, Any], request: Request) -> dict:
         # No backlog: the client keeps the work and comes back. This is the
         # whole point of the gate — an honest "not now" instead of an accepted
         # job that sits behind two thousand others.
-        event(
-            "v1.translate.busy",
-            {"mode": mode, "source": source, "lane": lane, **gate.stats().as_dict()},
-            ok=False,
+        detail = error_payload(
+            code="server_busy", message=str(exc),
+            user_message="The server is busy. Please try this image again shortly.",
+            origin="api", stage=f"{lane}_admission", category="capacity",
+            retryable=True, http_status=503, trace_id=trace_id,
+            extra={"retryAfterMs": int(exc.retry_after_sec * 1000),
+                   "generationAttempts": 0},
+            correlation=correlation,
         )
+        failure_event("/v1/translate", detail, mode=mode, source=source, lane=lane)
         raise HTTPException(
             status_code=503,
-            detail={"code": "server_busy", "message": str(exc),
-                    "retryable": True,
-                    "retryAfterMs": int(exc.retry_after_sec * 1000),
-                    "generationAttempts": 0, "traceId": trace_id},
+            detail=detail,
             headers={"Retry-After": str(exc.retry_after_sec)},
         ) from exc
     except SecurityError as exc:
@@ -365,21 +373,28 @@ async def translate_sync(payload: dict[str, Any], request: Request) -> dict:
              "failedStage": failed_stage or "unknown"},
             trace_id=trace_id,
         )
-        event(
-            "v1.translate.failed",
-            {"mode": mode, "source": source, "failureKind": mapped.code,
-             "status": mapped.status, "failedStage": failed_stage or "unknown",
-             "traceId": trace_id}, ok=False,
-        )
+        upstream_status = provider_status(exc)
         headers = ({"Retry-After": str(mapped.retry_after)}
                    if mapped.retry_after else None)
         generation_attempts = 0 if mapped.code == "provider_rate_limited" else 1
+        detail = error_payload(
+            code=mapped.code, message=mapped.message,
+            user_message=mapped.message,
+            origin=("upstream_ai" if mapped.code.startswith("provider_") or
+                    mapped.code in {"invalid_model_output", "incomplete_output",
+                                    "generation_stopped", "empty_output",
+                                    "invalid_output_contract"} else "api"),
+            stage=failed_stage or "unknown",
+            category="upstream" if mapped.status in (429, 502) else "internal",
+            retryable=mapped.retryable, http_status=mapped.status,
+            trace_id=trace_id, upstream_status=upstream_status,
+            extra={"generationAttempts": generation_attempts},
+            correlation=correlation,
+        )
+        failure_event("/v1/translate", detail, mode=mode, source=source)
         raise HTTPException(
             status_code=mapped.status,
-            detail={"code": mapped.code, "message": mapped.message,
-                    "retryable": mapped.retryable, "traceId": trace_id,
-                    "failedStage": failed_stage or "unknown",
-                    "generationAttempts": generation_attempts},
+            detail=detail,
             headers=headers,
         ) from exc
     if paced:

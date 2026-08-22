@@ -42,7 +42,7 @@ import {
 } from "../shared/prompt.js";
 import {
   filterImageFiles,
-  pickImageDirectory,
+  pickImagesFromDirectory,
   saveLocalSession,
   sortLocalPages,
   toLocalPageRecord,
@@ -922,52 +922,50 @@ async function handleLocalPickerChange(input, sourceLabel) {
   await openLocalViewerFromFiles(files, sourceLabel);
 }
 
-/**
- * Prefer a real directory handle. Unlike `webkitdirectory`, this path does not
- * hand TextPhantom a recursive FileList: only direct child image handles are
- * opened. Brave currently does not expose showDirectoryPicker(), so it falls
- * back immediately to the existing folder input there.
- */
-async function handleLocalFolderClick() {
-  reportLocalPick("");
-
-  // Keep the fallback click inside the original user gesture on Brave.
-  if (typeof globalThis.showDirectoryPicker !== "function") {
-    if (els.localFolderInput) els.localFolderInput.value = "";
-    els.localFolderInput?.click();
-    return;
-  }
-
-  reportLocalPick("Opening folder…");
-  const picked = await pickImageDirectory({ id: "textphantom-popup-images" });
-  if (picked.cancelled) {
-    reportLocalPick("");
-    return;
-  }
-  if (picked.error) {
-    reportLocalPick(`Could not read that folder: ${picked.error?.message || String(picked.error)}`);
-    return;
-  }
-
-  const result = picked.result;
-  if (!result?.files?.length) {
+async function openLocalViewerFromDirectoryPicker() {
+  let picked;
+  try {
+    // The picker call happens immediately in the click turn so transient user
+    // activation is preserved. No webkitdirectory fallback is used.
+    picked = await pickImagesFromDirectory(
+      typeof window.showDirectoryPicker === "function"
+        ? window.showDirectoryPicker.bind(window)
+        : undefined,
+    );
+  } catch (error) {
     reportLocalPick(
-      `No images directly in “${result?.folderName || "that folder"}”.` +
-        `${result?.subfolders ? ` ${result.subfolders} subfolder(s) were not opened.` : ""}` +
-        `${result?.skipped ? ` ${result.skipped} non-image file(s) were ignored.` : ""}`,
+      `Could not open the folder picker: ${error?.message || String(error)}. ` +
+      "In Brave, enable brave://flags/#file-system-access-api and relaunch the browser.",
+    );
+    return;
+  }
+
+  if (!picked.supported) {
+    reportLocalPick(
+      "Brave has File System Access disabled. Open brave://flags/#file-system-access-api, " +
+      "set it to Enabled, then Relaunch Brave. TextPhantom will not fall back to " +
+      "webkitdirectory because that API reads the folder's entire file hierarchy first.",
+    );
+    return;
+  }
+  if (picked.cancelled) return;
+  if (!picked.files.length) {
+    reportLocalPick(
+      `No image files were found directly in “${picked.folderName || "that folder"}”.` +
+      `${picked.subfolders ? ` ${picked.subfolders} subfolder(s) were not opened.` : ""}`,
     );
     return;
   }
 
   reportLocalPick(
-    `Opening ${result.files.length} image(s) from “${result.folderName || "folder"}”` +
-      `${result.skipped ? ` · ${result.skipped} non-image file(s) ignored` : ""}` +
-      `${result.subfolders ? ` · ${result.subfolders} subfolder(s) not opened` : ""}…`,
+    `Opening ${picked.files.length} image(s) from “${picked.folderName || "folder"}”` +
+      `${picked.skipped ? ` · ${picked.skipped} non-image/invalid file(s) skipped without being opened` : ""}` +
+      `${picked.subfolders ? ` · ${picked.subfolders} subfolder(s) not opened` : ""}…`,
   );
   await openLocalViewerSession(
     sortLocalPages(
-      result.files.map((file, i) =>
-        toLocalPageRecord(file, i, result.relativePaths?.[i] || ""),
+      picked.files.map((file, i) =>
+        toLocalPageRecord(file, i, picked.relativePaths?.[i] || ""),
       ),
     ),
     "folder",
@@ -1587,7 +1585,8 @@ els.openLocalImages?.addEventListener("click", () => {
   els.localImagesInput?.click();
 });
 els.openLocalFolder?.addEventListener("click", () => {
-  void handleLocalFolderClick();
+  reportLocalPick("");
+  void openLocalViewerFromDirectoryPicker();
 });
 
 // Auto translate: its own full-page tab, with its own saved mode/language/source.
@@ -1596,7 +1595,6 @@ els.openAutoTranslate?.addEventListener("click", async () => {
   window.close();
 });
 els.localImagesInput?.addEventListener("change", () => handleLocalPickerChange(els.localImagesInput, "images"));
-els.localFolderInput?.addEventListener("change", () => handleLocalPickerChange(els.localFolderInput, "folder"));
 
 els.resetApi.addEventListener("click", () => {
   setEmojiStatus("loading", "Fetching remote default...");

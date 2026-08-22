@@ -39,7 +39,9 @@ def _ts() -> str:
 
 
 def _json(data: Any) -> str:
-    text = json.dumps(data, ensure_ascii=False, default=str, separators=(",", ":"))
+    # Use the exact same redaction for stdout and JSONL. Keeping two sanitisers
+    # is how a signed URL becomes safe on disk but leaks in the host console.
+    text = json.dumps(logfile.sanitize(data), ensure_ascii=False, default=str, separators=(",", ":"))
     if len(text) > _MAX_PAYLOAD_CHARS:
         text = text[:_MAX_PAYLOAD_CHARS] + "…"
     return text

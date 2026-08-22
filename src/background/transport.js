@@ -8,6 +8,7 @@ import { pendingByJob } from "./job-registry.js";
 import { getTabSessionId } from "./tab-sessions.js";
 import { readLimitedText } from "./images.js";
 import { note as traceNote } from "../shared/trace.js";
+import { attachTpError } from "../shared/error-contract.js";
 
 const log = createLogger("SW.transport");
 
@@ -15,6 +16,45 @@ const LONG_POLL_WAIT_SEC = 25;
 const LONG_POLL_FETCH_TIMEOUT_MS = 32000;
 const SUBMIT_TIMEOUT_MS = 90000;
 const MAX_BACKOFF_MS = 60000;
+
+function isHtmlResponse(ctype, body) {
+  return String(ctype || "").toLowerCase().includes("html") || /^\s*(?:<!doctype|<html|<)/i.test(String(body || ""));
+}
+
+function apiDetail(body) {
+  try {
+    const parsed = JSON.parse(String(body || ""));
+    return parsed?.detail && typeof parsed.detail === "object" ? parsed.detail : parsed;
+  } catch { return {}; }
+}
+
+function httpFailure(label, res, body, stage) {
+  const detail = apiDetail(body);
+  const html = isHtmlResponse(res.headers.get("content-type"), body);
+  const gateway = Number(res.status) === 502 && html;
+  const code = gateway ? "GATEWAY_502" : String(detail?.code || detail?.error ||
+    (res.status >= 500 ? "API_5XX" : "API_BAD_RESPONSE"));
+  const origin = gateway ? "hosting_gateway" : String(detail?.origin || detail?.actor || "api");
+  return attachTpError(new Error(`${label}: HTTP ${res.status}`), {
+    code, origin, stage: String(detail?.stage || detail?.failedStage || stage), httpStatus: res.status,
+    upstreamStatus: Number(detail?.upstreamStatus) || 0,
+    retryable: detail?.retryable === true || res.status === 429 || res.status >= 500,
+    traceId: String(detail?.traceId || ""), requestId: String(detail?.requestId || ""),
+    jobId: String(detail?.jobId || ""), batchId: String(detail?.batchId || ""),
+    imageId: String(detail?.imageId || ""), correlationId: String(detail?.correlationId || ""),
+    upstream: String(detail?.upstream || ""),
+    diagnostic: `${label}: HTTP ${res.status}${body ? ` - ${body}` : ""}`,
+  });
+}
+
+function networkFailure(error, stage, { timeout = false, cancelled = false } = {}) {
+  if (error?.tpError) return error;
+  return attachTpError(error, {
+    code: cancelled ? "CANCELLED" : timeout ? "NET_TIMEOUT" : "NET_OFFLINE",
+    origin: "browser", category: "network", stage,
+    retryable: !cancelled, diagnostic: error?.message || String(error),
+  });
+}
 
 // Result, error and status callbacks, injected by index.js.
 let handlers = {
@@ -98,18 +138,18 @@ export async function submitJobViaRest(base, payload, { idempotencyKey = "" } = 
     });
   } catch (e) {
     if (e?.name === "AbortError") {
-      throw new Error(
+      throw networkFailure(new Error(
         `REST submit timed out after ${Math.round(SUBMIT_TIMEOUT_MS / 1000)}s — the server did not respond. It may be starting up or overloaded.`,
-      );
+      ), "submit", { timeout: true });
     }
-    throw e;
+    throw networkFailure(e, "submit");
   } finally {
     clearTimeout(timer);
   }
   if (!res.ok) {
     const retryAfterMs = noteRetryAfter(res);
     const errBody = await readLimitedText(res);
-    const err = new Error(`REST submit failed: HTTP ${res.status}${errBody ? ` - ${errBody}` : ""}`);
+    const err = httpFailure("REST submit failed", res, errBody, "submit");
     err.status = res.status;
     err.retryAfterMs = retryAfterMs;
     throw err;
@@ -181,17 +221,17 @@ export async function translateViaSyncRest(base, payload, { onSlow, onSent, sign
   } catch (e) {
     if (e?.name === "AbortError") {
       if (ctrl.signal.reason === CANCELLED_REASON) {
-        const err = new Error("Cancelled — the tab navigated away or was closed.");
+        const err = networkFailure(new Error("Cancelled — the tab navigated away or was closed."), "translate", { cancelled: true });
         err.cancelled = true;
         throw err;
       }
-      const err = new Error(
+      const err = networkFailure(new Error(
         `Translation timed out after ${Math.round(SYNC_TIMEOUT_MS / 1000)}s — the server did not respond.`,
-      );
+      ), "translate", { timeout: true });
       err.timeout = true;
       throw err;
     }
-    throw e;
+    throw networkFailure(e, "translate");
   } finally {
     clearTimeout(timer);
     clearInterval(slowTimer);
@@ -201,14 +241,14 @@ export async function translateViaSyncRest(base, payload, { onSlow, onSent, sign
   if (!res.ok) {
     const retryAfterMs = noteRetryAfter(res);
     const body = await readLimitedText(res);
-    const err = new Error(`Translate failed: HTTP ${res.status}${body ? ` - ${body}` : ""}`);
+    const err = httpFailure("Translate failed", res, body, "translate");
     err.status = res.status;
     err.retryAfterMs = res.status === 503 || res.status === 429 ? retryAfterMs || 2000 : 0;
     try {
       const parsed = JSON.parse(body);
       const detail = parsed?.detail && typeof parsed.detail === "object" ? parsed.detail : parsed;
-      err.code = String(detail?.code || "");
-      err.failedStage = String(detail?.failedStage || "");
+      err.code = String(detail?.code || detail?.error || "");
+      err.failedStage = String(detail?.stage || detail?.failedStage || "");
       err.retryable = detail?.retryable === true;
       err.generationAttempts = Number(detail?.generationAttempts || 0);
       err.traceId = String(detail?.traceId || "");
@@ -262,28 +302,32 @@ export async function fetchLensRawViaRest(
   form.append("batch_id", String(batchId || ""));
   form.append("tp_tab_session", String(tabSession || ""));
 
-  const res = await fetch(base.replace(/\/+$/, "") + API_PATHS.LENS_RAW, {
-    method: "POST",
-    headers: limitHeaders(base, apiUnlimited),
-    cache: "no-store",
-    body: form,
-    signal,
-  });
+  let res;
+  try {
+    res = await fetch(base.replace(/\/+$/, "") + API_PATHS.LENS_RAW, {
+      method: "POST", headers: limitHeaders(base, apiUnlimited), cache: "no-store", body: form, signal,
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") throw networkFailure(error, "lens", { cancelled: true });
+    throw networkFailure(error, "lens");
+  }
   if (!res.ok) {
     const retryAfterMs = noteRetryAfter(res);
     const body = await readLimitedText(res);
-    const err = new Error(`Lens upload failed: HTTP ${res.status}${body ? ` - ${body}` : ""}`);
+    const err = httpFailure("Lens upload failed", res, body, "lens");
     err.status = res.status;
     err.retryAfterMs = res.status === 429 || res.status === 503 ? retryAfterMs || 1000 : 0;
     try {
       const parsed = JSON.parse(body);
-      const detail = parsed?.detail && typeof parsed.detail === "object" ? parsed.detail : parsed;
-      err.code = String(detail?.code || "");
+      const rawDetail = parsed?.detail;
+      const detail = rawDetail && typeof rawDetail === "object" ? rawDetail : parsed;
+      err.code = String(detail?.code || detail?.error || err.code ||
+        (typeof rawDetail === "string" && rawDetail.startsWith("Lens upload failed:") ? "lens_upstream_failed" : ""));
       err.retryable = detail?.retryable === true;
       const preciseMs = Number(detail?.retryAfterMs);
       if (Number.isFinite(preciseMs) && preciseMs > 0) err.retryAfterMs = preciseMs;
     } catch {
-      err.code = "";
+      if (!err.code && res.status === 502) err.code = "GATEWAY_502";
     }
     err.permanent = res.status >= 400 && res.status < 500 && res.status !== 429;
     throw err;
@@ -299,17 +343,20 @@ export async function groupParagraphsViaRest(base, {
   const imageInput = imageArtifactToken
     ? { imageArtifactToken: String(imageArtifactToken) }
     : { imageDataUri: String(imageDataUri || "") };
-  const res = await fetch(base.replace(/\/+$/, "") + API_PATHS.GROUPS, {
-    method: "POST",
-    headers: limitHeaders(base, apiUnlimited, { "Content-Type": "application/json" }),
-    cache: "no-store",
-    signal,
-    body: JSON.stringify({ ...imageInput, tree, context }),
-  });
+  let res;
+  try {
+    res = await fetch(base.replace(/\/+$/, "") + API_PATHS.GROUPS, {
+      method: "POST", headers: limitHeaders(base, apiUnlimited, { "Content-Type": "application/json" }),
+      cache: "no-store", signal, body: JSON.stringify({ ...imageInput, tree, context }),
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") throw networkFailure(error, "grouping", { cancelled: true });
+    throw networkFailure(error, "grouping");
+  }
   if (!res.ok) {
     const retryAfterMs = noteRetryAfter(res);
     const body = await readLimitedText(res);
-    const err = new Error(`Grouping failed: HTTP ${res.status}${body ? ` - ${body}` : ""}`);
+    const err = httpFailure("Grouping failed", res, body, "grouping");
     err.status = res.status;
     err.retryAfterMs = res.status === 429 || res.status === 503 ? retryAfterMs || 1000 : 0;
     try {
@@ -384,11 +431,15 @@ async function fetchJobStatus(url) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), LONG_POLL_FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch(url, { cache: "no-store", signal: ctrl.signal });
+    let res;
+    try { res = await fetch(url, { cache: "no-store", signal: ctrl.signal }); }
+    catch (error) {
+      throw networkFailure(error, "poll", { timeout: error?.name === "AbortError" });
+    }
     if (!res.ok) {
       noteRetryAfter(res);
       const body = await readLimitedText(res);
-      throw new Error(`REST poll failed: HTTP ${res.status}${body ? ` - ${body}` : ""}`);
+      throw httpFailure("REST poll failed", res, body, "poll");
     }
     return await readJson(res, "REST poll failed");
   } finally {
@@ -436,7 +487,8 @@ async function fetchBatchPoll(base, ids) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), LONG_POLL_FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch(base.replace(/\/+$/, "") + API_PATHS.TRANSLATE_POLL, {
+    let res;
+    try { res = await fetch(base.replace(/\/+$/, "") + API_PATHS.TRANSLATE_POLL, {
       method: "POST",
       // Polling itself must not inherit an unlimited processing policy from
       // any one of the jobs represented by this shared batch request.
@@ -448,11 +500,13 @@ async function fetchBatchPoll(base, ids) {
         wait: BATCH_POLL_WAIT_SEC,
         max_results: BATCH_POLL_MAX_INLINE,
       }),
-    });
+    }); } catch (error) {
+      throw networkFailure(error, "poll", { timeout: error?.name === "AbortError" });
+    }
     if (!res.ok) {
       noteRetryAfter(res);
       const body = await readLimitedText(res);
-      const err = new Error(`Batch poll failed: HTTP ${res.status}${body ? ` - ${body}` : ""}`);
+      const err = httpFailure("Batch poll failed", res, body, "poll");
       err.status = res.status;
       throw err;
     }

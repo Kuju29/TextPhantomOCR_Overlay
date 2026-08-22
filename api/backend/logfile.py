@@ -51,6 +51,10 @@ _TZ = timezone(timedelta(hours=7))
 
 _LOCK = threading.Lock()
 _MAX_VALUE_CHARS = 4000
+_SECRET_KEYS = (
+    "authorization", "api_key", "apikey", "token", "cookie", "secret", "password",
+    "signature", "policy",
+)
 
 # Resolved once. Relative to `api/`, so `uvicorn backend.main:app` run from
 # there puts logs where the source is.
@@ -86,19 +90,43 @@ def _prune() -> None:
         pass
 
 
-def _clip(value: Any) -> Any:
+def _secret_key(key: Any) -> bool:
+    lowered = str(key).strip().lower()
+    return (
+        any(marker in lowered for marker in _SECRET_KEYS)
+        or lowered == "sig"
+        or lowered.startswith("x-amz-")
+        or lowered.startswith("x-goog-")
+    )
+
+
+def sanitize(value: Any) -> Any:
     """Keep one enormous field from making a line unreadable.
 
     Truncated rather than dropped: the first characters of a huge value are
     usually what identifies it (an HTML error page, a base64 image), and a
     field that silently vanished is worse than one that is visibly cut.
     """
-    if isinstance(value, str) and len(value) > _MAX_VALUE_CHARS:
-        return value[:_MAX_VALUE_CHARS] + f"…(+{len(value) - _MAX_VALUE_CHARS} chars)"
+    if isinstance(value, str):
+        # Credentials sometimes appear in exception URLs (notably Gemini's
+        # ``?key=``). Redaction at the sink protects every present/future caller.
+        import re
+        value = re.sub(
+            r"(?i)(authorization:\s*bearer\s+|bearer\s+|[?&](?:key|api_key|token|signature|sig|policy|x-amz-[^=&\s]+|x-goog-[^=&\s]+)=)[^\s&,]+",
+            lambda m: m.group(1) + "<redacted>", value,
+        )
+        if len(value) > _MAX_VALUE_CHARS:
+            return value[:_MAX_VALUE_CHARS] + f"…(+{len(value) - _MAX_VALUE_CHARS} chars)"
+        return value
     if isinstance(value, dict):
-        return {k: _clip(v) for k, v in value.items()}
+        return {
+            k: ("<redacted>" if _secret_key(k) else sanitize(v))
+            for k, v in value.items()
+        }
     if isinstance(value, list):
-        return [_clip(v) for v in value[:200]]
+        return [sanitize(v) for v in value[:200]]
+    if isinstance(value, tuple):
+        return [sanitize(v) for v in value[:200]]
     return value
 
 
@@ -107,9 +135,10 @@ def write(stream: str, record: dict[str, Any]) -> None:
     if not _ENABLED:
         return
     try:
+        safe_record = sanitize(record)
         line = {
             "at": datetime.now(_TZ).isoformat(timespec="milliseconds"),
-            **{k: _clip(v) for k, v in record.items()},
+            **(safe_record if isinstance(safe_record, dict) else {}),
         }
         text = json.dumps(line, ensure_ascii=False, default=str)
         with _LOCK:

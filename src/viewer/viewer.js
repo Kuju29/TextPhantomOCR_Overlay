@@ -18,7 +18,7 @@ import {
   isTopLevelRelativePath,
   loadLocalSession,
   pagesFromDrop,
-  pickImageDirectory,
+  pickImagesFromDirectory,
   saveLocalSession,
   sortLocalPages,
   toLocalPageRecord,
@@ -671,43 +671,47 @@ async function replaceSessionFromPages(pages, sourceLabel) {
   location.href = `${location.pathname}?sid=${encodeURIComponent(next.id)}`;
 }
 
-/**
- * Use a native directory handle when available. Only direct child image handles
- * are opened; subfolders and non-image files are ignored without reading their
- * contents. Brave currently lacks this API, so its click path uses the existing
- * `webkitdirectory` fallback.
- */
-async function replaceSessionFromNativeFolder() {
-  setStatus("Opening folder…");
-  const picked = await pickImageDirectory({ id: "textphantom-viewer-images" });
-  if (picked.cancelled) {
-    setStatus("Folder selection cancelled.");
-    return;
-  }
-  if (picked.error) {
-    setStatus(`Could not read that folder: ${picked.error?.message || String(picked.error)}`);
-    return;
-  }
-
-  const result = picked.result;
-  if (!result?.files?.length) {
+async function replaceSessionFromDirectoryPicker() {
+  let picked;
+  try {
+    picked = await pickImagesFromDirectory(
+      typeof window.showDirectoryPicker === "function"
+        ? window.showDirectoryPicker.bind(window)
+        : undefined,
+    );
+  } catch (error) {
     setStatus(
-      `No images directly in “${result?.folderName || "that folder"}”.` +
-        `${result?.subfolders ? ` ${result.subfolders} subfolder(s) were not opened.` : ""}` +
-        `${result?.skipped ? ` ${result.skipped} non-image file(s) were ignored.` : ""}`,
+      `Could not open the folder picker: ${error?.message || String(error)}. ` +
+      "In Brave, enable brave://flags/#file-system-access-api and relaunch the browser.",
+    );
+    return;
+  }
+  if (!picked.supported) {
+    setStatus(
+      "Brave has File System Access disabled. Enable brave://flags/#file-system-access-api " +
+      "and Relaunch Brave. The Select folder button intentionally does not fall back to " +
+      "webkitdirectory because that API materialises every file in the folder hierarchy first.",
+    );
+    return;
+  }
+  if (picked.cancelled) return;
+  if (!picked.files.length) {
+    setStatus(
+      `No image files were found directly in “${picked.folderName || "that folder"}”.` +
+      `${picked.subfolders ? ` ${picked.subfolders} subfolder(s) were not opened.` : ""}`,
     );
     return;
   }
 
   setStatus(
-    `Loading ${result.files.length} image(s) from “${result.folderName || "folder"}”` +
-      `${result.skipped ? ` · ${result.skipped} non-image file(s) ignored` : ""}` +
-      `${result.subfolders ? ` · ${result.subfolders} subfolder(s) not opened` : ""}…`,
+    `Loading ${picked.files.length} image(s) from “${picked.folderName || "folder"}”` +
+      `${picked.skipped ? ` · ${picked.skipped} non-image/invalid file(s) skipped without being opened` : ""}` +
+      `${picked.subfolders ? ` · ${picked.subfolders} subfolder(s) not opened` : ""}.`,
   );
   await replaceSessionFromPages(
     sortLocalPages(
-      result.files.map((file, i) =>
-        toLocalPageRecord(file, i, result.relativePaths?.[i] || ""),
+      picked.files.map((file, i) =>
+        toLocalPageRecord(file, i, picked.relativePaths?.[i] || ""),
       ),
     ),
     "folder",
@@ -880,13 +884,7 @@ els.openImages?.addEventListener("click", () => {
   els.imagesInput?.click();
 });
 els.openFolder?.addEventListener("click", () => {
-  // Brave: fall back synchronously so the file chooser keeps the user gesture.
-  if (typeof globalThis.showDirectoryPicker !== "function") {
-    resetInput(els.folderInput);
-    els.folderInput?.click();
-    return;
-  }
-  void replaceSessionFromNativeFolder();
+  void replaceSessionFromDirectoryPicker();
 });
 
 // Dropping a folder IS a folder selection, and the one that works everywhere.
@@ -909,11 +907,6 @@ els.imagesInput?.addEventListener("change", async () => {
   const files = [...(els.imagesInput.files || [])];
   resetInput(els.imagesInput);
   await replaceSessionFromFiles(files, "images");
-});
-els.folderInput?.addEventListener("change", async () => {
-  const files = [...(els.folderInput.files || [])];
-  resetInput(els.folderInput);
-  await replaceSessionFromFiles(files, "folder");
 });
 
 els.toggleSelect?.addEventListener("click", () => {

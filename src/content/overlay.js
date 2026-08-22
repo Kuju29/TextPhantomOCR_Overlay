@@ -948,16 +948,16 @@
   }
 
   async function applyImageErrorMessage(msg) {
-    const isNoOverlay = /no overlay data/i.test(String(msg?.message || ""));
-    const text = isNoOverlay ? "No text detected" : String(msg?.message || "");
+    const error = msg?.error && msg.error.schema === "tp.error/1" ? msg.error : null;
+    const text = error ? `${error.userMessage} · ${error.code}` : String(msg?.message || "Unknown error");
     // Pages that drive translation themselves (the local viewer, the Auto
     // translate tab) have no context menu to watch and no toast in view.
     // Without this event they would sit on "Translating…" forever whenever a
     // job ends in an error instead of an overlay.
-    TP.emitViewerEvent("textphantom:image-error", { original: msg?.original, message: text });
+    TP.emitViewerEvent("textphantom:image-error", { original: msg?.original, message: text, error });
     setTimeout(() => {
       if (TP.shouldShowReplaceError(msg?.original)) {
-        TP.markImageError(msg?.original, text);
+        TP.markImageError(msg?.original, error || text);
       }
     }, 1200);
     return { ok: true };

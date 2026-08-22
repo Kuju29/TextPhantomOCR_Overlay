@@ -142,6 +142,9 @@
   // Converts technical terminal errors into short text a normal reader can
   // report from a screenshot. The full diagnostic remains in the title.
   function shortImageError(msg) {
+    if (msg && typeof msg === "object" && msg.schema === "tp.error/1") {
+      return `${String(msg.userMessage || "เกิดข้อผิดพลาด")} · ${String(msg.code || "UNKNOWN")}`;
+    }
     const raw = String(msg || "Unknown error").trim();
     const lower = raw.toLowerCase();
     if (/onnx grouped nothing|grouping covered 0 of .*vertical|text grouping/.test(lower)) {
@@ -207,7 +210,9 @@
     const cur = img.currentSrc || img.src || "";
     if (img.dataset.tpBlobUrl || cur.startsWith("blob:") || cur.startsWith("data:")) return;
 
-    const full = String(msg || "Unknown error");
+    const full = msg && typeof msg === "object"
+      ? `${String(msg.userMessage || "เกิดข้อผิดพลาด")} · ${String(msg.code || "UNKNOWN")}`
+      : String(msg || "Unknown error");
     const short = shortImageError(full);
     let badge = imageErrorBadges.get(img);
     if (!badge || !badge.isConnected) {

@@ -71,7 +71,11 @@ export async function fetchImageDataUriFromTab(tabId, url, frameId = 0) {
 
 // Decides whether a job error is permanent or transient.
 export function classifyJobError(msg, context = {}) {
-  const m = String(msg || "").toLowerCase();
+  const structured = msg?.tpError || (msg && typeof msg === "object" && msg.schema === "tp.error/1" ? msg : null);
+  if (structured && typeof structured.retryable === "boolean") {
+    return { permanent: !structured.retryable };
+  }
+  const m = String(msg?.message || msg || "").toLowerCase();
   // One generation per image: once the model has actually been asked, nothing
   // is asked again. Failures BEFORE that — a Lens 502, a dropped socket — never
   // reached the model, so they are transient like any other transport error.

@@ -107,7 +107,8 @@ function isStageBackpressure(error) {
   if (error?.permanent === true) return false;
   const code = String(error?.code || "");
   return error?.retryable === true || code === "server_busy" ||
-    code === "lens_session_unavailable" || !code;
+    code === "lens_session_unavailable" || code === "API_5XX" ||
+    code === "API_BAD_RESPONSE" || !code;
 }
 
 // Runs one extension-owned server stage in its own lane. A rejected admission
@@ -223,10 +224,11 @@ export function handleStaleJob(jobId) {
 }
 
 // Reports a job error to its tab and marks the failure on its batch.
-export function handleJobError(jobId, errMsg = "Unknown error") {
+export function handleJobError(jobId, error = "Unknown error") {
   const ctx = pendingByJob.get(jobId);
+  const errMsg = error?.message || String(error || "Unknown error");
   const aiGenerationAttempted = Boolean(ctx?.aiGenerationAttempted);
-  let cls = classifyJobError(errMsg, { aiGenerationAttempted });
+  let cls = classifyJobError(error, { aiGenerationAttempted });
   const terminalAiError = aiGenerationAttempted || /(?:ai text was incomplete; no automatic retry was made|ai text layer cannot be rendered faithfully)/i.test(
     String(errMsg || ""),
   );
@@ -246,7 +248,7 @@ export function handleJobError(jobId, errMsg = "Unknown error") {
   if (ctx?.tabId && !isStale) {
     sendToTab(
       ctx.tabId,
-      imageErrorMessage(ctx, errMsg),
+      imageErrorMessage(ctx, error),
       ctx.frameId || 0,
     );
   }
@@ -994,7 +996,8 @@ async function imageBytesFor(payload, tabId, frameId) {
 // The API owns the Lens upload because Lens rejects extension-origin uploads.
 async function runLensDirectPath(base, payload, { tabId, frameId, signal = null, decline = {} }) {
   const stop = (reason) => {
-    decline.reason = String(reason || "the local route declined this image");
+    if (reason instanceof Error) decline.error = reason;
+    decline.reason = String(reason?.message || reason || "the local route declined this image");
     return null;
   };
   if (payload?.mode !== "lens_text") return stop("not a lens_text job");
@@ -1067,7 +1070,7 @@ async function runLensDirectPath(base, payload, { tabId, frameId, signal = null,
       reason: `/v1/lens/raw failed: ${e?.message || String(e)}`,
       source: payload.source,
     });
-    return stop(`/v1/lens/raw failed: ${e?.message || String(e)}`);
+    return stop(e);
   }
 
   let decoded;
@@ -1151,7 +1154,7 @@ async function runLensDirectPath(base, payload, { tabId, frameId, signal = null,
         reason: `/v1/groups failed: ${e?.message || String(e)}`,
         source: payload.source,
       });
-      return stop(`/v1/groups failed: ${e?.message || String(e)}`);
+      return stop(e);
     }
 
     // The detector deliberately saw the raw Lens paragraph set. Convert its
@@ -1901,7 +1904,7 @@ async function runSyncTranslate(
       mode: payload.mode, source: payload.source,
     }, String(payload?.context?.tp_trace || getTrace() || ""));
     await wf.failed(workflowId, reason);
-    handleJobError(jobId, reason);
+    handleJobError(jobId, decline.error || reason);
     return;
   }
 
@@ -2115,7 +2118,7 @@ async function runSyncTranslate(
 
       const msg = e?.message || String(e);
       await wf.failed(workflowId, msg);
-      handleJobError(jobId, msg);
+      handleJobError(jobId, e);
       return;
     }
   }
@@ -2144,12 +2147,12 @@ async function submitAndPollRest(
   } catch (e) {
     const msg = e?.message || String(e);
     if (jobId) {
-      handleJobError(jobId, msg);
+      handleJobError(jobId, e);
       return;
     }
     if (payload?.metadata?.image_id) pendingByImage.delete(payload.metadata.image_id);
     if (batch && imageKey) {
-      const cls = classifyJobError(msg);
+      const cls = classifyJobError(e);
       batchMark(batchId, imageKey, { status: "error", lastError: msg, permanent: !!cls.permanent });
       batchUpdateToast(batch, cls.permanent ? "Error (permanent)" : "Error");
       finalizeBatch(batch);
@@ -2157,7 +2160,7 @@ async function submitAndPollRest(
     failJobImmediately(
       tabId,
       payload?.src || null,
-      msg,
+      e,
       frameId,
       String(payload?.context?.tp_trace || ""),
     );

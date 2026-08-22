@@ -155,10 +155,12 @@ async function occupy(key, n) {
   const apiRoute = await readFile(new URL("../api/backend/api/routes/ai_v1.py", import.meta.url), "utf8");
   assert.match(apiRoute, /run_in_executor\(request\.app\.state\.ai_executor, _run_ai\)/,
     "text.ai must use the dedicated AI executor, never asyncio's shared default pool");
-  assert.match(apiRoute, /"code": "server_busy"/,
-    "admission backpressure must be structured and explicitly pre-provider");
-  assert.match(apiRoute, /"code": "provider_rate_limited" if provider_limited/,
-    "provider 429\/503 must be reported as a rejected HTTP attempt, not a generation");
+  assert.match(apiRoute, /error_payload\([\s\S]*?code="server_busy"[\s\S]*?generationAttempts": 0/,
+    "admission backpressure must use the canonical error payload and remain explicitly pre-provider");
+  assert.match(apiRoute, /stable_code = "provider_rate_limited" if provider_limited else kind/,
+    "provider throttling must keep its canonical machine-readable code");
+  assert.match(apiRoute, /generation_attempts = 0 if provider_limited else 1[\s\S]*?error_payload\([\s\S]*?code=stable_code[\s\S]*?"generationAttempts": generation_attempts/,
+    "provider 429/503 must still be reported as a rejected HTTP attempt, not a generation");
 
   const main = await readFile(new URL("../api/backend/main.py", import.meta.url), "utf8");
   const config = await readFile(new URL("../api/backend/config.py", import.meta.url), "utf8");
@@ -188,9 +190,9 @@ async function occupy(key, n) {
   const transport = await readFile(new URL("../src/background/transport.js", import.meta.url), "utf8");
   assert.match(transport, /detail\?\.retryAfterMs/,
     "the precise wait in the body must win over the whole-second Retry-After header");
-  assert.match(transport, /Lens upload failed:[\s\S]*err\.retryAfterMs/,
+  assert.match(transport, /httpFailure\("Lens upload failed"[\s\S]*?err\.retryAfterMs/,
     "Lens admission backpressure must preserve Retry-After for browser-side requeue");
-  assert.match(transport, /Grouping failed:[\s\S]*err\.retryAfterMs/,
+  assert.match(transport, /httpFailure\("Grouping failed"[\s\S]*?err\.retryAfterMs/,
     "ONNX admission backpressure must preserve Retry-After for browser-side requeue");
 
   assert.match(jobs, /async function runStageInLane\(/,

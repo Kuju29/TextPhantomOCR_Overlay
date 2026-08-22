@@ -67,18 +67,6 @@ const IMAGE_EXTENSIONS = new Set([
 ]);
 
 /**
- * True when a filename has an extension we intentionally treat as an image.
- *
- * Directory handles expose the child name before a File object is requested,
- * so this check lets us avoid opening non-image files at all.
- */
-export function hasImageExtension(name) {
-  const value = trim(name).toLowerCase();
-  const dot = value.lastIndexOf(".");
-  return dot >= 0 && IMAGE_EXTENSIONS.has(value.slice(dot + 1));
-}
-
-/**
  * True when a picked `File` is an image file.
  *
  * The picker is told `accept="image/*"`, but that is a hint the user can
@@ -87,10 +75,103 @@ export function hasImageExtension(name) {
  * @param {File} file
  * @returns {boolean}
  */
+export function isImageFileName(name) {
+  const value = trim(name).toLowerCase();
+  const dot = value.lastIndexOf(".");
+  if (dot < 0) return false;
+  return IMAGE_EXTENSIONS.has(value.slice(dot + 1));
+}
+
 export function isImageFile(file) {
   const mime = trim(file?.type).toLowerCase();
   if (mime) return mime.startsWith("image/");
-  return hasImageExtension(file?.name);
+  return isImageFileName(file?.name);
+}
+
+/**
+ * Read only top-level image files from a FileSystemDirectoryHandle.
+ *
+ * This is deliberately different from <input webkitdirectory>: the browser
+ * gives us one directory handle first, then we enumerate lightweight child
+ * handles. getFile() is called only for entries whose filename already looks
+ * like an image, so PDFs, ZIPs, TXT files, etc. are never opened by TextPhantom.
+ * Subdirectories are counted but never entered.
+ */
+export async function imagesFromDirectoryHandle(directoryHandle) {
+  if (!directoryHandle || typeof directoryHandle.values !== "function") {
+    throw new TypeError("invalid directory handle");
+  }
+
+  const files = [];
+  const relativePaths = [];
+  let entries = 0;
+  let skipped = 0;
+  let subfolders = 0;
+
+  for await (const entry of directoryHandle.values()) {
+    if (entry?.kind === "directory") {
+      subfolders++;
+      continue;
+    }
+    if (entry?.kind !== "file") continue;
+    entries++;
+
+    // Crucial: do not call getFile() for obvious non-images. This avoids the
+    // old webkitdirectory behaviour where every file was materialised first.
+    if (!isImageFileName(entry.name)) {
+      skipped++;
+      continue;
+    }
+
+    let file = null;
+    try {
+      file = await entry.getFile();
+    } catch {
+      skipped++;
+      continue;
+    }
+    if (!isImageFile(file)) {
+      skipped++;
+      continue;
+    }
+    files.push(file);
+    relativePaths.push(directoryHandle.name ? `${directoryHandle.name}/${file.name}` : file.name);
+  }
+
+  return {
+    files,
+    relativePaths,
+    folderName: trim(directoryHandle.name),
+    entries,
+    skipped,
+    subfolders,
+  };
+}
+
+/**
+ * Open the native File System Access directory picker and return top-level images.
+ * Returns supported=false instead of falling back to webkitdirectory because that
+ * fallback necessarily materialises the directory's whole file hierarchy first.
+ */
+export async function pickImagesFromDirectory(picker = globalThis?.showDirectoryPicker) {
+  if (typeof picker !== "function") {
+    return { supported: false, cancelled: false, files: [], relativePaths: [] };
+  }
+  try {
+    const handle = await picker({
+      id: "textphantom-local-images",
+      mode: "read",
+      startIn: "pictures",
+    });
+    const result = await imagesFromDirectoryHandle(handle);
+    return { supported: true, cancelled: false, ...result };
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      return { supported: true, cancelled: true, files: [], relativePaths: [] };
+    }
+    error.directoryPicker = true;
+    throw error;
+  }
 }
 
 /** Locale-aware natural comparison (handles "page2" < "page10"). */
@@ -148,96 +229,6 @@ export function filterImageFiles(files, { topLevelOnly = false } = {}) {
 }
 
 /**
- * Read only image files that sit DIRECTLY inside a FileSystemDirectoryHandle.
- *
- * This is the preferred folder path because non-image children are rejected by
- * name before `getFile()` is called. Subdirectories are counted but never
- * traversed. In Chromium browsers that expose `showDirectoryPicker()`, this
- * avoids the recursive FileList produced by `<input webkitdirectory>`.
- *
- * @param {FileSystemDirectoryHandle|object} directoryHandle
- * @returns {Promise<{files: File[], folderName: string, relativePaths: string[],
- *   scanned: number, skipped: number, subfolders: number}>}
- */
-export async function imagesFromDirectoryHandle(directoryHandle) {
-  const files = [];
-  const relativePaths = [];
-  const folderName = trim(directoryHandle?.name);
-  let scanned = 0;
-  let skipped = 0;
-  let subfolders = 0;
-
-  if (!directoryHandle || typeof directoryHandle.values !== "function") {
-    throw new TypeError("directory_handle_unavailable");
-  }
-
-  for await (const child of directoryHandle.values()) {
-    if (child?.kind === "directory") {
-      subfolders++;
-      continue;
-    }
-    if (child?.kind !== "file") continue;
-
-    scanned++;
-    // Crucial: do not call getFile() for non-images. The filename is enough to
-    // reject them, so their contents are never opened by TextPhantom.
-    if (!hasImageExtension(child.name)) {
-      skipped++;
-      continue;
-    }
-
-    const file = await child.getFile();
-    if (!isImageFile(file)) {
-      skipped++;
-      continue;
-    }
-    files.push(file);
-    relativePaths.push(folderName ? `${folderName}/${file.name}` : file.name);
-  }
-
-  return { files, folderName, relativePaths, scanned, skipped, subfolders };
-}
-
-/**
- * Open the browser's native directory picker when the File System Access API is
- * available. The picker must be called from a user gesture.
- *
- * Brave currently disables this API, so callers should fall back to the hidden
- * `webkitdirectory` input there. The result distinguishes unsupported from a
- * normal user cancellation so cancellation never opens a second picker.
- *
- * @returns {Promise<{supported: boolean, cancelled: boolean, result?: object, error?: Error}>}
- */
-export async function pickImageDirectory(options = {}) {
-  if (typeof globalThis.showDirectoryPicker !== "function") {
-    return { supported: false, cancelled: false };
-  }
-
-  let handle;
-  try {
-    handle = await globalThis.showDirectoryPicker({
-      id: trim(options.id) || "textphantom-local-images",
-      mode: "read",
-    });
-  } catch (error) {
-    if (error?.name === "AbortError") {
-      return { supported: true, cancelled: true };
-    }
-    return { supported: true, cancelled: false, error };
-  }
-
-  try {
-    return {
-      supported: true,
-      cancelled: false,
-      result: await imagesFromDirectoryHandle(handle),
-    };
-  } catch (error) {
-    return { supported: true, cancelled: false, error };
-  }
-}
-
-/**
  * Take the dropped items' filesystem entries.
  *
  * MUST be called synchronously inside the `drop` handler: the item list is
@@ -284,11 +275,12 @@ function entryToFile(entry) {
 /**
  * The images inside dropped folders (and any images dropped alongside them).
  *
- * A dropped folder is a real directory entry: this reads only its top level and
- * never recurses into subfolders. Non-image child names are rejected before
- * their File objects are requested, so TextPhantom does not open their contents.
- * This is the strictest image-only path available in Brave without a native
- * File System Access directory picker.
+ * A dropped folder is a real folder selection: the browser hands over the
+ * directory itself, this reads only its top level, and nothing is uploaded or
+ * confirmed. It is the way to pick a folder of images in a browser that has no
+ * directory picker — Brave blocks the File System Access API outright, and
+ * `<input webkitdirectory>` is the one that walks the whole subtree and makes
+ * the browser ask about every file in it.
  *
  * @param {Array<object>} entries from `dropEntriesFrom`
  * @returns {Promise<{files: File[], folderNames: string[], relativePaths: string[],
@@ -327,7 +319,6 @@ export async function imagesFromDroppedEntries(entries) {
         continue;
       }
       scanned++;
-      if (!hasImageExtension(child.name)) continue;
       const file = await entryToFile(child).catch(() => null);
       if (!file || !isImageFile(file)) continue;
       files.push(file);

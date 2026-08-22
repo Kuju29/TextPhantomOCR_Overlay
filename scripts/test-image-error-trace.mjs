@@ -16,8 +16,8 @@ assert.equal(firstMessage.original, first.imgUrl);
 assert.equal(secondMessage.original, second.imgUrl);
 
 const jobs = await readFile(new URL("../src/background/jobs.js", import.meta.url), "utf8");
-assert.match(jobs, /imageErrorMessage\(ctx, errMsg\)/,
-  "terminal job errors must be built from their owning context");
+assert.match(jobs, /imageErrorMessage\(ctx, error\)/,
+  "terminal structured job errors must be built from their owning context");
 const overlay = await readFile(new URL("../src/content/overlay.js", import.meta.url), "utf8");
 assert.match(overlay, /if \(msg\.tpTrace\) TP\.setTrace\?\.\(msg\.tpTrace\)/,
   "the page must adopt the message trace before tracing the terminal insert");

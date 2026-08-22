@@ -116,12 +116,17 @@ async def access_log_middleware(request: Request, call_next):
                 path = request.url.path
                 # No health/warmup/meta/poll success spam.  Only surface HTTP errors.
                 if response.status_code >= 400:
+                    # The HTTPException handler already emitted the canonical
+                    # `error.request` line with code/origin/stage/trace. A second
+                    # line saying only "Bad Gateway" hides rather than helps.
+                    if response.headers.get("X-TP-Error-Schema") == "tp.error/1":
+                        pass
                     # `POST /v1/logs -> 503` is the DOCUMENTED answer when file
                     # logging is off, which is the default. It is a correct reply to
                     # a correct request, so logging it as a server error puts a red
                     # line in the log for the log endpoint being switched off — and
                     # a log full of expected errors is a log nobody reads.
-                    if response.status_code == 503 and path == "/v1/logs":
+                    elif response.status_code == 503 and path == "/v1/logs":
                         pass
                     # Scanner-bot probes (404 on a path we never served) are
                     # aggregated, not logged per line — keeps real errors visible.

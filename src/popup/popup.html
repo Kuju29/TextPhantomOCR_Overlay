@@ -297,12 +297,11 @@
               <button type="button" id="open-local-folder" class="action-btn secondary">Select folder</button>
             </div>
             <div class="hint">
-              <strong>Select a image</strong> takes any number of image files. <strong>Select folder</strong> takes every image sitting directly in the folder you pick — images inside its subfolders are not added.<br />
+              <strong>Select a image</strong> takes any number of image files. <strong>Select folder</strong> uses the native File System Access picker and opens only image files directly in the folder — subfolders are not entered. In Brave, enable <code>brave://flags/#file-system-access-api</code> once and Relaunch Brave.<br />
               Both open your pages in a reader tab. Right-click a page to translate, then download the image (text baked in) or HTML.
             </div>
             <div id="local-picker-msg" class="hint local-picker-msg" role="status" aria-live="polite"></div>
             <input id="local-images-input" type="file" accept="image/*" multiple hidden />
-            <input id="local-folder-input" type="file" accept="image/*" multiple webkitdirectory hidden />
           </div>
 
           <div class="divider" role="separator"></div>

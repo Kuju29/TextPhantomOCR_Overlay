@@ -46,6 +46,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from backend.ai import markers, parsing
 from backend.ai.errors import ModelOutputContractError
 from backend.api.local_client import wants_unlimited
+from backend.api.errors import payload as error_payload, failure_event, provider_status
 from backend.ai.failure_reason import classify as _ai_failure_kind
 from backend.ai.failure_reason import is_rate_limited as _ai_is_rate_limited
 from backend.ai.failure_reason import retry_after_sec as _ai_retry_after_sec
@@ -241,6 +242,11 @@ async def ai_translate_v1(
     t0 = time.perf_counter()
     context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
     trace_id = str(context.get("tp_trace") or "")
+    correlation = {
+        "requestId": payload.get("operationId"),
+        "batchId": payload.get("batchId"),
+        "imageId": payload.get("imageId") or context.get("image_id"),
+    }
 
     def trace_failure(stage: str, exc: BaseException, status: int, **details: Any) -> None:
         provider_status = re.search(r"\bHTTP\s+(\d{3})\b", str(exc), re.IGNORECASE)
@@ -480,7 +486,17 @@ async def ai_translate_v1(
         if rate["enabled"] and not unlimited:
             rate_gate.report_success(resolved_provider, config.model, config.api_key)
     except AdmissionRejected as exc:
-        event("v1.ai.translate.busy", {"identity": identity}, ok=False)
+        detail = error_payload(
+            code="server_busy", message=str(exc),
+            user_message="The AI service is busy. Please try again shortly.",
+            origin="api", stage="ai_admission", category="capacity",
+            retryable=True, http_status=503, trace_id=trace_id,
+            extra={"retryAfterMs": int(exc.retry_after_sec * 1000),
+                   "providerAttempts": 0, "generationAttempts": 0,
+                   "automaticContentRetry": False, "automaticTransportRetry": False},
+            correlation=correlation,
+        )
+        failure_event("/v1/ai/translate", detail)
         trace_failure(
             "admission_gate", exc, 503,
             units=len(units), rateWaitMs=rate_wait_ms,
@@ -490,15 +506,7 @@ async def ai_translate_v1(
         )
         raise HTTPException(
             status_code=503,
-            detail={
-                "code": "server_busy",
-                "message": str(exc),
-                "retryAfterMs": int(exc.retry_after_sec * 1000),
-                "providerAttempts": 0,
-                "generationAttempts": 0,
-                "automaticContentRetry": False,
-                "automaticTransportRetry": False,
-            },
+            detail=detail,
             headers={"Retry-After": str(exc.retry_after_sec)},
         ) from exc
     except SecurityError as exc:
@@ -529,19 +537,22 @@ async def ai_translate_v1(
             providerAttempts=1,
             providerHttpStatuses=[200],
         )
+        detail = error_payload(
+            code="invalid_model_output", message=str(exc),
+            user_message="The AI response was incomplete or unreadable for this image.",
+            origin="upstream_ai", stage="model_output_contract",
+            category="upstream_contract", retryable=False, http_status=502,
+            trace_id=trace_id, upstream_status=200,
+            extra={"error": "invalid_model_output", "structuralDetails": structural,
+                   "providerAttempts": 1, "generationAttempts": 1,
+                   "automaticContentRetry": False, "automaticTransportRetry": False,
+                   "modelFallback": False, "schemaFallback": False},
+            correlation=correlation,
+        )
+        failure_event("/v1/ai/translate", detail)
         raise HTTPException(
             status_code=502,
-            detail={
-                "error": "invalid_model_output",
-                "message": str(exc),
-                "structuralDetails": structural,
-                "providerAttempts": 1,
-                "generationAttempts": 1,
-                "automaticContentRetry": False,
-                "automaticTransportRetry": False,
-                "modelFallback": False,
-                "schemaFallback": False,
-            },
+            detail=detail,
         ) from exc
     except ValueError as exc:
         trace_failure(
@@ -581,21 +592,32 @@ async def ai_translate_v1(
             providerAttempts=1,
             generationAttempts=generation_attempts,
         )
-        detail = {
-            "code": "provider_rate_limited" if provider_limited else "provider_failed",
-            "message": f"AI translation failed ({kind}); inspect TP_TRACE for details",
-            "providerAttempts": 1,
-            "generationAttempts": generation_attempts,
-            "automaticContentRetry": False,
-            "automaticTransportRetry": False,
-            "modelFallback": False,
-            "schemaFallback": False,
-        }
+        upstream_status = provider_status(exc)
+        stable_code = "provider_rate_limited" if provider_limited else kind
+        if stable_code == "provider_or_output_contract":
+            stable_code = "provider_failed"
+        detail = error_payload(
+            code=stable_code,
+            message=f"AI translation failed ({kind}).",
+            user_message=("The AI provider is limiting requests. Please wait and try again."
+                          if provider_limited else
+                          "The AI provider could not complete this image."),
+            origin="upstream_ai", stage="provider_request", category="upstream",
+            retryable=bool(provider_limited or kind in {
+                "provider_timeout", "provider_transport", "provider_http"
+            }),
+            http_status=502, trace_id=trace_id, upstream_status=upstream_status,
+            extra={"providerAttempts": 1, "generationAttempts": generation_attempts,
+                   "automaticContentRetry": False, "automaticTransportRetry": False,
+                   "modelFallback": False, "schemaFallback": False},
+            correlation=correlation,
+        )
         headers = None
         if provider_limited:
             retry_sec = max(1.0, float(provider_retry_sec or 1.0))
             detail["retryAfterMs"] = int(retry_sec * 1000)
             headers = {"Retry-After": str(max(1, math.ceil(retry_sec)))}
+        failure_event("/v1/ai/translate", detail)
         raise HTTPException(status_code=502, detail=detail, headers=headers) from exc
 
     text_full = str(result.get("aiTextFull") or "")

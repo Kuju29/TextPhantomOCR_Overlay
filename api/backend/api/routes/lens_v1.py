@@ -46,6 +46,7 @@ from backend.lens.languages import normalize as normalize_lang
 from backend.lens.tree import decode_tree, flatten_spans, tree_warnings
 from backend.log import event
 from backend.api.local_client import wants_unlimited
+from backend.api.errors import payload as error_payload, failure_event, provider_status
 from backend.render import erase_boxes as erase_boxes_mod
 
 router = APIRouter()
@@ -290,28 +291,51 @@ async def lens_raw(
                     request.app.state.lens_executor, _fetch_raw_sync, raw, target_lang, tp_trace
                 )
     except AdmissionRejected as exc:
-        event("v1.lens.raw.busy", {"identity": identity}, ok=False)
+        detail = error_payload(
+            code="server_busy", message=str(exc),
+            user_message="The server is busy. Please try this image again shortly.",
+            origin="api", stage="lens_admission", category="capacity",
+            retryable=True, http_status=503, trace_id=tp_trace,
+            extra={"retryAfterMs": int(exc.retry_after_sec * 1000)},
+            correlation={"batchId": batch_id},
+        )
+        failure_event("/v1/lens/raw", detail)
         raise HTTPException(
             status_code=503,
-            detail={"code": "server_busy", "stage": "lens",
-                    "message": str(exc), "retryable": True,
-                    "retryAfterMs": int(exc.retry_after_sec * 1000),
-                    "traceId": tp_trace},
+            detail=detail,
             headers={"Retry-After": str(exc.retry_after_sec)},
         ) from exc
     except Exception as exc:  # noqa: BLE001
         if (type(exc).__name__ == "LensSessionError"
                 and type(exc).__module__ == "backend.lens.client"):
-            event("v1.lens.raw.session_unavailable", {"identity": identity}, ok=False)
+            detail = error_payload(
+                code="lens_session_unavailable",
+                message="Google Lens rejected the refreshed server session.",
+                user_message="Google Lens is temporarily unavailable. Please try again later.",
+                origin="upstream_lens", stage="lens_session", category="upstream_session",
+                retryable=True, http_status=503, trace_id=tp_trace,
+                extra={"retryAfterMs": 30000},
+                correlation={"batchId": batch_id},
+            )
+            failure_event("/v1/lens/raw", detail)
             raise HTTPException(
                 status_code=503,
-                detail={"code": "lens_session_unavailable",
-                        "message": "Google Lens rejected the refreshed server session.",
-                        "retryable": True, "traceId": tp_trace},
+                detail=detail,
                 headers={"Retry-After": "30"},
             ) from exc
-        event("v1.lens.raw.error", {"error": str(exc)[:300]}, ok=False)
-        raise HTTPException(status_code=502, detail=f"Lens upload failed: {exc}") from exc
+        upstream_status = provider_status(exc)
+        detail = error_payload(
+            code="lens_http_error" if upstream_status else "lens_transport_error",
+            message="Google Lens could not complete the image request.",
+            user_message="Could not read this image with Google Lens. Please try again.",
+            origin="upstream_lens", stage="lens_upload", category="upstream",
+            retryable=True, http_status=502, trace_id=tp_trace,
+            upstream_status=upstream_status,
+            extra={"errorType": type(exc).__name__},
+            correlation={"batchId": batch_id},
+        )
+        failure_event("/v1/lens/raw", detail)
+        raise HTTPException(status_code=502, detail=detail) from exc
     if cancellation.is_cancelled(cancel_payload):
         event("v1.lens.raw.cancelled", {"batch_id": batch_id}, ok=False)
         raise HTTPException(status_code=409, detail="batch was cancelled while Lens was running")
@@ -320,10 +344,16 @@ async def lens_raw(
         # Not coerced to `{}`. An empty object decodes to a page with no text,
         # which is a real and common answer — so it must never be what a broken
         # response looks like.
-        raise HTTPException(
-            status_code=502,
-            detail=f"Lens returned {type(data).__name__}, not an object",
+        detail = error_payload(
+            code="lens_invalid_response", message="Google Lens returned an invalid response.",
+            user_message="Google Lens returned an unreadable result. Please try again.",
+            origin="upstream_lens", stage="lens_response", category="upstream_contract",
+            retryable=True, http_status=502, trace_id=tp_trace,
+            extra={"responseType": type(data).__name__},
+            correlation={"batchId": batch_id},
         )
+        failure_event("/v1/lens/raw", detail)
+        raise HTTPException(status_code=502, detail=detail)
 
     paragraphs = len(data.get("originalParagraphs") or [])
     artifact_info, artifact_outcome = _optional_image_artifact(

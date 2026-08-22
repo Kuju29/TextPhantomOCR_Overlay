@@ -210,11 +210,18 @@ def _fetch_lens_once(img_bytes: bytes, lang: str, ck: dict) -> dict[str, Any]:
     c = _session(ck)
     r = c.post(_UPLOAD_URL, files={"encoded_image": ("file.jpg", img_bytes, "image/jpeg")})
     if r.status_code not in (302, 303):
-        raise RuntimeError(f"Lens upload failed: {r.status_code}\n{r.text}")
+        # Never include the raw upstream body: gateways can echo request data
+        # and HTML error pages only make the public/log message noisy.
+        raise RuntimeError(f"Lens HTTP {r.status_code} (operation=upload)")
     redirect = r.headers["location"]
 
     translated_url = _to_translated_url(redirect, lang)
-    body = c.get(translated_url).text
+    translated_response = c.get(translated_url)
+    if not translated_response.is_success:
+        raise RuntimeError(
+            f"Lens HTTP {translated_response.status_code} (operation=result)"
+        )
+    body = translated_response.text
 
     # Strip the XSSI-protection prefix Google prepends to JSON responses.
     if body.startswith(")]}'"):

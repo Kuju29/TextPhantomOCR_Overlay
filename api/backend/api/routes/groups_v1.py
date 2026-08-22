@@ -56,6 +56,7 @@ from backend import trace
 from backend.config import settings
 from backend.jobs.admission import AdmissionRejected, identity_of
 from backend.log import event
+from backend.api.errors import payload as error_payload, failure_event
 from backend.lens.tree import iter_paragraphs
 from backend.render import textblocks_pass
 from backend.render.region import paragraph_reading_axis
@@ -348,6 +349,10 @@ async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict:
     identity = identity_of(payload)
     context = payload.get("context")
     trace_id = str((context if isinstance(context, dict) else {}).get("tp_trace") or "")
+    correlation = {
+        "batchId": (context if isinstance(context, dict) else {}).get("batch_id"),
+        "imageId": (context if isinstance(context, dict) else {}).get("image_id"),
+    }
 
     if not textblocks_available():
         # Said, not faked. A client that got its tree back unmerged would group
@@ -376,10 +381,18 @@ async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict:
             payload, identity, image_artifacts, b64_to_bytes
         )
     except ArtifactError as exc:
+        detail = error_payload(
+            code=exc.code, message=str(exc),
+            user_message="The temporary image expired. Please upload the image again.",
+            origin="api", stage="image_artifact", category="input",
+            retryable=False, http_status=exc.status, trace_id=trace_id,
+            extra={"fallback": "resend `imageDataUri` or call `/v1/lens/raw` again"},
+            correlation=correlation,
+        )
+        failure_event("/v1/groups", detail)
         raise HTTPException(
             status_code=exc.status,
-            detail={"code": exc.code, "message": str(exc),
-                    "fallback": "resend `imageDataUri` or call `/v1/lens/raw` again"},
+            detail=detail,
         ) from exc
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=f"could not decode the image: {exc}") from exc
@@ -567,26 +580,34 @@ async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict:
                 request.app.state.cpu_executor, _run
             )
     except TextBlockBusy as exc:
-        event(
-            "v1.groups.busy",
-            {"identity": identity, "reason": "detector_session", **timings},
-            ok=False,
+        detail = error_payload(
+            code="server_busy", message="text-block detector is busy",
+            user_message="Text layout detection is busy. Please try again shortly.",
+            origin="api", stage="onnx", category="capacity", retryable=True,
+            http_status=503, trace_id=trace_id,
+            extra={"retryAfterMs": int(exc.retry_after_sec * 1000),
+                   "generationAttempts": 0},
+            correlation=correlation,
         )
+        failure_event("/v1/groups", detail, reason="detector_session", **timings)
         raise HTTPException(
             status_code=503,
-            detail={"code": "server_busy", "stage": "onnx",
-                    "message": "text-block detector is busy", "retryable": True,
-                    "retryAfterMs": int(exc.retry_after_sec * 1000),
-                    "generationAttempts": 0},
+            detail=detail,
             headers={"Retry-After": str(exc.retry_after_sec)},
         ) from exc
     except AdmissionRejected as exc:
-        event("v1.groups.busy", {"identity": identity, "reason": "admission"}, ok=False)
+        detail = error_payload(
+            code="server_busy", message=str(exc),
+            user_message="Text layout detection is busy. Please try again shortly.",
+            origin="api", stage="onnx_admission", category="capacity",
+            retryable=True, http_status=503, trace_id=trace_id,
+            extra={"retryAfterMs": int(exc.retry_after_sec * 1000)},
+            correlation=correlation,
+        )
+        failure_event("/v1/groups", detail, reason="admission")
         raise HTTPException(
             status_code=503,
-            detail={"code": "server_busy", "stage": "onnx",
-                    "message": str(exc), "retryable": True,
-                    "retryAfterMs": int(exc.retry_after_sec * 1000)},
+            detail=detail,
             headers={"Retry-After": str(exc.retry_after_sec)},
         ) from exc
 
