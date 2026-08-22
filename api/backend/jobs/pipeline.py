@@ -46,6 +46,7 @@ from backend.lens.tree import (
     tree_stats,
 )
 from backend.log import dbg, event
+from backend.api.errors import future_result_with_stage
 from backend.render.bubble import attach_bubble_bounds, detect_bubble_bounds_combined
 from backend.render.colors import region_is_dark
 from backend.render.textblocks_pass import (
@@ -1305,7 +1306,7 @@ def process_image(
 
         if _f_ai is not None:
             try:
-                _f_ai.result()
+                future_result_with_stage(_f_ai, "provider_request")
             finally:
                 _ai_executor.shutdown(wait=False)  # type: ignore[union-attr]
             stages["ai_ms"] = round((time.perf_counter() - _t_ai_submit) * 1000, 1)
@@ -1585,7 +1586,7 @@ def process_image(
     # Wait for AI (will be instant if render+PNG took longer than AI).
     if _f_ai is not None:
         try:
-            _f_ai.result()  # re-raises any exception from the AI thread
+            future_result_with_stage(_f_ai, "provider_request")
         finally:
             _ai_executor.shutdown(wait=False)  # type: ignore[union-attr]
         stages["ai_ms"] = round((time.perf_counter() - _t_ai_submit) * 1000, 1)

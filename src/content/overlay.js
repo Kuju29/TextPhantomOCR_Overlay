@@ -947,7 +947,24 @@
     return TP.nextFrame();
   }
 
+  // Validates an error against the same page-generation contract as a
+  // successful overlay. Kept pure so the stale branch cannot mutate trace,
+  // status or image state before the decision is made.
+  function checkImageErrorGeneration(runtime, msg) {
+    const generation = msg?.generation;
+    if (!generation || typeof generation !== "object") return { ok: true, legacy: true };
+    if (typeof runtime?.isStillCurrent !== "function") return { ok: true, legacy: true };
+    const img = runtime.findTargetImage?.(msg?.original) || null;
+    return runtime.isStillCurrent(img, generation);
+  }
+
   async function applyImageErrorMessage(msg) {
+    const current = checkImageErrorGeneration(TP, msg);
+    if (!current.ok) {
+      TP.log.info("IMAGE_ERROR dropped: stale target", { reason: current.reason || "generation changed" });
+      return { ok: true, applied: false, stale: true, reason: current.reason || "generation changed" };
+    }
+    if (msg.tpTrace) TP.setTrace?.(msg.tpTrace);
     const error = msg?.error && msg.error.schema === "tp.error/1" ? msg.error : null;
     const text = error ? `${error.userMessage} · ${error.code}` : String(msg?.message || "Unknown error");
     // Pages that drive translation themselves (the local viewer, the Auto
@@ -1019,7 +1036,9 @@
     const msg = message || {};
     const type = String(msg.type || "");
 
-    if (msg.tpTrace) TP.setTrace?.(msg.tpTrace);
+    // IMAGE_ERROR must validate its generation before adopting the producer's
+    // trace. Other message types are safe to attach immediately.
+    if (msg.tpTrace && type !== "IMAGE_ERROR") TP.setTrace?.(msg.tpTrace);
     TP.traceNote?.("content/overlay.js", "applyInsertMessage", {
       ev: "insert message received",
       type,

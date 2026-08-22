@@ -32,6 +32,7 @@ const els = {
   mode: document.getElementById("auto-mode"),
   sourceWrap: document.getElementById("auto-source-wrap"),
   source: document.getElementById("auto-source"),
+  langWrap: document.getElementById("auto-lang-wrap"),
   lang: document.getElementById("auto-lang"),
   zoom: document.getElementById("auto-zoom"),
   fit: document.getElementById("auto-fit"),
@@ -64,6 +65,19 @@ const els = {
 const RAW_RENDER_LIMIT = 1_500_000;
 const DEFAULT_WIDTH = 1200;
 const RETRANSLATE_DEBOUNCE_MS = 200;
+
+// A credential/model/prompt change is a generation boundary. Tokens contain
+// only an integer and are intentionally unrelated to the setting values.
+function createSettingsEpochGuard() {
+  let epoch = 0;
+  return {
+    capture: () => epoch,
+    invalidate: () => ++epoch,
+    accepts: (token) => token === epoch,
+  };
+}
+
+const settingsEpochGuard = createSettingsEpochGuard();
 
 /**
  * Finished runs for the image currently on screen, keyed by everything that can
@@ -194,6 +208,29 @@ async function loadSettings() {
 
 const persist = (patch) => setStorage(patch);
 
+// These settings are owned by the main popup and are resolved by the same
+// translation pipeline this tab calls. Their values deliberately never enter
+// this page's cache key: in particular, credentials must not be copied into a
+// DOM string or cache identifier. A change simply invalidates prior answers.
+const AI_RESULT_SETTING_KEYS = new Set([
+  "aiKey",
+  "aiModel",
+  "aiProvider",
+  "aiBaseUrl",
+  "aiGlossary",
+  "aiCharMemory",
+  "aiMemoryMode",
+  "aiSendImage",
+  "aiPageImage",
+  "aiOnDevice",
+  "localRender",
+  "clientBackground",
+  "aiThinking",
+  "aiPromptByLang",
+  "aiPrompt",
+  "customApiUrl",
+]);
+
 // The popup can change the engine or the reading-direction rebuild while this
 // tab is open. Anything cached under the old value is no longer an answer to
 // the current settings, so it goes.
@@ -206,9 +243,26 @@ try {
     if (changes.relayoutTranslated) {
       state.relayout = changes.relayoutTranslated.newValue !== false;
     }
-    if (changes.engineMode || changes.relayoutTranslated) {
+    const aiSettingsChanged = Object.keys(changes).some((key) => AI_RESULT_SETTING_KEYS.has(key));
+    if (changes.engineMode || changes.relayoutTranslated || aiSettingsChanged) {
       resultCache.clear();
       if (state.showRaw) renderRaw();
+    }
+    if (aiSettingsChanged) {
+      settingsEpochGuard.invalidate();
+      // The overlay protocol already stamps each request with a page-instance
+      // generation. Rotate it while an AI run is pending so completion A is
+      // rejected by content/overlay.js and cannot be announced/cached as run B.
+      // This also tears down a displayed AI result that was produced with the
+      // now-obsolete settings, without exposing any setting value.
+      if (state.mode === "lens_text" && state.source === "ai" && (state.busy || state.result)) {
+        TP()?.resetForNavigation?.("auto_ai_settings_changed");
+        state.result = null;
+      }
+      state.runId++;
+      state.busy = false;
+      els.retranslate.disabled = false;
+      setStatus("AI settings changed in the main UI — the next run will use the new settings.");
     }
   });
 } catch {
@@ -220,7 +274,11 @@ try {
 // --------------------------------------------------------------------- chrome
 
 function applyModeVisibility() {
-  els.sourceWrap.style.display = state.mode === "lens_text" ? "" : "none";
+  const isText = state.mode === "lens_text";
+  els.sourceWrap.style.display = isText ? "" : "none";
+  // Original reproduces the OCR source text and does not consume a target
+  // language. Keep autoLang untouched so switching back restores the choice.
+  els.langWrap.style.display = isText && state.source === "original" ? "none" : "";
 }
 
 function applyWidth(px) {
@@ -629,6 +687,7 @@ async function translate({ force = false } = {}) {
 
   clearPick();
   const runId = ++state.runId;
+  const settingsEpoch = settingsEpochGuard.capture();
 
   // Already have this exact run in hand? Redraw it instead of paying for it
   // again. Re-translate skips this on purpose.
@@ -663,7 +722,7 @@ async function translate({ force = false } = {}) {
     debug: { raw: true },
   });
 
-  if (runId !== state.runId) return;
+  if (runId !== state.runId || !settingsEpochGuard.accepts(settingsEpoch)) return;
   if (response?.ok === false) {
     state.busy = false;
     els.retranslate.disabled = false;
@@ -735,6 +794,7 @@ els.mode.addEventListener("change", async () => {
 
 els.source.addEventListener("change", async () => {
   state.source = els.source.value;
+  applyModeVisibility();
   await persist({ autoSource: state.source });
   if (state.objectUrl) scheduleTranslate();
   else if (state.showRaw) renderRaw();

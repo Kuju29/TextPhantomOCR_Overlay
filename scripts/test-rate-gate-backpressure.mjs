@@ -157,10 +157,10 @@ async function occupy(key, n) {
     "text.ai must use the dedicated AI executor, never asyncio's shared default pool");
   assert.match(apiRoute, /error_payload\([\s\S]*?code="server_busy"[\s\S]*?generationAttempts": 0/,
     "admission backpressure must use the canonical error payload and remain explicitly pre-provider");
-  assert.match(apiRoute, /stable_code = "provider_rate_limited" if provider_limited else kind/,
-    "provider throttling must keep its canonical machine-readable code");
-  assert.match(apiRoute, /generation_attempts = 0 if provider_limited else 1[\s\S]*?error_payload\([\s\S]*?code=stable_code[\s\S]*?"generationAttempts": generation_attempts/,
-    "provider 429/503 must still be reported as a rejected HTTP attempt, not a generation");
+  assert.match(apiRoute, /stable_code = "provider_rate_limited" if provider_limited else \([\s\S]*?http_code if kind == "provider_http" else kind/,
+    "provider throttling must keep its canonical machine-readable code while permanent provider HTTP failures remain distinct");
+  assert.match(apiRoute, /generation_attempts = 0 if \(provider_limited or \([\s\S]*?400 <= upstream_status < 500[\s\S]*?error_payload\([\s\S]*?code=stable_code[\s\S]*?"generationAttempts": generation_attempts/,
+    "provider 429 and permanent 4xx responses must be reported as rejected HTTP attempts, not generations");
 
   const main = await readFile(new URL("../api/backend/main.py", import.meta.url), "utf8");
   const config = await readFile(new URL("../api/backend/config.py", import.meta.url), "utf8");

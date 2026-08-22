@@ -6,6 +6,7 @@ import { ensureApiDefaults } from "../shared/api-defaults.js";
 import { getStorage } from "../shared/storage.js";
 import { getTab, queryTabs } from "../shared/browser-api.js";
 import { KEEPALIVE_PORT_NAME } from "../shared/constants.js";
+import { publicTpError } from "../shared/error-contract.js";
 
 import { getApiBase, healthCache, warmupApi } from "./api.js";
 import { getLastBatchStatus, noteQueueStatus } from "./batches.js";
@@ -261,9 +262,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       onContextMenuClicked(menuInfo, tab, {
         overrides: msg?.overrides && typeof msg.overrides === "object" ? msg.overrides : null,
         debug: msg?.debug && typeof msg.debug === "object" ? msg.debug : null,
+        propagateErrors: true,
       })
         .then(() => sendResponse({ ok: true }))
-        .catch((e) => sendResponse({ ok: false, error: e?.message || String(e) }));
+        .catch((e) => sendResponse({
+          ok: false,
+          error: e?.message || String(e),
+          tpError: publicTpError(e),
+        }));
       return true;
     }
 

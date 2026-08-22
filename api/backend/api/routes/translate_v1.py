@@ -33,10 +33,14 @@ from backend import cancellation, trace, logfile
 from backend.config import settings
 from backend.ai.failure_reason import retry_after_sec as _ai_retry_after_sec
 from backend.ai.failure_reason import provider_http_failure as _provider_http_failure
-from backend.ai.providers import resolve_provider
+from backend.ai.providers import resolve_provider, is_local_provider
 from backend.ai.rategate import rate_gate, RateGateRejected, RateGateTimeout
 from backend.api.local_client import wants_unlimited
-from backend.api.errors import payload as error_payload, failure_event, provider_status
+from backend.api.errors import (
+    payload as error_payload, failure_event, provider_status,
+    ai_rate_feedback_allowed, cancelled_payload, stage_failure_semantics,
+    merged_request_correlation,
+)
 from backend.jobs.admission import AdmissionGate, AdmissionRejected, identity_of
 from backend.log import event
 from backend.security import SecurityError
@@ -82,9 +86,27 @@ def _lane_for(payload: dict[str, Any]) -> str:
     # AI layer entirely. Putting it in the AI lane would let a keyless batch
     # spend the lane that real AI jobs need.
     ai = payload.get("ai") if isinstance(payload.get("ai"), dict) else {}
-    has_key = bool(str(ai.get("api_key") or "").strip())
-    local = bool(ai.get("on_device")) or "localhost" in str(ai.get("base_url") or "").lower()
+    has_key = bool(str(ai.get("api_key") or settings.ai_api_key or "").strip())
+    provider = str(ai.get("provider") or "auto").strip().lower()
+    base_url = str(ai.get("base_url") or "").lower()
+    # ``on_device`` describes the extension engine. This route executes the
+    # server pipeline, which can only reach an explicitly configured local
+    # provider/server endpoint. Treating the browser flag as executable here
+    # silently put a keyless request in the AI lane even though the server then
+    # skipped AI generation.
+    local = is_local_provider(provider) or any(
+        host in base_url for host in ("localhost", "127.0.0.1", "0.0.0.0", "[::1]")
+    )
     return "ai" if (has_key or local) else "lens"
+
+
+def _ai_server_execution_configured(payload: dict[str, Any]) -> bool:
+    """Whether an AI-requesting payload can execute AI in this API process."""
+    if str(payload.get("mode") or "") != "lens_text":
+        return True
+    if str(payload.get("source") or "").strip().lower() != "ai":
+        return True
+    return _lane_for(payload) == "ai"
 
 
 
@@ -197,7 +219,29 @@ async def capabilities(request: Request) -> dict:
 async def translate_sync(payload: dict[str, Any], request: Request) -> dict:
     """Run one translation and return its result."""
     if cancellation.is_cancelled(payload):
-        raise HTTPException(status_code=409, detail="batch was cancelled")
+        context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+        raise HTTPException(status_code=409, detail=cancelled_payload(
+            trace_id=str(context.get("tp_trace") or ""), stage="translate_cancel"))
+    context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+    trace_id = str(context.get("tp_trace") or "")
+    if not trace_id:
+        trace_id = f"srv-{time.time_ns():x}"
+    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    correlation = merged_request_correlation(request, {
+        "batchId": metadata.get("batch_id") or payload.get("batch_id"),
+        "imageId": metadata.get("image_id") or payload.get("image_id"),
+    })
+    if not _ai_server_execution_configured(payload):
+        detail = error_payload(
+            code="ai_not_configured",
+            message="AI is selected but no API key or server-local provider is configured.",
+            user_message="AI translation is not configured on this server.",
+            origin="client", stage="ai_configuration", category="configuration",
+            retryable=False, http_status=400, trace_id=trace_id,
+            correlation=correlation,
+        )
+        failure_event("/v1/translate", detail)
+        raise HTTPException(status_code=400, detail=detail)
     lane = _lane_for(payload)
     gate = _gate(request, lane)
     mode = str(payload.get("mode") or "")
@@ -213,15 +257,6 @@ async def translate_sync(payload: dict[str, Any], request: Request) -> dict:
     # The trace id is minted by the extension when the user clicks, and travels
     # in the payload. Echoing it here is what makes one image's browser lines
     # and server lines the same story instead of two files to align by hand.
-    trace_id = str(((payload.get("context") or {}) if isinstance(payload.get("context"), dict) else {})
-                   .get("tp_trace") or "")
-    if not trace_id:
-        trace_id = f"srv-{time.time_ns():x}"
-    metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
-    correlation = {
-        "batchId": metadata.get("batch_id") or payload.get("batch_id"),
-        "imageId": metadata.get("image_id") or payload.get("image_id"),
-    }
     trace.write("api", "api/routes/translate_v1.py", "translate_sync", "->",
                 {"mode": mode, "source": source, "lane": lane, "identity": identity,
                  "hasImage": bool(payload.get("imageDataUri")), "src": payload.get("src")},
@@ -257,13 +292,19 @@ async def translate_sync(payload: dict[str, Any], request: Request) -> dict:
                 burst_override=rate["burst"] or None,
             )
         except (RateGateTimeout, RateGateRejected) as exc:
-            event("v1.translate.rate_limited", {"mode": mode, "source": source}, ok=False)
+            detail = error_payload(
+                code="local_rate_gate_busy",
+                message="Local provider pacing has no capacity yet.",
+                user_message="The AI service is busy. Please try again shortly.",
+                origin="api", stage="ai_rate_gate", category="capacity",
+                retryable=True, http_status=429, trace_id=trace_id,
+                extra={"retryAfterMs": 5000, "generationAttempts": 0},
+                correlation=correlation,
+            )
+            failure_event("/v1/translate", detail, mode=mode, source=source)
             raise HTTPException(
                 status_code=429,
-                detail={"code": "local_rate_gate_busy",
-                        "message": "Local provider pacing has no capacity yet.",
-                        "retryable": True, "retryAfterMs": 5000,
-                        "generationAttempts": 0, "traceId": trace_id},
+                detail=detail,
                 headers={"Retry-After": "5"},
             ) from exc
         rate_wait_ms = round((time.perf_counter() - rate_started) * 1000, 1)
@@ -280,7 +321,7 @@ async def translate_sync(payload: dict[str, Any], request: Request) -> dict:
             async with gate.slot(identity):
                 result = await loop.run_in_executor(executor, _run)
     except asyncio.CancelledError as exc:
-        event("v1.translate.cancelled", {"mode": mode, "source": source}, ok=False)
+        event("v1.translate.cancelled", {"mode": mode, "source": source}, ok=True)
         trace.write(
             "api", "api/routes/translate_v1.py", "translate_sync", "!!",
             {"failureKind": "cancelled", "httpStatus": 409}, trace_id=trace_id,
@@ -312,8 +353,14 @@ async def translate_sync(payload: dict[str, Any], request: Request) -> dict:
     except SecurityError as exc:
         # A rejected base_url / image URL is the caller's problem to fix, not a
         # server fault, and must not read as a transient failure worth retrying.
-        event("v1.translate.refused", {"mode": mode, "error": str(exc)[:200]}, ok=False)
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        detail = error_payload(
+            code="invalid_request", message=str(exc)[:200],
+            user_message=str(exc)[:200], origin="client",
+            stage="request_validation", category="input", retryable=False,
+            http_status=400, trace_id=trace_id, correlation=correlation,
+        )
+        failure_event("/v1/translate", detail, mode=mode, source=source)
+        raise HTTPException(status_code=400, detail=detail) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
@@ -354,46 +401,54 @@ async def translate_sync(payload: dict[str, Any], request: Request) -> dict:
                         "generationAttempts": 0, "traceId": trace_id},
                 headers={"Retry-After": "30"},
             ) from exc
-        mapped = _provider_http_failure(exc)
-        # Teach the gate once at this boundary. Never also report success for
-        # a failed provider request.
-        if paced and mapped.status == 429:
-            rate_gate.report_rate_limited(
-                rate_provider, rate_model, api_key,
-                retry_after_sec=_ai_retry_after_sec(exc),
-            )
         # WHERE it broke, not just that it broke. A bare RuntimeError here could
         # be the download, the Lens upload or the decode, and the trace could not
         # tell them apart.
         failed_stage = str(getattr(exc, "tp_stage", "") or "")
+        mapped = _provider_http_failure(exc)
+        upstream_status = provider_status(exc)
+        semantics = stage_failure_semantics(
+            failed_stage, default_code=mapped.code,
+            default_message=mapped.message, default_retryable=mapped.retryable,
+            upstream_status=upstream_status,
+        )
+        effective_status = int(semantics.get("httpStatus") or mapped.status)
+        # Only a confirmed AI/provider stage may teach the AI gate. A Lens 429
+        # is Lens backpressure; feeding it into the AI key bucket throttles an
+        # unrelated service and was the cause of misleading provider metrics.
+        if (paced and mapped.status == 429
+                and ai_rate_feedback_allowed(failed_stage)):
+            rate_gate.report_rate_limited(
+                rate_provider, rate_model, api_key,
+                retry_after_sec=_ai_retry_after_sec(exc),
+            )
         trace.write(
             "api", "api/routes/translate_v1.py", "translate_sync", "!!",
-            {"failureKind": mapped.code, "httpStatus": mapped.status,
-             "errorType": type(exc).__name__, "retryable": mapped.retryable,
+            {"failureKind": semantics["code"], "httpStatus": effective_status,
+             "upstreamStatus": upstream_status,
+             "errorType": type(exc).__name__, "retryable": semantics["retryable"],
              "failedStage": failed_stage or "unknown"},
             trace_id=trace_id,
         )
-        upstream_status = provider_status(exc)
         headers = ({"Retry-After": str(mapped.retry_after)}
                    if mapped.retry_after else None)
-        generation_attempts = 0 if mapped.code == "provider_rate_limited" else 1
+        generation_attempts = 0 if (mapped.code == "provider_rate_limited" or (
+            upstream_status is not None and 400 <= upstream_status < 500
+        )) else 1
         detail = error_payload(
-            code=mapped.code, message=mapped.message,
-            user_message=mapped.message,
-            origin=("upstream_ai" if mapped.code.startswith("provider_") or
-                    mapped.code in {"invalid_model_output", "incomplete_output",
-                                    "generation_stopped", "empty_output",
-                                    "invalid_output_contract"} else "api"),
+            code=semantics["code"], message=semantics["message"],
+            user_message=semantics["message"],
+            origin=semantics["origin"],
             stage=failed_stage or "unknown",
-            category="upstream" if mapped.status in (429, 502) else "internal",
-            retryable=mapped.retryable, http_status=mapped.status,
+            category=semantics["category"],
+            retryable=semantics["retryable"], http_status=effective_status,
             trace_id=trace_id, upstream_status=upstream_status,
             extra={"generationAttempts": generation_attempts},
             correlation=correlation,
         )
         failure_event("/v1/translate", detail, mode=mode, source=source)
         raise HTTPException(
-            status_code=mapped.status,
+            status_code=effective_status,
             detail=detail,
             headers=headers,
         ) from exc
@@ -401,8 +456,9 @@ async def translate_sync(payload: dict[str, Any], request: Request) -> dict:
         rate_gate.report_success(rate_provider, rate_model, api_key)
 
     if cancellation.is_cancelled(payload):
-        event("v1.translate.cancelled", {"mode": mode, "source": source}, ok=False)
-        raise HTTPException(status_code=409, detail="batch was cancelled while running")
+        event("v1.translate.cancelled", {"mode": mode, "source": source}, ok=True)
+        raise HTTPException(status_code=409, detail=cancelled_payload(
+            trace_id=trace_id, stage="translate_cancel", correlation=correlation))
 
     result["apiVersion"] = API_VERSION
     perf = result.get("perf") if isinstance(result.get("perf"), dict) else {}

@@ -994,7 +994,7 @@ async function imageBytesFor(payload, tabId, frameId) {
 // Decodes and lays out one image locally from `/v1/lens/raw`, returning a result, or null with
 // `decline.reason` set to the reason this image could not be drawn in the browser.
 // The API owns the Lens upload because Lens rejects extension-origin uploads.
-async function runLensDirectPath(base, payload, { tabId, frameId, signal = null, decline = {} }) {
+async function runLensDirectPath(base, payload, { tabId, frameId, jobId = "", signal = null, decline = {} }) {
   const stop = (reason) => {
     if (reason instanceof Error) decline.error = reason;
     decline.reason = String(reason?.message || reason || "the local route declined this image");
@@ -1038,6 +1038,8 @@ async function runLensDirectPath(base, payload, { tabId, frameId, signal = null,
       signal,
       traceId: String(payload?.context?.tp_trace || getTrace() || ""),
       batchId: String(payload?.metadata?.batch_id || ""),
+      jobId,
+      imageId: String(payload?.metadata?.image_id || ""),
       tabSession: String(payload?.context?.tp_tab_session || ""),
       apiUnlimited: payload?.limits?.apiUnlimited === true,
     }), {
@@ -1127,6 +1129,9 @@ async function runLensDirectPath(base, payload, { tabId, frameId, signal = null,
           tp_tab_session: String(payload?.context?.tp_tab_session || ""),
           batch_id: String(payload?.metadata?.batch_id || ""),
         },
+        jobId,
+        imageId: String(payload?.metadata?.image_id || ""),
+        batchId: String(payload?.metadata?.batch_id || ""),
         signal,
         apiUnlimited: payload?.limits?.apiUnlimited === true,
       }), {
@@ -1328,7 +1333,7 @@ function payloadForFullServer(payload) {
 // No retry: an incomplete AI answer is reported, not re-requested.
 async function runLocalAi(
   base, payload, result, plan, cancelBatchId = "", signal = null,
-  telemetry = null, onGenerationAttempt = null,
+  telemetry = null, onGenerationAttempt = null, jobId = "",
 ) {
   const doc = requireAiLensDocument(result);
   const units = translationUnits(doc);
@@ -1384,6 +1389,8 @@ async function runLocalAi(
     base,
     operationId,
     batchId: cancelBatchId,
+    jobId,
+    imageId: String(payload?.metadata?.image_id || ""),
     signal,
     traceId: String(payload?.context?.tp_trace || getTrace() || ""),
     trace: (event, data) => traceNote(
@@ -1608,7 +1615,7 @@ function isSafeNoGenerationBackpressure(error) {
 // Runs runLocalAi inside the payload's scheduler lane. Pre-provider admission
 // backpressure is re-queued indefinitely (until cancellation) with the SAME
 // operation id; a real provider/model attempt is never generated again here.
-async function runLocalAiInLane(base, payload, result, plan, batchId, signal, onGenerationAttempt = null) {
+async function runLocalAiInLane(base, payload, result, plan, batchId, signal, onGenerationAttempt = null, jobId = "") {
   const key = laneKeyFor(payload);
   const unlimited = payload?.limits?.aiUnlimited === true;
   setLaneUnlimited(key, unlimited);
@@ -1640,7 +1647,7 @@ async function runLocalAiInLane(base, payload, result, plan, batchId, signal, on
     const telemetry = {};
     try {
       const done = await runLocalAi(
-        base, payload, result, plan, batchId, signal, telemetry, onGenerationAttempt,
+        base, payload, result, plan, batchId, signal, telemetry, onGenerationAttempt, jobId,
       );
       const roundTripMs = Date.now() - started;
       const serverWaitMs =
@@ -1790,7 +1797,7 @@ async function runSyncTranslate(
       const directPayload = payload;
       decline.reason = "";
       direct = await runLensDirectPath(base, directPayload, {
-        tabId, frameId, signal: lensCtrl.signal, decline,
+        tabId, frameId, jobId, signal: lensCtrl.signal, decline,
       });
     } finally {
       endInFlight(jobId);
@@ -1834,6 +1841,7 @@ async function runSyncTranslate(
             const c = pendingByJob.get(jobId);
             if (c) c.aiGenerationAttempted = true;
           },
+          jobId,
         )
           .finally(() => endInFlight(jobId));
         aiRunning.catch(() => {});
@@ -1946,6 +1954,9 @@ async function runSyncTranslate(
       try {
         result = await translateViaSyncRest(base, outbound, {
           signal: ctrl.signal,
+          jobId,
+          imageId: serverImageId,
+          batchId,
         });
       } finally {
         endInFlight(jobId);

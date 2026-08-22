@@ -86,16 +86,6 @@ async def resolve(payload: dict[str, Any]) -> dict:
         result["lang"] = str(payload.get("lang") or "en")
         return result
     except Exception as exc:
-        event(
-            "ai.resolve.error",
-            {
-                "provider": str(payload.get("provider") or "auto"),
-                "lang": str(payload.get("lang") or ""),
-                "dt_ms": round((time.perf_counter() - t0) * 1000, 1),
-                "error": str(exc)[:240],
-            },
-            ok=False,
-        )
         raise
 
 

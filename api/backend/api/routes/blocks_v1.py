@@ -40,6 +40,9 @@ from backend import trace
 from backend.config import settings
 from backend.jobs.admission import AdmissionRejected, identity_of
 from backend.log import event
+from backend.api.errors import (
+    payload as error_payload, failure_event, merged_request_correlation,
+)
 
 router = APIRouter()
 
@@ -115,6 +118,11 @@ async def detect_blocks(payload: dict[str, Any], request: Request) -> dict:
         )
         or ""
     )
+    context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+    correlation = merged_request_correlation(request, {
+        "batchId": context.get("batch_id"),
+        "imageId": context.get("image_id"),
+    })
 
     if not textblocks_available():
         # Said, not faked. A client that gets an empty list would group the page
@@ -189,22 +197,33 @@ async def detect_blocks(payload: dict[str, Any], request: Request) -> dict:
                 request.app.state.cpu_executor, _run
             )
     except TextBlockBusy as exc:
-        event("v1.blocks.busy", {"identity": identity, "reason": "detector_session", **timings}, ok=False)
+        detail = error_payload(
+            code="server_busy", message="text-block detector is busy",
+            user_message="The server is busy. Please try again shortly.",
+            origin="api", stage="onnx", category="capacity", retryable=True,
+            http_status=503, trace_id=trace_id,
+            extra={"retryAfterMs": int(exc.retry_after_sec * 1000),
+                   "generationAttempts": 0}, correlation=correlation,
+        )
+        failure_event("/v1/blocks", detail, reason="detector_session", **timings)
         raise HTTPException(
             status_code=503,
-            detail={"code": "server_busy", "stage": "onnx",
-                    "message": "text-block detector is busy", "retryable": True,
-                    "retryAfterMs": int(exc.retry_after_sec * 1000),
-                    "generationAttempts": 0},
+            detail=detail,
             headers={"Retry-After": str(exc.retry_after_sec)},
         ) from exc
     except AdmissionRejected as exc:
-        event("v1.blocks.busy", {"identity": identity, "reason": "admission"}, ok=False)
+        detail = error_payload(
+            code="server_busy", message=str(exc),
+            user_message="The server is busy. Please try again shortly.",
+            origin="api", stage="onnx", category="capacity", retryable=True,
+            http_status=503, trace_id=trace_id,
+            extra={"retryAfterMs": int(exc.retry_after_sec * 1000)},
+            correlation=correlation,
+        )
+        failure_event("/v1/blocks", detail, reason="admission")
         raise HTTPException(
             status_code=503,
-            detail={"code": "server_busy", "stage": "onnx",
-                    "message": str(exc), "retryable": True,
-                    "retryAfterMs": int(exc.retry_after_sec * 1000)},
+            detail=detail,
             headers={"Retry-After": str(exc.retry_after_sec)},
         ) from exc
 

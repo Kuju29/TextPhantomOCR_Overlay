@@ -14,7 +14,7 @@ from typing import Any
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 
 from backend.jobs.queue import JobQueue, QueueFull
-from backend.log import dbg, event
+from backend.log import dbg
 from backend import cancellation
 
 router = APIRouter()
@@ -51,16 +51,6 @@ async def translate(
     try:
         meta = await _job_queue(request).enqueue(payload, idempotency_key=idempotency_key)
     except QueueFull as exc:
-        event(
-            "translate.busy",
-            {
-                "mode": str(payload.get("mode") or ""),
-                "lang": str(payload.get("lang") or ""),
-                "source": str(payload.get("source") or ""),
-                "error": str(exc),
-            },
-            ok=False,
-        )
         # 503 + Retry-After so the client can back off instead of failing hard.
         raise HTTPException(
             status_code=503,

@@ -22,6 +22,7 @@ from fastapi import Request
 from backend import trace
 from backend.config import settings
 from backend.log import event
+from backend.api.errors import safe_cause_class
 
 _UVICORN_MODE = "uvicorn"
 _EVENT_MODES = {"summary", "custom", "tp", "plain"}
@@ -59,7 +60,8 @@ def _note_scanner_probe(method: str, path: str) -> None:
                 "window_min": round((now - _scanner["since"]) / 60, 1),
                 "samples": list(_scanner["samples"]),
             },
-            ok=False,
+            # Diagnostic internet background, not a TextPhantom product error.
+            ok=True,
         )
         _scanner.update(count=0, since=now, samples=[])
 
@@ -105,7 +107,8 @@ async def access_log_middleware(request: Request, call_next):
                     {
                         "method": request.method,
                         "path": request.url.path,
-                        "error": str(exc)[:240],
+                        "errorType": type(exc).__name__,
+                        "causeClass": safe_cause_class(exc),
                     },
                     ok=False,
                 )

@@ -46,7 +46,11 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from backend.ai import markers, parsing
 from backend.ai.errors import ModelOutputContractError
 from backend.api.local_client import wants_unlimited
-from backend.api.errors import payload as error_payload, failure_event, provider_status
+from backend.api.errors import (
+    payload as error_payload, failure_event, provider_status,
+    cancelled_payload, provider_http_semantics, safe_validation_reason,
+    merged_request_correlation,
+)
 from backend.ai.failure_reason import classify as _ai_failure_kind
 from backend.ai.failure_reason import is_rate_limited as _ai_is_rate_limited
 from backend.ai.failure_reason import retry_after_sec as _ai_retry_after_sec
@@ -242,11 +246,24 @@ async def ai_translate_v1(
     t0 = time.perf_counter()
     context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
     trace_id = str(context.get("tp_trace") or "")
-    correlation = {
+    correlation = merged_request_correlation(request, {
         "requestId": payload.get("operationId"),
+        "jobId": payload.get("operationId"),
         "batchId": payload.get("batchId"),
         "imageId": payload.get("imageId") or context.get("image_id"),
-    }
+    })
+
+    def invalid_detail(message: str, stage: str = "request_validation") -> dict[str, Any]:
+        detail = error_payload(
+            code="invalid_request", message=str(message)[:200],
+            user_message=str(message)[:200], origin="client", stage=stage,
+            category="input", retryable=False, http_status=400,
+            trace_id=trace_id,
+            extra={"validation": safe_validation_reason(message)},
+            correlation=correlation,
+        )
+        failure_event("/v1/ai/translate", detail)
+        return detail
 
     def trace_failure(stage: str, exc: BaseException, status: int, **details: Any) -> None:
         provider_status = re.search(r"\bHTTP\s+(\d{3})\b", str(exc), re.IGNORECASE)
@@ -277,19 +294,20 @@ async def ai_translate_v1(
     if cancellation.is_cancelled(payload):
         exc = RuntimeError("batch was cancelled before AI started")
         trace_failure("cancelled", exc, 409)
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=cancelled_payload(
+            trace_id=trace_id, stage="ai_cancel", correlation=correlation)) from exc
 
     try:
         units = _validate_units(payload.get("units"))
     except ValueError as exc:
         trace_failure("request_validation", exc, 400)
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=invalid_detail(str(exc))) from exc
 
     target_lang = str(payload.get("targetLang") or "").strip()
     if not target_lang:
         exc = ValueError("targetLang is required")
         trace_failure("request_validation", exc, 400, units=len(units))
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=invalid_detail(str(exc))) from exc
     prompt_meta = ai_prompts.prompt_metadata(
         target_lang, str(payload.get("prompt") or "").strip()
     )
@@ -297,12 +315,14 @@ async def ai_translate_v1(
         config = _build_config(payload)
     except ValueError as exc:
         trace_failure("configuration", exc, 400, units=len(units))
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=invalid_detail(
+            str(exc), "configuration")) from exc
     resolved_provider = resolve_provider(config.provider, config.api_key)
     if not resolved_provider and config.api_key:
         exc = ValueError("AI provider must be selected explicitly for this API key")
         trace_failure("configuration", exc, 400, units=len(units))
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=invalid_detail(
+            str(exc), "configuration")) from exc
     resolved_model = resolve_generation_model(resolved_provider, config.model)
     rate = _rate_options(payload)
     image_bytes = (len(config.image_b64) * 3) // 4 if config.image_b64 else 0
@@ -439,7 +459,8 @@ async def ai_translate_v1(
             "cancelled", exc, 409, units=len(units), rateWaitMs=rate_wait_ms,
             providerAttempts=0,
         )
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=cancelled_payload(
+            trace_id=trace_id, stage="ai_cancel", correlation=correlation)) from exc
 
     # The marker protocol is what lets one model call carry many units and come
     # back separable. Reusing the existing one keeps this endpoint and the
@@ -518,7 +539,8 @@ async def ai_translate_v1(
             requestedProvider=config.provider, requestedModel=config.model,
             providerAttempts=0,
         )
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=invalid_detail(
+            str(exc), "provider_security")) from exc
     except ModelOutputContractError as exc:
         structural = dict(getattr(exc, "structural_details", {}) or {})
         trace_failure(
@@ -563,7 +585,8 @@ async def ai_translate_v1(
             requestedProvider=config.provider, requestedModel=config.model,
             providerAttempts=0,
         )
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=invalid_detail(
+            str(exc), "provider_validation")) from exc
     except Exception as exc:  # provider/network/output-contract failures
         # A provider 429/503 is a rejected HTTP attempt, not a model generation.
         # It is therefore safe for the extension to wait and re-submit the SAME
@@ -576,7 +599,10 @@ async def ai_translate_v1(
                 retry_after_sec=provider_retry_sec,
             )
         kind = _ai_failure_kind(exc)
-        generation_attempts = 0 if provider_limited else 1
+        upstream_status = provider_status(exc)
+        generation_attempts = 0 if (provider_limited or (
+            upstream_status is not None and 400 <= upstream_status < 500
+        )) else 1
         trace_failure(
             "provider_or_output_contract", exc, 502,
             units=len(units), chars=sum(len(unit["text"]) for unit in units),
@@ -592,8 +618,10 @@ async def ai_translate_v1(
             providerAttempts=1,
             generationAttempts=generation_attempts,
         )
-        upstream_status = provider_status(exc)
-        stable_code = "provider_rate_limited" if provider_limited else kind
+        http_code, http_retryable = provider_http_semantics(upstream_status)
+        stable_code = "provider_rate_limited" if provider_limited else (
+            http_code if kind == "provider_http" else kind
+        )
         if stable_code == "provider_or_output_contract":
             stable_code = "provider_failed"
         detail = error_payload(
@@ -604,8 +632,8 @@ async def ai_translate_v1(
                           "The AI provider could not complete this image."),
             origin="upstream_ai", stage="provider_request", category="upstream",
             retryable=bool(provider_limited or kind in {
-                "provider_timeout", "provider_transport", "provider_http"
-            }),
+                "provider_timeout", "provider_transport"
+            } or (kind == "provider_http" and http_retryable)),
             http_status=502, trace_id=trace_id, upstream_status=upstream_status,
             extra={"providerAttempts": 1, "generationAttempts": generation_attempts,
                    "automaticContentRetry": False, "automaticTransportRetry": False,
@@ -622,14 +650,15 @@ async def ai_translate_v1(
 
     text_full = str(result.get("aiTextFull") or "")
     if cancellation.is_cancelled(payload):
-        event("v1.ai.translate.cancelled", {"units": len(units)}, ok=False)
+        event("v1.ai.translate.cancelled", {"units": len(units)}, ok=True)
         exc = RuntimeError("batch was cancelled while AI was running")
         trace_failure(
             "cancelled", exc, 409, units=len(units),
             providerMs=provider_timing.get("provider_ms", 0.0),
             providerAttempts=1,
         )
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=409, detail=cancelled_payload(
+            trace_id=trace_id, stage="ai_cancel", correlation=correlation)) from exc
     # `extract_paragraphs` returns (paragraphs, clean_text) or None when the
     # model answered without any markers at all. None is not "no translations"
     # — it means the protocol broke — so it is reported as every unit missing

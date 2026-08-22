@@ -2,7 +2,9 @@
 
 import { createLogger } from "../shared/logger.js";
 import { readFullSettings } from "../shared/settings.js";
-import { isLocalAiProvider, isLocalHostUrl } from "../shared/constants.js";
+import { API_PATHS, isLocalAiProvider, isLocalHostUrl } from "../shared/constants.js";
+import { attachTpError } from "../shared/error-contract.js";
+import { autoAiSettingsIssue } from "../shared/ai-settings-contract.js";
 import { resolveSeriesKey, refineSeriesKeyWithTitle } from "../shared/series.js";
 import { getApiBase } from "./api.js";
 import { getSeriesMemory, selectPromptMemory } from "./series-memory.js";
@@ -23,6 +25,52 @@ import {
 const log = createLogger("SW.menu");
 
 const KEEPALIVE_MS = 10 * 60 * 1000;
+const AI_PREFLIGHT_TIMEOUT_MS = 2500;
+
+// Ask the configured server only when key ownership affects the decision.
+// Network/legacy uncertainty deliberately returns null and lets the normal
+// transport produce its more accurate error instead of a false config block.
+async function serverHasAiKey() {
+  const base = String(await getApiBase().catch(() => "")).replace(/\/+$/, "");
+  if (!base) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AI_PREFLIGHT_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${base}${API_PATHS.META}`, {
+      cache: "no-store",
+      headers: { accept: "application/json" },
+      signal: controller.signal,
+    });
+    if (!response.ok) return null;
+    const meta = await response.json();
+    return typeof meta?.has_env_ai_key === "boolean" ? meta.has_env_ai_key : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function assertAutoAiReady(settings) {
+  const provider = String(settings?.aiProvider || "").trim().toLowerCase();
+  const baseUrl = String(settings?.aiBaseUrl || "").trim();
+  // The current text.ai plan is server-owned even when the legacy
+  // `aiOnDevice` preference is present. Do not treat that preference as a
+  // working keyless route until an executable on-device translator exists.
+  const local = isLocalAiProvider(provider) || isLocalHostUrl(baseUrl);
+  const needsServerKeyFact = !local && !String(settings?.aiKey || "").trim();
+  const issue = autoAiSettingsIssue(settings, {
+    hasServerKey: needsServerKeyFact ? await serverHasAiKey() : null,
+  });
+  if (!issue) return;
+  throw attachTpError(new Error(issue.message), {
+    code: issue.code,
+    category: "configuration",
+    origin: "user",
+    stage: "ai_configuration",
+    retryable: false,
+  });
+}
 
 // Reads and discards the lastError left by a contextMenus call.
 function ignoreMenuError() {
@@ -406,7 +454,7 @@ async function handleTranslateAll(menuInfo, tab, ctx) {
  * @param {object} menuInfo
  * @param {object} tab
  * @param {{overrides?: {mode?: string, lang?: string, source?: string}|null,
- *          debug?: {raw?: boolean}|null}} [options]
+ *          debug?: {raw?: boolean}|null, propagateErrors?: boolean}} [options]
  */
 export async function onContextMenuClicked(menuInfo, tab, options = {}) {
   if (!tab?.id) return;
@@ -415,14 +463,18 @@ export async function onContextMenuClicked(menuInfo, tab, options = {}) {
     await ensureContentScript(tab.id);
     const tabSessionId = ensureTabSession(tab.id, tab?.url || "");
 
-    const settings = await readFullSettings();
     const overrides = options?.overrides && typeof options.overrides === "object" ? options.overrides : null;
+    const effectiveLang = String(overrides?.lang || "").trim();
+    const settings = await readFullSettings({ lang: effectiveLang });
     const debug = options?.debug && typeof options.debug === "object" ? { raw: options.debug.raw === true } : null;
     const mode = overrideMode(overrides?.mode) || settings.mode;
     const lang = String(overrides?.lang || "").trim() || settings.lang;
     const source = mode === "lens_text"
       ? overrideSource(overrides?.source) || settings.sources || "translated"
       : "translated";
+    if (overrides && mode === "lens_text" && source === "ai") {
+      await assertAutoAiReady(settings);
+    }
     if (overrides) {
       log.info("running this request on caller-supplied settings", { mode, lang, source, raw: debug?.raw === true });
     }
@@ -489,5 +541,9 @@ export async function onContextMenuClicked(menuInfo, tab, options = {}) {
     }
   } catch (e) {
     log.error("menu handler error", e);
+    // Browser context-menu clicks historically report errors through logging,
+    // toast/image messages. Programmatic callers need the rejected Promise so
+    // they can leave their busy state and show the immediate start failure.
+    if (options?.propagateErrors === true) throw e;
   }
 }

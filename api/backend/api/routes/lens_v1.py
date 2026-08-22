@@ -46,7 +46,10 @@ from backend.lens.languages import normalize as normalize_lang
 from backend.lens.tree import decode_tree, flatten_spans, tree_warnings
 from backend.log import event
 from backend.api.local_client import wants_unlimited
-from backend.api.errors import payload as error_payload, failure_event, provider_status
+from backend.api.errors import (
+    payload as error_payload, failure_event, provider_status, cancelled_payload,
+    safe_cause_class, merged_request_correlation,
+)
 from backend.render import erase_boxes as erase_boxes_mod
 
 router = APIRouter()
@@ -201,7 +204,6 @@ async def lens_decode(payload: dict[str, Any]) -> dict:
         # A decode failure means Google changed the geometry encoding. That is
         # a permanent condition for every page until the adapter is updated, so
         # it must be legible rather than look like a transient error.
-        event("v1.lens.decode.error", {"error": str(exc)[:300]}, ok=False)
         raise HTTPException(
             status_code=422,
             detail=f"could not decode the Lens geometry: {exc}",
@@ -227,6 +229,10 @@ async def lens_raw(
     tp_trace: str = Form(""),
     batch_id: str = Form(""),
     tp_tab_session: str = Form(""),
+    image_id: str = Form(""),
+    request_id: str = Form(""),
+    job_id: str = Form(""),
+    client_version: str = Form(""),
 ) -> dict:
     """Service 1: upload to Lens and hand back what Lens said. Nothing else.
 
@@ -241,6 +247,13 @@ async def lens_raw(
     given, and the caller cannot infer that from the response.
     """
     t0 = time.perf_counter()
+    correlation = merged_request_correlation(request, {
+        "requestId": request_id,
+        "jobId": job_id,
+        "batchId": batch_id,
+        "imageId": image_id,
+        "clientVersion": client_version,
+    })
     trace.write(
         "api", "api/routes/lens_v1.py", "lens_raw", "->",
         {"lang": lang, "contentType": image.content_type},
@@ -270,7 +283,8 @@ async def lens_raw(
     target_lang = normalize_lang(lang)
     cancel_payload = {"batch_id": batch_id}
     if cancellation.is_cancelled(cancel_payload):
-        raise HTTPException(status_code=409, detail="batch was cancelled")
+        raise HTTPException(status_code=409, detail=cancelled_payload(
+            trace_id=tp_trace, stage="lens_cancel", correlation=correlation))
     identity = _lens_identity(tp_tab_session)
     try:
         # fetch_lens_data is synchronous network I/O. Calling it directly from
@@ -297,7 +311,7 @@ async def lens_raw(
             origin="api", stage="lens_admission", category="capacity",
             retryable=True, http_status=503, trace_id=tp_trace,
             extra={"retryAfterMs": int(exc.retry_after_sec * 1000)},
-            correlation={"batchId": batch_id},
+            correlation=correlation,
         )
         failure_event("/v1/lens/raw", detail)
         raise HTTPException(
@@ -315,7 +329,7 @@ async def lens_raw(
                 origin="upstream_lens", stage="lens_session", category="upstream_session",
                 retryable=True, http_status=503, trace_id=tp_trace,
                 extra={"retryAfterMs": 30000},
-                correlation={"batchId": batch_id},
+                correlation=correlation,
             )
             failure_event("/v1/lens/raw", detail)
             raise HTTPException(
@@ -332,13 +346,14 @@ async def lens_raw(
             retryable=True, http_status=502, trace_id=tp_trace,
             upstream_status=upstream_status,
             extra={"errorType": type(exc).__name__},
-            correlation={"batchId": batch_id},
+            correlation=correlation,
         )
         failure_event("/v1/lens/raw", detail)
         raise HTTPException(status_code=502, detail=detail) from exc
     if cancellation.is_cancelled(cancel_payload):
-        event("v1.lens.raw.cancelled", {"batch_id": batch_id}, ok=False)
-        raise HTTPException(status_code=409, detail="batch was cancelled while Lens was running")
+        event("v1.lens.raw.cancelled", {"batch_id": batch_id}, ok=True)
+        raise HTTPException(status_code=409, detail=cancelled_payload(
+            trace_id=tp_trace, stage="lens_cancel", correlation=correlation))
 
     if not isinstance(data, dict):
         # Not coerced to `{}`. An empty object decodes to a page with no text,
@@ -350,7 +365,7 @@ async def lens_raw(
             origin="upstream_lens", stage="lens_response", category="upstream_contract",
             retryable=True, http_status=502, trace_id=tp_trace,
             extra={"responseType": type(data).__name__},
-            correlation={"batchId": batch_id},
+            correlation=correlation,
         )
         failure_event("/v1/lens/raw", detail)
         raise HTTPException(status_code=502, detail=detail)
@@ -395,6 +410,10 @@ async def lens_fallback(
     reason: str = Form(""),
     batch_id: str = Form(""),
     tp_tab_session: str = Form(""),
+    image_id: str = Form(""),
+    request_id: str = Form(""),
+    job_id: str = Form(""),
+    client_version: str = Form(""),
 ) -> dict:
     """Do the whole Lens round trip because the client could not.
 
@@ -405,6 +424,13 @@ async def lens_fallback(
     but it is counted, so the gap is visible.
     """
     t0 = time.perf_counter()
+    correlation = merged_request_correlation(request, {
+        "requestId": request_id,
+        "jobId": job_id,
+        "batchId": batch_id,
+        "imageId": image_id,
+        "clientVersion": client_version,
+    })
 
     if not settings.firebase_url:
         # Failing loudly: without a cookie source this endpoint cannot work at
@@ -431,7 +457,8 @@ async def lens_fallback(
     target_lang = normalize_lang(lang)
     cancel_payload = {"batch_id": batch_id}
     if cancellation.is_cancelled(cancel_payload):
-        raise HTTPException(status_code=409, detail="batch was cancelled")
+        raise HTTPException(status_code=409, detail=cancelled_payload(
+            stage="lens_cancel", correlation=correlation))
     identity = _lens_identity(tp_tab_session)
     try:
         async with request.app.state.admission_gate.slot(identity):
@@ -440,29 +467,52 @@ async def lens_fallback(
                 request.app.state.lens_executor, _fetch_fallback_sync, raw, target_lang
             )
     except AdmissionRejected as exc:
-        event("v1.lens.fallback.busy", {"identity": identity}, ok=False)
+        detail = error_payload(
+            code="server_busy", message=str(exc),
+            user_message="The server is busy. Please try again shortly.",
+            origin="api", stage="lens", category="capacity", retryable=True,
+            http_status=503,
+            extra={"retryAfterMs": int(exc.retry_after_sec * 1000)},
+            correlation=correlation,
+        )
+        failure_event("/v1/lens/fallback", detail, reason="admission")
         raise HTTPException(
             status_code=503,
-            detail={"code": "server_busy", "stage": "lens",
-                    "message": str(exc), "retryable": True,
-                    "retryAfterMs": int(exc.retry_after_sec * 1000)},
+            detail=detail,
             headers={"Retry-After": str(exc.retry_after_sec)},
         ) from exc
     except Exception as exc:  # noqa: BLE001
         if (type(exc).__name__ == "LensSessionError"
                 and type(exc).__module__ == "backend.lens.client"):
-            event("v1.lens.fallback.session_unavailable", {"identity": identity}, ok=False)
+            detail = error_payload(
+                code="lens_session_unavailable",
+                message="Google Lens rejected the refreshed server session.",
+                user_message="Google Lens is temporarily unavailable. Please try again.",
+                origin="upstream_lens", stage="lens_fallback",
+                category="upstream_lens", retryable=True, http_status=503,
+                extra={"retryAfterMs": 30000}, correlation=correlation,
+            )
+            failure_event("/v1/lens/fallback", detail, reason="session_unavailable")
             raise HTTPException(
                 status_code=503,
-                detail={"code": "lens_session_unavailable",
-                        "message": "Google Lens rejected the refreshed server session.",
-                        "retryable": True},
+                detail=detail,
                 headers={"Retry-After": "30"},
             ) from exc
-        event("v1.lens.fallback.error", {"reason": reason[:80], "error": str(exc)[:300]}, ok=False)
-        raise HTTPException(status_code=502, detail=f"Lens fallback failed: {exc}") from exc
+        upstream_status = provider_status(exc)
+        detail = error_payload(
+            code="lens_http_error" if upstream_status else "lens_transport_error",
+            message="Google Lens fallback could not complete the image request.",
+            user_message="Could not read this image with Google Lens. Please try again.",
+            origin="upstream_lens", stage="lens_fallback", category="upstream",
+            retryable=True, http_status=502, upstream_status=upstream_status,
+            extra={"errorType": type(exc).__name__, "causeClass": safe_cause_class(exc)},
+            correlation=correlation,
+        )
+        failure_event("/v1/lens/fallback", detail, fallbackReason=reason[:80])
+        raise HTTPException(status_code=502, detail=detail) from exc
     if cancellation.is_cancelled(cancel_payload):
-        raise HTTPException(status_code=409, detail="batch was cancelled while Lens was running")
+        raise HTTPException(status_code=409, detail=cancelled_payload(
+            stage="lens_cancel", correlation=correlation))
 
     event(
         "v1.lens.fallback",

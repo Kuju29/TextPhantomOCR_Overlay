@@ -15,12 +15,21 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
 from backend.api.middleware import access_log_middleware, configure_uvicorn_access_log
-from backend.api.errors import ERROR_SCHEMA, payload as error_payload, failure_event
+from backend.api.errors import (
+    ERROR_SCHEMA,
+    payload as error_payload,
+    failure_event,
+    request_correlation,
+    safe_cause_class,
+    safe_validation_reason,
+    validation_error_payload,
+)
 from backend.api.routes import (
     blocks_v1,
     ai,
@@ -190,31 +199,75 @@ async def tp_http_exception_handler(request: Request, exc: HTTPException) -> JSO
         legacy = exc.detail if isinstance(exc.detail, dict) else {}
         message = str(legacy.get("message") or exc.detail or "Request failed")
         status = int(exc.status_code)
+        raw_code = str(legacy.get("code") or "")
+        raw_message = message.lower()
+        expected_cancel = status == 409 and (raw_code == "cancelled" or "cancel" in raw_message)
+        diagnostics_disabled = status == 503 and request.url.path in ("/v1/logs", "/v1/trace")
+        code = raw_code or (
+            "cancelled" if expected_cancel else
+            ("diagnostic_logging_disabled" if request.url.path == "/v1/logs" else
+             "trace_disabled") if diagnostics_disabled else
+            "invalid_request" if status < 500 else "service_unavailable"
+        )
         detail = error_payload(
-            code=str(legacy.get("code") or (
-                "invalid_request" if status < 500 else "service_unavailable"
-            )),
+            code=code,
             message=message,
             user_message=str(legacy.get("userMessage") or message),
             origin="client" if status < 500 else "api",
-            stage=str(legacy.get("stage") or request.url.path.strip("/").replace("/", "_") or "http"),
-            category="input" if status < 500 else "service",
+            stage=str(legacy.get("stage") or ("cancel" if expected_cancel else
+                      request.url.path.strip("/").replace("/", "_") or "http")),
+            category=("lifecycle" if expected_cancel else "configuration"
+                      if diagnostics_disabled else "input" if status < 500 else "service"),
             retryable=bool(legacy.get("retryable", status in (429, 502, 503, 504))),
             http_status=status,
-            trace_id=str(legacy.get("traceId") or ""),
+            trace_id=str(legacy.get("traceId") or request.headers.get("x-tp-trace-id") or ""),
             upstream_status=legacy.get("upstreamStatus"),
-            extra={k: v for k, v in legacy.items() if k not in {
+            extra={**({"validation": safe_validation_reason(exc.detail)}
+                      if status in (400, 422) else {}), **{k: v for k, v in legacy.items() if k not in {
                 "schema", "code", "message", "userMessage", "origin", "stage",
                 "failedStage", "category", "retryable", "httpStatus", "traceId",
                 "upstreamStatus",
-            }},
+            }}},
+            correlation=request_correlation(request),
         )
-        failure_event(request.url.path, detail)
+        if not expected_cancel and not diagnostics_disabled:
+            failure_event(request.url.path, detail)
     headers = dict(exc.headers or {})
     # Internal marker used only to prevent the access middleware from emitting
     # a second, cause-less "Bad Gateway" line for this already-classified error.
     headers["X-TP-Error-Schema"] = ERROR_SCHEMA
     return JSONResponse(status_code=exc.status_code, content={"detail": detail}, headers=headers)
+
+
+@app.exception_handler(RequestValidationError)
+async def tp_validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """Keep FastAPI's 422 body while adding one safe, searchable log event."""
+    detail = validation_error_payload(
+        exc.errors(), trace_id=str(request.headers.get("x-tp-trace-id") or ""),
+        correlation=request_correlation(request),
+    )
+    failure_event(request.url.path, detail)
+    # A canonical body is required here: advertising tp.error/1 while returning
+    # FastAPI's raw list made the schema header false and could echo `input`.
+    return JSONResponse(status_code=422, content={"detail": detail},
+                        headers={"X-TP-Error-Schema": ERROR_SCHEMA})
+
+
+@app.exception_handler(Exception)
+async def tp_unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Expose no raw exception text, while retaining a useful safe cause class."""
+    detail = error_payload(
+        code="internal_error", message="The server could not complete this request.",
+        user_message="The server could not complete this request.", origin="api",
+        stage=request.url.path.strip("/").replace("/", "_") or "http",
+        category="internal", retryable=False, http_status=500,
+        trace_id=str(request.headers.get("x-tp-trace-id") or ""),
+        extra={"errorType": type(exc).__name__, "causeClass": safe_cause_class(exc)},
+        correlation=request_correlation(request),
+    )
+    failure_event(request.url.path, detail)
+    return JSONResponse(status_code=500, content={"detail": detail},
+                        headers={"X-TP-Error-Schema": ERROR_SCHEMA})
 
 # Provider SDKs are synchronous. Give them their own executor instead of the
 # process-wide asyncio default pool that Lens, ONNX, warmup and miscellaneous
@@ -338,6 +391,12 @@ app.state.pipeline_ai_executor = ThreadPoolExecutor(
 @app.get("/", include_in_schema=False)
 async def root() -> RedirectResponse:
     """Open the interactive API docs when the Space root URL is visited."""
+    return RedirectResponse(url="/docs")
+
+
+@app.head("/", include_in_schema=False)
+async def root_head() -> RedirectResponse:
+    """Answer hosting availability probes without producing a 405 error."""
     return RedirectResponse(url="/docs")
 
 # CORS. The extension does not rely on CORS at all — it fetches under its host

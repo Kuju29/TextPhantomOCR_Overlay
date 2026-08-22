@@ -105,7 +105,7 @@ export async function readCoreSettings() {
  * @returns {Promise<{mode:string, lang:string, sources:string, maxConcurrency:number,
  *   aiKey:string, aiModel:string, aiPrompt:string}>}
  */
-export async function readFullSettings() {
+export async function readFullSettings(options = {}) {
   const it = await getStorage([
     "mode",
     "lang",
@@ -136,7 +136,12 @@ export async function readFullSettings() {
     "engineMode",
   ]);
 
-  const lang = typeof it.lang === "string" ? it.lang : DEFAULT_LANG;
+  // A caller such as Auto translate may choose a per-request language without
+  // rewriting the popup's global language. Resolve the editable prompt against
+  // that effective language too; otherwise an Auto Thai request can silently
+  // receive (and cache) the popup's English prompt.
+  const requestedLang = String(options?.lang || "").trim();
+  const lang = requestedLang || (typeof it.lang === "string" && it.lang ? it.lang : DEFAULT_LANG);
   const aiModel = normalizeAiModel(typeof it.aiModel === "string" ? it.aiModel : "auto");
 
   const migration = migratePromptMap(

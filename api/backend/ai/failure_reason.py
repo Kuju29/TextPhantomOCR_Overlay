@@ -81,6 +81,26 @@ def provider_http_failure(exc: BaseException) -> ProviderHttpFailure:
             "The AI provider is rate limiting this request.", True,
             max(1, int(wait + 0.999)) if wait else 5,
         )
+    # A permanent upstream 4xx must not invite an identical retry.  Keep the
+    # existing outer 502 behaviour; upstreamStatus carries the real response.
+    import re
+    match = re.search(r"\bHTTP\s+(\d{3})\b", str(exc), re.IGNORECASE)
+    upstream_status = int(match.group(1)) if match else None
+    if upstream_status == 413:
+        return ProviderHttpFailure(
+            502, "provider_payload_too_large",
+            "The AI provider rejected this request because it was too large.", False,
+        )
+    if upstream_status in (401, 403):
+        return ProviderHttpFailure(
+            502, "provider_auth_failed",
+            "The AI provider rejected the configured credentials.", False,
+        )
+    if upstream_status is not None and 400 <= upstream_status < 500:
+        return ProviderHttpFailure(
+            502, "provider_http",
+            "The AI provider rejected this request.", False,
+        )
     reason = classify(exc)
     message = str(exc).lower()
     if any(marker in message for marker in (
@@ -102,7 +122,9 @@ def provider_http_failure(exc: BaseException) -> ProviderHttpFailure:
     } or (reason == "provider_or_output_contract" and provider_marked):
         return ProviderHttpFailure(
             502, reason, "The AI provider could not complete this request.",
-            reason in {"provider_timeout", "provider_transport", "provider_http"},
+            reason in {"provider_timeout", "provider_transport"} or (
+                reason == "provider_http" and upstream_status in (500, 502, 503, 504)
+            ),
         )
     return ProviderHttpFailure(
         500, "internal_error", "The server could not complete this request.", False,

@@ -326,6 +326,32 @@ kbd {
   cursor: text;
 }
 
+/*
+ * Original has two overlapping layers: the visible OCR lines and an invisible
+ * semantic target that Chrome replaces when its page translator runs. Keep
+ * only the layer the reader can currently see interactive, otherwise a drag
+ * selects the opacity:0 target and the browser paints no visible highlight.
+ */
+.tp-ol-root .tp-ol-scope .tp-gtext {
+  pointer-events: none !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+
+html.translated-ltr .tp-ol-root .tp-ol-scope .tp-src .tp-line,
+html.translated-rtl .tp-ol-root .tp-ol-scope .tp-src .tp-line {
+  pointer-events: none !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+
+html.translated-ltr .tp-ol-root .tp-ol-scope .tp-gtext,
+html.translated-rtl .tp-ol-root .tp-ol-scope .tp-gtext {
+  pointer-events: auto !important;
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}
+
 .tp-ol-root .tp-ol-scope .tp-line.tp-picked {
   background: color-mix(in srgb, var(--tp-accent) 30%, transparent);
   border-radius: 4px;

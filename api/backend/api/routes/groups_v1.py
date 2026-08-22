@@ -56,7 +56,9 @@ from backend import trace
 from backend.config import settings
 from backend.jobs.admission import AdmissionRejected, identity_of
 from backend.log import event
-from backend.api.errors import payload as error_payload, failure_event
+from backend.api.errors import (
+    payload as error_payload, failure_event, merged_request_correlation,
+)
 from backend.lens.tree import iter_paragraphs
 from backend.render import textblocks_pass
 from backend.render.region import paragraph_reading_axis
@@ -349,10 +351,10 @@ async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict:
     identity = identity_of(payload)
     context = payload.get("context")
     trace_id = str((context if isinstance(context, dict) else {}).get("tp_trace") or "")
-    correlation = {
+    correlation = merged_request_correlation(request, {
         "batchId": (context if isinstance(context, dict) else {}).get("batch_id"),
         "imageId": (context if isinstance(context, dict) else {}).get("image_id"),
-    }
+    })
 
     if not textblocks_available():
         # Said, not faked. A client that got its tree back unmerged would group

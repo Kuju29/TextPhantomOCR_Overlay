@@ -25,6 +25,7 @@ from fastapi import APIRouter, HTTPException
 from backend import logfile, trace
 from backend.config import settings
 from backend.trace_dedupe import TraceIngestDedupe, legacy_shipment_id
+from backend.api.errors import payload as error_payload
 
 router = APIRouter()
 
@@ -45,7 +46,13 @@ async def ingest(payload: dict[str, Any]) -> dict:
     if not logfile.is_enabled():
         # Says so rather than pretending to accept them: a client that believes
         # its logs are being kept, and is wrong, is worse off than one that knows.
-        raise HTTPException(status_code=503, detail="file logging is disabled (TP_LOG_FILE=0)")
+        raise HTTPException(status_code=503, detail=error_payload(
+            code="diagnostic_logging_disabled",
+            message="File logging is disabled (TP_LOG_FILE=0).",
+            user_message="Diagnostic file logging is disabled on this server.",
+            origin="api", stage="log_ingest", category="configuration",
+            retryable=False, http_status=503,
+        ))
 
     records = payload.get("records")
     if not isinstance(records, list):
@@ -71,7 +78,12 @@ async def ingest_trace(payload: dict[str, Any]) -> dict:
     if not trace.enabled():
         # Told, not silently dropped — the extension stops shipping on this
         # answer instead of retrying a doomed request on every batch.
-        raise HTTPException(status_code=503, detail="tracing is disabled (TP_TRACE=0)")
+        raise HTTPException(status_code=503, detail=error_payload(
+            code="trace_disabled", message="Tracing is disabled (TP_TRACE=0).",
+            user_message="Diagnostic tracing is disabled on this server.",
+            origin="api", stage="trace_ingest", category="configuration",
+            retryable=False, http_status=503,
+        ))
 
     current_session = trace.session_id()
     expected_session = str(payload.get("traceSession") or "").strip()

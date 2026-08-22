@@ -10,7 +10,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 
 
-TTL_SEC = max(5.0, float(os.environ.get("TP_IMAGE_ARTIFACT_TTL_SEC", "120")))
+TTL_SEC = max(5.0, float(os.environ.get("TP_IMAGE_ARTIFACT_TTL_SEC", "600")))
 BYTE_BUDGET = max(1 << 20, int(os.environ.get("TP_IMAGE_ARTIFACT_BYTES", str(64 << 20))))
 
 
@@ -37,7 +37,7 @@ class ImageArtifactStore:
         self._bytes = 0
         self._lock = threading.Lock()
         self._counts = {k: 0 for k in (
-            "stored", "hit", "miss", "expired", "evicted", "wrongScope",
+            "stored", "hit", "miss", "expired", "evicted", "rejected", "wrongScope",
         )}
 
     @staticmethod
@@ -60,8 +60,22 @@ class ImageArtifactStore:
             for key, rec in list(self._items.items()):
                 if rec.expires <= now:
                     self._drop(key, "expired")
-            while self._items and self._bytes + len(immutable) > self.byte_budget:
-                self._drop(next(iter(self._items)), "evicted")
+            # A token returned by /v1/lens/raw is a promise that /v1/groups can
+            # resolve it until it expires.  Evicting an unexpired record here
+            # broke that promise under large batches: later uploads displaced
+            # earlier images and every displaced token produced a noisy 410
+            # before the client's supported imageDataUri fallback succeeded.
+            #
+            # Keep the store bounded without invalidating advertised tokens.
+            # The Lens route treats a failed put as an optional-cache miss and
+            # omits the token, so the client sends the original bytes directly.
+            if self._bytes + len(immutable) > self.byte_budget:
+                self._counts["rejected"] += 1
+                raise ArtifactError(
+                    "artifact_store_full",
+                    "image artifact store is full; send the image bytes directly",
+                    503,
+                )
             self._items[token] = _Record(immutable, str(scope or "anon"), now + self.ttl_sec)
             self._bytes += len(immutable)
             self._counts["stored"] += 1

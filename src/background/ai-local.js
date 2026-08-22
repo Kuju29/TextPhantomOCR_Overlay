@@ -53,7 +53,7 @@ export function getPromptAudit(base, lang, { wantMemo = false } = {}) {
 // Translates a LensDocument's units over the chosen route and returns the translations, misses and metadata.
 export async function translateUnits(
   units,
-  { route, ai, rate = null, unlimited = false, imageDataUri = "", targetLang, sourceLang, systemText, promptAudit = null, base = "", operationId = "", batchId = "", signal = null, traceId = "", trace = null },
+  { route, ai, rate = null, unlimited = false, imageDataUri = "", targetLang, sourceLang, systemText, promptAudit = null, base = "", operationId = "", batchId = "", imageId = "", jobId = "", signal = null, traceId = "", trace = null },
 ) {
   if (!units.length) return { translations: [], missing: [], meta: { route, skipped: "no units" } };
 
@@ -86,7 +86,18 @@ export async function translateUnits(
       rate: rate && typeof rate === "object" ? rate : {},
       ...(imageDataUri ? { image: { dataUri: imageDataUri } } : {}),
     };
-    const headers = { "Content-Type": "application/json" };
+    const headers = {
+      "Content-Type": "application/json",
+      "X-TP-Request-Id": crypto.randomUUID(),
+      ...(jobId ? { "X-TP-Job-Id": String(jobId) } : {}),
+      ...(imageId ? { "X-TP-Image-Id": String(imageId) } : {}),
+      ...(batchId ? { "X-TP-Batch-Id": String(batchId) } : {}),
+    };
+    try {
+      const version = String(chrome?.runtime?.getManifest?.()?.version || "");
+      if (version) headers["X-TP-Client-Version"] = version;
+    } catch {
+    }
     if (operationId) headers["Idempotency-Key"] = operationId;
     // A local runtime is not a shared resource; the server verifies the caller
     // is on this machine before honouring it.

@@ -173,7 +173,9 @@ const CANCELLED_REASON = "tp:cancelled";
 const SLOW_AFTER_MS = 10000;
 
 // Runs one translation through `POST /v1/translate`, throwing errors tagged with `status` and `retryAfterMs`.
-export async function translateViaSyncRest(base, payload, { onSlow, onSent, signal } = {}) {
+export async function translateViaSyncRest(base, payload, {
+  onSlow, onSent, signal, jobId = "", imageId = "", batchId = "",
+} = {}) {
   const t0 = Date.now();
   const traceId = String(payload?.context?.tp_trace || "");
   const ctrl = new AbortController();
@@ -207,6 +209,11 @@ export async function translateViaSyncRest(base, payload, { onSlow, onSent, sign
       method: "POST",
       headers: limitHeaders(base, payload?.limits?.apiUnlimited === true, {
         "Content-Type": "application/json",
+        ...correlationHeaders({
+          jobId,
+          imageId: imageId || payload?.metadata?.image_id,
+          batchId: batchId || payload?.metadata?.batch_id,
+        }),
       }),
       cache: "no-store",
       signal: ctrl.signal,
@@ -290,9 +297,27 @@ function limitHeaders(base, unlimited, extra = {}) {
     : { ...extra };
 }
 
+function clientVersion() {
+  try { return String(chrome?.runtime?.getManifest?.()?.version || ""); } catch { return ""; }
+}
+
+// Additive diagnostic headers. Older APIs ignore them; matching APIs use them
+// to join one browser request to its compact server-side error line.
+function correlationHeaders({ jobId = "", imageId = "", batchId = "" } = {}) {
+  const headers = {
+    "X-TP-Request-Id": crypto.randomUUID(),
+    "X-TP-Job-Id": String(jobId || ""),
+    "X-TP-Image-Id": String(imageId || ""),
+    "X-TP-Batch-Id": String(batchId || ""),
+    "X-TP-Client-Version": clientVersion(),
+  };
+  return Object.fromEntries(Object.entries(headers).filter(([, value]) => value));
+}
+
 export async function fetchLensRawViaRest(
   base,
-  { imageBytes, mime, lang, signal, traceId = "", batchId = "", tabSession = "", apiUnlimited = false },
+  { imageBytes, mime, lang, signal, traceId = "", batchId = "", tabSession = "", apiUnlimited = false,
+    jobId = "", imageId = "" },
 ) {
   const form = new FormData();
   const binary = imageBytes instanceof Uint8Array ? imageBytes : new Uint8Array(imageBytes);
@@ -305,7 +330,9 @@ export async function fetchLensRawViaRest(
   let res;
   try {
     res = await fetch(base.replace(/\/+$/, "") + API_PATHS.LENS_RAW, {
-      method: "POST", headers: limitHeaders(base, apiUnlimited), cache: "no-store", body: form, signal,
+      method: "POST", headers: limitHeaders(base, apiUnlimited, correlationHeaders({
+        jobId, imageId, batchId,
+      })), cache: "no-store", body: form, signal,
     });
   } catch (error) {
     if (error?.name === "AbortError") throw networkFailure(error, "lens", { cancelled: true });
@@ -339,6 +366,7 @@ export async function fetchLensRawViaRest(
 // Called only for vertical pages, as decided by src/shared/lens-axis.js.
 export async function groupParagraphsViaRest(base, {
   imageDataUri = "", imageArtifactToken = "", tree, context, signal, apiUnlimited = false,
+  jobId = "", imageId = "", batchId = "",
 }) {
   const imageInput = imageArtifactToken
     ? { imageArtifactToken: String(imageArtifactToken) }
@@ -346,7 +374,10 @@ export async function groupParagraphsViaRest(base, {
   let res;
   try {
     res = await fetch(base.replace(/\/+$/, "") + API_PATHS.GROUPS, {
-      method: "POST", headers: limitHeaders(base, apiUnlimited, { "Content-Type": "application/json" }),
+      method: "POST", headers: limitHeaders(base, apiUnlimited, {
+        "Content-Type": "application/json",
+        ...correlationHeaders({ jobId, imageId, batchId }),
+      }),
       cache: "no-store", signal, body: JSON.stringify({ ...imageInput, tree, context }),
     });
   } catch (error) {
