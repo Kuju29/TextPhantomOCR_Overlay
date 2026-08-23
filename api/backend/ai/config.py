@@ -36,13 +36,14 @@ PROVIDER_DEFAULTS: Final[dict[str, ProviderDefaults]] = {
     "vllm":         {"model": "local-model",     "base_url": "http://localhost:8000/v1"},
     "llamafile":    {"model": "local-model",     "base_url": "http://localhost:8080/v1"},
     "gpt4all":      {"model": "local-model",     "base_url": "http://localhost:4891/v1"},
+    "llamacpp":     {"model": "local-model",     "base_url": "http://localhost:8080/v1"},
 }
 
 # Providers that run on the user's own machine and need NO API key.
 # All speak the OpenAI-compatible /v1 dialect, so one client handles them all.
 LOCAL_PROVIDERS: Final[frozenset[str]] = frozenset({
     "ollama", "lmstudio", "localai", "jan", "textgen",
-    "koboldcpp", "vllm", "llamafile", "gpt4all",
+    "koboldcpp", "vllm", "llamafile", "gpt4all", "llamacpp",
 })
 
 
@@ -68,6 +69,7 @@ PROVIDER_PROTOCOLS: Final[dict[str, str]] = {
     "vllm": "openai_chat_completions",
     "llamafile": "openai_chat_completions",
     "gpt4all": "openai_chat_completions",
+    "llamacpp": "openai_chat_completions",
 }
 
 
@@ -145,7 +147,6 @@ PROVIDER_ALIASES: Final[dict[str, str]] = {
     "google": "gemini",
     "local": "ollama",
     "llama": "ollama",
-    "llamacpp": "ollama",
     "llama.cpp": "ollama",
     "llama-cpp": "ollama",
     "lm-studio": "lmstudio",

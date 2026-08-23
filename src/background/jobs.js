@@ -56,7 +56,10 @@ import {
 import * as wf from "./workflow-track.js";
 import {
   translateUnits,
+  getSystemPrompt,
+  getPromptAudit,
 } from "./ai-local.js";
+import { shouldUseDirectLocalAi } from "../shared/local-ai-adapter.js";
 import {
   applyTranslations,
   attachBubbleGroups,
@@ -1301,8 +1304,11 @@ async function planLocalAi(payload) {
   if (!payload?.render?.lensDocument) return null;
 
   const ai = payload.ai && typeof payload.ai === "object" ? payload.ai : null;
-  const route = "server";
-  const reason = "AI text translation is API-owned; geometry and HTML are extension-owned";
+  const direct = shouldUseDirectLocalAi(payload?.engine, ai?.provider, ai?.base_url);
+  const route = direct ? "direct-local" : "server";
+  const reason = direct
+    ? "Local AI translation runs directly from the extension to the user's PC"
+    : "AI text translation is API-owned; geometry and HTML are extension-owned";
   const plan = { route, reason, ai, originalSource: payload.source };
   log.info(route === "server" ? "AI will use the text-only API" : "AI will run in the browser", {
     route,
@@ -1371,9 +1377,20 @@ async function runLocalAi(
     };
   }
 
-  // Prompt composition lives exclusively in `/v1/ai/translate`.
-  const systemText = "";
-  const promptAudit = null;
+  // Cloud/API routes compose their prompt server-side. Direct Local AI fetches
+  // the same public default once, then sends it from the browser to the local
+  // runtime; the translation itself never passes through TextPhantom API.
+  const systemText = plan.route === "direct-local"
+    ? await getSystemPrompt(base, String(payload.lang || ""), { wantMemo: false })
+    : "";
+  if (plan.route === "direct-local" && !systemText) {
+    throw Object.assign(new Error("Could not load the Local AI translation prompt"), {
+      code: "local_prompt_unavailable", generationAttempts: 0, providerAttempts: 0,
+    });
+  }
+  const promptAudit = plan.route === "direct-local"
+    ? getPromptAudit(base, String(payload.lang || ""), { wantMemo: false })
+    : null;
 
   const operationBase = `ai:${String(payload?.idempotency_key || payload?.metadata?.image_id || "")}`;
   const translate = (selectedUnits, operationId) => translateUnits(selectedUnits, {

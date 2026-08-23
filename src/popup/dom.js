@@ -17,6 +17,8 @@ export const els = {
   aiKey: document.getElementById("ai-key"),
   aiModelWrap: document.getElementById("ai-model-wrap"),
   aiModel: document.getElementById("ai-model"),
+  aiLocalModelId: document.getElementById("ai-local-model-id"),
+  aiLocalModelHint: document.getElementById("ai-local-model-hint"),
   aiThinkingWrap: document.getElementById("ai-thinking-wrap"),
   aiThinking: document.getElementById("ai-thinking"),
   aiGroup: document.getElementById("ai-group"),
@@ -24,13 +26,19 @@ export const els = {
   aiProviderWrap: document.getElementById("ai-provider-wrap"),
   aiBaseUrl: document.getElementById("ai-base-url"),
   aiEndpointWrap: document.getElementById("ai-endpoint-wrap"),
+  aiLocalTest: document.getElementById("ai-local-test"),
+  aiLocalStatus: document.getElementById("ai-local-status"),
+  aiLocalAdapterWrap: document.getElementById("ai-local-adapter-wrap"),
+  aiLocalAdapter: document.getElementById("ai-local-adapter"),
   aiCharactersWrap: document.getElementById("ai-characters-wrap"),
   aiCharactersCount: document.getElementById("ai-characters-count"),
+  aiMemoryHint: document.getElementById("ai-memory-hint"),
   aiCharactersClear: document.getElementById("ai-characters-clear"),
   aiMemoryMode: document.getElementById("ai-memory-mode"),
   aiPageImageWrap: document.getElementById("ai-page-image-wrap"),
   aiPageImage: document.getElementById("ai-page-image"),
   aiRateWrap: document.getElementById("ai-rate-wrap"),
+  aiLocalUnlimitedWrap: document.getElementById("ai-local-unlimited-wrap"),
   aiLocalUnlimited: document.getElementById("ai-local-unlimited"),
   apiLocalUnlimitedWrap: document.getElementById("api-local-unlimited-wrap"),
   apiLocalUnlimited: document.getElementById("api-local-unlimited"),
@@ -190,7 +198,13 @@ export function setFieldMessage(wrap, type, text) {
   if (!el) {
     el = document.createElement("div");
     el.className = "tp-field-msg";
-    wrap.appendChild(el);
+    // Model status belongs to the model controls, not to the pacing option
+    // that follows them inside the same field.
+    if (wrap === els.aiModelWrap && els.aiLocalUnlimitedWrap) {
+      wrap.insertBefore(el, els.aiLocalUnlimitedWrap);
+    } else {
+      wrap.appendChild(el);
+    }
   }
   el.dataset.type = type || "info";
   el.textContent = text;
@@ -215,7 +229,7 @@ export function updatePromptCount(maxChars, text = null) {
  */
 const LOCAL_PROVIDERS = new Set([
   "ollama", "lmstudio", "localai", "jan", "textgen",
-  "koboldcpp", "vllm", "llamafile", "gpt4all", "local", "llama",
+  "koboldcpp", "vllm", "llamafile", "gpt4all", "llamacpp", "customlocal", "local", "llama",
 ]);
 
 // Returns whether a custom API URL points at this machine or the local network.
@@ -279,6 +293,13 @@ export function toggleUi({ hasEnvKey }) {
 
   // Local providers need an endpoint URL (no key); cloud providers need a key.
   if (els.aiEndpointWrap) els.aiEndpointWrap.style.display = showAi && local ? "" : "none";
+  if (els.aiBaseUrl) {
+    els.aiBaseUrl.readOnly = provider === "customlocal";
+    els.aiBaseUrl.title = provider === "customlocal"
+      ? "For Custom Local Adapter, edit baseUrl in the JSON below"
+      : "";
+  }
+  if (els.aiLocalAdapterWrap) els.aiLocalAdapterWrap.style.display = showAi && provider === "customlocal" ? "" : "none";
   if (els.aiKeyWrap) els.aiKeyWrap.style.display = showAi && !local ? "" : "none";
 
   // Model discovery is independent from the Auto/key gate. The model picker is
@@ -287,17 +308,29 @@ export function toggleUi({ hasEnvKey }) {
   // models. The remaining controls still require a usable engine.
   const canConfigureAi = local || (els.aiKey.value || "").trim().length > 0 || hasEnvKey;
   els.aiModelWrap.style.display = showAi ? "" : "none";
-  if (els.aiThinkingWrap) els.aiThinkingWrap.style.display = showAi && canConfigureAi ? "" : "none";
+  if (els.aiLocalModelId) els.aiLocalModelId.style.display = showAi && local ? "" : "none";
+  if (els.aiLocalModelHint) els.aiLocalModelHint.style.display = showAi && local ? "" : "none";
+  if (els.aiLocalUnlimitedWrap) els.aiLocalUnlimitedWrap.style.display = showAi && local ? "" : "none";
+  // This control maps to Gemini's thinkingConfig only. Local/OpenAI-compatible
+  // transports do not consume it, so showing it there would promise an effect
+  // that cannot occur.
+  if (els.aiThinkingWrap) {
+    els.aiThinkingWrap.style.display = showAi && canConfigureAi && provider === "gemini" ? "" : "none";
+  }
   els.aiPromptWrap.style.display = showAi && canConfigureAi ? "" : "none";
   if (els.aiCharactersWrap) els.aiCharactersWrap.style.display = showAi && canConfigureAi ? "" : "none";
+  if (els.aiMemoryHint) {
+    els.aiMemoryHint.textContent = local
+      ? "Local AI reuses recent page context and any saved terms/characters. Direct Local mode does not automatically create new character notes yet. Off starts each page clean."
+      : "Off: each page translates cleanly (recommended). Terms only: keep names/terms spelled the same across pages. Full: also remember each character's gender & speech — this can push pronouns/particles back, so use it only if you want gendered speech. Kept per series; a new series starts fresh.";
+  }
   if (els.aiPageImageWrap) els.aiPageImageWrap.style.display = showAi && canConfigureAi ? "" : "none";
   // Rate pacing applies to cloud providers only: a local server has no
   // per-minute quota to respect, and the server-side gate skips it anyway.
   if (els.aiRateWrap) {
     els.aiRateWrap.style.display = showAi && canConfigureAi && !local ? "" : "none";
   }
-  // The unlimited switch belongs to the local endpoint block and is only
-  // meaningful there, so it appears and disappears with it.
+  // Local API unlimited is separate from the Local AI control under Model.
   if (els.apiLocalUnlimitedWrap) {
     els.apiLocalUnlimitedWrap.style.display =
       isLocalApiUrl(els.apiUrl?.value || "") ? "" : "none";

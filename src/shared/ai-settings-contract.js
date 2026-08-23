@@ -8,11 +8,27 @@ import { isLocalAiProvider, isLocalHostUrl } from "./constants.js";
  * browser key is not grounds for blocking: the server may own the credential.
  * Provider/model "auto" are valid legacy/server-resolved contracts.
  */
-export function autoAiSettingsIssue(settings, { hasServerKey = null } = {}) {
+export function autoAiSettingsIssue(settings, { hasServerKey = null, mainApiBaseUrl = "" } = {}) {
   const provider = String(settings?.aiProvider || "").trim().toLowerCase();
   const baseUrl = String(settings?.aiBaseUrl || "").trim();
   const userKey = String(settings?.aiKey || "").trim();
   const local = isLocalAiProvider(provider) || isLocalHostUrl(baseUrl);
+
+  if (provider === "customlocal" && String(settings?.engineMode || "extension") === "api") {
+    return {
+      code: "custom_local_extension_only",
+      message: "Custom Local Adapter runs from the Extension only. Open the main popup and choose Where the work runs: Extension.",
+    };
+  }
+
+  if (local && provider !== "customlocal"
+      && String(settings?.engineMode || "extension") === "api"
+      && mainApiBaseUrl && !isLocalHostUrl(mainApiBaseUrl)) {
+    return {
+      code: "local_ai_unreachable_from_remote_api",
+      message: "Local AI is on this PC, but runs: API would connect from the remote API server. Choose Where the work runs: Extension.",
+    };
+  }
 
   if (isLocalAiProvider(provider) && (!baseUrl || baseUrl.toLowerCase() === "auto")) {
     return {

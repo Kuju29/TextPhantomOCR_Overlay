@@ -12,6 +12,7 @@ import { normalizeUrl } from "../shared/url.js";
 import { resolveSeriesKey, refineSeriesKeyWithTitle } from "../shared/series.js";
 import { ensureApiDefaults } from "../shared/api-defaults.js";
 import { getStorage, setStorage } from "../shared/storage.js";
+import { localAiPreset, normalizeLocalAiAdapter, parseLocalAiAdapterJson, serializeLocalAiAdapter } from "../shared/local-ai-config.js";
 import { createTab, queryTabs } from "../shared/browser-api.js";
 import { broadcast, sendRuntimeMessage } from "../shared/messaging.js";
 import {
@@ -28,6 +29,7 @@ import {
   RATE_BURST_MAX,
   RATE_PRESETS,
   RATE_PRESET_DEFAULT,
+  isLocalAiProvider,
 } from "../shared/constants.js";
 import {
   AI_PROMPT_MAX_CHARS,
@@ -129,9 +131,31 @@ const LOCAL_ENDPOINTS = {
   vllm: "http://localhost:8000/v1",
   llamafile: "http://localhost:8080/v1",
   gpt4all: "http://localhost:4891/v1",
+  llamacpp: "http://localhost:8080/v1",
 };
 function defaultEndpointFor(provider) {
   return LOCAL_ENDPOINTS[String(provider || "").trim().toLowerCase()] || "";
+}
+
+function savedExactLocalModel() {
+  const model = String(state.desiredAiModel || "").trim();
+  return model && model.toLowerCase() !== "auto" ? model : "";
+}
+
+function showLocalModelFallback(message) {
+  const saved = savedExactLocalModel();
+  if (els.aiLocalModelId) els.aiLocalModelId.value = saved;
+  setModelOptions(saved ? [saved] : [], {
+    keepValue: saved,
+    placeholder: "No model list loaded — type an exact ID below",
+  });
+  setFieldMessage(
+    els.aiModelWrap,
+    "warn",
+    saved
+      ? `⚠ Model list unavailable. Keeping your saved exact ID: ${saved}`
+      : (message || "⚠ No model list loaded. Type the exact ID of an installed model."),
+  );
 }
 function renderSeriesMemory() {
   if (!els.aiCharactersCount) return;
@@ -409,6 +433,7 @@ function renderAiVerificationMessages() {
 /** Run one tiny real generation request for the concrete selected/resolved model. */
 async function probeSelectedModel() {
   if (!canUseAiUi()) return;
+  if (isLocalAiProvider(els.aiProvider?.value)) return;
   const base = normalizeUrl(els.apiUrl.value);
   const resolved = state.lastAiResolve;
   if (!base || !resolved?.backend_supported) return;
@@ -443,9 +468,6 @@ async function probeSelectedModel() {
 // AI meta (provider / model resolution)
 async function refreshAiMeta({ probeAfter = false } = {}) {
   if ((els.mode.value || "lens_text") !== "lens_text") return;
-
-  const base = normalizeUrl(els.apiUrl.value);
-  if (!base) return;
   if ((els.sources.value || "").trim() !== "ai") {
     setModelOptions([], { placeholder: "Select model…" });
     state.lastAiResolve = null;
@@ -467,6 +489,52 @@ async function refreshAiMeta({ probeAfter = false } = {}) {
     setFieldMessage(els.aiProviderWrap, "warn", "⚠ Select the company that issued this API key");
     return;
   }
+
+  // Local discovery belongs to the extension. Never send its endpoint or a
+  // stale cloud key through the remote TextPhantom API merely to list models.
+  if (isLocalAiProvider(selectedProvider)) {
+    try {
+      const stored = await getStorage(["localAiAdapter"]);
+      const source = selectedProvider === "customlocal"
+        ? stored.localAiAdapter
+        : { ...(localAiPreset(selectedProvider) || {}), baseUrl: selectedBaseUrl };
+      const adapter = normalizeLocalAiAdapter(
+        source,
+        { provider: selectedProvider },
+      );
+      const response = await sendRuntimeMessage({ type: "TP_LOCAL_AI_DISCOVER", adapter, provider: selectedProvider });
+      if (seq !== state.aiMetaSeq) return;
+      if (!response?.ok) throw new Error(response?.error || response?.message || "Local server could not be reached");
+      const models = Array.isArray(response.models) ? response.models : [];
+      const preferred = (els.aiModel.value || state.desiredAiModel || "").trim();
+      const saved = savedExactLocalModel();
+      const choices = saved && !models.includes(saved) ? [...models, saved] : models;
+      setModelOptions(choices, { keepValue: preferred, placeholder: "Select a model" });
+      if (els.aiLocalModelId) els.aiLocalModelId.value = saved;
+      const selected = String(els.aiModel?.value || "").trim();
+      if (selected && selected !== state.desiredAiModel) {
+        state.desiredAiModel = selected;
+        state.modelDirty = true;
+        scheduleSaveAi();
+      }
+      state.lastAiResolve = { provider: selectedProvider, backend_supported: true, key_status: "not_required", models_verified: true, models };
+      setFieldMessage(els.aiModelWrap, "info", `✓ ${models.length} model(s) loaded directly from your PC`);
+      if (els.aiLocalStatus) els.aiLocalStatus.textContent = `✓ Connected directly to ${adapter.baseUrl}`;
+      toggleUi();
+    } catch (error) {
+      if (seq === state.aiMetaSeq) {
+        state.lastAiResolve = null;
+        if (els.aiLocalStatus) {
+          els.aiLocalStatus.textContent = `✕ ${error.message}. Start the runtime and check the URL/CORS, then connect again.`;
+        }
+        showLocalModelFallback();
+      }
+    }
+    return;
+  }
+
+  const base = normalizeUrl(els.apiUrl.value);
+  if (!base) return;
 
   state.lastAiProbe = null;
   setFieldMessage(els.aiModelWrap, "info", "⏳ Loading models for this provider…");
@@ -506,9 +574,9 @@ async function refreshAiMeta({ probeAfter = false } = {}) {
 
     if (nextModel && nextModel !== currentModel) {
       state.desiredAiModel = nextModel;
-      await setStorage({ aiKey, aiModel: nextModel });
+      await setStorage({ aiKey, aiCloudKey: aiKey, aiModel: nextModel });
     } else {
-      await setStorage({ aiKey });
+      await setStorage({ aiKey, aiCloudKey: aiKey });
     }
 
     toggleUi();
@@ -849,7 +917,7 @@ function scheduleSaveAi() {
     state.desiredAiModel = aiModel;
 
     if ((els.mode.value || "lens_text") !== "lens_text") {
-      await setStorage({ aiKey, aiModel });
+      await setStorage({ aiKey, aiCloudKey: aiKey, aiModel });
       broadcast({ type: "AI_SETTINGS_CHANGED" });
       return;
     }
@@ -860,7 +928,7 @@ function scheduleSaveAi() {
       state.aiPromptByLang[key] = normalizePrompt(String(els.aiPrompt.value || ""));
       state.aiPromptDirtyByLang[key] = false;
     }
-    await setStorage({ aiKey, aiModel, aiPromptByLang: state.aiPromptByLang });
+    await setStorage({ aiKey, aiCloudKey: aiKey, aiModel, aiPromptByLang: state.aiPromptByLang });
     broadcast({ type: "AI_SETTINGS_CHANGED" });
     state.modelDirty = true;
     toggleUi();
@@ -986,9 +1054,11 @@ async function loadSettings() {
     "apiUrlReset",
     "apiDefaultsFetchedAt",
     "aiKey",
+    "aiCloudKey",
     "aiModel",
     "aiProvider",
     "aiBaseUrl",
+    "localAiAdapter",
     "aiCharMemory",
     "aiMemoryMode",
     "aiSendImage",
@@ -1020,6 +1090,7 @@ async function loadSettings() {
     typeof stored.sources === "string" && stored.sources ? stored.sources : "translated";
   state.desiredAiModel =
     typeof stored.aiModel === "string" && stored.aiModel ? stored.aiModel : "auto";
+  if (els.aiLocalModelId) els.aiLocalModelId.value = savedExactLocalModel();
 
   setSelectOptions(els.lang, orderLanguages(FALLBACK_LANGS, PINNED_LANG_CODES), { valueKey: "code", labelKey: "name", keepValue: state.desiredLang });
   setSelectOptions(els.sources, FALLBACK_SOURCES, { valueKey: "id", labelKey: "name", keepValue: state.desiredSources });
@@ -1053,7 +1124,7 @@ async function loadSettings() {
   if (migration.changed) await setStorage({ aiPromptByLang: state.aiPromptByLang });
 
   const promptKey = makePromptKey(state.desiredLang, state.desiredAiModel);
-  els.aiKey.value = String(stored.aiKey || "");
+  els.aiKey.value = String(stored.aiCloudKey ?? stored.aiKey ?? "");
   // Restore AI provider + local endpoint + translation memory.
   if (els.aiProvider) {
     const storedProviderRaw = String(stored.aiProvider || "").trim().toLowerCase();
@@ -1075,6 +1146,12 @@ async function loadSettings() {
     els.aiBaseUrl.value = staleLocalDefault ? "" : storedBaseUrl;
     if (staleLocalDefault) void setStorage({ aiBaseUrl: "" });
     if (!els.aiBaseUrl.value) els.aiBaseUrl.value = defaultEndpointFor(storedProvider);
+  }
+  if (els.aiLocalAdapter) {
+    try {
+      const adapter = normalizeLocalAiAdapter(stored.localAiAdapter || localAiPreset(els.aiProvider?.value), { provider: els.aiProvider?.value });
+      els.aiLocalAdapter.value = JSON.stringify(adapter, null, 2);
+    } catch { els.aiLocalAdapter.value = ""; }
   }
   void refreshSeriesMemory();
   if (els.aiMemoryMode) {
@@ -1331,8 +1408,28 @@ els.aiKey.addEventListener("blur", () => {
 
 els.aiProvider?.addEventListener("change", async () => {
   const provider = (els.aiProvider.value || "").trim();
+  // Invalidate old-provider discovery and debounced writes before the first
+  // await. A slow Ollama reply must never repopulate the Model UI after the
+  // user has already switched to LM Studio (or another provider).
+  state.aiMetaSeq += 1;
+  clearTimeout(aiResolveDebounce);
+  clearTimeout(aiDebounce);
+  state.pendingAiSave = false;
+  const previousProvider = String((await getStorage(["aiProvider"])).aiProvider || "").trim();
+  // A second rapid selection may finish storage lookup before this handler.
+  // Let the newest change event own the UI/storage update.
+  if (String(els.aiProvider.value || "").trim() !== provider) return;
   state.lastAiResolve = null;
   state.lastAiProbe = null;
+  if (provider !== previousProvider) {
+    // A model ID belongs to its runtime/provider. Never carry a Gemini model
+    // into Ollama (or an Ollama ID into LM Studio) merely because the provider
+    // selector changed.
+    state.desiredAiModel = "auto";
+    state.modelDirty = false;
+    if (els.aiLocalModelId) els.aiLocalModelId.value = "";
+    setModelOptions([], { placeholder: isLocalAiProvider(provider) ? "Connect to load models" : "Loading models…" });
+  }
   // Pre-fill the local endpoint when a local provider is picked and the field
   // is empty (or still holds another provider's default).
   const def = defaultEndpointFor(provider);
@@ -1350,7 +1447,14 @@ els.aiProvider?.addEventListener("change", async () => {
       els.aiBaseUrl.value = "";
     }
   }
-  await setStorage({ aiProvider: provider, aiBaseUrl: (els.aiBaseUrl?.value || "").trim() });
+  const preset = localAiPreset(provider);
+  if (els.aiLocalAdapter && preset) els.aiLocalAdapter.value = JSON.stringify(preset, null, 2);
+  await setStorage({
+    aiProvider: provider,
+    aiBaseUrl: (els.aiBaseUrl?.value || "").trim(),
+    ...(provider !== previousProvider ? { aiModel: "auto" } : {}),
+    ...(preset ? { localAiAdapter: preset } : {}),
+  });
   toggleUi();
   // The rate reference is per provider, so it has to follow this selection.
   updateRatePresetHint();
@@ -1364,13 +1468,77 @@ els.aiBaseUrl?.addEventListener("input", () => {
   state.lastAiProbe = null;
   clearTimeout(aiDebounce);
   aiDebounce = setTimeout(async () => {
-    await setStorage({ aiBaseUrl: (els.aiBaseUrl.value || "").trim() });
+    const baseUrl = (els.aiBaseUrl.value || "").trim();
+    const provider = String(els.aiProvider?.value || "").trim();
+    let adapter = null;
+    if (provider !== "customlocal") {
+      try {
+        adapter = normalizeLocalAiAdapter(
+          { ...(localAiPreset(provider) || {}), baseUrl }, { provider },
+        );
+      } catch { /* incomplete input is stored, then reported by preflight/test */ }
+    }
+    await setStorage({ aiBaseUrl: baseUrl, ...(adapter ? { localAiAdapter: adapter } : {}) });
     scheduleResolveAiMeta();
   }, 400);
 });
 els.aiBaseUrl?.addEventListener("blur", async () => {
-  await setStorage({ aiBaseUrl: (els.aiBaseUrl.value || "").trim() });
+  const baseUrl = (els.aiBaseUrl.value || "").trim();
+  const provider = String(els.aiProvider?.value || "").trim();
+  let adapter = null;
+  try { adapter = normalizeLocalAiAdapter({ ...(localAiPreset(provider) || {}), baseUrl }, { provider }); } catch { /* shown by connection test */ }
+  await setStorage({ aiBaseUrl: baseUrl, ...(adapter ? { localAiAdapter: adapter } : {}) });
   scheduleResolveAiMeta({ immediate: true, probeAfter: true });
+});
+
+els.aiLocalAdapter?.addEventListener("blur", async () => {
+  if (String(els.aiProvider?.value) !== "customlocal") return;
+  try {
+    const adapter = parseLocalAiAdapterJson(els.aiLocalAdapter.value);
+    els.aiLocalAdapter.value = serializeLocalAiAdapter(adapter);
+    els.aiBaseUrl.value = adapter.baseUrl;
+    await setStorage({ localAiAdapter: adapter, aiBaseUrl: adapter.baseUrl });
+    setFieldMessage(els.aiEndpointWrap, "info", "✓ Custom adapter is valid. Test the connection to load its models.");
+  } catch (error) { setFieldMessage(els.aiEndpointWrap, "error", `✕ ${error.message}`); }
+});
+
+els.aiLocalTest?.addEventListener("click", async () => {
+  const provider = String(els.aiProvider?.value || "").trim();
+  try {
+    const adapter = provider === "customlocal"
+      ? parseLocalAiAdapterJson(els.aiLocalAdapter?.value)
+      : normalizeLocalAiAdapter({ ...(localAiPreset(provider) || {}), baseUrl: els.aiBaseUrl?.value }, { provider });
+    els.aiLocalStatus.textContent = "Testing the local server…";
+    await setStorage({ localAiAdapter: adapter, aiBaseUrl: adapter.baseUrl });
+    const response = await sendRuntimeMessage({ type: "TP_LOCAL_AI_DISCOVER", adapter, provider });
+    if (!response?.ok) throw new Error(response?.error || response?.message || "Local server could not be reached");
+    const models = Array.isArray(response.models) ? response.models : [];
+    const saved = savedExactLocalModel();
+    const choices = saved && !models.includes(saved) ? [...models, saved] : models;
+    setModelOptions(choices, { keepValue: els.aiModel?.value || state.desiredAiModel, placeholder: "Select a model" });
+    if (els.aiLocalModelId) els.aiLocalModelId.value = saved;
+    const selected = String(els.aiModel?.value || "").trim();
+    if (selected && selected !== state.desiredAiModel) {
+      state.desiredAiModel = selected;
+      state.modelDirty = true;
+      scheduleSaveAi();
+    }
+    setFieldMessage(els.aiModelWrap, "info", `✓ ${models.length} model(s) loaded from this Local AI server`);
+    els.aiLocalStatus.textContent = `✓ Connected directly to ${adapter.baseUrl} · ${models.length} model(s) loaded`;
+  } catch (error) {
+    els.aiLocalStatus.textContent = `✕ ${error.message}. Check that the runtime is running and allows extension CORS.`;
+    showLocalModelFallback();
+  }
+});
+
+els.aiLocalModelId?.addEventListener("change", () => {
+  const model = String(els.aiLocalModelId.value || "").trim();
+  if (!model) return;
+  const known = [...(els.aiModel?.options || [])].map((option) => option.value).filter(Boolean);
+  setModelOptions([...known, model], { keepValue: model });
+  state.desiredAiModel = model;
+  state.modelDirty = true;
+  scheduleSaveAi();
 });
 
 els.aiCharactersClear?.addEventListener("click", async () => {
@@ -1650,10 +1818,10 @@ window.addEventListener("pagehide", () => {
         state.aiPromptDirtyByLang[key] = false;
       }
       if (state.pendingAiSave || dirty) {
-        setStorage({ aiKey, aiModel, aiPromptByLang: state.aiPromptByLang });
+        setStorage({ aiKey, aiCloudKey: aiKey, aiModel, aiPromptByLang: state.aiPromptByLang });
       }
     } else if (state.pendingAiSave) {
-      setStorage({ aiKey, aiModel });
+      setStorage({ aiKey, aiCloudKey: aiKey, aiModel });
     }
   } catch {
     /* best-effort */

@@ -126,6 +126,8 @@
                   <option value="vllm">vLLM</option>
                   <option value="llamafile">llamafile</option>
                   <option value="gpt4all">GPT4All</option>
+                  <option value="llamacpp">llama.cpp</option>
+                  <option value="customlocal">Custom local adapter</option>
                 </optgroup>
               </select>
             </div>
@@ -138,14 +140,13 @@
                 id="ai-base-url"
                 placeholder="http://localhost:11434/v1"
               />
-              <div class="hint">Your local AI server's OpenAI-compatible endpoint. No API key needed.</div>
-              <label class="label-row" style="cursor: pointer; margin-top: 8px">
-                <span>Remove all pacing for this local AI</span>
-                <input type="checkbox" id="ai-local-unlimited" />
-              </label>
-              <div class="hint">
-                Off by default. This runtime is on your machine, so there is no quota to respect and no other user to share with: turning this on sends every page at once, with no rate gate and no concurrency window on either side.<br />
-                Your machine is still the limit. Most local runtimes answer one request at a time anyway, so a large chapter will queue inside the model server instead — and on a small GPU it can run out of memory. Turn it off again if pages start failing.
+              <div class="hint">Your local AI server's OpenAI-compatible endpoint. No API key needed. For Custom Local Adapter this field is read-only—edit <code>baseUrl</code> in the JSON below.</div>
+              <button type="button" id="ai-local-test" class="secondary-btn">Connect &amp; load models</button>
+              <div class="hint" id="ai-local-status">Start the local runtime, then connect. Ollama may need OLLAMA_ORIGINS configured for this extension; LM Studio may need CORS enabled.</div>
+              <div id="ai-local-adapter-wrap" style="display: none; margin-top: 10px">
+                <label for="ai-local-adapter">Custom adapter JSON</label>
+                <textarea id="ai-local-adapter" rows="9" spellcheck="false" placeholder='{"version":1,"protocol":"openai","baseUrl":"http://localhost:8000/v1","modelsPath":"/models","chatPath":"/chat/completions","modelsResponsePath":"data.*.id","chatResponsePath":"choices.0.message.content"}'></textarea>
+                <div class="hint">Declarative JSON only. Supports OpenAI-compatible or Ollama protocol, local/private URLs and response paths. Scripts, API keys, headers and prompt templates are rejected.</div>
               </div>
             </div>
 
@@ -161,8 +162,20 @@
             </div>
 
             <div class="field" id="ai-model-wrap" style="display: none">
-              <label for="ai-model">Model</label>
+              <label for="ai-model">Model <span aria-hidden="true">(required)</span></label>
               <select id="ai-model" aria-label="AI Model"></select>
+              <input id="ai-local-model-id" type="text" aria-label="Exact Local AI model ID" placeholder="Model not listed? Type its exact ID" style="display: none; margin-top: 6px" />
+              <div class="hint" id="ai-local-model-hint" style="display: none">The URL chooses the Local AI server; the Model chooses which installed model on that server translates the text. Connect to load the list, or type the exact ID if the runtime cannot list models.</div>
+              <div id="ai-local-unlimited-wrap" style="display: none; margin-top: 10px">
+                <label class="label-row" style="cursor: pointer">
+                  <span>Remove all pacing for this local AI</span>
+                  <input type="checkbox" id="ai-local-unlimited" />
+                </label>
+                <div class="hint">
+                  Off by default. This runtime is on your machine, so there is no quota to respect and no other user to share with: turning this on sends every page at once, with no rate gate and no concurrency window on either side.<br />
+                  Your machine is still the limit. Most local runtimes answer one request at a time anyway, so a large chapter will queue inside the model server instead—and on a small GPU it can run out of memory. Turn it off again if pages start failing.
+                </div>
+              </div>
             </div>
 
             <div class="field" id="ai-thinking-wrap" style="display: none">
@@ -238,7 +251,7 @@
                 </select>
               </label>
               <div id="ai-characters-count" class="hint">No memory for this series yet</div>
-              <div class="hint">Off: each page translates cleanly (recommended). Terms only: keep names/terms spelled the same across pages. Full: also remember each character's gender &amp; speech — this can push pronouns/particles back, so use it only if you want gendered speech. Kept per series (auto-detected from the page URL); a new series starts fresh.</div>
+              <div id="ai-memory-hint" class="hint">Off: each page translates cleanly (recommended). Terms only: keep names/terms spelled the same across pages. Full: also remember each character's gender &amp; speech — this can push pronouns/particles back, so use it only if you want gendered speech. Kept per series (auto-detected from the page URL); a new series starts fresh.</div>
             </div>
 
             <div class="field" id="ai-page-image-wrap" style="display: none">
@@ -246,7 +259,7 @@
                 <span>Page image to AI</span>
                 <input type="checkbox" id="ai-page-image" />
               </label>
-              <div class="hint">Sends this page through the API, which reduces it before forwarding it to your selected AI provider, so the model can infer speakers, mood and replies. Uses more data, tokens and time; needs a vision-capable model. Off by default.</div>
+              <div class="hint">Sends the page image with the text so the model can infer speakers, mood and replies. With Extension + Local AI it goes directly to your PC; with API mode it goes through that API server. Enable only for a vision-capable model—text-only models may reject the request. Uses more memory and time; off by default.</div>
             </div>
 
             <!-- Rate limit: pace requests to the user's own model quota. -->
@@ -348,6 +361,7 @@
               <strong>Extension</strong> decodes Lens, builds the layout, samples colours and draws the overlay in your browser. The API only does three things: the Lens upload, ONNX bubble grouping, and the AI translation call.<br />
               <strong>API server</strong> is the older split: the server runs Lens, ONNX, the AI call, the erase, the fonts and the HTML, and sends back a finished overlay or image. Slower per page and it uploads the whole picture, but it needs almost nothing from the browser — useful when a site fights the overlay, when a page is too large for the local renderer, or to compare the two.<br />
               Both engines use the same AI contract, the same Lens client and the same per-key pacing, so switching does not change the translation you get.
+              <br /><strong>Custom Local Adapter</strong> is Extension-only. Built-in Local AI providers, including llama.cpp, also work with a self-hosted API when the runtime is on that API machine.
             </div>
           </div>
         </section>

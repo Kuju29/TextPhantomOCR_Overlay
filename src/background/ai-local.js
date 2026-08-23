@@ -1,6 +1,7 @@
 // Chooses where an AI translation runs — the user's own key, the on-device model, or the API — and runs it.
 import { createLogger } from "../shared/logger.js";
 import { API_PATHS } from "../shared/constants.js";
+import { translateWithLocalOpenAi } from "../shared/local-ai-adapter.js";
 const log = createLogger("SW.ai-local");
 
 const promptCache = new Map();
@@ -56,6 +57,34 @@ export async function translateUnits(
   { route, ai, rate = null, unlimited = false, imageDataUri = "", targetLang, sourceLang, systemText, promptAudit = null, base = "", operationId = "", batchId = "", imageId = "", jobId = "", signal = null, traceId = "", trace = null },
 ) {
   if (!units.length) return { translations: [], missing: [], meta: { route, skipped: "no units" } };
+
+  if (route === "direct-local") {
+    const started = performance.now();
+    trace?.("direct Local AI request", {
+      units: units.length,
+      provider: String(ai?.provider || "local"),
+      model: String(ai?.model || ""),
+      endpointHost: (() => { try { return new URL(String(ai?.base_url || "")).host; } catch { return "invalid"; } })(),
+      cloudKeySent: false,
+    });
+    const result = await translateWithLocalOpenAi(units, {
+      // Strip the key at the trust boundary as well as omitting it in the adapter.
+      ai: { ...(ai || {}), api_key: "" },
+      systemText,
+      imageDataUri,
+      signal,
+    });
+    trace?.("direct Local AI reply", {
+      ms: Math.round(performance.now() - started),
+      translations: result.translations.length,
+      missing: result.missing.length,
+      providerAttempts: 1,
+      generationAttempts: 1,
+      automaticTransportRetry: false,
+      modelFallback: false,
+    });
+    return result;
+  }
 
   if (route === "server") {
     const apiBase = String(base || "").replace(/\/+$/, "");
@@ -252,12 +281,8 @@ export async function translateUnits(
     return { ...result, meta: { ...(result.meta || {}), route: "server" } };
   }
 
-  // The only route this build has is "server": prompt composition lives in
-  // `/v1/ai/translate`, so there is nothing for the browser to compose. A
-  // caller asking for anything else is a bug in the caller, not a reason to
-  // quietly translate a page some other way.
   throw new Error(
-    `unknown AI route ${JSON.stringify(route)}; this build only has "server"`,
+    `unknown AI route ${JSON.stringify(route)}`,
   );
 }
 

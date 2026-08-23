@@ -70,11 +70,8 @@ async function walk(root) {
     "an unknown route must throw by name, not fall off the end of translateUnits",
   );
   const jobs = await readFile(path.join(projectRoot, "src/background/jobs.js"), "utf8");
-  assert.match(
-    jobs,
-    /const route = "server";/,
-    "planLocalAi still pins the route; if that changes, the throw above needs a second look",
-  );
+  assert.match(jobs, /shouldUseDirectLocalAi\(/,
+    "AI routing must use the explicit API-vs-extension Local AI route matrix");
 }
 
 console.log("Dead-offscreen test passed: no files, no callers, no permission, unknown routes throw.");

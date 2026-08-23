@@ -37,6 +37,20 @@ let settings = await readFullSettings({ lang: "th" });
 assert.equal(settings.lang, "th");
 assert.equal(settings.aiPrompt, "Thai style", "Auto override language must select its own prompt");
 
+storage.aiProvider = "ollama";
+storage.aiBaseUrl = "http://192.168.1.22:11434/v1";
+storage.localAiAdapter = {
+  version: 1, protocol: "openai", baseUrl: "http://192.168.1.11:11434/v1",
+  modelsPath: "/models", chatPath: "/chat/completions",
+  modelsResponsePath: "data.*.id", chatResponsePath: "choices.0.message.content",
+};
+settings = await readFullSettings({ lang: "th" });
+assert.equal(settings.localAiAdapter.baseUrl, "http://192.168.1.22:11434/v1",
+  "a built-in Local provider must use the newly visible endpoint, never a stale stored adapter");
+storage.aiProvider = "";
+storage.aiBaseUrl = "";
+delete storage.localAiAdapter;
+
 assert.equal(autoAiSettingsIssue({ aiProvider: "gemini", aiKey: "" }, { hasServerKey: true }), null,
   "a server-owned cloud key must remain valid");
 assert.equal(autoAiSettingsIssue({ aiProvider: "auto", aiModel: "auto", aiKey: "" }, { hasServerKey: null }), null,
@@ -57,13 +71,34 @@ assert.equal(autoAiSettingsIssue({ aiProvider: "ollama", aiBaseUrl: "", aiKey: "
   "ai_endpoint_missing");
 assert.equal(autoAiSettingsIssue({ aiProvider: "auto", aiBaseUrl: "http://127.0.0.1:11434", aiKey: "" }), null,
   "a keyless local URL with auto provider is supported");
+assert.equal(autoAiSettingsIssue({
+  aiProvider: "customlocal", aiBaseUrl: "http://127.0.0.1:9000/v1",
+  aiKey: "", engineMode: "api",
+})?.code, "custom_local_extension_only",
+"the API engine must fail early with a clear instruction for custom adapters");
+assert.equal(autoAiSettingsIssue({
+  aiProvider: "customlocal", aiBaseUrl: "http://127.0.0.1:9000/v1",
+  aiKey: "", engineMode: "extension",
+}), null, "custom adapters remain available on the direct Extension engine");
+assert.equal(autoAiSettingsIssue({
+  aiProvider: "ollama", aiBaseUrl: "http://127.0.0.1:11434", engineMode: "extension",
+}, { mainApiBaseUrl: "https://example.hf.space" }), null,
+"Extension mode reaches Local AI directly even when the main API is remote");
+assert.equal(autoAiSettingsIssue({
+  aiProvider: "ollama", aiBaseUrl: "http://127.0.0.1:11434", engineMode: "api",
+}, { mainApiBaseUrl: "https://example.hf.space" })?.code, "local_ai_unreachable_from_remote_api",
+"a remote API must not mistake its localhost for the user's PC");
+assert.equal(autoAiSettingsIssue({
+  aiProvider: "ollama", aiBaseUrl: "http://127.0.0.1:11434", engineMode: "api",
+}, { mainApiBaseUrl: "http://192.168.1.20:8000" }), null,
+"a self-hosted local API may reach Local AI on its network");
 
 // Keep this test dependency-light: context-menu imports the whole service-worker
 // graph, which expects browser APIs at module evaluation time. The source checks
 // protect the authoritative placement and its conservative server-key policy.
 assert.match(contextMenuSource, /has_env_ai_key/);
-assert.match(contextMenuSource, /if \(overrides && mode === "lens_text" && source === "ai"\)/,
-  "preflight must be limited to the Auto override text.ai path");
+assert.match(contextMenuSource, /if \(mode === "lens_text" && source === "ai"\)/,
+  "preflight must cover both manual and Auto text.ai paths");
 assert.match(contextMenuSource, /readFullSettings\(\{ lang: effectiveLang \}\)/);
 assert.match(contextMenuSource, /if \(options\?\.propagateErrors === true\) throw e;/,
   "programmatic callers must receive failures caught by the menu boundary");

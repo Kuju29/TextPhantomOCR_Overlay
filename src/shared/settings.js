@@ -29,6 +29,8 @@ import {
   normalizeAiModel,
   normalizePrompt,
 } from "./prompt.js";
+import { localAiPreset, normalizeLocalAiAdapter } from "./local-ai-config.js";
+import { isLocalAiProvider, isLocalHostUrl } from "./constants.js";
 
 /** @returns {"lens_images"|"lens_text"} */
 export function normalizeMode(value) {
@@ -112,9 +114,11 @@ export async function readFullSettings(options = {}) {
     "sources",
     "maxConcurrency",
     "aiKey",
+    "aiCloudKey",
     "aiModel",
     "aiProvider",
     "aiBaseUrl",
+    "localAiAdapter",
     "aiGlossary",
     "aiCharMemory",
     "aiMemoryMode",
@@ -143,6 +147,24 @@ export async function readFullSettings(options = {}) {
   const requestedLang = String(options?.lang || "").trim();
   const lang = requestedLang || (typeof it.lang === "string" && it.lang ? it.lang : DEFAULT_LANG);
   const aiModel = normalizeAiModel(typeof it.aiModel === "string" ? it.aiModel : "auto");
+  const aiProvider = typeof it.aiProvider === "string" ? it.aiProvider.trim().toLowerCase() : "";
+  const localAi = isLocalAiProvider(aiProvider) || isLocalHostUrl(it.aiBaseUrl);
+  let localAiAdapter = null;
+  if (localAi) {
+    try {
+      // Built-in providers always derive their adapter from the endpoint the
+      // user currently sees. Only Custom Local owns a stored JSON adapter.
+      // This prevents a stale adapter URL from silently winning over a newly
+      // typed aiBaseUrl when the popup closes before blur.
+      const adapterSource = aiProvider === "customlocal"
+        ? it.localAiAdapter
+        : { ...(localAiPreset(aiProvider) || {}), baseUrl: it.aiBaseUrl };
+      localAiAdapter = normalizeLocalAiAdapter(
+        adapterSource,
+        { provider: aiProvider },
+      );
+    } catch { localAiAdapter = null; }
+  }
 
   const migration = migratePromptMap(
     it.aiPromptByLang && typeof it.aiPromptByLang === "object" ? it.aiPromptByLang : {},
@@ -183,10 +205,11 @@ export async function readFullSettings(options = {}) {
     lang,
     sources: typeof it.sources === "string" ? it.sources : DEFAULT_SOURCE,
     maxConcurrency: Number.isFinite(Number(it.maxConcurrency)) ? Number(it.maxConcurrency) : DEFAULT_MAX_CONCURRENCY,
-    aiKey: typeof it.aiKey === "string" ? it.aiKey : "",
+    aiKey: localAi ? "" : (typeof it.aiCloudKey === "string" ? it.aiCloudKey : (typeof it.aiKey === "string" ? it.aiKey : "")),
     aiModel,
-    aiProvider: typeof it.aiProvider === "string" ? it.aiProvider : "",
+    aiProvider,
     aiBaseUrl: typeof it.aiBaseUrl === "string" ? it.aiBaseUrl : "",
+    localAiAdapter,
     aiGlossary: Array.isArray(it.aiGlossary) ? it.aiGlossary : [],
     aiCharMemory: it.aiCharMemory === true, // legacy boolean (Full == true)
     // Series-memory mode: "off" (default) | "terms" (glossary only) | "full"

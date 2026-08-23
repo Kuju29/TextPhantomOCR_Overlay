@@ -217,6 +217,7 @@ const AI_RESULT_SETTING_KEYS = new Set([
   "aiModel",
   "aiProvider",
   "aiBaseUrl",
+  "localAiAdapter",
   "aiGlossary",
   "aiCharMemory",
   "aiMemoryMode",

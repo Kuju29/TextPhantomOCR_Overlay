@@ -252,7 +252,8 @@ export const FALLBACK_LANGS = [
 // AI providers that run on the user's own machine; nothing about them is metered.
 export const LOCAL_AI_PROVIDERS = new Set([
   "ollama", "lmstudio", "localai", "jan", "textgen",
-  "koboldcpp", "vllm", "llamafile", "gpt4all", "local", "llama",
+  "koboldcpp", "vllm", "llamafile", "gpt4all", "llamacpp",
+  "customlocal", "local", "llama",
 ]);
 
 // Returns whether a provider id names a runtime on the user's own machine.

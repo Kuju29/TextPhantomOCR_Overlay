@@ -38,6 +38,12 @@ for (const code of [
   "server_busy", "provider_rate_limited", "lens_transport_error", "cancelled",
   "rate_gate_busy", "local_rate_gate_busy", "missing_api_key", "invalid_api_key",
   "model_unavailable", "missing_translation_units", "internal_error",
+  "ai_endpoint_missing", "invalid_local_endpoint", "local_endpoint_not_private",
+  "local_ai_unreachable", "local_ai_timeout", "local_model_missing",
+  "local_model_not_found", "local_ai_endpoint_incompatible", "local_ai_http_error",
+  "invalid_local_response", "invalid_model_output", "custom_local_extension_only",
+  "local_models_http_error", "local_models_empty", "local_ai_server_error",
+  "local_ai_unreachable_from_remote_api", "local_prompt_unavailable",
 ]) {
   const error = makeTpError({ code, origin: "api", stage: "ai" });
   assert.notEqual(error.userMessage, "เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ", `${code} needs a public message`);

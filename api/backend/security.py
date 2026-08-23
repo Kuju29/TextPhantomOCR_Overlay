@@ -28,7 +28,7 @@ import ipaddress
 import socket
 from urllib.parse import urlparse
 
-from backend.ai.config import PROVIDER_DEFAULTS
+from backend.ai.config import LOCAL_PROVIDERS, PROVIDER_DEFAULTS
 from backend.config import settings
 
 
@@ -76,7 +76,32 @@ def server_key_allowed_hosts() -> frozenset[str]:
     return frozenset(hosts)
 
 
-def assert_ai_base_url_allowed(provider: str, base_url: str, *, user_key: bool) -> None:
+def _is_keyless_local_endpoint(provider: str, url: str) -> bool:
+    """Allow a keyless local runtime without opening a general SSRF path.
+
+    API-owned Local AI is limited to this API host's loopback interface. LAN
+    runtimes must be explicitly allow-listed by the operator in
+    ``TP_AI_EXTRA_HOSTS``; browser-owned Local AI has its own private-LAN guard.
+    """
+    if (provider or "").strip().lower() not in LOCAL_PROVIDERS:
+        return False
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https") or parsed.username or parsed.password:
+            return False
+        if parsed.query or parsed.fragment:
+            return False
+        host = (parsed.hostname or "").strip().lower()
+        if host == "localhost" or host.endswith(".localhost"):
+            return True
+        return bool(host and ipaddress.ip_address(host).is_loopback)
+    except (ValueError, TypeError):
+        return False
+
+
+def assert_ai_base_url_allowed(
+    provider: str, base_url: str, *, user_key: bool, key_present: bool = True,
+) -> None:
     """Raise :class:`UnsafeBaseUrl` if this base URL may not receive this key.
 
     ``user_key=True``  — the caller supplied their own credential. Only their
@@ -87,6 +112,9 @@ def assert_ai_base_url_allowed(provider: str, base_url: str, *, user_key: bool) 
     """
     url = (base_url or "").strip()
     if user_key or not url:
+        return
+
+    if not key_present and _is_keyless_local_endpoint(provider, url):
         return
 
     host = _host_of(url)

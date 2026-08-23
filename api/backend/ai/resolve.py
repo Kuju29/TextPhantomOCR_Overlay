@@ -95,9 +95,9 @@ def _enumerate_models_detailed(provider: str, api_key: str, base_url: str) -> En
         live = anthropic_models_status(api_key)
     else:
         # Every other provider in PROVIDER_PROTOCOLS uses the OpenAI-compatible
-        # /models + /chat/completions dialect. Local servers accept no key, so
-        # a harmless placeholder is used only for the Authorization header.
-        key_for_list = api_key or ("local" if local else "")
+        # /models + /chat/completions dialect. Local servers receive no
+        # credential or placeholder Authorization header at all.
+        key_for_list = "" if local else api_key
         from backend.ai.providers import LIST_TIMEOUT_SEC, LOCAL_LIST_TIMEOUT_SEC
 
         live = openai_compat_models_status(
@@ -202,8 +202,8 @@ def resolve(payload: dict[str, Any]) -> ResolveResult:
     # Local providers use no credential (the model-list helper supplies only a
     # harmless placeholder header when required by an OpenAI-compatible server).
     local = is_local_provider(provider)
-    api_key = supplied_key or ("" if local else server_key)
-    key_source = "user" if supplied_key else ("env" if api_key else "none")
+    api_key = "" if local else (supplied_key or server_key)
+    key_source = "none" if local else ("user" if supplied_key else ("env" if api_key else "none"))
 
     mismatched_provider = provider_key_mismatch(provider, api_key) if api_key else ""
     if mismatched_provider:
@@ -261,7 +261,11 @@ def resolve(payload: dict[str, Any]) -> ResolveResult:
     # those turned plain settings discovery ("pick a provider, list its models
     # before typing a key") into an unhandled exception.
     uses_server_key = bool(server_key) and not supplied_key and not local
-    assert_ai_base_url_allowed(provider, base_url, user_key=not uses_server_key)
+    assert_ai_base_url_allowed(
+        provider, base_url,
+        user_key=bool(supplied_key),
+        key_present=bool(api_key),
+    )
 
     remap_reason = ""
     if not requested_is_auto and resolved_model != requested_model:

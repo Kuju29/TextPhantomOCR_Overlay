@@ -59,8 +59,12 @@ async function assertAutoAiReady(settings) {
   // working keyless route until an executable on-device translator exists.
   const local = isLocalAiProvider(provider) || isLocalHostUrl(baseUrl);
   const needsServerKeyFact = !local && !String(settings?.aiKey || "").trim();
+  const mainApiBaseUrl = local && settings?.engineMode === "api"
+    ? await getApiBase().catch(() => "")
+    : "";
   const issue = autoAiSettingsIssue(settings, {
     hasServerKey: needsServerKeyFact ? await serverHasAiKey() : null,
+    mainApiBaseUrl,
   });
   if (!issue) return;
   throw attachTpError(new Error(issue.message), {
@@ -161,6 +165,9 @@ async function buildAiPayload(mode, source, settings, seriesKey) {
     memory_mode: memMode,
     send_image: sendImage,
     thinking: String(settings.aiThinking || "default"),
+    local_adapter: settings.localAiAdapter && typeof settings.localAiAdapter === "object"
+      ? { ...settings.localAiAdapter }
+      : null,
   };
 }
 
@@ -472,7 +479,7 @@ export async function onContextMenuClicked(menuInfo, tab, options = {}) {
     const source = mode === "lens_text"
       ? overrideSource(overrides?.source) || settings.sources || "translated"
       : "translated";
-    if (overrides && mode === "lens_text" && source === "ai") {
+    if (mode === "lens_text" && source === "ai") {
       await assertAutoAiReady(settings);
     }
     if (overrides) {

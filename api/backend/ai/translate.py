@@ -30,7 +30,7 @@ from backend.ai.clients import openai_compat
 from backend.ai.providers import (
     is_hf_provider,
     is_local_provider,
-    openai_compat_models,
+    openai_compat_models_status,
     provider_key_mismatch,
     resolve_base_url,
     resolve_model,
@@ -173,7 +173,11 @@ def translate(
     # the last gate before the key reaches an Authorization header, so it runs
     # on the RESOLVED url — a payload that hides the target behind an alias
     # cannot slip past it.
-    assert_ai_base_url_allowed(provider, base_url, user_key=bool(getattr(ai, "user_key", False)))
+    assert_ai_base_url_allowed(
+        provider, base_url,
+        user_key=bool(getattr(ai, "user_key", False)),
+        key_present=bool(api_key),
+    )
 
     # Local servers (Ollama / LM Studio / …) load whatever model the USER has
     # installed; our default model name is only a placeholder.  When the user
@@ -183,7 +187,9 @@ def translate(
     if is_local_provider(provider):
         if str(ai.model or "auto").strip().lower() in ("", "auto"):
             try:
-                installed = openai_compat_models(api_key or "local", base_url)
+                installed = openai_compat_models_status(
+                    "", base_url, provider=provider,
+                )["models"]
             except Exception:
                 installed = []
             if installed:
@@ -220,11 +226,6 @@ def translate(
     )
     system_text = "\n\n".join(p for p in (system_static, system_dynamic) if p)
     user_parts = prompts.build_user_parts(original_text_full)
-
-    # Local servers ignore the key but the OpenAI client always sends a
-    # bearer header; supply a harmless placeholder when none was given.
-    if not api_key and is_local_provider(provider):
-        api_key = "local"
 
     used_model = model
     if provider == "gemini":

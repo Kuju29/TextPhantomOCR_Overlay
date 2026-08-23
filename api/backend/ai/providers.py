@@ -233,7 +233,7 @@ def openai_compat_models_status(
     not equate "present in a catalogue" with "usable for TextPhantom chat".
     """
     prov = canonical_provider(provider or "")
-    if not api_key or not base_url:
+    if not base_url or (not api_key and not is_local_provider(prov)):
         return _model_list_result(status="missing")
 
     root = base_url.rstrip("/")
@@ -254,11 +254,8 @@ def openai_compat_models_status(
 
     try:
         with httpx.Client(timeout=timeout_sec) as client:
-            r = client.get(
-                url,
-                headers={"Authorization": f"Bearer {api_key}"},
-                params=params or None,
-            )
+            headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+            r = client.get(url, headers=headers, params=params or None)
     except httpx.RequestError as exc:
         return _model_list_result(status="unreachable", error=type(exc).__name__)
 

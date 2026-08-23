@@ -89,10 +89,9 @@ def _post(provider: str, api_key: str, base_url: str, model: str) -> httpx.Respo
             return client.post(url, headers=headers, json=payload)
 
     url = base_url.rstrip("/") + "/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     payload: dict[str, Any] = {
         "model": model,
         "messages": [{"role": "user", "content": "Reply only OK."}],
@@ -158,7 +157,7 @@ def probe(payload: dict[str, Any]) -> ProbeResult:
     local = is_local_provider(provider)
     # A server-owned cloud key must never be sent to a caller-selected local
     # endpoint. Local providers need no real key.
-    api_key = supplied_key or ("" if local else server_key)
+    api_key = "" if local else (supplied_key or server_key)
     if not api_key and not local:
         return ProbeResult(
             ok=False,
@@ -170,9 +169,6 @@ def probe(payload: dict[str, Any]) -> ProbeResult:
             http_status=0,
             cached=False,
         )
-    if local and not api_key:
-        api_key = "local"
-
     mismatched_provider = provider_key_mismatch(provider, api_key) if not local else ""
     if mismatched_provider:
         return ProbeResult(
@@ -186,7 +182,11 @@ def probe(payload: dict[str, Any]) -> ProbeResult:
     # Same rule as resolve(): guard the endpoint only when the SERVER-OWNED key
     # is the credential that would actually leave this process.
     uses_server_key = bool(server_key) and not supplied_key and not local
-    assert_ai_base_url_allowed(provider, base_url, user_key=not uses_server_key)
+    assert_ai_base_url_allowed(
+        provider, base_url,
+        user_key=bool(supplied_key),
+        key_present=bool(api_key),
+    )
 
     cache_key = _cache_key(provider, model, base_url, api_key)
     now = time.time()

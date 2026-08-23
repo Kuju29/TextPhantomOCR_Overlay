@@ -56,7 +56,7 @@ from backend.ai.failure_reason import is_rate_limited as _ai_is_rate_limited
 from backend.ai.failure_reason import retry_after_sec as _ai_retry_after_sec
 from backend.ai import prompts as ai_prompts
 from backend.ai.rategate import rate_gate, RateGateRejected, RateGateTimeout
-from backend.ai.providers import resolve_provider
+from backend.ai.providers import is_local_provider, resolve_provider
 from backend.ai.translate import (
     AiConfig,
     resolve_generation_model,
@@ -182,12 +182,18 @@ def _build_config(payload: dict) -> AiConfig:
     memory = payload.get("memory") if isinstance(payload.get("memory"), dict) else {}
 
     user_key = str(provider.get("apiKey") or "").strip()
+    provider_id = str(provider.get("id") or "auto").strip() or "auto"
+    base_url = str(provider.get("baseUrl") or "auto").strip() or "auto"
+    looks_local = is_local_provider(provider_id) or any(
+        host in base_url.lower()
+        for host in ("localhost", "127.0.0.1", "0.0.0.0", "[::1]")
+    )
     config = AiConfig(
-        api_key=user_key or settings.ai_api_key,
+        api_key="" if looks_local else (user_key or settings.ai_api_key),
         user_key=bool(user_key),
-        provider=str(provider.get("id") or "auto").strip() or "auto",
+        provider=provider_id,
         model=str(provider.get("model") or "auto").strip() or "auto",
-        base_url=str(provider.get("baseUrl") or "auto").strip() or "auto",
+        base_url=base_url,
         thinking=str(provider.get("thinking") or "default").strip().lower() or "default",
         prompt_editable=str(payload.get("prompt") or "").strip(),
         glossary=memory.get("glossary") if isinstance(memory.get("glossary"), list) else [],

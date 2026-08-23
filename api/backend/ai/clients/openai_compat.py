@@ -145,10 +145,9 @@ def generate(
 ) -> ChatResult:
     """POST exactly one chat completion request using the requested model."""
     url = base_url.rstrip("/") + "/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     # Kept for public-call compatibility. A caller may still pass this legacy
     # flag, but one-attempt mode intentionally never performs HF substitution.
     _ = allow_hf_fallback

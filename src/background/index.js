@@ -39,6 +39,7 @@ import { bumpTabSession, dropTabSession, ensureTabSession } from "./tab-sessions
 import { setHandlers, cancelJobsViaRest } from "./transport.js";
 import { onContextMenuClicked, recreateMenus } from "./context-menu.js";
 import { ensureThunderbirdMessageScripts } from "./thunderbird.js";
+import { discoverLocalModels } from "../shared/local-ai-adapter.js";
 
 const log = createLogger("SW");
 
@@ -106,6 +107,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const type = String(msg?.type || "");
 
   switch (type) {
+    case "TP_LOCAL_AI_DISCOVER":
+      discoverLocalModels(msg?.adapter || {})
+        .then((result) => sendResponse(result))
+        .catch((error) => sendResponse({
+          ok: false,
+          code: String(error?.code || "local_ai_discovery_failed"),
+          error: String(error?.message || "Local AI discovery failed"),
+        }));
+      return true;
+
     case "AI_SETTINGS_CHANGED":
       forgetPrompts();
       sendResponse({ ok: true });
