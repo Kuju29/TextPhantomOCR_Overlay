@@ -1,6 +1,6 @@
 [![Website](https://img.shields.io/badge/Website-kuju29.github.io-blue?style=flat-square&logo=github&logoColor=white)](https://kuju29.github.io/)
 
-*Note: ปกติผมใช้ Ai cloud ของ gemini 2.5 มันฟรีแต่จำกัดใช้ช่วงสั้นๆ ส่วน Ai local มันแปลไม่ดีเท่าผมเลยว่าจะเทรนเองแล้วปล่อยให้ใช้กัน แต่ตอนนี้กำลังอยู่ในช่วงรวบรวมดาต้าสำหรับเทรน ai ที่ทำไว้จะรองรับ 3 ภาษานั่นคือ ไทย ญี่ปุ่น อังกฤษ รอดูกันต่อไปครับ*
+*Note: *
 
 ![Desktop2026 02 06-08 11 52 01-ezgif com-video-to-gif-converter](https://github.com/user-attachments/assets/43cc9a1e-eb79-46f0-b4a1-08ca9bcd49f5)
 
