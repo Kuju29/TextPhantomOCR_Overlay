@@ -1081,7 +1081,9 @@ async function runLensDirectPath(base, payload, { tabId, frameId, jobId = "", si
     }, stageTrace);
     lens = answer?.lens;
     if (!lens || typeof lens !== "object") {
-      throw new Error("the raw Lens reply carried no `lens` object");
+      throw attachTpError(new Error("the raw Lens reply carried no `lens` object"), {
+        code: "LENS_FAILED", origin: "upstream_lens", stage: "lens", retryable: true,
+      });
     }
     lensImageSize = authoritativeLensImageSize(answer?.image);
     imageArtifactToken = String(answer?.imageArtifact?.token || "").trim();
@@ -1145,7 +1147,9 @@ async function runLensDirectPath(base, payload, { tabId, frameId, jobId = "", si
     let grouped;
     try {
       if (!image.dataUri) {
-        throw new Error("the image reader returned no data URI to group with");
+        throw attachTpError(new Error("the image reader returned no data URI to group with"), {
+          code: "IMG_READ_FAILED", origin: "extension", stage: "image_read", retryable: false,
+        });
       }
       const stageTrace = String(payload?.context?.tp_trace || "");
       traceNote("background/jobs.js", "imageStage", {
@@ -1907,7 +1911,15 @@ async function runSyncTranslate(
             : aiOutcome?.reason || "AI produced no usable translation; no automatic retry was made";
           log.warn("extension-first AI stopped without invoking the full image pipeline", { reason });
           await wf.failed(workflowId, reason);
-          handleJobError(jobId, reason);
+          // "AI produced no usable translation" matches none of the legacy
+          // patterns, so as a bare string it reached the reader as
+          // "unknown cause · UNKNOWN". The two outcomes are different and the
+          // code already knows which one happened.
+          handleJobError(jobId, attachTpError(new Error(reason), {
+            code: aiOutcome?.usable ? "RENDER_FAILED" : "AI_NO_RESULT",
+            origin: "extension", stage: aiOutcome?.usable ? "render" : "ai",
+            retryable: false, diagnostic: reason,
+          }));
           return;
         }
         if (!aiOutcome.complete) {
@@ -1957,7 +1969,13 @@ async function runSyncTranslate(
       mode: payload.mode, source: payload.source,
     }, String(payload?.context?.tp_trace || getTrace() || ""));
     await wf.failed(workflowId, reason);
-    handleJobError(jobId, decline.error || reason);
+    // stop() names why it declined at eight sites; that reason must survive the
+    // trip to the image. A decline.error is already a coded Error and is passed
+    // through untouched — only a bare reason string needs dressing.
+    handleJobError(jobId, decline.error || attachTpError(new Error(reason), {
+      code: "EXTENSION_DECLINED", origin: "extension", stage: "lens_direct",
+      retryable: false, diagnostic: reason,
+    }));
     return;
   }
 
@@ -2231,7 +2249,10 @@ export async function resumePendingRestJobs() {
     const base = String(ctx?.base || "").trim();
     if (!base) continue;
     addTask(
-      () => pollJobViaRest(base, jobId).catch((e) => handleJobError(jobId, e?.message || String(e))),
+      // transport.js already attached a code to this error. Flattening it to
+      // e.message threw that away and the reader got "unknown cause · UNKNOWN"
+      // for a plain network or gateway failure we had classified correctly.
+      () => pollJobViaRest(base, jobId).catch((e) => handleJobError(jobId, e)),
       { shouldStart: () => pendingByJob.has(jobId) },
     );
   }

@@ -48,6 +48,8 @@ const USER_MESSAGES = Object.freeze({
   AI_STOPPED: "AI หยุดสร้างข้อความกลางคัน กรุณาลองใหม่",
   AI_OUTPUT_INVALID: "AI แปลผลไม่ตรงรูปแบบที่ต้องใช้",
   AI_NOT_CONFIGURED: "เซิร์ฟเวอร์ไม่มี AI key ให้ใช้—กรุณาใส่ AI key ของคุณเองในหน้าตั้งค่า",
+  AI_NO_RESULT: "AI ไม่ได้ผลลัพธ์ที่ใช้ได้สำหรับภาพนี้",
+  EXTENSION_DECLINED: "ส่วนขยายแปลภาพนี้ไม่สำเร็จ—ลองใหม่ หรือสลับเป็นโหมด API server",
   UNKNOWN: "เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ",
 });
 
@@ -102,6 +104,7 @@ export function userMessageForCode(code) {
     generation_stopped: "AI_STOPPED", empty_output: "AI_STOPPED",
     invalid_output_contract: "AI_OUTPUT_INVALID", incomplete_output: "AI_INCOMPLETE",
     ai_not_configured: "AI_NOT_CONFIGURED", unsafe_base_url: "LOCAL_ENDPOINT_UNSAFE",
+    ai_no_result: "AI_NO_RESULT", extension_declined: "EXTENSION_DECLINED",
   };
   return USER_MESSAGES[raw] || USER_MESSAGES[aliases[normalized]] || USER_MESSAGES.UNKNOWN;
 }
