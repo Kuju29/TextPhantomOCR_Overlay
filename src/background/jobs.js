@@ -37,6 +37,7 @@ import {
   } from "./tabs-messaging.js";
 import { enqueueDomInsert } from "./insert-queue.js";
 import { imageErrorMessage } from "./error-message.js";
+import { attachTpError } from "../shared/error-contract.js";
 import {
   submitJobViaRest,
   pollJobViaRest,
@@ -830,7 +831,21 @@ async function processJobInner(payload, tabId, frameId = 0) {
               finalizeBatch(batch);
             }
             await wf.failed(workflowId, `image could not be fetched: ${errMsg}`);
-            failJobImmediately(tabId, payload?.src || null, errMsg, frameId, traceId);
+            // Same rule: name the reason in the contract, not only in the log.
+            const readCode = browserOnlySrc ? "IMG_BLOCKED"
+              : /not an image/i.test(errMsg) ? "IMG_INVALID"
+                : /too large/i.test(errMsg) ? "IMG_TOO_LARGE"
+                  : "IMG_READ_FAILED";
+            failJobImmediately(
+              tabId,
+              payload?.src || null,
+              attachTpError(new Error(errMsg), {
+                code: readCode, origin: "extension", stage: "image_read",
+                category: "input", retryable: false, diagnostic: errMsg,
+              }),
+              frameId,
+              traceId,
+            );
             return;
           }
         }
@@ -909,7 +924,20 @@ async function processJobInner(payload, tabId, frameId = 0) {
       batchUpdateToast(batch, "Compatibility error");
       finalizeBatch(batch);
     }
-    failJobImmediately(tabId, payload?.src || null, compatibilityIssue, frameId, traceId);
+    // A bare string reaches makeTpError() with no code, matches none of the
+    // legacy patterns, and is rendered to the user as "unknown cause · UNKNOWN"
+    // — the least useful sentence we can put on an image, for the one failure
+    // whose cause we know exactly.
+    failJobImmediately(
+      tabId,
+      payload?.src || null,
+      attachTpError(new Error(compatibilityIssue), {
+        code: "API_CAPS_UNAVAILABLE", origin: "api", stage: "capabilities",
+        category: "service", retryable: true, diagnostic: compatibilityIssue,
+      }),
+      frameId,
+      traceId,
+    );
     return;
   }
   // The API reports the slots each of its lanes currently holds. Matching the

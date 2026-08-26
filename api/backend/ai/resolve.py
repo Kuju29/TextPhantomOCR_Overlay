@@ -263,7 +263,7 @@ def resolve(payload: dict[str, Any]) -> ResolveResult:
     uses_server_key = bool(server_key) and not supplied_key and not local
     assert_ai_base_url_allowed(
         provider, base_url,
-        user_key=bool(supplied_key),
+        user_key=not uses_server_key,
         key_present=bool(api_key),
     )
 

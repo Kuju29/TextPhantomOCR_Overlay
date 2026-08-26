@@ -44,9 +44,24 @@ for (const code of [
   "invalid_local_response", "invalid_model_output", "custom_local_extension_only",
   "local_models_http_error", "local_models_empty", "local_ai_server_error",
   "local_ai_unreachable_from_remote_api", "local_prompt_unavailable",
+  // Codes the live API emits. These all used to read "unknown cause" to the
+  // reader while the real reason sat in the code field beside it.
+  "invalid_request", "service_unavailable", "api_caps_unavailable",
+  "lens_http_error", "lens_invalid_response", "lens_session_unavailable",
+  "image_fetch_failed", "image_fetch_http_error", "provider_transport",
+  "provider_timeout", "provider_http", "unsupported_provider",
+  "generation_stopped", "empty_output", "invalid_output_contract",
+  "incomplete_output", "ai_not_configured", "unsafe_base_url",
+  "provider_key_mismatch", "image_blocked", "onnx_failed",
 ]) {
   const error = makeTpError({ code, origin: "api", stage: "ai" });
   assert.notEqual(error.userMessage, "เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ", `${code} needs a public message`);
   assert.equal(error.code, code, "normalising display text must not change the retry machine code");
 }
+assert.doesNotMatch(
+  makeTpError({ code: "invalid_model_output", origin: "upstream_ai", stage: "model_output_contract" }).userMessage,
+  /Local AI/,
+  "the cloud AI route emits invalid_model_output too — its text must not blame Local AI",
+);
+
 console.log("Error contract test passed: public errors are structured, concise and safe.");

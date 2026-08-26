@@ -5,8 +5,16 @@ import { createLogger } from "../shared/logger.js";
 
 const log = createLogger("SW.caps");
 
-const PROBE_TIMEOUT_MS = 5000;
+// A cold Hugging Face Space answers its first request in tens of seconds, not
+// milliseconds. Five seconds was short enough that every user who arrived
+// while the container was booting was told the server could not do the job.
+const PROBE_TIMEOUT_MS = 12000;
 const CACHE_TTL_MS = 10 * 60 * 1000;
+// A failed probe describes one bad moment — a booting server, a 502 from the
+// host, a dropped socket. Remembering it for as long as a real answer turned
+// seconds of upstream trouble into ten minutes of "every image on every site
+// fails", continuing long after the server was healthy again.
+const FAILED_CACHE_TTL_MS = 15 * 1000;
 
 const cache = new Map();
 
@@ -74,8 +82,12 @@ export async function getCapabilities(base) {
   const key = String(base || "").replace(/\/+$/, "");
   if (!key) return legacyCapabilities("no api base configured");
 
+  // `reason` is set only by legacyCapabilities(), so it is exactly "this entry
+  // is a guess we made because the probe failed".
   const hit = cache.get(key);
-  if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.caps;
+  if (hit && Date.now() - hit.at < (hit.caps.reason ? FAILED_CACHE_TTL_MS : CACHE_TTL_MS)) {
+    return hit.caps;
+  }
 
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS);

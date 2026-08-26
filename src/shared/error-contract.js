@@ -38,6 +38,16 @@ const USER_MESSAGES = Object.freeze({
   RENDER_FAILED: "สร้างข้อความทับภาพไม่สำเร็จ",
   INSERT_FAILED: "หน้าเว็บไม่รับข้อความแปล",
   SERVER_BUSY: "เซิร์ฟเวอร์ไม่ว่างชั่วคราว",
+  REQUEST_REJECTED: "เซิร์ฟเวอร์ปฏิเสธคำขอนี้—ลองรีเฟรชหน้าเว็บแล้วสั่งใหม่",
+  API_CAPS_UNAVAILABLE: "ตรวจสอบความสามารถของเซิร์ฟเวอร์ไม่สำเร็จ—เซิร์ฟเวอร์อาจกำลังเริ่มทำงาน ลองใหม่อีกครั้ง",
+  IMG_SOURCE_UNREACHABLE: "โหลดภาพจากเว็บไซต์ต้นทางไม่ได้",
+  AI_UNREACHABLE: "เชื่อมต่อผู้ให้บริการ AI ไม่ได้ กรุณาลองใหม่",
+  AI_TIMEOUT: "ผู้ให้บริการ AI ตอบช้าเกินเวลา กรุณาลองใหม่",
+  AI_PROVIDER_ERROR: "ผู้ให้บริการ AI ปฏิเสธคำขอ—ตรวจ AI key และสิทธิ์ของบัญชี",
+  AI_PROVIDER_UNSUPPORTED: "ยังไม่รองรับผู้ให้บริการ AI รายนี้",
+  AI_STOPPED: "AI หยุดสร้างข้อความกลางคัน กรุณาลองใหม่",
+  AI_OUTPUT_INVALID: "AI แปลผลไม่ตรงรูปแบบที่ต้องใช้",
+  AI_NOT_CONFIGURED: "เซิร์ฟเวอร์ไม่มี AI key ให้ใช้—กรุณาใส่ AI key ของคุณเองในหน้าตั้งค่า",
   UNKNOWN: "เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ",
 });
 
@@ -73,12 +83,25 @@ export function userMessageForCode(code) {
     local_ai_server_error: "LOCAL_SERVER_ERROR",
     local_models_http_error: "LOCAL_SERVER_ERROR", local_models_empty: "LOCAL_MODEL_MISSING",
     local_protocol_error: "LOCAL_INCOMPATIBLE", invalid_local_response: "LOCAL_BAD_RESPONSE",
-    local_response_invalid: "LOCAL_BAD_RESPONSE", invalid_model_output: "LOCAL_OUTPUT_INVALID",
+    local_response_invalid: "LOCAL_BAD_RESPONSE", invalid_model_output: "AI_OUTPUT_INVALID",
     local_output_incomplete: "AI_INCOMPLETE", custom_local_extension_only: "LOCAL_EXTENSION_ONLY",
     local_ai_unreachable_from_remote_api: "LOCAL_REMOTE_API_ROUTE",
     local_prompt_unavailable: "LOCAL_PROMPT_UNAVAILABLE",
     ai_incomplete: "AI_INCOMPLETE", render_failed: "RENDER_FAILED", insert_failed: "INSERT_FAILED",
     server_busy: "SERVER_BUSY",
+    // Codes the API emits today. Every one of these used to fall through to
+    // UNKNOWN, which told the reader nothing while the real cause sat in the
+    // `code` field right next to it.
+    invalid_request: "REQUEST_REJECTED", service_unavailable: "API_5XX",
+    api_caps_unavailable: "API_CAPS_UNAVAILABLE",
+    lens_http_error: "LENS_FAILED", lens_invalid_response: "LENS_FAILED",
+    image_fetch_failed: "IMG_SOURCE_UNREACHABLE",
+    image_fetch_http_error: "IMG_SOURCE_UNREACHABLE",
+    provider_transport: "AI_UNREACHABLE", provider_timeout: "AI_TIMEOUT",
+    provider_http: "AI_PROVIDER_ERROR", unsupported_provider: "AI_PROVIDER_UNSUPPORTED",
+    generation_stopped: "AI_STOPPED", empty_output: "AI_STOPPED",
+    invalid_output_contract: "AI_OUTPUT_INVALID", incomplete_output: "AI_INCOMPLETE",
+    ai_not_configured: "AI_NOT_CONFIGURED", unsafe_base_url: "LOCAL_ENDPOINT_UNSAFE",
   };
   return USER_MESSAGES[raw] || USER_MESSAGES[aliases[normalized]] || USER_MESSAGES.UNKNOWN;
 }

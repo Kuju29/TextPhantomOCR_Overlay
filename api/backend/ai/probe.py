@@ -17,6 +17,7 @@ import httpx
 from backend.ai.clients.openai_compat import _uses_reasoning_safe_parameters
 from backend.ai.config import PROVIDER_DEFAULTS, PROVIDER_PROTOCOLS
 from backend.ai.providers import (
+    _safe_error_text,
     canonical_provider,
     detect_provider_from_key,
     is_local_provider,
@@ -29,7 +30,14 @@ from backend.security import assert_ai_base_url_allowed
 
 PROBE_TIMEOUT_SEC = 15.0
 PROBE_CACHE_TTL_SEC = 15 * 60
-_PROBE_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+# A pass is a durable fact about this key and model. A failure is usually a
+# snapshot of one bad moment - a 429, a dropped socket, a plan the user is
+# fixing right now. Remembering both for fifteen minutes meant somebody who
+# corrected the real problem kept being shown the stale failure and concluded
+# the correction had not worked. The cache key is provider+model+base_url+key
+# hash, so that stale answer also crossed browsers and machines.
+PROBE_FAILURE_CACHE_TTL_SEC = 30
+_PROBE_CACHE: dict[str, tuple[float, dict[str, Any], float]] = {}
 
 
 class ProbeResult(TypedDict, total=False):
@@ -184,14 +192,14 @@ def probe(payload: dict[str, Any]) -> ProbeResult:
     uses_server_key = bool(server_key) and not supplied_key and not local
     assert_ai_base_url_allowed(
         provider, base_url,
-        user_key=bool(supplied_key),
+        user_key=not uses_server_key,
         key_present=bool(api_key),
     )
 
     cache_key = _cache_key(provider, model, base_url, api_key)
     now = time.time()
     cached = _PROBE_CACHE.get(cache_key)
-    if cached and now - cached[0] < PROBE_CACHE_TTL_SEC:
+    if cached and now - cached[0] < cached[2]:
         out = dict(cached[1])
         out["cached"] = True
         return ProbeResult(**out)
@@ -232,7 +240,11 @@ def probe(payload: dict[str, Any]) -> ProbeResult:
                 status=_classify_status(response.status_code),
                 http_status=response.status_code,
                 cached=False,
+                # The provider said why. Dropping it left the settings panel
+                # with a bare number and no way to act on it.
+                error=_safe_error_text(response),
             )
 
-    _PROBE_CACHE[cache_key] = (now, dict(result))
+    ttl = PROBE_CACHE_TTL_SEC if result["ok"] else PROBE_FAILURE_CACHE_TTL_SEC
+    _PROBE_CACHE[cache_key] = (now, dict(result), ttl)
     return result

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import time
 from typing import TypedDict
 
@@ -56,6 +57,33 @@ def _model_list_result(
         http_status=int(http_status or 0),
         error=(error or "")[:240],
     )
+
+
+# Credentials can appear in an upstream error body (an echoed request, a proxy
+# that quotes the URL it called). The body is worth keeping; the key never is.
+_SECRET_PATTERN = re.compile(
+    r"AIza[0-9A-Za-z_\-]{10,}"
+    r"|sk-[A-Za-z0-9_\-]{8,}"
+    r"|hf_[A-Za-z0-9]{8,}"
+    r"|gsk_[A-Za-z0-9]{8,}"
+    r"|key=[A-Za-z0-9._\-]{8,}"
+    r"|Bearer\s+[A-Za-z0-9._\-]{8,}"
+)
+
+
+def _safe_error_text(response: httpx.Response) -> str:
+    """Return the provider's own explanation, with any credential scrubbed.
+
+    Keeping only the status code turned "this project's billing is past due"
+    into a bare 403 that nobody could act on: the settings panel could say no
+    more than "access was denied", and the reason had to be rediscovered by
+    hand. The body is the answer. It just must never carry a key with it.
+    """
+    try:
+        text = response.text or ""
+    except Exception:  # noqa: BLE001 - an unreadable body must not mask the status
+        return "<error body could not be read>"
+    return _SECRET_PATTERN.sub("[redacted]", " ".join(text.split()))
 
 # Environment variables checked, in order, when no explicit key is supplied.
 _AI_KEY_ENV_NAMES = (
@@ -263,11 +291,14 @@ def openai_compat_models_status(
     # distinct: several providers use it for plan/model/gate access, and calling
     # a valid key "invalid" made troubleshooting impossible.
     if r.status_code == 401:
-        return _model_list_result(status="invalid_key", http_status=r.status_code)
+        return _model_list_result(status="invalid_key", http_status=r.status_code,
+                                  error=_safe_error_text(r))
     if r.status_code == 403:
-        return _model_list_result(status="forbidden", http_status=r.status_code)
+        return _model_list_result(status="forbidden", http_status=r.status_code,
+                                  error=_safe_error_text(r))
     if not r.is_success:
-        return _model_list_result(status="error", http_status=r.status_code)
+        return _model_list_result(status="error", http_status=r.status_code,
+                                  error=_safe_error_text(r))
     try:
         data = r.json()
     except ValueError:
@@ -365,11 +396,14 @@ def gemini_models_status(api_key: str) -> ModelListResult:
     except httpx.RequestError as exc:
         return _model_list_result(status="unreachable", error=type(exc).__name__)
     if r.status_code == 401:
-        return _model_list_result(status="invalid_key", http_status=r.status_code)
+        return _model_list_result(status="invalid_key", http_status=r.status_code,
+                                  error=_safe_error_text(r))
     if r.status_code == 403:
-        return _model_list_result(status="forbidden", http_status=r.status_code)
+        return _model_list_result(status="forbidden", http_status=r.status_code,
+                                  error=_safe_error_text(r))
     if not r.is_success:
-        return _model_list_result(status="error", http_status=r.status_code)
+        return _model_list_result(status="error", http_status=r.status_code,
+                                  error=_safe_error_text(r))
     try:
         data = r.json()
     except ValueError:
@@ -409,11 +443,14 @@ def anthropic_models_status(api_key: str) -> ModelListResult:
     except httpx.RequestError as exc:
         return _model_list_result(status="unreachable", error=type(exc).__name__)
     if r.status_code == 401:
-        return _model_list_result(status="invalid_key", http_status=r.status_code)
+        return _model_list_result(status="invalid_key", http_status=r.status_code,
+                                  error=_safe_error_text(r))
     if r.status_code == 403:
-        return _model_list_result(status="forbidden", http_status=r.status_code)
+        return _model_list_result(status="forbidden", http_status=r.status_code,
+                                  error=_safe_error_text(r))
     if not r.is_success:
-        return _model_list_result(status="error", http_status=r.status_code)
+        return _model_list_result(status="error", http_status=r.status_code,
+                                  error=_safe_error_text(r))
     try:
         data = r.json()
     except ValueError:
