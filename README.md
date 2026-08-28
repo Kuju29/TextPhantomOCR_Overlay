@@ -20,7 +20,7 @@
 #### **Option – Chrome Web Store**
 1. Install from [Chrome Web Store](https://chromewebstore.google.com/detail/cjbaepobgmickhgebgagklfcfacbbpem?utm_source=item-share-cb).  
 
-#### **Option – Manual Install**
+### **Option – Manual Install**
 1. Download and extract the **Source Code** for your version.  
 2. Open Chrome → Go to `chrome://extensions/`.  
 3. Enable **Developer Mode** (top right).  
@@ -29,9 +29,7 @@
 
 ##  2. Hugging Face API
 
-Choose one of these **2 options**:
-
-### ☁️ Option 1: Public API
+### **Option - Public API**
 
 1. Install and open **TextPhantom**.
 2. Click **Refresh API URL**.
@@ -39,7 +37,7 @@ Choose one of these **2 options**:
 
 > Shared with other users, so it may be slower during high usage.
 
-### 🔒 Option 2: Your Own API
+### **Option - Your Own API**
 
 1. Open the [TextPhantom Hugging Face Space](https://huggingface.co/spaces/plan291037/TextPhantom-v4.0.0/tree/main).
 2. Click **⋯ → Duplicate this Space**.
@@ -49,20 +47,13 @@ Choose one of these **2 options**:
 
 > Free cloned Spaces may stop automatically after being unused for up to 48 hours.
 
-**Notes:**
-* If unused, the Space will shut down automatically within 48 hours.
-* To stop it manually, go to **Settings** and click the small **Pause Space** link.
-* This API works only in **images** mode.
-
 ##  3. Getting Started with the Extension
   - Navigate to the page you want to translate.  
   - **Right-click** anywhere → choose **🔍 Translate...** from the context menu.
 
 ## 🤖 AI Translation for free
 
-TextPhantom supports **2 AI options**:
-
-### 🖥️ Option 1: Local AI — Ollama
+### **Option - Local AI: Ollama**
 
 Run AI directly on your computer. **Free and no API key required.**
 
@@ -90,7 +81,7 @@ Run AI directly on your computer. **Free and no API key required.**
 
 ---
 
-### ☁️ Option 2: Cloud AI — Hugging Face
+### **Option - Cloud AI: Hugging Face**
 
 Run AI on **Hugging Face's cloud servers**. No local AI installation or powerful GPU is required.
 
