@@ -34,7 +34,9 @@ from backend.config import settings
 from backend.ai.failure_reason import retry_after_sec as _ai_retry_after_sec
 from backend.ai.failure_reason import provider_http_failure as _provider_http_failure
 from backend.ai.providers import resolve_provider, is_local_provider
-from backend.ai.rategate import rate_gate, RateGateRejected, RateGateTimeout
+from backend.ai.rategate import (
+    rate_gate, RateGateCancelled, RateGateRejected, RateGateTimeout,
+)
 from backend.api.local_client import wants_unlimited
 from backend.api.errors import (
     payload as error_payload, failure_event, provider_status,
@@ -290,7 +292,12 @@ async def translate_sync(payload: dict[str, Any], request: Request) -> dict:
                 max_waiters=settings.rate_max_waiters_per_bucket,
                 rpm_override=rate["rpm"] or None,
                 burst_override=rate["burst"] or None,
+                cancel_check=lambda: cancellation.is_cancelled(payload),
             )
+        except RateGateCancelled as exc:
+            detail = cancelled_payload(
+                trace_id=trace_id, stage="translate_cancel", correlation=correlation)
+            raise HTTPException(status_code=409, detail=detail) from exc
         except (RateGateTimeout, RateGateRejected) as exc:
             detail = error_payload(
                 code="local_rate_gate_busy",

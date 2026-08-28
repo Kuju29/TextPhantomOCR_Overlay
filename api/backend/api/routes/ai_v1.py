@@ -30,6 +30,7 @@ Three things this does that ``/translate`` could not
 from __future__ import annotations
 
 import hashlib
+import json
 import asyncio
 import base64
 import io
@@ -55,7 +56,9 @@ from backend.ai.failure_reason import classify as _ai_failure_kind
 from backend.ai.failure_reason import is_rate_limited as _ai_is_rate_limited
 from backend.ai.failure_reason import retry_after_sec as _ai_retry_after_sec
 from backend.ai import prompts as ai_prompts
-from backend.ai.rategate import rate_gate, RateGateRejected, RateGateTimeout
+from backend.ai.rategate import (
+    rate_gate, RateGateCancelled, RateGateRejected, RateGateTimeout,
+)
 from backend.ai.providers import is_local_provider, resolve_provider
 from backend.ai.translate import (
     AiConfig,
@@ -87,29 +90,107 @@ MAX_IMAGE_BYTES = 12 * 1024 * 1024
 # than the honest limitation.
 _LEDGER_MAX = 512
 _LEDGER_TTL_SEC = 3600.0
-_ledger: "OrderedDict[str, tuple[float, dict]]" = OrderedDict()
+_ledger: "OrderedDict[str, tuple[float, str, dict]]" = OrderedDict()
+_inflight: dict[str, tuple[str, "asyncio.Future[dict | None]"]] = {}
 _ledger_lock = threading.Lock()
 
 
-def _ledger_get(key: str) -> dict | None:
+def _ledger_get(key: str, request_hash: str) -> tuple[str, dict | None]:
     with _ledger_lock:
         hit = _ledger.get(key)
         if not hit:
-            return None
-        at, value = hit
+            return "miss", None
+        at, stored_hash, value = hit
         if time.time() - at > _LEDGER_TTL_SEC:
             _ledger.pop(key, None)
-            return None
+            return "miss", None
         _ledger.move_to_end(key)
-        return value
+        if stored_hash != request_hash:
+            return "mismatch", None
+        return "hit", value
 
 
-def _ledger_put(key: str, value: dict) -> None:
+def _ledger_put(key: str, request_hash: str, value: dict) -> None:
     with _ledger_lock:
-        _ledger[key] = (time.time(), value)
+        _ledger[key] = (time.time(), request_hash, value)
         _ledger.move_to_end(key)
         while len(_ledger) > _LEDGER_MAX:
             _ledger.popitem(last=False)
+        pending = _inflight.pop(key, None)
+        if pending and pending[0] == request_hash and not pending[1].done():
+            pending[1].set_result(value)
+
+
+def _reserve_inflight(key: str, request_hash: str) -> tuple[str, dict | asyncio.Future | None]:
+    """Atomically replay, conflict, wait, or own one billable provider call."""
+    with _ledger_lock:
+        hit = _ledger.get(key)
+        if hit and time.time() - hit[0] <= _LEDGER_TTL_SEC:
+            _ledger.move_to_end(key)
+            return ("hit", hit[2]) if hit[1] == request_hash else ("mismatch", None)
+        if hit:
+            _ledger.pop(key, None)
+        pending = _inflight.get(key)
+        if pending:
+            return ("wait", pending[1]) if pending[0] == request_hash else ("mismatch", None)
+        future = asyncio.get_running_loop().create_future()
+        _inflight[key] = (request_hash, future)
+        return "owner", future
+
+
+def _release_inflight(key: str, request_hash: str, future: asyncio.Future) -> None:
+    """Wake identical retries after owner failure/cancellation so one may retry."""
+    with _ledger_lock:
+        current = _inflight.get(key)
+        if current and current[0] == request_hash and current[1] is future:
+            _inflight.pop(key, None)
+            if not future.done():
+                future.set_result(None)
+
+
+def _request_fingerprint(payload: dict[str, Any]) -> str:
+    """Hash only fields that can change the translation/provider output."""
+    provider = payload.get("provider") if isinstance(payload.get("provider"), dict) else {}
+    semantic = {
+        "units": payload.get("units"),
+        "sourceLang": payload.get("sourceLang"),
+        "targetLang": payload.get("targetLang"),
+        "prompt": payload.get("prompt"),
+        "provider": {
+            key: provider.get(key)
+            for key in ("id", "model", "baseUrl", "thinking")
+            if key in provider
+        },
+        "memory": payload.get("memory"),
+        "image": payload.get("image"),
+    }
+    canonical = json.dumps(
+        semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _caller_scope(request: Request, payload: dict[str, Any]) -> str:
+    """Stable, non-secret scope preventing one caller replaying another's key."""
+    provider = payload.get("provider") if isinstance(payload.get("provider"), dict) else {}
+    identity = identity_of({
+        "ai": {"api_key": str(provider.get("apiKey") or "")},
+        "context": payload.get("context") if isinstance(payload.get("context"), dict) else {},
+    })
+    context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+    session = str(context.get("tp_tab_session") or "")[:128]
+    # An API key identifies a provider quota, not necessarily a person: teams
+    # can share one. Combine it with the browser session (or network caller for
+    # old clients) so a shared key can never expose one user's cached output to
+    # another user who happens to choose the same Idempotency-Key.
+    client = request.client.host if request.client else "unknown"
+    origin = str(request.headers.get("origin") or "")[:256]
+    auth = str(request.headers.get("authorization") or "")
+    auth_hash = hashlib.sha256(auth.encode("utf-8")).hexdigest()[:16] if auth else ""
+    caller = session or f"{client}|{origin}|{auth_hash}"
+    raw = f"{identity}|{caller}"
+    return "c:" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
 
 
 def unit_hash(text: str) -> str:
@@ -363,10 +444,37 @@ async def ai_translate_v1(
         trace_id=trace_id,
     )
 
-    key = str(idempotency_key or "").strip()
+    raw_key = str(idempotency_key or "").strip()
+    request_hash = _request_fingerprint(payload)
+    key_hash = hashlib.sha256(raw_key.encode("utf-8")).hexdigest() if raw_key else ""
+    key = f"{_caller_scope(request, payload)}:{key_hash}" if raw_key else ""
     if key:
-        cached = _ledger_get(key)
-        if cached is not None:
+        ledger_state, cached = _reserve_inflight(key, request_hash)
+        if ledger_state == "mismatch":
+            detail = error_payload(
+                code="idempotency_conflict",
+                message="Idempotency-Key was already used with a different request.",
+                user_message="This retry key belongs to different translation data. Please retry with a new key.",
+                origin="client", stage="idempotency", category="input",
+                retryable=False, http_status=409, trace_id=trace_id,
+                correlation=correlation,
+            )
+            failure_event("/v1/ai/translate", detail)
+            raise HTTPException(status_code=409, detail=detail)
+        while ledger_state == "wait":
+            # One disconnected retry must not cancel the shared owner future
+            # and thereby disrupt every other identical retry.
+            cached = await asyncio.shield(cached)
+            if cached is not None:
+                ledger_state = "hit"
+            else:
+                # The owner failed before producing a cacheable response. This
+                # request now atomically competes to become the sole retry.
+                ledger_state, cached = _reserve_inflight(key, request_hash)
+        if ledger_state == "mismatch":
+            raise HTTPException(status_code=409, detail=invalid_detail(
+                "Idempotency-Key payload changed while retrying", "idempotency"))
+        if ledger_state == "hit" and cached is not None:
             # Replayed verbatim, and SAID so: a client that cannot tell a
             # replay from a fresh call cannot tell whether its retry worked.
             replayed = {
@@ -393,6 +501,14 @@ async def ai_translate_v1(
                 trace_id=trace_id,
             )
             return replayed
+        if ledger_state == "owner":
+            owner_future = cached
+            owner_task = asyncio.current_task()
+            if owner_task is not None:
+                owner_task.add_done_callback(
+                    lambda _task, k=key, h=request_hash, f=owner_future:
+                    _release_inflight(k, h, f)
+                )
 
     # Optional user-pinned RPM pacing. Auto/provider-managed requests arrive
     # with rate.enabled=false and skip this gate entirely; the real provider
@@ -422,7 +538,12 @@ async def ai_translate_v1(
                 max_waiters=settings.rate_max_waiters_per_bucket,
                 rpm_override=rate["rpm"] or None,
                 burst_override=rate["burst"] or None,
+                cancel_check=lambda: cancellation.is_cancelled(payload),
             )
+        except RateGateCancelled as exc:
+            trace_failure("cancelled", exc, 409, units=len(units), providerAttempts=0)
+            raise HTTPException(status_code=409, detail=cancelled_payload(
+                trace_id=trace_id, stage="ai_cancel", correlation=correlation)) from exc
         except (RateGateTimeout, RateGateRejected) as exc:
             # A 429 from THIS gate is not the same event as a 429 from the
             # provider, and the client must be able to tell them apart.
@@ -633,9 +754,11 @@ async def ai_translate_v1(
         detail = error_payload(
             code=stable_code,
             message=f"AI translation failed ({kind}).",
-            user_message=("The AI provider is limiting requests. Please wait and try again."
+            user_message=("ผู้ให้บริการ AI จำกัดความถี่ กรุณารอแล้วลองใหม่"
                           if provider_limited else
-                          "The AI provider could not complete this image."),
+                          "โควตา/เครดิต AI หมด หรือต้องตั้งค่าการชำระเงิน"
+                          if stable_code in {"provider_quota_exhausted", "billing_required"} else
+                          "ผู้ให้บริการ AI ไม่สามารถทำภาพนี้ได้"),
             origin="upstream_ai", stage="provider_request", category="upstream",
             retryable=bool(provider_limited or kind in {
                 "provider_timeout", "provider_transport"
@@ -777,7 +900,7 @@ async def ai_translate_v1(
     }
 
     if key:
-        _ledger_put(key, body)
+        _ledger_put(key, request_hash, body)
 
     event(
         "v1.ai.translate",

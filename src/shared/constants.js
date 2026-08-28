@@ -83,15 +83,12 @@ export const UPLOAD_FORMATS = ["webp", "png", "jpeg"];
 export const DEFAULT_RELAYOUT_TRANSLATED = true;
 
 /**
- * Manual AI requests-per-minute pacing is OFF by default. Auto/provider-managed
- * mode has no TextPhantom RPM cap; the adaptive concurrency lane reacts to the
- * provider's real 429/503 backpressure. RPM/burst are only used when the user
- * deliberately enables a profile or custom limit; Burst then also becomes the
- * user's explicit client-concurrency ceiling for that AI key.
+ * Cloud AI starts with a conservative, explicit cost guard. Users can opt out,
+ * but a fresh install must not fan out an entire chapter against a paid key.
  */
-export const DEFAULT_RATE_LIMIT_ENABLED = false;
-export const DEFAULT_RATE_RPM = 0;
-export const DEFAULT_RATE_BURST = 0;
+export const DEFAULT_RATE_LIMIT_ENABLED = true;
+export const DEFAULT_RATE_RPM = 30;
+export const DEFAULT_RATE_BURST = 4;
 
 /**
  * Hard bounds for the rate inputs. These exist to stop a typo from breaking

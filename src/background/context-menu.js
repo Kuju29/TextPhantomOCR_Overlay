@@ -164,7 +164,9 @@ async function buildAiPayload(mode, source, settings, seriesKey) {
     char_memory: useChars,
     memory_mode: memMode,
     send_image: sendImage,
-    thinking: String(settings.aiThinking || "default"),
+    thinking: String(isLocalAiProvider(settings.aiProvider)
+      ? (settings.aiLocalThinking || "off")
+      : (settings.aiThinking || "default")),
     local_adapter: settings.localAiAdapter && typeof settings.localAiAdapter === "object"
       ? { ...settings.localAiAdapter }
       : null,
@@ -205,9 +207,27 @@ function buildRatePayload(mode, source, settings) {
 
 // Builds the `limits` block that tells both sides which pacing the user switched off.
 function buildLimitsPayload(settings) {
+  const local = isLocalAiProvider(settings.aiProvider) || isLocalHostUrl(settings.aiBaseUrl);
+  const capacityMode = local && ["auto", "safe", "manual"].includes(settings.aiLocalCapacityMode)
+    ? settings.aiLocalCapacityMode : "auto";
+  const manualConcurrency = Math.min(4, Math.max(1, Number(settings.aiLocalManualConcurrency) || 1));
+  const storedHint = settings.aiLocalCapabilityHint;
+  const sameHint = storedHint &&
+    String(storedHint.provider || "").trim().toLowerCase() === String(settings.aiProvider || "").trim().toLowerCase() &&
+    String(storedHint.baseUrl || "").trim().replace(/\/+$/, "") === String(settings.aiBaseUrl || "").trim().replace(/\/+$/, "") &&
+    String(storedHint.model || "").trim() === String(settings.aiModel || "").trim();
+  const localCapability = sameHint && Number.isFinite(Number(storedHint.recommendedMax))
+    ? { recommendedMax: Math.min(2, Math.max(1, Math.floor(Number(storedHint.recommendedMax)))) }
+    : null;
   return {
     aiUnlimited: aiIsUnlimitedLocal(settings),
     apiUnlimited: settings.apiLocalUnlimited === true,
+    // Explicit names prevent consumers from mistaking disabled time pacing
+    // for permission to run an unbounded number of generations.
+    timePacingDisabled: aiIsUnlimitedLocal(settings),
+    capacityMode,
+    manualConcurrency,
+    localCapability,
   };
 }
 

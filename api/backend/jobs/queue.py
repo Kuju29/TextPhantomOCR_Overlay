@@ -17,6 +17,7 @@ automatic split.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 import time
 import traceback
@@ -31,9 +32,14 @@ from backend.ai.rategate import rate_gate, RateGateTimeout, RateGateRejected
 from backend.ai.errors import ModelOutputContractError
 from backend.ai.failure_reason import classify as classify_ai_failure
 from backend.ai.providers import resolve_provider
-from backend import trace
+from backend import cancellation, trace
 
 Job = dict[str, Any]
+
+
+def _opaque_selector(value: Any) -> str:
+    raw = str(value or "").strip()
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest() if raw else ""
 
 
 def _provider_attempted(exc: BaseException) -> bool:
@@ -105,6 +111,10 @@ def _trace_ai_terminal(
 
 class QueueFull(Exception):
     """Raised by :meth:`JobQueue.enqueue` when the pending queue is saturated."""
+
+
+class IdempotencyConflict(Exception):
+    """A scoped retry key was reused for different semantic input."""
 
 
 # Feeds the adaptive rate gate from the legacy queue, so the server-side pipeline
@@ -210,13 +220,27 @@ class JobQueue:
     def _total_depth(self) -> int:
         return sum(q.qsize() for q in self._queues.values())
 
-    async def enqueue(self, payload: dict, *, idempotency_key: str | None = None) -> dict[str, Any]:
+    async def enqueue(
+        self,
+        payload: dict,
+        *,
+        idempotency_token: str = "",
+        request_fingerprint: str = "",
+        caller_scope: str = "",
+    ) -> dict[str, Any]:
         """Register a new job and return its public metadata."""
         self._evict_if_needed()
-        idem = (idempotency_key or str(payload.get("idempotency_key") or "")).strip()
+        # These are opaque hashes prepared by the HTTP boundary. The queue
+        # never retains a raw retry key, credential, or caller identifier.
+        idem = str(idempotency_token or "").strip()
+        fingerprint = str(request_fingerprint or "").strip()
         if idem:
             old_id = self._idempotency.get(idem)
             if old_id and old_id in self._jobs:
+                if str(self._jobs[old_id].get("request_fingerprint") or "") != fingerprint:
+                    raise IdempotencyConflict(
+                        "Idempotency-Key was already used with a different request"
+                    )
                 out = self.public_record(old_id)
                 out["dedup"] = True
                 return out
@@ -226,8 +250,6 @@ class JobQueue:
 
         job_id = str(uuid.uuid4())
         kind = self._queue_kind(payload)
-        _ctx = payload.get("context") if isinstance(payload.get("context"), dict) else {}
-        _meta = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
         rec: Job = {
             "id": job_id,
             "status": "queued",
@@ -235,11 +257,16 @@ class JobQueue:
             "ts": time.time(),
             "updated": time.time(),
             # Kept for cancellation matching (cancel by batch or by tab session).
-            "batch_id": str(_meta.get("batch_id") or ""),
-            "session": str(_ctx.get("tp_tab_session") or ""),
+            # Use the canonical extractors shared by synchronous cancellation
+            # and the cancel route; metadata/context aliases therefore match
+            # exactly at enqueue and cancellation time.
+            "batch_id": _opaque_selector(cancellation.batch_id_of(payload)),
+            "session": _opaque_selector(cancellation.scope_of(payload)),
+            "caller_scope": str(caller_scope or ""),
         }
         if idem:
-            rec["idempotency_key"] = idem
+            rec["idempotency_token"] = idem
+            rec["request_fingerprint"] = fingerprint
             self._idempotency[idem] = job_id
         self._jobs[job_id] = rec
 
@@ -258,6 +285,18 @@ class JobQueue:
         rec = self._jobs.get(job_id)
         if not rec:
             return {"id": job_id, "status": "error", "result": "job_not_found"}
+        return self.public_record(job_id)
+
+    def get_scoped(self, job_id: str, *, caller_scope: str) -> Job:
+        """Return a job only to its opaque owner.
+
+        A missing job and a job owned by another caller deliberately have the
+        same public shape.  This prevents a learned UUID from becoming an
+        existence oracle while keeping the legacy ``job_not_found`` contract.
+        """
+        rec = self._jobs.get(job_id)
+        if not rec or not caller_scope or str(rec.get("caller_scope") or "") != caller_scope:
+            return self.public_record("") | {"id": job_id, "result": "job_not_found"}
         return self.public_record(job_id)
 
     @staticmethod
@@ -343,7 +382,14 @@ class JobQueue:
             _trace_ai_terminal(payload, job_id, "rate_gate", exc=exc, attempts=0)
             return False
 
-    async def cancel(self, *, job_ids: Any = None, batch_id: str = "", session: str = "") -> dict:
+    async def cancel(
+        self,
+        *,
+        job_ids: Any = None,
+        batch_id: str = "",
+        session: str = "",
+        caller_scope: str = "",
+    ) -> dict:
         """Cancel queued / gate-waiting jobs by id, batch, or tab session.
 
         Jobs still queued or blocked on the rate gate are dropped immediately so
@@ -352,17 +398,32 @@ class JobQueue:
         at a time and interrupting a native thread is unsafe).
         """
         ids = {str(j) for j in (job_ids or [])}
-        batch_id = str(batch_id or "")
-        session = str(session or "")
+        batch_id = _opaque_selector(batch_id)
+        session = _opaque_selector(session)
         matched: list[str] = []
+        cancelled: list[str] = []
+        running: list[str] = []
         for jid, rec in list(self._jobs.items()):
             st = str(rec.get("status") or "")
             if st in ("done", "error", "aborted"):
                 continue
-            hit = (
+            batch_matches = (
+                bool(batch_id)
+                and str(rec.get("batch_id") or "") == batch_id
+                # New clients scope batch cancellation to their tab. Legacy
+                # clients send no session and retain the old batch-only rule.
+                and (not session or str(rec.get("session") or "") == session)
+            )
+            # A supplied scope is authoritative even for explicit job ids: a
+            # caller must not cancel another caller's work after learning an id.
+            scope_matches = (
+                not caller_scope
+                or str(rec.get("caller_scope") or "") == str(caller_scope)
+            )
+            hit = scope_matches and (
                 jid in ids
-                or (batch_id and str(rec.get("batch_id") or "") == batch_id)
-                or (session and str(rec.get("session") or "") == session)
+                or batch_matches
+                or (not batch_id and session and str(rec.get("session") or "") == session)
             )
             if not hit:
                 continue
@@ -374,20 +435,36 @@ class JobQueue:
                     jid,
                     {**rec, "status": "aborted", "result": "cancelled", "ts": time.time()},
                 )
+                cancelled.append(jid)
+            else:
+                running.append(jid)
         # Release any of these that are parked waiting for a rate-gate token.
         rate_gate.cancel_jobs(matched)
         if matched:
             dbg("jobs.cancel", {"count": len(matched), "batch_id": batch_id, "session": session})
-        return {"cancelled": len(matched)}
+        # ``cancelled`` means terminally aborted now. ``accepted`` preserves
+        # visibility that a selector matched, while ``running`` tells clients
+        # how many provider calls cannot be interrupted safely and will finish.
+        return {
+            "cancelled": len(cancelled),
+            "accepted": len(matched),
+            "running": len(running),
+        }
 
-    async def wait(self, job_id: str, *, wait_sec: float = 0.0) -> Job:
+    async def wait(
+        self, job_id: str, *, wait_sec: float = 0.0, caller_scope: str = "",
+    ) -> Job:
         wait_sec = max(0.0, min(float(wait_sec or 0.0), 25.0))
         initial = self._jobs.get(job_id)
+        if caller_scope and (
+            not initial or str(initial.get("caller_scope") or "") != caller_scope
+        ):
+            return self.get_scoped(job_id, caller_scope=caller_scope)
         if not initial or wait_sec <= 0:
-            return self.get(job_id)
+            return self.get_scoped(job_id, caller_scope=caller_scope) if caller_scope else self.get(job_id)
         initial_status = str(initial.get("status") or "")
-        if initial_status in ("done", "error"):
-            return self.get(job_id)
+        if initial_status in self._TERMINAL:
+            return self.get_scoped(job_id, caller_scope=caller_scope) if caller_scope else self.get(job_id)
 
         cond = self._conditions.setdefault(job_id, asyncio.Condition())
         try:
@@ -395,17 +472,19 @@ class JobQueue:
                 await asyncio.wait_for(
                     cond.wait_for(
                         lambda: str((self._jobs.get(job_id) or {}).get("status") or "") != initial_status
-                        or str((self._jobs.get(job_id) or {}).get("status") or "") in ("done", "error")
+                        or str((self._jobs.get(job_id) or {}).get("status") or "") in self._TERMINAL
                     ),
                     timeout=wait_sec,
                 )
         except asyncio.TimeoutError:
             pass
-        return self.get(job_id)
+        return self.get_scoped(job_id, caller_scope=caller_scope) if caller_scope else self.get(job_id)
 
     _TERMINAL = ("done", "error", "aborted")
 
-    async def wait_any(self, job_ids: list[str], *, wait_sec: float = 0.0) -> list[str]:
+    async def wait_any(
+        self, job_ids: list[str], *, wait_sec: float = 0.0, caller_scope: str = "",
+    ) -> list[str]:
         """Wait until at least one of ``job_ids`` is finished (or timeout).
 
         Returns the ids that are already terminal (``done``/``error``/
@@ -420,7 +499,10 @@ class JobQueue:
             out: list[str] = []
             for jid in job_ids:
                 rec = self._jobs.get(jid)
-                if rec is None or str(rec.get("status") or "") in self._TERMINAL:
+                unauthorized = bool(caller_scope) and (
+                    rec is None or str(rec.get("caller_scope") or "") != caller_scope
+                )
+                if rec is None or unauthorized or str(rec.get("status") or "") in self._TERMINAL:
                     out.append(jid)
             return out
 
@@ -453,6 +535,11 @@ class JobQueue:
     # --- public metadata helpers ------------------------------------------
     def public_record(self, job_id: str) -> Job:
         rec = dict(self._jobs.get(job_id) or {"id": job_id, "status": "error", "result": "job_not_found"})
+        for internal_key in (
+            "idempotency_token", "request_fingerprint", "caller_scope",
+            "batch_id", "session",
+        ):
+            rec.pop(internal_key, None)
         rec.setdefault("id", job_id)
         kind = str(rec.get("queue_kind") or self.DIRECT)
         rec["queue_kind"] = kind
@@ -500,10 +587,10 @@ class JobQueue:
         cap = max(100, settings.max_jobs_tracked)
         if len(self._jobs) <= cap:
             return
-        finished = [(jid, j) for jid, j in self._jobs.items() if j.get("status") in ("done", "error")]
+        finished = [(jid, j) for jid, j in self._jobs.items() if j.get("status") in self._TERMINAL]
         finished.sort(key=lambda kv: float(kv[1].get("ts", 0)))
         for jid, rec in finished[: len(self._jobs) - cap]:
-            idem = str(rec.get("idempotency_key") or "")
+            idem = str(rec.get("idempotency_token") or "")
             if idem:
                 self._idempotency.pop(idem, None)
             self._jobs.pop(jid, None)
@@ -689,7 +776,7 @@ class JobQueue:
             dead = [jid for jid, j in self._jobs.items() if float(j.get("ts", 0)) < cutoff]
             for jid in dead:
                 rec = self._jobs.pop(jid, None) or {}
-                idem = str(rec.get("idempotency_key") or "")
+                idem = str(rec.get("idempotency_token") or "")
                 if idem:
                     self._idempotency.pop(idem, None)
                 self._conditions.pop(jid, None)

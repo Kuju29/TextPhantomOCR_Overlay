@@ -19,6 +19,7 @@ import hashlib
 from typing import Any, TypedDict
 
 from backend.ai import prompts
+from backend.ai.clients import ollama as ollama_client
 from backend.ai.config import (
     PROVIDER_DEFAULTS,
     PROVIDER_PROTOCOLS,
@@ -93,6 +94,10 @@ def _enumerate_models_detailed(provider: str, api_key: str, base_url: str) -> En
         live = gemini_models_status(api_key)
     elif provider == "anthropic":
         live = anthropic_models_status(api_key)
+    elif provider == "ollama":
+        from backend.ai.providers import LOCAL_LIST_TIMEOUT_SEC
+
+        live = ollama_client.models_status(base_url, timeout_sec=LOCAL_LIST_TIMEOUT_SEC)
     else:
         # Every other provider in PROVIDER_PROTOCOLS uses the OpenAI-compatible
         # /models + /chat/completions dialect. Local servers receive no
@@ -363,4 +368,7 @@ def prompt_default(lang: str, *, want_memo: bool = True) -> dict[str, Any]:
         **metadata,
         "systemPromptHash": hashlib.sha256(system_text.encode("utf-8")).hexdigest(),
         "systemPromptChars": len(system_text),
+        "canonicalPrompt": prompts.canonical_prompt_contract(
+            code, want_memo=want_memo
+        ),
     }

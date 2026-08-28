@@ -4,6 +4,12 @@
 // is not provider evidence and must leave the provider window alone.
 
 import { getStorage, setStorage } from "../shared/storage.js";
+import {
+  isLocalAiPayload,
+  isLocalCapacityFailure,
+  localCapacityConfig,
+  localRuntimeIdentity,
+} from "./local-capacity.js";
 
 const MIN_WINDOW = 1;
 const DEFAULT_MAX_WINDOW = 32;
@@ -66,8 +72,39 @@ function makeLane(key) {
     // start at that capacity immediately.
     slowStart: true,
     unlimited: false,
+    localCapacity: null,
     stats: { ok: 0, rejected: 0, failed: 0, backoffs: 0, ceilingHits: 0, gated: 0 },
   };
+}
+
+// Applies the local-runtime capacity policy without changing time/RPM pacing.
+// Auto starts at one and may grow only when runtime discovery supplied an
+// executable concurrency limit. Safe is fixed at one; Manual is explicitly 1-4.
+export function setLocalCapacityPolicy(key, config = {}) {
+  const l = lane(key);
+  const mode = ["auto", "safe", "manual"].includes(config.mode) ? config.mode : "auto";
+  const ceiling = Math.max(1, Math.min(4, Math.floor(Number(config.ceiling) || 1)));
+  const initial = Math.max(1, Math.min(ceiling, Math.floor(Number(config.initial) || 1)));
+  const evidence = Math.max(0, Number(config.evidence) || 0);
+  const samePolicy = l.localCapacity?.mode === mode &&
+    l.localCapacity?.evidence === evidence && l.localCapacity?.ceiling === ceiling;
+  l.localCapacity = { mode, evidence, ceiling };
+  l.unlimited = false;
+  l.ceiling = ceiling;
+  l.userCeiling = ceiling;
+  l.capacityHint = ceiling;
+  l.capacityTarget = initial;
+  // Payload construction calls this once per image. Preserve learning across
+  // images when the policy is unchanged; reset only after an actual mode or
+  // capability change.
+  if (!samePolicy) {
+    if (mode === "manual") l.window = ceiling;
+    else l.window = initial;
+  } else if (l.window > ceiling) {
+    l.window = ceiling;
+  }
+  pump(l);
+  return { ...l.localCapacity, ceiling, initial };
 }
 
 // The largest window worth holding open, given what the lane may actually spend.
@@ -79,6 +116,11 @@ function effectiveMax(l) {
 
 function storageAvailable() {
   return typeof chrome !== "undefined" && Boolean(chrome?.storage?.local);
+}
+
+function isLearnedAiLane(key) {
+  const id = String(key || "").toLowerCase();
+  return id.startsWith("ai:") || id.startsWith("ai-local:");
 }
 
 async function loadLearningCache() {
@@ -115,7 +157,7 @@ function pruneLearning(cache) {
 async function ensureLearningLoaded(l) {
   if (l.learningLoaded) return;
   l.learningLoaded = true;
-  if (!String(l.key || "").toLowerCase().startsWith("ai:") || !storageAvailable()) return;
+  if (!isLearnedAiLane(l.key) || !storageAvailable()) return;
   const cache = await loadLearningCache();
   pruneLearning(cache);
   const saved = cache[l.key];
@@ -131,13 +173,25 @@ async function ensureLearningLoaded(l) {
   // setLaneCapacityHint() may have optimistically opened a fresh lane to the
   // server's capacity before async storage finished loading. A saved provider
   // limit is authoritative and may therefore LOWER that fresh window.
-  if (!l.backpressured && l.userCeiling <= 0) {
-    l.window = Math.min(effectiveMax(l), Math.max(MIN_WINDOW, learned));
+  if (!l.backpressured) {
+    if (l.localCapacity?.mode === "auto") {
+      l.window = restoredWindowForPolicy("auto", effectiveMax(l), learned);
+    } else if (!l.localCapacity && l.userCeiling <= 0) {
+      l.window = Math.min(effectiveMax(l), Math.max(MIN_WINDOW, learned));
+    }
   }
 }
 
+// Pure seam used by restore and regression tests. Safe/Manual are explicit
+// choices and never borrow an old Auto window. Unknown Auto has ceiling=1.
+export function restoredWindowForPolicy(mode, ceiling, learned) {
+  const cap = Math.max(MIN_WINDOW, Math.floor(Number(ceiling) || 1));
+  if (String(mode) !== "auto") return cap;
+  return Math.min(cap, Math.max(MIN_WINDOW, Math.floor(Number(learned) || 1)));
+}
+
 function persistLearning(l, { force = false } = {}) {
-  if (!String(l.key || "").toLowerCase().startsWith("ai:") || !storageAvailable()) return;
+  if (!isLearnedAiLane(l.key) || !storageAvailable()) return;
   const safe = Math.max(MIN_WINDOW, Math.floor(Math.min(l.window, effectiveMax(l))));
   if (!force && safe === l.lastPersistedWindow) return;
   l.lastPersistedWindow = safe;
@@ -270,6 +324,15 @@ export function releaseSuccess(key, ms = 0) {
   pump(l);
 }
 
+// Releases an idempotent/cache replay. No model generation completed now, so
+// it is neither success evidence nor latency evidence for Auto capacity.
+export function releaseReplay(key) {
+  const l = lane(key);
+  l.running = Math.max(0, l.running - 1);
+  l.stats.replayed = (l.stats.replayed || 0) + 1;
+  pump(l);
+}
+
 // Returns a slot after REAL provider backpressure, halving the provider window
 // and pausing this exact provider/model/key lane for Retry-After. Server_busy
 // must use releaseDeferred instead: it says nothing about provider capacity.
@@ -337,6 +400,23 @@ export function releaseFailed(key) {
   l.running = Math.max(0, l.running - 1);
   l.stats.failed++;
   pump(l);
+}
+
+// Releases a direct/API local-runtime attempt using generation evidence rather
+// than HTTP status alone. Admission failures did not exercise model capacity.
+export function releaseLocalFailure(key, error, retryAfterMs = 0) {
+  const attempts = Number(error?.generationAttempts || error?.providerAttempts || 0);
+  if (attempts < 1) {
+    releaseDeferred(key, retryAfterMs);
+    return "deferred";
+  }
+  const status = Number(error?.status) || 0;
+  if (status === 429 || status === 503 || isLocalCapacityFailure(error)) {
+    releaseRejected(key, retryAfterMs);
+    return "rejected";
+  }
+  releaseFailed(key);
+  return "failed";
 }
 
 // Backward-compatible observer for older call sites. Server RPM is already
@@ -444,7 +524,17 @@ export function laneKeyFor(payload) {
     const ai = payload?.ai || {};
     const provider = String(ai.provider || "auto").trim().toLowerCase();
     const model = String(ai.model || "auto").trim().toLowerCase();
+    if (isLocalAiPayload(payload)) {
+      const identity = localRuntimeIdentity(payload);
+      return `ai-local:${identity.protocol}:${aiKeyLane(identity.endpoint)}:${model}`;
+    }
     return `ai:${provider}:${model}:${aiKeyLane(ai.api_key)}`;
   }
   return "lens:direct";
+}
+
+export function configureLocalCapacityForPayload(payload) {
+  if (!isLocalAiPayload(payload)) return null;
+  const key = laneKeyFor(payload);
+  return { key, ...setLocalCapacityPolicy(key, localCapacityConfig(payload)) };
 }

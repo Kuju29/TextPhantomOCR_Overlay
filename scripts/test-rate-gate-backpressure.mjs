@@ -209,6 +209,13 @@ async function occupy(key, n) {
     "a stored RPM must be inert while the user's rate switch is off");
   assert.match(contextMenu, /burst: enabled \? configuredBurst : 0/,
     "a stored burst must be inert while the user's rate switch is off");
+  const transientBranch = jobs.slice(jobs.indexOf("if (isBusy && safeDeferred)"), jobs.indexOf("if (slotHeld)", jobs.indexOf("if (isBusy && safeDeferred)") + 30));
+  assert.doesNotMatch(transientBranch, /wf\.(?:aiDegraded|lensDegraded)/,
+    "transient requeue must remain REQUESTED so repeated waits can later succeed legally");
+  assert.match(jobs, /configureLocalCapacityForPayload\(/,
+    "every local request must configure its model-scoped capacity independently of time pacing");
+  assert.doesNotMatch(jobs, /setLaneSlotCeiling\(key, removeTimePacing \? 1 : 0\)/,
+    "removing time pacing must never be interpreted as a concurrency ceiling");
 
   assert.match(main, /app\.state\.lens_executor = ThreadPoolExecutor\(/,
     "Lens must have a dedicated executor");

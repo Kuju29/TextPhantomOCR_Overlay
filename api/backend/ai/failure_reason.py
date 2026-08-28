@@ -17,6 +17,33 @@ def classify(exc: BaseException) -> str:
     if isinstance(exc, ModelOutputContractError):
         return "invalid_model_output"
     message = str(exc).lower()
+    if any(marker in message for marker in (
+        "billing required", "billing_required", "billing is past due",
+        "payment required", "billing_hard_limit", "billing hard limit",
+        "hard_limit_reached", "hard limit reached",
+    )):
+        return "billing_required"
+    if any(marker in message for marker in (
+        "insufficient credit", "insufficient_credit",
+        "insufficient quota", "insufficient_quota",
+        "credit balance", "token quota exhausted", "quota exhausted",
+        "exceeded your current quota", "current quota exceeded",
+    )):
+        return "provider_quota_exhausted"
+    if any(marker in message for marker in (
+        "model_not_found", "model not found", "does not exist",
+    )):
+        return "provider_model_not_found"
+    if any(marker in message for marker in (
+        "model access", "does not have access", "not permitted to use",
+        "permission denied for model",
+    )):
+        return "provider_model_access_denied"
+    if any(marker in message for marker in (
+        "prohibited_content", "prohibited content", "content_policy_violation",
+        "blocked this content", "blockreason", "safety",
+    )):
+        return "provider_content_blocked"
     if "incomplete translation object" in message or (
         "incomplete" in message and "unit" in message
     ):
@@ -42,7 +69,6 @@ _RATE_LIMIT_MARKERS = (
     "rate_limit",
     "ratelimit",
     "too many requests",
-    "quota",
     "resource_exhausted",
     "resource exhausted",
     "overloaded",
@@ -74,6 +100,12 @@ class ProviderHttpFailure:
 
 def provider_http_failure(exc: BaseException) -> ProviderHttpFailure:
     """Map an upstream/provider failure without returning its raw message."""
+    reason = classify(exc)
+    if reason in {"provider_quota_exhausted", "billing_required"}:
+        return ProviderHttpFailure(
+            502, reason,
+            "AI quota/credit is exhausted or billing is required.", False,
+        )
     if is_rate_limited(exc):
         wait = retry_after_sec(exc)
         return ProviderHttpFailure(
@@ -91,6 +123,20 @@ def provider_http_failure(exc: BaseException) -> ProviderHttpFailure:
             502, "provider_payload_too_large",
             "The AI provider rejected this request because it was too large.", False,
         )
+    if reason == "provider_model_not_found":
+        return ProviderHttpFailure(
+            502, "provider_model_not_found",
+            "The configured AI model was not found by the provider.", False,
+        )
+    if reason == "provider_model_access_denied":
+        return ProviderHttpFailure(
+            502, reason,
+            "The configured account does not have access to this AI model.", False,
+        )
+    if reason == "provider_content_blocked":
+        return ProviderHttpFailure(
+            502, reason, "The AI provider refused this content.", False,
+        )
     if upstream_status in (401, 403):
         return ProviderHttpFailure(
             502, "provider_auth_failed",
@@ -101,16 +147,7 @@ def provider_http_failure(exc: BaseException) -> ProviderHttpFailure:
             502, "provider_http",
             "The AI provider rejected this request.", False,
         )
-    reason = classify(exc)
     message = str(exc).lower()
-    if any(marker in message for marker in (
-        "prohibited_content", "prohibited content", "blocked this content",
-        "blockreason", "safety",
-    )):
-        return ProviderHttpFailure(
-            502, "provider_content_blocked",
-            "The AI provider refused this content.", False,
-        )
     provider_marked = any(marker in message for marker in (
         "provider", "gemini", "anthropic", "openai", "hugging face",
         "model output", "model response", "no candidates", "finishreason",

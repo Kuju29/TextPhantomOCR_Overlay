@@ -340,6 +340,23 @@ button {
   background: rgba(255, 255, 255, 0.02);
 }
 
+.page-error {
+  position: absolute;
+  z-index: 20;
+  top: 8px;
+  left: 8px;
+  max-width: min(88%, 560px);
+  padding: 7px 10px;
+  border: 1px solid rgba(255, 110, 110, 0.75);
+  border-radius: 6px;
+  background: rgba(70, 8, 8, 0.94);
+  color: #fff;
+  font: 600 12px/1.35 system-ui, sans-serif;
+  text-align: left;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
 .empty-state {
   width: min(100%, 720px);
   margin: 48px auto 0;

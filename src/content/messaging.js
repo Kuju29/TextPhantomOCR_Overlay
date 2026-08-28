@@ -104,6 +104,11 @@
         TP.showToast(msg?.text || msg?.message || "", msg?.ms || 1600);
         return sendResponse({ ok: true });
       }
+      if (type === "BATCH_STATUS_UPDATE") {
+        // Batch telemetry remains available to extension pages, but the web
+        // page has one compact presenter only: TP_TOAST above.
+        return sendResponse({ ok: true });
+      }
       if (type === "API_STATUS_UPDATE") {
         return sendResponse({ ok: true });
       }

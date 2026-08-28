@@ -222,4 +222,21 @@ await assert.rejects(
 );
 assert.equal(artifactRequests.length, 0, "cancelled work must not attempt token or byte requests");
 
+// Result reads are owner-authorized with the stable tab session, never an AI
+// provider credential. Shared polling must not combine two tab owners.
+const transportSource = await readFile(new URL("../src/background/transport.js", import.meta.url), "utf8");
+assert.match(transportSource, /fetchJobStatus\(url, session[\s\S]*?"X-TP-Tab-Session": session/,
+  "single-result GET must carry the stable tab session");
+assert.match(transportSource, /fetchBatchPoll\(base, ids, session[\s\S]*?tp_tab_session: session/,
+  "batch poll must carry the same stable tab session as enqueue");
+assert.match(transportSource, /const key = `\$\{w\.base\}\\u0000\$\{session\}`/,
+  "the shared batch poller must never mix owner sessions");
+assert.match(jobsSource, /pollJobViaRest\(base, jobId, \{[\s\S]*?session:/,
+  "submission and resume must pass their retained owner session");
+const singleResultGet = transportSource.match(/async function fetchJobStatus[\s\S]*?\n\}/)?.[0] || "";
+assert.doesNotMatch(singleResultGet, /api[_-]?key|authorization/i,
+  "result authorization must not require an AI provider key");
+assert.match(transportSource, /data\?\.status === "error" \|\| data\?\.status === "aborted"/,
+  "legacy single-job polling must treat an aborted job as terminal cancellation");
+
 console.log("Routing behavior test passed: engine boundary and per-request policy on all processing endpoints.");

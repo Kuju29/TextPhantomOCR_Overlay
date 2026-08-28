@@ -8,6 +8,7 @@ import httpx
 
 from backend.ai import config as ai_config
 from backend.ai.clients.base import ChatResult
+from backend.ai.clients.provider_error import safe_http_error
 
 _ENDPOINT = "https://api.anthropic.com/v1/messages"
 _API_VERSION = "2023-06-01"
@@ -157,9 +158,7 @@ def generate(
     try:
         r.raise_for_status()
     except httpx.HTTPStatusError as e:
-        raise RuntimeError(
-            f"Anthropic HTTP {r.status_code} (model={model}, attempts=1)"
-        ) from e
+        raise safe_http_error("Anthropic", r, model) from e
     data = r.json()
 
     stop_reason = str(data.get("stop_reason") or "").strip()

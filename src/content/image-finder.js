@@ -143,9 +143,9 @@
   // report from a screenshot. The full diagnostic remains in the title.
   function shortImageError(msg) {
     if (msg && typeof msg === "object" && msg.schema === "tp.error/1") {
-      return `${String(msg.userMessage || "เกิดข้อผิดพลาด")} · ${String(msg.code || "UNKNOWN")}`;
+      return `${String(msg.userMessage || "เกิดข้อผิดพลาด")} · ${String(msg.code || "PROCESSING_FAILED")}`;
     }
-    const raw = String(msg || "Unknown error").trim();
+    const raw = String(msg || "PROCESSING_FAILED").trim();
     const lower = raw.toLowerCase();
     if (/onnx grouped nothing|grouping covered 0 of .*vertical|text grouping/.test(lower)) {
       return "ONNX: text grouping failed";
@@ -198,6 +198,17 @@
     if (img.dataset?.tpLensPrevOutline !== undefined) delete img.dataset.tpLensPrevOutline;
   }
 
+  function positionImageErrorBadge(img, badge) {
+    if (!img?.isConnected || !badge?.isConnected) return false;
+    const r = img.getBoundingClientRect?.();
+    if (!r) return false;
+    Object.assign(badge.style, {
+      left: `${r.left + window.scrollX + 4}px`,
+      top: `${r.top + window.scrollY + 4}px`,
+    });
+    return true;
+  }
+
   // Draws a red outline and a readable warning badge on an image that failed
   // to translate. Users should not need to inspect a title/HTML attribute to
   // know why one page failed.
@@ -205,30 +216,29 @@
     if (!shouldShowReplaceError(original)) return;
 
     const img = findTargetImage(original);
-    if (!img) return;
-
-    const cur = img.currentSrc || img.src || "";
-    if (img.dataset.tpBlobUrl || cur.startsWith("blob:") || cur.startsWith("data:")) return;
+    if (!img) return false;
 
     const full = msg && typeof msg === "object"
-      ? `${String(msg.userMessage || "เกิดข้อผิดพลาด")} · ${String(msg.code || "UNKNOWN")}`
-      : String(msg || "Unknown error");
+      ? `${String(msg.userMessage || "เกิดข้อผิดพลาด")} · ${String(msg.code || "PROCESSING_FAILED")}`
+      : String(msg || "PROCESSING_FAILED");
     const short = shortImageError(full);
     let badge = imageErrorBadges.get(img);
     if (!badge || !badge.isConnected) {
-      badge = document.createElement("div");
+      badge = document.createElement("button");
+      badge.type = "button";
+      badge.setAttribute("role", "alert");
+      badge.dataset.tpImageError = "1";
       imageErrorBadges.set(img, badge);
       document.body.appendChild(badge);
+      badge.addEventListener("click", () => clearImageError(img));
     }
     if (!img.dataset.lensError) img.dataset.tpLensPrevOutline = img.style.outline || "";
     img.style.outline = "3px solid red";
     badge.textContent = `⚠️ ${short}`;
+    badge.setAttribute("aria-label", `Dismiss image translation error: ${short}`);
     badge.title = full;
-    const r = img.getBoundingClientRect();
     Object.assign(badge.style, {
       position: "absolute",
-      left: `${r.left + window.scrollX + 4}px`,
-      top: `${r.top + window.scrollY + 4}px`,
       maxWidth: "280px",
       whiteSpace: "normal",
       overflowWrap: "anywhere",
@@ -242,13 +252,18 @@
       lineHeight: "1.25",
       zIndex: 9999,
       boxShadow: "0 1px 4px rgba(0,0,0,0.25)",
+      cursor: "pointer",
+      textAlign: "left",
+      appearance: "none",
     });
+    positionImageErrorBadge(img, badge);
     img.dataset.lensError = "1";
     TP.log.info("markImageError", {
       original: TP.truncate(original),
       message: full,
       visibleMessage: short,
     });
+    return true;
   }
 
   // Drops the per-URL image indexes so a client-side route change cannot resolve a stale element.
@@ -271,5 +286,6 @@
     markImageError,
     clearImageError,
     shortImageError,
+    positionImageErrorBadge,
   });
 })();

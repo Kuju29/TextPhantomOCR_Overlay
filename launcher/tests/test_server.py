@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import shutil
 import socket
@@ -15,10 +16,26 @@ import tkstub
 tkstub.install()
 
 SANDBOX = Path("/tmp/tp-srv")
+shutil.rmtree(SANDBOX, ignore_errors=True)
 os.environ["XDG_DATA_HOME"] = str(SANDBOX)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import textphantom_launcher as L  # noqa: E402
+
+# This file is an integration test: unlike the launcher's unit tests it starts
+# the real downloaded API.  A source checkout intentionally does not require
+# the API wheels merely to run the launcher UI.  Report that distinction and
+# skip the integration test when the runtime is absent, instead of entering
+# three blind 90-second polling loops after the server thread has already
+# reported an import error.
+RUNTIME_MODULES = ("fastapi", "uvicorn", "httpx", "cv2", "budoux", "onnxruntime")
+missing_runtime = [name for name in RUNTIME_MODULES
+                   if importlib.util.find_spec(name) is None]
+if missing_runtime:
+    print("SKIPPED SERVER INTEGRATION: missing API runtime modules: "
+          + ", ".join(missing_runtime))
+    print("Install launcher/requirements-launcher.txt to run start/stop integration checks.")
+    raise SystemExit(0)
 
 API_SRC = Path(__file__).resolve().parent.parent.parent / "api"
 FAILS: list[str] = []
@@ -66,6 +83,12 @@ ctl.start(settings, L.API_DIR)
 deadline = time.time() + 90
 health = None
 while time.time() < deadline:
+    # Import/configuration failures are terminal and are already surfaced by
+    # ServerController.  Waiting out the full startup allowance after that
+    # point hid the useful traceback and made this test look hung.
+    if ctl.state == L.STATE_ERROR or (ctl._thread is not None
+                                      and not ctl._thread.is_alive()):
+        break
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as r:
             health = json.loads(r.read())
@@ -73,6 +96,11 @@ while time.time() < deadline:
     except Exception:
         time.sleep(0.5)
 check("/health answered", bool(health and health.get("ok")), str(health))
+if not health:
+    startup_lines = [line for _level, line in bus.drain(9999)]
+    sys.stdout = sys.__stdout__
+    print("SERVER START FAILED:\n" + "\n".join(startup_lines[-20:]))
+    raise SystemExit(1)
 for _ in range(60):  # the badge flips from its own health watcher, a moment later
     if ctl.state == L.STATE_RUNNING:
         break
@@ -149,6 +177,9 @@ ctl.start(settings, L.API_DIR)
 deadline = time.time() + 90
 version = None
 while time.time() < deadline:
+    if ctl.state == L.STATE_ERROR or (ctl._thread is not None
+                                      and not ctl._thread.is_alive()):
+        break
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port2}/version", timeout=2) as r:
             version = json.loads(r.read())
@@ -169,6 +200,9 @@ settings["env"] = {k: v for k, v in settings["env"].items()
 ctl.start(settings, L.API_DIR)
 deadline = time.time() + 90
 while time.time() < deadline:
+    if ctl.state == L.STATE_ERROR or (ctl._thread is not None
+                                      and not ctl._thread.is_alive()):
+        break
     try:
         urllib.request.urlopen(f"http://127.0.0.1:{port3}/health", timeout=2).read()
         break

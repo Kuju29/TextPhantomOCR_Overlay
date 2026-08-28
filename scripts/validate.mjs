@@ -138,6 +138,10 @@ for (const target of targets) {
 
     if (file.endsWith(".js")) {
       const source = await readFile(file, "utf8");
+      if (relative === "popup/popup.js") {
+        assert(!/\bisLocalProvider\(/.test(source),
+          `${target}: popup contains the undefined legacy isLocalProvider helper`);
+      }
       for (const match of source.matchAll(
         /(?:import\s+(?:[^"']+\s+from\s+)?|export\s+[^"']+\s+from\s+)["'](\.[^"']+)["']/g,
       )) {

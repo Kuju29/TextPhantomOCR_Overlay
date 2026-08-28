@@ -81,11 +81,13 @@ export function parseDataUriMeta(dataUri) {
 
 /** Status-badge text/class for a page record. */
 export function badgeText(page) {
+  if (page?.errorMessage) return "Error";
   if (page?.overlayApplied) return "Overlay ready";
   if (page?.translatedImageDataUri) return "Image ready";
   return "Original";
 }
 export function badgeClass(page) {
+  if (page?.errorMessage) return "badge bad";
   return page?.overlayApplied || page?.translatedImageDataUri ? "badge ok" : "badge";
 }
 

@@ -45,8 +45,10 @@ storage.localAiAdapter = {
   modelsResponsePath: "data.*.id", chatResponsePath: "choices.0.message.content",
 };
 settings = await readFullSettings({ lang: "th" });
-assert.equal(settings.localAiAdapter.baseUrl, "http://192.168.1.22:11434/v1",
-  "a built-in Local provider must use the newly visible endpoint, never a stale stored adapter");
+assert.equal(settings.localAiAdapter.baseUrl, "http://192.168.1.22:11434",
+  "native Ollama must use the newly visible endpoint root, never a stale stored /v1 adapter");
+assert.equal(settings.localAiAdapter.protocol, "ollama",
+  "legacy Ollama OpenAI-compatible settings must migrate to the native protocol");
 storage.aiProvider = "";
 storage.aiBaseUrl = "";
 delete storage.localAiAdapter;

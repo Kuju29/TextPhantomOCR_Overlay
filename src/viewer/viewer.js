@@ -97,6 +97,24 @@ function syncPageUi(pageId) {
   els.pageList
     .querySelector(`.page-list-item[data-page-id="${CSS.escape(pageId)}"]`)
     ?.classList.toggle("active", checked);
+  const frame = articleForPage(pageId)?.querySelector(".page-frame");
+  let warning = frame?.querySelector(".page-error");
+  if (page.errorMessage && frame) {
+    if (!warning) {
+      warning = document.createElement("button");
+      warning.type = "button";
+      warning.className = "page-error";
+      warning.title = "Dismiss this message";
+      warning.addEventListener("click", () => {
+        page.errorMessage = "";
+        syncPageUi(pageId);
+      });
+      frame.appendChild(warning);
+    }
+    warning.textContent = `⚠ ${page.errorMessage}`;
+  } else {
+    warning?.remove();
+  }
 }
 
 function syncUi() {
@@ -785,6 +803,7 @@ function handleTranslatedImage(detail) {
   const pageId = findPageIdByOriginal(detail?.original);
   const page = pagesById.get(pageId);
   if (!page) return;
+  page.errorMessage = "";
   page.currentSrc = String(detail?.newSrc || page.currentSrc || "");
   if (page.currentSrc) originalToPageId.set(page.currentSrc, pageId);
   if (String(detail?.rawNewSrc || "").startsWith("data:")) page.translatedImageDataUri = detail.rawNewSrc;
@@ -797,6 +816,7 @@ function handleOverlayUpdated(detail) {
   const pageId = findPageIdByOriginal(detail?.original);
   const page = pagesById.get(pageId);
   if (!page) return;
+  page.errorMessage = "";
   // `drawn: false` means the job finished without putting any translated text
   // on the page — Lens read no text, or the AI layer was unavailable. Marking
   // that page "Overlay ready" would claim a translation that is not there.
@@ -811,6 +831,19 @@ function handleOverlayUpdated(detail) {
       ? `Overlay ready for ${page.name}`
       : `Nothing drawn on ${page.name}${detail?.note ? ` — ${detail.note}` : ""}`,
   );
+}
+
+function handleImageError(detail) {
+  const pageId = findPageIdByOriginal(detail?.original);
+  const page = pagesById.get(pageId);
+  // A terminal message for a page no longer in this session is stale. Never
+  // let it change the status of whichever page happens to be visible now.
+  if (!page) return;
+  page.errorMessage = String(detail?.message || "the translation job failed");
+  page.overlayApplied = false;
+  pagesById.set(pageId, page);
+  syncPageUi(pageId);
+  setStatus(`Not translated: ${page.name} — ${page.errorMessage}`);
 }
 
 // Event wiring
@@ -949,6 +982,7 @@ els.downloadHtml?.addEventListener("click", () => downloadSelected("html"));
 
 window.addEventListener("textphantom:image-updated", (event) => handleTranslatedImage(event.detail || {}));
 window.addEventListener("textphantom:overlay-updated", (event) => handleOverlayUpdated(event.detail || {}));
+window.addEventListener("textphantom:image-error", (event) => handleImageError(event.detail || {}));
 window.addEventListener("beforeunload", revokeObjectUrls);
 
 // Go

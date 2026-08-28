@@ -106,6 +106,15 @@ PROMPT_POLICY_VERSION: Final[dict[str, str]] = {
     "th": "th-2026.08.10.1",
 }
 
+# Public, additive contract used by browser-direct runtimes when they compose
+# the same translation semantics as the server.  Runtime-only concerns such as
+# thinking, context budgeting, transport and sampling deliberately do not
+# belong to this version.
+CANONICAL_PROMPT_CONTRACT_VERSION: Final[str] = "translation-plan-1"
+SERIES_NOTES_HEADING: Final[str] = (
+    "SERIES NOTES (from the user — follow these even when they conflict with a rule above):"
+)
+
 
 # Fixed block appended only when the page image is attached. Kept OUT of the
 # editable style so prompt edits cannot break the marker protocol, and kept
@@ -186,7 +195,9 @@ def _select_style(lang: str, prompt_override: str = "") -> tuple[str, str]:
         return override, source
     return (
         built_in
-        + "\n\nSERIES NOTES (from the user — follow these even when they conflict with a rule above):\n"
+        + "\n\n"
+        + SERIES_NOTES_HEADING
+        + "\n"
         + override,
         "built_in_plus_series_notes",
     )
@@ -529,3 +540,59 @@ def build_user_parts(original_text_full: str) -> list[str]:
     small and the model translates from the original.
     """
     return ["Source (translate this):\n" + str(original_text_full or "")]
+
+
+def canonical_prompt_contract(lang: str, *, want_memo: bool = True) -> dict:
+    """Return provider-neutral prompt pieces for a direct/local adapter.
+
+    This endpoint contract intentionally contains no page text, translation,
+    credentials, character memory or series memory.  Those remain on the
+    caller's machine.  Joining ``staticSystemText`` with the appropriate output
+    contract (and caller-built runtime context between them) reproduces the
+    same semantic ordering used by :func:`build_system_split` for Cloud.
+
+    The legacy fields returned by ``/ai/prompt/default`` remain untouched;
+    this is an additive, versioned description for newer callers.
+    """
+    code = _normalize_lang(lang)
+    style = lang_style(code)
+    static_system_text = "\n\n".join((SYSTEM_BASE.strip(), style))
+    _static, marker_contract = build_system_split(
+        code, want_memo=want_memo, structured_output=False
+    )
+    _static, structured_contract = build_system_split(
+        code, want_memo=want_memo, structured_output=True
+    )
+    source_prefix = "Source (translate this):\n"
+    pieces = {
+        "systemBase": SYSTEM_BASE.strip(),
+        "editableStyle": style,
+        "staticSystemText": static_system_text,
+        "imageHint": IMAGE_HINT,
+        "markerOutputContract": marker_contract,
+        "structuredOutputContract": structured_contract,
+        "sourcePrefix": source_prefix,
+        "seriesNotesHeading": SERIES_NOTES_HEADING,
+    }
+    hashes = {
+        key: hashlib.sha256(value.encode("utf-8")).hexdigest()
+        for key, value in pieces.items()
+    }
+    aggregate = "\n".join(f"{key}:{hashes[key]}" for key in sorted(hashes))
+    return {
+        "version": CANONICAL_PROMPT_CONTRACT_VERSION,
+        "compositionOrder": [
+            "systemBase",
+            "editableStyle",
+            "imageHintIfAttached",
+            "runtimeContext",
+            "outputContract",
+        ],
+        "editableStylePolicy": {
+            "fullPolicyPrefix": "target language",
+            "otherwise": "built_in_plus_series_notes",
+        },
+        "pieces": pieces,
+        "hashes": hashes,
+        "hash": hashlib.sha256(aggregate.encode("utf-8")).hexdigest(),
+    }

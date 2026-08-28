@@ -128,11 +128,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return true;
 
     case "GET_API_STATUS":
-      sendResponse({ ok: healthCache.ok, ts: healthCache.ts });
+      getApiBase().then((base) => {
+        const fresh = Date.now() - Number(healthCache.ts || 0) < 60_000;
+        const matches = Boolean(base && healthCache.base === base);
+        sendResponse({ ok: healthCache.ok === true && fresh && matches, ts: healthCache.ts, base: healthCache.base, fresh, snapshot: true });
+      }).catch(() => sendResponse({ ok: false, ts: 0, base: "", fresh: false, snapshot: true }));
       return true;
 
     case "API_URL_CHANGED":
+      healthCache.ok = false;
       healthCache.ts = 0;
+      healthCache.base = "";
       getApiBase()
         .then((b) => warmupApi(b))
         .catch(() => {});

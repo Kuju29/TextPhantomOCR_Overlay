@@ -20,6 +20,8 @@ const USER_MESSAGES = Object.freeze({
   AI_KEY_MISSING: "ยังไม่ได้ตั้งค่า AI key",
   AI_KEY_INVALID: "AI key ใช้งานไม่ได้",
   AI_RATE_LIMIT: "ผู้ให้บริการ AI จำกัดการใช้งานชั่วคราว",
+  AI_QUOTA_EXHAUSTED: "โควตาหรือเครดิต AI หมด กรุณาเติมเครดิตหรือตรวจแผนการใช้งาน",
+  AI_BILLING_REQUIRED: "ต้องตั้งค่าหรือชำระค่าบริการ AI ก่อนจึงจะใช้งานต่อได้",
   AI_MODEL_UNAVAILABLE: "โมเดล AI ที่เลือกใช้งานไม่ได้",
   AI_INCOMPLETE: "AI แปลได้ไม่ครบ—เก็บข้อความเดิมในส่วนที่ขาด",
   LOCAL_ENDPOINT_MISSING: "ยังไม่ได้ตั้งค่า URL ของ Local AI",
@@ -32,6 +34,7 @@ const USER_MESSAGES = Object.freeze({
   LOCAL_SERVER_ERROR: "โปรแกรม Local AI ขัดข้อง กรุณาตรวจ log ของโปรแกรม",
   LOCAL_BAD_RESPONSE: "Local AI ส่งข้อมูลกลับมาไม่ถูกต้อง",
   LOCAL_OUTPUT_INVALID: "Local AI แปลผลไม่ตรงรูปแบบที่ต้องใช้",
+  LOCAL_THINKING_NO_ANSWER: "Local AI สร้างเฉพาะ Thinking แต่ยังไม่ส่งคำแปล—ลองปิด AI Thinking หรือลด Context",
   LOCAL_EXTENSION_ONLY: "Custom Local Adapter ใช้ได้เฉพาะโหมด Extension",
   LOCAL_REMOTE_API_ROUTE: "Local AI อยู่บนเครื่องนี้—กรุณาเลือกโหมด Extension",
   LOCAL_PROMPT_UNAVAILABLE: "โหลดคำสั่งแปลจาก TextPhantom API ไม่ได้—ตรวจการเชื่อมต่อ API แล้วลองใหม่",
@@ -44,19 +47,51 @@ const USER_MESSAGES = Object.freeze({
   AI_UNREACHABLE: "เชื่อมต่อผู้ให้บริการ AI ไม่ได้ กรุณาลองใหม่",
   AI_TIMEOUT: "ผู้ให้บริการ AI ตอบช้าเกินเวลา กรุณาลองใหม่",
   AI_PROVIDER_ERROR: "ผู้ให้บริการ AI ปฏิเสธคำขอ—ตรวจ AI key และสิทธิ์ของบัญชี",
+  AI_REQUEST_TOO_LARGE: "คำขอที่ส่งให้ AI มีขนาดใหญ่เกินขีดจำกัดของผู้ให้บริการ",
   AI_PROVIDER_UNSUPPORTED: "ยังไม่รองรับผู้ให้บริการ AI รายนี้",
   AI_STOPPED: "AI หยุดสร้างข้อความกลางคัน กรุณาลองใหม่",
   AI_OUTPUT_INVALID: "AI แปลผลไม่ตรงรูปแบบที่ต้องใช้",
   AI_NOT_CONFIGURED: "เซิร์ฟเวอร์ไม่มี AI key ให้ใช้—กรุณาใส่ AI key ของคุณเองในหน้าตั้งค่า",
-  AI_NO_RESULT: "AI ไม่ได้ผลลัพธ์ที่ใช้ได้สำหรับภาพนี้",
-  EXTENSION_DECLINED: "ส่วนขยายแปลภาพนี้ไม่สำเร็จ—ลองใหม่ หรือสลับเป็นโหมด API server",
-  UNKNOWN: "เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ",
+  UNCLASSIFIED: "เกิดข้อผิดพลาดที่ระบบยังไม่มีคำอธิบาย",
 });
 
-const stageDefault = (stage) => stage === "lens" ? "LENS_FAILED"
-  : stage === "grouping" ? "GROUP_FAILED"
-    : stage === "render" ? "RENDER_FAILED"
-      : stage === "insert" ? "INSERT_FAILED" : "UNKNOWN";
+const stageDefault = (stage) => {
+  const normalized = String(stage || "").toLowerCase().replace(/[^a-z0-9]+/g, "_");
+  if (/^(?:lens|image_ocr)$/.test(normalized)) return "LENS_FAILED";
+  if (/^(?:grouping|onnx)$/.test(normalized)) return "GROUP_FAILED";
+  if (normalized === "render") return "RENDER_FAILED";
+  if (normalized === "insert") return "INSERT_FAILED";
+  if (/^(?:image_read|prefetch_datauri|prefetch_datauri_tab)$/.test(normalized)) return "IMG_READ_FAILED";
+  if (/^(?:ai|text)$/.test(normalized)) return "AI_FAILED";
+  if (normalized === "ai_configuration") return "AI_CONFIGURATION_FAILED";
+  if (/^context_menu_(?:all|single)$/.test(normalized)) return "COMMAND_FAILED";
+  if (normalized === "capabilities") return "API_CAPS_UNAVAILABLE";
+  if (normalized === "response_validation") return "API_BAD_RESPONSE";
+  if (normalized === "http") return "HTTP_FAILED";
+  if (normalized === "server_processing_lens_ai") return "SERVER_PROCESSING_FAILED";
+  return "PROCESSING_FAILED";
+};
+
+const NATIVE_ERROR_CODES = Object.freeze({
+  ReferenceError: "REFERENCE_ERROR",
+  TypeError: "TYPE_ERROR",
+  SyntaxError: "SYNTAX_ERROR",
+  RangeError: "RANGE_ERROR",
+  URIError: "URI_ERROR",
+  EvalError: "EVAL_ERROR",
+  AbortError: "CANCELLED",
+  TimeoutError: "NET_TIMEOUT",
+});
+
+// Error codes cross into arbitrary web pages. Keep useful machine identifiers,
+// but reject anything that could be a provider body, URL, credential or markup.
+function safeMachineCode(value) {
+  const code = String(value || "").trim();
+  if (!/^[A-Za-z][A-Za-z0-9_.:-]{0,63}$/.test(code)) return "";
+  if (/^(?:unknown|unknown_error|error|undefined|null)$/i.test(code)) return "";
+  if (/^(?:sk-|hf_|AIza|Bearer)/i.test(code) || /(?:secret|password)/i.test(code)) return "";
+  return code;
+}
 
 export function userMessageForCode(code) {
   const raw = String(code || "").trim();
@@ -73,6 +108,7 @@ export function userMessageForCode(code) {
     grouping_failed: "GROUP_FAILED", onnx_failed: "GROUP_FAILED",
     missing_api_key: "AI_KEY_MISSING", invalid_api_key: "AI_KEY_INVALID",
     provider_key_mismatch: "AI_KEY_INVALID", provider_rate_limited: "AI_RATE_LIMIT",
+    provider_quota_exhausted: "AI_QUOTA_EXHAUSTED", billing_required: "AI_BILLING_REQUIRED",
     rate_gate_busy: "AI_RATE_LIMIT", local_rate_gate_busy: "AI_RATE_LIMIT",
     model_unavailable: "AI_MODEL_UNAVAILABLE", missing_translation_units: "AI_INCOMPLETE",
     ai_endpoint_missing: "LOCAL_ENDPOINT_MISSING", local_endpoint_missing: "LOCAL_ENDPOINT_MISSING",
@@ -86,6 +122,7 @@ export function userMessageForCode(code) {
     local_models_http_error: "LOCAL_SERVER_ERROR", local_models_empty: "LOCAL_MODEL_MISSING",
     local_protocol_error: "LOCAL_INCOMPATIBLE", invalid_local_response: "LOCAL_BAD_RESPONSE",
     local_response_invalid: "LOCAL_BAD_RESPONSE", invalid_model_output: "AI_OUTPUT_INVALID",
+    local_ai_thinking_no_answer: "LOCAL_THINKING_NO_ANSWER",
     local_output_incomplete: "AI_INCOMPLETE", custom_local_extension_only: "LOCAL_EXTENSION_ONLY",
     local_ai_unreachable_from_remote_api: "LOCAL_REMOTE_API_ROUTE",
     local_prompt_unavailable: "LOCAL_PROMPT_UNAVAILABLE",
@@ -101,12 +138,13 @@ export function userMessageForCode(code) {
     image_fetch_http_error: "IMG_SOURCE_UNREACHABLE",
     provider_transport: "AI_UNREACHABLE", provider_timeout: "AI_TIMEOUT",
     provider_http: "AI_PROVIDER_ERROR", unsupported_provider: "AI_PROVIDER_UNSUPPORTED",
+    provider_auth_failed: "AI_KEY_INVALID", provider_payload_too_large: "AI_REQUEST_TOO_LARGE",
     generation_stopped: "AI_STOPPED", empty_output: "AI_STOPPED",
-    invalid_output_contract: "AI_OUTPUT_INVALID", incomplete_output: "AI_INCOMPLETE",
+    invalid_output_contract: "AI_OUTPUT_INVALID", model_output_contract: "AI_OUTPUT_INVALID",
+    local_ai_error: "LOCAL_SERVER_ERROR", incomplete_output: "AI_INCOMPLETE",
     ai_not_configured: "AI_NOT_CONFIGURED", unsafe_base_url: "LOCAL_ENDPOINT_UNSAFE",
-    ai_no_result: "AI_NO_RESULT", extension_declined: "EXTENSION_DECLINED",
   };
-  return USER_MESSAGES[raw] || USER_MESSAGES[aliases[normalized]] || USER_MESSAGES.UNKNOWN;
+  return USER_MESSAGES[raw] || USER_MESSAGES[aliases[normalized]] || USER_MESSAGES.UNCLASSIFIED;
 }
 
 function legacyCode(message, stage = "") {
@@ -136,7 +174,9 @@ export function makeTpError(input = {}) {
   const origin = String(source.origin || source.actor || "extension");
   if (!code && status === 502 && origin === "hosting_gateway") code = "GATEWAY_502";
   if (!code && status >= 500) code = "API_5XX";
-  if (!code) code = legacyCode(source.message, stage);
+  code = safeMachineCode(code);
+  if (!code) code = NATIVE_ERROR_CODES[String(source.errorName || source.name || "")] || legacyCode(source.message, stage);
+  code = safeMachineCode(code) || stageDefault(stage);
   const retryable = typeof source.retryable === "boolean"
     ? source.retryable : code === "NET_OFFLINE" || code === "NET_TIMEOUT" ||
       code === "GATEWAY_502" || code === "API_5XX" || code === "SERVER_BUSY";
@@ -178,8 +218,12 @@ export function publicTpError(error, traceId = "") {
   const e = makeTpError(error instanceof Error
     ? { ...(error.tpError || {}), message: error.message, status: error.status,
         code: error.code, failedStage: error.failedStage, retryable: error.retryable,
+        errorName: error.name,
         traceId: error.traceId || traceId }
-    : typeof error === "object" ? { ...error, traceId: error?.traceId || traceId }
+    : typeof error === "object"
+      ? (error?.tpError?.schema === TP_ERROR_SCHEMA
+          ? { ...error.tpError, message: error?.message || error.tpError?.diagnostic, traceId: error.tpError?.traceId || traceId }
+          : { ...error, traceId: error?.traceId || traceId })
       : { message: error, traceId });
   return {
     schema: e.schema, code: e.code, category: e.category, origin: e.origin,

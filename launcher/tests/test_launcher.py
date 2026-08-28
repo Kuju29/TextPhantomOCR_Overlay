@@ -75,6 +75,11 @@ sys.modules.update({"tkinter": tk, "tkinter.ttk": ttk,
                     "tkinter.messagebox": messagebox})
 
 SANDBOX = Path("/tmp/tp-data")
+# Every run must begin with an empty launcher data directory.  In particular,
+# env_snapshot.json is deliberately persistent in production, so reusing the
+# fixed test directory made the "first install" assertion depend on whichever
+# test run happened previously.
+shutil.rmtree(SANDBOX, ignore_errors=True)
 os.environ["XDG_DATA_HOME"] = str(SANDBOX)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))

@@ -39,7 +39,7 @@ for (const code of [
   "rate_gate_busy", "local_rate_gate_busy", "missing_api_key", "invalid_api_key",
   "model_unavailable", "missing_translation_units", "internal_error",
   "ai_endpoint_missing", "invalid_local_endpoint", "local_endpoint_not_private",
-  "local_ai_unreachable", "local_ai_timeout", "local_model_missing",
+  "local_ai_unreachable", "local_ai_timeout", "local_model_missing", "local_ai_thinking_no_answer",
   "local_model_not_found", "local_ai_endpoint_incompatible", "local_ai_http_error",
   "invalid_local_response", "invalid_model_output", "custom_local_extension_only",
   "local_models_http_error", "local_models_empty", "local_ai_server_error",
@@ -53,15 +53,70 @@ for (const code of [
   "generation_stopped", "empty_output", "invalid_output_contract",
   "incomplete_output", "ai_not_configured", "unsafe_base_url",
   "provider_key_mismatch", "image_blocked", "onnx_failed",
+  "provider_quota_exhausted", "billing_required",
+  "provider_auth_failed", "provider_payload_too_large", "model_output_contract", "local_ai_error",
 ]) {
   const error = makeTpError({ code, origin: "api", stage: "ai" });
   assert.notEqual(error.userMessage, "เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ", `${code} needs a public message`);
   assert.equal(error.code, code, "normalising display text must not change the retry machine code");
+}
+for (const code of ["provider_quota_exhausted", "billing_required"]) {
+  const publicError = publicTpError({ code, origin: "upstream_ai", stage: "provider_request", httpStatus: 502, upstreamStatus: 403 });
+  assert.equal(publicError.code, code);
+  assert.equal(publicError.retryable, false);
+  assert.match(publicError.userMessage, /AI|เครดิต|ชำระ/);
+  assert.doesNotMatch(JSON.stringify(publicError), /raw provider body|AIza|sk-/);
 }
 assert.doesNotMatch(
   makeTpError({ code: "invalid_model_output", origin: "upstream_ai", stage: "model_output_contract" }).userMessage,
   /Local AI/,
   "the cloud AI route emits invalid_model_output too — its text must not blame Local AI",
 );
+const thinkingOnly = imageErrorMessage(
+  { imgUrl: "https://example/page.jpg", traceId: "trace-local-thinking" },
+  Object.assign(new Error("reasoning was produced but no final answer"), {
+    code: "local_ai_thinking_no_answer",
+  }),
+);
+assert.equal(thinkingOnly.error.code, "local_ai_thinking_no_answer");
+assert.match(thinkingOnly.error.userMessage, /Thinking/);
+assert.doesNotMatch(thinkingOnly.error.userMessage, /ไม่ทราบสาเหตุ/);
+
+// Public IMAGE_ERROR objects must always carry a safe reportable name. Raw
+// diagnostics, URLs, provider bodies and credentials remain log-only.
+for (const input of [
+  undefined,
+  "",
+  new Error("provider failed for an unclassified reason"),
+  "[object Object]",
+  { message: "brand new failure", stage: "ai" },
+]) {
+  const shown = imageErrorMessage({ imgUrl: "https://example/page.jpg" }, input);
+  assert.ok(shown.error.code && shown.error.code !== "UNKNOWN");
+  assert.doesNotMatch(shown.message, /UNKNOWN|ไม่ทราบสาเหตุ/);
+}
+assert.equal(publicTpError(new ReferenceError("missing symbol")).code, "REFERENCE_ERROR");
+assert.equal(publicTpError(new TypeError("bad shape")).code, "TYPE_ERROR");
+assert.equal(publicTpError({ message: "failed", stage: "render" }).code, "RENDER_FAILED");
+assert.equal(publicTpError({ message: "failed", stage: "ai" }).code, "AI_FAILED");
+assert.equal(publicTpError({ message: "failed" }).code, "PROCESSING_FAILED");
+
+for (const unsafeCode of [
+  "Bearer-secret-token", "hf_abcdefghijklmnopqrstuvwxyz", "AIza012345678901234567890",
+  "https://private.example/error", "<b>provider body</b>", "x".repeat(10000), "api_key_secret",
+  "UNKNOWN", "unknown_error", "ERROR", "undefined", "null",
+]) {
+  const shown = imageErrorMessage({}, { code: unsafeCode, message: `secret ${unsafeCode}` });
+  assert.equal(shown.error.code, "PROCESSING_FAILED");
+  assert.doesNotMatch(JSON.stringify(shown), /private\.example|provider body|api_key_secret|abcdefghijklmnopqrstuvwxyz/);
+}
+const hostileNested = publicTpError({ tpError: {
+  schema: "tp.error/1", code: "hf_abcdefghijklmnopqrstuvwxyz",
+  userMessage: "secret provider body", diagnostic: "Bearer private-token",
+} });
+assert.equal(hostileNested.code, "PROCESSING_FAILED");
+assert.doesNotMatch(JSON.stringify(hostileNested), /abcdefghijklmnopqrstuvwxyz|provider body|private-token/);
+assert.equal(publicTpError({ code: "UNKNOWN", stage: "ai" }).code, "AI_FAILED");
+assert.equal(publicTpError({ tpError: { schema: "tp.error/1", code: "UNKNOWN", stage: "render" } }).code, "RENDER_FAILED");
 
 console.log("Error contract test passed: public errors are structured, concise and safe.");

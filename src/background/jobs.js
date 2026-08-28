@@ -7,6 +7,7 @@ import {
   ensureBatch,
   getBatch,
   batchMark,
+  markImagePhase,
   batchUpdateToast,
   batchStopKeepAlive,
   batchPassStats,
@@ -57,7 +58,7 @@ import {
 import * as wf from "./workflow-track.js";
 import {
   translateUnits,
-  getSystemPrompt,
+  getCanonicalPrompt,
   getPromptAudit,
 } from "./ai-local.js";
 import { shouldUseDirectLocalAi } from "../shared/local-ai-adapter.js";
@@ -80,18 +81,33 @@ import { aiLayoutDecision } from "../shared/lens-axis.js";
 import {
   acquire,
   releaseSuccess,
+  releaseReplay,
   releaseRejected,
   releaseDeferred,
   releaseGated,
   releaseFailed,
+  releaseLocalFailure,
   laneKeyFor,
   describe as describeLane,
   setLaneCapacityHint,
   setLaneSlotCeiling,
   setLaneUnlimited,
+  configureLocalCapacityForPayload,
 } from "./scheduler.js";
+import { isLocalAiPayload } from "./local-capacity.js";
 
 const log = createLogger("SW.jobs");
+
+// Advances the canonical per-image progress record for a registered job.
+// Keeping this lookup here lets stage owners report their real boundary without
+// threading batch UI objects through Lens/ONNX/AI internals.
+function markJobPhase(jobId, phase, details = {}) {
+  const ctx = pendingByJob.get(jobId);
+  const batchId = String(ctx?.batchId || ctx?.metadata?.batch_id || "").trim();
+  const imageKey = String(ctx?.imageKey || ctx?.metadata?.image_id || "").trim();
+  if (!batchId || !imageKey) return null;
+  return markImagePhase(batchId, imageKey, phase, details);
+}
 
 // Whether a 429 came from the API's per-key AI rate gate rather than from the
 // provider or from server overload. Read from the response body's `code`, not
@@ -221,16 +237,16 @@ export function handleStaleJob(jobId) {
   const imageKey = String(ctx?.imageKey || ctx?.metadata?.image_id || "").trim();
   const batch = batchId ? ensureBatch(batchId, ctx.tabId || 0, ctx.frameId || 0) : null;
   if (batch && imageKey) {
-    batchMark(batchId, imageKey, { status: "aborted" });
+    markImagePhase(batchId, imageKey, "cancelled", { lastError: "navigation" });
     batchUpdateToast(batch, "Cancelled", true);
     finalizeBatch(batch);
   }
 }
 
 // Reports a job error to its tab and marks the failure on its batch.
-export function handleJobError(jobId, error = "Unknown error") {
+export function handleJobError(jobId, error = { code: "PROCESSING_FAILED", message: "Job failed without error detail" }) {
   const ctx = pendingByJob.get(jobId);
-  const errMsg = error?.message || String(error || "Unknown error");
+  const errMsg = error?.message || String(error || "PROCESSING_FAILED");
   const aiGenerationAttempted = Boolean(ctx?.aiGenerationAttempted);
   let cls = classifyJobError(error, { aiGenerationAttempted });
   const terminalAiError = aiGenerationAttempted || /(?:ai text was incomplete; no automatic retry was made|ai text layer cannot be rendered faithfully)/i.test(
@@ -260,8 +276,7 @@ export function handleJobError(jobId, error = "Unknown error") {
   removeJob(jobId, ctx?.metadata?.image_id);
 
   if (batch && imageKey) {
-    batchMark(batchId, imageKey, {
-      status: "error",
+    markImagePhase(batchId, imageKey, "error", {
       lastError: errMsg,
       permanent: !!cls.permanent,
     });
@@ -390,10 +405,10 @@ export async function handleResult(jobId, result) {
     removeJob(jobId, result?.metadata?.image_id);
     if (batch && imageKey) {
       if (ctx.keepCacheOnStale) {
-        batchMark(batchId, imageKey, { status: "done", cachedOnly: true });
+        markImagePhase(batchId, imageKey, "done", { cachedOnly: true });
         batchUpdateToast(batch, "Saved", true);
       } else {
-        batchMark(batchId, imageKey, { status: "aborted" });
+        markImagePhase(batchId, imageKey, "cancelled", { lastError: "navigation" });
         batchUpdateToast(batch, "Cancelled", true);
       }
       finalizeBatch(batch);
@@ -402,7 +417,7 @@ export async function handleResult(jobId, result) {
   }
 
   if (batch && imageKey) {
-    batchMark(batchId, imageKey, { status: "inserting" });
+    markImagePhase(batchId, imageKey, "rendering");
     batchUpdateToast(batch, "Inserting");
   }
 
@@ -482,7 +497,7 @@ export async function handleResult(jobId, result) {
   if (batch && imageKey) {
     if (ok) {
       const skipped = errMsg === "No text detected";
-      batchMark(batchId, imageKey, {
+      markImagePhase(batchId, imageKey, "done", {
         status: skipped ? "skipped" : "done",
         lastError: skipped ? errMsg : "",
       });
@@ -492,9 +507,8 @@ export async function handleResult(jobId, result) {
         aiRouteEntered: Boolean(ctx?.aiRouteEntered),
         aiGenerationAttempted: Boolean(ctx?.aiGenerationAttempted),
       });
-      batchMark(batchId, imageKey, {
-        status: "error",
-        lastError: errMsg || "Unknown error",
+      markImagePhase(batchId, imageKey, "error", {
+        lastError: errMsg || "PROCESSING_FAILED",
         permanent: !!cls.permanent,
       });
       batchUpdateToast(batch, cls.permanent ? "Error (permanent)" : "Error");
@@ -526,11 +540,14 @@ export function finalizeBatch(b) {
     for (const k of failed) {
       const it = b.items.get(k);
       if (!it) continue;
-      b.items.set(k, {
-        ...it,
-        payload: withPipelineStage(it.payload, "retry_failed_once"),
+      markImagePhase(b.id, k, "waiting", {
         attempt: 2,
-        status: "queued",
+        lastError: "",
+        permanent: false,
+        phaseAt: Date.now(),
+      });
+      batchMark(b.id, k, {
+        payload: withPipelineStage(it.payload, "retry_failed_once"),
       });
     }
     batchUpdateToast(b, `Retrying ${failed.length} failed image(s) shortly`, true);
@@ -588,12 +605,11 @@ async function runRetryPass(b) {
       const k = imageKeyFromPayload(pl);
       if (k && b.items.has(k)) {
         const it = b.items.get(k);
-        b.items.set(k, {
-          ...it,
-          lastError: msg,
-          status: cls.permanent ? "error" : it.status,
-          permanent: cls.permanent,
-        });
+        if (cls.permanent) {
+          markImagePhase(b.id, k, "error", { lastError: msg, permanent: true });
+        } else {
+          b.items.set(k, { ...it, lastError: msg, permanent: false });
+        }
         if (cls.permanent) {
           batchUpdateToast(b, "Error (permanent)");
           finalizeBatch(b);
@@ -705,6 +721,7 @@ async function processJobInner(payload, tabId, frameId = 0) {
   const imageKey = imageKeyFromPayload(payload);
   const batch = batchId ? ensureBatch(batchId, tabId, frameId) : null;
   let traceId = "";
+  if (batch && imageKey) markImagePhase(batchId, imageKey, "waiting");
 
   const pageUrl = payload?.context?.page_url || "";
   const isMd = isMangaDexPageUrl(pageUrl);
@@ -715,7 +732,7 @@ async function processJobInner(payload, tabId, frameId = 0) {
   const curSession = getTabSessionId(tabId);
   if (originSession && curSession && originSession !== curSession && !isMd) {
     if (batch && imageKey) {
-      batchMark(batchId, imageKey, { status: "aborted", lastError: "navigation" });
+      markImagePhase(batchId, imageKey, "cancelled", { lastError: "navigation" });
       batchUpdateToast(batch, "Cancelled");
       finalizeBatch(batch);
       batchStopKeepAlive(batch);
@@ -724,9 +741,7 @@ async function processJobInner(payload, tabId, frameId = 0) {
   }
 
   if (batch && imageKey) {
-    const it = batch.items.get(imageKey);
-    if (it) batch.items.set(imageKey, { ...it, status: "processing" });
-    batchUpdateToast(batch, "Processing");
+    markImagePhase(batchId, imageKey, "scanning");
   }
 
   const workflowId = await wf.begin({
@@ -762,6 +777,7 @@ async function processJobInner(payload, tabId, frameId = 0) {
   if (await stopIfBatchWasCancelled()) return;
 
   if (shouldPrefetchDataUri(payload)) {
+    if (batch && imageKey) markImagePhase(batchId, imageKey, "downloading");
     const src = String(payload.src || "").trim();
     const key = normImgSrc(src);
     const cached = getCachedDataUri(key);
@@ -826,7 +842,7 @@ async function processJobInner(payload, tabId, frameId = 0) {
           if (cls.permanent) {
             if (payload?.metadata?.image_id) pendingByImage.delete(payload.metadata.image_id);
             if (batch && imageKey) {
-              batchMark(batchId, imageKey, { status: "error", lastError: errMsg, permanent: true });
+              markImagePhase(batchId, imageKey, "error", { lastError: errMsg, permanent: true });
               batchUpdateToast(batch, "Error (permanent)");
               finalizeBatch(batch);
             }
@@ -920,7 +936,7 @@ async function processJobInner(payload, tabId, frameId = 0) {
     await wf.failed(workflowId, compatibilityIssue);
     if (payload?.metadata?.image_id) pendingByImage.delete(payload.metadata.image_id);
     if (batch && imageKey) {
-      batchMark(batchId, imageKey, { status: "error", lastError: compatibilityIssue, permanent: true });
+      markImagePhase(batchId, imageKey, "error", { lastError: compatibilityIssue, permanent: true });
       batchUpdateToast(batch, "Compatibility error");
       finalizeBatch(batch);
     }
@@ -1058,6 +1074,7 @@ async function runLensDirectPath(base, payload, { tabId, frameId, jobId = "", si
   let lensImageSize;
   let imageArtifactToken = "";
   try {
+    markJobPhase(jobId, "lens");
     const stageTrace = String(payload?.context?.tp_trace || "");
     traceNote("background/jobs.js", "imageStage", {
       stage: "lens", state: "started", imageId: payload?.metadata?.image_id || "",
@@ -1081,9 +1098,7 @@ async function runLensDirectPath(base, payload, { tabId, frameId, jobId = "", si
     }, stageTrace);
     lens = answer?.lens;
     if (!lens || typeof lens !== "object") {
-      throw attachTpError(new Error("the raw Lens reply carried no `lens` object"), {
-        code: "LENS_FAILED", origin: "upstream_lens", stage: "lens", retryable: true,
-      });
+      throw new Error("the raw Lens reply carried no `lens` object");
     }
     lensImageSize = authoritativeLensImageSize(answer?.image);
     imageArtifactToken = String(answer?.imageArtifact?.token || "").trim();
@@ -1146,10 +1161,9 @@ async function runLensDirectPath(base, payload, { tabId, frameId, jobId = "", si
   if (decoded.groups.needed) {
     let grouped;
     try {
+      markJobPhase(jobId, "grouping");
       if (!image.dataUri) {
-        throw attachTpError(new Error("the image reader returned no data URI to group with"), {
-          code: "IMG_READ_FAILED", origin: "extension", stage: "image_read", retryable: false,
-        });
+        throw new Error("the image reader returned no data URI to group with");
       }
       const stageTrace = String(payload?.context?.tp_trace || "");
       traceNote("background/jobs.js", "imageStage", {
@@ -1412,10 +1426,10 @@ async function runLocalAi(
   // Cloud/API routes compose their prompt server-side. Direct Local AI fetches
   // the same public default once, then sends it from the browser to the local
   // runtime; the translation itself never passes through TextPhantom API.
-  const systemText = plan.route === "direct-local"
-    ? await getSystemPrompt(base, String(payload.lang || ""), { wantMemo: false })
-    : "";
-  if (plan.route === "direct-local" && !systemText) {
+  const canonicalPrompt = plan.route === "direct-local"
+    ? await getCanonicalPrompt(base, String(payload.lang || ""), { wantMemo: false })
+    : null;
+  if (plan.route === "direct-local" && !canonicalPrompt) {
     throw Object.assign(new Error("Could not load the Local AI translation prompt"), {
       code: "local_prompt_unavailable", generationAttempts: 0, providerAttempts: 0,
     });
@@ -1433,7 +1447,7 @@ async function runLocalAi(
     imageDataUri: plan.ai?.send_image ? String(result?.sourceImageDataUri || payload?.imageDataUri || "") : "",
     targetLang: String(payload.lang || ""),
     sourceLang: String(doc?.languages?.source || ""),
-    systemText,
+    canonicalPrompt,
     promptAudit,
     base,
     operationId,
@@ -1666,8 +1680,14 @@ function isSafeNoGenerationBackpressure(error) {
 // operation id; a real provider/model attempt is never generated again here.
 async function runLocalAiInLane(base, payload, result, plan, batchId, signal, onGenerationAttempt = null, jobId = "") {
   const key = laneKeyFor(payload);
-  const unlimited = payload?.limits?.aiUnlimited === true;
-  setLaneUnlimited(key, unlimited);
+  // Removing RPM/time pacing is independent from generation concurrency.
+  // Capacity is selected per runtime endpoint + model, never globally.
+  const localCapacity = configureLocalCapacityForPayload(payload);
+  if (!localCapacity) {
+    setLaneUnlimited(key, false);
+    setLaneSlotCeiling(key, 0);
+  }
+  const unlimited = false;
   const traceId = String(payload?.context?.tp_trace || getTrace() || "");
   const imageId = String(payload?.metadata?.image_id || "");
   let orchestrationAttempts = 0;
@@ -1676,12 +1696,14 @@ async function runLocalAiInLane(base, payload, result, plan, batchId, signal, on
 
   while (true) {
     orchestrationAttempts++;
+    markJobPhase(jobId, "ai_queued");
     traceNote("background/jobs.js", "imageStage", {
       stage: "ai", state: "queued", route: "extension", imageId,
       orchestrationAttempts,
     }, traceId);
 
     const slot = await acquire(key, signal);
+    markJobPhase(jobId, "ai_generating");
     const queueWaitMs = Number(slot?.waitMs) || 0;
     accumulatedQueueWaitMs += queueWaitMs;
     traceNote("background/jobs.js", "imageStage", {
@@ -1718,7 +1740,8 @@ async function runLocalAiInLane(base, payload, result, plan, batchId, signal, on
         : (reportedProviderMs > 0 ? "server.providerMs" : "roundTrip-minus-serverWait");
       // A ledger replay did not call the provider now. Do not pollute the
       // scheduler's latency telemetry with the original generation's duration.
-      releaseSuccess(key, replayed ? 0 : providerMs);
+      if (replayed) releaseReplay(key);
+      else releaseSuccess(key, providerMs);
       const rpmNow = Number(telemetry.rate?.rpm) || 0;
       const ceiling = Number(describeLane(key)?.effectiveMax) || 0;
       traceNote("background/jobs.js", "imageStage", {
@@ -1754,7 +1777,10 @@ async function runLocalAiInLane(base, payload, result, plan, batchId, signal, on
         ? Math.min(5000, Math.max(retryAfterMs, 300 * (2 ** Math.min(4, orchestrationAttempts - 1))))
         : retryAfterMs;
 
+      const generationAttempts = Number(e?.generationAttempts || e?.providerAttempts || 0);
       if (gated) releaseGated(key, retryAfterMs);
+      else if (isLocalAiPayload(payload)) releaseLocalFailure(key, e, retryAfterMs);
+      else if (generationAttempts === 0 && backpressure) releaseDeferred(key, retryAfterMs);
       else if (providerBackpressure) releaseRejected(key, retryAfterMs);
       else if (serverDeferred) releaseDeferred(key, serverRetryMs);
       else if (backpressure) releaseRejected(key, retryAfterMs);
@@ -1827,6 +1853,11 @@ async function runSyncTranslate(
 
   await wf.lensRequested(workflowId, `lens-direct:${jobId}`);
   let lensDone = false;
+  // Own failures by the stage that is actually running. The old catch always
+  // reported Lens degradation, even after Lens had succeeded and the local AI
+  // request was already in flight, producing the illegal transition
+  // AI_REQUESTED -> LENS_DEGRADED and hiding the real provider failure.
+  let directStage = "lens";
   try {
     if (!mayUseLensDirect) {
       if (apiEngine) {
@@ -1855,6 +1886,7 @@ async function runSyncTranslate(
       await wf.lensReady(workflowId);
       lensDone = true;
       if (plan) {
+        directStage = "ai";
         const aiContext = pendingByJob.get(jobId);
         if (aiContext) aiContext.aiRouteEntered = true;
         await wf.aiRequested(workflowId, `ai-route:${jobId}`);
@@ -1911,14 +1943,11 @@ async function runSyncTranslate(
             : aiOutcome?.reason || "AI produced no usable translation; no automatic retry was made";
           log.warn("extension-first AI stopped without invoking the full image pipeline", { reason });
           await wf.failed(workflowId, reason);
-          // "AI produced no usable translation" matches none of the legacy
-          // patterns, so as a bare string it reached the reader as
-          // "unknown cause · UNKNOWN". The two outcomes are different and the
-          // code already knows which one happened.
           handleJobError(jobId, attachTpError(new Error(reason), {
-            code: aiOutcome?.usable ? "RENDER_FAILED" : "AI_NO_RESULT",
-            origin: "extension", stage: aiOutcome?.usable ? "render" : "ai",
-            retryable: false, diagnostic: reason,
+            code: aiOutcome?.usable ? "RENDER_FAILED" : "AI_OUTPUT_INVALID",
+            origin: "extension",
+            stage: aiOutcome?.usable ? "render" : "ai",
+            retryable: false,
           }));
           return;
         }
@@ -1934,6 +1963,7 @@ async function runSyncTranslate(
           route: plan.route, source: plan.originalSource, lens: "direct",
         });
       }
+      directStage = "postprocess";
       await wf.textReady(workflowId);
       await handleResult(jobId, direct);
       return;
@@ -1944,13 +1974,33 @@ async function runSyncTranslate(
     if (e?.name === "AbortError") {
       return;
     }
+    // Preserve the structured Local-AI error through the route-decline path.
+    // Keeping only its message used to discard codes such as timeout and
+    // thinking-without-final-answer, so the image badge fell back to UNKNOWN.
+    decline.error = e;
     if (!e?.skipDirect) {
       log.warn("the extension route threw before it could draw", {
+        stage: directStage,
         error: e?.message || String(e),
       });
       if (!decline.reason) decline.reason = `the extension route threw: ${e?.message || String(e)}`;
     }
-    await wf.lensDegraded(workflowId, `lens direct threw: ${e?.message || String(e)}`);
+    const failureReason = e?.message || String(e);
+    if (directStage === "ai") {
+      // No alternate AI route is attempted here: record the correct degraded
+      // stage, then let the extension-engine stop below with the same reason.
+      // This preserves the one-provider-call contract.
+      await wf.aiDegraded(workflowId, `local AI threw: ${failureReason}`);
+    } else if (directStage === "lens") {
+      await wf.lensDegraded(workflowId, `lens direct threw: ${failureReason}`);
+    } else {
+      // Lens and AI have already completed. An insertion/preparation failure is
+      // terminal and must not masquerade as either route degrading or trigger a
+      // second pipeline.
+      await wf.failed(workflowId, `extension postprocess threw: ${failureReason}`);
+      handleJobError(jobId, e);
+      return;
+    }
   }
 
   // The extension engine does not quietly hand a text page to the server. When the
@@ -1969,18 +2019,16 @@ async function runSyncTranslate(
       mode: payload.mode, source: payload.source,
     }, String(payload?.context?.tp_trace || getTrace() || ""));
     await wf.failed(workflowId, reason);
-    // stop() names why it declined at eight sites; that reason must survive the
-    // trip to the image. A decline.error is already a coded Error and is passed
-    // through untouched — only a bare reason string needs dressing.
-    handleJobError(jobId, decline.error || attachTpError(new Error(reason), {
-      code: "EXTENSION_DECLINED", origin: "extension", stage: "lens_direct",
-      retryable: false, diagnostic: reason,
-    }));
+    handleJobError(jobId, decline.error || reason);
     return;
   }
 
   let browserImageFallbackUsed = false;
   let syncProviderBackpressureSince = 0;
+  // A transient wait retries the same committed operation. Re-entering a
+  // REQUESTED state on every loop was both semantically wrong and an illegal
+  // X_REQUESTED -> X_REQUESTED workflow transition.
+  let serverRequestTracked = false;
   for (let attempt = 0; ; attempt++) {
     const serverPayload = payloadForFullServer(payload);
     const outbound = serverPayload;
@@ -1990,6 +2038,10 @@ async function runSyncTranslate(
       delete outbound.idempotency_key;
     }
     const requestLane = laneKeyFor(outbound);
+    const localRequest = isLocalAiPayload(outbound);
+    // API-engine Local AI uses the same per-runtime+endpoint+model capacity
+    // policy as direct-local before it can acquire its first slot.
+    configureLocalCapacityForPayload(outbound);
     const ctrl = beginInFlight(jobId, tabId);
     let slotHeld = false;
     let queueWaitMs = 0;
@@ -2001,7 +2053,13 @@ async function runSyncTranslate(
       stage: "ai", state: "queued", route: "api", imageId: serverImageId,
     }, serverTraceId);
     try {
+      if (apiEngine && !lensDone) {
+        markJobPhase(jobId, "server_processing", { stage: "Server processing (Lens/AI)" });
+      } else {
+        markJobPhase(jobId, lensDone ? "ai_queued" : "lens");
+      }
       const slot = await acquire(requestLane, ctrl.signal);
+      if (lensDone) markJobPhase(jobId, "ai_generating");
       queueWaitMs = Number(slot?.waitMs) || 0;
       requestStartedAt = Date.now();
       slotHeld = true;
@@ -2011,8 +2069,11 @@ async function runSyncTranslate(
         maxWindow: Number(slot?.maxWindow) || 0,
         unlimited: slot?.unlimited === true,
       }, serverTraceId);
-      if (lensDone) await wf.aiRequested(workflowId, `ai-server:${jobId}:${attempt}`);
-      else await wf.lensRequested(workflowId, `sync:${jobId}:${attempt}`);
+      if (!serverRequestTracked) {
+        if (lensDone) await wf.aiRequested(workflowId, `ai-server:${jobId}`);
+        else await wf.lensRequested(workflowId, `sync:${jobId}`);
+        serverRequestTracked = true;
+      }
       let result;
       try {
         result = await translateViaSyncRest(base, outbound, {
@@ -2033,7 +2094,10 @@ async function runSyncTranslate(
       // close to ordinary network overhead.
       const transportProxyMs = serverProcessingMs > 0
         ? Math.max(0, requestMs - serverProcessingMs) : 0;
-      releaseSuccess(requestLane, requestMs);
+      const replayed = result?.replayed === true || result?.perf?.replayed === true ||
+        result?.perf?.replayedFromLedger === true;
+      if (replayed) releaseReplay(requestLane);
+      else releaseSuccess(requestLane, requestMs);
       slotHeld = false;
       traceNote("background/jobs.js", "imageStage", {
         stage: "ai", state: "finished", route: "api", imageId: serverImageId,
@@ -2060,6 +2124,7 @@ async function runSyncTranslate(
         if (slotHeld) releaseFailed(requestLane);
         log.info("request cancelled with the tab", { jobId });
         await wf.failed(workflowId, "cancelled with the tab");
+        markJobPhase(jobId, "cancelled", { lastError: "cancelled with the tab" });
         removeJob(jobId, payload?.metadata?.image_id);
         return;
       }
@@ -2111,6 +2176,9 @@ async function runSyncTranslate(
               tabFallbackError: browserFetchError || "",
             });
             await wf.lensDegraded(workflowId, "server image fetch failed; browser supplied bytes");
+            // This is a real Lens-route change, unlike admission backpressure.
+            // The next loop therefore commits one new Lens operation.
+            serverRequestTracked = false;
             continue;
           }
         } catch (browserError) {
@@ -2142,6 +2210,7 @@ async function runSyncTranslate(
           : retryAfterMs;
         if (slotHeld) {
           if (gated) releaseGated(requestLane, retryAfterMs);
+          else if (localRequest) releaseLocalFailure(requestLane, e, retryAfterMs);
           else if (code === "provider_rate_limited") releaseRejected(requestLane, retryAfterMs);
           else releaseDeferred(requestLane, serverRetryMs);
           slotHeld = false;
@@ -2152,7 +2221,12 @@ async function runSyncTranslate(
           if (Date.now() - syncProviderBackpressureSince >= PROVIDER_BACKPRESSURE_MAX_WAIT_MS) {
             const msg = "AI provider stayed rate limited for 90s; the request was never generated.";
             await wf.failed(workflowId, msg);
-            handleJobError(jobId, msg);
+            handleJobError(jobId, attachTpError(new Error(msg), {
+              code: "provider_rate_limited",
+              origin: "upstream_ai",
+              stage: "provider_request",
+              retryable: true,
+            }));
             return;
           }
         } else {
@@ -2175,8 +2249,9 @@ async function runSyncTranslate(
         const why = gated
           ? `AI key paced by the server's rate gate (wait ${retryAfterMs}ms)`
           : `${code || "server busy"} (retry-after ${retryAfterMs}ms)`;
-        if (lensDone) await wf.aiDegraded(workflowId, why);
-        else await wf.lensDegraded(workflowId, why);
+        // Admission backpressure is a transient wait, not a route degradation.
+        // Keep the workflow in REQUESTED so repeated waits and later success
+        // retain a legal REQUESTED -> READY transition.
         // Keep the rejected work in this browser. Shared-server pressure gets
         // an exponential client-side retry delay; provider/rate signals keep
         // their own advertised delay. Only a REAL provider rejection is allowed
@@ -2186,7 +2261,8 @@ async function runSyncTranslate(
       }
 
       if (slotHeld) {
-        if (isBusy) releaseRejected(requestLane, retryAfterMs);
+        if (localRequest) releaseLocalFailure(requestLane, e, retryAfterMs);
+        else if (isBusy) releaseRejected(requestLane, retryAfterMs);
         else releaseFailed(requestLane);
       }
 
@@ -2208,6 +2284,15 @@ async function submitAndPollRest(
     const idempotencyKey = await idempotencyKeyForPayload(payload);
     payload.idempotency_key = idempotencyKey;
     await wf.lensRequested(workflowId, `rest:${idempotencyKey}`);
+    if (batch && imageKey) {
+      if (payload?.engine === "api") {
+        markImagePhase(batchId, imageKey, "server_processing", {
+          stage: "Server processing (Lens/AI)",
+        });
+      } else {
+        markImagePhase(batchId, imageKey, "lens");
+      }
+    }
     const submitted = await submitJobViaRest(base, payload, { idempotencyKey });
     jobId = String(submitted.id || "");
     const ctx = makeContext({
@@ -2217,7 +2302,9 @@ async function submitAndPollRest(
       serverHints: submitted,
     });
     rememberJob(jobId, ctx);
-    await pollJobViaRest(base, jobId);
+    await pollJobViaRest(base, jobId, {
+      session: String(ctx?.sessionId || payload?.context?.tp_tab_session || ""),
+    });
   } catch (e) {
     const msg = e?.message || String(e);
     if (jobId) {
@@ -2227,7 +2314,7 @@ async function submitAndPollRest(
     if (payload?.metadata?.image_id) pendingByImage.delete(payload.metadata.image_id);
     if (batch && imageKey) {
       const cls = classifyJobError(e);
-      batchMark(batchId, imageKey, { status: "error", lastError: msg, permanent: !!cls.permanent });
+      markImagePhase(batchId, imageKey, "error", { lastError: msg, permanent: !!cls.permanent });
       batchUpdateToast(batch, cls.permanent ? "Error (permanent)" : "Error");
       finalizeBatch(batch);
     }
@@ -2249,10 +2336,8 @@ export async function resumePendingRestJobs() {
     const base = String(ctx?.base || "").trim();
     if (!base) continue;
     addTask(
-      // transport.js already attached a code to this error. Flattening it to
-      // e.message threw that away and the reader got "unknown cause · UNKNOWN"
-      // for a plain network or gateway failure we had classified correctly.
-      () => pollJobViaRest(base, jobId).catch((e) => handleJobError(jobId, e)),
+      () => pollJobViaRest(base, jobId, { session: String(ctx?.sessionId || "") })
+        .catch((e) => handleJobError(jobId, e)),
       { shouldStart: () => pendingByJob.has(jobId) },
     );
   }
@@ -2301,7 +2386,7 @@ export function cancelTabWork(tabId, reason = "navigation") {
     removeJob(jobId, ctx?.metadata?.image_id);
 
     if (batch && imageKey) {
-      batchMark(batchId, imageKey, { status: "aborted", lastError: msg });
+      markImagePhase(batchId, imageKey, "cancelled", { lastError: msg });
       batchUpdateToast(batch, "Cancelled");
       finalizeBatch(batch);
       batchStopKeepAlive(batch);
@@ -2336,7 +2421,7 @@ export function discardBatchResults(batchId, reason = "user_cancelled") {
   batch.cancelled = true;
   for (const [key, item] of batch.items.entries()) {
     if (["done", "error", "aborted", "skipped"].includes(item?.status)) continue;
-    batch.items.set(key, { ...item, status: "aborted", lastError: reason });
+    markImagePhase(bid, key, "cancelled", { lastError: reason });
   }
   batchUpdateToast(batch, "Cancelled", true);
   batchStopKeepAlive(batch);

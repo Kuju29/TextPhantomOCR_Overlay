@@ -7,10 +7,47 @@ const log = createLogger("SW.ai-local");
 const promptCache = new Map();
 const promptAuditCache = new Map();
 
-// Returns the system prompt for a language from the API, or null when it cannot be fetched.
+const FALLBACK_MARKER_CONTRACT = [
+  "Output ONLY the translated text (no JSON, no markdown, no extra commentary).",
+  "Keep every paragraph marker like <<TP_P0>> exactly as it appears, in order.",
+  "For each marker, output the marker followed by that paragraph's translated text.",
+  "You MUST return every marker from the first through the last exactly once; never omit, combine, renumber or reorder a marker, even for punctuation or very short text.",
+  "If the target is Thai, Japanese, Chinese or Korean, do NOT insert spaces between words of that script. A space is only OK between scripts (e.g. Thai + digits).",
+].join("\n");
+
+function normalizeCanonicalPrompt(data) {
+  const supplied = data?.canonicalPrompt;
+  const pieces = supplied?.pieces;
+  if (supplied?.version === "translation-plan-1" && pieces &&
+      String(pieces.systemBase || "").trim() && String(pieces.editableStyle || "").trim() &&
+      String(pieces.markerOutputContract || "").trim() &&
+      String(pieces.structuredOutputContract || "").trim() &&
+      String(pieces.sourcePrefix || "").trim()) {
+    return structuredClone(supplied);
+  }
+  // Compatibility with older APIs: reconstruct a marker-only plan from the
+  // public pieces. Never append the UI style after a complete default prompt.
+  const systemBase = String(data?.system_base || "").trim();
+  const editableStyle = String(data?.lang_style || data?.prompt_editable_default || "").trim();
+  if (!systemBase || !editableStyle) return null;
+  return {
+    version: "translation-plan-1-compat",
+    compositionOrder: ["systemBase", "editableStyle", "runtimeContext", "outputContract"],
+    pieces: {
+      systemBase,
+      editableStyle,
+      imageHint: "",
+      markerOutputContract: FALLBACK_MARKER_CONTRACT,
+      sourcePrefix: "Source (translate this):\n",
+      seriesNotesHeading: "SERIES NOTES (from the user — follow these even when they conflict with a rule above):",
+    },
+  };
+}
+
+// Returns the provider-neutral prompt plan for a language, or null when it cannot be fetched.
 export async function getSystemPrompt(base, lang, { wantMemo = false } = {}) {
   const key = `${base}|${lang}|memo=${wantMemo ? 1 : 0}`;
-  if (promptCache.has(key)) return promptCache.get(key);
+  if (promptCache.has(key)) return structuredClone(promptCache.get(key));
   try {
     const url =
       `${base.replace(/\/+$/, "")}${API_PATHS.AI_PROMPT_DEFAULT}` +
@@ -18,18 +55,20 @@ export async function getSystemPrompt(base, lang, { wantMemo = false } = {}) {
     const res = await fetch(url, { cache: "no-store" });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    const text = String(data?.system_text || "").trim();
-    if (!text) throw new Error("response carried no system_text");
-    promptCache.set(key, text);
+    const promptPlan = normalizeCanonicalPrompt(data);
+    if (!promptPlan) throw new Error("response carried no canonical prompt pieces");
+    promptCache.set(key, promptPlan);
     promptAuditCache.set(key, {
       promptVersion: String(data?.promptVersion || ""),
       promptHash: String(data?.promptHash || ""),
       promptChars: Number(data?.promptChars || 0),
       promptSource: String(data?.promptSource || "built_in"),
       systemPromptHash: String(data?.systemPromptHash || ""),
-      systemPromptChars: Number(data?.systemPromptChars || text.length),
+      systemPromptChars: Number(data?.systemPromptChars || 0),
+      canonicalPromptVersion: String(promptPlan.version || ""),
+      canonicalPromptHash: String(data?.canonicalPrompt?.hash || ""),
     });
-    return text;
+    return structuredClone(promptPlan);
   } catch (e) {
     log.warn("could not fetch the system prompt; local AI is unavailable", {
       lang,
@@ -39,13 +78,16 @@ export async function getSystemPrompt(base, lang, { wantMemo = false } = {}) {
   }
 }
 
+// Named alias makes the provider-neutral contract explicit at call sites.
+export const getCanonicalPrompt = getSystemPrompt;
+
 // Clears the cached system prompts and their audit metadata.
 export function forgetPrompts() {
   promptCache.clear();
   promptAuditCache.clear();
 }
 
-// Returns the version and hash metadata for the prompt getSystemPrompt fetched.
+// Returns version/hash metadata for the canonical prompt fetched above.
 export function getPromptAudit(base, lang, { wantMemo = false } = {}) {
   const key = `${base}|${lang}|memo=${wantMemo ? 1 : 0}`;
   return { ...(promptAuditCache.get(key) || {}) };
@@ -54,7 +96,7 @@ export function getPromptAudit(base, lang, { wantMemo = false } = {}) {
 // Translates a LensDocument's units over the chosen route and returns the translations, misses and metadata.
 export async function translateUnits(
   units,
-  { route, ai, rate = null, unlimited = false, imageDataUri = "", targetLang, sourceLang, systemText, promptAudit = null, base = "", operationId = "", batchId = "", imageId = "", jobId = "", signal = null, traceId = "", trace = null },
+  { route, ai, rate = null, unlimited = false, imageDataUri = "", targetLang, sourceLang, canonicalPrompt = null, promptAudit = null, base = "", operationId = "", batchId = "", imageId = "", jobId = "", signal = null, traceId = "", trace = null },
 ) {
   if (!units.length) return { translations: [], missing: [], meta: { route, skipped: "no units" } };
 
@@ -70,7 +112,7 @@ export async function translateUnits(
     const result = await translateWithLocalOpenAi(units, {
       // Strip the key at the trust boundary as well as omitting it in the adapter.
       ai: { ...(ai || {}), api_key: "" },
-      systemText,
+      canonicalPrompt,
       imageDataUri,
       signal,
     });

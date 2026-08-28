@@ -14,6 +14,8 @@ from typing import Any, TypedDict
 
 import httpx
 
+from backend.ai.clients.ollama import _extract_text as extract_ollama_text
+from backend.ai.clients.ollama import normalize_base_url as normalize_ollama_base_url
 from backend.ai.clients.openai_compat import _uses_reasoning_safe_parameters
 from backend.ai.config import PROVIDER_DEFAULTS, PROVIDER_PROTOCOLS
 from backend.ai.providers import (
@@ -95,6 +97,20 @@ def _post(provider: str, api_key: str, base_url: str, model: str) -> httpx.Respo
         }
         with httpx.Client(timeout=PROBE_TIMEOUT_SEC) as client:
             return client.post(url, headers=headers, json=payload)
+
+    if provider == "ollama":
+        # Probe the exact native contract used by generation. Do not attach a
+        # cloud/server key to a local runtime, even if the caller supplied one.
+        url = normalize_ollama_base_url(base_url) + "/api/chat"
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": "Reply only OK."}],
+            "stream": False,
+            "think": False,
+            "options": {"num_predict": 8},
+        }
+        with httpx.Client(timeout=PROBE_TIMEOUT_SEC) as client:
+            return client.post(url, headers={"Content-Type": "application/json"}, json=payload)
 
     url = base_url.rstrip("/") + "/chat/completions"
     headers = {"Content-Type": "application/json"}
@@ -219,7 +235,17 @@ def probe(payload: dict[str, Any]) -> ProbeResult:
             error=type(exc).__name__,
         )
     else:
-        if response.is_success:
+        ollama_response_error = ""
+        if response.is_success and provider == "ollama":
+            try:
+                data = response.json()
+                if not isinstance(data, dict):
+                    raise RuntimeError("Ollama returned an invalid response shape")
+                extract_ollama_text(data)
+            except (ValueError, RuntimeError) as exc:
+                ollama_response_error = str(exc)[:240]
+
+        if response.is_success and not ollama_response_error:
             result = ProbeResult(
                 ok=True,
                 provider=provider,
@@ -229,6 +255,18 @@ def probe(payload: dict[str, Any]) -> ProbeResult:
                 status="passed",
                 http_status=response.status_code,
                 cached=False,
+            )
+        elif ollama_response_error:
+            result = ProbeResult(
+                ok=False,
+                provider=provider,
+                model=model,
+                backend_supported=True,
+                provider_protocol=protocol,
+                status="invalid_model_output",
+                http_status=response.status_code,
+                cached=False,
+                error=ollama_response_error,
             )
         else:
             result = ProbeResult(

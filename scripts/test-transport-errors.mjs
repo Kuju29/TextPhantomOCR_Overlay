@@ -1,6 +1,19 @@
 import assert from "node:assert/strict";
 globalThis.chrome = { storage: { local: { get: (_k, cb) => cb({}), set: (_v, cb) => cb?.() } } };
-const { fetchLensRawViaRest, groupParagraphsViaRest, translateViaSyncRest } = await import("../src/background/transport.js");
+const { fetchLensRawViaRest, groupParagraphsViaRest, translateViaSyncRest, pollFailure } = await import("../src/background/transport.js");
+
+const polled = pollFailure({ error: {
+  schema: "tp.error/1", code: "provider_auth_failed", userMessage: "safe",
+  origin: "upstream_ai", stage: "provider_request",
+} }, "error");
+assert.equal(polled.code, "provider_auth_failed", "polling must not stringify structured API errors");
+assert.equal(pollFailure({ result: "", error: polled }, "error"), polled,
+  "an empty result must not hide the structured error field");
+assert.equal(pollFailure({}, "error").code, "API_BAD_RESPONSE",
+  "a malformed terminal poll response needs an explicit reportable code");
+assert.equal(pollFailure({}, "aborted").code, "cancelled");
+assert.equal(pollFailure({ error: { schema: "tp.error/1", code: "UNKNOWN", stage: "ai" } }, "error").code, "UNKNOWN",
+  "transport preserves the envelope; the public boundary replaces placeholder codes safely");
 
 globalThis.fetch = async () => new Response("<!doctype html><h1>Bad Gateway</h1>", {
   status: 502, headers: { "content-type": "text/html" },

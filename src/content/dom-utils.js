@@ -207,6 +207,7 @@
     }, Math.max(800, Number(ms) || 0));
   }
 
+
   // Dispatches a textphantom:* CustomEvent that the local viewer listens for.
   function emitViewerEvent(type, detail) {
     try {

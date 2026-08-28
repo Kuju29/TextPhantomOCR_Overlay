@@ -138,7 +138,7 @@
               <input
                 type="text"
                 id="ai-base-url"
-                placeholder="http://localhost:11434/v1"
+                placeholder="http://localhost:11434"
               />
               <div class="hint">Your local AI server's OpenAI-compatible endpoint. No API key needed. For Custom Local Adapter this field is read-only—edit <code>baseUrl</code> in the JSON below.</div>
               <button type="button" id="ai-local-test" class="secondary-btn">Connect &amp; load models</button>
@@ -168,23 +168,41 @@
               <div class="hint" id="ai-local-model-hint" style="display: none">The URL chooses the Local AI server; the Model chooses which installed model on that server translates the text. Connect to load the list, or type the exact ID if the runtime cannot list models.</div>
               <div id="ai-local-unlimited-wrap" style="display: none; margin-top: 10px">
                 <label class="label-row" style="cursor: pointer">
-                  <span>Remove all pacing for this local AI</span>
+                  <span>Remove time/RPM delays for this local AI</span>
                   <input type="checkbox" id="ai-local-unlimited" />
                 </label>
                 <div class="hint">
-                  Off by default. This runtime is on your machine, so there is no quota to respect and no other user to share with: turning this on sends every page at once, with no rate gate and no concurrency window on either side.<br />
-                  Your machine is still the limit. Most local runtimes answer one request at a time anyway, so a large chapter will queue inside the model server instead—and on a small GPU it can run out of memory. Turn it off again if pages start failing.
+                  On by default. This removes delays between requests only. The capacity setting below still limits simultaneous work so a chapter cannot flood RAM/VRAM.
                 </div>
+              </div>
+              <div id="ai-local-capacity-wrap" style="display: none; margin-top: 10px">
+                <label for="ai-local-capacity-mode">Local AI capacity</label>
+                <select id="ai-local-capacity-mode" aria-label="Local AI capacity mode">
+                  <option value="auto" selected>Auto (recommended)</option>
+                  <option value="safe">Safe — 1 request</option>
+                  <option value="manual">Manual</option>
+                </select>
+                <div id="ai-local-manual-concurrency-wrap" style="display: none; margin-top: 6px">
+                  <label for="ai-local-manual-concurrency">Simultaneous requests</label>
+                  <select id="ai-local-manual-concurrency" aria-label="Local AI simultaneous requests">
+                    <option value="1">1</option>
+                    <option value="2">2</option>
+                    <option value="3">3</option>
+                    <option value="4">4</option>
+                  </select>
+                </div>
+                <div class="hint" id="ai-local-capacity-hint">Auto starts safely and adapts separately for each runtime and model. Large or CPU/GPU-split models normally stay at 1.</div>
               </div>
             </div>
 
             <div class="field" id="ai-thinking-wrap" style="display: none">
               <label for="ai-thinking">AI thinking</label>
               <select id="ai-thinking" aria-label="AI thinking mode">
-                <option value="default" selected>Normal thinking (model default)</option>
-                <option value="off">Thinking off (much faster)</option>
+                <option value="default">Runtime/model default</option>
+                <option value="off" selected>Thinking off (recommended for translation)</option>
+                <option value="on">Thinking on</option>
               </select>
-              <div class="hint">Gemini only: turning thinking off makes translation several times faster with nearly identical quality (pro models cannot disable it).</div>
+              <div class="hint" id="ai-thinking-hint"></div>
             </div>
 
             <div class="field" id="ai-prompt-wrap" style="display: none">
@@ -296,7 +314,7 @@
                 <strong>Burst:</strong> when manual pacing is enabled, this is also the maximum AI concurrency for this key (and the token-bucket burst).
                 Setting a number higher than the provider really allows cannot increase throughput; the provider will return backpressure and the lane will reduce concurrency.
               </div>
-              <div class="hint">Off is the recommended default: TextPhantom does not impose an RPM cap; it fills real server capacity quickly, learns per-key provider capacity, and backs off only from real provider feedback.</div>
+              <div class="hint">On by default at 30 requests/minute with burst 4 to reduce accidental paid-token spikes. Adjust it to your provider plan.</div>
             </div>
           </section>
         </section>
@@ -345,7 +363,7 @@
                 <input type="checkbox" id="api-local-unlimited" />
               </label>
               <div class="hint">
-                Off by default. Shown because this URL is on your machine or your own network. The API's admission gates exist to share one server between several people; a local API has one. Turning this on lets Lens uploads and AI calls skip those gates.<br />
+                On by default and only applied when this URL is on your machine or private network. It removes server time/RPM admission delays; browser concurrency and the server's CPU/GPU safety bounds remain active.<br />
                 Two things stay paced on purpose: <strong>Google Lens</strong> is still a remote service, so the extension keeps spacing uploads to it, and <strong>ONNX grouping</strong> is bound by your real CPU cores, where more parallelism is slower, not faster.
               </div>
             </div>

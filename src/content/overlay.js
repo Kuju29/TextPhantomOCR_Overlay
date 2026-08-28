@@ -966,7 +966,7 @@
     }
     if (msg.tpTrace) TP.setTrace?.(msg.tpTrace);
     const error = msg?.error && msg.error.schema === "tp.error/1" ? msg.error : null;
-    const text = error ? `${error.userMessage} · ${error.code}` : String(msg?.message || "Unknown error");
+    const text = error ? `${error.userMessage} · ${error.code}` : String(msg?.message || "PROCESSING_FAILED");
     // Pages that drive translation themselves (the local viewer, the Auto
     // translate tab) have no context menu to watch and no toast in view.
     // Without this event they would sit on "Translating…" forever whenever a
@@ -974,7 +974,8 @@
     TP.emitViewerEvent("textphantom:image-error", { original: msg?.original, message: text, error });
     setTimeout(() => {
       if (TP.shouldShowReplaceError(msg?.original)) {
-        TP.markImageError(msg?.original, error || text);
+        const badged = TP.markImageError(msg?.original, error || text);
+        if (!badged) TP.showToast?.(`Not translated: ${text}`, 12000);
       }
     }, 1200);
     return { ok: true };

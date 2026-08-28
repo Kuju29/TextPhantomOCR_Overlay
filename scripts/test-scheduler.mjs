@@ -1,9 +1,12 @@
 // Guards the AI lane's AIMD window, the server-reported ceiling, and unlimited mode.
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 
 const {
   acquire,
   releaseSuccess,
+  releaseReplay,
+  releaseLocalFailure,
   releaseRejected,
   releaseDeferred,
   releaseFailed,
@@ -11,10 +14,27 @@ const {
   setLaneCapacityHint,
   setLaneSlotCeiling,
   setLaneUnlimited,
+  configureLocalCapacityForPayload,
   laneKeyFor,
   describe,
   reset,
+  restoredWindowForPolicy,
 } = await import("../src/background/scheduler.js");
+
+const jobsSource = await readFile(new URL("../src/background/jobs.js", import.meta.url), "utf8");
+assert.match(jobsSource,
+  /const requestLane = laneKeyFor\(outbound\);[\s\S]{0,400}configureLocalCapacityForPayload\(outbound\);[\s\S]{0,900}await acquire\(requestLane/,
+  "API-engine path must configure local capacity before its first acquire");
+assert.match(jobsSource,
+  /if \(gated\) releaseGated\(requestLane,[\s\S]{0,180}else if \(localRequest\) releaseLocalFailure\(requestLane, e, retryAfterMs\)/,
+  "API-local safe-deferred catch must classify by generation evidence");
+assert.match(jobsSource,
+  /if \(slotHeld\) \{\s*if \(localRequest\) releaseLocalFailure\(requestLane, e, retryAfterMs\);\s*else if \(isBusy\) releaseRejected/,
+  "API-local terminal catch must not reject from HTTP status alone");
+
+const { localCapacityConfig, isLocalCapacityFailure } = await import(
+  "../src/background/local-capacity.js"
+);
 
 // --- lane keys -------------------------------------------------------------
 {
@@ -45,6 +65,97 @@ const {
     "lens:direct",
     "non-AI work belongs to the lens lane",
   );
+}
+
+// --- local capacity is per runtime endpoint + model and starts safely -------
+reset();
+{
+  const local = (model, limits = {}, base_url = "http://localhost:11434") => ({
+    mode: "lens_text", source: "ai",
+    ai: { provider: "ollama", model, base_url },
+    limits,
+  });
+  const qwen = local("qwen3.8:27b", { aiUnlimited: true, aiLocalCapacityMode: "auto" });
+  const key = laneKeyFor(qwen);
+  assert.ok(key.startsWith("ai-local:ollama:"), `unexpected local lane ${key}`);
+  assert.notEqual(key, laneKeyFor(local("qwen3.5:12b")), "models must not share learning");
+  assert.notEqual(key, laneKeyFor(local("qwen3.8:27b", {}, "http://192.168.1.9:11434")),
+    "runtime endpoints must not share learning");
+  configureLocalCapacityForPayload(qwen);
+  assert.equal(describe(key).effectiveMax, 1, "unknown Auto capacity must stay at one");
+  assert.equal(describe(key).unlimited, false, "remove time pacing must not remove capacity");
+
+  reset();
+  const evidenced = local("small", {
+    capacityMode: "auto", localCapability: { recommendedMax: 2 },
+  });
+  const evidenceKey = laneKeyFor(evidenced);
+  configureLocalCapacityForPayload(evidenced);
+  assert.equal(Math.floor(describe(evidenceKey).window), 1, "Auto must begin at one");
+  assert.equal(describe(evidenceKey).effectiveMax, 2, "runtime evidence may permit conservative growth");
+  await acquire(evidenceKey);
+  releaseSuccess(evidenceKey, 1000);
+  assert.ok(describe(evidenceKey).window > 1, "a real successful generation may grow evidenced Auto");
+  const learned = describe(evidenceKey).window;
+  configureLocalCapacityForPayload(evidenced);
+  assert.equal(describe(evidenceKey).window, learned,
+    "the next image must not reset unchanged Auto learning to one");
+
+  reset();
+  const manual = local("small", { capacityMode: "manual", manualConcurrency: 99 });
+  const manualKey = laneKeyFor(manual);
+  configureLocalCapacityForPayload(manual);
+  assert.equal(describe(manualKey).effectiveMax, 4, "Manual must clamp to the supported 1-4 range");
+  assert.equal(Math.floor(describe(manualKey).window), 4);
+
+  reset();
+  const safe = local("small", {
+    aiLocalCapacityMode: "safe", aiLocalCapabilityConcurrency: 4,
+  });
+  configureLocalCapacityForPayload(safe);
+  assert.equal(describe(laneKeyFor(safe)).effectiveMax, 1, "Safe is fixed at one");
+
+  assert.equal(localCapacityConfig(local("x", { aiLocalCapacityMode: "bogus" })).mode, "auto");
+  assert.equal(isLocalCapacityFailure({ generationAttempts: 0, status: 503 }), false,
+    "pre-generation 503 is not model capacity evidence");
+  assert.equal(isLocalCapacityFailure({ generationAttempts: 1, code: "local_timeout" }), true,
+    "a real generation timeout is model capacity evidence");
+
+  assert.equal(restoredWindowForPolicy("auto", 2, 2), 2,
+    "evidenced Auto restores its learned safe window after worker restart");
+  assert.equal(restoredWindowForPolicy("auto", 1, 2), 1,
+    "unknown Auto clamps stale learning to one");
+  assert.equal(restoredWindowForPolicy("safe", 1, 2), 1,
+    "Safe never borrows an Auto window");
+
+  // evidenceKey was reset above, so create a fresh evidenced lane for replay.
+  reset();
+  configureLocalCapacityForPayload(evidenced);
+  const replayKey = laneKeyFor(evidenced);
+  await acquire(replayKey);
+  const replayWindow = describe(replayKey).window;
+  releaseReplay(replayKey);
+  assert.equal(describe(replayKey).window, replayWindow,
+    "an idempotent replay must not grow Auto");
+
+  reset();
+  configureLocalCapacityForPayload(evidenced);
+  const failureKey = laneKeyFor(evidenced);
+  await acquire(failureKey);
+  releaseSuccess(failureKey, 1000);
+  await acquire(failureKey);
+  const beforeAdmission503 = describe(failureKey).window;
+  assert.equal(releaseLocalFailure(failureKey, {
+    status: 503, generationAttempts: 0, code: "server_busy",
+  }), "deferred");
+  assert.equal(describe(failureKey).window, beforeAdmission503,
+    "pre-generation local 503 must not narrow capacity");
+  await acquire(failureKey);
+  assert.equal(releaseLocalFailure(failureKey, {
+    status: 503, generationAttempts: 1, code: "local_oom",
+  }), "rejected");
+  assert.ok(describe(failureKey).window < beforeAdmission503,
+    "post-generation local OOM/503 must narrow capacity");
 }
 
 // --- the AI window must actually grow --------------------------------------

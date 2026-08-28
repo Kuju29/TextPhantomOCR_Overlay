@@ -7,7 +7,7 @@ from typing import Any
 
 _TTL = 30 * 60.0
 _lock = threading.Lock()
-_batches: dict[str, float] = {}
+_batches: dict[tuple[str, str], float] = {}
 
 
 def batch_id_of(payload: dict[str, Any]) -> str:
@@ -22,7 +22,16 @@ def batch_id_of(payload: dict[str, Any]) -> str:
     ).strip()
 
 
-def mark_batch(batch_id: str) -> None:
+def scope_of(payload: dict[str, Any]) -> str:
+    """Browser-owner scope; empty retains compatibility for legacy clients."""
+    context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+    return str(
+        payload.get("tp_tab_session") or payload.get("session")
+        or context.get("tp_tab_session") or ""
+    ).strip()[:128]
+
+
+def mark_batch(batch_id: str, scope: str = "") -> None:
     value = str(batch_id or "").strip()
     if not value:
         return
@@ -31,7 +40,7 @@ def mark_batch(batch_id: str) -> None:
         for key in list(_batches):
             if now - _batches[key] > _TTL:
                 _batches.pop(key, None)
-        _batches[value] = now
+        _batches[(str(scope or ""), value)] = now
 
 
 def is_cancelled(payload: dict[str, Any]) -> bool:
@@ -39,5 +48,5 @@ def is_cancelled(payload: dict[str, Any]) -> bool:
     if not value:
         return False
     with _lock:
-        at = _batches.get(value)
+        at = _batches.get((scope_of(payload), value))
     return at is not None and time.monotonic() - at <= _TTL

@@ -41,8 +41,33 @@ const { readFullSettings } = await import("../src/shared/settings.js");
 
   stored = {};
   const defaults = await readFullSettings();
-  assert.equal(defaults.aiLocalUnlimited, false, "unlimited local AI is opt-in");
-  assert.equal(defaults.apiLocalUnlimited, false, "unlimited local API is opt-in");
+  assert.equal(defaults.aiLocalUnlimited, true, "local AI removes time pacing by default");
+  assert.equal(defaults.apiLocalUnlimited, true, "local API removes time pacing by default");
+  assert.equal(defaults.aiLocalCapacityMode, "auto", "new and migrated Local AI defaults to bounded Auto capacity");
+  assert.equal(defaults.aiLocalManualConcurrency, 1, "manual Local AI capacity starts safely at one");
+
+  stored = { aiLocalUnlimited: true };
+  const legacyUnlimited = await readFullSettings();
+  assert.equal(legacyUnlimited.aiLocalUnlimited, true, "an explicit legacy remove-delay choice is preserved");
+  assert.equal(legacyUnlimited.aiLocalCapacityMode, "auto", "legacy unlimited pacing never becomes unlimited concurrency");
+
+  stored = { aiLocalCapacityMode: "manual", aiLocalManualConcurrency: 99 };
+  const boundedManual = await readFullSettings();
+  assert.equal(boundedManual.aiLocalCapacityMode, "manual");
+  assert.equal(boundedManual.aiLocalManualConcurrency, 4, "manual capacity is clamped to the UI/runtime ceiling");
+
+  stored = { rateLimitEnabled: true, rateRpm: 0, rateBurst: 0 };
+  const migratedCap = await readFullSettings();
+  assert.equal(migratedCap.rateLimitEnabled, true);
+  assert.equal(migratedCap.rateRpm, 30, "enabled legacy zero RPM must use the visible safe default");
+  assert.equal(migratedCap.rateBurst, 4, "enabled legacy zero burst must use the visible safe default");
+  assert.equal(migratedCap.rateProfile, "custom");
+
+  stored = { rateLimitEnabled: false, rateRpm: 0, rateBurst: 0 };
+  const explicitOff = await readFullSettings();
+  assert.equal(explicitOff.rateLimitEnabled, false, "an explicit off switch must remain off");
+  assert.equal(explicitOff.rateRpm, 0);
+  assert.equal(explicitOff.rateBurst, 0);
 }
 
 // --- the popup writes the value the settings layer reads --------------------

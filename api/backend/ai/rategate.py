@@ -45,6 +45,7 @@ import math
 import os
 import tempfile
 import time
+from collections.abc import Callable
 from collections import OrderedDict, deque
 from pathlib import Path
 
@@ -63,6 +64,10 @@ class RateGateTimeout(RateGateError):
 
 class RateGateRejected(RateGateError):
     """The bucket already has too many waiters — shed load immediately."""
+
+
+class RateGateCancelled(RateGateError):
+    """The owning browser batch was cancelled while waiting for a token."""
 
 
 def _env_float(name: str, default: float) -> float:
@@ -366,6 +371,7 @@ class RateGate:
         max_waiters: int,
         rpm_override: float | None = None,
         burst_override: int | None = None,
+        cancel_check: Callable[[], bool] | None = None,
     ) -> None:
         """Block until this request may call the provider.
 
@@ -426,12 +432,26 @@ class RateGate:
         self._pump(bucket)  # may grant right away if a token is free
 
         try:
-            await asyncio.wait_for(future, timeout=max(0.1, deadline_sec))
-        except asyncio.TimeoutError as exc:
-            self._drop(bucket, job_id)
-            raise RateGateTimeout(
-                f"waited {deadline_sec:.0f}s without a slot for {provider}"
-            ) from exc
+            # Do not sleep for the whole (commonly 75 s) pacing deadline. A
+            # browser can cancel the batch through another HTTP request while
+            # this coroutine is waiting, so sample that shared cancellation
+            # state promptly without consuming a thread or a provider token.
+            deadline = loop.time() + max(0.1, deadline_sec)
+            while not future.done():
+                if cancel_check is not None and cancel_check():
+                    self._drop(bucket, job_id)
+                    raise RateGateCancelled(
+                        f"rate-gate wait cancelled for {provider}"
+                    )
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    self._drop(bucket, job_id)
+                    raise RateGateTimeout(
+                        f"waited {deadline_sec:.0f}s without a slot for {provider}"
+                    )
+                await asyncio.wait({future}, timeout=min(0.10, remaining))
+            # Propagate external task/future cancellation, if any.
+            await future
         except asyncio.CancelledError:
             # Either the caller's task was cancelled or cancel_jobs() cancelled
             # our future — release our place and consume no token.
@@ -685,6 +705,9 @@ class RateGate:
                 if not dq:
                     bucket.sessions.pop(session, None)
                 break
+        if not bucket.sessions and bucket.timer is not None:
+            bucket.timer.cancel()
+            bucket.timer = None
 
 
 # Process-wide singleton.

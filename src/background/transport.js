@@ -64,6 +64,31 @@ let handlers = {
   onStale: () => {},
 };
 
+// Preserve a structured server error all the way to the image badge. Polling
+// used to String(object) here, turning useful tp.error data into
+// "[object Object]" and ultimately an UNKNOWN badge.
+export function pollFailure(record, status = "") {
+  if (String(status) === "aborted") {
+    return { code: "cancelled", message: "cancelled", origin: "api", stage: "poll" };
+  }
+  const raw = [record?.result, record?.error, record?.message].find((value) => (
+    value != null && (typeof value === "object" || String(value).trim())
+  ));
+  if (raw && typeof raw === "object") {
+    if (raw.schema === "tp.error/1" || raw.tpError) return raw;
+    if (raw.detail && typeof raw.detail === "object") return raw.detail;
+    if (raw.error && typeof raw.error === "object") return raw.error;
+    return raw;
+  }
+  if (String(raw || "").trim()) return String(raw).trim();
+  return {
+    code: "API_BAD_RESPONSE",
+    message: "API job ended without structured error detail",
+    origin: "api",
+    stage: "response_validation",
+  };
+}
+
 // Registers the callbacks invoked when a result, error or status arrives.
 export function setHandlers(next) {
   handlers = { ...handlers, ...next };
@@ -458,12 +483,16 @@ function pollDelay(data, elapsedMs) {
 }
 
 // Fetches one job's status document, aborting the request after the long-poll timeout.
-async function fetchJobStatus(url) {
+async function fetchJobStatus(url, session = "") {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), LONG_POLL_FETCH_TIMEOUT_MS);
   try {
     let res;
-    try { res = await fetch(url, { cache: "no-store", signal: ctrl.signal }); }
+    try { res = await fetch(url, {
+      cache: "no-store",
+      signal: ctrl.signal,
+      headers: limitHeaders(url, false, session ? { "X-TP-Tab-Session": session } : {}),
+    }); }
     catch (error) {
       throw networkFailure(error, "poll", { timeout: error?.name === "AbortError" });
     }
@@ -514,7 +543,7 @@ const batchWaiters = new Map();
 let batchLoopRunning = false;
 
 // Polls `POST /translate/poll` for the status of many jobs at once.
-async function fetchBatchPoll(base, ids) {
+async function fetchBatchPoll(base, ids, session = "") {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), LONG_POLL_FETCH_TIMEOUT_MS);
   try {
@@ -530,6 +559,7 @@ async function fetchBatchPoll(base, ids) {
         ids,
         wait: BATCH_POLL_WAIT_SEC,
         max_results: BATCH_POLL_MAX_INLINE,
+        tp_tab_session: session,
       }),
     }); } catch (error) {
       throw networkFailure(error, "poll", { timeout: error?.name === "AbortError" });
@@ -556,9 +586,9 @@ function settleBatchWaiter(jobId, error = null) {
   else w.resolve();
 }
 
-// Drops waiters whose job is gone or stale and returns the live ids grouped by API base.
+// Drops waiters whose job is gone or stale and returns live ids grouped by API base + owner session.
 function pruneBatchWaiters() {
-  const byBase = new Map();
+  const byOwner = new Map();
   for (const [jobId, w] of Array.from(batchWaiters.entries())) {
     const ctx = pendingByJob.get(jobId);
     if (!ctx) {
@@ -571,15 +601,18 @@ function pruneBatchWaiters() {
       settleBatchWaiter(jobId);
       continue;
     }
-    const list = byBase.get(w.base) || [];
+    const session = String(w.session || ctx.sessionId || "");
+    const key = `${w.base}\u0000${session}`;
+    const group = byOwner.get(key) || { base: w.base, session, ids: [] };
+    const list = group.ids;
     list.push(jobId);
-    byBase.set(w.base, list);
+    byOwner.set(key, group);
   }
-  return byBase;
+  return byOwner;
 }
 
 // Dispatches one job record from a batch-poll response and returns whether the job reached a terminal state.
-async function dispatchBatchRecord(base, rec) {
+async function dispatchBatchRecord(base, rec, session = "") {
   const jobId = String(rec?.id || "");
   if (!jobId || !batchWaiters.has(jobId)) return false;
   if (!pendingByJob.get(jobId)) {
@@ -594,7 +627,7 @@ async function dispatchBatchRecord(base, rec) {
       const url =
         base.replace(/\/+$/, "") + API_PATHS.TRANSLATE + "/" + encodeURIComponent(jobId) + "?wait=0";
       try {
-        const single = await fetchJobStatus(url);
+        const single = await fetchJobStatus(url, session);
         result = single?.result;
       } catch (e) {
         log.debug?.("result fetch retry later", { jobId, err: e?.message || String(e) });
@@ -608,10 +641,7 @@ async function dispatchBatchRecord(base, rec) {
   }
 
   if (status === "error" || status === "aborted") {
-    handlers.onError(
-      jobId,
-      String(rec?.result || rec?.error || (status === "aborted" ? "cancelled" : "Unknown error")),
-    );
+    handlers.onError(jobId, pollFailure(rec, status));
     settleBatchWaiter(jobId);
     return true;
   }
@@ -627,14 +657,14 @@ async function runBatchPollLoop() {
   let lastContact = Date.now();
   try {
     while (batchWaiters.size) {
-      const byBase = pruneBatchWaiters();
-      if (!byBase.size) break;
+      const byOwner = pruneBatchWaiters();
+      if (!byOwner.size) break;
 
       let sawTerminal = false;
-      for (const [base, ids] of byBase.entries()) {
+      for (const { base, session, ids } of byOwner.values()) {
         let data;
         try {
-          data = await fetchBatchPoll(base, ids.slice(0, BATCH_POLL_MAX_IDS));
+          data = await fetchBatchPoll(base, ids.slice(0, BATCH_POLL_MAX_IDS), session);
         } catch (e) {
           if (e?.status === 404 || e?.status === 405) {
             log.info("batch poll unsupported; falling back to per-job long-poll");
@@ -653,7 +683,7 @@ async function runBatchPollLoop() {
         batchPollSupported = true;
         for (const rec of Array.isArray(data?.jobs) ? data.jobs : []) {
           try {
-            if (await dispatchBatchRecord(base, rec)) sawTerminal = true;
+            if (await dispatchBatchRecord(base, rec, session)) sawTerminal = true;
           } catch (e) {
             log.warn("batch dispatch failed", { id: rec?.id, err: e?.message || String(e) });
           }
@@ -672,7 +702,7 @@ function switchBatchWaitersToLegacy() {
   batchPollSupported = false;
   for (const [jobId, w] of Array.from(batchWaiters.entries())) {
     batchWaiters.delete(jobId);
-    pollJobViaRestLegacy(w.base, jobId).then(w.resolve, w.reject);
+    pollJobViaRestLegacy(w.base, jobId, { session: w.session }).then(w.resolve, w.reject);
   }
 }
 
@@ -680,13 +710,13 @@ function switchBatchWaitersToLegacy() {
 export function pollJobViaRest(base, jobId, opts = {}) {
   if (batchPollSupported === false) return pollJobViaRestLegacy(base, jobId, opts);
   return new Promise((resolve, reject) => {
-    batchWaiters.set(String(jobId), { base, resolve, reject });
+    batchWaiters.set(String(jobId), { base, session: String(opts.session || ""), resolve, reject });
     void runBatchPollLoop();
   });
 }
 
 // Long-polls `GET /translate/{id}` per job until it finishes, for servers without `/translate/poll`.
-async function pollJobViaRestLegacy(base, jobId, { timeoutMs = 0 } = {}) {
+async function pollJobViaRestLegacy(base, jobId, { timeoutMs = 0, session = "" } = {}) {
   const start = Date.now();
   const urlBase = base.replace(/\/+$/, "") + API_PATHS.TRANSLATE + "/" + encodeURIComponent(jobId);
   let lastContact = Date.now();
@@ -711,7 +741,7 @@ async function pollJobViaRestLegacy(base, jobId, { timeoutMs = 0 } = {}) {
     await acquirePollSlot();
     try {
       if (!pendingByJob.get(jobId)) return;
-      data = await fetchJobStatus(url);
+      data = await fetchJobStatus(url, session || String(ctx.sessionId || ""));
     } catch (e) {
       log.debug?.("poll retry", { jobId, err: e?.message || String(e) });
       await new Promise((r) => setTimeout(r, POLL_RETRY_DELAY_MS + Math.random() * 1000));
@@ -728,8 +758,8 @@ async function pollJobViaRestLegacy(base, jobId, { timeoutMs = 0 } = {}) {
       await handlers.onResult(jobId, data.result);
       return;
     }
-    if (data?.status === "error") {
-      handlers.onError(jobId, String(data?.result || data?.error || data?.message || "Unknown error"));
+    if (data?.status === "error" || data?.status === "aborted") {
+      handlers.onError(jobId, pollFailure(data, data?.status));
       return;
     }
     await new Promise((r) => setTimeout(r, pollDelay(data, Date.now() - start)));

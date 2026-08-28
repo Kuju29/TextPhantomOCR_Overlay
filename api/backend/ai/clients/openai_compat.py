@@ -18,6 +18,7 @@ import httpx
 
 from backend.ai import config as ai_config
 from backend.ai.clients.base import ChatResult
+from backend.ai.clients.provider_error import safe_http_error
 
 
 def _is_official_openai(base_url: str) -> bool:
@@ -171,6 +172,4 @@ def generate(
         r.raise_for_status()
         return ChatResult(text=_extract_text(r.json()), used_model=model)
     except httpx.HTTPStatusError as e:
-        raise RuntimeError(
-            f"AI HTTP {r.status_code} (model={model}, attempts=1)"
-        ) from e
+        raise safe_http_error("AI", r, model) from e

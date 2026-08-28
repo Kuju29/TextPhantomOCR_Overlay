@@ -25,6 +25,7 @@ from backend.ai import markers, parsing, prompts
 from backend.ai.errors import ModelOutputContractError
 from backend.ai.clients import anthropic as anthropic_client
 from backend.ai.clients import gemini as gemini_client
+from backend.ai.clients import ollama as ollama_client
 from backend.ai import throttle
 from backend.ai.clients import openai_compat
 from backend.ai.providers import (
@@ -73,8 +74,8 @@ class AiConfig:
     send_image: bool | str = False
     image_b64: str = ""
     image_mime: str = "image/jpeg"
-    # Reasoning control (currently Gemini only): "default" lets the model
-    # think normally; "off" minimises thinking for the fastest answers.
+    # Reasoning control: "default" lets the model think normally; "off"
+    # minimises Gemini thinking and sends native ``think: false`` to Ollama.
     thinking: str = "default"
     # --- Frozen series context (read-then-translate batches) ---------------
     # ⛔ DORMANT-FED — this group of fields (series_state / speakers / prev_context /
@@ -187,9 +188,12 @@ def translate(
     if is_local_provider(provider):
         if str(ai.model or "auto").strip().lower() in ("", "auto"):
             try:
-                installed = openai_compat_models_status(
-                    "", base_url, provider=provider,
-                )["models"]
+                if provider == "ollama":
+                    installed = ollama_client.list_models(base_url)
+                else:
+                    installed = openai_compat_models_status(
+                        "", base_url, provider=provider,
+                    )["models"]
             except Exception:
                 installed = []
             if installed:
@@ -240,6 +244,13 @@ def translate(
             api_key, model, system_text, user_parts,
             image_b64=image_b64, image_mime=image_mime,
             system_static=system_static, system_dynamic=system_dynamic,
+            response_schema=response_schema,
+        )
+    elif provider == "ollama":
+        result = ollama_client.generate(
+            base_url, model, system_text, user_parts,
+            image_b64=image_b64, image_mime=image_mime,
+            thinking=str(getattr(ai, "thinking", "") or ""),
             response_schema=response_schema,
         )
     elif is_hf_provider(provider, base_url):

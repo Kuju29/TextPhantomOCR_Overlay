@@ -25,9 +25,10 @@ PROVIDER_DEFAULTS: Final[dict[str, ProviderDefaults]] = {
     "together":    {"model": "openai/gpt-oss-20b",          "base_url": "https://api.together.xyz/v1"},
     "deepseek":    {"model": "deepseek-v4-flash",           "base_url": "https://api.deepseek.com/v1"},
     "anthropic":   {"model": "claude-sonnet-5",             "base_url": "https://api.anthropic.com"},
-    # Local, self-hosted LLM servers that speak the OpenAI /v1 dialect.
+    # Ollama uses its native /api/chat + /api/tags contract. Other local
+    # runtimes below keep their OpenAI-compatible /v1 contract.
     # No API key required — base_url points at the user's own machine.
-    "ollama":       {"model": "llama3.1",        "base_url": "http://localhost:11434/v1"},
+    "ollama":       {"model": "llama3.1",        "base_url": "http://localhost:11434"},
     "lmstudio":     {"model": "local-model",     "base_url": "http://localhost:1234/v1"},
     "localai":      {"model": "local-model",     "base_url": "http://localhost:8080/v1"},
     "jan":          {"model": "local-model",     "base_url": "http://localhost:1337/v1"},
@@ -40,7 +41,8 @@ PROVIDER_DEFAULTS: Final[dict[str, ProviderDefaults]] = {
 }
 
 # Providers that run on the user's own machine and need NO API key.
-# All speak the OpenAI-compatible /v1 dialect, so one client handles them all.
+# Ollama is native; the remaining providers speak the OpenAI-compatible /v1
+# dialect. All are keyless self-hosted runtimes.
 LOCAL_PROVIDERS: Final[frozenset[str]] = frozenset({
     "ollama", "lmstudio", "localai", "jan", "textgen",
     "koboldcpp", "vllm", "llamafile", "gpt4all", "llamacpp",
@@ -60,7 +62,7 @@ PROVIDER_PROTOCOLS: Final[dict[str, str]] = {
     "groq": "openai_chat_completions",
     "together": "openai_chat_completions",
     "deepseek": "openai_chat_completions",
-    "ollama": "openai_chat_completions",
+    "ollama": "ollama_native_chat",
     "lmstudio": "openai_chat_completions",
     "localai": "openai_chat_completions",
     "jan": "openai_chat_completions",

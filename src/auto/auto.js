@@ -133,6 +133,13 @@ function setMeta(text) {
   els.meta.textContent = String(text || "");
 }
 
+function belongsToCurrentImage(original) {
+  const key = String(original || "");
+  if (!key) return true; // backward-compatible messages predate target keys
+  return [state.objectUrl, els.image?.src, els.image?.currentSrc, els.image?.dataset?.tpOriginal]
+    .some((value) => String(value || "") === key);
+}
+
 /** Popular languages first, then everything else by name. */
 function orderLanguages(list) {
   const items = (Array.isArray(list) ? list : []).filter(Boolean);
@@ -725,14 +732,15 @@ async function translate({ force = false } = {}) {
 
   if (runId !== state.runId || !settingsEpochGuard.accepts(settingsEpoch)) return;
   if (response?.ok === false) {
-    state.busy = false;
-    els.retranslate.disabled = false;
-    setStatus(`Translation could not start: ${response.error || "unknown error"}`, "bad");
+    onTranslateError({
+      original: els.image.currentSrc || els.image.src || state.objectUrl,
+      message: `Translation could not start: ${response.error || "unknown error"}`,
+    });
   }
 }
 
 function onTranslated(detail, kind) {
-  if (!state.objectUrl) return;
+  if (!state.objectUrl || !belongsToCurrentImage(detail?.original)) return;
   state.busy = false;
   els.retranslate.disabled = false;
   // Image mode reports a swapped picture and carries no result object. Record
@@ -777,6 +785,7 @@ function onTranslated(detail, kind) {
 }
 
 function onTranslateError(detail) {
+  if (!state.objectUrl || !belongsToCurrentImage(detail?.original)) return;
   state.busy = false;
   els.retranslate.disabled = false;
   setStatus(`Not translated: ${detail?.message || "the job ended without an overlay"}`, "bad");

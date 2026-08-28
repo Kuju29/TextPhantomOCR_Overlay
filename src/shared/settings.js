@@ -128,6 +128,7 @@ export async function readFullSettings(options = {}) {
     "localRender",
     "clientBackground",
     "aiThinking",
+    "aiLocalThinking",
     "aiPromptByLang",
     "aiPrompt",
     "relayoutTranslated",
@@ -136,6 +137,9 @@ export async function readFullSettings(options = {}) {
     "rateRpm",
     "rateBurst",
     "aiLocalUnlimited",
+    "aiLocalCapacityMode",
+    "aiLocalManualConcurrency",
+    "aiLocalCapabilityHint",
     "apiLocalUnlimited",
     "engineMode",
   ]);
@@ -239,22 +243,38 @@ export async function readFullSettings(options = {}) {
     clientBackground: true,
     // Reasoning control (Gemini): "default" = think normally, "off" = fastest.
     aiThinking: it.aiThinking === "off" ? "off" : "default",
+    // Kept separate from cloud thinking so enabling/disabling a local model
+    // never silently changes Gemini. New Local AI installs default to off.
+    aiLocalThinking: ["default", "off", "on"].includes(it.aiLocalThinking)
+      ? it.aiLocalThinking
+      : "off",
     aiPrompt,
     // Orientation relayout for the Translated overlay. Default ON.
     relayoutTranslated: readBool(it.relayoutTranslated, DEFAULT_RELAYOUT_TRANSLATED),
     // Optional AI pacing. 0 for rpm/burst = provider-managed; no TextPhantom RPM cap.
     rateLimitEnabled: readBool(it.rateLimitEnabled, DEFAULT_RATE_LIMIT_ENABLED),
-    // Opt-in, default off: pacing only comes off when the user says the runtime
-    // is their own machine, because only they know that.
+    // Local pacing defaults off, while concurrency remains bounded by the
+    // scheduler/runtime. Preserve an explicitly stored false value.
     // "extension" is the current engine; "api" restores the pre-v2 split where
     // the server ran Lens, ONNX, AI and rendering.
     engineMode: it.engineMode === "api" ? "api" : "extension",
-    aiLocalUnlimited: readBool(it.aiLocalUnlimited, false),
-    apiLocalUnlimited: readBool(it.apiLocalUnlimited, false),
+    aiLocalUnlimited: readBool(it.aiLocalUnlimited, true),
+    // Capacity is independent from time/RPM pacing. Legacy "unlimited" only
+    // removed delays and must never turn into unbounded parallel generation.
+    aiLocalCapacityMode: ["auto", "safe", "manual"].includes(it.aiLocalCapacityMode)
+      ? it.aiLocalCapacityMode
+      : "auto",
+    aiLocalManualConcurrency: Math.min(4, Math.max(1, readCount(it.aiLocalManualConcurrency, 1))),
+    aiLocalCapabilityHint: it.aiLocalCapabilityHint && typeof it.aiLocalCapabilityHint === "object"
+      ? it.aiLocalCapabilityHint
+      : null,
+    apiLocalUnlimited: readBool(it.apiLocalUnlimited, true),
     rateProfile: ["auto", "stable", "balanced", "fast", "custom"].includes(it.rateProfile)
       ? it.rateProfile
-      : (Number(it.rateRpm) > 0 || Number(it.rateBurst) > 0 ? "custom" : "auto"),
-    rateRpm: readCount(it.rateRpm, DEFAULT_RATE_RPM),
-    rateBurst: readCount(it.rateBurst, DEFAULT_RATE_BURST),
+      : (readBool(it.rateLimitEnabled, DEFAULT_RATE_LIMIT_ENABLED) ? "custom" : "auto"),
+    rateRpm: readBool(it.rateLimitEnabled, DEFAULT_RATE_LIMIT_ENABLED) && readCount(it.rateRpm, DEFAULT_RATE_RPM) === 0
+      ? DEFAULT_RATE_RPM : readCount(it.rateRpm, DEFAULT_RATE_RPM),
+    rateBurst: readBool(it.rateLimitEnabled, DEFAULT_RATE_LIMIT_ENABLED) && readCount(it.rateBurst, DEFAULT_RATE_BURST) === 0
+      ? DEFAULT_RATE_BURST : readCount(it.rateBurst, DEFAULT_RATE_BURST),
   };
 }

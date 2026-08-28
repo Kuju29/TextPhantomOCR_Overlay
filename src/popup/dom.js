@@ -21,6 +21,7 @@ export const els = {
   aiLocalModelHint: document.getElementById("ai-local-model-hint"),
   aiThinkingWrap: document.getElementById("ai-thinking-wrap"),
   aiThinking: document.getElementById("ai-thinking"),
+  aiThinkingHint: document.getElementById("ai-thinking-hint"),
   aiGroup: document.getElementById("ai-group"),
   aiProvider: document.getElementById("ai-provider"),
   aiProviderWrap: document.getElementById("ai-provider-wrap"),
@@ -40,6 +41,11 @@ export const els = {
   aiRateWrap: document.getElementById("ai-rate-wrap"),
   aiLocalUnlimitedWrap: document.getElementById("ai-local-unlimited-wrap"),
   aiLocalUnlimited: document.getElementById("ai-local-unlimited"),
+  aiLocalCapacityWrap: document.getElementById("ai-local-capacity-wrap"),
+  aiLocalCapacityMode: document.getElementById("ai-local-capacity-mode"),
+  aiLocalManualConcurrencyWrap: document.getElementById("ai-local-manual-concurrency-wrap"),
+  aiLocalManualConcurrency: document.getElementById("ai-local-manual-concurrency"),
+  aiLocalCapacityHint: document.getElementById("ai-local-capacity-hint"),
   apiLocalUnlimitedWrap: document.getElementById("api-local-unlimited-wrap"),
   apiLocalUnlimited: document.getElementById("api-local-unlimited"),
   engineMode: document.getElementById("engine-mode"),
@@ -311,11 +317,36 @@ export function toggleUi({ hasEnvKey }) {
   if (els.aiLocalModelId) els.aiLocalModelId.style.display = showAi && local ? "" : "none";
   if (els.aiLocalModelHint) els.aiLocalModelHint.style.display = showAi && local ? "" : "none";
   if (els.aiLocalUnlimitedWrap) els.aiLocalUnlimitedWrap.style.display = showAi && local ? "" : "none";
-  // This control maps to Gemini's thinkingConfig only. Local/OpenAI-compatible
-  // transports do not consume it, so showing it there would promise an effect
-  // that cannot occur.
+  if (els.aiLocalCapacityWrap) els.aiLocalCapacityWrap.style.display = showAi && local ? "" : "none";
+  if (els.aiLocalManualConcurrencyWrap) {
+    els.aiLocalManualConcurrencyWrap.style.display = showAi && local && els.aiLocalCapacityMode?.value === "manual" ? "" : "none";
+  }
+  // Gemini and native Ollama have known thinking controls. A custom Local
+  // adapter can opt in with an explicit declarative mapping; other compatible
+  // runtimes stay on their own default rather than receiving a guessed field.
   if (els.aiThinkingWrap) {
-    els.aiThinkingWrap.style.display = showAi && canConfigureAi && provider === "gemini" ? "" : "none";
+    els.aiThinkingWrap.style.display = showAi && canConfigureAi && (provider === "gemini" || local) ? "" : "none";
+  }
+  if (els.aiThinking && els.aiThinkingHint) {
+    let supportsLocalControl = provider === "ollama";
+    if (provider === "customlocal") {
+      try {
+        const adapter = JSON.parse(els.aiLocalAdapter?.value || "{}");
+        supportsLocalControl = Boolean(adapter?.thinking?.parameter);
+      } catch { supportsLocalControl = false; }
+    }
+    for (const option of els.aiThinking.options) {
+      option.disabled = (local && !supportsLocalControl && option.value !== "default") ||
+        (!local && option.value === "on");
+    }
+    if (local && !supportsLocalControl) {
+      els.aiThinking.value = "default";
+      els.aiThinkingHint.textContent = "This runtime has no declared thinking control, so TextPhantom leaves its model default unchanged. Custom adapters may declare an explicit mapping.";
+    } else if (local) {
+      els.aiThinkingHint.textContent = "Off is the translation default. Thinking can use more context and time, and some models may return reasoning without a final translation. Turn it on only when the model needs it.";
+    } else {
+      els.aiThinkingHint.textContent = "Gemini: Off is faster and uses fewer thinking tokens. Some Pro models may not allow thinking to be fully disabled.";
+    }
   }
   els.aiPromptWrap.style.display = showAi && canConfigureAi ? "" : "none";
   if (els.aiCharactersWrap) els.aiCharactersWrap.style.display = showAi && canConfigureAi ? "" : "none";

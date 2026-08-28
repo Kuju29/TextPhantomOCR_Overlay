@@ -1,5 +1,6 @@
 // Guards the per-image state machine: legal transitions, terminals, staleness.
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 
 const {
   STATES,
@@ -127,6 +128,75 @@ const ALL = new Set(Object.values(STATES));
   assert.equal(described.itemId, "img-7");
   assert.equal(described.state, STATES.CREATED);
   assert.deepEqual(described.degradations, []);
+}
+
+// --- Lens success followed by a direct-local failure belongs to AI ----------
+{
+  let record = createWorkflow({ workflowId: "w8", itemId: "img-8", request: { source: "ai" } });
+  const move = (to, options = {}) => {
+    const moved = transition(record, to, options);
+    assert.equal(moved.ok, true, `${record.state} -> ${to} must be legal`);
+    record = moved.record;
+  };
+  move(STATES.MEDIA_READY);
+  move(STATES.LENS_REQUESTED, { operation: "lens-direct:w8" });
+  move(STATES.LENS_READY);
+  move(STATES.AI_REQUESTED, { operation: "ai-route:w8" });
+  assert.equal(canTransition(record.state, STATES.LENS_DEGRADED), false,
+    "a local AI throw after Lens success must never be blamed on Lens");
+  move(STATES.AI_DEGRADED, { reason: "local AI returned no text" });
+  move(STATES.FAILED, { reason: "local AI returned no text" });
+  assert.equal(record.degradations.at(-1)?.stage, "ai");
+}
+
+// --- admission backpressure keeps one request in flight until success -------
+{
+  let record = createWorkflow({ workflowId: "w9", itemId: "img-9", request: { engine: "api" } });
+  const move = (to, options = {}) => {
+    const moved = transition(record, to, options);
+    assert.equal(moved.ok, true, `${record.state} -> ${to} must be legal`);
+    record = moved.record;
+  };
+  move(STATES.MEDIA_READY);
+  move(STATES.LENS_REQUESTED, { operation: "sync:w9" });
+  // Two server_busy/provider_rate_limited waits cause no workflow transition;
+  // the eventual response completes the one operation committed above.
+  assert.equal(transition(record, STATES.LENS_REQUESTED, { operation: "sync:w9:retry" }).ok, false,
+    "a retry must not re-enter the same REQUESTED state");
+  move(STATES.LENS_READY);
+  move(STATES.TEXT_READY);
+}
+
+// Guard the orchestration wiring as well as the pure transition table.
+{
+  const jobs = await readFile(new URL("../src/background/jobs.js", import.meta.url), "utf8");
+  assert.match(jobs, /if \(directStage === "ai"\)[\s\S]*?wf\.aiDegraded/,
+    "the direct-local catch must attribute failures to AI");
+  assert.match(jobs, /let serverRequestTracked = false;[\s\S]*?if \(!serverRequestTracked\)/,
+    "sync retries must commit their workflow operation only once");
+  const transient = jobs.slice(
+    jobs.indexOf("if (isBusy && safeDeferred)"),
+    jobs.indexOf("if (slotHeld)", jobs.indexOf("if (isBusy && safeDeferred)") + 30),
+  );
+  assert.doesNotMatch(transient, /wf\.(?:lensRequested|aiRequested|lensDegraded|aiDegraded)/,
+    "transient backpressure must remain in the current REQUESTED state");
+  for (const phase of [
+    "waiting", "downloading", "lens", "grouping", "ai_queued",
+    "ai_generating", "server_processing", "rendering", "done", "error", "cancelled",
+  ]) {
+    assert.match(jobs, new RegExp(`mark(?:Job|Image)Phase\\([^\\n]*["']${phase}["']`),
+      `jobs must report the real ${phase} boundary`);
+  }
+  assert.match(jobs, /markJobPhase\(jobId, "ai_queued"\)[\s\S]*?acquire\(key, signal\)[\s\S]*?markJobPhase\(jobId, "ai_generating"\)/,
+    "AI must say queued before scheduler admission and generating only after admission");
+  assert.match(jobs, /markImagePhase\(batchId, imageKey, "rendering"\)[\s\S]*?enqueueDomInsert/,
+    "rendering must begin before DOM insertion");
+  assert.match(jobs, /markImagePhase\(b\.id, k, "waiting", \{\s*attempt: 2,[\s\S]*?lastError: ""/,
+    "retry pass must reopen terminal errors with a new attempt and clear the stale reason");
+  assert.match(jobs, /discardBatchResults[\s\S]*?markImagePhase\(bid, key, "cancelled"/,
+    "discarding a batch must terminally cancel active per-image phases");
+  assert.match(jobs, /apiEngine && !lensDone[\s\S]*?"server_processing"[\s\S]*?Server processing \(Lens\/AI\)/,
+    "the combined API engine must not pretend its opaque server pipeline is still only in Lens");
 }
 
 console.log("Workflow state test passed: closed state set, terminals absorb, generations invalidate.");

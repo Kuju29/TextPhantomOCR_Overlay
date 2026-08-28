@@ -13,12 +13,17 @@ const WARMUP_TTL_MS = 20 * 60 * 1000;
 const warmupByBase = new Map();
 
 // Last known `/health` result, read by the popup's GET_API_STATUS query.
-export const healthCache = { ok: false, ts: 0 };
+export const healthCache = { ok: false, ts: 0, base: "" };
 
 // Pings `/warmup` for a base URL, throttled to once per WARMUP_TTL_MS.
 export async function warmupApi(base) {
   const b = normalizeUrl(base);
   if (!b) return;
+  if (healthCache.base !== b) {
+    healthCache.ok = false;
+    healthCache.ts = 0;
+    healthCache.base = b;
+  }
   const now = Date.now();
   if (now - (warmupByBase.get(b) || 0) < WARMUP_TTL_MS) return;
   const ctrl = new AbortController();
@@ -34,10 +39,12 @@ export async function warmupApi(base) {
     warmupByBase.set(b, Date.now());
     healthCache.ok = true;
     healthCache.ts = Date.now();
+    healthCache.base = b;
     return true;
   } catch (error) {
     healthCache.ok = false;
     healthCache.ts = Date.now();
+    healthCache.base = b;
     log.warn("API warmup failed", error?.message || String(error));
     return false;
   } finally {

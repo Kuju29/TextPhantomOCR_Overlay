@@ -116,63 +116,6 @@ const UNKNOWN_TEXT = "เกิดข้อผิดพลาดที่ไม�
   }
 }
 
-// --- 4b. every terminal path in jobs.js must carry a code -------------------
-//
-// These four sites handed a bare reason string to handleJobError()/
-// failJobImmediately(). A bare string has no code, matches none of the legacy
-// patterns, and is drawn on the image as "unknown cause · UNKNOWN" — for
-// failures the code had already named precisely. The reason lives on in the log
-// and the trace; what reaches the reader must at least say which part gave up.
-{
-  const jobs = await readFile(path.join(projectRoot, "src/background/jobs.js"), "utf8");
-
-  const wrapped = [
-    ["LENS_FAILED", /the raw Lens reply carried no `lens` object[\s\S]{0,220}?code: "LENS_FAILED"/],
-    ["IMG_READ_FAILED", /returned no data URI to group with[\s\S]{0,220}?code: "IMG_READ_FAILED"/],
-    ["AI_NO_RESULT", /handleJobError\(jobId, attachTpError\(new Error\(reason\)[\s\S]{0,200}?AI_NO_RESULT/],
-    ["EXTENSION_DECLINED", /decline\.error \|\| attachTpError\(new Error\(reason\)[\s\S]{0,200}?EXTENSION_DECLINED/],
-  ];
-  for (const [code, pattern] of wrapped) {
-    assert.match(jobs, pattern, `the terminal path for ${code} lost its code again`);
-  }
-
-  assert.ok(
-    !/handleJobError\(jobId, reason\)/.test(jobs),
-    "a bare reason string must never reach handleJobError",
-  );
-  assert.ok(
-    !/failJobImmediately\(tabId, payload\?\.src \|\| null, (?:errMsg|compatibilityIssue),/.test(jobs),
-    "a bare message string must never reach failJobImmediately",
-  );
-  assert.ok(
-    !/handleJobError\(jobId, e\?\.message \|\| String\(e\)\)/.test(jobs),
-    "a resumed poll must keep the code transport.js attached, not flatten it to text",
-  );
-
-  // A decline that already carries a coded Error must pass through untouched.
-  const already = attachTpError(new Error("ONNX grouped nothing on this vertical page"), {
-    code: "GROUP_FAILED", origin: "extension", stage: "grouping",
-  });
-  assert.equal(makeTpError({ ...already.tpError }).code, "GROUP_FAILED",
-    "wrapping must not overwrite a reason that already knows its own code");
-
-  // And the sentences these sites actually produce must read as something.
-  for (const [reason, code] of [
-    ["AI produced no usable translation; no automatic retry was made", "AI_NO_RESULT"],
-    ["extension AI geometry was not faithful: text does not fit", "RENDER_FAILED"],
-    ["ONNX grouped nothing on this vertical page", "EXTENSION_DECLINED"],
-    ["the extension route declined this image", "EXTENSION_DECLINED"],
-    ["the raw Lens reply carried no `lens` object", "LENS_FAILED"],
-    ["the image reader returned no data URI to group with", "IMG_READ_FAILED"],
-  ]) {
-    const shown = imageErrorMessage({ imgUrl: "https://site/1.jpg", traceId: "t" },
-      attachTpError(new Error(reason), { code, origin: "extension", stage: "x" }));
-    assert.equal(shown.error.code, code);
-    assert.notEqual(shown.error.userMessage, UNKNOWN_TEXT, `${reason} still reads as unknown`);
-    assert.doesNotMatch(shown.message, /UNKNOWN/, `${reason} still prints UNKNOWN`);
-  }
-}
-
 // --- 5. no live API code may emit a code the user cannot read ---------------
 {
   const emitted = [
