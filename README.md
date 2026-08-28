@@ -1,7 +1,5 @@
 [![Website](https://img.shields.io/badge/Website-kuju29.github.io-blue?style=flat-square&logo=github&logoColor=white)](https://kuju29.github.io/)
 
-*Note: *
-
 ![Desktop2026 02 06-08 11 52 01-ezgif com-video-to-gif-converter](https://github.com/user-attachments/assets/43cc9a1e-eb79-46f0-b4a1-08ca9bcd49f5)
 
 # ✨ TextPhantomOCR Overlay 
@@ -17,7 +15,7 @@
 | **[v2.0.2](https://github.com/Kuju29/TextPhantomOCR_Overlay/tree/backup_V2.0.2)** | [![Install Extension](https://img.shields.io/badge/Download%20ZIP%20from-Source%20Code-yellow?logo=github)](https://github.com/Kuju29/TextPhantomOCR_Overlay/archive/refs/tags/backup_V2.0.2.zip) | [![Download API](https://img.shields.io/badge/Download-API%20v2.0.2-blue?logo=github)](https://github.com/Kuju29/TextPhantomOCR_Overlay/releases/tag/v2.0.2) | Manual install |
 | **[v1.0.1](https://github.com/Kuju29/TextPhantomOCR_Overlay/tree/v1.0.1)** | [![Install Extension](https://img.shields.io/badge/Download%20ZIP%20from-Source%20Code-yellow?logo=github)](https://github.com/Kuju29/TextPhantomOCR_Overlay/archive/refs/tags/v1.0.1.zip) | [![Download API](https://img.shields.io/badge/Download-API%20v1.0.1-blue?logo=github)](https://github.com/Kuju29/TextPhantomOCR_Overlay/releases/tag/v1.0.1) | Manual install |
 
-## 🧩 1. Extension Installation
+##  1. Extension Installation
 
 #### **Option – Chrome Web Store**
 1. Install from [Chrome Web Store](https://chromewebstore.google.com/detail/cjbaepobgmickhgebgagklfcfacbbpem?utm_source=item-share-cb).  
@@ -29,64 +27,93 @@
 4. Click **Load unpacked**.  
 5. Select the extracted folder.  
 
-## 🌐 2. Using the API on Hugging Face 
-1. Go to: [https://huggingface.co/spaces/plan291037/TextPhantom-v4.0.0/tree/main](https://huggingface.co/spaces/plan291037/TextPhantom-v4.0.0/tree/main)
-2. Click the **three dots** in the top-right and select **Duplicate this Space**.
-3. The build will start automatically — wait until you see **Running**.
-4. Click the **three dots** again and choose **Embed this Space**.
-5. Copy the link and use it in your API extension.
+##  2. Hugging Face API
+
+Choose one of these **2 options**:
+
+### ☁️ Option 1: Public API
+
+1. Install and open **TextPhantom**.
+2. Click **Refresh API URL**.
+3. **Start translating! 🎉**
+
+> Shared with other users, so it may be slower during high usage.
+
+### 🔒 Option 2: Your Own API
+
+1. Open the [TextPhantom Hugging Face Space](https://huggingface.co/spaces/plan291037/TextPhantom-v4.0.0/tree/main).
+2. Click **⋯ → Duplicate this Space**.
+3. Wait until **Running**.
+4. Click **⋯ → Embed this Space** and copy the URL.
+5. Paste it into **Custom API URL**.
+
+> Free cloned Spaces may stop automatically after being unused for up to 48 hours.
 
 **Notes:**
 * If unused, the Space will shut down automatically within 48 hours.
 * To stop it manually, go to **Settings** and click the small **Pause Space** link.
 * This API works only in **images** mode.
 
-## 🖱️ 3. Getting Started with the Extension
+##  3. Getting Started with the Extension
   - Navigate to the page you want to translate.  
   - **Right-click** anywhere → choose **🔍 Translate...** from the context menu.
 
-## 🤖 Free AI Option (Hugging Face – Google Gemma)
+## 🤖 AI Translation for free
 
-TextPhantom can use **Google Gemma** models via Hugging Face.  
-This option is **free to start** (you use your own Hugging Face API key).
+TextPhantom supports **2 AI options**:
 
+### 🖥️ Option 1: Local AI — Ollama
 
-#### Step 1: Enable Access to Gemma Model
+Run AI directly on your computer. **Free and no API key required.**
 
-Google Gemma models require accepting a license before use.
+1. **Install Ollama**
+   https://ollama.com/download
 
-1. Log in to Hugging Face  
+2. **Allow the extension to connect**
+   Open PowerShell:
+
+   ```powershell
+   $env:OLLAMA_ORIGINS="chrome-extension://*"
+   ```
+
+3. **Install an AI model**
+
+   ```powershell
+   ollama pull gemma3
+   ```
+
+4. Open **TextPhantom → Local AI** and click **Connect**.
+
+5. Select your installed model → **Start translating! 🎉**
+
+> Ollama must be running while using Local AI.
+
+---
+
+### ☁️ Option 2: Cloud AI — Hugging Face
+
+Run AI on **Hugging Face's cloud servers**. No local AI installation or powerful GPU is required.
+
+1. **Create / log in to Hugging Face**
    https://huggingface.co/login
 
-2. Open the model page  
+2. **Enable access to Google Gemma**
    https://huggingface.co/google/gemma-3-27b-it
+   Click **Agree and access**.
 
-3. Click **“Agree and access”** (or **“Request access”**)
-
-4. Wait for approval (usually a few minutes)
-
-> You only need to do this **once per account**.
-
-
-#### Step 2: Create a Hugging Face API Key
-
-This API key will be used by TextPhantom to call the AI model.
-
-1. Go to  
+3. **Create an API Token**
    https://huggingface.co/settings/tokens
 
-2. Click **New token**
+4. Enable:
 
-3. Set:
-   - **Name**: `textphantom-ai`
-   - **Role**: `Read`
+   * ✅ **Read access to contents of all public gated repos you can access**
 
-4. Create the token and **copy it**
-5. Required Token Permissions
-When creating your Hugging Face API key, make sure the following permissions are enabled:
+5. Copy the token and paste it into **TextPhantom → Hugging Face API Key**.
 
-- ✅ **Read access to contents of all public gated repos you can access**  
-  Required to use gated models such as **Google Gemma**.
+6. Select **Google Gemma** → **Start translating! 🎉**
+
+> Hugging Face runs the AI in the cloud, so your computer does not need to run the model locally.
+
 
 
 ## 🖼️ DEMO / UI PREVIEW
