@@ -1,11 +1,3 @@
-## 2026.9.5.43 upgrade
-
-Update the API together with the .43 Extension and restart the API process.
-This release changes grouping execution, standalone-ruby handling and usage
-receipt initialization. Preserve your existing `.env`, `data/`, keys and models;
-do not delete the deployment directory or reset saved user settings. There is
-no new required environment variable or model dependency for these fixes.
-
 ---
 title: TextPhantom v4.0.0
 emoji: 👻
