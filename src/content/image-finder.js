@@ -37,13 +37,17 @@
     for (const u of urls || []) {
       const k = TP.normUrl(u);
       if (k) recentImgByUrl.set(k, { img, ts });
+      const identity = TP.imageIdentity?.(u);
+      if (identity && identity !== k) recentImgByUrl.set(identity, { img, ts });
     }
     if (recentImgByUrl.size > 200) {
       const cutoff = ts - 5 * 60 * 1000;
       for (const [k, v] of recentImgByUrl.entries()) {
-        if (!v?.img || !v.img.isConnected || (v.ts || 0) < cutoff) recentImgByUrl.delete(k);
+        if (!v?.img || !v.img.isConnected || (v.ts || 0) < cutoff)
+          recentImgByUrl.delete(k);
       }
-      while (recentImgByUrl.size > 220) recentImgByUrl.delete(recentImgByUrl.keys().next().value);
+      while (recentImgByUrl.size > 220)
+        recentImgByUrl.delete(recentImgByUrl.keys().next().value);
     }
   }
 
@@ -75,7 +79,11 @@
     const lrc = lastRightClick;
     const img = lrc?.img;
     if (!img || !img.isConnected) return null;
-    if (!Number.isFinite(lrc.ts) || now - lrc.ts < 0 || now - lrc.ts > RIGHT_CLICK_MAX_AGE_MS) {
+    if (
+      !Number.isFinite(lrc.ts) ||
+      now - lrc.ts < 0 ||
+      now - lrc.ts > RIGHT_CLICK_MAX_AGE_MS
+    ) {
       return null;
     }
 
@@ -83,15 +91,23 @@
     const clicked = TP.normUrl(request?.clickedSrcUrl || request?.srcUrl);
     if (!requested && !clicked) return null;
 
-    const clickAliases = new Set((lrc.urls || []).map(TP.normUrl).filter(Boolean));
+    const clickAliases = new Set(
+      (lrc.urls || []).map(TP.normUrl).filter(Boolean),
+    );
     const currentAliases = new Set(
       [
         img.currentSrc,
         img.src,
         img?.dataset?.tpOriginal,
-        typeof img.getAttribute === "function" ? img.getAttribute("data-src") : "",
-        typeof img.getAttribute === "function" ? img.getAttribute("data-original") : "",
-        typeof img.getAttribute === "function" ? img.getAttribute("data-lazy-src") : "",
+        typeof img.getAttribute === "function"
+          ? img.getAttribute("data-src")
+          : "",
+        typeof img.getAttribute === "function"
+          ? img.getAttribute("data-original")
+          : "",
+        typeof img.getAttribute === "function"
+          ? img.getAttribute("data-lazy-src")
+          : "",
         TP.getBestImgUrl(img),
       ]
         .map(TP.normUrl)
@@ -102,37 +118,76 @@
     if (requested && !allAliases.has(requested)) return null;
     if (clicked && !allAliases.has(clicked)) return null;
 
-    if (requested && clicked && requested !== clicked && !currentAliases.has(requested)) {
+    if (
+      requested &&
+      clicked &&
+      requested !== clicked &&
+      !currentAliases.has(requested)
+    ) {
       return null;
     }
     return img;
   }
 
   // Resolves the image element a result belongs to from every known index.
-  function findTargetImage(original) {
+  function findTargetImage(original, generation = null) {
+    if (generation?.targetInstanceId) {
+      return Array.from(document.images || []).find(img => img.isConnected &&
+        TP.targetInstanceFor?.(img) === generation.targetInstanceId) || null;
+    }
     const o = TP.normUrl(original);
+    const identity = TP.imageIdentity?.(original) || o;
     const images = () => Array.from(document.images || []);
 
     const mdKey = TP.mdKeyFromUrl ? TP.mdKeyFromUrl(original) : "";
     if (mdKey) {
-      const byKey = images().find((img) => String(img.dataset.tpOriginalKey || "") === mdKey);
+      const byKey = images().find(
+        (img) => String(img.dataset.tpOriginalKey || "") === mdKey,
+      );
       if (byKey) return byKey;
     }
 
     if (o) {
-      const byData = images().find((img) => TP.normUrl(img.dataset.tpOriginal) === o);
+      const byData = images().find(
+        (img) => TP.normUrl(img.dataset.tpOriginal) === o,
+      );
       if (byData) return byData;
 
       const rec = recentImgByUrl.get(o);
       if (rec?.img && rec.img.isConnected) return rec.img;
+      const identityRec = recentImgByUrl.get(identity);
+      if (identityRec?.img && identityRec.img.isConnected)
+        return identityRec.img;
     }
 
-    if (lastRightClick.img && Date.now() - lastRightClick.ts < RIGHT_CLICK_MAX_AGE_MS) {
-      if (!o || (lastRightClick.urls || []).includes(o)) return lastRightClick.img;
+    if (
+      lastRightClick.img &&
+      Date.now() - lastRightClick.ts < RIGHT_CLICK_MAX_AGE_MS
+    ) {
+      if (!o || (lastRightClick.urls || []).includes(o))
+        return lastRightClick.img;
     }
 
     for (const img of images()) {
-      if (o && (TP.normUrl(img.currentSrc) === o || TP.normUrl(img.src) === o)) return img;
+      if (o && (TP.normUrl(img.currentSrc) === o || TP.normUrl(img.src) === o))
+        return img;
+    }
+    if (identity && identity !== o) {
+      const candidates = images().filter(
+        (img) => TP.imageIdentity?.(img.currentSrc || img.src) === identity,
+      );
+      const score = (img) => {
+        const r = img.getBoundingClientRect?.() || {};
+        const visible = img.isConnected && r.width > 1 && r.height > 1 ? 1 : 0;
+        const dialog = img.closest?.('[role="dialog"]') ? 1 : 0;
+        return (
+          dialog * 1e12 +
+          visible * 1e11 +
+          (Number(r.width) || 0) * (Number(r.height) || 0)
+        );
+      };
+      candidates.sort((a, b) => score(b) - score(a));
+      if (candidates[0]) return candidates[0];
     }
     return null;
   }
@@ -147,13 +202,25 @@
     }
     const raw = String(msg || "PROCESSING_FAILED").trim();
     const lower = raw.toLowerCase();
-    if (/onnx grouped nothing|grouping covered 0 of .*vertical|text grouping/.test(lower)) {
-      return "ONNX: text grouping failed";
+    if (
+      /grouping covered 0 of .*vertical|text grouping/.test(
+        lower,
+      )
+    ) {
+      return "Text grouping failed";
     }
-    if (/no text detected|no[_ -]?text|no translatable text|no[_ -]?translatable/.test(lower)) {
+    if (
+      /no text detected|no[_ -]?text|no translatable text|no[_ -]?translatable/.test(
+        lower,
+      )
+    ) {
       return "No text found";
     }
-    if (/ai api_key is required|no ai key|missing_api_key|api key is required/.test(lower)) {
+    if (
+      /ai api_key is required|no ai key|missing_api_key|api key is required/.test(
+        lower,
+      )
+    ) {
       return "No AI key";
     }
     if (/provider\/key mismatch|provider.*key.*mismatch/.test(lower)) {
@@ -171,7 +238,9 @@
     if (/lens session|google lens|lens.*failed/.test(lower)) {
       return "Lens OCR failed";
     }
-    if (/incomplete|missing translation|missing_translation_units/.test(lower)) {
+    if (
+      /incomplete|missing translation|missing_translation_units/.test(lower)
+    ) {
       return "AI translation incomplete";
     }
     if (/overlay insert|dom replace|could not erase|renderer/.test(lower)) {
@@ -188,14 +257,17 @@
     if (!img) return;
     const badge = imageErrorBadges.get(img);
     if (badge) {
-      try { badge.remove(); } catch {}
+      try {
+        badge.remove();
+      } catch {}
       imageErrorBadges.delete(img);
     }
     if (img.dataset?.lensError) delete img.dataset.lensError;
     if (img.style) {
       img.style.outline = String(img.dataset?.tpLensPrevOutline || "");
     }
-    if (img.dataset?.tpLensPrevOutline !== undefined) delete img.dataset.tpLensPrevOutline;
+    if (img.dataset?.tpLensPrevOutline !== undefined)
+      delete img.dataset.tpLensPrevOutline;
   }
 
   function positionImageErrorBadge(img, badge) {
@@ -212,15 +284,16 @@
   // Draws a red outline and a readable warning badge on an image that failed
   // to translate. Users should not need to inspect a title/HTML attribute to
   // know why one page failed.
-  function markImageError(original, msg) {
+  function markImageError(original, msg, generation = null) {
     if (!shouldShowReplaceError(original)) return;
 
-    const img = findTargetImage(original);
-    if (!img) return false;
+    const img = findTargetImage(original, generation);
+    if (!img || (generation && !TP.isStillCurrent?.(img, generation)?.ok)) return false;
 
-    const full = msg && typeof msg === "object"
-      ? `${String(msg.userMessage || "เกิดข้อผิดพลาด")} · ${String(msg.code || "PROCESSING_FAILED")}`
-      : String(msg || "PROCESSING_FAILED");
+    const full =
+      msg && typeof msg === "object"
+        ? `${String(msg.userMessage || "เกิดข้อผิดพลาด")} · ${String(msg.code || "PROCESSING_FAILED")}`
+        : String(msg || "PROCESSING_FAILED");
     const short = shortImageError(full);
     let badge = imageErrorBadges.get(img);
     if (!badge || !badge.isConnected) {
@@ -232,10 +305,14 @@
       document.body.appendChild(badge);
       badge.addEventListener("click", () => clearImageError(img));
     }
-    if (!img.dataset.lensError) img.dataset.tpLensPrevOutline = img.style.outline || "";
+    if (!img.dataset.lensError)
+      img.dataset.tpLensPrevOutline = img.style.outline || "";
     img.style.outline = "3px solid red";
     badge.textContent = `⚠️ ${short}`;
-    badge.setAttribute("aria-label", `Dismiss image translation error: ${short}`);
+    badge.setAttribute(
+      "aria-label",
+      `Dismiss image translation error: ${short}`,
+    );
     badge.title = full;
     Object.assign(badge.style, {
       position: "absolute",
@@ -287,5 +364,6 @@
     clearImageError,
     shortImageError,
     positionImageErrorBadge,
+    repositionImageError: img => positionImageErrorBadge(img, imageErrorBadges.get(img)),
   });
 })();

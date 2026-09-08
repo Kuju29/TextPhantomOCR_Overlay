@@ -4,10 +4,12 @@
   const TP = window.__TP;
   if (!TP || TP.bail) return;
 
-  const newPageInstanceId = () => `page-${Math.random().toString(36).slice(2)}-${Date.now()}`;
+  const newPageInstanceId = () =>
+    `page-${Math.random().toString(36).slice(2)}-${Date.now()}`;
   let pageInstanceId = newPageInstanceId();
 
   const targets = new WeakMap();
+  let instanceSequence = 0;
 
   // Returns an image's target key, which is its normalised URL, and records its revision.
   function targetKeyFor(img) {
@@ -20,7 +22,7 @@
       }
       entry.src = src;
     } else {
-      targets.set(img, { revision: 0, src });
+      targets.set(img, { revision: 0, src, instanceId: globalThis.crypto?.randomUUID?.() || `target-${++instanceSequence}` });
     }
     return src;
   }
@@ -37,9 +39,13 @@
   function generationFor(img) {
     const targetKey = targetKeyFor(img);
     const revision = targetRevisionFor(img);
+    const entry = targets.get(img);
+    entry.capturedSource = TP.normUrl(img.currentSrc || img.src || "");
+    entry.appliedSource = "";
     return {
       pageInstanceId,
       targetKey,
+      targetInstanceId: targets.get(img)?.instanceId || "",
       targetRevision: revision === null ? 0 : revision,
     };
   }
@@ -48,14 +54,24 @@
   function isStillCurrent(img, generation) {
     if (!generation) return { ok: true, reason: "" };
 
-    if (generation.pageInstanceId && generation.pageInstanceId !== pageInstanceId) {
+    if (
+      generation.pageInstanceId &&
+      generation.pageInstanceId !== pageInstanceId
+    ) {
       return { ok: false, reason: "page reloaded since the request" };
     }
     if (!img || !img.isConnected) {
       return { ok: false, reason: "target left the DOM" };
     }
 
-    // No URL or revision comparison: findTargetImage already owns that judgement.
+    if (generation.targetInstanceId && targets.get(img)?.instanceId !== generation.targetInstanceId)
+      return {ok:false, reason:"target instance changed"};
+    if (generation.targetInstanceId) {
+      const entry=targets.get(img), current=TP.normUrl(img.currentSrc || img.src || "");
+      const equivalent=(a,b)=>a===b || (a && b && TP.imageIdentity?.(a) && TP.imageIdentity(a)===TP.imageIdentity(b));
+      if (current && ![entry.capturedSource,entry.appliedSource,generation.targetKey].some(v=>v && equivalent(current,v)))
+        return {ok:false,reason:"target source changed"};
+    }
     return { ok: true, reason: "" };
   }
 
@@ -76,7 +92,10 @@
         entry.resolve(img);
       }
     });
-    observer.observe(document.documentElement, { childList: true, subtree: true });
+    observer.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+    });
   }
 
   // Waits for a target to mount, resolving null when it never comes back in time.
@@ -98,6 +117,8 @@
 
   // Starts a new page instance and drops parked waiters, so results from the previous route are refused.
   function resetPageInstance(reason = "") {
+    TP.clearToasts?.();
+    TP.clearImageStatuses?.();
     pageInstanceId = newPageInstanceId();
     TP.pageInstanceId = pageInstanceId;
     for (const [key, entry] of Array.from(pending.entries())) {
@@ -112,6 +133,8 @@
   TP.pageInstanceId = pageInstanceId;
   TP.resetPageInstance = resetPageInstance;
   TP.targetKeyFor = targetKeyFor;
+  TP.noteAppliedImageSource = (img, source) => { const entry=targets.get(img); if(entry) entry.appliedSource=TP.normUrl(source); };
+  TP.targetInstanceFor = img => targets.get(img)?.instanceId || "";
   TP.targetRevisionFor = targetRevisionFor;
   TP.generationFor = generationFor;
   TP.isStillCurrent = isStillCurrent;

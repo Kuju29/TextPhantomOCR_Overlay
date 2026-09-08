@@ -14,7 +14,7 @@ export const pendingByImage = new Map();
 let persistTimer = null;
 
 function storageArea() {
-  return chrome?.storage?.session || chrome?.storage?.local || null;
+  return globalThis.chrome?.storage?.session || null;
 }
 
 function serializableContext(ctx) {
@@ -51,7 +51,8 @@ export async function restorePendingJobs() {
   for (const rec of records) {
     const jobId = String(rec?.jobId || "").trim();
     const ctx = rec?.ctx && typeof rec.ctx === "object" ? rec.ctx : null;
-    if (!jobId || !ctx) continue;
+    if (!jobId || !ctx || pendingByJob.has(jobId)) continue;
+    if (Date.now() - Number(ctx.startedAt || 0) > 6 * 60 * 60 * 1000) continue;
     pendingByJob.set(jobId, ctx);
     const imageId = String(ctx?.metadata?.image_id || "").trim();
     if (imageId) pendingByImage.set(imageId, ctx);
@@ -76,14 +77,20 @@ export function findContext(jobId, imageId) {
   if (direct) return direct;
   if (imageId) {
     const mapped = pendingByImage.get(imageId);
-    return typeof mapped === "string" ? pendingByJob.get(mapped) : mapped || null;
+    return typeof mapped === "string"
+      ? pendingByJob.get(mapped)
+      : mapped || null;
   }
   return null;
 }
 
 // Removes a job and its image-id entry from the registry.
 export function removeJob(jobId, imageId) {
+  const owned = pendingByJob.get(jobId);
   pendingByJob.delete(jobId);
-  if (imageId) pendingByImage.delete(imageId);
+  if (imageId) {
+    const current = pendingByImage.get(imageId);
+    if (current === jobId || (owned && current === owned)) pendingByImage.delete(imageId);
+  }
   schedulePersist();
 }

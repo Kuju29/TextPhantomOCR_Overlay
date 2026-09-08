@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 class ModelOutputContractError(RuntimeError):
     """The provider answered, but its answer cannot be mapped losslessly.
 
@@ -29,3 +28,7 @@ class ModelOutputContractError(RuntimeError):
             **{key: value for key, value in details.items() if value not in (None, [], {})},
         }
 
+class WrongLanguageOutput(ModelOutputContractError):
+    """High-confidence output in a script other than the selected target."""
+
+    code = "wrong_language_output"

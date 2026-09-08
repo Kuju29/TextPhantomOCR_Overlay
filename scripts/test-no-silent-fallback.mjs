@@ -1,6 +1,6 @@
 // The extension engine must never hand a `lens_text` page to `/v1/translate`.
 //
-// It used to: when ONNX stamped nothing on a vertical page the local route
+// It used to: when grouping returned no members for a vertical page the local route
 // declined, the job fell through to the server, and the page arrived rendered
 // by the OTHER engine with no sign that anything had gone wrong. 8 of 51
 // translated images in trace-20260815-082454 took that path, which is what made
@@ -15,6 +15,25 @@ import { fileURLToPath } from "node:url";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const jobs = await readFile(path.join(projectRoot, "src/background/jobs.js"), "utf8");
+const lensDirect = await readFile(path.join(projectRoot, "src/background/pipeline/lens-direct.js"), "utf8");
+
+function traceObjects(source, event) {
+  const startPattern = new RegExp(`\\btrace\\s*\\(\\s*"${event}"\\s*,\\s*\\{`, "g");
+  const payloads = [];
+  for (const match of source.matchAll(startPattern)) {
+    const objectAt = match.index + match[0].lastIndexOf("{");
+    let depth = 0;
+    for (let index = objectAt; index < source.length; index += 1) {
+      if (source[index] === "{") depth += 1;
+      if (source[index] === "}" && --depth === 0) {
+        payloads.push(source.slice(objectAt, index + 1));
+        break;
+      }
+    }
+  }
+  assert.ok(payloads.length > 0, `missing ${event} trace event`);
+  return payloads;
+}
 
 // --- the rule itself ---------------------------------------------------------
 {
@@ -27,63 +46,85 @@ const jobs = await readFile(path.join(projectRoot, "src/background/jobs.js"), "u
     "the old AI-only guard must be gone, or translated still falls through",
   );
 
-  // The fall-through loop must be reachable ONLY after that guard.
+  // The extracted server path must be reachable ONLY after that guard.
   const guardAt = jobs.indexOf('if (!apiEngine && payload.mode === "lens_text") {');
-  const loopAt = jobs.indexOf("for (let attempt = 0; ; attempt++) {");
-  assert.ok(guardAt > 0 && loopAt > guardAt, "the guard must precede the /v1/translate loop");
+  const serverDispatchAt = jobs.indexOf("return runServerTranslation(");
+  assert.ok(guardAt > 0 && serverDispatchAt > guardAt,
+    "the guard must precede dispatch to the extracted /v1/translate path");
 }
 
-// --- vertical verdict is explicit and source-aware --------------------------
+// --- canonical grouping result is mandatory for every source ----------------
 {
   assert.ok(
-    jobs.includes("const mergeContract = decideVerticalMerge(grouped, payload?.source)"),
-    "the client must consume the versioned server usability contract",
+    lensDirect.includes("const groupingResult = grouped?.groupingResult"),
+    "the client must consume the canonical member-addressed result",
   );
   assert.ok(
-    !jobs.includes('grouped?.merge?.authority === "partial"'),
-    "the client must not infer usability from authority plus coverage",
+    lensDirect.includes("attachCanonicalOriginalTree(document, grouped?.tree)"),
+    "the client must attach the canonical Original tree directly",
   );
   assert.ok(
-    jobs.includes("if (!mergeUsable && isAiSource)"),
-    "ambiguous vertical AI must stop",
+    !lensDirect.includes("groupingResultToBubbleGroups("),
+    "the removed group sidecar adapter must not return",
   );
   assert.ok(
-    jobs.includes("decision: mergeContract.decision"),
-    "Original/Translated must explicitly continue ungrouped when ONNX is unusable",
+    lensDirect.includes("grouping response carried no groupingResult"),
+    "a missing grouping result must stop instead of falling through",
+  );
+  assert.doesNotMatch(lensDirect, /decideVerticalMerge|verticalVerdict|merge\.usable/,
+    "no source-specific detector-era fallback verdict may survive");
+}
+
+// --- detector-free grouping observability distinguishes decisive branches ----
+{
+  assert.match(
+    traceObjects(lensDirect, "groupingDecision")[0],
+    /state:\s*needsSourceGrouping\s*\?\s*"requested"\s*:\s*"skipped"[\s\S]*\bbatchId\b/,
+    "axis evidence must say whether grouping was requested or deliberately skipped",
+  );
+  const groupingTraces = traceObjects(lensDirect, "groupingStage");
+  assert.ok(
+    groupingTraces.some((payload) => /state:\s*"started"[\s\S]*\bbatchId\b/.test(payload)),
+    "a requested grouping run must expose its start boundary",
+  );
+  assert.ok(
+    groupingTraces.some((payload) => /state:\s*"failed"[\s\S]*\berrorName:/.test(payload)),
+    "transport/runtime failure must be distinct from a valid zero-detection result",
   );
   assert.match(
-    jobs,
-    /traceNote\("background\/jobs\.js", "verticalVerdict", \{[\s\S]{0,600}?uncoveredIndices/,
-    "the terminal vertical decision must be traceable with uncovered indices",
+    traceObjects(lensDirect, "groupingAttached")[0],
+    /\bstatus:[\s\S]*\bgroups:[\s\S]*\bunits:/,
+    "the final document must report canonical status, groups and translation units",
   );
 }
 
 // --- the reason must be the real one -----------------------------------------
 {
   assert.ok(
-    jobs.includes("const stop = (reason) => {"),
+    lensDirect.includes("const stop = (reason) => {"),
     "runLensDirectPath must name why it declined",
   );
-  const declineSites = (jobs.match(/return stop\(/g) || []).length;
+  const declineSites = (lensDirect.match(/return stop\(/g) || []).length;
   assert.ok(
     declineSites >= 8,
     `every decline must carry a reason; found only ${declineSites} stop() returns`,
   );
   assert.ok(
-    !/\breturn null;\r?\n\s*\}\r?\n\r?\n\s*let decoded;/.test(jobs),
+    !/\breturn null;\r?\n\s*\}\r?\n\r?\n\s*let decoded;/.test(lensDirect),
     "no bare `return null` may survive in the lens-direct path",
   );
   assert.ok(
-    jobs.includes("ONNX grouped nothing on this vertical page"),
-    "the ONNX miss must say so in words the user can act on",
+    lensDirect.includes("the grouping result does not fit this document"),
+    "a rejected canonical result must name the true boundary",
   );
-  assert.ok(
-    jobs.includes("const reason = decline.reason ||"),
+  assert.match(
+    jobs,
+    /const reason\s*=\s*decline\.reason\s*\|\|/,
     "the failure must report the decline reason, not a generic message",
   );
   assert.match(
     jobs,
-    /traceNote\("background\/jobs\.js", "engineRoute", \{[\s\S]{0,200}?outcome: "stopped"/,
+    /traceNote\(\s*"background\/jobs\.js",\s*"engineRoute",\s*\{[\s\S]{0,400}?outcome:\s*"stopped"/,
     "a stop must be visible in the trace",
   );
 }
@@ -91,7 +132,7 @@ const jobs = await readFile(path.join(projectRoot, "src/background/jobs.js"), "u
 // --- lens_images is untouched -------------------------------------------------
 {
   assert.ok(
-    jobs.includes('if (payload?.mode !== "lens_text") return stop("not a lens_text job")'),
+    lensDirect.includes('if (payload?.mode !== "lens_text") return stop("not a lens_text job")'),
     "lens_images must still leave the local route immediately",
   );
 }

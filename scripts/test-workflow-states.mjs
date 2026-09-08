@@ -170,13 +170,18 @@ const ALL = new Set(Object.values(STATES));
 // Guard the orchestration wiring as well as the pure transition table.
 {
   const jobs = await readFile(new URL("../src/background/jobs.js", import.meta.url), "utf8");
+  const aiExecution = await readFile(new URL("../src/background/pipeline/ai-execution.js", import.meta.url), "utf8");
+  const serverTranslation = await readFile(new URL("../src/background/pipeline/server-translation.js", import.meta.url), "utf8");
+  const lensDirect = await readFile(new URL("../src/background/pipeline/lens-direct.js", import.meta.url), "utf8");
+  const resultDelivery = await readFile(new URL("../src/background/jobs/result-delivery.js", import.meta.url), "utf8");
+  const batchRetry = await readFile(new URL("../src/background/jobs/batch-retry.js", import.meta.url), "utf8");
   assert.match(jobs, /if \(directStage === "ai"\)[\s\S]*?wf\.aiDegraded/,
     "the direct-local catch must attribute failures to AI");
-  assert.match(jobs, /let serverRequestTracked = false;[\s\S]*?if \(!serverRequestTracked\)/,
+  assert.match(serverTranslation, /let serverRequestTracked = false;[\s\S]*?if \(!serverRequestTracked\)/,
     "sync retries must commit their workflow operation only once");
-  const transient = jobs.slice(
-    jobs.indexOf("if (isBusy && safeDeferred)"),
-    jobs.indexOf("if (slotHeld)", jobs.indexOf("if (isBusy && safeDeferred)") + 30),
+  const transient = serverTranslation.slice(
+    serverTranslation.indexOf("if (isBusy && safeDeferred)"),
+    serverTranslation.indexOf("if (slotHeld)", serverTranslation.indexOf("if (isBusy && safeDeferred)") + 30),
   );
   assert.doesNotMatch(transient, /wf\.(?:lensRequested|aiRequested|lensDegraded|aiDegraded)/,
     "transient backpressure must remain in the current REQUESTED state");
@@ -184,18 +189,20 @@ const ALL = new Set(Object.values(STATES));
     "waiting", "downloading", "lens", "grouping", "ai_queued",
     "ai_generating", "server_processing", "rendering", "done", "error", "cancelled",
   ]) {
-    assert.match(jobs, new RegExp(`mark(?:Job|Image)Phase\\([^\\n]*["']${phase}["']`),
+    // Stage calls may be formatted across lines (notably the API-engine ternary).
+    // Bound the match so a phase string elsewhere in the module cannot satisfy it.
+    assert.match(jobs + aiExecution + lensDirect + serverTranslation + resultDelivery + batchRetry, new RegExp(`mark(?:(?:Job|Image)Phase|Phase)\\([\\s\\S]{0,320}?["']${phase}["']`),
       `jobs must report the real ${phase} boundary`);
   }
-  assert.match(jobs, /markJobPhase\(jobId, "ai_queued"\)[\s\S]*?acquire\(key, signal\)[\s\S]*?markJobPhase\(jobId, "ai_generating"\)/,
+  assert.match(aiExecution, /markJobPhase\(jobId, "ai_queued"\)[\s\S]*?acquire\(key, signal\)[\s\S]*?markJobPhase\(jobId, "ai_generating"\)/,
     "AI must say queued before scheduler admission and generating only after admission");
-  assert.match(jobs, /markImagePhase\(batchId, imageKey, "rendering"\)[\s\S]*?enqueueDomInsert/,
+  assert.match(resultDelivery, /markImagePhase\(batchId, imageKey, "rendering"\)[\s\S]*?enqueueDomInsert/,
     "rendering must begin before DOM insertion");
-  assert.match(jobs, /markImagePhase\(b\.id, k, "waiting", \{\s*attempt: 2,[\s\S]*?lastError: ""/,
+  assert.match(batchRetry, /markImagePhase\(batch\.id, key, "waiting", \{\s*attempt: 2,[\s\S]*?lastError: ""/,
     "retry pass must reopen terminal errors with a new attempt and clear the stale reason");
   assert.match(jobs, /discardBatchResults[\s\S]*?markImagePhase\(bid, key, "cancelled"/,
     "discarding a batch must terminally cancel active per-image phases");
-  assert.match(jobs, /apiEngine && !lensDone[\s\S]*?"server_processing"[\s\S]*?Server processing \(Lens\/AI\)/,
+  assert.match(serverTranslation, /apiEngine && !lensDone[\s\S]*?"server_processing"[\s\S]*?Server processing \(Lens\/AI\)/,
     "the combined API engine must not pretend its opaque server pipeline is still only in Lens");
 }
 

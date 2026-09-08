@@ -4,9 +4,9 @@
 
 from __future__ import annotations
 
-import time
-
 from fastapi import APIRouter
+
+import time
 
 from backend.config import settings
 from backend.lens.languages import UI_LANGUAGES
@@ -21,7 +21,6 @@ _SOURCES = [
     {"id": "ai", "name": "Ai"},
 ]
 
-
 @router.get("/meta")
 async def meta() -> dict:
     """Languages / sources the UI should offer, plus whether a server AI key exists."""
@@ -31,7 +30,6 @@ async def meta() -> dict:
         "sources": _SOURCES,
         "has_env_ai_key": bool(settings.ai_api_key),
     }
-
 
 @router.get("/warmup")
 async def warmup(lang: str | None = None) -> dict:

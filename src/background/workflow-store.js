@@ -76,14 +76,21 @@ function request(store, method, ...args) {
 
 // Creates and persists a workflow record.
 export async function create({ workflowId, itemId, request: req, generation }) {
-  const record = createWorkflow({ workflowId, itemId, request: req, generation });
+  const record = createWorkflow({
+    workflowId,
+    itemId,
+    request: req,
+    generation,
+  });
   await runTransaction("readwrite", (store) => store.put(record));
   return record;
 }
 
 // Reads one workflow record by id.
 export async function get(workflowId) {
-  return runTransaction("readonly", (store) => request(store, "get", workflowId));
+  return runTransaction("readonly", (store) =>
+    request(store, "get", workflowId),
+  );
 }
 
 // Moves a workflow to a new state and persists it, returning null when the transition is illegal.
@@ -95,7 +102,12 @@ export async function advance(workflowId, to, options = {}) {
   }
   const result = transition(current, to, options);
   if (!result.ok) {
-    log.warn("advance: refused", { workflowId, from: current.state, to, reason: result.reason });
+    log.warn("advance: refused", {
+      workflowId,
+      from: current.state,
+      to,
+      reason: result.reason,
+    });
     return null;
   }
   await runTransaction("readwrite", (store) => store.put(result.record));
@@ -113,7 +125,9 @@ export async function patch(workflowId, fields) {
 
 // Returns every non-terminal workflow, oldest first.
 export async function listActive() {
-  const all = await runTransaction("readonly", (store) => request(store, "getAll"));
+  const all = await runTransaction("readonly", (store) =>
+    request(store, "getAll"),
+  );
   return (all || [])
     .filter((r) => !isTerminal(r.state))
     .sort((a, b) => (a.updatedAt || 0) - (b.updatedAt || 0));
@@ -123,7 +137,8 @@ export async function listActive() {
 export async function listStranded(now = Date.now()) {
   const active = await listActive();
   return active.filter(
-    (r) => IN_FLIGHT.has(r.state) && now - (r.updatedAt || 0) > STRANDED_AFTER_MS,
+    (r) =>
+      IN_FLIGHT.has(r.state) && now - (r.updatedAt || 0) > STRANDED_AFTER_MS,
   );
 }
 
@@ -142,7 +157,9 @@ export async function cancelTab(tabId, reason = "navigation") {
 
 // Deletes terminal records past their TTL and returns how many were removed.
 export async function sweep(now = Date.now()) {
-  const all = await runTransaction("readonly", (store) => request(store, "getAll"));
+  const all = await runTransaction("readonly", (store) =>
+    request(store, "getAll"),
+  );
   const stale = (all || []).filter(
     (r) => isTerminal(r.state) && now - (r.updatedAt || 0) > TERMINAL_TTL_MS,
   );
@@ -171,7 +188,14 @@ export async function reportOnStartup() {
     }
     return { active, stranded, swept };
   } catch (e) {
-    log.warn("workflow store unavailable this session", { error: e?.message || String(e) });
-    return { active: [], stranded: [], swept: 0, error: e?.message || String(e) };
+    log.warn("workflow store unavailable this session", {
+      error: e?.message || String(e),
+    });
+    return {
+      active: [],
+      stranded: [],
+      swept: 0,
+      error: e?.message || String(e),
+    };
   }
 }

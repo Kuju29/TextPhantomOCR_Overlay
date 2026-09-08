@@ -1,31 +1,25 @@
-"""Bounded process-local handoff for image bytes between v1 services."""
+"""Bounded process-local handoff from Lens upload to graph grouping."""
 
 from __future__ import annotations
 
-import os
-import secrets
-import threading
-import time
+import secrets, os, threading, time
+
 from collections import OrderedDict
 from dataclasses import dataclass
 
-
 TTL_SEC = max(5.0, float(os.environ.get("TP_IMAGE_ARTIFACT_TTL_SEC", "600")))
 BYTE_BUDGET = max(1 << 20, int(os.environ.get("TP_IMAGE_ARTIFACT_BYTES", str(64 << 20))))
-
 
 class ArtifactError(LookupError):
     def __init__(self, code: str, message: str, status: int) -> None:
         super().__init__(message)
         self.code, self.status = code, status
 
-
 @dataclass(frozen=True)
 class _Record:
     data: bytes
     scope: str
     expires: float
-
 
 class ImageArtifactStore:
     def __init__(self, *, ttl_sec: float = TTL_SEC, byte_budget: int = BYTE_BUDGET,
@@ -60,11 +54,12 @@ class ImageArtifactStore:
             for key, rec in list(self._items.items()):
                 if rec.expires <= now:
                     self._drop(key, "expired")
-            # A token returned by /v1/lens/raw is a promise that /v1/groups can
+            # A token returned by the Lens upload route is a promise that the
+            # canonical Lens graph grouping route can
             # resolve it until it expires.  Evicting an unexpired record here
             # broke that promise under large batches: later uploads displaced
             # earlier images and every displaced token produced a noisy 410
-            # before the client's supported imageDataUri fallback succeeded.
+            # before the client's explicit imageDataUri retry succeeded.
             #
             # Keep the store bounded without invalidating advertised tokens.
             # The Lens route treats a failed put as an optional-cache miss and
@@ -104,6 +99,5 @@ class ImageArtifactStore:
         with self._lock:
             return {**self._counts, "entries": len(self._items), "bytes": self._bytes,
                     "byteBudget": self.byte_budget, "ttlSec": self.ttl_sec}
-
 
 image_artifacts = ImageArtifactStore()

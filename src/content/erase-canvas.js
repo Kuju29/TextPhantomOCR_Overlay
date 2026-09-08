@@ -128,7 +128,10 @@
     const w = Math.max(0, x2 - x1);
     const h = Math.max(0, y2 - y1);
     if (!w || !h) return null;
-    const stride = Math.max(1, Math.ceil(Math.sqrt((w * h) / MAX_REGION_SAMPLES)));
+    const stride = Math.max(
+      1,
+      Math.ceil(Math.sqrt((w * h) / MAX_REGION_SAMPLES)),
+    );
     const rs = [];
     const gs = [];
     const bs = [];
@@ -151,10 +154,22 @@
     const bands = [
       [x1, y1, x2, Math.min(y2, y1 + edge)],
       [x1, Math.max(y1, y2 - edge), x2, y2],
-      [x1, Math.min(y2, y1 + edge), Math.min(x2, x1 + edge), Math.max(y1, y2 - edge)],
-      [Math.max(x1, x2 - edge), Math.min(y2, y1 + edge), x2, Math.max(y1, y2 - edge)],
+      [
+        x1,
+        Math.min(y2, y1 + edge),
+        Math.min(x2, x1 + edge),
+        Math.max(y1, y2 - edge),
+      ],
+      [
+        Math.max(x1, x2 - edge),
+        Math.min(y2, y1 + edge),
+        x2,
+        Math.max(y1, y2 - edge),
+      ],
     ];
-    const colours = bands.map((band) => sampleRectColor(data, W, H, band)).filter(Boolean);
+    const colours = bands
+      .map((band) => sampleRectColor(data, W, H, band))
+      .filter(Boolean);
     if (!colours.length) return null;
     return [
       medianOf(colours.map((rgb) => rgb[0])),
@@ -168,13 +183,13 @@
       const c = channel / 255;
       return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
     };
-    return (0.2126 * lin(rgb[0])) + (0.7152 * lin(rgb[1])) + (0.0722 * lin(rgb[2]));
+    return 0.2126 * lin(rgb[0]) + 0.7152 * lin(rgb[1]) + 0.0722 * lin(rgb[2]);
   }
 
   // Returns true when text on this colour must be light; mirrors api/backend/render/colors.py.
   function colourNeedsLightText(rgb) {
     const lum = relativeLuminance(rgb);
-    return ((1.0 + 0.05) / (lum + 0.05)) >= ((lum + 0.05) / 0.05);
+    return (1.0 + 0.05) / (lum + 0.05) >= (lum + 0.05) / 0.05;
   }
 
   // Returns the pixel bounding box of a LensDocument paragraph.
@@ -231,13 +246,19 @@
   }
 
   // Fills LensDocument.textLight by sampling the image itself.
-  async function annotateDocumentTextLight(img, lensDocument, sourceImageDataUri = "") {
+  async function annotateDocumentTextLight(
+    img,
+    lensDocument,
+    sourceImageDataUri = "",
+  ) {
     if (!lensDocument?.paragraphs?.length) return { annotated: 0, light: 0 };
     const readableSource = canReadImagePixels(img)
       ? img
       : await loadReadableImage(sourceImageDataUri);
-    const W = Number(readableSource?.naturalWidth || readableSource?.width) || 0;
-    const H = Number(readableSource?.naturalHeight || readableSource?.height) || 0;
+    const W =
+      Number(readableSource?.naturalWidth || readableSource?.width) || 0;
+    const H =
+      Number(readableSource?.naturalHeight || readableSource?.height) || 0;
     if (!(W > 0) || !(H > 0)) return null;
     try {
       const canvas = document.createElement("canvas");
@@ -250,7 +271,9 @@
       TP.log.debug("contrast: document annotated locally", stats);
       return stats;
     } catch (e) {
-      TP.log.warn("contrast: canvas is not readable", { error: e?.message || String(e) });
+      TP.log.warn("contrast: canvas is not readable", {
+        error: e?.message || String(e),
+      });
       return null;
     }
   }
@@ -275,15 +298,19 @@
   ) {
     const boxes = Array.isArray(eraseBoxes?.boxes) ? eraseBoxes.boxes : null;
     if (!boxes) {
-      TP.log.warn("erase: result carried no eraseBoxes", { schema: eraseBoxes?.schema });
+      TP.log.warn("erase: result carried no eraseBoxes", {
+        schema: eraseBoxes?.schema,
+      });
       return null;
     }
 
     const readableSource = canReadImagePixels(img)
       ? img
       : await loadReadableImage(sourceImageDataUri);
-    const W = Number(readableSource?.naturalWidth || readableSource?.width) || 0;
-    const H = Number(readableSource?.naturalHeight || readableSource?.height) || 0;
+    const W =
+      Number(readableSource?.naturalWidth || readableSource?.width) || 0;
+    const H =
+      Number(readableSource?.naturalHeight || readableSource?.height) || 0;
     if (!(W > 0) || !(H > 0)) {
       TP.log.warn("erase: image has no natural size yet");
       return null;
@@ -301,7 +328,9 @@
       ctx.drawImage(readableSource, 0, 0, W, H);
       data = ctx.getImageData(0, 0, W, H).data;
     } catch (e) {
-      TP.log.warn("erase: canvas is not readable", { error: e?.message || String(e) });
+      TP.log.warn("erase: canvas is not readable", {
+        error: e?.message || String(e),
+      });
       return null;
     }
 
@@ -336,7 +365,9 @@
       painted++;
     }
 
-    const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/webp", 0.92));
+    const blob = await new Promise((resolve) =>
+      canvas.toBlob(resolve, "image/webp", 0.92),
+    );
     if (!blob) {
       TP.log.warn("erase: canvas could not be exported");
       return null;

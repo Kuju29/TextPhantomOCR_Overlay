@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 globalThis.chrome = { storage: { local: { get: (_k, cb) => cb({}), set: (_v, cb) => cb?.() } } };
-const { fetchLensRawViaRest, groupParagraphsViaRest, translateViaSyncRest, pollFailure } = await import("../src/background/transport.js");
+const { fetchLensRawViaRest } = await import("../src/background/transports/lens.js");
+const { groupParagraphsViaRest } = await import("../src/background/transports/groups.js");
+const { translateViaSyncRest } = await import("../src/background/transports/translate.js");
+const { pollFailure } = await import("../src/background/transports/polling.js");
 
 const polled = pollFailure({ error: {
   schema: "tp.error/1", code: "provider_auth_failed", userMessage: "safe",

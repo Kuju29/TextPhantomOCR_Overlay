@@ -25,8 +25,19 @@ import {
   PINNED_LANG_CODES,
 } from "../shared/constants.js";
 import { getStorage, setStorage } from "../shared/storage.js";
+import { effectiveEngineMode } from "../shared/engine-mode.js";
 import { resolveApiBase } from "../shared/api-defaults.js";
 import { dropEntriesFrom, isImageFile } from "../shared/local-gallery.js";
+
+/** Auto Translate intentionally excludes AI to prevent unattended AI usage. */
+export function autoTranslateSources(list) {
+  return (Array.isArray(list) ? list : []).filter(
+    (item) =>
+      String(item?.id || "")
+        .trim()
+        .toLowerCase() !== "ai",
+  );
+}
 
 const els = {
   mode: document.getElementById("auto-mode"),
@@ -79,19 +90,7 @@ function createSettingsEpochGuard() {
 
 const settingsEpochGuard = createSettingsEpochGuard();
 
-/**
- * Finished runs for the image currently on screen, keyed by everything that can
- * change the answer.
- *
- * Flipping the language to compare readings, or the source between Translated
- * and Ai, used to send the picture to Lens again every single time. A result
- * already in hand is re-applied from here instead: no upload, no Lens call, no
- * AI call. Cleared whenever the image changes, so it can never show one
- * picture's text over another's, and capped because each entry holds that
- * page's decoded document and its erase background.
- *
- * Re-translate deliberately ignores this — that button exists to ask again.
- */
+/** Bounded finished-run cache for the current image; Re-translate bypasses it. */
 const resultCache = new Map();
 const CACHE_LIMIT = 6;
 
@@ -136,22 +135,34 @@ function setMeta(text) {
 function belongsToCurrentImage(original) {
   const key = String(original || "");
   if (!key) return true; // backward-compatible messages predate target keys
-  return [state.objectUrl, els.image?.src, els.image?.currentSrc, els.image?.dataset?.tpOriginal]
-    .some((value) => String(value || "") === key);
+  return [
+    state.objectUrl,
+    els.image?.src,
+    els.image?.currentSrc,
+    els.image?.dataset?.tpOriginal,
+  ].some((value) => String(value || "") === key);
 }
 
 /** Popular languages first, then everything else by name. */
 function orderLanguages(list) {
   const items = (Array.isArray(list) ? list : []).filter(Boolean);
-  const rank = new Map(PINNED_LANG_CODES.map((code, i) => [String(code).toLowerCase(), i]));
+  const rank = new Map(
+    PINNED_LANG_CODES.map((code, i) => [String(code).toLowerCase(), i]),
+  );
   const rankOf = (it) => rank.get(String(it?.code ?? "").toLowerCase());
-  const pinned = items.filter((it) => rankOf(it) !== undefined).sort((a, b) => rankOf(a) - rankOf(b));
+  const pinned = items
+    .filter((it) => rankOf(it) !== undefined)
+    .sort((a, b) => rankOf(a) - rankOf(b));
   const rest = items
     .filter((it) => rankOf(it) === undefined)
     .sort((a, b) =>
-      String(a?.name ?? a?.code ?? "").localeCompare(String(b?.name ?? b?.code ?? ""), undefined, {
-        sensitivity: "base",
-      }),
+      String(a?.name ?? a?.code ?? "").localeCompare(
+        String(b?.name ?? b?.code ?? ""),
+        undefined,
+        {
+          sensitivity: "base",
+        },
+      ),
     );
   return [...pinned, ...rest];
 }
@@ -195,21 +206,28 @@ async function loadSettings() {
     "engineMode",
     "relayoutTranslated",
   ]);
-  state.mode = stored.autoMode === "lens_images" || stored.autoMode === "lens_text"
-    ? stored.autoMode
-    : "lens_text";
-  state.lang = typeof stored.autoLang === "string" && stored.autoLang ? stored.autoLang : "en";
-  state.source = ["original", "translated", "ai"].includes(stored.autoSource)
+  state.mode =
+    stored.autoMode === "lens_images" || stored.autoMode === "lens_text"
+      ? stored.autoMode
+      : "lens_text";
+  state.lang =
+    typeof stored.autoLang === "string" && stored.autoLang
+      ? stored.autoLang
+      : "en";
+  state.source = ["original", "translated"].includes(stored.autoSource)
     ? stored.autoSource
     : "translated";
+  if (stored.autoSource === "ai")
+    await setStorage({ autoSource: "translated" });
   state.showRaw = stored.autoShowRaw === true;
   state.rawTab = stored.autoRawTab === "tree" ? "tree" : "raw";
-  state.width = Number(stored.autoWidth) > 0 ? Number(stored.autoWidth) : DEFAULT_WIDTH;
+  state.width =
+    Number(stored.autoWidth) > 0 ? Number(stored.autoWidth) : DEFAULT_WIDTH;
   // Read-only here: the engine and the reading-direction rebuild are global
   // choices made in the popup. The raw panel needs the engine to explain an
   // absent lens.raw truthfully, and both belong in the cache key because both
   // change what a run produces.
-  state.engineMode = stored.engineMode === "api" ? "api" : "extension";
+  state.engineMode = effectiveEngineMode(stored.engineMode);
   state.relayout = stored.relayoutTranslated !== false;
 }
 
@@ -246,12 +264,14 @@ try {
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== "local" || !changes) return;
     if (changes.engineMode) {
-      state.engineMode = changes.engineMode.newValue === "api" ? "api" : "extension";
+      state.engineMode = effectiveEngineMode(changes.engineMode.newValue);
     }
     if (changes.relayoutTranslated) {
       state.relayout = changes.relayoutTranslated.newValue !== false;
     }
-    const aiSettingsChanged = Object.keys(changes).some((key) => AI_RESULT_SETTING_KEYS.has(key));
+    const aiSettingsChanged = Object.keys(changes).some((key) =>
+      AI_RESULT_SETTING_KEYS.has(key),
+    );
     if (changes.engineMode || changes.relayoutTranslated || aiSettingsChanged) {
       resultCache.clear();
       if (state.showRaw) renderRaw();
@@ -263,20 +283,28 @@ try {
       // rejected by content/overlay.js and cannot be announced/cached as run B.
       // This also tears down a displayed AI result that was produced with the
       // now-obsolete settings, without exposing any setting value.
-      if (state.mode === "lens_text" && state.source === "ai" && (state.busy || state.result)) {
+      if (
+        state.mode === "lens_text" &&
+        state.source === "ai" &&
+        (state.busy || state.result)
+      ) {
         TP()?.resetForNavigation?.("auto_ai_settings_changed");
         state.result = null;
       }
       state.runId++;
       state.busy = false;
       els.retranslate.disabled = false;
-      setStatus("AI settings changed in the main UI — the next run will use the new settings.");
+      setStatus(
+        "AI settings changed in the main UI — the next run will use the new settings.",
+      );
     }
   });
 } catch {
   // No storage events: the cache key still holds the values read at load, and a
   // stale entry can only be corrected with Re-translate. Worth knowing about.
-  setStatus("This browser sent no settings-change events; press Re-translate after changing settings in the popup.");
+  setStatus(
+    "This browser sent no settings-change events; press Re-translate after changing settings in the popup.",
+  );
 }
 
 // --------------------------------------------------------------------- chrome
@@ -286,14 +314,21 @@ function applyModeVisibility() {
   els.sourceWrap.style.display = isText ? "" : "none";
   // Original reproduces the OCR source text and does not consume a target
   // language. Keep autoLang untouched so switching back restores the choice.
-  els.langWrap.style.display = isText && state.source === "original" ? "none" : "";
+  els.langWrap.style.display =
+    isText && state.source === "original" ? "none" : "";
 }
 
 function applyWidth(px) {
   const min = Number(els.zoom.min);
   const max = Number(els.zoom.max);
-  state.width = Math.min(max, Math.max(min, Math.round(Number(px) || DEFAULT_WIDTH)));
-  document.documentElement.style.setProperty("--auto-width", `${state.width}px`);
+  state.width = Math.min(
+    max,
+    Math.max(min, Math.round(Number(px) || DEFAULT_WIDTH)),
+  );
+  document.documentElement.style.setProperty(
+    "--auto-width",
+    `${state.width}px`,
+  );
   els.zoom.value = String(state.width);
   persist({ autoWidth: state.width });
 }
@@ -316,7 +351,10 @@ function applyRawVisibility() {
   els.rawToggle.setAttribute("aria-pressed", String(state.showRaw));
   els.rawToggle.textContent = state.showRaw ? "Hide raw data" : "Show raw data";
   for (const tab of els.raw.querySelectorAll(".rawtab")) {
-    tab.setAttribute("aria-selected", String(tab.dataset.rawTab === state.rawTab));
+    tab.setAttribute(
+      "aria-selected",
+      String(tab.dataset.rawTab === state.rawTab),
+    );
   }
   if (state.showRaw) renderRaw();
 }
@@ -389,7 +427,9 @@ function renderRaw() {
     els.rawNote.textContent = [
       "The decoded tree for the text source selected above: paragraphs, lines and spans with real pixel geometry.",
       picked.note || "",
-      debugLens.warnings?.length ? `Decoder warnings: ${debugLens.warnings.join(" · ")}` : "",
+      debugLens.warnings?.length
+        ? `Decoder warnings: ${debugLens.warnings.join(" · ")}`
+        : "",
     ]
       .filter(Boolean)
       .join(" ");
@@ -430,7 +470,11 @@ function pickBlock(line) {
   // which neighbours belong with it.
   const block =
     paraId && scope
-      ? [...scope.querySelectorAll(`.tp-line[data-tp-para="${CSS.escape(paraId)}"]`)]
+      ? [
+          ...scope.querySelectorAll(
+            `.tp-line[data-tp-para="${CSS.escape(paraId)}"]`,
+          ),
+        ]
       : [line];
   state.picked = block;
   for (const el of block) el.classList.add("tp-picked");
@@ -473,17 +517,14 @@ function revokeCurrent() {
 
 /** Identifies one picked file well enough to recognise it arriving twice. */
 const signatureOf = (blob, name) =>
-  [String(name || ""), Number(blob?.size) || 0, Number(blob?.lastModified) || 0, String(blob?.type || "")].join("|");
+  [
+    String(name || ""),
+    Number(blob?.size) || 0,
+    Number(blob?.lastModified) || 0,
+    String(blob?.type || ""),
+  ].join("|");
 
-/**
- * Put a blob on screen and translate it. Any previous image is replaced.
- *
- * `repeatIsAccident` marks the arrivals nobody performs on purpose — a drop or
- * a paste. Selecting text means dragging across the picture, and a slip there
- * used to hand this page back the image it is already showing and translate it
- * all over again. Changing the language or the mode is how a page gets
- * re-translated; Re-translate is how the same settings get run again.
- */
+/** Replace and translate an image; optionally ignore duplicate drop/paste events. */
 async function useImageBlob(blob, name, { repeatIsAccident = false } = {}) {
   // Same test the local viewer's pickers use: the MIME type when the OS gave
   // one, the file extension when it did not (Windows reports nothing for .webp
@@ -517,7 +558,8 @@ async function useImageBlob(blob, name, { repeatIsAccident = false } = {}) {
 
   const loaded = new Promise((resolve, reject) => {
     els.image.onload = () => resolve();
-    els.image.onerror = () => reject(new Error("the browser could not decode this image"));
+    els.image.onerror = () =>
+      reject(new Error("the browser could not decode this image"));
   });
   els.image.src = state.objectUrl;
   showUploader(false);
@@ -538,19 +580,7 @@ async function useImageBlob(blob, name, { repeatIsAccident = false } = {}) {
 
 const MAX_URL_IMAGE_BYTES = 25 * 1024 * 1024;
 
-/**
- * Load an image from a pasted link.
- *
- * Fetched here, from this page, and deliberately WITHOUT credentials. The
- * extension holds host permission for every site, so a fetch made on the
- * strength of typed text could otherwise pull a logged-in, private image using
- * the user's own cookies and hand it straight to an upload. A public image link
- * needs no cookies; a private one should be saved and dropped in, where the
- * user can see what they are sending.
- *
- * The content type is checked before the body is read, so a link that is not an
- * image is refused instead of being downloaded into this tab.
- */
+/** Load a public image URL without credentials and reject non-image responses. */
 async function useImageUrl(rawUrl) {
   const url = String(rawUrl || "").trim();
   if (!url) return;
@@ -560,7 +590,11 @@ async function useImageUrl(rawUrl) {
   }
   setStatus(`Fetching ${url}…`, "working");
   try {
-    const response = await fetch(url, { credentials: "omit", cache: "no-store", redirect: "follow" });
+    const response = await fetch(url, {
+      credentials: "omit",
+      cache: "no-store",
+      redirect: "follow",
+    });
     if (!response.ok) {
       setStatus(
         response.status === 401 || response.status === 403
@@ -570,34 +604,61 @@ async function useImageUrl(rawUrl) {
       );
       return;
     }
-    const mime = String(response.headers.get("content-type") || "").split(";")[0].trim().toLowerCase();
+    const mime = String(response.headers.get("content-type") || "")
+      .split(";")[0]
+      .trim()
+      .toLowerCase();
     if (!mime.startsWith("image/")) {
-      setStatus(`That link is not an image${mime ? ` (${mime})` : ""}; nothing was loaded.`, "bad");
+      setStatus(
+        `That link is not an image${mime ? ` (${mime})` : ""}; nothing was loaded.`,
+        "bad",
+      );
       return;
     }
     const declared = Number(response.headers.get("content-length"));
     if (Number.isFinite(declared) && declared > MAX_URL_IMAGE_BYTES) {
-      setStatus(`That image is ${Math.round(declared / 1048576)} MB — too large to translate here.`, "bad");
+      setStatus(
+        `That image is ${Math.round(declared / 1048576)} MB — too large to translate here.`,
+        "bad",
+      );
       return;
     }
     const blob = await response.blob();
     if (blob.size > MAX_URL_IMAGE_BYTES) {
-      setStatus(`That image is ${Math.round(blob.size / 1048576)} MB — too large to translate here.`, "bad");
+      setStatus(
+        `That image is ${Math.round(blob.size / 1048576)} MB — too large to translate here.`,
+        "bad",
+      );
       return;
     }
-    await useImageBlob(blob, decodeURIComponent(url.split("/").pop() || "image").split("?")[0]);
+    await useImageBlob(
+      blob,
+      decodeURIComponent(url.split("/").pop() || "image").split("?")[0],
+    );
   } catch (error) {
-    setStatus(`Could not fetch that link: ${error?.message || String(error)}`, "bad");
+    setStatus(
+      `Could not fetch that link: ${error?.message || String(error)}`,
+      "bad",
+    );
   }
 }
 
 /** First image file in a DataTransfer / clipboard payload, or null. */
 function firstImageFile(source) {
   const files = [...(source?.files || [])];
-  const direct = files.find((file) => String(file.type || "").toLowerCase().startsWith("image/"));
+  const direct = files.find((file) =>
+    String(file.type || "")
+      .toLowerCase()
+      .startsWith("image/"),
+  );
   if (direct) return direct;
   for (const item of [...(source?.items || [])]) {
-    if (item.kind === "file" && String(item.type || "").toLowerCase().startsWith("image/")) {
+    if (
+      item.kind === "file" &&
+      String(item.type || "")
+        .toLowerCase()
+        .startsWith("image/")
+    ) {
       const file = item.getAsFile();
       if (file) return file;
     }
@@ -624,8 +685,13 @@ function rememberResult(kind, detail) {
   // Re-inserting refreshes the entry's position, so the least recently used one
   // is the one that falls off the end.
   resultCache.delete(key);
-  resultCache.set(key, { kind, result: detail?.result || null, newSrc: String(detail?.newSrc || "") });
-  while (resultCache.size > CACHE_LIMIT) resultCache.delete(resultCache.keys().next().value);
+  resultCache.set(key, {
+    kind,
+    result: detail?.result || null,
+    newSrc: String(detail?.newSrc || ""),
+  });
+  while (resultCache.size > CACHE_LIMIT)
+    resultCache.delete(resultCache.keys().next().value);
 }
 
 /**
@@ -642,8 +708,13 @@ async function applyCachedResult(entry) {
   state.fromCache = true;
   try {
     if (entry.kind === "image") {
-      if (!entry.newSrc) throw new Error("the cached image-mode run kept no picture");
-      await tp.applyInsertMessage({ type: "REPLACE_IMAGE", original, newSrc: entry.newSrc });
+      if (!entry.newSrc)
+        throw new Error("the cached image-mode run kept no picture");
+      await tp.applyInsertMessage({
+        type: "REPLACE_IMAGE",
+        original,
+        newSrc: entry.newSrc,
+      });
     } else {
       if (!entry.result) throw new Error("the cached run kept no result");
       await tp.applyInsertMessage({
@@ -669,15 +740,26 @@ async function applyCachedResult(entry) {
 /** Coalesce a burst of setting changes into one run. */
 function scheduleTranslate() {
   clearTimeout(state.retranslateTimer);
-  state.retranslateTimer = setTimeout(() => translate(), RETRANSLATE_DEBOUNCE_MS);
+  state.retranslateTimer = setTimeout(
+    () => translate(),
+    RETRANSLATE_DEBOUNCE_MS,
+  );
 }
 
 async function translate({ force = false } = {}) {
   clearTimeout(state.retranslateTimer);
   if (!state.objectUrl) return;
+  if (state.source === "ai") {
+    state.source = "translated";
+    await persist({ autoSource: "translated" });
+    TP()?.resetForNavigation?.("auto_ai_source_removed");
+  }
   const tp = TP();
   if (!tp || tp.bail) {
-    setStatus("The TextPhantom page modules did not load in this tab. Reload the tab.", "bad");
+    setStatus(
+      "The TextPhantom page modules did not load in this tab. Reload the tab.",
+      "bad",
+    );
     return;
   }
 
@@ -730,7 +812,8 @@ async function translate({ force = false } = {}) {
     debug: { raw: true },
   });
 
-  if (runId !== state.runId || !settingsEpochGuard.accepts(settingsEpoch)) return;
+  if (runId !== state.runId || !settingsEpochGuard.accepts(settingsEpoch))
+    return;
   if (response?.ok === false) {
     onTranslateError({
       original: els.image.currentSrc || els.image.src || state.objectUrl,
@@ -770,7 +853,9 @@ function onTranslated(detail, kind) {
     // "Translated" here would be a lie the raw panel would then contradict.
     setStatus(
       `Finished with nothing to draw${detail?.note ? ` — ${detail.note}` : ""}. ` +
-        (state.showRaw ? "The raw panel below shows what Lens returned." : "Turn on raw data to see what Lens returned."),
+        (state.showRaw
+          ? "The raw panel below shows what Lens returned."
+          : "Turn on raw data to see what Lens returned."),
       "bad",
     );
   } else {
@@ -788,7 +873,10 @@ function onTranslateError(detail) {
   if (!state.objectUrl || !belongsToCurrentImage(detail?.original)) return;
   state.busy = false;
   els.retranslate.disabled = false;
-  setStatus(`Not translated: ${detail?.message || "the job ended without an overlay"}`, "bad");
+  setStatus(
+    `Not translated: ${detail?.message || "the job ended without an overlay"}`,
+    "bad",
+  );
   if (state.showRaw) renderRaw();
 }
 
@@ -803,7 +891,10 @@ els.mode.addEventListener("change", async () => {
 });
 
 els.source.addEventListener("change", async () => {
-  state.source = els.source.value;
+  state.source = ["original", "translated"].includes(els.source.value)
+    ? els.source.value
+    : "translated";
+  els.source.value = state.source;
   applyModeVisibility();
   await persist({ autoSource: state.source });
   if (state.objectUrl) scheduleTranslate();
@@ -857,8 +948,12 @@ els.raw.addEventListener("click", async (event) => {
   applyRawVisibility();
   await persist({ autoRawTab: state.rawTab });
 });
-els.rawCopy.addEventListener("click", () => copyText(state.rawText, els.rawCopy));
-els.pickCopy.addEventListener("click", () => copyText(els.pick.dataset.text || "", els.pickCopy));
+els.rawCopy.addEventListener("click", () =>
+  copyText(state.rawText, els.rawCopy),
+);
+els.pickCopy.addEventListener("click", () =>
+  copyText(els.pick.dataset.text || "", els.pickCopy),
+);
 
 // Click a translated line to take the whole bubble; a real drag-selection is
 // left alone so text can still be selected by hand.
@@ -880,7 +975,9 @@ window.addEventListener("paste", async (event) => {
   const file = firstImageFile(event.clipboardData);
   if (file) {
     event.preventDefault();
-    await useImageBlob(file, file.name || "pasted image", { repeatIsAccident: true });
+    await useImageBlob(file, file.name || "pasted image", {
+      repeatIsAccident: true,
+    });
     return;
   }
   const text = String(event.clipboardData?.getData("text/plain") || "").trim();
@@ -932,14 +1029,24 @@ window.addEventListener("drop", async (event) => {
     await useImageBlob(file, file.name, { repeatIsAccident: true });
     return;
   }
-  const text = String(event.dataTransfer?.getData("text/uri-list") || event.dataTransfer?.getData("text/plain") || "").trim();
+  const text = String(
+    event.dataTransfer?.getData("text/uri-list") ||
+      event.dataTransfer?.getData("text/plain") ||
+      "",
+  ).trim();
   if (/^https?:\/\//i.test(text)) await useImageUrl(text);
   else setStatus("That drop carried no image file and no image link.", "bad");
 });
 
-window.addEventListener("textphantom:overlay-updated", (event) => onTranslated(event.detail || {}, "overlay"));
-window.addEventListener("textphantom:image-updated", (event) => onTranslated(event.detail || {}, "image"));
-window.addEventListener("textphantom:image-error", (event) => onTranslateError(event.detail || {}));
+window.addEventListener("textphantom:overlay-updated", (event) =>
+  onTranslated(event.detail || {}, "overlay"),
+);
+window.addEventListener("textphantom:image-updated", (event) =>
+  onTranslated(event.detail || {}, "image"),
+);
+window.addEventListener("textphantom:image-error", (event) =>
+  onTranslateError(event.detail || {}),
+);
 window.addEventListener("beforeunload", revokeCurrent);
 
 // --------------------------------------------------------------------- start
@@ -964,7 +1071,11 @@ async function refreshLanguagesFromApi() {
       });
     }
     if (Array.isArray(data.sources) && data.sources.length) {
-      fillSelect(els.source, data.sources, { valueKey: "id", labelKey: "name", keep: state.source });
+      fillSelect(els.source, autoTranslateSources(data.sources), {
+        valueKey: "id",
+        labelKey: "name",
+        keep: state.source,
+      });
     }
   } catch {
     // The shipped language list stays on screen; nothing here is worth
@@ -975,8 +1086,16 @@ async function refreshLanguagesFromApi() {
 (async () => {
   await loadSettings();
 
-  fillSelect(els.mode, MODES, { valueKey: "id", labelKey: "name", keep: state.mode });
-  fillSelect(els.source, FALLBACK_SOURCES, { valueKey: "id", labelKey: "name", keep: state.source });
+  fillSelect(els.mode, MODES, {
+    valueKey: "id",
+    labelKey: "name",
+    keep: state.mode,
+  });
+  fillSelect(els.source, autoTranslateSources(FALLBACK_SOURCES), {
+    valueKey: "id",
+    labelKey: "name",
+    keep: state.source,
+  });
   fillSelect(els.lang, orderLanguages(FALLBACK_LANGS), {
     valueKey: "code",
     labelKey: "name",
@@ -990,7 +1109,9 @@ async function refreshLanguagesFromApi() {
   applyWidth(state.width);
   applyRawVisibility();
   showUploader(true);
-  setStatus("Drop, paste (Ctrl+V) or upload an image — it translates by itself.");
+  setStatus(
+    "Drop, paste (Ctrl+V) or upload an image — it translates by itself.",
+  );
 
   refreshLanguagesFromApi();
 })();

@@ -1,34 +1,55 @@
-/**
- * Promise wrappers around `chrome.storage.local`.
- *
- */
+/** Promise wrappers for callback- and Promise-based extension storage APIs. */
 
-/**
- * Read keys from `chrome.storage.local`.
- * @param {string[]|Record<string,*>} keys - key list, or `{key: default}` map
- * @returns {Promise<Record<string,*>>}
- */
-export function getStorage(keys) {
-  return new Promise((resolve) => {
+function localStorageArea() {
+  return (
+    globalThis.browser?.storage?.local ||
+    globalThis.chrome?.storage?.local ||
+    null
+  );
+}
+
+function runtimeError() {
+  const error = globalThis.chrome?.runtime?.lastError;
+  return error
+    ? new Error(error.message || "Extension storage operation failed")
+    : null;
+}
+
+function invoke(method, args, fallback) {
+  const area = localStorageArea();
+  // Explicit non-extension behavior keeps pure modules and test runners usable.
+  if (!area || typeof area[method] !== "function")
+    return Promise.resolve(fallback);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      if (error) reject(error);
+      else resolve(value);
+    };
+    const callback = (value) => finish(runtimeError(), value ?? fallback);
+    let returned;
     try {
-      chrome.storage.local.get(keys, (items) => resolve(items || {}));
-    } catch {
-      resolve({});
+      returned = area[method](...args, callback);
+    } catch (error) {
+      finish(error);
+      return;
+    }
+    if (returned && typeof returned.then === "function") {
+      Promise.resolve(returned).then(
+        (value) => finish(null, value ?? fallback),
+        (error) =>
+          finish(error instanceof Error ? error : new Error(String(error))),
+      );
     }
   });
 }
 
-/**
- * Write a patch into `chrome.storage.local`.
- * @param {Record<string,*>} patch
- * @returns {Promise<void>}
- */
+export function getStorage(keys) {
+  return invoke("get", [keys], {}).then((items) => items || {});
+}
+
 export function setStorage(patch) {
-  return new Promise((resolve) => {
-    try {
-      chrome.storage.local.set(patch, () => resolve());
-    } catch {
-      resolve();
-    }
-  });
+  return invoke("set", [patch], undefined).then(() => undefined);
 }

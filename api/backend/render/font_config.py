@@ -22,47 +22,88 @@ ZH_TC_PATH: Final[str] = "NotoSansCJKtc-Regular.otf"
 AR_PATH: Final[str] = "NotoSansArabic-Regular.ttf"
 HE_PATH: Final[str] = "NotoSansHebrew-Regular.ttf"
 
-# NOTE: the Google Fonts repo reorganised away from the
-# ``ofl/<family>/<family>-Regular.ttf`` naming used by the old API — those
-# URLs now 404. We hit the dedicated notofonts.github.io mirrors (hinted TTFs)
-# first, falling back to the notofonts GitHub repos, then jsDelivr as a CDN
-# of last resort. Each list is tried in order until one returns >10 KB.
-THAI_URLS: Final[list[str]] = [
-    "https://notofonts.github.io/thai/fonts/NotoSansThai/hinted/ttf/NotoSansThai-Regular.ttf",
-    "https://raw.githubusercontent.com/notofonts/thai/main/fonts/NotoSansThai/hinted/ttf/NotoSansThai-Regular.ttf",
-    "https://cdn.jsdelivr.net/gh/notofonts/thai/fonts/NotoSansThai/hinted/ttf/NotoSansThai-Regular.ttf",
-]
-LATIN_URLS: Final[list[str]] = [
-    "https://notofonts.github.io/latin-greek-cyrillic/fonts/NotoSans/hinted/ttf/NotoSans-Regular.ttf",
-    "https://raw.githubusercontent.com/notofonts/latin-greek-cyrillic/main/fonts/NotoSans/hinted/ttf/NotoSans-Regular.ttf",
-    "https://cdn.jsdelivr.net/gh/notofonts/latin-greek-cyrillic/fonts/NotoSans/hinted/ttf/NotoSans-Regular.ttf",
-]
-JA_URLS: Final[list[str]] = [
-    "https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf",
-    "https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf",
-    "https://cdn.jsdelivr.net/gh/notofonts/noto-cjk/Sans/OTF/Japanese/NotoSansCJKjp-Regular.otf",
-]
-ZH_SC_URLS: Final[list[str]] = [
-    "https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf",
-    "https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf",
-    "https://cdn.jsdelivr.net/gh/notofonts/noto-cjk/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf",
-]
-ZH_TC_URLS: Final[list[str]] = [
-    "https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/OTF/TraditionalChinese/NotoSansCJKtc-Regular.otf",
-    "https://github.com/notofonts/noto-cjk/raw/main/Sans/OTF/TraditionalChinese/NotoSansCJKtc-Regular.otf",
-    "https://cdn.jsdelivr.net/gh/notofonts/noto-cjk/Sans/OTF/TraditionalChinese/NotoSansCJKtc-Regular.otf",
-]
-AR_URLS: Final[list[str]] = [
-    "https://notofonts.github.io/arabic/fonts/NotoSansArabic/hinted/ttf/NotoSansArabic-Regular.ttf",
-    "https://raw.githubusercontent.com/notofonts/arabic/main/fonts/NotoSansArabic/hinted/ttf/NotoSansArabic-Regular.ttf",
-    "https://cdn.jsdelivr.net/gh/notofonts/arabic/fonts/NotoSansArabic/hinted/ttf/NotoSansArabic-Regular.ttf",
-]
-HE_URLS: Final[list[str]] = [
-    "https://notofonts.github.io/hebrew/fonts/NotoSansHebrew/hinted/ttf/NotoSansHebrew-Regular.ttf",
-    "https://raw.githubusercontent.com/notofonts/hebrew/main/fonts/NotoSansHebrew/hinted/ttf/NotoSansHebrew-Regular.ttf",
-    "https://cdn.jsdelivr.net/gh/notofonts/hebrew/fonts/NotoSansHebrew/hinted/ttf/NotoSansHebrew-Regular.ttf",
-]
+_NOTO_ARCHIVE_COMMIT: Final[str] = "bf20559450ec75aec7a646b208343540a4496262"
+_NOTO_CJK_COMMIT: Final[str] = "f8d157532fbfaeda587e826d4cd5b21a49186f7c"
 
+def _noto_urls(family: str) -> list[str]:
+    filename = f"{family}-Regular.ttf"
+    artifact = f"phaseIII_only/hinted/ttf/{family}/{filename}"
+    return [
+        f"https://raw.githubusercontent.com/notofonts/noto-fonts/{_NOTO_ARCHIVE_COMMIT}/{artifact}",
+        f"https://github.com/notofonts/noto-fonts/raw/{_NOTO_ARCHIVE_COMMIT}/{artifact}",
+        f"https://cdn.jsdelivr.net/gh/notofonts/noto-fonts@{_NOTO_ARCHIVE_COMMIT}/{artifact}",
+    ]
+
+def _cjk_urls(region: str, filename: str) -> list[str]:
+    artifact = f"Sans/OTF/{region}/{filename}"
+    return [
+        f"https://raw.githubusercontent.com/notofonts/noto-cjk/{_NOTO_CJK_COMMIT}/{artifact}",
+        f"https://github.com/notofonts/noto-cjk/raw/{_NOTO_CJK_COMMIT}/{artifact}",
+        f"https://cdn.jsdelivr.net/gh/notofonts/noto-cjk@{_NOTO_CJK_COMMIT}/{artifact}",
+    ]
+
+# Keep a version-pinned upstream first.  The old notofonts.github.io Latin
+# artifact path returned 404, and ``main`` URLs can change underneath a
+# deployed build.  Each list is tried in order until a valid font is found.
+THAI_URLS: Final[list[str]] = _noto_urls("NotoSansThai")
+LATIN_URLS: Final[list[str]] = _noto_urls("NotoSans")
+JA_URLS: Final[list[str]] = _cjk_urls("Japanese", JA_PATH)
+ZH_SC_URLS: Final[list[str]] = _cjk_urls("SimplifiedChinese", ZH_SC_PATH)
+ZH_TC_URLS: Final[list[str]] = _cjk_urls("TraditionalChinese", ZH_TC_PATH)
+AR_URLS: Final[list[str]] = _noto_urls("NotoSansArabic")
+HE_URLS: Final[list[str]] = _noto_urls("NotoSansHebrew")
+
+_SCRIPT_FAMILIES: Final[dict[str, str]] = {
+    "hangul": "NotoSansCJKkr-Regular.otf",
+    "devanagari": "NotoSansDevanagari-Regular.ttf",
+    "bengali": "NotoSansBengali-Regular.ttf",
+    "tamil": "NotoSansTamil-Regular.ttf",
+    "telugu": "NotoSansTelugu-Regular.ttf",
+    "malayalam": "NotoSansMalayalam-Regular.ttf",
+    "gujarati": "NotoSansGujarati-Regular.ttf",
+    "gurmukhi": "NotoSansGurmukhi-Regular.ttf",
+    "kannada": "NotoSansKannada-Regular.ttf",
+    "sinhala": "NotoSansSinhala-Regular.ttf",
+    "myanmar": "NotoSansMyanmar-Regular.ttf",
+    "khmer": "NotoSansKhmer-Regular.ttf",
+    "lao": "NotoSansLao-Regular.ttf",
+    "armenian": "NotoSansArmenian-Regular.ttf",
+    "georgian": "NotoSansGeorgian-Regular.ttf",
+    "ethiopic": "NotoSansEthiopic-Regular.ttf",
+    "odia": "NotoSansOriya-Regular.ttf",
+}
+
+SCRIPT_FONT_CONFIG: Final[dict[str, tuple[str, list[str]]]] = {
+    "latin": (LATIN_PATH, LATIN_URLS),
+    "thai": (THAI_PATH, THAI_URLS),
+    "cjk-ja": (JA_PATH, JA_URLS),
+    "cjk-sc": (ZH_SC_PATH, ZH_SC_URLS),
+    "cjk-tc": (ZH_TC_PATH, ZH_TC_URLS),
+    "arabic": (AR_PATH, AR_URLS),
+    "hebrew": (HE_PATH, HE_URLS),
+}
+for _script, _filename in _SCRIPT_FAMILIES.items():
+    if _script == "hangul":
+        SCRIPT_FONT_CONFIG[_script] = (_filename, _cjk_urls("Korean", _filename))
+    else:
+        SCRIPT_FONT_CONFIG[_script] = (_filename, _noto_urls(_filename.removesuffix("-Regular.ttf")))
+
+_LANGUAGE_SCRIPTS: Final[dict[str, str]] = {
+    "th": "thai", "ja": "cjk-ja", "ko": "hangul",
+    "zh": "cjk-sc", "zh-cn": "cjk-sc", "zh-tw": "cjk-tc",
+    "ar": "arabic", "fa": "arabic", "ur": "arabic", "ps": "arabic",
+    "ug": "arabic", "sd": "arabic", "ckb": "arabic",
+    "iw": "hebrew", "he": "hebrew", "yi": "hebrew",
+    "hi": "devanagari", "mr": "devanagari", "ne": "devanagari",
+    "bn": "bengali", "ta": "tamil", "te": "telugu", "ml": "malayalam",
+    "gu": "gujarati", "pa": "gurmukhi", "kn": "kannada", "si": "sinhala",
+    "my": "myanmar", "km": "khmer", "lo": "lao", "hy": "armenian",
+    "ka": "georgian", "am": "ethiopic", "or": "odia",
+}
+
+def script_for_lang(lang: str) -> str:
+    code = (lang or "").strip().lower().replace("_", "-")
+    return _LANGUAGE_SCRIPTS.get(code, "latin")
 
 def latin_font_for_lang(lang: str) -> tuple[str, list[str]]:
     """Return ``(default_path, download_urls)`` for the *non-Thai* font that
@@ -72,18 +113,12 @@ def latin_font_for_lang(lang: str) -> tuple[str, list[str]]:
     the matching Arabic / Hebrew face; everyone else gets plain Noto Sans.
     """
     code = (lang or "").strip().lower().replace("_", "-")
-    if code == "ja":
-        return JA_PATH, JA_URLS
-    if code in ("zh", "zh-hans", "zh-cn", "zh_cn", "zh_hans"):
-        return ZH_SC_PATH, ZH_SC_URLS
-    if code in ("zh-hant", "zh-tw", "zh_tw", "zh_hant"):
-        return ZH_TC_PATH, ZH_TC_URLS
-    # Primary subtag handles regional variants (e.g. ``ar-EG`` -> ``ar``).
-    primary = code.split("-", 1)[0]
-    # Arabic script also serves Persian (fa) and Urdu (ur).
-    if primary in ("ar", "fa", "ur", "ps", "ckb", "ku", "sd", "ug"):
-        return AR_PATH, AR_URLS
-    # Hebrew block; Lens reports Hebrew as "iw".
-    if primary in ("he", "iw", "yi"):
-        return HE_PATH, HE_URLS
-    return LATIN_PATH, LATIN_URLS
+    # Thai is always loaded in the dedicated first slot of ``font_pair``.
+    # The second slot must remain the Latin fallback for mixed strings such as
+    # "ทดสอบ AI 123"; returning Noto Sans Thai here makes the U+0041 warmup
+    # probe fail even though Thai rendering itself is healthy.
+    if code == "th":
+        return SCRIPT_FONT_CONFIG["latin"]
+    aliases = {"zh-hans": "zh-cn", "zh-hant": "zh-tw"}
+    script = script_for_lang(aliases.get(code, code).split("-", 1)[0] if code not in ("zh-cn", "zh-tw") else code)
+    return SCRIPT_FONT_CONFIG[script]

@@ -1,0 +1,26 @@
+{
+  "image": { "width": 500, "height": 800 },
+  "languages": { "source": "ja", "target": "th" },
+  "paragraphs": [
+    {
+      "id": "horizontal", "sourceText": "原文<&>",
+      "items": [{ "text": "原文<&>", "height": 0.025, "rotation": 0, "baseline": [[0.1, 0.15], [0.4, 0.15]], "valid_text": true }],
+      "lensItems": [{ "text": "ข้อความแปล<&>", "height": 0.025, "rotation": 0, "baseline": [[0.1, 0.15], [0.4, 0.15]], "valid_text": true }],
+      "aiText": "ข้อความ AI <script>alert(1)</script>"
+    },
+    {
+      "id": "vertical-right", "sourceText": "日本",
+      "items": [{ "text": "日本", "height": 0.06, "rotation": 90, "baseline": [[0.78, 0.25], [0.78, 0.55]], "valid_text": true }],
+      "lensItems": [{ "text": "ภาษา", "height": 0.06, "rotation": 90, "baseline": [[0.78, 0.25], [0.78, 0.55]], "valid_text": true }],
+      "aiText": "ข้อความแนวตั้ง", "aiGroupParagraphIds": ["vertical-right", "vertical-left"]
+    },
+    {
+      "id": "vertical-left", "sourceText": "語文",
+      "items": [{ "text": "語文", "height": 0.06, "rotation": 90, "baseline": [[0.66, 0.25], [0.66, 0.55]], "valid_text": true }],
+      "lensItems": [{ "text": "ไทย", "height": 0.06, "rotation": 90, "baseline": [[0.66, 0.25], [0.66, 0.55]], "valid_text": true }],
+      "aiCoveredBy": "vertical-right"
+    }
+  ],
+  "groups": [{ "id": "lens-group-vertical", "paragraphIds": ["vertical-right", "vertical-left"], "direction": "v", "text": "日本語文", "boundsPx": [300, 180, 420, 460] }],
+  "uncoveredParagraphIds": []
+}

@@ -12,7 +12,7 @@
  *
  * Schema `tp.erase-boxes/1`:
  *
- *     { "schema": "tp.erase-boxes/1", "boxes": [ {l, t, w, h, r?}, ... ] }
+ *     { "schema": "tp.erase-boxes/1", "boxes": [ {l, t, w, h, r?, p?}, ... ] }
  *
  * `l/t/w/h` are normalised to the image size (0..1) and `r` is the box's
  * rotation in degrees about its own centre — the same numbers
@@ -20,6 +20,8 @@
  * server would have erased.
  */
 
+// `p` is the source LensDocument paragraph ID. It is mandatory for selective
+// erasure of a partial AI result; geometry-only callers may omit it.
 export const ERASE_BOXES_SCHEMA = "tp.erase-boxes/1";
 
 // Normalised coordinates only ever need this much precision: at 5 decimals one
@@ -85,7 +87,8 @@ export function buildEraseBoxes(tokens, { ownerForToken = null } = {}) {
   const boxes = [];
   let skipped = 0;
   for (const token of Array.isArray(tokens) ? tokens : []) {
-    const payload = token && typeof token === "object" ? boxPayload(token) : null;
+    const payload =
+      token && typeof token === "object" ? boxPayload(token) : null;
     if (payload === null) {
       skipped += 1;
       continue;
@@ -102,35 +105,68 @@ export function buildEraseBoxes(tokens, { ownerForToken = null } = {}) {
   return out;
 }
 
+/** Match buildLensDocument's source paragraph namespace AFTER filtering.
+ * Never infer an owner from a box position or from an old OCR para_index.
+ */
+export function buildOwnedEraseBoxes(originalTree) {
+  const boxes = [];
+  let skipped = 0;
+  for (const [index, paragraph] of (originalTree?.paragraphs || []).entries()) {
+    if (!paragraph || typeof paragraph !== "object") continue;
+    const tokens = (paragraph.items || []).flatMap(item => item?.spans || []);
+    const part = buildEraseBoxes(tokens, { ownerForToken: () => `p${index}` });
+    boxes.push(...part.boxes);
+    skipped += part.skipped || 0;
+  }
+  return { schema: ERASE_BOXES_SCHEMA, boxes, ...(skipped ? { skipped } : {}) };
+}
+
 export function eraseBoxesForAiPartial(doc, eraseBoxes) {
   const boxes = Array.isArray(eraseBoxes?.boxes) ? eraseBoxes.boxes : null;
   if (!boxes || eraseBoxes?.schema !== ERASE_BOXES_SCHEMA) {
-    return { ok: false, reason: "partial AI erase geometry has no supported box list" };
+    return {
+      ok: false,
+      reason: "partial AI erase geometry has no supported box list",
+    };
   }
   const paragraphs = Array.isArray(doc?.paragraphs) ? doc.paragraphs : [];
-  const known = new Set(paragraphs.map((p) => String(p?.id || "")).filter(Boolean));
+  const known = new Set(
+    paragraphs.map((p) => String(p?.id || "")).filter(Boolean),
+  );
   const replaced = new Set();
   for (const para of paragraphs) {
     if (!String(para?.aiText || "").trim()) continue;
-    const ids = Array.isArray(para?.aiGroupParagraphIds) && para.aiGroupParagraphIds.length
-      ? para.aiGroupParagraphIds.map(String)
-      : [String(para?.id || "")];
+    const ids =
+      Array.isArray(para?.aiGroupParagraphIds) &&
+      para.aiGroupParagraphIds.length
+        ? para.aiGroupParagraphIds.map(String)
+        : [String(para?.id || "")];
     for (const id of ids) {
       if (!known.has(id)) {
-        return { ok: false, reason: `partial AI group names unknown paragraph ${JSON.stringify(id)}` };
+        return {
+          ok: false,
+          reason: `partial AI group names unknown paragraph ${JSON.stringify(id)}`,
+        };
       }
       replaced.add(id);
     }
   }
-  if (!replaced.size) return { ok: false, reason: "partial AI has no replacement paragraph" };
+  if (!replaced.size)
+    return { ok: false, reason: "partial AI has no replacement paragraph" };
   for (const box of boxes) {
     if (typeof box?.p !== "string" || !known.has(box.p)) {
-      return { ok: false, reason: "partial AI erase ownership is missing or ambiguous" };
+      return {
+        ok: false,
+        reason: "partial AI erase ownership is missing or ambiguous",
+      };
     }
   }
   return {
     ok: true,
-    eraseBoxes: { ...eraseBoxes, boxes: boxes.filter((box) => replaced.has(box.p)) },
+    eraseBoxes: {
+      ...eraseBoxes,
+      boxes: boxes.filter((box) => replaced.has(box.p)),
+    },
     replacedParagraphIds: [...replaced],
   };
 }

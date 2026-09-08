@@ -1,52 +1,11 @@
-// MangaDex reader support: stable page keys, a key-based overlay set, and cached-result hydration.
-
 (function () {
   const TP = window.__TP;
   if (!TP || TP.bail) return;
 
-  const isMangaDexHost = () => /(^|\.)mangadex\.org$/i.test(String(location.hostname || ""));
-
-  // Builds a stable md:data/hash/file key from any at-home image URL.
-  function mdKeyFromUrl(u) {
-    const s = TP.normUrl(u);
-    if (!s) return "";
-    try {
-      const parts = String(new URL(s, location.href).pathname || "")
-        .split("/")
-        .filter(Boolean);
-      for (let i = parts.length - 1; i >= 0; i--) {
-        if (parts[i] === "data" || parts[i] === "data-saver") {
-          if (parts.length >= i + 3) return `md:${parts[i]}/${parts[i + 1]}/${parts[i + 2]}`;
-          break;
-        }
-      }
-      return "";
-    } catch {
-      return "";
-    }
-  }
-
-  function getMangaDexChapterId() {
-    const m = String(location.pathname || "").match(/\/chapter\/([a-f0-9-]{8,})/i);
-    return m ? m[1] : "";
-  }
-
-  // Returns the current page index taken from the URL path, query or hash.
-  function getMangaDexPageIndexFromUrl() {
-    const parts = String(location.pathname || "").split("/").filter(Boolean);
-    const ci = parts.indexOf("chapter");
-    if (ci >= 0 && parts.length >= ci + 3 && /^\d+$/.test(parts[ci + 2])) {
-      return Math.max(0, Number(parts[ci + 2]) - 1);
-    }
-    try {
-      const qs = new URLSearchParams(String(location.search || ""));
-      const q = qs.get("page") || qs.get("p");
-      if (q && /^\d+$/.test(q)) return Math.max(0, Number(q) - 1);
-    } catch {
-    }
-    const hm = String(location.hash || "").match(/(?:^|[?#&])page=(\d+)/i);
-    return hm ? Math.max(0, Number(hm[1]) - 1) : null;
-  }
+  const isMangaDexHost = TP.isMangaDexHost;
+  const mdKeyFromUrl = TP.mdKeyFromUrl;
+  const getMangaDexChapterId = TP.getMangaDexChapterId;
+  const getMangaDexPageIndexFromUrl = TP.getMangaDexPageIndexFromUrl;
 
   const mdPendingByOriginal = new Map();
 
@@ -55,7 +14,8 @@
     const items = [...mdPendingByOriginal.entries()].sort(
       (a, b) => (a[1]?.ts || 0) - (b[1]?.ts || 0),
     );
-    for (let i = 0; i < items.length - maxSize; i++) mdPendingByOriginal.delete(items[i][0]);
+    for (let i = 0; i < items.length - maxSize; i++)
+      mdPendingByOriginal.delete(items[i][0]);
   }
 
   // Parks a result for an image that is not mapped in the DOM yet.
@@ -76,75 +36,24 @@
     return v || null;
   }
 
-  // Looks an md key back up in the chapter list to recover its at-home URL.
-  function mdUrlFromKey(key) {
-    const wanted = String(key || "");
-    if (!wanted) return "";
-    const urls = mdCache?.urls;
-    if (!Array.isArray(urls)) return "";
-    for (const u of urls) {
-      if (mdKeyFromUrl(u) === wanted) return TP.normUrl(u);
-    }
-    return "";
-  }
-
-  const MD_CACHE_TTL_MS = 180000;
-  let mdCache = null;
-
-  // Fetches and caches the ordered image URL list for the current chapter.
-  async function fetchMangaDexChapterUrls() {
-    if (!isMangaDexHost()) return null;
-    const chapterId = getMangaDexChapterId();
-    if (!chapterId) return null;
-
-    const now = Date.now();
-    if (
-      mdCache &&
-      mdCache.chapterId === chapterId &&
-      now - (mdCache.ts || 0) < MD_CACHE_TTL_MS &&
-      Array.isArray(mdCache.urls) &&
-      mdCache.urls.length
-    ) {
-      return mdCache;
-    }
-
-    try {
-      const res = await fetch(`https://api.mangadex.org/at-home/server/${chapterId}`, {
-        credentials: "omit",
-      });
-      if (!res.ok) throw new Error(`MangaDex API ${res.status}`);
-      const info = await res.json();
-
-      const baseUrl = info?.baseUrl;
-      const hash = info?.chapter?.hash;
-      const data = Array.isArray(info?.chapter?.data) ? info.chapter.data : [];
-      const dataSaver = Array.isArray(info?.chapter?.dataSaver) ? info.chapter.dataSaver : [];
-
-      let path = "data";
-      let files = data;
-      if (!files.length && dataSaver.length) {
-        path = "data-saver";
-        files = dataSaver;
-      }
-      if (!baseUrl || !hash || !files.length) throw new Error("Unexpected MangaDex API shape");
-
-      mdCache = {
-        chapterId,
-        ts: now,
-        path,
-        urls: files.map((file) => `${baseUrl}/${path}/${hash}/${file}`),
-      };
-      return mdCache;
-    } catch (e) {
-      TP.log.warn("MangaDex API error", e?.message || e);
-      mdCache = { chapterId, ts: now, urls: [], path: "data" };
-      return null;
-    }
-  }
+  const mdUrlFromKey = TP.mdUrlFromKey;
 
   // Asks the service worker for cached results for a set of md keys.
-  const mdCacheGet = (keys, includeNewImg = false, lang = "", mode = "", source = "") =>
-    TP.sendBg({ type: "TP_MD_CACHE_GET", keys, includeNewImg: !!includeNewImg, lang, mode, source });
+  const mdCacheGet = (
+    keys,
+    includeNewImg = false,
+    lang = "",
+    mode = "",
+    source = "",
+  ) =>
+    TP.sendBg({
+      type: "TP_MD_CACHE_GET",
+      keys,
+      includeNewImg: !!includeNewImg,
+      lang,
+      mode,
+      source,
+    });
 
   // Returns the cached replacement-image URL for one md key.
   async function mdCacheGetNewImg(key, lang, mode, source = "") {
@@ -159,7 +68,15 @@
   }
 
   // Applies a cached replacement image to an md-keyed image, as an overlay or in place.
-  function mdApplyCachedNewImg(originalUrl, key, isTextMode, imgElement, lang, mode, source = "") {
+  function mdApplyCachedNewImg(
+    originalUrl,
+    key,
+    isTextMode,
+    imgElement,
+    lang,
+    mode,
+    source = "",
+  ) {
     mdCacheGetNewImg(key, lang, mode, source).then((newSrc) => {
       if (!newSrc) return;
       if (isTextMode) {
@@ -202,11 +119,13 @@
   async function hydrateMangaDexFromCache() {
     if (!isMangaDexHost() || !TP.isTop) return null;
 
-    const info = await fetchMangaDexChapterUrls();
+    const info = await TP.getMangaDexManifest();
     const urls = info?.urls;
     if (!Array.isArray(urls) || !urls.length) return null;
 
-    const pairs = urls.map((u) => ({ url: u, key: mdKeyFromUrl(u) })).filter((p) => p.key);
+    const pairs = urls
+      .map((u) => ({ url: u, key: mdKeyFromUrl(u) }))
+      .filter((p) => p.key);
     const keys = [...new Set(pairs.map((p) => p.key))].slice(0, 600);
     if (!keys.length) return null;
 
@@ -223,10 +142,23 @@
 
       if (rec.result) {
         const img = TP.findTargetImage(p.url);
-        if (img) void TP.applyHtmlOverlay(img, rec.result, source, isText, p.url).catch((e) =>
-          TP.log.warn("cached overlay render failed", e?.message || String(e)),
-        );
-        else mdRememberPending(p.url, { overlay: { result: rec.result, source, isTextMode: isText } });
+        if (img)
+          void TP.applyHtmlOverlay(
+            img,
+            rec.result,
+            source,
+            isText,
+            p.url,
+          ).catch((e) =>
+            TP.log.warn(
+              "cached overlay render failed",
+              e?.message || String(e),
+            ),
+          );
+        else
+          mdRememberPending(p.url, {
+            overlay: { result: rec.result, source, isTextMode: isText },
+          });
       }
 
       const hasNewImg =
@@ -235,7 +167,16 @@
         Boolean(TP.extractNewImageSrc(rec?.result || null));
       if (hasNewImg) {
         const img = TP.findTargetImage(p.url);
-        if (img) mdApplyCachedNewImg(p.url, p.key, isText, img, st.lang, st.mode, source);
+        if (img)
+          mdApplyCachedNewImg(
+            p.url,
+            p.key,
+            isText,
+            img,
+            st.lang,
+            st.mode,
+            source,
+          );
         else
           mdRememberPending(p.url, {
             needNewImg: true,
@@ -269,8 +210,14 @@
 
   // Infers an image's page index from its alt text, data attributes or URL.
   function inferMangaDexPageIndexForImg(img) {
-    const alt = String(img?.getAttribute?.("alt") || img?.getAttribute?.("aria-label") || "");
-    const patterns = [/^\s*(\d+)\s*[-_]/, /(?:^|\D)(\d+)\s*\/\s*(\d+)/, /page\s*(\d+)/i];
+    const alt = String(
+      img?.getAttribute?.("alt") || img?.getAttribute?.("aria-label") || "",
+    );
+    const patterns = [
+      /^\s*(\d+)\s*[-_]/,
+      /(?:^|\D)(\d+)\s*\/\s*(\d+)/,
+      /page\s*(\d+)/i,
+    ];
     for (const re of patterns) {
       const m = alt.match(re);
       if (m) return Math.max(0, Number(m[1]) - 1);
@@ -278,20 +225,32 @@
 
     const tpPage =
       img?.dataset?.tpMdPage ||
-      (typeof img?.getAttribute === "function" ? img.getAttribute("data-tp-md-page") : "");
-    if (tpPage && /^\d+$/.test(String(tpPage))) return Math.max(0, Number(tpPage) - 1);
+      (typeof img?.getAttribute === "function"
+        ? img.getAttribute("data-tp-md-page")
+        : "");
+    if (tpPage && /^\d+$/.test(String(tpPage)))
+      return Math.max(0, Number(tpPage) - 1);
 
-    for (const src of [String(img?.dataset?.tpOriginalKey || ""), String(img?.dataset?.tpOriginal || "")]) {
+    for (const src of [
+      String(img?.dataset?.tpOriginalKey || ""),
+      String(img?.dataset?.tpOriginal || ""),
+    ]) {
       const m = src.match(/\/(\d+)\s*[-_]/);
       if (m) return Math.max(0, Number(m[1]) - 1);
     }
 
     const direct =
-      img?.getAttribute?.("data-page") || img?.dataset?.page || img?.dataset?.pageIndex || "";
-    if (direct && /^\d+$/.test(String(direct))) return Math.max(0, Number(direct) - 1);
+      img?.getAttribute?.("data-page") ||
+      img?.dataset?.page ||
+      img?.dataset?.pageIndex ||
+      "";
+    if (direct && /^\d+$/.test(String(direct)))
+      return Math.max(0, Number(direct) - 1);
 
-    const near = img?.closest?.("[data-page]")?.getAttribute?.("data-page") || "";
-    if (near && /^\d+$/.test(String(near))) return Math.max(0, Number(near) - 1);
+    const near =
+      img?.closest?.("[data-page]")?.getAttribute?.("data-page") || "";
+    if (near && /^\d+$/.test(String(near)))
+      return Math.max(0, Number(near) - 1);
 
     return null;
   }
@@ -314,7 +273,9 @@
         .then((applied) => {
           if (!applied) {
             mdRememberPending(target, { newSrc: pending.newSrc });
-            TP.log.warn("md pending re-parked: image vanished during apply", { key });
+            TP.log.warn("md pending re-parked: image vanished during apply", {
+              key,
+            });
           }
         })
         .catch((e) => {
@@ -353,9 +314,10 @@
           pending.overlay.source,
           pending.overlay.isTextMode,
           url,
-        ).catch((e) => TP.log.warn("pending overlay render failed", e?.message || String(e)));
-      } catch {
-      }
+        ).catch((e) =>
+          TP.log.warn("pending overlay render failed", e?.message || String(e)),
+        );
+      } catch {}
     }
     if (pending.needNewImg) {
       mdApplyCachedNewImg(
@@ -372,13 +334,21 @@
 
   // Stamps an image with its resolved at-home URL and key, then flushes parked results.
   function mdApplyOriginalToImg(img, idx, urls) {
-    if (!img || !Array.isArray(urls) || idx == null || idx < 0 || idx >= urls.length) return;
+    if (
+      !img ||
+      !Array.isArray(urls) ||
+      idx == null ||
+      idx < 0 ||
+      idx >= urls.length
+    )
+      return;
     const url = TP.normUrl(urls[idx]);
     if (!url) return;
     const key = mdKeyFromUrl(url) || url;
 
     if (img.dataset.tpOriginalKey !== key) img.dataset.tpOriginalKey = key;
-    if (TP.normUrl(img.dataset.tpOriginal) !== url) img.dataset.tpOriginal = url;
+    if (TP.normUrl(img.dataset.tpOriginal) !== url)
+      img.dataset.tpOriginal = url;
     img.dataset.tpMdPage = String(idx + 1);
 
     mdFlushPendingFor(img, key, url);
@@ -390,14 +360,9 @@
 
     mdCheckChapterChange();
 
-    if (typeof TP.mdSiteMapDom === "function") {
-      try {
-        await TP.mdSiteMapDom();
-      } catch {
-      }
-    }
+    await TP.mapMangaDexDom().catch(() => 0);
 
-    const urls = (await fetchMangaDexChapterUrls())?.urls || [];
+    const urls = (await TP.getMangaDexManifest())?.urls || [];
     for (const img of getMangaDexPageImagesInDOM()) {
       const key = String(img.dataset.tpOriginalKey || "");
       if (key) {
@@ -428,10 +393,12 @@
   async function resolveMangaDexOriginalForBlob(blobUrl) {
     if (!isMangaDexHost() || !blobUrl?.startsWith("blob:")) return null;
     scheduleMangaDexMapping();
-    const urls = (await fetchMangaDexChapterUrls())?.urls || [];
+    const urls = (await TP.getMangaDexManifest())?.urls || [];
     if (!urls.length) return null;
 
-    const img = Array.from(document.images || []).find((i) => (i.currentSrc || i.src) === blobUrl);
+    const img = Array.from(document.images || []).find(
+      (i) => (i.currentSrc || i.src) === blobUrl,
+    );
     if (!img) return null;
     if (img.dataset.tpOriginal) return TP.normUrl(img.dataset.tpOriginal);
 
@@ -477,19 +444,16 @@
     for (const rec of mdOverlaysByKey.values()) {
       try {
         if (rec?.blobUrl?.startsWith("blob:")) URL.revokeObjectURL(rec.blobUrl);
-      } catch {
-      }
+      } catch {}
       try {
         rec?.el?.remove();
-      } catch {
-      }
+      } catch {}
     }
     mdOverlaysByKey.clear();
     for (const rec of mdHtmlOverlaysByKey.values()) {
       try {
         rec?.host?.remove();
-      } catch {
-      }
+      } catch {}
     }
     mdHtmlOverlaysByKey.clear();
   }
@@ -512,13 +476,21 @@
     const id = getMangaDexChapterId();
     if (!id || id === mdCurrentChapterId) return false;
     TP.log.info("md chapter changed", { from: mdCurrentChapterId, to: id });
+    // MangaDex bypasses the generic SPA reset path. Reset the page generation
+    // here so the old toast disappears immediately and late results cannot
+    // attach to the new chapter while background cancellation is still in flight.
+    TP.forgetImageState?.();
+    TP.resetPageInstance?.("chapter_change");
     try {
-      const p = TP.sendBg({ type: "TP_MD_CHAPTER_CHANGED", from: mdCurrentChapterId, to: id });
+      const p = TP.sendBg({
+        type: "TP_MD_CHAPTER_CHANGED",
+        from: mdCurrentChapterId,
+        to: id,
+      });
       p?.catch?.(() => {});
-    } catch {
-    }
+    } catch {}
     mdCurrentChapterId = id;
-    mdCache = null;
+    TP.invalidateMangaDexManifest();
     mdPendingByOriginal.clear();
     mdDestroyAllOverlays();
     mdClearImgStamps();
@@ -530,7 +502,9 @@
 
   // Returns true when an image cannot belong to a key; the reader's img alt is the page filename.
   function mdImgConflictsWithKey(img, key) {
-    const file = String(key || "").split("/").pop();
+    const file = String(key || "")
+      .split("/")
+      .pop();
     const alt = String(img?.getAttribute?.("alt") || "").trim();
     return Boolean(file && alt && alt !== file);
   }
@@ -545,7 +519,8 @@
       : null;
 
   const mdGetKeyForImg = (img) =>
-    String(img?.dataset?.tpOriginalKey || "") || mdKeyFromUrl(String(img?.dataset?.tpOriginal || ""));
+    String(img?.dataset?.tpOriginalKey || "") ||
+    mdKeyFromUrl(String(img?.dataset?.tpOriginal || ""));
 
   // Re-positions MangaDex overlays, optionally restricted to a set of keys.
   function updateMangaDexOverlays(onlyKeys = null) {
@@ -561,7 +536,8 @@
       let img = rec.img;
       if (img && img.isConnected) {
         const dsKey = String(img.dataset.tpOriginalKey || "");
-        if ((dsKey && dsKey !== key) || mdImgConflictsWithKey(img, key)) img = null;
+        if ((dsKey && dsKey !== key) || mdImgConflictsWithKey(img, key))
+          img = null;
       }
       if (!img || !img.isConnected) img = findMangaDexImgByKey(key);
       if (!img) {
@@ -593,7 +569,8 @@
       let img = rec.img;
       if (img && img.isConnected) {
         const dsKey = String(img.dataset.tpOriginalKey || "");
-        if ((dsKey && dsKey !== key) || mdImgConflictsWithKey(img, key)) img = null;
+        if ((dsKey && dsKey !== key) || mdImgConflictsWithKey(img, key))
+          img = null;
       }
       if (!img || !img.isConnected) img = findMangaDexImgByKey(key);
       if (!img) {
@@ -636,12 +613,8 @@
         continue;
       }
 
-      const { nw, nh, sx, sy, offX, offY, transform, transformOrigin } = TP.computeScale(
-        img,
-        rec.baseW,
-        rec.baseH,
-        true,
-      );
+      const { nw, nh, sx, sy, offX, offY, transform, transformOrigin } =
+        TP.computeScale(img, rec.baseW, rec.baseH, true);
       TP.setOverlayStyleIfChanged(scope, "width", `${nw}px`);
       TP.setOverlayStyleIfChanged(scope, "height", `${nh}px`);
       TP.setOverlayStyleIfChanged(
@@ -652,7 +625,11 @@
       TP.setOverlayStyleIfChanged(scope, "transform-origin", "0 0");
       if (transform && transform !== "none") {
         TP.setOverlayStyleIfChanged(host, "transform", transform);
-        TP.setOverlayStyleIfChanged(host, "transform-origin", transformOrigin || "0 0");
+        TP.setOverlayStyleIfChanged(
+          host,
+          "transform-origin",
+          transformOrigin || "0 0",
+        );
       } else {
         TP.setOverlayStyleIfChanged(host, "transform", "");
         TP.setOverlayStyleIfChanged(host, "transform-origin", "");
@@ -681,22 +658,38 @@
   function ensureMangaDexOverlayListeners() {
     if (window.__tpMdOverlayListeners) return;
     window.__tpMdOverlayListeners = true;
-    window.addEventListener("scroll", scheduleMangaDexOverlayUpdate, { passive: true });
-    window.addEventListener("resize", scheduleMangaDexOverlayUpdate, { passive: true });
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") scheduleMangaDexOverlayUpdate();
-    }, { passive: true });
+    window.addEventListener("scroll", scheduleMangaDexOverlayUpdate, {
+      passive: true,
+    });
+    window.addEventListener("resize", scheduleMangaDexOverlayUpdate, {
+      passive: true,
+    });
+    document.addEventListener(
+      "visibilitychange",
+      () => {
+        if (document.visibilityState === "visible")
+          scheduleMangaDexOverlayUpdate();
+      },
+      { passive: true },
+    );
     try {
       new MutationObserver((records) => {
-        if (TP.overlayMutationsNeedUpdate(records)) scheduleMangaDexOverlayUpdate();
+        if (TP.overlayMutationsNeedUpdate(records))
+          scheduleMangaDexOverlayUpdate();
       }).observe(document.documentElement, {
         subtree: true,
         childList: true,
         attributes: true,
-        attributeFilter: ["src", "srcset", "data-src", "data-srcset", "style", "class"],
+        attributeFilter: [
+          "src",
+          "srcset",
+          "data-src",
+          "data-srcset",
+          "style",
+          "class",
+        ],
       });
-    } catch {
-    }
+    } catch {}
   }
 
   // Returns the MangaDex HTML overlay record for a key, creating it if needed.
@@ -737,7 +730,9 @@
 
     const img = findMangaDexImgByKey(mdKey) || TP.findTargetImage(original);
     if (!img) {
-      TP.log.warn("REPLACE_IMAGE target not found", { original: TP.truncate(original) });
+      TP.log.warn("REPLACE_IMAGE target not found", {
+        original: TP.truncate(original),
+      });
       return 0;
     }
 
@@ -790,13 +785,17 @@
       const blobUrl = await TP.dataUriToBlobUrl(newSrc);
       if (blobUrl) nextSrc = blobUrl;
     }
-    if (rec.blobUrl && rec.blobUrl.startsWith("blob:") && rec.blobUrl !== nextSrc) {
+    if (
+      rec.blobUrl &&
+      rec.blobUrl.startsWith("blob:") &&
+      rec.blobUrl !== nextSrc
+    ) {
       try {
         URL.revokeObjectURL(rec.blobUrl);
-      } catch {
-      }
+      } catch {}
     }
-    rec.blobUrl = typeof nextSrc === "string" && nextSrc.startsWith("blob:") ? nextSrc : "";
+    rec.blobUrl =
+      typeof nextSrc === "string" && nextSrc.startsWith("blob:") ? nextSrc : "";
     rec.el.src = nextSrc;
 
     scheduleMangaDexOverlayUpdate(mdKey);
@@ -806,14 +805,16 @@
   if (isMangaDexHost() && TP.isTop) {
     scheduleMangaDexMapping();
     try {
-      new MutationObserver(() => scheduleMangaDexMapping()).observe(document.documentElement, {
-        subtree: true,
-        childList: true,
-        attributes: true,
-        attributeFilter: ["src", "srcset", "data-src", "alt", "aria-label"],
-      });
+      new MutationObserver(() => scheduleMangaDexMapping()).observe(
+        document.documentElement,
+        {
+          subtree: true,
+          childList: true,
+          attributes: true,
+          attributeFilter: ["src", "srcset", "data-src", "alt", "aria-label"],
+        },
+      );
       const onNav = () => {
-        mdCache = null;
         mdCheckChapterChange();
         scheduleMangaDexMapping();
       };
@@ -830,8 +831,7 @@
           };
         }
       }
-    } catch {
-    }
+    } catch {}
   }
 
   try {
@@ -845,14 +845,10 @@
         hydrateMangaDexFromCache().catch(() => {});
       }, 150);
     });
-  } catch {
-  }
+  } catch {}
 
   Object.assign(TP, {
-    isMangaDexHost,
-    mdKeyFromUrl,
     mdRememberPending,
-    fetchMangaDexChapterUrls,
     hydrateMangaDexFromCache,
     getMangaDexPageImagesInDOM,
     ensureMangaDexDomMapping,

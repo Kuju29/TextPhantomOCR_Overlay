@@ -1,6 +1,5 @@
 """Pour an AI translation into a template tree.
 
-
 ``patch`` takes the marker-encoded AI text plus a *template tree* (normally
 the Lens **Translated** tree, because it already carries target-language
 geometry: the right number of lines per bubble, each line's free-angle
@@ -13,7 +12,7 @@ result is an ``Ai`` tree with the same geometry as the template but the AI's
 (better) wording.
 
 Per-item *font sizes* are picked by
-:func:`backend.render.tp_html.fit_item_font_size`, a closed-form formula
+:func:`backend.render.components.typography.fit_item_font_size`, a closed-form formula
 that doesn't need Pillow.  The renderer (`render_tree_overlay`) emits one
 ``<div class="tp-line">`` per item with that font size — no per-word span
 tiling, no PIL fonts, no fragile measurement.
@@ -21,8 +20,9 @@ tiling, no PIL fonts, no fragile measurement.
 
 from __future__ import annotations
 
-import copy
 from typing import Any
+
+import copy
 
 from backend.ai import markers
 from backend.lens.languages import normalize as normalize_lang
@@ -32,9 +32,8 @@ from backend.render.layout import (
     font_size_minimum_for_image,
     pad_lines,
 )
-from backend.render.tp_html import fit_item_font_size
-from backend.utils.text import ZWSP
-
+from backend.render.components.typography import fit_item_font_size
+from backend.render.ai_tree.spans import join_line_tokens
 
 def _patch_groups(
     ai_text_full: str,
@@ -110,7 +109,7 @@ def _patch_groups(
         all_sizes: list[int] = []
         for li, item in enumerate(all_items):
             line_tokens = lines[li] if li < len(lines) else []
-            line_text = _line_text(line_tokens)
+            line_text = join_line_tokens(line_tokens)
 
             item["side"] = "Ai"
             item["text"] = line_text
@@ -162,27 +161,13 @@ def _patch_groups(
 
     return {"aiTextFull": ai_text_full_clean, "aiTree": out_tree}
 
-
-def _line_text(tokens: list[tuple[str, str, float]]) -> str:
-    """Reassemble a distributed line's token list back into a flat string.
-
-    ``distribute_to_template`` returns one line per template item as a list
-    of ``(kind, text, _)`` tuples (kind = ``"word"`` or ``"space"``).  For
-    item-level rendering we just concatenate them, drop the zero-width
-    sentinel and trim outer whitespace.
-    """
-    return "".join(
-        s for _kind, s, _w in (tokens or []) if s and s != ZWSP
-    ).strip()
-
-
 def patch(
     ai_text_full: str,
     template_tree: dict,
     img_w: int,
     img_h: int,
-    _thai_font: str,
-    _latin_font: str,
+    # _thai_font: str,
+    # _latin_font: str,
     lang: str,
     group_map: list[list[int]] | None = None,
 ) -> dict[str, Any]:
@@ -256,7 +241,7 @@ def patch(
             item["item_index"] = ii
 
             line_tokens = lines[ii] if ii < len(lines) else []
-            line_text = _line_text(line_tokens)
+            line_text = join_line_tokens(line_tokens)
 
             item["text"] = line_text
             item["valid_text"] = bool(line_text)

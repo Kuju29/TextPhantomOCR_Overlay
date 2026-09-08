@@ -1,6 +1,5 @@
 """Request-boundary security policy.
 
-
 Two attacks are closed here, both of which were reachable from any web page
 because the API has open CORS and no authentication:
 
@@ -24,35 +23,30 @@ logs, not one that should look like it succeeded.
 
 from __future__ import annotations
 
-import ipaddress
-import socket
 from urllib.parse import urlparse
 
-from backend.ai.config import LOCAL_PROVIDERS, PROVIDER_DEFAULTS
-from backend.config import settings
+import socket, ipaddress
 
+# from backend.ai import providers as _providers  # noqa: F401
+from backend.ai.provider_registry import provider_registry
+from backend.config import settings
 
 class SecurityError(RuntimeError):
     """Base class for policy violations at the request boundary."""
 
-
 class UnsafeBaseUrl(SecurityError):
     """The requested AI base URL is not allowed for this key."""
-
 
 class UnsafeImageUrl(SecurityError):
     """The requested image URL points somewhere the server must not fetch."""
 
-
 # --- AI base URL ------------------------------------------------------------
-
 
 def _host_of(url: str) -> str:
     try:
         return (urlparse(url).hostname or "").strip().lower()
     except ValueError:
         return ""
-
 
 def server_key_allowed_hosts() -> frozenset[str]:
     """Hosts the SERVER-OWNED key may ever be sent to.
@@ -64,7 +58,7 @@ def server_key_allowed_hosts() -> frozenset[str]:
     """
     hosts = {
         _host_of(str(d.get("base_url") or ""))
-        for d in PROVIDER_DEFAULTS.values()
+        for d in ({"base_url": spec.default_base_url} for spec in provider_registry)
     }
     hosts.discard("")
     hosts.discard("localhost")
@@ -75,7 +69,6 @@ def server_key_allowed_hosts() -> frozenset[str]:
             hosts.add(h)
     return frozenset(hosts)
 
-
 def _is_keyless_local_endpoint(provider: str, url: str) -> bool:
     """Allow a keyless local runtime without opening a general SSRF path.
 
@@ -83,7 +76,8 @@ def _is_keyless_local_endpoint(provider: str, url: str) -> bool:
     runtimes must be explicitly allow-listed by the operator in
     ``TP_AI_EXTRA_HOSTS``; browser-owned Local AI has its own private-LAN guard.
     """
-    if (provider or "").strip().lower() not in LOCAL_PROVIDERS:
+    spec = provider_registry.get((provider or "").strip().lower())
+    if spec is None or not spec.local:
         return False
     try:
         parsed = urlparse(url)
@@ -97,7 +91,6 @@ def _is_keyless_local_endpoint(provider: str, url: str) -> bool:
         return bool(host and ipaddress.ip_address(host).is_loopback)
     except (ValueError, TypeError):
         return False
-
 
 def assert_ai_base_url_allowed(
     provider: str, base_url: str, *, user_key: bool, key_present: bool = True,
@@ -129,11 +122,9 @@ def assert_ai_base_url_allowed(
         f"host to TP_AI_EXTRA_HOSTS."
     )
 
-
 # --- Image URLs (SSRF) ------------------------------------------------------
 
 _ALLOWED_IMAGE_SCHEMES = ("http", "https")
-
 
 def _ip_is_forbidden(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Whether an address belongs to a range the server must never fetch."""
@@ -147,7 +138,6 @@ def _ip_is_forbidden(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
         or (ip.version == 6 and ip.ipv4_mapped is not None and _ip_is_forbidden(ip.ipv4_mapped))
     )
 
-
 def resolve_host_addresses(host: str) -> list[str]:
     """Resolve ``host`` to every address it currently maps to.
 
@@ -155,7 +145,6 @@ def resolve_host_addresses(host: str) -> list[str]:
     """
     infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
     return [str(info[4][0]) for info in infos]
-
 
 def assert_image_url_allowed(url: str, *, resolver=resolve_host_addresses) -> None:
     """Raise :class:`UnsafeImageUrl` unless ``url`` is a public http(s) URL.

@@ -1,11 +1,22 @@
+import { restoreSettingsEpoch } from "./jobs/lifecycle.js";
+import { restoreTabSessions } from "./tab-sessions.js";
+import { repairCoordinator } from "./repair/coordinator.js";
 // Creates the context-menu items and turns a click on them into job payloads enqueued as one batch.
 
 import { createLogger } from "../shared/logger.js";
 import { readFullSettings } from "../shared/settings.js";
-import { API_PATHS, isLocalAiProvider, isLocalHostUrl } from "../shared/constants.js";
+import { effectiveEngineMode } from "../shared/engine-mode.js";
+import { API_PATHS, isLocalAiProvider } from "../shared/constants.js";
+import { AI_PROMPT_MODE } from "../shared/ai-prompt-policy.js";
 import { attachTpError } from "../shared/error-contract.js";
-import { autoAiSettingsIssue } from "../shared/ai-settings-contract.js";
-import { resolveSeriesKey, refineSeriesKeyWithTitle } from "../shared/series.js";
+import {
+  autoAiSettingsIssue,
+  classifyAiRuntime,
+} from "../shared/ai-settings-contract.js";
+import {
+  resolveSeriesKey,
+  refineSeriesKeyWithTitle,
+} from "../shared/series.js";
 import { getApiBase } from "./api.js";
 import { getSeriesMemory, selectPromptMemory } from "./series-memory.js";
 import { ensureBatch, batchUpdateToast } from "./batches.js";
@@ -13,8 +24,15 @@ import { fetchImageDataUriFromTab } from "./images.js";
 import { describeLimits } from "./job-queue.js";
 import { imageKeyFromPayload } from "./job-keys.js";
 import { enqueue, setCurrentBatchId } from "./jobs.js";
+import { getSettingsEpoch } from "./jobs/lifecycle.js";
+import { resolveJobAiProfile } from "./ai-profile-resolver.js";
+import { getTrace, note as traceNote } from "../shared/trace.js";
 import { chooseCanonicalImageSource } from "./right-click-target.js";
 import { ensureTabSession } from "./tab-sessions.js";
+import {
+  contextOperationKey,
+  joinActiveOperation,
+} from "./active-operations.js";
 import {
   ensureContentScript,
   requestFromTab,
@@ -43,7 +61,9 @@ async function serverHasAiKey() {
     });
     if (!response.ok) return null;
     const meta = await response.json();
-    return typeof meta?.has_env_ai_key === "boolean" ? meta.has_env_ai_key : null;
+    return typeof meta?.has_env_ai_key === "boolean"
+      ? meta.has_env_ai_key
+      : null;
   } catch {
     return null;
   } finally {
@@ -52,16 +72,19 @@ async function serverHasAiKey() {
 }
 
 async function assertAutoAiReady(settings) {
-  const provider = String(settings?.aiProvider || "").trim().toLowerCase();
+  const provider = String(settings?.aiProvider || "")
+    .trim()
+    .toLowerCase();
   const baseUrl = String(settings?.aiBaseUrl || "").trim();
   // The current text.ai plan is server-owned even when the legacy
   // `aiOnDevice` preference is present. Do not treat that preference as a
   // working keyless route until an executable on-device translator exists.
-  const local = isLocalAiProvider(provider) || isLocalHostUrl(baseUrl);
+  const local = classifyAiRuntime(settings).local;
   const needsServerKeyFact = !local && !String(settings?.aiKey || "").trim();
-  const mainApiBaseUrl = local && settings?.engineMode === "api"
-    ? await getApiBase().catch(() => "")
-    : "";
+  const mainApiBaseUrl =
+    local && settings?.engineMode === "api"
+      ? await getApiBase().catch(() => "")
+      : "";
   const issue = autoAiSettingsIssue(settings, {
     hasServerKey: needsServerKeyFact ? await serverHasAiKey() : null,
     mainApiBaseUrl,
@@ -108,7 +131,9 @@ const overrideMode = (v) => {
   return s === "lens_images" || s === "lens_text" ? s : "";
 };
 const overrideSource = (v) => {
-  const s = String(v || "").trim().toLowerCase();
+  const s = String(v || "")
+    .trim()
+    .toLowerCase();
   return s === "original" || s === "translated" || s === "ai" ? s : "";
 };
 
@@ -141,15 +166,24 @@ export function recreateMenus() {
 }
 
 // Builds the `ai` sub-object of a payload from the user's settings and the series' memory, or null for non-AI jobs.
-async function buildAiPayload(mode, source, settings, seriesKey) {
+export async function buildAiPayload(mode, source, settings, seriesKey) {
   if (mode !== "lens_text" || source !== "ai") return null;
   const memory = selectPromptMemory(await getSeriesMemory(seriesKey));
-  const sendImage = String(settings.aiPageImage || "off") === "always" ? "always" : false;
+  const sendImage =
+    String(settings.aiPageImage || "off") === "always" ? "always" : false;
   const memMode = ["off", "terms", "full"].includes(settings.aiMemoryMode)
     ? settings.aiMemoryMode
     : "off";
   const useGlossary = memMode === "terms" || memMode === "full";
   const useChars = memMode === "full";
+  const local = isLocalAiProvider(settings.aiProvider);
+  const storedCapability = settings.aiLocalCapabilityHint;
+  const sameLocalCapability = local && storedCapability &&
+    String(storedCapability.provider || "").trim().toLowerCase() ===
+      String(settings.aiProvider || "").trim().toLowerCase() &&
+    String(storedCapability.baseUrl || "").trim().replace(/\/+$/, "") ===
+      String(settings.aiBaseUrl || "").trim().replace(/\/+$/, "") &&
+    String(storedCapability.model || "").trim() === String(settings.aiModel || "").trim();
   return {
     api_key: settings.aiKey || "",
     on_device: settings.aiOnDevice === true,
@@ -157,44 +191,66 @@ async function buildAiPayload(mode, source, settings, seriesKey) {
     provider: settings.aiProvider || "",
     base_url: settings.aiBaseUrl || "auto",
     prompt: settings.aiPrompt || "",
+    prompt_mode: AI_PROMPT_MODE,
     glossary: useGlossary ? memory.glossary : [],
     characters: useChars ? memory.characters : [],
-    series_state: useChars ? (memory.state || "") : "",
-    prev_context: useChars ? (memory.prevContext || []) : [],
+    series_state: useChars ? memory.state || "" : "",
+    prev_context: useChars ? memory.prevContext || [] : [],
     char_memory: useChars,
     memory_mode: memMode,
     send_image: sendImage,
-    thinking: String(isLocalAiProvider(settings.aiProvider)
-      ? (settings.aiLocalThinking || "off")
-      : (settings.aiThinking || "default")),
-    local_adapter: settings.localAiAdapter && typeof settings.localAiAdapter === "object"
-      ? { ...settings.localAiAdapter }
-      : null,
+    thinking: String(
+      isLocalAiProvider(settings.aiProvider)
+        ? settings.aiLocalThinking || "off"
+        : settings.aiThinking === "on" ? "on" : "off",
+    ),
+    model_capabilities: local
+      ? sameLocalCapability
+        ? { structuredOutput: storedCapability.structuredOutput || null,
+            reasoning: storedCapability.reasoning || null,
+            limits: storedCapability.limits || { contextTokens: storedCapability.contextLength,
+              source: "ollama-api-ps", scope: "runtime" } }
+        : {}
+      : settings.aiModelCapabilities && typeof settings.aiModelCapabilities === "object"
+        ? settings.aiModelCapabilities
+        : {},
+    local_adapter:
+      settings.localAiAdapter && typeof settings.localAiAdapter === "object"
+        ? { ...settings.localAiAdapter }
+        : null,
   };
 }
 
 // Builds the `layout` sub-object carrying the Translated-orientation relayout switch, or null for non-text jobs.
-function buildLayoutPayload(mode, settings) {
+export function buildLayoutPayload(mode, settings) {
   if (mode !== "lens_text") return null;
   return { relayout_translated: settings.relayoutTranslated !== false };
 }
 
 // Returns whether the user has declared this AI runtime to be their own machine.
-function aiIsUnlimitedLocal(settings) {
-  return settings.aiLocalUnlimited === true && (
-    isLocalAiProvider(settings.aiProvider) || isLocalHostUrl(settings.aiBaseUrl)
-  );
+function aiIsLocal(settings) {
+  return classifyAiRuntime(settings).local;
 }
 
 // Builds optional user-pinned pacing. Empty/Auto means NO TextPhantom RPM
 // throttle: the provider's real quota is authoritative and actual 429/503
 // responses drive the adaptive concurrency lane.
-function buildRatePayload(mode, source, settings) {
+export function buildRatePayload(mode, source, settings) {
   if (mode !== "lens_text" || source !== "ai") return null;
-  if (aiIsUnlimitedLocal(settings)) return { enabled: false, rpm: 0, burst: 0, unlimited: true };
-  const configuredRpm = Number(settings.rateRpm) > 0 ? Number(settings.rateRpm) : 0;
-  const configuredBurst = Number(settings.rateBurst) > 0 ? Number(settings.rateBurst) : 0;
-  const enabled = settings.rateLimitEnabled === true && (configuredRpm > 0 || configuredBurst > 0);
+  // runs:Extension talks to a selected local runtime directly. Local capacity
+  // is controlled independently by scheduler slots, so an RPM/token-bucket
+  // delay is never appropriate here (including when the old Unlimited switch
+  // is off).
+  if (aiIsLocal(settings)) {
+    return { enabled: false, rpm: 0, burst: 0, unlimited: true };
+  }
+  const configuredRpm =
+    Number(settings.rateRpm) > 0 ? Number(settings.rateRpm) : 0;
+  const configuredBurst =
+    Number(settings.rateBurst) > 0 ? Number(settings.rateBurst) : 0;
+  // Burst is only a concurrency companion to an explicitly enabled RPM cap;
+  // a stale Burst value must never activate pacing by itself.
+  const enabled = settings.rateLimitEnabled === true && configuredRpm > 0;
   // Stored values are preferences, not active limits. If the user turns the
   // switch OFF, do not let yesterday's RPM/Burst silently seed today's
   // scheduler window or server rate gate.
@@ -206,25 +262,48 @@ function buildRatePayload(mode, source, settings) {
 }
 
 // Builds the `limits` block that tells both sides which pacing the user switched off.
-function buildLimitsPayload(settings) {
-  const local = isLocalAiProvider(settings.aiProvider) || isLocalHostUrl(settings.aiBaseUrl);
-  const capacityMode = local && ["auto", "safe", "manual"].includes(settings.aiLocalCapacityMode)
-    ? settings.aiLocalCapacityMode : "auto";
-  const manualConcurrency = Math.min(4, Math.max(1, Number(settings.aiLocalManualConcurrency) || 1));
+export function buildLimitsPayload(settings) {
+  const local = aiIsLocal(settings);
+  const capacityMode =
+    local && ["auto", "safe", "manual"].includes(settings.aiLocalCapacityMode)
+      ? settings.aiLocalCapacityMode
+      : "auto";
+  const manualConcurrency = Math.min(
+    4,
+    Math.max(1, Number(settings.aiLocalManualConcurrency) || 1),
+  );
   const storedHint = settings.aiLocalCapabilityHint;
-  const sameHint = storedHint &&
-    String(storedHint.provider || "").trim().toLowerCase() === String(settings.aiProvider || "").trim().toLowerCase() &&
-    String(storedHint.baseUrl || "").trim().replace(/\/+$/, "") === String(settings.aiBaseUrl || "").trim().replace(/\/+$/, "") &&
-    String(storedHint.model || "").trim() === String(settings.aiModel || "").trim();
-  const localCapability = sameHint && Number.isFinite(Number(storedHint.recommendedMax))
-    ? { recommendedMax: Math.min(2, Math.max(1, Math.floor(Number(storedHint.recommendedMax)))) }
-    : null;
+  const sameHint =
+    storedHint &&
+    String(storedHint.provider || "")
+      .trim()
+      .toLowerCase() ===
+      String(settings.aiProvider || "")
+        .trim()
+        .toLowerCase() &&
+    String(storedHint.baseUrl || "")
+      .trim()
+      .replace(/\/+$/, "") ===
+      String(settings.aiBaseUrl || "")
+        .trim()
+        .replace(/\/+$/, "") &&
+    String(storedHint.model || "").trim() ===
+      String(settings.aiModel || "").trim();
+  const localCapability =
+    sameHint && Number.isFinite(Number(storedHint.recommendedMax))
+      ? {
+          recommendedMax: Math.min(
+            2,
+            Math.max(1, Math.floor(Number(storedHint.recommendedMax))),
+          ),
+        }
+      : null;
   return {
-    aiUnlimited: aiIsUnlimitedLocal(settings),
+    aiUnlimited: local,
     apiUnlimited: settings.apiLocalUnlimited === true,
     // Explicit names prevent consumers from mistaking disabled time pacing
     // for permission to run an unbounded number of generations.
-    timePacingDisabled: aiIsUnlimitedLocal(settings),
+    timePacingDisabled: local,
     capacityMode,
     manualConcurrency,
     localCapability,
@@ -250,11 +329,22 @@ function buildMetadata({ existing, imageId, batchId, sourceUrl, stage }) {
 
 // Handles a click on `img_one` by building the clicked image's payload and enqueuing it.
 async function handleTranslateOne(menuInfo, tab, ctx) {
-  const { mode, lang, source, aiPayload, layoutPayload, ratePayload, limitsPayload, engineMode, tabSessionId, batchId, seriesKey, debug } = ctx;
+  const {
+    mode,
+    lang,
+    source,
+    aiPayload,
+    layoutPayload,
+    ratePayload,
+    limitsPayload,
+    engineMode,
+    tabSessionId,
+    batchId,
+    seriesKey,
+    debug,
+  } = ctx;
   const frameId = Number(menuInfo.frameId) || 0;
   let originalUrl = menuInfo.srcUrl;
-
-  await sendToTab(tab.id, { type: "TP_KEEPALIVE_START", ms: KEEPALIVE_MS }, frameId);
 
   let payload = null;
   try {
@@ -279,7 +369,10 @@ async function handleTranslateOne(menuInfo, tab, ctx) {
     });
   }
 
-  const meta0 = payload?.metadata && typeof payload.metadata === "object" ? payload.metadata : {};
+  const meta0 =
+    payload?.metadata && typeof payload.metadata === "object"
+      ? payload.metadata
+      : {};
   const imageId = String(meta0.image_id || "").trim() || crypto.randomUUID();
   const sourceUrl = chooseCanonicalImageSource(originalUrl, payload?.src);
 
@@ -289,7 +382,10 @@ async function handleTranslateOne(menuInfo, tab, ctx) {
     lang,
     type: "image",
     src: sourceUrl,
-    imageDataUri: typeof payload?.imageDataUri === "string" ? payload.imageDataUri || null : null,
+    imageDataUri:
+      typeof payload?.imageDataUri === "string"
+        ? payload.imageDataUri || null
+        : null,
     menu: "img_one",
     source,
     ai: aiPayload,
@@ -299,19 +395,31 @@ async function handleTranslateOne(menuInfo, tab, ctx) {
     engine: engineMode,
     debug,
     context: {
-      ...(payload?.context && typeof payload.context === "object" ? payload.context : {}),
+      ...(payload?.context && typeof payload.context === "object"
+        ? payload.context
+        : {}),
       page_url: tab?.url || null,
       series_key: seriesKey || null,
       batch_id: batchId,
       timestamp: new Date().toISOString(),
       tp_tab_session: tabSessionId,
     },
-    metadata: buildMetadata({ existing: meta0, imageId, batchId, sourceUrl, stage: "context_menu_single" }),
+    metadata: buildMetadata({
+      existing: meta0,
+      imageId,
+      batchId,
+      sourceUrl,
+      stage: "context_menu_single",
+    }),
   };
 
   if (!payload.imageDataUri && String(sourceUrl || "").startsWith("blob:")) {
     try {
-      payload.imageDataUri = await fetchImageDataUriFromTab(tab.id, sourceUrl, frameId || 0);
+      payload.imageDataUri = await fetchImageDataUriFromTab(
+        tab.id,
+        sourceUrl,
+        frameId || 0,
+      );
     } catch (e) {
       log.warn("blob datauri fetch failed", e?.message || String(e));
     }
@@ -330,10 +438,10 @@ async function handleTranslateOne(menuInfo, tab, ctx) {
         chrome.action?.setBadgeBackgroundColor?.({ color: "#c0392b" });
         chrome.action?.setTitle?.({
           tabId: tab.id,
-          title: 'TextPhantom: enable "Allow access to file URLs" in chrome://extensions to translate local images',
+          title:
+            'TextPhantom: enable "Allow access to file URLs" in chrome://extensions to translate local images',
         });
-      } catch {
-      }
+      } catch {}
     }
     sendToastToTab(tab.id, frameId, msg, 9000);
     return;
@@ -341,15 +449,28 @@ async function handleTranslateOne(menuInfo, tab, ctx) {
 
   if (!payload.src && !payload.imageDataUri) return;
 
+  await sendToTab(
+    tab.id,
+    { type: "TP_KEEPALIVE_START", ms: KEEPALIVE_MS, batchId },
+    frameId,
+  );
+
   const batch = ensureBatch(batchId, tab.id, frameId);
   batch.total1 = 1;
   const key = imageKeyFromPayload(payload);
-  if (key) batch.items.set(key, { payload, attempt: 1, status: "queued", lastError: "" });
+  if (key)
+    batch.items.set(key, {
+      payload,
+      attempt: 1,
+      status: "queued",
+      lastError: "",
+    });
   batchUpdateToast(batch, "Collecting", true);
 
+  await repairCoordinator.registerBatch(batch, [payload]);
   enqueue(payload, tab.id, frameId);
+  return batchId;
 }
-
 
 // Normalises a page image-scan response into its items and stats.
 function unpackImageScanResponse(resp) {
@@ -360,7 +481,13 @@ function unpackImageScanResponse(resp) {
 
 // Sums two image-scan stats records.
 function mergeScanStats(a, b) {
-  const out = { candidates: 0, accepted: 0, skipped: 0, duplicates: 0, reasons: {} };
+  const out = {
+    candidates: 0,
+    accepted: 0,
+    skipped: 0,
+    duplicates: 0,
+    reasons: {},
+  };
   for (const s of [a, b]) {
     if (!s || typeof s !== "object") continue;
     out.candidates += Number(s.candidates) || 0;
@@ -376,20 +503,38 @@ function mergeScanStats(a, b) {
 
 // Handles a click on `img_all` by scanning the page's frames for images and enqueuing one job per image.
 async function handleTranslateAll(menuInfo, tab, ctx) {
-  const { mode, lang, source, aiPayload, layoutPayload, ratePayload, limitsPayload, engineMode, tabSessionId, batchId, seriesKey } = ctx;
+  const {
+    mode,
+    lang,
+    source,
+    aiPayload,
+    layoutPayload,
+    ratePayload,
+    limitsPayload,
+    engineMode,
+    tabSessionId,
+    batchId,
+    seriesKey,
+  } = ctx;
   const scanFrameId = 0;
-
-  await sendToTab(tab.id, { type: "TP_KEEPALIVE_START", ms: KEEPALIVE_MS }, scanFrameId);
 
   let images = [];
   let imagesFrameId = scanFrameId;
   let scanStats = null;
-  const primaryResp = await requestFromTab(tab.id, { type: "GET_IMAGES" }, scanFrameId);
+  const primaryResp = await requestFromTab(
+    tab.id,
+    { type: "GET_IMAGES" },
+    scanFrameId,
+  );
   const primary = unpackImageScanResponse(primaryResp);
   images = primary.items;
   scanStats = primary.stats;
   if (!images.length && menuInfo.frameId) {
-    const altResp = await requestFromTab(tab.id, { type: "GET_IMAGES" }, menuInfo.frameId);
+    const altResp = await requestFromTab(
+      tab.id,
+      { type: "GET_IMAGES" },
+      menuInfo.frameId,
+    );
     const alt = unpackImageScanResponse(altResp);
     scanStats = mergeScanStats(scanStats, alt.stats);
     if (alt.items.length) {
@@ -419,10 +564,12 @@ async function handleTranslateAll(menuInfo, tab, ctx) {
         ai: aiPayload,
         layout: layoutPayload,
         rate: ratePayload,
-    limits: limitsPayload,
-    engine: engineMode,
+        limits: limitsPayload,
+        engine: engineMode,
         context: {
-          ...(meta?.context && typeof meta.context === "object" ? meta.context : {}),
+          ...(meta?.context && typeof meta.context === "object"
+            ? meta.context
+            : {}),
           page_url: tab?.url || null,
           series_key: seriesKey || null,
           page_index: pageIndex,
@@ -430,18 +577,27 @@ async function handleTranslateAll(menuInfo, tab, ctx) {
           timestamp: new Date().toISOString(),
           tp_tab_session: tabSessionId,
         },
-        metadata: buildMetadata({ existing: m, imageId, batchId, sourceUrl: src || null, stage: "context_menu_all" }),
+        metadata: buildMetadata({
+          existing: m,
+          imageId,
+          batchId,
+          sourceUrl: src || null,
+          stage: "context_menu_all",
+        }),
       };
     })
     .filter((p) => p.src || p.imageDataUri);
 
   const missingRender = payloads.filter((pl) => !pl.render).length;
   if (missingRender) {
-    log.warn("payloads arrived without a render block; those images cannot use the local renderer", {
-      missing: missingRender,
-      of: payloads.length,
-      mode,
-    });
+    log.warn(
+      "payloads arrived without a render block; those images cannot use the local renderer",
+      {
+        missing: missingRender,
+        of: payloads.length,
+        mode,
+      },
+    );
   }
 
   const seen = new Set();
@@ -452,19 +608,34 @@ async function handleTranslateAll(menuInfo, tab, ctx) {
     return true;
   });
 
+  if (!payloads.length) return;
+  await sendToTab(
+    tab.id,
+    { type: "TP_KEEPALIVE_START", ms: KEEPALIVE_MS, batchId },
+    imagesFrameId,
+  );
+
   const batch = ensureBatch(batchId, tab.id, imagesFrameId);
   batch.total1 = payloads.length;
   batch.scanStats = scanStats || null;
-  batch.skipped1 = Number(scanStats?.skipped || 0) + Number(scanStats?.duplicates || 0);
+  batch.skipped1 =
+    Number(scanStats?.skipped || 0) + Number(scanStats?.duplicates || 0);
   for (const pl of payloads) {
     const k = imageKeyFromPayload(pl);
     if (k && !batch.items.has(k)) {
-      batch.items.set(k, { payload: pl, attempt: 1, status: "queued", lastError: "" });
+      batch.items.set(k, {
+        payload: pl,
+        attempt: 1,
+        status: "queued",
+        lastError: "",
+      });
     }
   }
   batchUpdateToast(batch, "Collecting", true);
 
+  await repairCoordinator.registerBatch(batch, payloads);
   for (const pl of payloads) enqueue(pl, tab.id, imagesFrameId);
+  return batchId;
 }
 
 /**
@@ -483,27 +654,47 @@ async function handleTranslateAll(menuInfo, tab, ctx) {
  * @param {{overrides?: {mode?: string, lang?: string, source?: string}|null,
  *          debug?: {raw?: boolean}|null, propagateErrors?: boolean}} [options]
  */
-export async function onContextMenuClicked(menuInfo, tab, options = {}) {
+async function dispatchContextMenuClick(menuInfo, tab, options = {}) {
   if (!tab?.id) return;
+  await Promise.all([restoreSettingsEpoch(), restoreTabSessions()]);
   log.info("menu click", menuInfo.menuItemId);
   try {
     await ensureContentScript(tab.id);
     const tabSessionId = ensureTabSession(tab.id, tab?.url || "");
 
-    const overrides = options?.overrides && typeof options.overrides === "object" ? options.overrides : null;
+    const overrides =
+      options?.overrides && typeof options.overrides === "object"
+        ? options.overrides
+        : null;
     const effectiveLang = String(overrides?.lang || "").trim();
-    const settings = await readFullSettings({ lang: effectiveLang });
-    const debug = options?.debug && typeof options.debug === "object" ? { raw: options.debug.raw === true } : null;
-    const mode = overrideMode(overrides?.mode) || settings.mode;
-    const lang = String(overrides?.lang || "").trim() || settings.lang;
-    const source = mode === "lens_text"
-      ? overrideSource(overrides?.source) || settings.sources || "translated"
-      : "translated";
+    const flatSettings = await readFullSettings({ lang: effectiveLang });
+    const debug =
+      options?.debug && typeof options.debug === "object"
+        ? { raw: options.debug.raw === true }
+        : null;
+    const mode = overrideMode(overrides?.mode) || flatSettings.mode;
+    const lang = String(overrides?.lang || "").trim() || flatSettings.lang;
+    const profileSnapshot = await resolveJobAiProfile(flatSettings, {
+      language: lang,
+    });
+    const settings = {
+      ...profileSnapshot.settings,
+      engineMode: effectiveEngineMode(profileSnapshot.settings.engineMode),
+    };
+    const source =
+      mode === "lens_text"
+        ? overrideSource(overrides?.source) || settings.sources || "translated"
+        : "translated";
     if (mode === "lens_text" && source === "ai") {
       await assertAutoAiReady(settings);
     }
     if (overrides) {
-      log.info("running this request on caller-supplied settings", { mode, lang, source, raw: debug?.raw === true });
+      log.info("running this request on caller-supplied settings", {
+        mode,
+        lang,
+        source,
+        raw: debug?.raw === true,
+      });
     }
     const seriesKey = refineSeriesKeyWithTitle(
       await resolveSeriesKey(tab?.url || ""),
@@ -513,7 +704,17 @@ export async function onContextMenuClicked(menuInfo, tab, options = {}) {
     const layoutPayload = buildLayoutPayload(mode, settings);
     const ratePayload = buildRatePayload(mode, source, settings);
     const limitsPayload = buildLimitsPayload(settings);
-    const engineMode = settings.engineMode === "api" ? "api" : "extension";
+    const engineMode = effectiveEngineMode(settings.engineMode);
+
+    traceNote(
+      "background/ai-profile-resolver.js",
+      "jobProfileSnapshot",
+      {
+        ...profileSnapshot.audit,
+        execution: engineMode === "api" ? "runsapi" : "runsextension",
+      },
+      getTrace(),
+    );
 
     log.debug("batch concurrency", describeLimits());
 
@@ -545,12 +746,18 @@ export async function onContextMenuClicked(menuInfo, tab, options = {}) {
       60000,
     );
 
-    if (tab?.url?.includes("mangadex.org") && menuInfo.srcUrl?.startsWith("blob:")) {
+    if (
+      tab?.url?.includes("mangadex.org") &&
+      menuInfo.srcUrl?.startsWith("blob:")
+    ) {
       const clickedSrcUrl = menuInfo.srcUrl;
       try {
         const resp = await requestFromTab(
           tab.id,
-          { type: "RESOLVE_AND_REPLACE_MANGADEX_BLOB", blobUrl: menuInfo.srcUrl },
+          {
+            type: "RESOLVE_AND_REPLACE_MANGADEX_BLOB",
+            blobUrl: menuInfo.srcUrl,
+          },
           Number(menuInfo.frameId) || 0,
         );
         if (resp?.resolved) {
@@ -562,15 +769,49 @@ export async function onContextMenuClicked(menuInfo, tab, options = {}) {
     }
 
     if (menuInfo.menuItemId === "img_one") {
-      await handleTranslateOne(menuInfo, tab, ctx);
+      return await handleTranslateOne(menuInfo, tab, ctx);
     } else if (menuInfo.menuItemId === "img_all") {
-      await handleTranslateAll(menuInfo, tab, ctx);
+      return await handleTranslateAll(menuInfo, tab, ctx);
     }
   } catch (e) {
     log.error("menu handler error", e);
+    if ([
+      "AI_PROFILE_INVALID",
+      "AI_PROFILE_INCOMPLETE",
+      "AI_PROFILE_MIGRATION_CONFLICT",
+      "AI_PROFILE_MIGRATION_INCOMPLETE",
+    ].includes(e?.code)) {
+      traceNote(
+        "background/ai-profile-resolver.js",
+        "jobProfileValidationError",
+        {
+          event: "profile_validation_failed",
+          code: String(e.code),
+          stage: String(e.profileValidationStage || "context_menu_profile_resolution"),
+          reason: String(e.profileValidationReason || e.message || "unknown"),
+          requestDispatched: false,
+        },
+        getTrace(),
+      );
+      sendToastToTab(
+        tab.id,
+        Number(menuInfo?.frameId) || 0,
+        `TextPhantom: AI settings need attention (${e.code}). Open Provider and save the intended Provider and Model. No translation was started.`,
+        12000,
+      );
+    }
     // Browser context-menu clicks historically report errors through logging,
     // toast/image messages. Programmatic callers need the rejected Promise so
     // they can leave their busy state and show the immediate start failure.
     if (options?.propagateErrors === true) throw e;
   }
+}
+
+export function onContextMenuClicked(menuInfo, tab, options = {}) {
+  if (!tab?.id) return Promise.resolve();
+  const operationOptions = { ...options, settingsEpoch: getSettingsEpoch() };
+  return joinActiveOperation(
+    contextOperationKey(menuInfo, tab, operationOptions),
+    () => dispatchContextMenuClick(menuInfo, tab, options),
+  );
 }

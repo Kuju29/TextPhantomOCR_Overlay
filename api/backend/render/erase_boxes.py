@@ -1,6 +1,5 @@
 """Serialise Lens text boxes so the CLIENT can erase them.
 
-
 The server used to do the whole background job: inpaint every Lens token out
 of the page, re-encode the result, and base64 it into the response. That is
 the single most expensive thing the direct lane does and the largest field in
@@ -25,7 +24,8 @@ Schema ``tp.erase-boxes/1``::
 ``l/t/w/h`` are normalised to the image size (0..1) and ``r`` is the box's
 rotation in degrees about its own centre — the same numbers
 ``render.geometry.token_box_quad_px`` consumes, so the client reconstructs
-exactly the quad the server would have erased.
+exactly the quad the server would have erased. Source-tree producers also
+include ``p`` (source LensDocument paragraph ID) for safe partial AI erasure.
 """
 
 from __future__ import annotations
@@ -44,7 +44,6 @@ _PRECISION = 5
 # nothing visible.
 _MIN_SIDE = 1e-4
 
-
 def _round(value: Any) -> float | None:
     """Round to the wire precision, or ``None`` when there is no number here."""
     try:
@@ -54,7 +53,6 @@ def _round(value: Any) -> float | None:
     if rounded != rounded or rounded in (float("inf"), float("-inf")):  # NaN / inf
         return None
     return rounded
-
 
 def box_payload(token: dict) -> dict[str, float] | None:
     """One token's box, or ``None`` when it carries no usable geometry.
@@ -94,7 +92,6 @@ def box_payload(token: dict) -> dict[str, float] | None:
             out["r"] = rotation
     return out
 
-
 def build(tokens: list[dict] | None) -> dict[str, Any]:
     """Build the ``tp.erase-boxes/1`` payload for ``tokens``.
 
@@ -116,3 +113,22 @@ def build(tokens: list[dict] | None) -> dict[str, Any]:
     if skipped:
         out["skipped"] = skipped
     return out
+
+
+def build_for_tree(original_tree: dict | None) -> dict[str, Any]:
+    """Own each source span in the same post-filter order as LensDocument.build.
+
+    Ownership cannot be reconstructed later from bounding-box proximity: a
+    partial result must leave the untranslated source pixels untouched.
+    """
+    boxes = []
+    skipped = 0
+    for index, paragraph in enumerate((original_tree or {}).get("paragraphs") or []):
+        if not isinstance(paragraph, dict):
+            continue
+        tokens = [span for item in paragraph.get("items") or []
+                  if isinstance(item, dict) for span in item.get("spans") or []]
+        part = build(tokens)
+        boxes.extend({**box, "p": f"p{index}"} for box in part["boxes"])
+        skipped += part.get("skipped", 0)
+    return {"schema": SCHEMA, "boxes": boxes, **({"skipped": skipped} if skipped else {})}

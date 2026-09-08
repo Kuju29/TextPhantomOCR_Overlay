@@ -1,48 +1,4 @@
-/**
- * Decode Google Lens OCR data into the structured "tree" the renderer uses.
- *
- *
- * Port of `api/backend/lens/tree.py`. `README.md#architecture-and-ownership` puts this
- * decode into the service worker: the extension already holds the Lens
- * response, and shipping it to Python and back buys nothing but a round trip.
- * Python keeps its copy for `/v1/lens/fallback`, where the server did the Lens
- * call itself, so both readers stay alive and both are pinned to the same
- * fixture (`scripts/test-lens-tree.mjs`, `api/tests/test_lens_tree.py`).
- *
- * Tree shape:
- *
- *     {
- *       side: "original" | "translated" | "Ai",
- *       paragraphs: [
- *         {
- *           side, para_index, start_raw, end_raw, text, valid_text,
- *           bounds_px,
- *           items: [
- *             {
- *               side, para_index, item_index, start_raw, end_raw,
- *               text, valid_text, height_raw,
- *               baseline_p1: {x, y}, baseline_p2: {x, y},
- *               box: {...}, bounds_px,
- *               spans: [ { ...span fields..., box: {...} }, ... ]
- *             }, ...
- *           ]
- *         }, ...
- *       ],
- *       diagnostics: { ... }
- *     }
- *
- * Each paragraph's geometry is a *polyline*: items carry their own straight
- * baseline, so a curved line of text is approximated by several items at
- * slightly different angles.
- *
- * WHY `diagnostics` EXISTS
- * Lens sends malformed items. Both implementations skip them — they have to,
- * there is nothing to draw — but skipping is where this decode can lie. A page
- * that quietly loses four of its eleven paragraphs still renders, still looks
- * like a translated page, and reads as "the AI dropped some bubbles" or "the
- * renderer is clipping" — two wrong files to go looking in. Every skip is
- * counted, by reason, and the counts ride out with the tree.
- */
+/** Decode Google Lens OCR into the renderer tree and report every dropped item. */
 
 import {
   base64ToBytes,
@@ -85,14 +41,10 @@ export function boxQuadPx(node, W, H, padPx = 0) {
 
   const w = Number(b.width) * W;
   const h = Number(b.height) * H;
-  // A non-positive or non-finite size is a degenerate box, which is a real
-  // answer: there is nothing to cover. Returning null keeps it out of the
-  // bounds union instead of dragging it to the origin.
+  // Exclude degenerate boxes from the bounds union.
   if (!(w > 0) || !(h > 0)) return null;
 
-  // `left` and `top` are NOT defaulted. Zero is a real position — the left
-  // edge of the page — so substituting it for a missing one would put a
-  // paragraph's bounds at the top-left corner and read as a layout bug.
+  // Zero is valid; missing coordinates must not be coerced to the page origin.
   if (!Number.isFinite(Number(b.left)) || !Number.isFinite(Number(b.top))) {
     throw new LensTreeError("box has a non-finite left/top");
   }
@@ -107,7 +59,8 @@ export function boxQuadPx(node, W, H, padPx = 0) {
   // Rotation is the one genuine default here: most boxes omit it, and "unset"
   // and "0°" are the same intent. Mirrors `token_box_quad_px`.
   const rotation = b.rotation_deg === undefined ? 0 : Number(b.rotation_deg);
-  if (!Number.isFinite(rotation)) throw new LensTreeError("box has a non-finite rotation_deg");
+  if (!Number.isFinite(rotation))
+    throw new LensTreeError("box has a non-finite rotation_deg");
   const rad = (rotation * Math.PI) / 180;
   const c = Math.cos(rad);
   const s = Math.sin(rad);
@@ -134,23 +87,13 @@ function unionBounds(bounds, next) {
 /** `[min start, max end]` over a list of `[start, end]` ranges. */
 function rangeMinMax(ranges) {
   if (!ranges.length) return [null, null];
-  return [Math.min(...ranges.map((r) => r[0])), Math.max(...ranges.map((r) => r[1]))];
+  return [
+    Math.min(...ranges.map((r) => r[0])),
+    Math.max(...ranges.map((r) => r[1])),
+  ];
 }
 
-/**
- * Every reason this decode can drop something, so a count is never anonymous.
- *
- * Kept as an explicit list rather than accumulated on demand: a reason that
- * only appears in the output when it fires is a reason nobody knows to look
- * for.
- *
- * Every one of these is REACHABLE — the shared fixture fires all five. A
- * counter that can never move is worse than no counter: it reads as "this
- * never happens" when it means "this cannot be seen". Three earlier candidates
- * (`item_no_geometry`, `item_text_out_of_range`, `paragraph_text_out_of_range`)
- * turned out to be unreachable given what `isItemMessage` already guarantees,
- * so they are assertions now — see `impossible` below.
- */
+/** Stable diagnostic reasons emitted when malformed Lens elements are dropped. */
 export const DROP_REASONS = [
   "item_unusable_geometry",
   "item_degenerate_baseline",
@@ -159,14 +102,7 @@ export const DROP_REASONS = [
   "span_text_out_of_range",
 ];
 
-/**
- * Thrown when the decode reaches a state its own guards rule out.
- *
- * Not a bad-input error — bad input has a counter. This means two functions in
- * this module disagree about what a well-formed item is, which is a code bug,
- * and a code bug that silently produced an empty string here would land as "a
- * bubble came out blank" three layers downstream.
- */
+/** Signals an internal invariant failure rather than malformed Lens input. */
 export class LensTreeInvariantError extends Error {}
 
 function impossible(what) {
@@ -222,7 +158,9 @@ export function decodeTree(paragraphsB64, fullText, side, imgW, imgH) {
   // blank — a page of empty bubbles, which reads as an OCR failure rather than
   // as a caller that forgot an argument.
   if (typeof fullText !== "string") {
-    throw new LensTreeError(`fullText must be a string, got ${typeof fullText}`);
+    throw new LensTreeError(
+      `fullText must be a string, got ${typeof fullText}`,
+    );
   }
   // Code POINTS, not UTF-16 units: Lens offsets index the string the way
   // Python does. On a page with an emoji or any astral character the two
@@ -239,7 +177,11 @@ export function decodeTree(paragraphsB64, fullText, side, imgW, imgH) {
 
   paragraphsB64.forEach((b64, paraIndex) => {
     const parBytes = base64ToBytes(b64);
-    const { items: itemMsgs, deep, exhausted } = extractItemsFromParagraph(parBytes);
+    const {
+      items: itemMsgs,
+      deep,
+      exhausted,
+    } = extractItemsFromParagraph(parBytes);
     if (deep) diagnostics.deepWalkParagraphs += 1;
     if (exhausted) diagnostics.exhaustedParagraphs += 1;
 
@@ -384,7 +326,9 @@ export function decodeTree(paragraphsB64, fullText, side, imgW, imgH) {
         // here is a broken invariant, not bad input.
         const sliced = sliceText(chars, s0, s1);
         if (sliced === null) {
-          impossible(`item range ${s0}..${s1} escaped a set of validated ranges`);
+          impossible(
+            `item range ${s0}..${s1} escaped a set of validated ranges`,
+          );
         }
         itemText = sliced.trim();
         paraRanges.push([s0, s1]);
@@ -426,7 +370,9 @@ export function decodeTree(paragraphsB64, fullText, side, imgW, imgH) {
     if (p0 !== null) {
       const sliced = sliceText(chars, p0, p1r);
       if (sliced === null) {
-        impossible(`paragraph range ${p0}..${p1r} escaped a set of validated ranges`);
+        impossible(
+          `paragraph range ${p0}..${p1r} escaped a set of validated ranges`,
+        );
       }
       paraText = sliced.trim();
     }
@@ -505,7 +451,9 @@ export function paragraphTexts(tree) {
     const text = String(p.text || "").trim();
     if (text) return text;
     return (p.items || [])
-      .filter((it) => it && typeof it === "object" && String(it.text || "").trim())
+      .filter(
+        (it) => it && typeof it === "object" && String(it.text || "").trim(),
+      )
       .map((it) => String(it.text || "").trim())
       .join(" ");
   });

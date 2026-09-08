@@ -1,6 +1,5 @@
 """FastAPI application entry point for the TextPhantom OCR API.
 
-
 Wires the routers, CORS, the custom access log, and the async job queue
 together.  Run with::
 
@@ -9,16 +8,23 @@ together.  Run with::
 
 from __future__ import annotations
 
-import asyncio
-import os
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+
+import os, asyncio
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
+
+# Compose concrete providers before routes import services that resolve provider
+# names. This is the API process's composition root; declaration modules remain
+# side-effect free and repeated composition is safe.
+from backend.ai.provider_bootstrap import ensure_provider_registry
+
+ensure_provider_registry()
 
 from backend.api.middleware import access_log_middleware, configure_uvicorn_access_log
 from backend.api.errors import (
@@ -31,10 +37,11 @@ from backend.api.errors import (
     validation_error_payload,
 )
 from backend.api.routes import (
-    blocks_v1,
     ai,
     ai_v1,
-    groups_v1,
+    repair_runs,
+    lens_groups,
+    local_wire_trace,
     health,
     lens_v1,
     logs,
@@ -49,19 +56,23 @@ from backend.config import settings
 from backend.jobs.pipeline import process_payload
 from backend.jobs.queue import JobQueue
 from backend.lens import cookie as lens_cookie
+from backend.lens.client import close_session as close_lens_session
 from backend.log import event
-from backend.utils.cpu_runtime import cpu_runtime_info, effective_cpu_count
+from backend.utils.cpu_runtime import cpu_runtime_info
 from backend.warmup import warmup as run_warmup
-
 
 async def _warm_at_boot() -> None:
     """Prime the Lens cookie + fonts right after boot (not on first request)."""
     try:
         result = await asyncio.to_thread(run_warmup, settings.warmup_lang)
-        event("warmup.boot", {"lang": result.get("lang"), "cookie_ok": result.get("cookie_ok")})
+        event("warmup.boot", {
+            "lang": result.get("lang"),
+            "cookie_ok": result.get("cookie_ok"),
+            "fonts_ok": result.get("fonts_ok"),
+            "font_reason": result.get("font_warning") or None,
+        })
     except Exception as e:  # noqa: BLE001 - warmup must never block startup
         event("warmup.boot", {"error": str(e)[:200]}, ok=False)
-
 
 async def _cookie_refresh_loop() -> None:
     """Keep the Lens cookie fresh in the background.
@@ -78,7 +89,6 @@ async def _cookie_refresh_loop() -> None:
         except Exception:
             pass  # transient Firebase errors — next tick retries
 
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start the job queue's worker pool when the server boots."""
@@ -91,9 +101,7 @@ async def lifespan(app: FastAPI):
     print(
         "[TextPhantom][api] CPU runtime "
         f"host={_cpu['host']} affinity={_cpu['affinity']} quota={_cpu['quota']} "
-        f"effective={_cpu['effective']} onnx_public={getattr(app.state, 'cpu_executor_workers', '?')} "
-        f"textblock_pool_requested={settings.textblock_pool_size} "
-        f"geometry_fallback={'on' if settings.textblock_geometry_fallback else 'off'}",
+        f"effective={_cpu['effective']}",
         flush=True,
     )
 
@@ -182,13 +190,31 @@ async def lifespan(app: FastAPI):
             "credentials. Set TP_ALLOWED_ORIGINS to lock it down.",
             flush=True,
         )
-    asyncio.create_task(_warm_at_boot())
-    asyncio.create_task(_cookie_refresh_loop())
-    yield
-
+    background_tasks = {
+        asyncio.create_task(_warm_at_boot(), name="tp-warmup"),
+        asyncio.create_task(_cookie_refresh_loop(), name="tp-cookie-refresh"),
+    }
+    try:
+        yield
+    finally:
+        for task in background_tasks:
+            task.cancel()
+        if background_tasks:
+            await asyncio.gather(*background_tasks, return_exceptions=True)
+        await queue.shutdown(timeout=5.0)
+        # Thread work already executing cannot be force-killed safely. Cancel
+        # only futures that never started and do not hold ASGI shutdown open.
+        for name in (
+            "ai_executor", "lens_executor",
+            "pipeline_lens_executor", "pipeline_ai_executor",
+        ):
+            executor = getattr(app.state, name, None)
+            if executor is not None:
+                executor.shutdown(wait=False, cancel_futures=True)
+        await asyncio.to_thread(close_lens_session)
+        trace.flush()
 
 app = FastAPI(title="TextPhantom OCR API", version="2.0", lifespan=lifespan)
-
 
 @app.exception_handler(HTTPException)
 async def tp_http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
@@ -238,7 +264,6 @@ async def tp_http_exception_handler(request: Request, exc: HTTPException) -> JSO
     headers["X-TP-Error-Schema"] = ERROR_SCHEMA
     return JSONResponse(status_code=exc.status_code, content={"detail": detail}, headers=headers)
 
-
 @app.exception_handler(RequestValidationError)
 async def tp_validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     """Keep FastAPI's 422 body while adding one safe, searchable log event."""
@@ -251,7 +276,6 @@ async def tp_validation_exception_handler(request: Request, exc: RequestValidati
     # FastAPI's raw list made the schema header false and could echo `input`.
     return JSONResponse(status_code=422, content={"detail": detail},
                         headers={"X-TP-Error-Schema": ERROR_SCHEMA})
-
 
 @app.exception_handler(Exception)
 async def tp_unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
@@ -270,7 +294,7 @@ async def tp_unhandled_exception_handler(request: Request, exc: Exception) -> JS
                         headers={"X-TP-Error-Schema": ERROR_SCHEMA})
 
 # Provider SDKs are synchronous. Give them their own executor instead of the
-# process-wide asyncio default pool that Lens, ONNX, warmup and miscellaneous
+# process-wide asyncio default pool that Lens, warmup and miscellaneous
 # to_thread() work also use. Most importantly, the AI admission gate below is
 # never allowed to exceed this worker count, so submitting an admitted AI call
 # can start immediately rather than disappearing into ThreadPoolExecutor's FIFO
@@ -286,7 +310,7 @@ app.state.ai_executor = ThreadPoolExecutor(
 # it, and a capabilities probe that arrives before startup finished (or under an
 # ASGI runner that skips lifespan) would otherwise 500 on a missing attribute.
 # The legacy JobQueue still starts in the lifespan; it needs a running loop.
-# TP_ADAPTIVE remains available to legacy/internal gates, but public Lens/AI/ONNX
+# TP_ADAPTIVE remains available to legacy/internal gates, but public Lens/AI
 # admission is pinned to real executor capacity in this build. Provider/client
 # feedback controls request pacing; server latency must not manufacture capacity.
 _ADAPTIVE = str(os.environ.get("TP_ADAPTIVE", "1")).strip().lower() not in ("0", "false", "no", "off")
@@ -329,52 +353,6 @@ app.state.ai_admission_gate = AdmissionGate(
     limit_max=_AI_LIMIT,
 )
 app.state.ai_executor_workers = _AI_THREADS
-# A THIRD lane, for the detector-only calls (`/v1/groups`, `/v1/blocks`).
-#
-# Same argument as the AI lane, pointing the other way. ONNX is ~445 ms of pure
-# CPU; a Lens upload is 3.7 s of network sleep. While these shared the Lens lane,
-# one image's compute held a slot the next image's upload could have used — so a
-# page that needed grouping cost the batch a whole upload slot for half a second,
-# on a lane whose whole purpose is to keep uploads in flight.
-#
-# Sized from CPU concurrency, not from the worker count: `_CPU_GATE` is what
-# actually bounds this work, and a wider lane in front of it only queues behind
-# the semaphore where nothing can see the wait. `+ 2` keeps the gate fed while a
-# finished request serialises its reply.
-# ONNX is bounded by real cores, so its ceiling is cores-derived, not a multiple
-# of the starting size: growing past the CPU only moves the wait behind _CPU_GATE.
-_CPU_RUNTIME = cpu_runtime_info()
-_EFFECTIVE_CPU = max(1, effective_cpu_count())
-_CPU_CONFIGURED = settings.sync_cpu_max_concurrency or settings.cpu_concurrency
-# Public detector concurrency must match BOTH quota-visible CPU capacity and
-# the number of real ONNX sessions.  Admitting two /v1/groups requests in
-# front of one model session only creates a hidden lock queue.
-_CPU_LIMIT = max(1, min(
-    _CPU_CONFIGURED,
-    settings.cpu_concurrency,
-    _EFFECTIVE_CPU,
-    max(1, settings.textblock_pool_size),
-))
-app.state.cpu_runtime_info = _CPU_RUNTIME
-# Detector work is CPU-bound and already protected by _CPU_GATE. A dedicated
-# executor with the same public capacity prevents Lens/AI network waits from
-# occupying its workers and prevents /v1/groups from hiding behind the default
-# asyncio executor. Keep it pinned: more admitted ONNX calls than real workers
-# are just a queue in another place.
-app.state.cpu_executor = ThreadPoolExecutor(
-    max_workers=_CPU_LIMIT,
-    thread_name_prefix="tp-onnx",
-)
-app.state.cpu_executor_workers = _CPU_LIMIT
-app.state.cpu_admission_gate = AdmissionGate(
-    _CPU_LIMIT,
-    max_waiters=settings.sync_cpu_max_waiters,
-    max_wait_sec=settings.sync_cpu_max_wait_sec,
-    adaptive=False,
-    limit_min=_CPU_LIMIT,
-    limit_max=_CPU_LIMIT,
-)
-
 # The full API-server engine owns a whole image pipeline on one worker. Give
 # each admission lane a matching executor so /v1/translate cannot recreate the
 # hidden shared-default-pool queue that the extension-first route eliminated.
@@ -422,9 +400,10 @@ app.include_router(translate.router)
 app.include_router(translate_v1.router)
 app.include_router(ai.router)
 app.include_router(ai_v1.router)
+app.include_router(repair_runs.router)
 app.include_router(lens_v1.router)
-app.include_router(blocks_v1.router)
-app.include_router(groups_v1.router)
+app.include_router(lens_groups.router)
+app.include_router(local_wire_trace.router)
 app.include_router(logs.router)
 
 # This must precede trace_install.install(). In full mode the installer wraps

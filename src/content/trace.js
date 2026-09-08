@@ -6,42 +6,95 @@
 
   const MAX_STR = 200;
   const MAX_ITEMS = 12;
-  const SECRET_HINTS = ["api_key", "apikey", "key", "token", "secret", "password", "cookie", "auth"];
+  const SECRET_HINTS = [
+    "api_key",
+    "apikey",
+    "key",
+    "token",
+    "secret",
+    "password",
+    "cookie",
+    "auth",
+    "source",
+    "translation",
+    "prompt",
+    "text",
+    "image",
+    "url",
+    "original",
+    "authorization",
+  ];
+  const SAFE_STRING_FIELDS = new Set([
+    "event",
+    "ev",
+    "type",
+    "outcome",
+    "mode",
+    "state",
+    "stage",
+    "errorType",
+    "code",
+    "route",
+    "provider",
+    "model",
+    "fn",
+    "file",
+  ]);
 
   let enabled = false;
   let detail = "off";
   let currentTrace = "";
   let lineNo = 0;
   const producerId = (() => {
-    try { return String(globalThis.crypto?.randomUUID?.() || `page-${Date.now()}-${Math.random()}`); }
-    catch { return `page-${Date.now()}-${Math.random()}`; }
+    try {
+      return String(
+        globalThis.crypto?.randomUUID?.() ||
+          `page-${Date.now()}-${Math.random()}`,
+      );
+    } catch {
+      return `page-${Date.now()}-${Math.random()}`;
+    }
   })();
 
   const isSecret = (name) => {
     const low = String(name).toLowerCase();
+    if (["sourcefingerprint", "imageid", "imagekey"].includes(low))
+      return false;
     return SECRET_HINTS.some((h) => low.includes(h));
   };
 
   // Reduces a value to a small, redacted form safe to write into a trace line.
-  function shorten(value, depth = 0) {
+  function shorten(value, depth = 0, fieldName = "") {
+    if (value?.schema === "tp.audit/1" && globalThis.TPAuditSchema) return globalThis.TPAuditSchema.sanitize(value);
     if (value === null || value === undefined) return null;
     const t = typeof value;
     if (t === "boolean") return value;
-    if (t === "number") return Number.isFinite(value) ? Math.round(value * 1e4) / 1e4 : String(value);
+    if (t === "number")
+      return Number.isFinite(value)
+        ? Math.round(value * 1e4) / 1e4
+        : String(value);
     if (t === "string") {
-      return value.length <= MAX_STR
-        ? value
-        : `${value.slice(0, MAX_STR)}…(+${value.length - MAX_STR})`;
+      if (!SAFE_STRING_FIELDS.has(String(fieldName)))
+        return `<redacted-string:${value.length}>`;
+      const safe = value.replace(
+        /\b(https?:\/\/[^/?#\s]+)[^\s]*/gi,
+        "$1/<redacted>",
+      );
+      return safe.length <= MAX_STR
+        ? safe
+        : `${safe.slice(0, MAX_STR)}…(+${safe.length - MAX_STR})`;
     }
     if (t === "function") return `<fn ${value.name || "anon"}>`;
     if (depth >= 3) return `<${t}>`;
     if (value instanceof Element) {
-      const src = value.currentSrc || value.getAttribute?.("src") || "";
-      return `<${value.tagName.toLowerCase()}${src ? ` ${String(src).slice(0, 80)}` : ""}>`;
+      return `<${value.tagName.toLowerCase()}${value.id ? `#${value.id}` : ""}>`;
     }
     if (Array.isArray(value)) {
-      const head = value.slice(0, MAX_ITEMS).map((v) => shorten(v, depth + 1));
-      if (value.length > MAX_ITEMS) head.push(`…+${value.length - MAX_ITEMS} more`);
+      const head = value
+        .slice(0, MAX_ITEMS)
+        .map((v) => shorten(v, depth + 1, fieldName));
+      if (value.length > MAX_ITEMS)
+        head.push(`…+${value.length - MAX_ITEMS} more`);
       return head;
     }
     if (t === "object") {
@@ -52,7 +105,7 @@
           out["…"] = `+${Object.keys(value).length - MAX_ITEMS} more keys`;
           break;
         }
-        out[k] = isSecret(k) ? "<redacted>" : shorten(v, depth + 1);
+        out[k] = isSecret(k) ? "<redacted>" : shorten(v, depth + 1, k);
         n++;
       }
       return out;
@@ -63,9 +116,11 @@
   // Hands one trace line to the service worker, which writes it to the trace file.
   function relay(record) {
     try {
-      chrome.runtime.sendMessage({ type: "TP_TRACE", record }, () => void chrome.runtime.lastError);
-    } catch {
-    }
+      chrome.runtime.sendMessage(
+        { type: "TP_TRACE", record },
+        () => void chrome.runtime.lastError,
+      );
+    } catch {}
   }
 
   // Emits one trace line for the current trace id.
@@ -83,8 +138,7 @@
         ev,
         ...(data === undefined ? {} : { d: shorten(data) }),
       });
-    } catch {
-    }
+    } catch {}
   }
 
   // Returns a wrapper that traces a function's arguments, result and duration.
@@ -121,13 +175,20 @@
       try {
         out = fn.apply(this, args);
       } catch (e) {
-        line(file, label, "!!", { error: e?.message || String(e), ms: Date.now() - t0 });
+        line(file, label, "!!", {
+          error: e?.message || String(e),
+          ms: Date.now() - t0,
+        });
         throw e;
       }
       if (out && typeof out.then === "function") {
         return out.then(
           (v) => {
-            line(file, label, "<-", { ret: v, ms: Date.now() - t0, async: true });
+            line(file, label, "<-", {
+              ret: v,
+              ms: Date.now() - t0,
+              async: true,
+            });
             return v;
           },
           (e) => {
@@ -148,6 +209,12 @@
   }
 
   const SKIP = new Set([
+    "updateImageStatus",
+    "clearImageStatuses",
+    "targetInstanceFor",
+    "noteAppliedImageSource",
+    "imageStatusHeight",
+    "repositionImageError",
     "log",
     "traceNote",
     "setTrace",
@@ -178,8 +245,7 @@
       try {
         TP[key] = wrapFn(value, "content/*", key);
         count++;
-      } catch {
-      }
+      } catch {}
     }
     return count;
   }
@@ -194,7 +260,8 @@
   TP.getTrace = () => currentTrace;
   TP.setTracingEnabled = (on, traceDetail = "compact") => {
     enabled = Boolean(on);
-    detail = enabled && traceDetail === "full" ? "full" : enabled ? "compact" : "off";
+    detail =
+      enabled && traceDetail === "full" ? "full" : enabled ? "compact" : "off";
   };
   TP.isTracing = () => enabled;
   TP.getTraceDetail = () => detail;

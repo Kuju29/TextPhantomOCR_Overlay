@@ -17,11 +17,12 @@ export function isMangaDexPageUrl(u) {
   }
 }
 
-
 // Builds the stable `md:data/<hash>/<file>` key for an at-home image URL, or "" when the URL is not one.
 export function mdKeyFromUrl(url) {
   try {
-    const parts = new URL(String(url || "")).pathname.split("/").filter(Boolean);
+    const parts = new URL(String(url || "")).pathname
+      .split("/")
+      .filter(Boolean);
     for (let i = parts.length - 3; i >= 0; i--) {
       if (parts[i] === "data" || parts[i] === "data-saver") {
         const hash = parts[i + 1] || "";
@@ -29,8 +30,7 @@ export function mdKeyFromUrl(url) {
         if (hash && file) return `md:${parts[i]}/${hash}/${file}`;
       }
     }
-  } catch {
-  }
+  } catch {}
   return "";
 }
 
@@ -48,7 +48,11 @@ export function mdCacheKey(mdKey, lang, mode, source = "") {
   const s = mdScopeFromMode(mode);
   if (!(k && l && s)) return "";
   const src =
-    s === "text" ? String(source || "translated").trim().toLowerCase() || "translated" : "";
+    s === "text"
+      ? String(source || "translated")
+          .trim()
+          .toLowerCase() || "translated"
+      : "";
   return src ? `${k}::${l}::${s}::${src}` : `${k}::${l}::${s}`;
 }
 

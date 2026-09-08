@@ -27,11 +27,13 @@ const MAX_BUFFER = 400;
 const FLUSH_AFTER_MS = 1500;
 const FLUSH_AT_COUNT = 40;
 const MAX_BATCH = 200;
+const MAX_REQUEST_BYTES = 48 * 1024;
 
 let buffer = [];
 let dropped = 0;
 let timer = null;
 let shipping = false;
+let configurationRevision = 0;
 let baseUrlProvider = null;
 let enabled = false;
 let consecutiveFailures = 0;
@@ -59,11 +61,20 @@ const FAILURE_BUDGET = 3;
  *
  * @param {() => Promise<string>} getBaseUrl resolves the API base, or "".
  */
-export function setLogShippingEnabled(on, getBaseUrl, baseKey = "", { authoritative = false } = {}) {
+export function setLogShippingEnabled(
+  on,
+  getBaseUrl,
+  baseKey = "",
+  { authoritative = false } = {},
+) {
+  const previousBase = activeBaseKey, previousEnabled = enabled;
   if (getBaseUrl) baseUrlProvider = getBaseUrl;
   activeBaseKey = String(baseKey || "").replace(/\/+$/, "");
-  if (authoritative && on && activeBaseKey) unsupportedBases.delete(activeBaseKey);
-  enabled = Boolean(on) && !(activeBaseKey && unsupportedBases.has(activeBaseKey));
+  if (authoritative && on && activeBaseKey)
+    unsupportedBases.delete(activeBaseKey);
+  enabled =
+    Boolean(on) && !(activeBaseKey && unsupportedBases.has(activeBaseKey));
+  if (previousBase !== activeBaseKey || previousEnabled !== enabled) configurationRevision++;
   if (!enabled) {
     buffer = [];
     dropped = 0;
@@ -79,8 +90,6 @@ export function resetLogShippingSupport(baseKey = "") {
   if (key) unsupportedBases.delete(key);
   else unsupportedBases.clear();
 }
-
-
 
 /**
  * Record one line.
@@ -119,29 +128,40 @@ export async function flushLogs() {
   if (!enabled || shipping || !buffer.length) return;
   if (consecutiveFailures >= FAILURE_BUDGET) return;
 
-  let base = "";
-  try {
-    base = String((await baseUrlProvider?.()) || "").replace(/\/+$/, "");
-  } catch {
-    base = "";
-  }
-  if (!base) return;
-
-  const batch = buffer.slice(0, MAX_BATCH);
   shipping = true;
+  const revision = configurationRevision;
+  let deadline;
   try {
+    const base = String((await baseUrlProvider?.()) || "").replace(/\/+$/, "");
+    if (!base || !enabled || revision !== configurationRevision) return;
+    const batch = [], oversized = new Set();
+    let bytes = 256;
+    for (const record of buffer.slice(0, MAX_BATCH)) {
+      let recordBytes;
+      try { recordBytes = new TextEncoder().encode(JSON.stringify(record)).length + 1; }
+      catch { oversized.add(record); continue; }
+      if (recordBytes + 256 > MAX_REQUEST_BYTES) { oversized.add(record); continue; }
+      if (batch.length && bytes + recordBytes > MAX_REQUEST_BYTES) break;
+      batch.push(record); bytes += recordBytes;
+    }
+    if (oversized.size) {
+      buffer = buffer.filter(record => !oversized.has(record));
+      dropped += oversized.size;
+    }
+    if (!batch.length) return;
+    const droppedAtSend = dropped;
+    const controller = new AbortController();
+    deadline = setTimeout(() => controller.abort(), 10000);
     const response = await fetch(`${base}/v1/logs`, {
-      method: "POST",
+      method: "POST", signal: controller.signal,
       headers: { "Content-Type": "application/json" },
       cache: "no-store",
-      // Survives the page/worker going away mid-flight, which is precisely
-      // when the last few lines matter most.
-      keepalive: true,
-      body: JSON.stringify({
-        records: batch,
-        droppedSinceLastBatch: dropped,
-      }),
+      // Worker-owned diagnostics are not unload beacons and must not contend
+      // with other outstanding requests for the small keepalive body quota.
+      keepalive: false,
+      body: JSON.stringify({ records: batch, droppedSinceLastBatch: droppedAtSend }),
     });
+    if (revision !== configurationRevision) return;
     if (response.status === 503) {
       // The server answers 503 for exactly one reason here: file logging is
       // turned off (TP_LOG_FILE), which is the default. That is a settled
@@ -160,9 +180,10 @@ export async function flushLogs() {
     // never sent and keep ones that were.
     const sent = new Set(batch);
     buffer = buffer.filter((r) => !sent.has(r));
-    dropped = 0;
+    dropped = Math.max(0, dropped - droppedAtSend);
     consecutiveFailures = 0;
   } catch {
+    if (revision !== configurationRevision) return;
     consecutiveFailures++;
     if (consecutiveFailures >= FAILURE_BUDGET) {
       // Stop rather than retry forever: an unreachable log endpoint would
@@ -170,8 +191,9 @@ export async function flushLogs() {
       buffer = [];
     }
   } finally {
+    if (deadline) clearTimeout(deadline);
     shipping = false;
-    if (buffer.length && consecutiveFailures < FAILURE_BUDGET && !timer) {
+    if (enabled && buffer.length && consecutiveFailures < FAILURE_BUDGET && !timer) {
       timer = setTimeout(() => void flushLogs(), FLUSH_AFTER_MS);
     }
   }

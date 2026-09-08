@@ -22,21 +22,46 @@ const GLYPH_W_RATIO_LATIN = 0.55;
 export const MIN_FONT_PX = 9;
 
 const CJK_RANGES = [
-  [0x2e80, 0x2eff], [0x2f00, 0x2fdf], [0x3000, 0x303f], [0x3040, 0x309f],
-  [0x30a0, 0x30ff], [0x3100, 0x312f], [0x3130, 0x318f], [0x3190, 0x319f],
-  [0x31a0, 0x31bf], [0x31c0, 0x31ef], [0x31f0, 0x31ff], [0x3200, 0x32ff],
-  [0x3300, 0x33ff], [0x3400, 0x4dbf], [0x4e00, 0x9fff], [0xa000, 0xa48f],
-  [0xac00, 0xd7af], [0xf900, 0xfaff], [0xfe30, 0xfe4f], [0xff00, 0xffef],
-  [0x20000, 0x2a6df], [0x2a700, 0x2b73f], [0x2b740, 0x2b81f], [0x2b820, 0x2ceaf],
+  [0x2e80, 0x2eff],
+  [0x2f00, 0x2fdf],
+  [0x3000, 0x303f],
+  [0x3040, 0x309f],
+  [0x30a0, 0x30ff],
+  [0x3100, 0x312f],
+  [0x3130, 0x318f],
+  [0x3190, 0x319f],
+  [0x31a0, 0x31bf],
+  [0x31c0, 0x31ef],
+  [0x31f0, 0x31ff],
+  [0x3200, 0x32ff],
+  [0x3300, 0x33ff],
+  [0x3400, 0x4dbf],
+  [0x4e00, 0x9fff],
+  [0xa000, 0xa48f],
+  [0xac00, 0xd7af],
+  [0xf900, 0xfaff],
+  [0xfe30, 0xfe4f],
+  [0xff00, 0xffef],
+  [0x20000, 0x2a6df],
+  [0x2a700, 0x2b73f],
+  [0x2b740, 0x2b81f],
+  [0x2b820, 0x2ceaf],
 ];
 
 const RTL_RANGES = [
-  [0x0590, 0x05ff], [0x0600, 0x06ff], [0x0700, 0x074f], [0x0750, 0x077f],
-  [0x0780, 0x07bf], [0x08a0, 0x08ff], [0xfb1d, 0xfdff], [0xfe70, 0xfeff],
+  [0x0590, 0x05ff],
+  [0x0600, 0x06ff],
+  [0x0700, 0x074f],
+  [0x0750, 0x077f],
+  [0x0780, 0x07bf],
+  [0x08a0, 0x08ff],
+  [0xfb1d, 0xfdff],
+  [0xfe70, 0xfeff],
 ];
 
 function inRanges(codePoint, ranges) {
-  for (const [lo, hi] of ranges) if (codePoint >= lo && codePoint <= hi) return true;
+  for (const [lo, hi] of ranges)
+    if (codePoint >= lo && codePoint <= hi) return true;
   return false;
 }
 
@@ -124,12 +149,18 @@ export function fitColumnFontSizePx(boxWidthPx, boxHeightPx, text) {
   if (!(boxWidthPx > 0) || !(boxHeightPx > 0)) return MIN_FONT_PX;
   const n = visibleCharCount(text);
   if (n <= 0) {
-    return Math.max(MIN_FONT_PX, roundHalfEven(Math.min(boxWidthPx, boxHeightPx) * 0.85));
+    return Math.max(
+      MIN_FONT_PX,
+      roundHalfEven(Math.min(boxWidthPx, boxHeightPx) * 0.85),
+    );
   }
   const fsArea = Math.sqrt((boxWidthPx * boxHeightPx) / n) * 0.9;
   const fsColumnWidth = boxWidthPx * 0.95;
   const fsSingle = boxHeightPx * 0.95;
-  return Math.max(MIN_FONT_PX, roundHalfEven(Math.min(fsArea, fsColumnWidth, fsSingle)));
+  return Math.max(
+    MIN_FONT_PX,
+    roundHalfEven(Math.min(fsArea, fsColumnWidth, fsSingle)),
+  );
 }
 
 // The same fit from a percentage box.
@@ -154,16 +185,26 @@ export function fitItemFontSize(boxWidthPct, boxHeightPct, text, imgW, imgH) {
 }
 
 /** Font size for text that is allowed to wrap across a paragraph box. */
-export function fitParagraphFontSizeHorizontal(boxWidthPct, boxHeightPct, text, imgW, imgH) {
+export function fitParagraphFontSizeHorizontal(
+  boxWidthPct,
+  boxHeightPct,
+  text,
+  imgW,
+  imgH,
+) {
   const wPx = (Math.max(0, boxWidthPct) / 100) * Math.max(1, Math.trunc(imgW));
   const hPx = (Math.max(0, boxHeightPct) / 100) * Math.max(1, Math.trunc(imgH));
   if (!(wPx > 0) || !(hPx > 0)) return MIN_FONT_PX;
   const n = visibleCharCount(text);
-  if (n <= 0) return Math.max(MIN_FONT_PX, roundHalfEven(Math.min(wPx, hPx) * 0.85));
+  if (n <= 0)
+    return Math.max(MIN_FONT_PX, roundHalfEven(Math.min(wPx, hPx) * 0.85));
   const ratio = glyphWidthRatio(text);
   const areaFit = Math.sqrt((wPx * hPx) / Math.max(1, n * ratio)) * 0.85;
   const oneLineCeiling = hPx * 0.8;
-  return Math.max(MIN_FONT_PX, roundHalfEven(Math.min(areaFit, oneLineCeiling)));
+  return Math.max(
+    MIN_FONT_PX,
+    roundHalfEven(Math.min(areaFit, oneLineCeiling)),
+  );
 }
 
 /**
@@ -219,10 +260,15 @@ export function sharedParagraphFontSize(items, imgW, imgH) {
  * @returns {Map<string, number>}
  */
 export function harmonizeVerticalFontRecords(records) {
-  const rows = (Array.isArray(records) ? records : []).filter((row) => (
-    row && row.id && Number(row.fontPx) > 0 && Number(row.glyphPx) > 0 &&
-    Number(row.right) > Number(row.left) && Number(row.bottom) > Number(row.top)
-  ));
+  const rows = (Array.isArray(records) ? records : []).filter(
+    (row) =>
+      row &&
+      row.id &&
+      Number(row.fontPx) > 0 &&
+      Number(row.glyphPx) > 0 &&
+      Number(row.right) > Number(row.left) &&
+      Number(row.bottom) > Number(row.top),
+  );
   const parent = rows.map((_row, index) => index);
   const minFont = rows.map((row) => Number(row.fontPx));
   const maxFont = [...minFont];
@@ -244,18 +290,26 @@ export function harmonizeVerticalFontRecords(records) {
       const bGroup = String(b.groupId || "");
       if ((aGroup || bGroup) && aGroup !== bGroup) continue;
 
-      const overlap = Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
+      const overlap = Math.max(
+        0,
+        Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top),
+      );
       const shorter = Math.max(1, Math.min(a.bottom - a.top, b.bottom - b.top));
       const horizontalGap = Math.max(a.left - b.right, b.left - a.right, 0);
       const glyph = Math.max(Number(a.glyphPx), Number(b.glyphPx), 1);
       const explicitGroup = Boolean(aGroup && aGroup === bGroup);
       if (overlap / shorter < (explicitGroup ? 0.25 : 0.4)) continue;
       if (horizontalGap > (explicitGroup ? 3.2 : 1.8) * glyph) continue;
-      if (Math.max(a.fontPx, b.fontPx) / Math.min(a.fontPx, b.fontPx) > 1.55) continue;
+      if (Math.max(a.fontPx, b.fontPx) / Math.min(a.fontPx, b.fontPx) > 1.55)
+        continue;
       // Fitted translated text can make a huge title and normal dialogue both
       // land near 20px.  Source glyph scale is the independent evidence that
       // they are different typographic sets.
-      if (Math.max(a.glyphPx, b.glyphPx) / Math.min(a.glyphPx, b.glyphPx) > 1.55) continue;
+      if (
+        Math.max(a.glyphPx, b.glyphPx) / Math.min(a.glyphPx, b.glyphPx) >
+        1.55
+      )
+        continue;
       edges.push([horizontalGap / glyph, i, j]);
     }
   }

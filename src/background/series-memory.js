@@ -30,20 +30,42 @@ export async function getSeriesMemory(seriesKey) {
       glossary: Array.isArray(m.glossary) ? m.glossary : [],
       characters: Array.isArray(m.characters) ? m.characters : [],
       state: typeof m.state === "string" ? m.state : "",
-      prevContext: Array.isArray(m.prevContext) ? m.prevContext.slice(-MAX_PREV_CONTEXT) : [],
-      pageContexts: m.pageContexts && typeof m.pageContexts === "object" ? m.pageContexts : {},
-      visionPages: Number.isFinite(Number(m.visionPages)) ? Number(m.visionPages) : 0,
+      prevContext: Array.isArray(m.prevContext)
+        ? m.prevContext.slice(-MAX_PREV_CONTEXT)
+        : [],
+      pageContexts:
+        m.pageContexts && typeof m.pageContexts === "object"
+          ? m.pageContexts
+          : {},
+      visionPages: Number.isFinite(Number(m.visionPages))
+        ? Number(m.visionPages)
+        : 0,
     };
   } catch {
-    return { glossary: [], characters: [], state: "", prevContext: [], pageContexts: {}, visionPages: 0 };
+    return {
+      glossary: [],
+      characters: [],
+      state: "",
+      prevContext: [],
+      pageContexts: {},
+      visionPages: 0,
+    };
   }
 }
 
 // Returns the bounded slice of series memory that travels with an AI request.
-export function selectPromptMemory(memory, { glossaryLimit = 12, characterLimit = 6 } = {}) {
+export function selectPromptMemory(
+  memory,
+  { glossaryLimit = 12, characterLimit = 6 } = {},
+) {
   return {
-    glossary: (Array.isArray(memory?.glossary) ? memory.glossary : []).slice(-glossaryLimit),
-    characters: (Array.isArray(memory?.characters) ? memory.characters : []).slice(-characterLimit),
+    glossary: (Array.isArray(memory?.glossary) ? memory.glossary : []).slice(
+      -glossaryLimit,
+    ),
+    characters: (Array.isArray(memory?.characters)
+      ? memory.characters
+      : []
+    ).slice(-characterLimit),
     state: String(memory?.state || "").slice(0, 1200),
     prevContext: (Array.isArray(memory?.prevContext) ? memory.prevContext : [])
       .slice(-MAX_PREV_CONTEXT)
@@ -51,9 +73,10 @@ export function selectPromptMemory(memory, { glossaryLimit = 12, characterLimit 
         src: String(entry?.src || entry?.source || "").slice(0, 240),
         tgt: String(entry?.tgt || entry?.target || "").slice(0, 240),
       })),
-    pageContexts: memory?.pageContexts && typeof memory.pageContexts === "object"
-      ? memory.pageContexts
-      : {},
+    pageContexts:
+      memory?.pageContexts && typeof memory.pageContexts === "object"
+        ? memory.pageContexts
+        : {},
     visionPages: Number(memory?.visionPages) || 0,
   };
 }
@@ -62,10 +85,15 @@ export function selectPromptMemory(memory, { glossaryLimit = 12, characterLimit 
 function mergeGlossary(existing, incoming) {
   const bySrc = new Map();
   for (const e of Array.isArray(existing) ? existing : []) {
-    if (e && e.src) bySrc.set(String(e.src), { src: String(e.src), tgt: String(e.tgt || "") });
+    if (e && e.src)
+      bySrc.set(String(e.src), {
+        src: String(e.src),
+        tgt: String(e.tgt || ""),
+      });
   }
   for (const e of Array.isArray(incoming) ? incoming : []) {
-    if (e && e.src && e.tgt) bySrc.set(String(e.src), { src: String(e.src), tgt: String(e.tgt) });
+    if (e && e.src && e.tgt)
+      bySrc.set(String(e.src), { src: String(e.src), tgt: String(e.tgt) });
   }
   return [...bySrc.values()].slice(-MAX_GLOSSARY);
 }
@@ -91,7 +119,11 @@ function mergeCharacters(existing, incoming) {
         String(prev.gender).toLowerCase() !== v.toLowerCase()
       ) {
         merged.gender = "unknown";
-        merged.note = [prev.note, c.note, `gender evidence conflicts: ${prev.gender}/${v}`]
+        merged.note = [
+          prev.note,
+          c.note,
+          `gender evidence conflicts: ${prev.gender}/${v}`,
+        ]
           .filter(Boolean)
           .join("; ")
           .slice(0, 300);
@@ -116,8 +148,12 @@ async function accumulateSeriesMemoryNow(seriesKey, result) {
       .filter((p) => String(p?.aiText || "").trim())
       .slice(-MAX_PREV_CONTEXT)
       .map((p) => ({
-        src: String(p?.text || p?.originalText || "").trim().slice(0, 240),
-        tgt: String(p.aiText || "").trim().slice(0, 240),
+        src: String(p?.text || p?.originalText || "")
+          .trim()
+          .slice(0, 240),
+        tgt: String(p.aiText || "")
+          .trim()
+          .slice(0, 240),
       }));
     const pageIndex = Number(result?.Ai?.meta?.pageIndex);
     const batchId = String(result?.Ai?.meta?.batchId || "");
@@ -130,22 +166,36 @@ async function accumulateSeriesMemoryNow(seriesKey, result) {
     const cur = all[key] && typeof all[key] === "object" ? all[key] : {};
     delete all[key];
     all[key] = {
-      glossary: hasG ? mergeGlossary(cur.glossary, glossary) : (cur.glossary || []),
-      characters: hasC ? mergeCharacters(cur.characters, characters) : (cur.characters || []),
+      glossary: hasG
+        ? mergeGlossary(cur.glossary, glossary)
+        : cur.glossary || [],
+      characters: hasC
+        ? mergeCharacters(cur.characters, characters)
+        : cur.characters || [],
       state: typeof cur.state === "string" ? cur.state : "",
-      prevContext: pageContext.length ? pageContext : (cur.prevContext || []),
+      prevContext: pageContext.length ? pageContext : cur.prevContext || [],
       pageContexts: (() => {
-        const contexts = cur.pageContexts && typeof cur.pageContexts === "object"
-          ? { ...cur.pageContexts }
-          : {};
-        if (batchId && Number.isInteger(pageIndex) && pageIndex >= 0 && pageContext.length) {
-          const batch = contexts[batchId] && typeof contexts[batchId] === "object"
-            ? { ...contexts[batchId] }
+        const contexts =
+          cur.pageContexts && typeof cur.pageContexts === "object"
+            ? { ...cur.pageContexts }
             : {};
+        if (
+          batchId &&
+          Number.isInteger(pageIndex) &&
+          pageIndex >= 0 &&
+          pageContext.length
+        ) {
+          const batch =
+            contexts[batchId] && typeof contexts[batchId] === "object"
+              ? { ...contexts[batchId] }
+              : {};
           batch[String(pageIndex)] = pageContext;
           contexts[batchId] = batch;
         }
-        for (const stale of Object.keys(contexts).slice(0, Math.max(0, Object.keys(contexts).length - 4))) {
+        for (const stale of Object.keys(contexts).slice(
+          0,
+          Math.max(0, Object.keys(contexts).length - 4),
+        )) {
           delete contexts[stale];
         }
         return contexts;
@@ -170,7 +220,9 @@ async function accumulateSeriesMemoryNow(seriesKey, result) {
 // Merges one page's AI result into the series memory, serialised against every other write.
 export async function accumulateSeriesMemory(seriesKey, result) {
   const key = String(seriesKey || "default");
-  const next = writeChain.catch(() => {}).then(() => accumulateSeriesMemoryNow(key, result));
+  const next = writeChain
+    .catch(() => {})
+    .then(() => accumulateSeriesMemoryNow(key, result));
   writeChain = next;
   await next;
 }

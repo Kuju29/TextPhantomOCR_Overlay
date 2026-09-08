@@ -1,20 +1,16 @@
 """Language list and code normalisation shared across the backend.
 
-
 The list of UI languages is what the Chrome extension shows in its picker.
 ``normalize`` is the canonical helper used everywhere a user-supplied code
 needs to be coerced into the form Google Lens expects.
 """
-
 from __future__ import annotations
 
 from typing import Final, TypedDict
 
-
 class LanguageEntry(TypedDict):
     code: str
     name: str
-
 
 UI_LANGUAGES: Final[list[LanguageEntry]] = [
     {"code": "en", "name": "English"},
@@ -129,9 +125,9 @@ UI_LANGUAGES: Final[list[LanguageEntry]] = [
     {"code": "ny", "name": "Chichewa"},
 ]
 
-
 # Canonical lowercase -> Lens-expected casing.
 _LENS_CASE_MAP: Final[dict[str, str]] = {
+    "jp": "ja",
     "zh-cn": "zh-CN",
     "zh-tw": "zh-TW",
     "zh_hans": "zh-CN",
@@ -141,7 +137,6 @@ _LENS_CASE_MAP: Final[dict[str, str]] = {
     "zh-hant": "zh-TW",
     "zh_tw": "zh-TW",
 }
-
 
 def normalize(lang: str | None) -> str:
     """Coerce a user-supplied language code to Lens form.
@@ -159,7 +154,6 @@ def normalize(lang: str | None) -> str:
     if low in _LENS_CASE_MAP:
         return _LENS_CASE_MAP[low]
     return low
-
 
 def is_cjk(lang: str) -> bool:
     """True for codes that need CJK fonts (Japanese / Chinese / Korean)."""

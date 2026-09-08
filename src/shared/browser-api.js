@@ -32,5 +32,8 @@ export function getTab(tabId) {
 }
 
 export function createTab(createProperties) {
-  return callbackPromise((done) => chrome.tabs.create(createProperties, done), null);
+  return callbackPromise(
+    (done) => chrome.tabs.create(createProperties, done),
+    null,
+  );
 }

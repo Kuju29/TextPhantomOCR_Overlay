@@ -1,0 +1,45 @@
+{
+  "critical": [
+    "scripts/test-background-job-ownership.mjs",
+    "scripts/test-custom-adapter-save.mjs",
+    "scripts/test-prompt-system-cross-runtime.mjs",
+    "scripts/test-erase-owner-api.py",
+    "scripts/test-repair-http.py",
+    "scripts/test-workload-execution-scope.mjs",
+    "scripts/test-script-reachability.mjs",
+    "scripts/test-audit-wire.mjs",
+    "scripts/test-request-timing.mjs",
+    "scripts/test-usage-commit-queue.mjs",
+    "scripts/test-workload-decisions.mjs",
+    "scripts/test-image-status.mjs",
+    "scripts/test-geometry-invariants.py",
+    "scripts/test-settings-wire-matrix.mjs",
+    "scripts/test-repair-stability-regressions.mjs",
+    "scripts/test-gemini-thinking.py"
+  ],
+  "nested": {
+    "scripts/test-ai-thinking-reporting.py": "scripts/test-local-ai-config.mjs"
+  },
+  "separate": {
+    "browser": {
+      "reason": "Requires a local Chromium executable; offline real DOM/canvas gate, not live provider.",
+      "command": "npm run test:browser-display && python scripts/test-repair-browser.py --browser /path/to/chromium --out /tmp/tp-repair && npm run test:browser-status",
+      "files": [
+        "scripts/test-display-browser.py",
+        "scripts/test-native-axis-browser.py",
+        "scripts/test-repair-browser.py",
+        "scripts/test-image-status-browser.py"
+      ]
+    },
+    "windows": {
+      "reason": "Run npm test in the actual Windows project venv; Linux newline simulation does not replace it.",
+      "command": "npm test",
+      "files": []
+    },
+    "provider_quality": {
+      "reason": "Paid opt-in repeated trials and human semantic assessment; never an implicit npm test call.",
+      "command": "Follow scripts/provider-quality-plan.md after setting a call/token/cost ceiling.",
+      "files": []
+    }
+  }
+}

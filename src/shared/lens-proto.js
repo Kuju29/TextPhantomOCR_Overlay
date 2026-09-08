@@ -51,7 +51,9 @@ export function readVarint(buf, i) {
     result += (b & 0x7f) * 2 ** shift;
     if ((b & 0x80) === 0) {
       if (!Number.isSafeInteger(result)) {
-        throw new LensProtoError(`varint ${result} exceeds the safe integer range`);
+        throw new LensProtoError(
+          `varint ${result} exceeds the safe integer range`,
+        );
       }
       return [result, i];
     }
@@ -101,7 +103,9 @@ export function parse(buf, start = 0, end = null) {
  */
 export function f32(b4) {
   if (!b4 || b4.length !== 4) {
-    throw new LensProtoError(`expected 4 bytes for a float32, got ${b4 ? b4.length : "none"}`);
+    throw new LensProtoError(
+      `expected 4 bytes for a float32, got ${b4 ? b4.length : "none"}`,
+    );
   }
   return new DataView(b4.buffer, b4.byteOffset, 4).getFloat32(0, true);
 }
@@ -169,7 +173,11 @@ export function looksLikeGeom(geomBytes) {
   for (const { field, wire, value } of parse(geomBytes)) {
     if (field === 1 && wire === 2) {
       const pFields = parse(value);
-      if (getFloatField(pFields, 1) !== null && getFloatField(pFields, 2) !== null) points += 1;
+      if (
+        getFloatField(pFields, 1) !== null &&
+        getFloatField(pFields, 2) !== null
+      )
+        points += 1;
     } else if (field === 3 && wire === 5) {
       hasHeight = true;
     }
@@ -202,7 +210,8 @@ export function isItemMessage(msgBytes) {
 /** A stable identity for a byte slice, so the deep walk can de-duplicate. */
 function bytesKey(bytes) {
   let out = "";
-  for (let i = 0; i < bytes.length; i += 1) out += String.fromCharCode(bytes[i]);
+  for (let i = 0; i < bytes.length; i += 1)
+    out += String.fromCharCode(bytes[i]);
   return out;
 }
 
@@ -300,7 +309,9 @@ export function base64ToBytes(b64) {
   try {
     binary = atob(String(b64));
   } catch (cause) {
-    throw new LensProtoError(`paragraph is not base64: ${cause.message}`, { cause });
+    throw new LensProtoError(`paragraph is not base64: ${cause.message}`, {
+      cause,
+    });
   }
   const out = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i += 1) out[i] = binary.charCodeAt(i);

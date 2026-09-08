@@ -18,7 +18,11 @@ export function normalizeUrl(raw) {
 
   try {
     const u = new URL(url.replace(/\/+$/, ""));
-    if (u.hostname === "0.0.0.0" || u.hostname === "127.0.0.1" || u.hostname === "[::1]") {
+    if (
+      u.hostname === "0.0.0.0" ||
+      u.hostname === "127.0.0.1" ||
+      u.hostname === "[::1]"
+    ) {
       u.hostname = "localhost";
     }
     return u.toString().replace(/\/+$/, "");

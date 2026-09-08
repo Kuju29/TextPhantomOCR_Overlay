@@ -1,6 +1,5 @@
 """Proactive per-provider AI request pacing (the "batch gate").
 
-
 Why this exists
 ---------------
 On a manga page with many images the extension enqueues one AI translation
@@ -38,37 +37,36 @@ a thread), so waiting is cheap and does not pin a worker thread.
 
 from __future__ import annotations
 
-import asyncio
-import hashlib
-import json
-import math
-import os
-import tempfile
-import time
+import time, asyncio, hashlib, json, math, os, tempfile
+
 from collections.abc import Callable
 from collections import OrderedDict, deque
 from pathlib import Path
 
-from backend.ai import config as ai_config
-from backend.ai.providers import canonical_provider, is_local_provider, resolve_model
+# from backend.ai import providers as _provider_modules  # noqa: F401
+from backend.ai.provider_registry import provider_registry
+from backend.ai.provider_resolution import canonical_provider, resolve_model
 from backend.config import settings
 
+RATE_ADAPT_OK_STREAK = 8
+RATE_ADAPT_OK_STREAK_MIN = 2
+RATE_ADAPT_OK_WINDOW_SEC = 10.0
+RATE_ADAPT_STEP_RPM = 6.0
+RATE_ADAPT_BACKOFF = 0.5
+RATE_ADAPT_IDLE_RESET_SEC = 900.0
+RATE_ADAPT_IDLE_DECAY = 0.5
 
 class RateGateError(Exception):
     """Base class for gate refusals (never raised for a normal grant)."""
 
-
 class RateGateTimeout(RateGateError):
     """The request could not get a token within its deadline — skip it."""
-
 
 class RateGateRejected(RateGateError):
     """The bucket already has too many waiters — shed load immediately."""
 
-
 class RateGateCancelled(RateGateError):
     """The owning browser batch was cancelled while waiting for a token."""
-
 
 def _env_float(name: str, default: float) -> float:
     try:
@@ -76,13 +74,11 @@ def _env_float(name: str, default: float) -> float:
     except (TypeError, ValueError):
         return default
 
-
 def _env_int(name: str, default: int) -> int:
     try:
         return int(os.environ.get(name, str(default)))
     except (TypeError, ValueError):
         return default
-
 
 # Upper bound on how many distinct (provider, model, key) buckets we keep. Each
 # bucket is tiny, but on a multi-user server the set of API keys is unbounded,
@@ -90,7 +86,6 @@ def _env_int(name: str, default: int) -> int:
 # and no pending refill timer) are ever evicted; an evicted bucket simply starts
 # full again next time, which is the correct state for one that was quiet.
 _MAX_BUCKETS = _env_int("TP_RATE_MAX_BUCKETS", 512)
-
 
 # --- learned-rate persistence -------------------------------------------------
 #
@@ -115,7 +110,6 @@ _STATE_TTL_SEC = _env_float("TP_RATE_STATE_TTL_SEC", 7 * 24 * 3600.0)
 _STATE_SAVE_MIN_INTERVAL_SEC = _env_float("TP_RATE_STATE_SAVE_SEC", 30.0)
 _STATE_SCHEMA = "tp.rategate.state/1"
 
-
 def _state_path() -> Path | None:
     """Where the learned rates live, or None when persistence is switched off.
 
@@ -138,7 +132,6 @@ def _state_path() -> Path | None:
             return candidate / "rate-gate.json"
     return Path(tempfile.gettempdir()) / "textphantom-rate-gate.json"
 
-
 class _Waiter:
     __slots__ = ("job_id", "session", "future")
 
@@ -146,7 +139,6 @@ class _Waiter:
         self.job_id = job_id
         self.session = session
         self.future = future
-
 
 class _Bucket:
     """A single token bucket with per-session fair queues."""
@@ -208,13 +200,12 @@ class _Bucket:
     # Clean calls required before the rate may step up (see RATE_ADAPT_* notes).
     def ok_streak_target(self) -> int:
         if self.rate <= 0:
-            return ai_config.RATE_ADAPT_OK_STREAK
-        per_window = math.ceil(self.rate * ai_config.RATE_ADAPT_OK_WINDOW_SEC)
+            return RATE_ADAPT_OK_STREAK
+        per_window = math.ceil(self.rate * RATE_ADAPT_OK_WINDOW_SEC)
         return max(
-            ai_config.RATE_ADAPT_OK_STREAK_MIN,
-            min(ai_config.RATE_ADAPT_OK_STREAK, per_window),
+            RATE_ADAPT_OK_STREAK_MIN,
+            min(RATE_ADAPT_OK_STREAK, per_window),
         )
-
 
 class RateGate:
     """Process-wide singleton coordinating all AI provider pacing."""
@@ -322,7 +313,8 @@ class RateGate:
     @staticmethod
     def _policy(provider: str) -> tuple[float, int, float, float]:
         """Return ``(start_rpm, burst, rpm_min, rpm_max)``, env-overridable."""
-        dflt = ai_config.RATE_POLICY_DEFAULTS.get(provider, {})
+        spec = provider_registry.get(provider)
+        dflt = dict(spec.rate_metadata) if spec else {}
         rpm = _env_float(
             f"TP_RATE_RPM_{provider.upper()}",
             float(dflt.get("rpm", settings.rate_default_rpm)),
@@ -346,8 +338,9 @@ class RateGate:
 
     @staticmethod
     def _gated(provider: str) -> bool:
-        """Local servers have no limit; Hugging Face has its own throttle."""
-        return not (is_local_provider(provider) or provider == "huggingface")
+        """Apply provider-owned policy; unknown cloud IDs stay gated."""
+        spec = provider_registry.get(provider)
+        return spec.uses_proactive_rate_gate if spec is not None else True
 
     # Identity of one quota: provider + resolved model + API key. The rate is NOT
     # part of the key, because the bucket's rate now moves at runtime — one key
@@ -477,16 +470,16 @@ class RateGate:
         key = self._bucket_key(provider, model, api_key)
         bucket = self._buckets.get(key)
         now = time.monotonic()
-        if bucket is not None and (now - bucket.touched) > ai_config.RATE_ADAPT_IDLE_RESET_SEC:
+        if bucket is not None and (now - bucket.touched) > RATE_ADAPT_IDLE_RESET_SEC:
             # A quota that has been quiet for this long is weaker evidence, not
             # no evidence. Give back one idle window's worth and keep the rest:
             # being wrong here costs a single 429 that halves the rate anyway,
             # while resetting to the start cost the whole ramp after every
             # break the user took.
             idle_windows = int(
-                (now - bucket.touched) // max(1.0, ai_config.RATE_ADAPT_IDLE_RESET_SEC)
+                (now - bucket.touched) // max(1.0, RATE_ADAPT_IDLE_RESET_SEC)
             )
-            decayed = bucket.rpm * (ai_config.RATE_ADAPT_IDLE_DECAY ** max(1, idle_windows))
+            decayed = bucket.rpm * (RATE_ADAPT_IDLE_DECAY ** max(1, idle_windows))
             bucket.set_rpm(max(start_rpm, decayed))
             bucket.ok_streak = 0
         if bucket is None:
@@ -531,7 +524,7 @@ class RateGate:
             return
         bucket.ok_streak = 0
         if bucket.rpm < bucket.rpm_max:
-            bucket.set_rpm(min(bucket.rpm_max, bucket.rpm + ai_config.RATE_ADAPT_STEP_RPM))
+            bucket.set_rpm(min(bucket.rpm_max, bucket.rpm + RATE_ADAPT_STEP_RPM))
             self._state_dirty = True
         self._save_state()
 
@@ -545,7 +538,7 @@ class RateGate:
             return
         bucket.ok_streak = 0
         if not bucket.pinned and self.adaptive_enabled():
-            bucket.set_rpm(max(bucket.rpm_min, bucket.rpm * ai_config.RATE_ADAPT_BACKOFF))
+            bucket.set_rpm(max(bucket.rpm_min, bucket.rpm * RATE_ADAPT_BACKOFF))
             # Persist the DECREASE straight away. A rate we learned was too high
             # is the one piece of evidence worth surviving a crash: replaying it
             # after a restart is another round of 429s at the user's expense.
@@ -708,7 +701,6 @@ class RateGate:
         if not bucket.sessions and bucket.timer is not None:
             bucket.timer.cancel()
             bucket.timer = None
-
 
 # Process-wide singleton.
 rate_gate = RateGate()

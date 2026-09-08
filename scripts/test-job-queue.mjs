@@ -1,6 +1,8 @@
 // Verifies bounded automatic admission, draining and pre-start cancellation.
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { buildEnqueuePolicy } from "../src/background/pipeline/enqueue-policy.js";
+import { createJobPreparation } from "../src/background/pipeline/job-preparation.js";
 
 const {
   addTask,
@@ -9,6 +11,11 @@ const {
   setMaxConcurrency,
 } = await import("../src/background/job-queue.js");
 const { ensureBatch, getBatch } = await import("../src/background/batches.js");
+const {
+  claimImageJob,
+  releaseImageJob,
+  scheduleOwnedImageJob,
+} = await import("../src/background/jobs/lifecycle.js");
 
 const waitUntil = async (predicate, timeoutMs = 5000) => {
   const deadline = Date.now() + timeoutMs;
@@ -107,11 +114,177 @@ releaseBatchBlocker();
 await waitUntil(() => describeLimits().running === 0 && describeLimits().queued === 0);
 assert.equal(serverRouteCalls, 0, "a CANCEL_BATCH race must not start its server route");
 
-// Integration guard: production enqueue must actually pass the pre-start
-// session predicate; testing only the queue primitive would miss broken wiring.
+// The extracted enqueue policy is location-independent and exercises the exact
+// predicates passed to the queue by production orchestration.
+let currentSession = "session-a";
+const policyBatch = { cancelled: false };
+const extensionPolicy = buildEnqueuePolicy({
+  engine: "extension",
+  context: { tp_tab_session: "session-a" },
+  metadata: { batch_id: "batch-a" },
+}, 7, {
+  getTabSessionId: (tabId) => tabId === 7 ? currentSession : "",
+  getBatch: (batchId) => batchId === "batch-a" ? policyBatch : null,
+});
+assert.equal(extensionPolicy.laneManaged, true,
+  "runs:Extension must bypass the top-level image slot and use resource lanes");
+assert.equal(extensionPolicy.shouldStart(), true);
+currentSession = "session-b";
+assert.equal(extensionPolicy.shouldStart(), false, "a stale tab session cannot start");
+currentSession = "session-a";
+policyBatch.cancelled = true;
+assert.equal(extensionPolicy.shouldStart(), false, "a cancelled batch cannot start");
+const apiPolicy = buildEnqueuePolicy({ engine: "api" }, 7, {
+  getTabSessionId: () => "session-a", getBatch: () => null,
+});
+assert.equal(apiPolicy.laneManaged, false,
+  "runs:API server must remain bounded by the top-level image slot");
+
+// Two discoveries of the same image can arrive in the same JavaScript turn.
+// The synchronous owner claim must allow only one provider-capable workflow to
+// cross the first async boundary.
+{
+  const identity = {
+    batchId: "batch-atomic",
+    imageKey: "image-atomic",
+    sessionId: "session-atomic",
+    engine: "extension",
+    settingsEpoch: 7,
+    tabId: 42,
+  };
+  let workflowStarts = 0;
+  let providerCapableStarts = 0;
+  const submit = async () => {
+    const owner = claimImageJob(identity);
+    if (!owner.claimed) return false;
+    try {
+      await Promise.resolve();
+      workflowStarts++;
+      providerCapableStarts++;
+      return true;
+    } finally {
+      releaseImageJob(owner);
+    }
+  };
+  const [firstStarted, duplicateStarted] = await Promise.all([
+    submit(), submit(),
+  ]);
+  assert.deepEqual([firstStarted, duplicateStarted], [true, false]);
+  assert.equal(workflowStarts, 1);
+  assert.equal(providerCapableStarts, 1,
+    "concurrent duplicate enqueue must not create a second provider-capable job");
+  const afterTerminal = claimImageJob(identity);
+  assert.equal(afterTerminal.claimed, true,
+    "terminal release must permit an intentional later run");
+  releaseImageJob(afterTerminal);
+  const newBatch = claimImageJob({ ...identity, batchId: "batch-new" });
+  assert.equal(newBatch.claimed, true,
+    "a genuinely new batch must retain independent ownership");
+  releaseImageJob(newBatch);
+}
+
+function preparationFixture(overrides = {}) {
+  const calls = [];
+  const cache = new Map();
+  const dependencies = {
+    batchIsCancelled: () => false,
+    failWorkflow: async (reason) => { calls.push(["failWorkflow", reason]); },
+    shouldPrefetch: () => true,
+    fetchFromTab: async (_tabId, src, _frameId) => `data:image/png;base64,TAB:${src}`,
+    fetchFromUrl: async (src, pageUrl) => `data:image/png;base64,URL:${src}:${pageUrl}`,
+    getCached: (key) => cache.get(key),
+    setCached: (key, value) => { cache.set(key, value); calls.push(["setCached", key, value]); },
+    normalizeImageKey: (src) => `key:${src}`,
+    classifyError: () => ({ permanent: false }),
+    onDownloadStarted: () => { calls.push(["download"]); },
+    onPayloadUpdated: (payload) => { calls.push(["updated", payload]); },
+    onPermanentReadError: async (error) => { calls.push(["permanent", error]); },
+    logInfo: (message, detail) => { calls.push(["info", message, detail]); },
+    logWarn: (message, detail) => { calls.push(["warn", message, detail]); },
+    ...overrides,
+  };
+  return { preparation: createJobPreparation(dependencies), calls, cache };
+}
+
+// Cancellation checkpoint occurs before callers enter prefetch work.
+{
+  let prefetchChecks = 0;
+  const fixture = preparationFixture({
+    batchIsCancelled: () => true,
+    shouldPrefetch: () => { prefetchChecks++; return true; },
+  });
+  assert.equal(await fixture.preparation.stopIfBatchWasCancelled(), true);
+  assert.deepEqual(fixture.calls, [["failWorkflow", "cancelled with batch"]]);
+  assert.equal(prefetchChecks, 0, "cancelled preparation must not inspect or fetch image media");
+}
+
+// Cache hit bypasses both network paths and hydrates the payload immediately.
+{
+  let networkCalls = 0;
+  const fixture = preparationFixture({
+    fetchFromTab: async () => { networkCalls++; },
+    fetchFromUrl: async () => { networkCalls++; },
+  });
+  const payload = { src: "https://cdn.test/cached.png", metadata: {} };
+  fixture.cache.set(`key:${payload.src}`, "data:image/png;base64,CACHED");
+  assert.deepEqual(await fixture.preparation.prefetchDataUri(payload), {
+    stopped: false, cached: true,
+  });
+  assert.equal(payload.imageDataUri, "data:image/png;base64,CACHED");
+  assert.equal(networkCalls, 0);
+}
+
+// A server-side HTTP 403 falls back to the browser tab, where page credentials
+// and anti-hotlink context may legitimately make the same image readable.
+{
+  const fixture = preparationFixture({
+    fetchFromUrl: async () => { throw new Error("HTTP 403 from image host"); },
+    fetchFromTab: async (tabId, src, frameId) => {
+      fixture.calls.push(["tabFetch", tabId, src, frameId]);
+      return "data:image/webp;base64,FALLBACK";
+    },
+  });
+  const payload = { src: "https://protected.test/page.webp", metadata: {} };
+  const outcome = await fixture.preparation.prefetchDataUri(payload, {
+    tabId: 19, frameId: 3, pageUrl: "https://protected.test/chapter",
+  });
+  assert.deepEqual(outcome, { stopped: false });
+  assert.equal(payload.imageDataUri, "data:image/webp;base64,FALLBACK");
+  assert.deepEqual(fixture.calls.find(([name]) => name === "tabFetch"),
+    ["tabFetch", 19, payload.src, 3]);
+  assert.equal(payload.metadata.pipeline.at(-1).stage, "prefetch_datauri_tab");
+}
+
+// Permanent browser-only failures stop preparation and publish a typed error.
+{
+  const fixture = preparationFixture({
+    fetchFromTab: async () => { throw new Error("tab cannot read blob"); },
+  });
+  const payload = { src: "blob:https://reader.test/id", metadata: {} };
+  assert.deepEqual(await fixture.preparation.prefetchDataUri(payload, { tabId: 5 }), {
+    stopped: true,
+  });
+  const permanent = fixture.calls.find(([name]) => name === "permanent");
+  assert.equal(permanent[1].code, "IMG_BLOCKED");
+  assert.equal(permanent[1].payload, payload);
+}
+
+// A fresh successful read updates cache, pipeline metadata and observers.
+{
+  const fixture = preparationFixture();
+  const payload = { src: "https://cdn.test/new.png", metadata: { pipeline: [{ stage: "queued" }] } };
+  assert.deepEqual(await fixture.preparation.prefetchDataUri(payload, {
+    pageUrl: "https://reader.test/chapter",
+  }), { stopped: false });
+  assert.equal(fixture.cache.get(`key:${payload.src}`), payload.imageDataUri);
+  assert.deepEqual(payload.metadata.pipeline.map(({ stage }) => stage), ["queued", "prefetch_datauri"]);
+  assert.ok(!Number.isNaN(Date.parse(payload.metadata.timestamp)));
+  assert.equal(fixture.calls.filter(([name]) => name === "updated").length, 1);
+}
+
+// These remaining lifecycle checks stay until cancellation preparation is
+// extracted behind an injectable module; they must not be silently weakened.
 const jobsSource = await readFile(new URL("../src/background/jobs.js", import.meta.url), "utf8");
-assert.match(jobsSource, /shouldStart: isAdmissible[\s\S]*laneManaged: payload\?\.engine !== "api"/,
-  "runs:Extension enqueue must bypass the top-level image slot and rely on resource lanes");
 assert.match(jobsSource, /getBatch\(batchId\)\?\.cancelled\) return/,
   "processJob must defensively stop a cancelled batch before workflow/server work");
 const beginRecheck = jobsSource.indexOf("if (await stopIfBatchWasCancelled()) return;",
@@ -133,5 +306,36 @@ assert.ok(mediaRecheck < capabilitiesProbe,
   "cancelled work must stop before the capabilities probe");
 assert.match(jobsSource, /\{ shouldStart: \(\) => pendingByJob\.has\(jobId\) \}/,
   "resumed polls removed during cancellation must not start from the queue");
+assert.match(jobsSource, /return scheduleOwnedImageJob\(\{[\s\S]{0,700}?work: \(\) => processJob\(payload/,
+  "production enqueue must pass work through atomic image ownership");
+
+// Exercise the production ownership scheduler itself, not only its map.
+{
+  let scheduled = 0;
+  let started = 0;
+  let releaseWork;
+  const held = new Promise((resolve) => { releaseWork = resolve; });
+  const args = {
+    identity: {
+      batchId: "batch-scheduler", imageKey: "image-scheduler",
+      sessionId: "session-scheduler", engine: "extension",
+      settingsEpoch: 8, tabId: 8,
+    },
+    isAdmissible: () => true,
+    schedule: (fn, options) => {
+      scheduled++;
+      assert.equal(options.shouldStart(), true);
+      void fn();
+    },
+    work: async () => { started++; await held; },
+    laneManaged: true,
+  };
+  assert.equal(scheduleOwnedImageJob(args), true);
+  assert.equal(scheduleOwnedImageJob(args), false);
+  await Promise.resolve();
+  assert.equal(scheduled, 1);
+  assert.equal(started, 1);
+  releaseWork();
+}
 
 console.log("Job queue test passed: auto is bounded, 500 jobs drain, hints stabilize, cancellation skips.");

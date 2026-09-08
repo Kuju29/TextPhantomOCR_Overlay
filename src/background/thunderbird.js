@@ -11,7 +11,8 @@ const MESSAGE_DISPLAY_SCRIPTS = [
   "content/payload.js",
   "content/overlay.js",
   "content/image-buttons.js",
-  "content/site-mangadex.js",
+  "content/sites/mangadex/adapter.js",
+  "content/sites/mangadex/collector.js",
   "content/mangadex.js",
   "content/messaging.js",
   "content/index.js",
@@ -34,7 +35,9 @@ export function ensureThunderbirdMessageScripts() {
     const currentFiles = Array.isArray(current?.js) ? current.js : [];
     const isCurrent =
       currentFiles.length === MESSAGE_DISPLAY_SCRIPTS.length &&
-      currentFiles.every((file, index) => file === MESSAGE_DISPLAY_SCRIPTS[index]);
+      currentFiles.every(
+        (file, index) => file === MESSAGE_DISPLAY_SCRIPTS[index],
+      );
 
     if (!isCurrent && current) {
       await messageDisplay.unregisterScripts({ ids: [MESSAGE_SCRIPT_ID] });

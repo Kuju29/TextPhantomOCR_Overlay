@@ -14,10 +14,11 @@ Modes via ``TP_ACCESS_LOG_MODE``:
 
 from __future__ import annotations
 
-import logging
+import asyncio
 from http import HTTPStatus
-
 from fastapi import Request
+
+import logging
 
 from backend import trace
 from backend.config import settings
@@ -35,12 +36,11 @@ _FAILURE_MODES = _EVENT_MODES | _ERROR_ONLY_MODES
 # out real errors; now they are AGGREGATED into one compact summary line per
 # window (see _note_scanner_probe).
 _KNOWN_PREFIXES = (
-    "/translate", "/ai/", "/v1/", "/health", "/warmup", "/meta", "/version",
+    "/translate", "/ai/", "/v1/", "/v2/", "/health", "/warmup", "/meta", "/version",
 )
 
 _SCANNER_WINDOW_SEC = 600  # one summary line per 10 minutes at most
 _scanner = {"count": 0, "since": 0.0, "samples": []}
-
 
 def _note_scanner_probe(method: str, path: str) -> None:
     """Count an off-route 404 and emit one summary line per window."""
@@ -65,7 +65,6 @@ def _note_scanner_probe(method: str, path: str) -> None:
         )
         _scanner.update(count=0, since=now, samples=[])
 
-
 def _quiet_logger(name: str, *, disable: bool = False) -> None:
     """Lower a third-party logger without risking request handling."""
     try:
@@ -78,7 +77,6 @@ def _quiet_logger(name: str, *, disable: bool = False) -> None:
             logger.setLevel(logging.WARNING)
     except Exception:
         pass
-
 
 def configure_uvicorn_access_log() -> None:
     """Silence uvicorn/websocket request chatter unless explicitly restored."""
@@ -94,12 +92,15 @@ def configure_uvicorn_access_log() -> None:
     _quiet_logger("websockets.server")
     _quiet_logger("websockets.protocol")
 
-
 async def access_log_middleware(request: Request, call_next):
     """Log only HTTP failures; success summaries are emitted by route/job code."""
     try:
         try:
             response = await call_next(request)
+        except asyncio.CancelledError:
+            # ASGI shutdown/user disconnect is lifecycle control flow. It must
+            # propagate so Uvicorn can stop, but is not an application error.
+            raise
         except Exception as exc:
             if settings.access_log_mode in _FAILURE_MODES:
                 event(
@@ -151,7 +152,8 @@ async def access_log_middleware(request: Request, call_next):
                 pass
         return response
     finally:
-        # Lens, ONNX, AI and browser-ingest routes are separate requests.  The
+        # Lens upload, Lens graph grouping, AI and browser-ingest routes are
+        # separate requests.  The
         # old code flushed only /v1/translate, leaving the last stage buffered
         # until another request happened or the process exited cleanly.
         trace.flush()

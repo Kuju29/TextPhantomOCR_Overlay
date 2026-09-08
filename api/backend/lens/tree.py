@@ -1,6 +1,5 @@
 """Decode Google Lens OCR data into the structured "tree" the renderer uses.
 
-
 Tree shape::
 
     {
@@ -29,9 +28,9 @@ slightly different angles.  Neighbouring item baselines already preserve that lo
 
 from __future__ import annotations
 
-import base64
-import math
 from typing import Any
+
+import math, base64
 
 from backend.lens import proto
 from backend.render.geometry import (
@@ -41,7 +40,6 @@ from backend.render.geometry import (
 
 # A side label identifies which translation layer a tree belongs to.
 Side = str
-
 
 # Every reason this decode can drop something, so a count is never anonymous.
 # Kept as an explicit tuple rather than accumulated on demand: a reason that
@@ -62,7 +60,6 @@ DROP_REASONS = (
     "span_text_out_of_range",
 )
 
-
 class LensTreeInvariantError(RuntimeError):
     """Raised when the decode reaches a state its own guards rule out.
 
@@ -72,10 +69,8 @@ class LensTreeInvariantError(RuntimeError):
     as "a bubble came out blank" three layers downstream.
     """
 
-
 def _impossible(what: str) -> None:
     raise LensTreeInvariantError(what)
-
 
 def _empty_diagnostics() -> dict[str, Any]:
     return {
@@ -83,7 +78,6 @@ def _empty_diagnostics() -> dict[str, Any]:
         "deepWalkParagraphs": 0,
         "exhaustedParagraphs": 0,
     }
-
 
 def _slice_text(full_text: str, start: int | None, end: int | None) -> str | None:
     """Slice ``full_text[start:end]``, or ``None`` when the range is unusable.
@@ -99,13 +93,11 @@ def _slice_text(full_text: str, start: int | None, end: int | None) -> str | Non
         return None
     return full_text[start:end]
 
-
 def _range_min_max(ranges: list[tuple[int, int]]) -> tuple[int | None, int | None]:
     """Return ``(min start, max end)`` over a list of ``(start, end)`` ranges."""
     if not ranges:
         return None, None
     return min(r[0] for r in ranges), max(r[1] for r in ranges)
-
 
 def decode_tree(
     paragraphs_b64: list[str],
@@ -350,7 +342,6 @@ def decode_tree(
 
     return {"side": side, "paragraphs": paragraphs, "diagnostics": diagnostics}
 
-
 def tree_warnings(tree: dict | None) -> list[str]:
     """The drops worth telling somebody about, as human-readable lines.
 
@@ -377,7 +368,6 @@ def tree_warnings(tree: dict | None) -> list[str]:
             "items past that point were NOT read"
         )
     return out
-
 
 # --- Tree traversal helpers ------------------------------------------------
 
@@ -414,7 +404,6 @@ def spans_for_paragraphs(tree: dict | None, indices) -> list[dict]:
             spans.extend(item.get("spans") or [])
     return spans
 
-
 def paragraph_texts(tree: dict | None) -> list[str]:
     """Return one text string per paragraph.
 
@@ -432,7 +421,6 @@ def paragraph_texts(tree: dict | None) -> list[str]:
             )
         out.append(text)
     return out
-
 
 def tree_stats(tree: dict | None) -> dict[str, int]:
     """Return ``{paras, items, spans}`` counts — used for debug logging."""

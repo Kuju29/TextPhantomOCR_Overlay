@@ -1,0 +1,34 @@
+{
+  "schema": "tp.grouping-fixture/1",
+  "source": "User-supplied logs 2026.9.5.42.zip / debug-extension-6; pixel fixture retains only the reported two balloons",
+  "rawSha256": "e7a9823b5b7c30b5587445805d2ce108a4f41db67bbba3186f103a9e50c494ef",
+  "imageSha256": "66a8f63ea80b5f7f45260eed5999a48bacc0e6c29bc23e8a403b53e833d354d8",
+  "imageSize": [
+    1129,
+    1618
+  ],
+  "crop": [
+    75,
+    750,
+    370,
+    977
+  ],
+  "expectedRawMembers": [
+    [
+      "p8",
+      "p9",
+      "p10",
+      "p11",
+      "p12"
+    ],
+    [
+      "p13",
+      "p14",
+      "p15"
+    ]
+  ],
+  "expectedText": [
+    "いやちょっと買い物しててさ",
+    "オレが駅前にいるのそんなに変か?"
+  ]
+}

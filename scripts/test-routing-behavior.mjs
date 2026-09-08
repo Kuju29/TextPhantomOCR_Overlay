@@ -11,7 +11,8 @@ globalThis.chrome = {
 const { engineCompatibilityIssue } = await import("../src/background/capabilities.js");
 
 const legacy = { syncTranslate: false, reason: "HTTP 404" };
-const modern = { syncTranslate: true };
+const modern = { syncTranslate: true, engineRoutesV2: true };
+const preV2 = { syncTranslate: true, engineRoutesV2: false };
 assert.match(
   engineCompatibilityIssue({ engine: "extension", mode: "lens_text" }, legacy),
   /stopped; it was not sent to the legacy full-server pipeline/i,
@@ -39,7 +40,10 @@ const contextStoredAt = jobsSource.indexOf("pendingByImage.set(payload.metadata.
 const capsAt = jobsSource.indexOf("const caps = await getCapabilities(base)");
 const tracingAt = jobsSource.indexOf("setTracingEnabled(", capsAt);
 const issueAt = jobsSource.indexOf("const compatibilityIssue = engineCompatibilityIssue", capsAt);
-const stopAt = jobsSource.indexOf('traceNote("background/jobs.js", "engineRoute"', issueAt);
+const stopOffset = jobsSource.slice(issueAt).search(
+  /traceNote\(\s*["']background\/jobs\.js["']\s*,\s*["']engineRoute["']/,
+);
+const stopAt = stopOffset < 0 ? -1 : issueAt + stopOffset;
 assert.ok(
   traceCreatedAt > 0 && traceCreatedAt < contextStoredAt && contextStoredAt < capsAt &&
     capsAt < tracingAt && tracingAt < issueAt && issueAt < stopAt,
@@ -57,7 +61,7 @@ globalThis.fetch = async (url, init = {}) => {
   if (requests.length === 1) await firstHeld;
   const body = record.url.endsWith("/translate") && !record.url.endsWith("/v1/translate")
     ? { id: "legacy-job" }
-    : record.url.endsWith("/v1/lens/raw")
+      : (record.url.endsWith("/v1/lens/raw") || record.url.endsWith("/v2/engine/runsextension/lens/raw"))
       ? { lens: { ok: true } }
       : { ok: true };
   return new Response(JSON.stringify(body), {
@@ -66,13 +70,12 @@ globalThis.fetch = async (url, init = {}) => {
   });
 };
 
-const {
-  fetchLensRawViaRest,
-  groupParagraphsViaRest,
-  groupParagraphsWithArtifactFallback,
-  submitJobViaRest,
-  translateViaSyncRest,
-} = await import("../src/background/transport.js");
+const { fetchLensRawViaRest } = await import("../src/background/transports/lens.js");
+const { groupParagraphsViaRest, groupParagraphsWithArtifactFallback } =
+  await import("../src/background/transports/groups.js");
+const { submitJobViaRest, translateViaSyncRest } =
+  await import("../src/background/transports/translate.js");
+const { translateUnits } = await import("../src/background/ai/translation-service.js");
 const bytes = new Uint8Array([1, 2, 3]);
 const unlimited = fetchLensRawViaRest("http://localhost:7860", {
   imageBytes: bytes, mime: "image/png", lang: "en", apiUnlimited: true,
@@ -121,12 +124,12 @@ const assertPolicies = async (name, invoke) => {
   }
 };
 
-await assertPolicies("/v1/groups", (base, apiUnlimited) => groupParagraphsViaRest(base, {
-  imageDataUri: "data:image/png;base64,AQ==", tree: {}, context: {}, apiUnlimited,
+await assertPolicies("canonical grouping", (base, apiUnlimited) => groupParagraphsViaRest(base, {
+  imageDataUri: "data:image/png;base64,AQ==", tree: {}, rawToDocument: {}, context: {}, apiUnlimited, capabilities: preV2,
 }));
 await assertPolicies("/v1/translate", (base, apiUnlimited) => translateViaSyncRest(base, {
   mode: "lens_text", limits: { apiUnlimited }, context: {},
-}));
+}, { capabilities: preV2 }));
 await assertPolicies("legacy /translate", (base, apiUnlimited) => submitJobViaRest(base, {
   mode: "lens_images", limits: { apiUnlimited }, context: {},
 }));
@@ -148,12 +151,14 @@ const artifactOptions = {
   imageArtifactToken: "art-1",
   imageDataUri: "data:image/png;base64,AQ==",
   tree: { paragraphs: [] },
+  rawToDocument: { raw0: "p0" },
   context: { tp_tab_session: "s1" },
+  capabilities: modern,
 };
 artifactReplies = [{ status: 200, body: { ok: true } }];
 await groupParagraphsWithArtifactFallback("http://localhost:7860", artifactOptions);
 assert.equal(artifactRequests.length, 1);
-assert.equal(artifactRequests[0].url.endsWith("/v1/groups"), true);
+assert.equal(artifactRequests[0].url.endsWith("/v2/engine/runsextension/groups"), true);
 assert.equal(artifactRequests[0].body.imageArtifactToken, "art-1");
 assert.equal("imageDataUri" in artifactRequests[0].body, false, "token request must not resend pixels");
 
@@ -164,7 +169,7 @@ artifactReplies = [
 ];
 await groupParagraphsWithArtifactFallback("http://localhost:7860", artifactOptions);
 assert.equal(artifactRequests.length, 2, "explicit artifact expiry retries exactly once");
-assert.equal(artifactRequests.every((r) => r.url.endsWith("/v1/groups")), true);
+assert.equal(artifactRequests.every((r) => r.url.endsWith("/v2/engine/runsextension/groups")), true);
 assert.equal(artifactRequests[1].body.imageDataUri, artifactOptions.imageDataUri);
 assert.equal("imageArtifactToken" in artifactRequests[1].body, false);
 
@@ -222,9 +227,68 @@ await assert.rejects(
 );
 assert.equal(artifactRequests.length, 0, "cancelled work must not attempt token or byte requests");
 
+// Capability-driven compatibility is exact and stays within the selected
+// engine. Grouping is canonical-only even when other split services still use
+// their matching v1 aliases on a pre-v2 server.
+const routeCases = [
+  {
+    name: "new extension + new server",
+    capabilities: modern,
+    expected: [
+      "/v2/engine/runsextension/lens/raw",
+      "/v2/engine/runsextension/groups",
+      "/v2/engine/runsextension/ai/translate",
+      "/v2/engine/runsapi/translate",
+    ],
+  },
+  {
+    name: "new extension + pre-v2 server",
+    capabilities: preV2,
+    expected: [
+      "/v1/lens/raw",
+      "/v2/engine/runsextension/groups",
+      "/v1/ai/translate",
+      "/v1/translate",
+    ],
+  },
+];
+for (const testCase of routeCases) {
+  const exactRequests = [];
+  globalThis.fetch = async (url) => {
+    exactRequests.push(new URL(String(url)).pathname);
+    const pathname = new URL(String(url)).pathname;
+    const body = pathname.endsWith("/lens/raw")
+      ? { lens: {} }
+      : pathname.endsWith("/ai/translate")
+        ? { schema: "tp.ai.result/1", translations: [{ id: "g0", text: "แปล" }], missing: [] }
+        : { ok: true };
+    return new Response(JSON.stringify(body), {
+      status: 200, headers: { "content-type": "application/json" },
+    });
+  };
+  await fetchLensRawViaRest("https://api.example.test", {
+    imageBytes: bytes, mime: "image/png", lang: "th", capabilities: testCase.capabilities,
+  });
+  await groupParagraphsViaRest("https://api.example.test", {
+    imageDataUri: "data:image/png;base64,AQ==", tree: {}, rawToDocument: {}, context: {}, capabilities: testCase.capabilities,
+  });
+  await translateUnits([{ id: "g0", text: "text" }], {
+    route: "server", ai: { prompt: "full style" }, base: "https://api.example.test", targetLang: "th", sourceLang: "en",
+    capabilities: testCase.capabilities,
+  });
+  await translateViaSyncRest("https://api.example.test", {
+    mode: "lens_text", limits: {}, context: {},
+  }, { capabilities: testCase.capabilities });
+  assert.deepEqual(exactRequests, testCase.expected, `${testCase.name} must use exact engine-owned routes`);
+  assert.equal(
+    exactRequests.includes("/translate"), false,
+    `${testCase.name} must never cross either engine into the legacy queued pipeline`,
+  );
+}
+
 // Result reads are owner-authorized with the stable tab session, never an AI
 // provider credential. Shared polling must not combine two tab owners.
-const transportSource = await readFile(new URL("../src/background/transport.js", import.meta.url), "utf8");
+const transportSource = await readFile(new URL("../src/background/transports/polling.js", import.meta.url), "utf8");
 assert.match(transportSource, /fetchJobStatus\(url, session[\s\S]*?"X-TP-Tab-Session": session/,
   "single-result GET must carry the stable tab session");
 assert.match(transportSource, /fetchBatchPoll\(base, ids, session[\s\S]*?tp_tab_session: session/,

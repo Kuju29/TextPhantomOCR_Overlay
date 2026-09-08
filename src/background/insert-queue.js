@@ -92,7 +92,9 @@ async function sendBatch(g, batch) {
     if (resp?.ok && resp?.bulk && Array.isArray(resp.results)) {
       const byId = new Map(resp.results.map((r) => [String(r?.id || ""), r]));
       for (const entry of batch) {
-        entry.resolve(byId.get(entry.id) || { ok: false, error: "missing bulk result" });
+        entry.resolve(
+          byId.get(entry.id) || { ok: false, error: "missing bulk result" },
+        );
       }
       log.debug?.("bulk insert flushed", {
         count: batch.length,
@@ -127,14 +129,20 @@ async function flushGroup(g) {
     while (g.items.length) {
       const inFlight = [];
       let bytes = 0;
-      while (g.items.length && (!inFlight.length || bytes < INSERT_INFLIGHT_MAX_CHARS)) {
+      while (
+        g.items.length &&
+        (!inFlight.length || bytes < INSERT_INFLIGHT_MAX_CHARS)
+      ) {
         const batch = takeBatch(g);
         if (!batch.length) break;
         bytes += batch.reduce((n, e) => n + (Number(e.size) || 0), 0);
         inFlight.push(sendBatch(g, batch));
       }
       if (!inFlight.length) break;
-      log.debug?.("bulk insert dispatched", { batches: inFlight.length, chars: bytes });
+      log.debug?.("bulk insert dispatched", {
+        batches: inFlight.length,
+        chars: bytes,
+      });
       await Promise.all(inFlight);
     }
   } finally {
@@ -146,7 +154,8 @@ async function flushGroup(g) {
 
 // Queues a page DOM insertion or replacement command and resolves with the page's answer.
 export function enqueueDomInsert(tabId, message, frameId = 0) {
-  if (!tabId || !message?.type) return Promise.resolve({ ok: false, error: "invalid insert target" });
+  if (!tabId || !message?.type)
+    return Promise.resolve({ ok: false, error: "invalid insert target" });
   return new Promise((resolve) => {
     const g = getGroup(tabId, frameId);
     const size = approxMessageChars(message);
@@ -158,7 +167,9 @@ export function enqueueDomInsert(tabId, message, frameId = 0) {
     };
     g.items.push(entry);
     g.bytes += size;
-    const immediate = g.items.length >= INSERT_BATCH_MAX_ITEMS || g.bytes >= INSERT_BATCH_MAX_CHARS;
+    const immediate =
+      g.items.length >= INSERT_BATCH_MAX_ITEMS ||
+      g.bytes >= INSERT_BATCH_MAX_CHARS;
     scheduleFlush(g, immediate);
   });
 }

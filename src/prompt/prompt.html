@@ -1,65 +1,65 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <title>TextPhantom · Prompt Studio</title>
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <link rel="stylesheet" href="../shared/theme.css" />
-    <link rel="stylesheet" href="prompt.css" />
-  </head>
-  <body>
-    <header class="ps-head">
-      <div class="ps-title">
-        <h1>Prompt Studio</h1>
-        <span class="ps-sub">Edit the AI translation style for each language</span>
+
+<head>
+  <meta charset="utf-8" />
+  <title>TextPhantom · Prompt Studio</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="stylesheet" href="../shared/theme.css" />
+  <link rel="stylesheet" href="prompt.css" />
+</head>
+
+<body>
+  <header class="ps-head">
+    <div class="ps-title">
+      <h1>Prompt Studio</h1>
+      <span class="ps-sub">Edit the AI translation style for each language</span>
+    </div>
+    <div class="ps-head-actions">
+      <span id="ps-status" class="ps-status" aria-live="polite"></span>
+    </div>
+  </header>
+
+  <main class="ps-main">
+    <aside class="ps-side">
+      <div class="ps-field">
+        <label for="ps-lang">Language</label>
+        <select id="ps-lang" aria-label="Language"></select>
       </div>
-      <div class="ps-head-actions">
-        <span id="ps-status" class="ps-status" aria-live="polite"></span>
+      <div class="ps-hint">Saved separately for this Provider, Model and Language.</div>
+      <div class="ps-actions">
+        <button type="button" id="ps-load-default" class="ps-btn">Reload built-in style</button>
+        <button type="button" id="ps-clear" class="ps-btn ghost">Clear</button>
       </div>
-    </header>
 
-    <main class="ps-main">
-      <aside class="ps-side">
-        <div class="ps-field">
-          <label for="ps-lang">Language</label>
-          <select id="ps-lang" aria-label="Language"></select>
-        </div>
-        <div class="ps-hint">The style is saved per language and applies to every model.</div>
+      <div class="ps-actions">
+        <button type="button" id="ps-back" class="ps-btn" title="Back to the previous saved version">↶ Back</button>
+        <button type="button" id="ps-forward" class="ps-btn" title="Forward to the next saved version">↷
+          Forward</button>
+      </div>
 
-        <div class="ps-actions">
-          <button type="button" id="ps-load-default" class="ps-btn">Load built-in default</button>
-          <button type="button" id="ps-clear" class="ps-btn ghost">Clear</button>
-        </div>
+      <div class="ps-actions ps-actions-primary">
+        <button type="button" id="ps-save" class="ps-btn primary">Save</button>
+      </div>
 
-        <div class="ps-actions">
-          <button type="button" id="ps-back" class="ps-btn" title="Back to the previous saved version">↶ Back</button>
-          <button type="button" id="ps-forward" class="ps-btn" title="Forward to the next saved version">↷ Forward</button>
-        </div>
+      <div class="ps-note">
+        The popup's "AI Style" box edits this same value — this page is just a
+        bigger workspace for long prompts.
+      </div>
+    </aside>
 
-        <div class="ps-actions ps-actions-primary">
-          <button type="button" id="ps-save" class="ps-btn primary">Save</button>
-        </div>
+    <section class="ps-editor">
+      <div class="ps-editor-bar">
+        <span id="ps-key" class="ps-key">en</span>
+        <span id="ps-count" class="ps-count">0</span>
+      </div>
+      <textarea id="ps-text" spellcheck="false"
+        placeholder="Full AI translation style. Load the built-in default if this is empty."></textarea>
+    </section>
+  </main>
 
-        <div class="ps-note">
-          The popup's "AI Style" box edits this same value — this page is just a
-          bigger workspace for long prompts.
-        </div>
-      </aside>
+  <script src="../shared/compat.js"></script>
+  <script type="module" src="prompt.js"></script>
+</body>
 
-      <section class="ps-editor">
-        <div class="ps-editor-bar">
-          <span id="ps-key" class="ps-key">en</span>
-          <span id="ps-count" class="ps-count">0</span>
-        </div>
-        <textarea
-          id="ps-text"
-          spellcheck="false"
-          placeholder="Write your translation style here. Tone, pronoun rules, terminology, examples — anything that guides the AI. Leave empty to use the built-in style for this language."
-        ></textarea>
-      </section>
-    </main>
-
-    <script src="../shared/compat.js"></script>
-    <script type="module" src="prompt.js"></script>
-  </body>
 </html>

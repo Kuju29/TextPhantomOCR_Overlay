@@ -1,6 +1,5 @@
 """Admission control for the synchronous translate endpoint.
 
-
 The queue this replaces
 -----------------------
 ``JobQueue`` accepted up to ``TP_MAX_QUEUE_SIZE`` (2000) payloads, held every
@@ -60,13 +59,11 @@ is fair in name only.
 
 from __future__ import annotations
 
-import asyncio
-import hashlib
-import time
+import hashlib, asyncio, time
+
 from dataclasses import dataclass, field
 
 ANONYMOUS = "anon"
-
 
 class AdmissionRejected(RuntimeError):
     """No capacity. Carries the delay the caller should honour."""
@@ -74,7 +71,6 @@ class AdmissionRejected(RuntimeError):
     def __init__(self, message: str, retry_after_sec: int) -> None:
         super().__init__(message)
         self.retry_after_sec = max(1, int(retry_after_sec))
-
 
 def identity_of(payload: dict | None) -> str:
     """Who this request belongs to, for the purpose of sharing capacity.
@@ -93,7 +89,6 @@ def identity_of(payload: dict | None) -> str:
     if session:
         return "s:" + session[:32]
     return ANONYMOUS
-
 
 @dataclass(frozen=True)
 class GateStats:
@@ -122,7 +117,6 @@ class GateStats:
             "share": self.share,
             "anonymousRunning": self.anonymous_running,
         }
-
 
 class AdmissionGate:
     """Bounded-concurrency gate with bounded waiting and no backlog."""

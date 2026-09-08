@@ -2,12 +2,9 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-import hashlib
-import json
-import threading
-import time
 from typing import Any
 
+import json, hashlib, threading, time
 
 class TraceIngestDedupe:
     def __init__(self, ttl: float = 600, maximum: int = 100_000,
@@ -56,7 +53,6 @@ class TraceIngestDedupe:
             while len(self.seen) > self.maximum:
                 self.seen.popitem(last=False)
         return fresh, duplicates
-
 
 def legacy_shipment_id(dropped: int, records: list[Any]) -> str:
     """Stable bounded identity for old clients that send no shipmentId."""

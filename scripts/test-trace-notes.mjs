@@ -185,9 +185,53 @@ assert.deepEqual(
     'overlay.js must not report "old" for a route that draws the server markup',
   );
   assert.ok(
-    /reportRoute\("server"/.test(overlay),
+    /reportRoute\(\s*"server"/.test(overlay),
     "the server-markup route must be named for what it draws",
   );
+}
+
+// TP_TRACE must explain the AI page without exporting its dialogue.
+{
+  const jobs = await readFile(path.join(projectRoot, "src/background/jobs.js"), "utf8");
+  const pageTranslation = await readFile(
+    path.join(projectRoot, "src/background/pipeline/page-translation.js"), "utf8",
+  );
+  const repair = await readFile(path.join(projectRoot, "src/shared/ai-content-repair.js"), "utf8");
+  const aiLocal = await readFile(path.join(projectRoot, "src/background/ai/transports/direct-local.js"), "utf8");
+  const adapter = await readFile(path.join(projectRoot, "src/shared/ai/direct-local/generation.js"), "utf8");
+  const background = await readFile(path.join(projectRoot, "src/background/index.js"), "utf8");
+  const popupMeta = await readFile(path.join(projectRoot, "src/popup/controllers/provider-meta-controller.js"), "utf8");
+  const popupLocal = await readFile(path.join(projectRoot, "src/popup/controllers/local-connection-controller.js"), "utf8");
+  for (const required of ["aiPageContract", "aiUnitFingerprints", "aiUnitStageFingerprints",
+    "provider_parsed", "document_applied", "contentFingerprint", "sourceFingerprint", "aiContentAttempt",
+    "wrongLanguageIds", "repairAccepted", "generationStarted", "jobCancellation"]) {
+    assert.ok(`${jobs}\n${pageTranslation}\n${repair}`.includes(required),
+      `missing AI trace field/event ${required}`);
+  }
+  for (const required of ["missingIds", "emptyIds", "duplicateIds", "extraIds"]) {
+    assert.ok(adapter.includes(required), `missing unit-contract diagnostic ${required}`);
+  }
+  assert.ok(aiLocal.includes('"direct Local AI failed"'));
+  for (const event of ['event: "start"', 'event: "result"', 'event: "error"', 'event: "stale_discard"']) {
+    assert.ok(background.includes(event), `missing Local AI discovery ${event}`);
+  }
+  assert.ok(popupMeta.includes("TP_LOCAL_AI_DISCOVERY_STALE"));
+  assert.match(popupLocal, /TP_LOCAL_AI_DISCOVER[\s\S]{0,180}apiBase:\s*normalizeUrl\(els\.apiUrl\.value\)/,
+    "explicit Connect must send the API base used for the trace handshake");
+  const handshake = await readFile(path.join(projectRoot, "src/background/trace-handshake.js"), "utf8");
+  assert.match(handshake, /epoch !== handshakeEpoch \|\| base !== activeBase/,
+    "late capability results from an old API base must be ignored");
+  assert.match(
+    pageTranslation,
+    /crypto\.getRandomValues\(\s*new Uint8Array\(32\),?\s*\)/,
+  );
+  assert.match(
+    pageTranslation,
+    /crypto\.subtle\.digest\(\s*"SHA-256",\s*keyed,?\s*\)/,
+  );
+  assert.ok(pageTranslation.includes("Never fall back to an unsalted hash"));
+  assert.doesNotMatch(pageTranslation, /aiUnitFingerprints[\s\S]{0,500}\btext\s*:/);
+  assert.doesNotMatch(pageTranslation, /aiUnitStageFingerprints[\s\S]{0,500}\btext\s*:/);
 }
 
 console.log("Trace note test passed: every trace id is in scope, route labels describe the route.");

@@ -21,7 +21,9 @@ let currentLevel = LEVELS[currentLevelName] ?? LEVELS.warn;
 
 /** Change the visible console threshold without affecting the diagnostic sink. */
 export function setLogLevel(name) {
-  const next = String(name || "").trim().toLowerCase();
+  const next = String(name || "")
+    .trim()
+    .toLowerCase();
   currentLevelName = Object.hasOwn(LEVELS, next) ? next : "warn";
   currentLevel = LEVELS[currentLevelName];
   return currentLevelName;
@@ -45,7 +47,8 @@ function safeSerialize(value) {
  * copy is flattened.
  */
 function readable(value) {
-  if (typeof value === "string" || value === null || value === undefined) return value;
+  if (typeof value === "string" || value === null || value === undefined)
+    return value;
   if (typeof value !== "object") return value;
   try {
     return JSON.stringify(value);
@@ -86,7 +89,10 @@ export function createLogger(namespace) {
           ns: namespace,
           level,
           msg: typeof message === "string" ? message : safeSerialize(message),
-          data: rest.length === 1 ? safeSerialize(rest[0]) : rest.map(safeSerialize),
+          data:
+            rest.length === 1
+              ? safeSerialize(rest[0])
+              : rest.map(safeSerialize),
           t: Date.now(),
         });
       } catch {

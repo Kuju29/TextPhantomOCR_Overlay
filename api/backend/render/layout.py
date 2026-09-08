@@ -31,14 +31,13 @@ stuck.
 """
 
 from __future__ import annotations
-
-import math
-import re
-from typing import Any, Final
-
 from PIL import Image, ImageDraw
 
-from backend.render.fonts import is_truetype, pick_font
+from typing import Any, Final
+
+import re, math
+
+from backend.render.fonts import UnsupportedFontError, is_truetype, pick_font
 from backend.render.geometry import ensure_box_fields
 from backend.render.text_metrics import baseline_offset_px, line_metrics_px
 from backend.render.text_utils import contains_thai, sanitize_draw_text
@@ -50,7 +49,6 @@ _SCRATCH = ImageDraw.Draw(Image.new("RGBA", (10, 10), (0, 0, 0, 0)))
 # Token tuples.
 RawToken = tuple[str, str]               # (kind, text)
 LineToken = tuple[str, str, float]       # (kind, text, width_px)
-
 
 # Languages whose orthography has no inter-word spaces. When the target
 # language belongs to this set we strip stray spaces that sit between two
@@ -104,7 +102,6 @@ _CHAR_LEVEL_LANGS = frozenset(
 # kana — common in Japanese onomatopoeia.
 _HALF_WIDTH_CHARS: Final[frozenset[str]] = frozenset("っッぁぃぅぇぉゃゅょャュョ")
 
-
 def count_text_length(text: str) -> float:
     """Visual text length, with half-width chars counted as 0.5.
 
@@ -119,7 +116,6 @@ def count_text_length(text: str) -> float:
             continue
         total += 0.5 if ch in _HALF_WIDTH_CHARS else 1.0
     return total
-
 
 def font_size_minimum_for_image(img_w: int, img_h: int) -> int:
     """Readability floor for the AI fit pass.
@@ -140,11 +136,9 @@ def font_size_minimum_for_image(img_w: int, img_h: int) -> int:
     side_sum = short + min(long_, 2 * short)
     return max(8, int(round(side_sum / 200.0)))
 
-
 def _normalise_lang(lang: str) -> str:
     """Lowercase + ``_``→``-`` so language comparisons are robust."""
     return (lang or "").strip().lower().replace("_", "-")
-
 
 def collapse_intra_script_spaces(text: str, lang: str) -> str:
     """Remove spaces between adjacent CJK / Thai characters.
@@ -162,7 +156,6 @@ def collapse_intra_script_spaces(text: str, lang: str) -> str:
     # The regex eats *only* the whitespace between two same-script chars, in
     # one left-to-right sweep that handles arbitrarily long Thai/CJK runs.
     return _INTRA_SCRIPT_SPACE_RE.sub(r"\1", text)
-
 
 def _split_word_for_lang(word: str, parser, code: str) -> list[str]:
     """Per-language strategy that turns a single non-whitespace run into one
@@ -200,7 +193,6 @@ def _split_word_for_lang(word: str, parser, code: str) -> list[str]:
             return [word]
     return [word]
 
-
 def tokens_with_spaces(text: str, parser, lang: str) -> list[RawToken]:
     """Split ``text`` into ``(kind, text)`` tokens.
 
@@ -225,7 +217,6 @@ def tokens_with_spaces(text: str, parser, lang: str) -> list[RawToken]:
         out.extend(("word", seg) for seg in _split_word_for_lang(part, parser, code))
     return out
 
-
 def _measure_width(font, text: str) -> float:
     """Pixel advance width of ``text`` in ``font`` (robust to old Pillow)."""
     try:
@@ -238,6 +229,14 @@ def _measure_width(font, text: str) -> float:
             w, _ = _SCRATCH.textsize(text, font=font)  # type: ignore[attr-defined]
             return float(w)
 
+def _font_width_or_estimate(text: str, thai_font: str, latin_font: str, size: int) -> float:
+    """Measure with a covered font or use a bounded geometry-only estimate."""
+    try:
+        return _measure_width(pick_font(text, thai_font, latin_font, size), text)
+    except UnsupportedFontError:
+        # Never measure tofu/default glyphs: that fixed metric corrupts font
+        # fitting. This estimate is only used to distribute/wrap safely.
+        return max(1.0, len(text) * float(size) * 0.6)
 
 def _line_cap_px(item: dict, img_w: int, img_h: int) -> float:
     """Maximum line width (px) for an item — its baseline length, or box width."""
@@ -250,7 +249,6 @@ def _line_cap_px(item: dict, img_w: int, img_h: int) -> float:
         return cap
     box = ensure_box_fields(item.get("box") or {})
     return float(box.get("width") or 0.0) * img_w
-
 
 def wrap_tokens_to_lines(
     tokens: list[RawToken],
@@ -297,14 +295,12 @@ def wrap_tokens_to_lines(
         if not txt:
             continue
 
-        word_w = _measure_width(pick_font(txt, thai_font, latin_font, int(font_size)), txt)
+        word_w = _font_width_or_estimate(txt, thai_font, latin_font, int(font_size))
 
         space_w = 0.0
         if pending_space:
             hint = last_word_hint or txt
-            space_w = _measure_width(
-                pick_font(hint, thai_font, latin_font, int(font_size)), pending_space
-            )
+            space_w = _font_width_or_estimate(pending_space, thai_font, latin_font, int(font_size))
 
         cap = cap_for_line(li)
         soft_cap = cap * soft_factor if (li < desired and cap > 0.0) else cap
@@ -345,7 +341,6 @@ def wrap_tokens_to_lines(
         lines[i] = line
 
     return lines
-
 
 def ensure_min_lines_by_split(
     lines: list[list[LineToken]], min_lines: int, max_lines: int
@@ -393,7 +388,6 @@ def ensure_min_lines_by_split(
 
     return lines
 
-
 def fit_para_size_and_lines(
     ptext: str,
     parser,
@@ -403,7 +397,7 @@ def fit_para_size_and_lines(
     thai_font: str,
     latin_font: str,
     base_size: int,
-    min_lines: int,
+    # min_lines: int,
     lang: str,
 ) -> tuple[int, list[list[LineToken]]]:
     """Find the largest font size at which ``ptext`` fits the item boxes.
@@ -455,7 +449,6 @@ def fit_para_size_and_lines(
     lines10 = ensure_min_lines_by_split(lines10, desired_lines, max_lines)
     return 10, lines10
 
-
 def pad_lines(lines: list[list[LineToken]], max_lines: int) -> list[list[LineToken]]:
     """Truncate or pad ``lines`` to exactly ``max_lines`` entries."""
     max_lines = int(max_lines)
@@ -467,7 +460,6 @@ def pad_lines(lines: list[list[LineToken]], max_lines: int) -> list[list[LineTok
     if len(lines) < max_lines:
         lines.extend([[] for _ in range(max_lines - len(lines))])
     return lines
-
 
 # --- Template-mirrored distribution ---------------------------------------
 # Instead of greedily wrapping AI text to *fit* the item boxes (which often
@@ -490,7 +482,6 @@ def _item_weight(item: dict, img_w: int, img_h: int) -> float:
         return max(1.0, count_text_length(text))
     cap = _line_cap_px(item, img_w, img_h)
     return cap if cap > 1e-6 else 1.0
-
 
 def distribute_to_template(
     para_text: str,
@@ -558,7 +549,6 @@ def distribute_to_template(
             line.pop()
     return lines
 
-
 def fit_font_size_for_lines(
     lines: list[list[LineToken]],
     items: list[dict],
@@ -567,14 +557,14 @@ def fit_font_size_for_lines(
     thai_font: str,
     latin_font: str,
     base_size: int,
-    lang: str,
+    # lang: str,
     min_size_px: int | None = None,
 ) -> int:
     """Largest font size (>=floor) at which every fixed line fits its item height.
 
     The line distribution is already decided (see :func:`distribute_to_template`)
     so this only searches for a size — it never re-wraps. Per-item width fitting
-    is handled later by ``backend.render.tp_html.fit_tree_font_sizes``.
+    is handled later by ``backend.render.components.typography.fit_tree_font_sizes``.
 
     ``min_size_px`` is the readability floor; defaults to
     :func:`font_size_minimum_for_image` for the supplied ``img_w``/``img_h``.
@@ -605,7 +595,6 @@ def fit_font_size_for_lines(
             return size
         size -= 1
     return floor
-
 
 def apply_line_to_item(
     item: dict,
@@ -674,13 +663,17 @@ def apply_line_to_item(
     base_h_px = base_h * H
     base_size = 96  # measure at a fixed reference size, then scale
 
-    # If a real TTF/OTF is unavailable Pillow falls back to a bitmap default
-    # whose ``textbbox`` ignores the requested size — every measurement
-    # becomes the same tiny number, which makes ``scale_line`` (and the
-    # downstream fit-size) explode. Detect that here and use a height-based
+    # If a covered TTF/OTF is unavailable, never measure Pillow's default/tofu
+    # face: its metrics can make ``scale_line`` and downstream fit-size explode.
+    # Detect the explicit unsupported-font outcome and use a height-based
     # heuristic + equal proportional shares per word: visually similar to
     # what Lens emits, and recoverable once the font finally loads.
-    if not is_truetype(pick_font(item_text or "a", thai_path, latin_path, base_size)):
+    try:
+        reference_font = pick_font(item_text or "a", thai_path, latin_path, base_size)
+        unsupported_font = not is_truetype(reference_font)
+    except UnsupportedFontError:
+        unsupported_font = True
+    if unsupported_font:
         final_size = int(forced_size_px) if forced_size_px else max(10, int(base_h_px * 0.85))
         item["font_size_px"] = final_size
         word_count = sum(1 for k, _s, _w in tokens if k == "word")
@@ -827,7 +820,7 @@ def apply_line_to_item(
     # the previous centre-and-pad layout produced). Within each span the
     # CSS flex centring renders the text at its natural size — visually
     # matching how Google Lens lays out its own overlays.
-    w_scaled = [w * scale_line for w in widths_px]
+    # w_scaled = [w * scale_line for w in widths_px]
     _proportion_total = sum(widths_px) or 1.0
     _shares = [w / _proportion_total for w in widths_px]
 

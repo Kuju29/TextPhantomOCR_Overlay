@@ -1,6 +1,5 @@
 """Robust parsing of AI responses.
 
-
 LLMs frequently wrap their output in code fences, add stray prose, emit raw
 newlines inside JSON strings, or get "stuck" repeating a character.  These
 helpers recover the actual translated text from that mess.
@@ -15,7 +14,6 @@ from __future__ import annotations
 import json
 import re
 
-
 def strip_wrappers(s: str) -> str:
     """Remove code fences and ``<AiTextFull>`` tags, normalise newlines."""
     t = (s or "").strip()
@@ -27,7 +25,6 @@ def strip_wrappers(s: str) -> str:
         t = t.replace("```", "")
     t = re.sub(r"</?AiTextFull>", "", t, flags=re.IGNORECASE).strip()
     return t
-
 
 def _sanitize_json_like(raw: str) -> str:
     """Make almost-JSON text parseable.
@@ -98,7 +95,6 @@ def _sanitize_json_like(raw: str) -> str:
     flush_run()
     return "".join(out)
 
-
 def _extract_first_json(raw: str) -> object:
     """Find and parse the first balanced ``{...}`` object in ``raw``."""
     t = _sanitize_json_like(raw)
@@ -136,7 +132,6 @@ def _extract_first_json(raw: str) -> object:
 
     raise ValueError("Failed to parse AI JSON")
 
-
 def parse_json(raw: str) -> str:
     """Extract ``aiTextFull`` from a JSON-style AI response."""
     obj = _extract_first_json(raw)
@@ -151,7 +146,6 @@ def parse_json(raw: str) -> str:
     if "\\n" in t and "\n" not in t:
         t = t.replace("\\n", "\n")
     return t.replace("\r\n", "\n").replace("\r", "\n").strip()
-
 
 def parse_character_memo(memo: str) -> list[dict]:
     """Parse the ``<<TP_MEMO>>`` block into character entries.
@@ -186,7 +180,6 @@ def parse_character_memo(memo: str) -> list[dict]:
             break
     return out
 
-
 def parse_speaker_pairs(body: str) -> dict[str, str]:
     """Parse one page's speaker list from a ``<<TP_SPEAKERS>>`` line.
 
@@ -210,7 +203,6 @@ def parse_speaker_pairs(body: str) -> dict[str, str]:
         if len(out) >= 50:
             break
     return out
-
 
 def parse_text(raw: str) -> str:
     """Extract translated text from a plain-text AI response.

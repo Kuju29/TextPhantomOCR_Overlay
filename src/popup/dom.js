@@ -6,6 +6,14 @@
  * state. The orchestrator (`popup.js`) owns the state and calls these.
  */
 
+import { isLocalAiProvider } from "../shared/constants.js";
+import {
+  localProviderCatalog,
+} from "../shared/ai/providers/local-registry.js";
+import {
+  cloudProviderCatalog,
+} from "../shared/ai/providers/cloud-registry.js";
+
 /** All the elements the popup interacts with, looked up once. */
 export const els = {
   mode: document.getElementById("mode"),
@@ -15,6 +23,7 @@ export const els = {
   sourcesWrap: document.getElementById("sources-wrap"),
   aiKeyWrap: document.getElementById("ai-key-wrap"),
   aiKey: document.getElementById("ai-key"),
+  aiKeyGet: document.getElementById("ai-key-get"),
   aiModelWrap: document.getElementById("ai-model-wrap"),
   aiModel: document.getElementById("ai-model"),
   aiLocalModelId: document.getElementById("ai-local-model-id"),
@@ -25,6 +34,15 @@ export const els = {
   aiGroup: document.getElementById("ai-group"),
   aiProvider: document.getElementById("ai-provider"),
   aiProviderWrap: document.getElementById("ai-provider-wrap"),
+  aiUsageWrap: document.getElementById("ai-usage-wrap"),
+  aiUsageKind: document.getElementById("ai-usage-kind"),
+  aiUsageModel: document.getElementById("ai-usage-model"),
+  aiUsageCounts: document.getElementById("ai-usage-counts"),
+  aiUsageReset: document.getElementById("ai-usage-reset"),
+  aiUsageHistory: document.getElementById("ai-usage-history"),
+  aiUsageHistoryDialog: document.getElementById("ai-usage-history-dialog"),
+  aiUsageHistoryClose: document.getElementById("ai-usage-history-close"),
+  aiUsageHistoryList: document.getElementById("ai-usage-history-list"),
   aiBaseUrl: document.getElementById("ai-base-url"),
   aiEndpointWrap: document.getElementById("ai-endpoint-wrap"),
   aiLocalTest: document.getElementById("ai-local-test"),
@@ -39,12 +57,14 @@ export const els = {
   aiPageImageWrap: document.getElementById("ai-page-image-wrap"),
   aiPageImage: document.getElementById("ai-page-image"),
   aiRateWrap: document.getElementById("ai-rate-wrap"),
-  aiLocalUnlimitedWrap: document.getElementById("ai-local-unlimited-wrap"),
-  aiLocalUnlimited: document.getElementById("ai-local-unlimited"),
   aiLocalCapacityWrap: document.getElementById("ai-local-capacity-wrap"),
   aiLocalCapacityMode: document.getElementById("ai-local-capacity-mode"),
-  aiLocalManualConcurrencyWrap: document.getElementById("ai-local-manual-concurrency-wrap"),
-  aiLocalManualConcurrency: document.getElementById("ai-local-manual-concurrency"),
+  aiLocalManualConcurrencyWrap: document.getElementById(
+    "ai-local-manual-concurrency-wrap",
+  ),
+  aiLocalManualConcurrency: document.getElementById(
+    "ai-local-manual-concurrency",
+  ),
   aiLocalCapacityHint: document.getElementById("ai-local-capacity-hint"),
   apiLocalUnlimitedWrap: document.getElementById("api-local-unlimited-wrap"),
   apiLocalUnlimited: document.getElementById("api-local-unlimited"),
@@ -70,6 +90,13 @@ export const els = {
   apiStatusEmoji2: document.getElementById("api-status-emoji-2"),
   resetApi: document.getElementById("reset-api"),
   tabAi: document.getElementById("tab-ai"),
+  tabTools: document.getElementById("tab-tools"),
+  translatePanel: document.getElementById("panel-translate"),
+  aiPanel: document.getElementById("panel-ai"),
+  apiGateTranslate: document.getElementById("api-gate-translate"),
+  apiGateTranslateOpen: document.getElementById("api-gate-translate-open"),
+  apiGateAi: document.getElementById("api-gate-ai"),
+  apiGateAiOpen: document.getElementById("api-gate-ai-open"),
   translatePageBtn: document.getElementById("translate-page-btn"),
   imgButtonsToggle: document.getElementById("img-buttons-toggle"),
   fontScaleRange: document.getElementById("font-scale-range"),
@@ -85,13 +112,44 @@ export const els = {
   localPickerMsg: document.getElementById("local-picker-msg"),
 };
 
+export function renderProviderOptions() {
+  const cloud = document.getElementById("ai-cloud-provider-options");
+  if (cloud) {
+    cloud.replaceChildren(
+      ...cloudProviderCatalog().map((spec) => {
+        const option = document.createElement("option");
+        option.value = spec.id;
+        option.textContent = spec.displayName;
+        return option;
+      }),
+    );
+  }
+  const group = document.getElementById("ai-local-provider-options");
+  if (!group) return;
+  const custom = group.querySelector('option[value="customlocal"]');
+  for (const option of [...group.querySelectorAll("option")])
+    if (option !== custom) option.remove();
+  for (const spec of localProviderCatalog()) {
+    const option = document.createElement("option");
+    option.value = spec.id;
+    option.textContent = spec.displayName;
+    group.insertBefore(option, custom);
+  }
+}
+
+export const renderLocalProviderOptions = renderProviderOptions;
+
 /**
  * Populate a `<select>` from a list, preserving the current/desired value.
  * @param {HTMLSelectElement} sel
  * @param {Array<object>} list
  * @param {{valueKey?:string, labelKey?:string, keepValue?:string}} opts
  */
-export function setSelectOptions(sel, list, { valueKey = "id", labelKey = "name", keepValue = "" } = {}) {
+export function setSelectOptions(
+  sel,
+  list,
+  { valueKey = "id", labelKey = "name", keepValue = "" } = {},
+) {
   const prev = keepValue || sel.value || "";
   sel.innerHTML = "";
   for (const it of Array.isArray(list) ? list : []) {
@@ -137,16 +195,22 @@ export function orderLanguages(list, pinnedCodes = []) {
  * No `auto` or static fallback is offered: if the provider/key cannot enumerate
  * a model, the user sees a disabled placeholder instead of a model that may fail.
  * @param {string[]} models
- * @param {{keepValue?:string, placeholder?:string}} opts
+ * @param {{keepValue?:string, placeholder?:string, selectFirst?:boolean}} opts
  */
-export function setModelOptions(models, { keepValue = "", placeholder = "Select model…" } = {}) {
+export function setModelOptions(
+  models,
+  { keepValue = "", placeholder = "Select model…", selectFirst = true } = {},
+) {
   const prev = String(keepValue || els.aiModel.value || "").trim();
   els.aiModel.innerHTML = "";
 
-  const ids = [...new Set((Array.isArray(models) ? models : [])
-    .map((m) => String(m || "").trim())
-    .filter(Boolean))]
-    .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+  const ids = [
+    ...new Set(
+      (Array.isArray(models) ? models : [])
+        .map((m) => String(m || "").trim())
+        .filter(Boolean),
+    ),
+  ].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
 
   const ph = document.createElement("option");
   ph.value = "";
@@ -161,7 +225,7 @@ export function setModelOptions(models, { keepValue = "", placeholder = "Select 
     els.aiModel.appendChild(opt);
   }
 
-  const next = ids.includes(prev) ? prev : (ids[0] || "");
+  const next = ids.includes(prev) ? prev : (selectFirst ? ids[0] || "" : "");
   els.aiModel.value = next;
   els.aiModel.disabled = ids.length === 0;
 }
@@ -204,13 +268,7 @@ export function setFieldMessage(wrap, type, text) {
   if (!el) {
     el = document.createElement("div");
     el.className = "tp-field-msg";
-    // Model status belongs to the model controls, not to the pacing option
-    // that follows them inside the same field.
-    if (wrap === els.aiModelWrap && els.aiLocalUnlimitedWrap) {
-      wrap.insertBefore(el, els.aiLocalUnlimitedWrap);
-    } else {
-      wrap.appendChild(el);
-    }
+    wrap.appendChild(el);
   }
   el.dataset.type = type || "info";
   el.textContent = text;
@@ -233,11 +291,6 @@ export function updatePromptCount(maxChars, text = null) {
  * Show/hide the language / sources / AI fields for the current mode+source.
  * @param {{hasEnvKey:boolean}} ctx
  */
-const LOCAL_PROVIDERS = new Set([
-  "ollama", "lmstudio", "localai", "jan", "textgen",
-  "koboldcpp", "vllm", "llamafile", "gpt4all", "llamacpp", "customlocal", "local", "llama",
-]);
-
 // Returns whether a custom API URL points at this machine or the local network.
 export function isLocalApiUrl(url) {
   const raw = String(url || "").trim();
@@ -248,7 +301,12 @@ export function isLocalApiUrl(url) {
   } catch {
     return false;
   }
-  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) return true;
+  if (
+    host === "localhost" ||
+    host.endsWith(".localhost") ||
+    host.endsWith(".local")
+  )
+    return true;
   if (host === "::1" || host === "[::1]" || host === "0.0.0.0") return true;
   if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
   if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
@@ -258,7 +316,7 @@ export function isLocalApiUrl(url) {
 }
 
 export function isLocalProvider(provider) {
-  return LOCAL_PROVIDERS.has(String(provider || "").trim().toLowerCase());
+  return isLocalAiProvider(provider);
 }
 
 export function toggleUi({ hasEnvKey }) {
@@ -279,7 +337,8 @@ export function toggleUi({ hasEnvKey }) {
   // to stay aligned with the artwork; the Ai layer decides its own direction
   // from the target language and needs no switch.)
   if (els.relayoutWrap) {
-    els.relayoutWrap.style.display = isText && source === "translated" ? "" : "none";
+    els.relayoutWrap.style.display =
+      isText && source === "translated" ? "" : "none";
   }
 
   const showAi = isText && source === "ai";
@@ -298,80 +357,85 @@ export function toggleUi({ hasEnvKey }) {
   const local = isLocalProvider(provider);
 
   // Local providers need an endpoint URL (no key); cloud providers need a key.
-  if (els.aiEndpointWrap) els.aiEndpointWrap.style.display = showAi && local ? "" : "none";
+  if (els.aiEndpointWrap)
+    els.aiEndpointWrap.style.display = showAi && local ? "" : "none";
   if (els.aiBaseUrl) {
     els.aiBaseUrl.readOnly = provider === "customlocal";
-    els.aiBaseUrl.title = provider === "customlocal"
-      ? "For Custom Local Adapter, edit baseUrl in the JSON below"
-      : "";
+    els.aiBaseUrl.title =
+      provider === "customlocal"
+        ? "For Custom Local Adapter, edit baseUrl in the JSON below"
+        : "";
   }
-  if (els.aiLocalAdapterWrap) els.aiLocalAdapterWrap.style.display = showAi && provider === "customlocal" ? "" : "none";
-  if (els.aiKeyWrap) els.aiKeyWrap.style.display = showAi && !local ? "" : "none";
+  if (els.aiLocalAdapterWrap)
+    els.aiLocalAdapterWrap.style.display =
+      showAi && provider === "customlocal" ? "" : "none";
+  if (els.aiKeyWrap)
+    els.aiKeyWrap.style.display = showAi && !local ? "" : "none";
 
   // Model discovery is independent from the Auto/key gate. The model picker is
   // always visible for Source=AI so selecting a Provider immediately shows its
   // known models; a valid key then upgrades that list to the provider's LIVE
   // models. The remaining controls still require a usable engine.
-  const canConfigureAi = local || (els.aiKey.value || "").trim().length > 0 || hasEnvKey;
+  const canConfigureAi =
+    local || (els.aiKey.value || "").trim().length > 0 || hasEnvKey;
   els.aiModelWrap.style.display = showAi ? "" : "none";
-  if (els.aiLocalModelId) els.aiLocalModelId.style.display = showAi && local ? "" : "none";
-  if (els.aiLocalModelHint) els.aiLocalModelHint.style.display = showAi && local ? "" : "none";
-  if (els.aiLocalUnlimitedWrap) els.aiLocalUnlimitedWrap.style.display = showAi && local ? "" : "none";
-  if (els.aiLocalCapacityWrap) els.aiLocalCapacityWrap.style.display = showAi && local ? "" : "none";
+  if (els.aiLocalModelId)
+    els.aiLocalModelId.style.display = showAi && local ? "" : "none";
+  if (els.aiLocalModelHint)
+    els.aiLocalModelHint.style.display = showAi && local ? "" : "none";
+  if (els.aiLocalCapacityWrap)
+    els.aiLocalCapacityWrap.style.display = showAi && local ? "" : "none";
   if (els.aiLocalManualConcurrencyWrap) {
-    els.aiLocalManualConcurrencyWrap.style.display = showAi && local && els.aiLocalCapacityMode?.value === "manual" ? "" : "none";
+    els.aiLocalManualConcurrencyWrap.style.display =
+      showAi && local && els.aiLocalCapacityMode?.value === "manual"
+        ? ""
+        : "none";
   }
-  // Gemini and native Ollama have known thinking controls. A custom Local
-  // adapter can opt in with an explicit declarative mapping; other compatible
-  // runtimes stay on their own default rather than receiving a guessed field.
+  // Provider protocol support is not proof that the selected model/account
+  // accepts a thinking control. The controller reveals this only after an
+  // exact capability result is available.
   if (els.aiThinkingWrap) {
-    els.aiThinkingWrap.style.display = showAi && canConfigureAi && (provider === "gemini" || local) ? "" : "none";
+    els.aiThinkingWrap.style.display =
+      "none";
   }
   if (els.aiThinking && els.aiThinkingHint) {
-    let supportsLocalControl = provider === "ollama";
-    if (provider === "customlocal") {
-      try {
-        const adapter = JSON.parse(els.aiLocalAdapter?.value || "{}");
-        supportsLocalControl = Boolean(adapter?.thinking?.parameter);
-      } catch { supportsLocalControl = false; }
-    }
     for (const option of els.aiThinking.options) {
-      option.disabled = (local && !supportsLocalControl && option.value !== "default") ||
-        (!local && option.value === "on");
+      option.disabled = true;
     }
-    if (local && !supportsLocalControl) {
-      els.aiThinking.value = "default";
-      els.aiThinkingHint.textContent = "This runtime has no declared thinking control, so TextPhantom leaves its model default unchanged. Custom adapters may declare an explicit mapping.";
-    } else if (local) {
-      els.aiThinkingHint.textContent = "Off is the translation default. Thinking can use more context and time, and some models may return reasoning without a final translation. Turn it on only when the model needs it.";
-    } else {
-      els.aiThinkingHint.textContent = "Gemini: Off is faster and uses fewer thinking tokens. Some Pro models may not allow thinking to be fully disabled.";
-    }
+    els.aiThinkingHint.textContent =
+      "Thinking control is unavailable until this exact model is verified.";
   }
   els.aiPromptWrap.style.display = showAi && canConfigureAi ? "" : "none";
-  if (els.aiCharactersWrap) els.aiCharactersWrap.style.display = showAi && canConfigureAi ? "" : "none";
+  if (els.aiCharactersWrap)
+    els.aiCharactersWrap.style.display = showAi && canConfigureAi ? "" : "none";
   if (els.aiMemoryHint) {
     els.aiMemoryHint.textContent = local
-      ? "Local AI reuses recent page context and any saved terms/characters. Direct Local mode does not automatically create new character notes yet. Off starts each page clean."
-      : "Off: each page translates cleanly (recommended). Terms only: keep names/terms spelled the same across pages. Full: also remember each character's gender & speech — this can push pronouns/particles back, so use it only if you want gendered speech. Kept per series; a new series starts fresh.";
+      ? "Off starts clean; Terms/Full reuse saved context."
+      : "Off starts clean; Terms/Full keep series context.";
   }
-  if (els.aiPageImageWrap) els.aiPageImageWrap.style.display = showAi && canConfigureAi ? "" : "none";
+  if (els.aiPageImageWrap)
+    els.aiPageImageWrap.style.display = showAi && canConfigureAi ? "" : "none";
   // Rate pacing applies to cloud providers only: a local server has no
   // per-minute quota to respect, and the server-side gate skips it anyway.
   if (els.aiRateWrap) {
-    els.aiRateWrap.style.display = showAi && canConfigureAi && !local ? "" : "none";
+    els.aiRateWrap.style.display =
+      showAi && canConfigureAi && !local ? "" : "none";
   }
   // Local API unlimited is separate from the Local AI control under Model.
   if (els.apiLocalUnlimitedWrap) {
-    els.apiLocalUnlimitedWrap.style.display =
-      isLocalApiUrl(els.apiUrl?.value || "") ? "" : "none";
+    els.apiLocalUnlimitedWrap.style.display = isLocalApiUrl(
+      els.apiUrl?.value || "",
+    )
+      ? ""
+      : "none";
   }
   // The RPM / burst boxes are inert while pacing is off — disable rather than
   // hide, so the numbers stay visible and come back exactly as they were.
   const paceOn = Boolean(els.rateLimitEnabled?.checked);
   const customRate = els.rateProfile?.value === "custom";
   if (els.rateProfile) els.rateProfile.disabled = !paceOn;
-  if (els.rateCustomFields) els.rateCustomFields.style.display = customRate ? "" : "none";
+  if (els.rateCustomFields)
+    els.rateCustomFields.style.display = customRate ? "" : "none";
   for (const el of [els.rateRpm, els.rateBurst]) {
     if (el) el.disabled = !paceOn || !customRate;
   }

@@ -1,17 +1,14 @@
 """Resolve the (thai_font, latin_font) path pair for a target language.
 
-
 The renderer always pairs a Thai face with a "latin" face — for CJK targets
 the latin slot is swapped for the matching Noto CJK font.  When
 ``DOWNLOAD_FONTS`` is on, missing files are fetched on demand.
 """
-
 from __future__ import annotations
 
 from backend.lens.languages import normalize as normalize_lang
 from backend.render import font_config
 from backend.render.fonts import ensure_font
-
 
 def resolve_font_pair(lang: str) -> tuple[str, str]:
     """Return ``(thai_font_path, latin_font_path)`` for ``lang``."""

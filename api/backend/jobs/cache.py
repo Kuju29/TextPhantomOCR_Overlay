@@ -1,6 +1,5 @@
 """Thread-safe LRU caches for translation results.
 
-
 Two caches are kept separate because AI results depend on extra inputs
 (provider / model / prompt) and tend to be larger and slower to recompute,
 so they get their own size budget.
@@ -8,17 +7,15 @@ so they get their own size budget.
 
 from __future__ import annotations
 
-import copy
-import hashlib
-import json
 from collections import OrderedDict
 from threading import Lock
 from typing import Any
 
-from backend.ai.translate import AiConfig
+import hashlib, copy, json
+
+from backend.ai.translation.contracts import AiConfig
 from backend.config import settings
 from backend.lens.languages import normalize as normalize_lang
-
 
 class LruCache:
     """A small thread-safe LRU cache that deep-copies values in and out.
@@ -50,17 +47,14 @@ class LruCache:
             while len(self._store) > self._max:
                 self._store.popitem(last=False)
 
-
 # Module-level singletons.
 result_cache = LruCache(settings.result_cache_max)
 ai_result_cache = LruCache(settings.ai_result_cache_max)
-
 
 def _ai_prompt_signature(prompt: str) -> str:
     """Short stable hash of an editable prompt (for cache keys)."""
     t = (prompt or "").strip()
     return hashlib.sha256(t.encode("utf-8")).hexdigest()[:12] if t else ""
-
 
 def _ai_context_signature(ai_cfg: AiConfig) -> str:
     """Short stable hash of the FROZEN series context (for cache keys).
@@ -82,7 +76,6 @@ def _ai_context_signature(ai_cfg: AiConfig) -> str:
         default=str,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
-
 
 def build_cache_key(
     img_hash: str,
@@ -119,7 +112,7 @@ def build_cache_key(
                 f"img_{str(getattr(ai_cfg, 'send_image', False) or 'off').lower()}",
                 "memo" if getattr(ai_cfg, "char_memory", True) else "",
                 # Thinking mode changes the answer -> separate cache entries.
-                f"think_{str(getattr(ai_cfg, 'thinking', '') or 'default').lower()}",
+                f"think_{str(getattr(ai_cfg, 'thinking', '') or 'off').lower()}",
             ]
         )
         # Frozen series context: immutable per batch -> correct AND cacheable.

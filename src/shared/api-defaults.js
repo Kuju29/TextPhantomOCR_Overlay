@@ -34,7 +34,8 @@ function parseLooseJson(raw) {
     if (!(text.startsWith("{") && text.endsWith("}"))) return null;
     // Quote bare keys, then swap single quotes for double quotes.
     let fixed = text.replace(/([{,]\s*)([A-Za-z0-9_]+)\s*:/g, '$1"$2":');
-    if (fixed.includes("'") && !fixed.includes('"')) fixed = fixed.replace(/'/g, '"');
+    if (fixed.includes("'") && !fixed.includes('"'))
+      fixed = fixed.replace(/'/g, '"');
     try {
       return JSON.parse(fixed);
     } catch {
@@ -68,7 +69,10 @@ async function fetchRemoteDefaults() {
       coerceUrl(data.reset_api_url);
 
     if (!defaultApiUrl && !resetApiUrl) return null;
-    return { defaultApiUrl: defaultApiUrl || "", resetApiUrl: resetApiUrl || "" };
+    return {
+      defaultApiUrl: defaultApiUrl || "",
+      resetApiUrl: resetApiUrl || "",
+    };
   } catch {
     return null;
   } finally {
@@ -124,7 +128,10 @@ export async function ensureApiDefaults({ force = false } = {}) {
  * @param {{force?: boolean, preferRemote?: boolean}} [opts]
  * @returns {Promise<string>}
  */
-export async function resolveApiBase({ force = false, preferRemote = false } = {}) {
+export async function resolveApiBase({
+  force = false,
+  preferRemote = false,
+} = {}) {
   const stored = await getStorage({ customApiUrl: "" });
   const custom = coerceUrl(stored.customApiUrl);
   const defaults = await ensureApiDefaults({ force });

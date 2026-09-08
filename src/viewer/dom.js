@@ -88,13 +88,16 @@ export function badgeText(page) {
 }
 export function badgeClass(page) {
   if (page?.errorMessage) return "badge bad";
-  return page?.overlayApplied || page?.translatedImageDataUri ? "badge ok" : "badge";
+  return page?.overlayApplied || page?.translatedImageDataUri
+    ? "badge ok"
+    : "badge";
 }
 
 // Page-element lookups
 export const articleForPage = (pageId) =>
   document.querySelector(`.page-strip[data-page-id="${CSS.escape(pageId)}"]`);
-export const imageForPage = (pageId) => articleForPage(pageId)?.querySelector("img") || null;
+export const imageForPage = (pageId) =>
+  articleForPage(pageId)?.querySelector("img") || null;
 export const overlayRootForPage = (pageId) =>
   articleForPage(pageId)?.querySelector(".tp-ol-root") || null;
 
@@ -112,7 +115,8 @@ export function triggerAnchorDownload(url, filename) {
 export function blobToDataUri(blob) {
   return new Promise((resolve) => {
     const reader = new FileReader();
-    reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
+    reader.onload = () =>
+      resolve(typeof reader.result === "string" ? reader.result : "");
     reader.onerror = () => resolve("");
     reader.readAsDataURL(blob);
   });

@@ -1,6 +1,5 @@
 """Pure geometry helpers for text boxes / baselines.
 
-
 Coordinates in the tree are normalised 0..1; these helpers convert them to
 pixel space and produce the rotated quadrilaterals (``quad``) that the
 renderer and the eraser both consume.
@@ -11,8 +10,7 @@ A *token* here is any dict with a ``box`` and (optionally) ``baseline_p1`` /
 
 from __future__ import annotations
 
-import copy
-import math
+import math, copy
 
 # Lens reports the OCR baseline; the visual box is shifted down from it by a
 # fraction of the text height.  These two tunables reproduce that shift.
@@ -20,7 +18,6 @@ BASELINE_SHIFT: bool = True
 BASELINE_SHIFT_FACTOR: float = 0.40
 
 Quad = list[tuple[float, float]]
-
 
 def ensure_box_fields(box: dict | None) -> dict:
     """Return a copy of ``box`` with derived fields (center, *_pct) filled in.
@@ -47,7 +44,6 @@ def ensure_box_fields(box: dict | None) -> dict:
         b.setdefault("height_pct", b["height"] * 100.0)
     return b
 
-
 def token_box_px(token: dict, W: int, H: int, pad_px: int = 0) -> tuple[int, int, int, int] | None:
     """Axis-aligned pixel bbox of a token's ``box`` (ignores rotation).
 
@@ -66,7 +62,6 @@ def token_box_px(token: dict, W: int, H: int, pad_px: int = 0) -> tuple[int, int
     if right <= left or bottom <= top:
         return None
     return left, top, right, bottom
-
 
 def token_quad_px(token: dict, W: int, H: int, pad_px: float = 0.0, apply_baseline_shift: bool = True) -> Quad | None:
     """Rotated quad built from a token's *baseline* + height.
@@ -127,7 +122,6 @@ def token_quad_px(token: dict, W: int, H: int, pad_px: float = 0.0, apply_baseli
     ox, oy = nx * hh, ny * hh
     return [(sx - ox, sy - oy), (ex - ox, ey - oy), (ex + ox, ey + oy), (sx + ox, sy + oy)]
 
-
 def token_box_quad_px(token: dict, W: int, H: int, pad_px: float = 0.0) -> Quad | None:
     """Rotated quad built from a token's *box* (left/top/width/height + angle).
 
@@ -156,7 +150,6 @@ def token_box_quad_px(token: dict, W: int, H: int, pad_px: float = 0.0) -> Quad 
         out.append((cx + (x * c - y * s), cy + (x * s + y * c)))
     return out
 
-
 def quad_bbox(quad: Quad, W: int, H: int) -> tuple[int, int, int, int] | None:
     """Integer axis-aligned bbox of a quad, clamped to the canvas."""
     xs = [p[0] for p in quad]
@@ -168,7 +161,6 @@ def quad_bbox(quad: Quad, W: int, H: int) -> tuple[int, int, int, int] | None:
     if right <= left or bottom <= top:
         return None
     return left, top, right, bottom
-
 
 def normalize_angle_deg(angle_deg: float) -> float:
     """Fold an angle into (-90, 90].

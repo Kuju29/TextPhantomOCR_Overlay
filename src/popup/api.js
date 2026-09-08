@@ -93,7 +93,10 @@ export async function warmup(base) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), WARMUP_TIMEOUT_MS);
   try {
-    await fetch(`${normalizeUrl(base)}${API_PATHS.WARMUP}`, { cache: "no-store", signal: ctrl.signal });
+    await fetch(`${normalizeUrl(base)}${API_PATHS.WARMUP}`, {
+      cache: "no-store",
+      signal: ctrl.signal,
+    });
   } catch {
     /* best-effort */
   } finally {

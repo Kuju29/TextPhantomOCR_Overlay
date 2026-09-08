@@ -43,7 +43,9 @@ import {
 } from "./dom.js";
 
 const READER_WIDTH_KEY = "textphantom.viewer.width";
-const sessionId = String(new URLSearchParams(location.search).get("sid") || "").trim();
+const sessionId = String(
+  new URLSearchParams(location.search).get("sid") || "",
+).trim();
 
 // State
 const pagesById = new Map();
@@ -56,8 +58,10 @@ let dragPageId = "";
 let readerWidth = Number(localStorage.getItem(READER_WIDTH_KEY) || 980);
 
 // Page collections
-const getOrderedPages = () => pageOrder.map((id) => pagesById.get(id)).filter(Boolean);
-const getSelectedPages = () => getOrderedPages().filter((p) => selectedPageIds.has(p.id));
+const getOrderedPages = () =>
+  pageOrder.map((id) => pagesById.get(id)).filter(Boolean);
+const getSelectedPages = () =>
+  getOrderedPages().filter((p) => selectedPageIds.has(p.id));
 
 function revokeObjectUrls() {
   for (const url of objectUrls.values()) {
@@ -73,10 +77,12 @@ function revokeObjectUrls() {
 // UI sync
 function updateSelectionSummary() {
   const selected = selectedPageIds.size;
-  if (els.selectionSummary) els.selectionSummary.textContent = `${selected} selected`;
+  if (els.selectionSummary)
+    els.selectionSummary.textContent = `${selected} selected`;
   if (els.toggleSelect) {
     const total = pageOrder.length;
-    els.toggleSelect.textContent = total && selected === total ? "Deselect all" : "Select all";
+    els.toggleSelect.textContent =
+      total && selected === total ? "Deselect all" : "Select all";
   }
 }
 
@@ -85,14 +91,20 @@ function syncPageUi(pageId) {
   if (!page) return;
   const checked = selectedPageIds.has(pageId);
   document
-    .querySelectorAll(`[data-page-id="${CSS.escape(pageId)}"] input[data-role="select-page"]`)
+    .querySelectorAll(
+      `[data-page-id="${CSS.escape(pageId)}"] input[data-role="select-page"]`,
+    )
     .forEach((el) => {
       el.checked = checked;
     });
-  document.querySelectorAll(`[data-page-id="${CSS.escape(pageId)}"] .page-state-badge`).forEach((badge) => {
-    badge.className = `page-state-badge ${badgeClass(page)}`;
-    badge.textContent = badgeText(page);
-  });
+  document
+    .querySelectorAll(
+      `[data-page-id="${CSS.escape(pageId)}"] .page-state-badge`,
+    )
+    .forEach((badge) => {
+      badge.className = `page-state-badge ${badgeClass(page)}`;
+      badge.textContent = badgeText(page);
+    });
   articleForPage(pageId)?.classList.toggle("active", checked);
   els.pageList
     .querySelector(`.page-list-item[data-page-id="${CSS.escape(pageId)}"]`)
@@ -135,8 +147,15 @@ function setPageSelection(pageId, checked) {
 
 // Zoom
 function applyReaderWidth(px) {
-  readerWidth = clamp(Number(px) || 980, Number(els.zoomRange.min), Number(els.zoomRange.max));
-  document.documentElement.style.setProperty("--reader-width", `${readerWidth}px`);
+  readerWidth = clamp(
+    Number(px) || 980,
+    Number(els.zoomRange.min),
+    Number(els.zoomRange.max),
+  );
+  document.documentElement.style.setProperty(
+    "--reader-width",
+    `${readerWidth}px`,
+  );
   localStorage.setItem(READER_WIDTH_KEY, String(readerWidth));
   if (els.zoomRange) els.zoomRange.value = String(readerWidth);
   if (els.zoomIndicator) els.zoomIndicator.textContent = `${readerWidth}px`;
@@ -172,7 +191,10 @@ async function persistCurrentOrder() {
 }
 
 const scrollToPage = (pageId) =>
-  articleForPage(pageId)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  articleForPage(pageId)?.scrollIntoView({
+    behavior: "smooth",
+    block: "start",
+  });
 
 /** Resolve a page id from a translated image's "original" key. */
 function findPageIdByOriginal(original) {
@@ -182,7 +204,8 @@ function findPageIdByOriginal(original) {
   if (direct) return direct;
   for (const id of pageOrder) {
     const page = pagesById.get(id);
-    if (page && (page.originalKey === key || page.currentSrc === key)) return id;
+    if (page && (page.originalKey === key || page.currentSrc === key))
+      return id;
   }
   return "";
 }
@@ -198,7 +221,9 @@ async function getCurrentSettings() {
 
 async function makeExportFilename(page, ext) {
   const { mode, lang } = await getCurrentSettings();
-  const stem = sanitizeFilenamePart(page?.name || page?.relativePath || page?.id || "page");
+  const stem = sanitizeFilenamePart(
+    page?.name || page?.relativePath || page?.id || "page",
+  );
   const safeMode = sanitizeFilenamePart(mode || "mode").replace(/\s+/g, "-");
   const safeLang = sanitizeFilenamePart(lang || "en").replace(/\s+/g, "-");
   return `${stem}.${safeMode}.${safeLang}.${ext}`;
@@ -219,7 +244,8 @@ async function downloadBlob(blob, filename) {
   }
 }
 
-const dataUriToBlob = async (dataUri) => (await fetch(String(dataUri || ""))).blob();
+const dataUriToBlob = async (dataUri) =>
+  (await fetch(String(dataUri || ""))).blob();
 
 /** The image URL currently shown for a page (translated if available). */
 function currentImageUrlForPage(pageId) {
@@ -413,11 +439,17 @@ async function downloadImageForPage(pageId) {
   if (!src) return;
   if (src.startsWith("data:")) {
     const { ext } = parseDataUriMeta(src);
-    await downloadBlob(await dataUriToBlob(src), await makeExportFilename(page, ext));
+    await downloadBlob(
+      await dataUriToBlob(src),
+      await makeExportFilename(page, ext),
+    );
     return;
   }
   const blob = await (await fetch(src)).blob();
-  await downloadBlob(blob, await makeExportFilename(page, extFromMime(blob.type || page.type)));
+  await downloadBlob(
+    blob,
+    await makeExportFilename(page, extFromMime(blob.type || page.type)),
+  );
 }
 
 /** Build a self-contained HTML file (background image + overlay markup). */
@@ -428,7 +460,8 @@ async function buildStandaloneHtml(pageId) {
 
   const overlayRoot = overlayRootForPage(pageId);
   const overlayScope = overlayRoot?.querySelector(".tp-ol-scope") || null;
-  const styleText = document.getElementById("textphantom_overlay_css")?.textContent || "";
+  const styleText =
+    document.getElementById("textphantom_overlay_css")?.textContent || "";
   const cleanImg = overlayRoot?.querySelector(".tp-ol-clean-img") || null;
   const width = Number(img.naturalWidth) || 1;
   const height = Number(img.naturalHeight) || 1;
@@ -437,7 +470,9 @@ async function buildStandaloneHtml(pageId) {
   // Background: the translated/clean image as a data URI.
   let bgSrc = String(page.translatedImageDataUri || "");
   if (!bgSrc) {
-    const src = String(cleanImg?.currentSrc || cleanImg?.src || img.currentSrc || img.src || "");
+    const src = String(
+      cleanImg?.currentSrc || cleanImg?.src || img.currentSrc || img.src || "",
+    );
     if (src.startsWith("data:")) {
       bgSrc = src;
     } else if (src) {
@@ -475,18 +510,25 @@ async function downloadHtmlForPage(pageId) {
   if (!page) return;
   const html = await buildStandaloneHtml(pageId);
   if (!html) return;
-  await downloadBlob(new Blob([html], { type: "text/html;charset=utf-8" }), await makeExportFilename(page, "html"));
+  await downloadBlob(
+    new Blob([html], { type: "text/html;charset=utf-8" }),
+    await makeExportFilename(page, "html"),
+  );
 }
 
 async function downloadSelected(kind) {
   const selected = getSelectedPages();
   if (!selected.length) return;
-  setStatus(`Downloading ${selected.length} ${kind === "html" ? "HTML" : "image"} file(s)…`);
+  setStatus(
+    `Downloading ${selected.length} ${kind === "html" ? "HTML" : "image"} file(s)…`,
+  );
   for (const page of selected) {
     if (kind === "html") await downloadHtmlForPage(page.id);
     else await downloadImageForPage(page.id);
   }
-  setStatus(`Downloaded ${selected.length} ${kind === "html" ? "HTML" : "image"} file(s).`);
+  setStatus(
+    `Downloaded ${selected.length} ${kind === "html" ? "HTML" : "image"} file(s).`,
+  );
 }
 
 // Rendering
@@ -569,11 +611,7 @@ function makeReaderPage(page, index) {
   titleDetails.firstElementChild.replaceWith(
     Object.assign(document.createElement("strong"), { textContent: page.name }),
   );
-  title.append(
-    makeSelectionCheckbox(page),
-    titleDetails,
-    makeStateBadge(page),
-  );
+  title.append(makeSelectionCheckbox(page), titleDetails, makeStateBadge(page));
 
   const actions = document.createElement("div");
   actions.className = "page-actions";
@@ -663,7 +701,9 @@ async function replaceSessionFromFiles(fileList, sourceLabel) {
   if (!files.length) {
     // Say why the reader did not change. Doing nothing, silently, reads as a
     // broken button.
-    const deeper = topLevelOnly ? filterImageFiles(picked, { topLevelOnly: false }).length : 0;
+    const deeper = topLevelOnly
+      ? filterImageFiles(picked, { topLevelOnly: false }).length
+      : 0;
     setStatus(
       deeper
         ? `No images directly in that folder. ${deeper} image(s) sit in its subfolders, which are not added.`
@@ -700,15 +740,15 @@ async function replaceSessionFromDirectoryPicker() {
   } catch (error) {
     setStatus(
       `Could not open the folder picker: ${error?.message || String(error)}. ` +
-      "In Brave, enable brave://flags/#file-system-access-api and relaunch the browser.",
+        "In Brave, enable brave://flags/#file-system-access-api and relaunch the browser.",
     );
     return;
   }
   if (!picked.supported) {
     setStatus(
       "Brave has File System Access disabled. Enable brave://flags/#file-system-access-api " +
-      "and Relaunch Brave. The Select folder button intentionally does not fall back to " +
-      "webkitdirectory because that API materialises every file in the folder hierarchy first.",
+        "and Relaunch Brave. The Select folder button intentionally does not fall back to " +
+        "webkitdirectory because that API materialises every file in the folder hierarchy first.",
     );
     return;
   }
@@ -716,7 +756,7 @@ async function replaceSessionFromDirectoryPicker() {
   if (!picked.files.length) {
     setStatus(
       `No image files were found directly in “${picked.folderName || "that folder"}”.` +
-      `${picked.subfolders ? ` ${picked.subfolders} subfolder(s) were not opened.` : ""}`,
+        `${picked.subfolders ? ` ${picked.subfolders} subfolder(s) were not opened.` : ""}`,
     );
     return;
   }
@@ -748,7 +788,9 @@ async function replaceSessionFromDrop(entries, plainFiles) {
     // No entries API: all that arrived is a flat file list.
     const images = filterImageFiles(plainFiles);
     if (!images.length) {
-      setStatus(`Nothing was added: none of the ${plainFiles.length} dropped file(s) are images.`);
+      setStatus(
+        `Nothing was added: none of the ${plainFiles.length} dropped file(s) are images.`,
+      );
       return;
     }
     setStatus(`Loading ${images.length} dropped image(s)…`);
@@ -764,14 +806,16 @@ async function replaceSessionFromDrop(entries, plainFiles) {
   try {
     drop = await imagesFromDroppedEntries(entries);
   } catch (error) {
-    setStatus(`Could not read what was dropped: ${error?.message || String(error)}`);
+    setStatus(
+      `Could not read what was dropped: ${error?.message || String(error)}`,
+    );
     return;
   }
   if (!drop.files.length) {
     setStatus(
       drop.hadFolder
         ? `No images directly in “${drop.folderNames.join(", ")}” (${drop.scanned} file(s) checked` +
-          `${drop.subfolders ? `, ${drop.subfolders} subfolder(s) not opened` : ""}).`
+            `${drop.subfolders ? `, ${drop.subfolders} subfolder(s) not opened` : ""}).`
         : `Nothing was added: none of the ${drop.scanned} dropped file(s) are images.`,
     );
     return;
@@ -783,11 +827,15 @@ async function replaceSessionFromDrop(entries, plainFiles) {
       `${drop.subfolders ? ` · ${drop.subfolders} subfolder(s) not opened` : ""}` +
       `${drop.truncated ? " · WARNING: the folder listing stopped early, so this is not all of it" : ""}.`,
   );
-  await replaceSessionFromPages(pagesFromDrop(drop), drop.hadFolder ? "folder" : "images");
+  await replaceSessionFromPages(
+    pagesFromDrop(drop),
+    drop.hadFolder ? "folder" : "images",
+  );
 }
 
 async function clearViewer() {
-  if (currentSession?.id) await deleteLocalSession(currentSession.id).catch(() => {});
+  if (currentSession?.id)
+    await deleteLocalSession(currentSession.id).catch(() => {});
   currentSession = null;
   pagesById.clear();
   selectedPageIds.clear();
@@ -806,7 +854,8 @@ function handleTranslatedImage(detail) {
   page.errorMessage = "";
   page.currentSrc = String(detail?.newSrc || page.currentSrc || "");
   if (page.currentSrc) originalToPageId.set(page.currentSrc, pageId);
-  if (String(detail?.rawNewSrc || "").startsWith("data:")) page.translatedImageDataUri = detail.rawNewSrc;
+  if (String(detail?.rawNewSrc || "").startsWith("data:"))
+    page.translatedImageDataUri = detail.rawNewSrc;
   pagesById.set(pageId, page);
   syncPageUi(pageId);
   setStatus(`Updated ${page.name}`);
@@ -823,7 +872,8 @@ function handleOverlayUpdated(detail) {
   const drawn = detail?.drawn !== false;
   page.overlayApplied = drawn;
   const imageDataUri = String(detail?.result?.imageDataUri || "");
-  if (imageDataUri.startsWith("data:")) page.translatedImageDataUri = imageDataUri;
+  if (imageDataUri.startsWith("data:"))
+    page.translatedImageDataUri = imageDataUri;
   pagesById.set(pageId, page);
   syncPageUi(pageId);
   setStatus(
@@ -868,7 +918,9 @@ els.pageList.addEventListener("dragover", (event) => {
   const item = event.target.closest(".page-list-item");
   if (!item || !dragPageId) return;
   event.preventDefault();
-  els.pageList.querySelectorAll(".page-list-item.drag-over").forEach((el) => el.classList.remove("drag-over"));
+  els.pageList
+    .querySelectorAll(".page-list-item.drag-over")
+    .forEach((el) => el.classList.remove("drag-over"));
   item.classList.add("drag-over");
 });
 
@@ -892,14 +944,20 @@ els.pageList.addEventListener("drop", async (event) => {
 
 els.pageList.addEventListener("dragend", () => {
   dragPageId = "";
-  els.pageList.querySelectorAll(".page-list-item.drag-over").forEach((el) => el.classList.remove("drag-over"));
+  els.pageList
+    .querySelectorAll(".page-list-item.drag-over")
+    .forEach((el) => el.classList.remove("drag-over"));
 });
 
 // Selection checkboxes + per-page download buttons (delegated on both panels).
 for (const root of [els.pageList, els.reader]) {
   root.addEventListener("change", (event) => {
     const input = event.target.closest('input[data-role="select-page"]');
-    if (input) setPageSelection(String(input.dataset.pageId || ""), Boolean(input.checked));
+    if (input)
+      setPageSelection(
+        String(input.dataset.pageId || ""),
+        Boolean(input.checked),
+      );
   });
   root.addEventListener("click", async (event) => {
     const button = event.target.closest("button[data-role]");
@@ -959,13 +1017,19 @@ els.reverseOrder?.addEventListener("click", async () => {
 
 els.clearViewer?.addEventListener("click", () => clearViewer());
 
-els.zoomOut?.addEventListener("click", () => applyReaderWidth(readerWidth - 120));
-els.zoomIn?.addEventListener("click", () => applyReaderWidth(readerWidth + 120));
+els.zoomOut?.addEventListener("click", () =>
+  applyReaderWidth(readerWidth - 120),
+);
+els.zoomIn?.addEventListener("click", () =>
+  applyReaderWidth(readerWidth + 120),
+);
 els.fitWidth?.addEventListener("click", () => {
   const sidebarOffset = window.innerWidth > 1120 ? 420 : 48;
   applyReaderWidth(window.innerWidth - sidebarOffset);
 });
-els.zoomRange?.addEventListener("input", () => applyReaderWidth(els.zoomRange.value));
+els.zoomRange?.addEventListener("input", () =>
+  applyReaderWidth(els.zoomRange.value),
+);
 
 document.addEventListener(
   "wheel",
@@ -980,9 +1044,15 @@ document.addEventListener(
 els.downloadImages?.addEventListener("click", () => downloadSelected("image"));
 els.downloadHtml?.addEventListener("click", () => downloadSelected("html"));
 
-window.addEventListener("textphantom:image-updated", (event) => handleTranslatedImage(event.detail || {}));
-window.addEventListener("textphantom:overlay-updated", (event) => handleOverlayUpdated(event.detail || {}));
-window.addEventListener("textphantom:image-error", (event) => handleImageError(event.detail || {}));
+window.addEventListener("textphantom:image-updated", (event) =>
+  handleTranslatedImage(event.detail || {}),
+);
+window.addEventListener("textphantom:overlay-updated", (event) =>
+  handleOverlayUpdated(event.detail || {}),
+);
+window.addEventListener("textphantom:image-error", (event) =>
+  handleImageError(event.detail || {}),
+);
 window.addEventListener("beforeunload", revokeObjectUrls);
 
 // Go

@@ -1,11 +1,4 @@
-/**
- *
- * IndexedDB-backed store for the local image viewer.
- *
- * The popup can open local images / a folder; those files are saved as a
- * "session" here and the viewer tab loads them back by id. Blobs are stored
- * directly (IndexedDB handles them natively).
- */
+/** IndexedDB sessions for local viewer image blobs. */
 
 const DB_NAME = "textphantom_local_gallery";
 const DB_VERSION = 1;
@@ -41,40 +34,37 @@ function txComplete(tx) {
 
 const trim = (v) => String(v || "").trim();
 
-/**
- * True when a `webkitRelativePath` points DIRECTLY inside the picked folder.
- * "" (plain multi-file picker) counts as top-level; "Folder/img.jpg" is
- * top-level; "Folder/sub/img.jpg" is not. Splits on / and \ to be safe.
- */
+/** True for plain files or files directly inside the selected folder. */
 export function isTopLevelRelativePath(relativePath) {
   const rel = trim(relativePath);
   if (!rel) return true;
   return rel.split(/[\\/]+/).filter(Boolean).length <= 2;
 }
 
-/**
- * Extensions the browser decodes as images.
- *
- * Only consulted when the OS handed back an EMPTY MIME type, which Windows
- * does for formats it has no registry entry for (.webp / .avif / .jxl are the
- * usual ones). A file that reports a NON-image MIME is never accepted on the
- * strength of its name, and a file with neither a MIME nor a known image
- * extension is dropped rather than guessed at.
- */
+/** Image extensions used only when the OS supplies no MIME type. */
 const IMAGE_EXTENSIONS = new Set([
-  "apng", "avif", "bmp", "gif", "heic", "heif", "ico", "jfif", "jpe", "jpeg",
-  "jpg", "jxl", "pjp", "pjpeg", "png", "svg", "tif", "tiff", "webp",
+  "apng",
+  "avif",
+  "bmp",
+  "gif",
+  "heic",
+  "heif",
+  "ico",
+  "jfif",
+  "jpe",
+  "jpeg",
+  "jpg",
+  "jxl",
+  "pjp",
+  "pjpeg",
+  "png",
+  "svg",
+  "tif",
+  "tiff",
+  "webp",
 ]);
 
-/**
- * True when a picked `File` is an image file.
- *
- * The picker is told `accept="image/*"`, but that is a hint the user can
- * override in the OS dialog, and a folder pick is not filtered by it at all —
- * so "images only" is decided here, for both pickers.
- * @param {File} file
- * @returns {boolean}
- */
+/** Validate a picked image independently of the file-picker hint. */
 export function isImageFileName(name) {
   const value = trim(name).toLowerCase();
   const dot = value.lastIndexOf(".");
@@ -88,15 +78,7 @@ export function isImageFile(file) {
   return isImageFileName(file?.name);
 }
 
-/**
- * Read only top-level image files from a FileSystemDirectoryHandle.
- *
- * This is deliberately different from <input webkitdirectory>: the browser
- * gives us one directory handle first, then we enumerate lightweight child
- * handles. getFile() is called only for entries whose filename already looks
- * like an image, so PDFs, ZIPs, TXT files, etc. are never opened by TextPhantom.
- * Subdirectories are counted but never entered.
- */
+/** Read top-level images without opening non-images or traversing subfolders. */
 export async function imagesFromDirectoryHandle(directoryHandle) {
   if (!directoryHandle || typeof directoryHandle.values !== "function") {
     throw new TypeError("invalid directory handle");
@@ -116,8 +98,7 @@ export async function imagesFromDirectoryHandle(directoryHandle) {
     if (entry?.kind !== "file") continue;
     entries++;
 
-    // Crucial: do not call getFile() for obvious non-images. This avoids the
-    // old webkitdirectory behaviour where every file was materialised first.
+    // Do not materialize obvious non-images.
     if (!isImageFileName(entry.name)) {
       skipped++;
       continue;
@@ -135,7 +116,9 @@ export async function imagesFromDirectoryHandle(directoryHandle) {
       continue;
     }
     files.push(file);
-    relativePaths.push(directoryHandle.name ? `${directoryHandle.name}/${file.name}` : file.name);
+    relativePaths.push(
+      directoryHandle.name ? `${directoryHandle.name}/${file.name}` : file.name,
+    );
   }
 
   return {
@@ -153,7 +136,9 @@ export async function imagesFromDirectoryHandle(directoryHandle) {
  * Returns supported=false instead of falling back to webkitdirectory because that
  * fallback necessarily materialises the directory's whole file hierarchy first.
  */
-export async function pickImagesFromDirectory(picker = globalThis?.showDirectoryPicker) {
+export async function pickImagesFromDirectory(
+  picker = globalThis?.showDirectoryPicker,
+) {
   if (typeof picker !== "function") {
     return { supported: false, cancelled: false, files: [], relativePaths: [] };
   }
@@ -176,10 +161,10 @@ export async function pickImagesFromDirectory(picker = globalThis?.showDirectory
 
 /** Locale-aware natural comparison (handles "page2" < "page10"). */
 export function naturalCompare(a, b) {
-  return new Intl.Collator(undefined, { numeric: true, sensitivity: "base" }).compare(
-    String(a || ""),
-    String(b || ""),
-  );
+  return new Intl.Collator(undefined, {
+    numeric: true,
+    sensitivity: "base",
+  }).compare(String(a || ""), String(b || ""));
 }
 
 /** Sort pages by relative path / name (natural order). */
@@ -223,7 +208,8 @@ export function toLocalPageRecord(file, index = 0, relativePath = "") {
 export function filterImageFiles(files, { topLevelOnly = false } = {}) {
   return [...(files || [])].filter((file) => {
     if (!isImageFile(file)) return false;
-    if (topLevelOnly && !isTopLevelRelativePath(file?.webkitRelativePath)) return false;
+    if (topLevelOnly && !isTopLevelRelativePath(file?.webkitRelativePath))
+      return false;
     return true;
   });
 }
@@ -240,7 +226,11 @@ export function filterImageFiles(files, { topLevelOnly = false } = {}) {
  */
 export function dropEntriesFrom(dataTransfer) {
   return [...(dataTransfer?.items || [])]
-    .map((item) => (typeof item?.webkitGetAsEntry === "function" ? item.webkitGetAsEntry() : null))
+    .map((item) =>
+      typeof item?.webkitGetAsEntry === "function"
+        ? item.webkitGetAsEntry()
+        : null,
+    )
     .filter(Boolean);
 }
 
@@ -260,7 +250,9 @@ const MAX_DIRECTORY_BATCHES = 400;
 async function readDirectoryEntries(reader) {
   const all = [];
   for (let batchIndex = 0; batchIndex < MAX_DIRECTORY_BATCHES; batchIndex++) {
-    const batch = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+    const batch = await new Promise((resolve, reject) =>
+      reader.readEntries(resolve, reject),
+    );
     if (!batch?.length) return { entries: all, truncated: false };
     all.push(...batch);
   }

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TextPhantom — แปลข้อความในภาพมังงะ มังฮวา",
-  "version": "2026.8.28.4",
+  "version": "2026.9.9",
   "description": "🧠 Right-click any image → translate images",
   "host_permissions": [
     "<all_urls>"
@@ -14,16 +14,28 @@
       "js": [
         "shared/compat.js",
         "content/namespace.js",
+        "shared/diagnostic-schema.js",
+        "shared/image-status-view.js",
         "content/trace.js",
         "content/keepalive.js",
         "content/dom-utils.js",
         "content/image-finder.js",
         "content/target-key.js",
+        "content/image-status.js",
         "content/erase-canvas.js",
         "content/payload.js",
+        "content/overlay/style.js",
+        "content/overlay/background.js",
+        "content/overlay/font-scale.js",
+        "content/overlay/sanitize.js",
+        "content/overlay/status.js",
+        "content/overlay/mount.js",
+        "content/overlay/local-render.js",
         "content/overlay.js",
+        "content/overlay/message-controller.js",
         "content/image-buttons.js",
-        "content/site-mangadex.js",
+        "content/sites/mangadex/adapter.js",
+        "content/sites/mangadex/collector.js",
         "content/mangadex.js",
         "content/messaging.js",
         "content/index.js"
@@ -36,6 +48,7 @@
     {
       "resources": [
         "processors/*.js",
+        "processors/render/*.js",
         "shared/lens-document.js",
         "shared/ai-markers.js"
       ],

@@ -1,3 +1,7 @@
+import { repairCoordinator } from "./repair/coordinator.js";
+import { restoreSettingsEpoch } from "./jobs/lifecycle.js";
+import { restoreTabSessions } from "./tab-sessions.js";
+import { translationSettingsChanged } from "./translation-settings.js";
 // Service-worker entry point: wires the background modules together and registers every `chrome.*` listener.
 
 import "../shared/compat.js";
@@ -8,10 +12,14 @@ import { getTab, queryTabs } from "../shared/browser-api.js";
 import { KEEPALIVE_PORT_NAME } from "../shared/constants.js";
 import { publicTpError } from "../shared/error-contract.js";
 
-import { getApiBase, healthCache, warmupApi } from "./api.js";
+import { apiHealthSnapshot, getApiBase, healthCache, warmupApi } from "./api.js";
 import { getLastBatchStatus, noteQueueStatus } from "./batches.js";
 import { blobToDataUri } from "./images.js";
-import { setMaxConcurrency, describeLimits, applyServerConcurrencyHint } from "./job-queue.js";
+import {
+  setMaxConcurrency,
+  describeLimits,
+  applyServerConcurrencyHint,
+} from "./job-queue.js";
 import { pendingByJob } from "./job-registry.js";
 import {
   bumpSettingsEpoch,
@@ -24,10 +32,20 @@ import {
 } from "./jobs.js";
 import { reportOnStartup } from "./workflow-track.js";
 import { forgetCapabilities } from "./capabilities.js";
-import { forgetPrompts } from "./ai-local.js";
+import { forgetPrompts } from "./ai/prompt-cache.js";
 import { setLogSink } from "../shared/logger.js";
-import { flushLogs, recordLogLine, resetLogShippingSupport } from "../shared/log-sink.js";
-import { flushTrace, getTraceDetail, isTracing, traceRelay } from "../shared/trace.js";
+import {
+  flushLogs,
+  recordLogLine,
+  resetLogShippingSupport,
+} from "../shared/log-sink.js";
+import {
+  flushTrace,
+  getTraceDetail,
+  isTracing,
+  note as traceNote,
+  traceRelay,
+} from "../shared/trace.js";
 import {
   isMangaDexPageUrl,
   mdCacheKey,
@@ -35,13 +53,52 @@ import {
   getCachedDataUri,
   stripImageFields,
 } from "./mangadex.js";
-import { bumpTabSession, dropTabSession, ensureTabSession } from "./tab-sessions.js";
-import { setHandlers, cancelJobsViaRest } from "./transport.js";
+import {
+  bumpTabSession,
+  dropTabSession,
+  ensureTabSession,
+  getTabSessionId,
+} from "./tab-sessions.js";
+import { createSessionLifecycle } from "./session-lifecycle.js";
+import { createKeepalivePortLifecycle } from "./keepalive-port-lifecycle.js";
+import { setHandlers } from "./transports/polling.js";
+import { cancelJobsViaRest } from "./transports/cancel.js";
 import { onContextMenuClicked, recreateMenus } from "./context-menu.js";
 import { ensureThunderbirdMessageScripts } from "./thunderbird.js";
-import { discoverLocalModels } from "../shared/local-ai-adapter.js";
+import { discoverLocalModels } from "../shared/ai/direct-local/generation.js";
+import {
+  ensureTraceHandshake,
+  resetTraceHandshakeIdentity,
+} from "./trace-handshake.js";
 
 const log = createLogger("SW");
+const sessionLifecycle = createSessionLifecycle({
+  getTabSessionId,
+  cancelTabWork,
+  bumpTabSession,
+});
+
+// Independently validate the content script's navigation claim. Only a
+// detail<->photo modal transition for the same X status may retain work.
+function preservesXPhotoTarget(before, after) {
+  const parse = (href) => {
+    try {
+      const u = new URL(String(href || ""));
+      if (!/^(?:x|twitter)\.com$/i.test(u.hostname)) return null;
+      const m = u.pathname.match(
+        /^\/[^/]+\/status\/(\d+)(?:\/photo\/(\d+))?\/?$/,
+      );
+      return m ? { status: m[1], photo: m[2] || "" } : null;
+    } catch {
+      return null;
+    }
+  };
+  const a = parse(before);
+  const b = parse(after);
+  return Boolean(
+    a && b && a.status === b.status && Boolean(a.photo) !== Boolean(b.photo),
+  );
+}
 
 setHandlers({
   onResult: handleResult,
@@ -55,7 +112,10 @@ setHandlers({
 
 ensureApiDefaults().catch(() => {});
 ensureThunderbirdMessageScripts().catch((error) => {
-  log.warn("Thunderbird message scripts unavailable", error?.message || String(error));
+  log.warn(
+    "Thunderbird message scripts unavailable",
+    error?.message || String(error),
+  );
 });
 
 setLogSink(recordLogLine);
@@ -63,7 +123,15 @@ log.info("boot", { build: chrome.runtime.getManifest().version });
 
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local" || !changes) return;
-  if (changes.mode || changes.lang || changes.sources) bumpSettingsEpoch();
+  if (translationSettingsChanged(changes, areaName)) {
+    bumpSettingsEpoch();
+    void repairCoordinator.cancelSettings();
+    traceNote("background/index.js", "translationSettingsChanged", {
+      keys: Object.keys(changes).filter(key => key !== "aiProfileCredentialsV1"),
+      semanticChange: true,
+    });
+  }
+
 
   if (changes.customApiUrl) {
     resetLogShippingSupport();
@@ -80,13 +148,16 @@ chrome.runtime.onConnect.addListener((port) => {
   if (!port || port.name !== KEEPALIVE_PORT_NAME) return;
   const tabId = port.sender?.tab?.id;
   const frameId = port.sender?.frameId;
-  port.onMessage.addListener(() => {});
+  const lifecycle = createKeepalivePortLifecycle(() => {
+    if (Number.isFinite(tabId) && (!Number.isFinite(frameId) || frameId === 0))
+      sessionLifecycle.onKeepaliveDisconnect(tabId);
+  });
+  port.onMessage.addListener((message) => lifecycle.onMessage(message));
   port.onDisconnect.addListener(() => {
     void chrome.runtime.lastError;
     if (!Number.isFinite(tabId)) return;
     if (Number.isFinite(frameId) && frameId !== 0) return;
-    bumpTabSession(tabId, "");
-    cancelTabWork(tabId, "page_unloaded");
+    lifecycle.onDisconnect();
   });
 });
 
@@ -94,8 +165,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (!Number.isFinite(tabId) || changeInfo.status !== "loading") return;
   const href = changeInfo.url || tab?.url || "";
   if (isMangaDexPageUrl(href)) return;
-  bumpTabSession(tabId, href);
-  cancelTabWork(tabId, "navigation");
+  sessionLifecycle.onTabLoading(tabId, href);
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
@@ -107,19 +177,135 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const type = String(msg?.type || "");
 
   switch (type) {
-    case "TP_LOCAL_AI_DISCOVER":
-      discoverLocalModels(msg?.adapter || {})
-        .then((result) => sendResponse(result))
-        .catch((error) => sendResponse({
-          ok: false,
-          code: String(error?.code || "local_ai_discovery_failed"),
-          error: String(error?.message || "Local AI discovery failed"),
-        }));
+    case "TP_LOCAL_AI_DISCOVER": {
+      const discoveryId = String(msg?.discoveryId || crypto.randomUUID());
+      const provider = String(
+        msg?.provider || msg?.adapter?.protocol || "local",
+      );
+      const endpointOrigin = (() => {
+        try {
+          return new URL(String(msg?.adapter?.baseUrl || "")).origin;
+        } catch {
+          return "invalid";
+        }
+      })();
+      traceNote(
+        "background/index.js",
+        "localModelDiscovery",
+        {
+          event: "start",
+          discoveryId,
+          provider,
+          endpointOrigin,
+        },
+        discoveryId,
+      );
+      const traceBase = String(msg?.apiBase || "").replace(/\/+$/, "");
+      ensureTraceHandshake(traceBase)
+        .then(async (traceState) => {
+          const tabs = await queryTabs({});
+          await Promise.allSettled(
+            (tabs || [])
+              .filter((tab) => Number.isFinite(tab?.id))
+              .map(
+                (tab) =>
+                  new Promise((resolve) =>
+                    chrome.tabs.sendMessage(
+                      tab.id,
+                      {
+                        type: "TP_DIAGNOSTICS_STATE",
+                        enabled: traceState.known && traceState.trace,
+                        detail: traceState?.caps?.traceDetail || "off",
+                        consoleLevel: traceState?.caps?.consoleLevel || "warn",
+                      },
+                      () => {
+                        void chrome.runtime.lastError;
+                        resolve();
+                      },
+                    ),
+                  ),
+              ),
+          );
+          return discoverLocalModels(msg?.adapter || {}, {
+            provider: msg?.provider,
+            model: msg?.model,
+            verifySelected: true,
+            probeTimeoutMs: 60_000,
+          });
+        })
+        .then(async (result) => {
+          traceNote(
+            "background/index.js",
+            "localModelDiscovery",
+            {
+              event: "result",
+              discoveryId,
+              provider,
+              endpointOrigin,
+              protocol: String(result?.protocol || ""),
+              modelCount: Array.isArray(result?.models)
+                ? result.models.length
+                : 0,
+            },
+            discoveryId,
+          );
+          await flushTrace();
+          sendResponse({ ...result, discoveryId });
+        })
+        .catch(async (error) => {
+          traceNote(
+            "background/index.js",
+            "localModelDiscovery",
+            {
+              event: "error",
+              discoveryId,
+              provider,
+              endpointOrigin,
+              code: String(error?.code || "local_ai_discovery_failed"),
+              status: Number(error?.status || 0),
+            },
+            discoveryId,
+          );
+          await flushTrace();
+          sendResponse({
+            ok: false,
+            discoveryId,
+            code: String(error?.code || "local_ai_discovery_failed"),
+            error: String(error?.message || "Local AI discovery failed"),
+          });
+        });
       return true;
+    }
+
+    case "TP_LOCAL_AI_DISCOVERY_STALE": {
+      const discoveryId = String(msg?.discoveryId || "");
+      traceNote(
+        "background/index.js",
+        "localModelDiscovery",
+        {
+          event: "stale_discard",
+          discoveryId,
+          provider: String(msg?.provider || "local"),
+        },
+        discoveryId,
+      );
+      flushTrace().finally(() => sendResponse({ ok: true }));
+      return true;
+    }
 
     case "AI_SETTINGS_CHANGED":
       forgetPrompts();
       sendResponse({ ok: true });
+      return true;
+
+    case "TP_GET_TRANSLATION_SESSIONS":
+      if (sender?.tab) { sendResponse({ok:false, error:"trusted_ui_only"}); return true; }
+      repairCoordinator.summaries().then(runs => sendResponse({ok:true, runs}));
+      return true;
+
+    case "TP_RESUME_REPAIRS":
+      if (sender?.tab) { sendResponse({ok:false, error:"trusted_ui_only"}); return true; }
+      repairCoordinator.resume().then(() => sendResponse({ok:true}));
       return true;
 
     case "GET_BATCH_STATUS":
@@ -128,14 +314,25 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return true;
 
     case "GET_API_STATUS":
-      getApiBase().then((base) => {
-        const fresh = Date.now() - Number(healthCache.ts || 0) < 60_000;
-        const matches = Boolean(base && healthCache.base === base);
-        sendResponse({ ok: healthCache.ok === true && fresh && matches, ts: healthCache.ts, base: healthCache.base, fresh, snapshot: true });
-      }).catch(() => sendResponse({ ok: false, ts: 0, base: "", fresh: false, snapshot: true }));
+      // Status reads must be side-effect free. Opening the popup is not a
+      // request to wake or re-probe the API.
+      getApiBase({ warm: false })
+        .then((base) => {
+          sendResponse(apiHealthSnapshot(base));
+        })
+        .catch(() =>
+          sendResponse({
+            ok: false,
+            ts: 0,
+            base: "",
+            fresh: false,
+            snapshot: true,
+          }),
+        );
       return true;
 
     case "API_URL_CHANGED":
+      resetTraceHandshakeIdentity();
       healthCache.ok = false;
       healthCache.ts = 0;
       healthCache.base = "";
@@ -178,12 +375,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       );
       return true;
 
+
     case "TP_CONTENT_READY":
-      if (msg?.top && Number.isFinite(sender?.tab?.id)) {
-        ensureTabSession(sender.tab.id, msg?.href);
-        getApiBase().catch(() => {});
-      }
-      sendResponse({ ok: true });
+      Promise.all([restoreSettingsEpoch(), restoreTabSessions()]).then(() => {
+        if (msg?.top && Number.isFinite(sender?.tab?.id)) {
+          ensureTabSession(sender.tab.id, msg?.href);
+          getApiBase().catch(() => {});
+        }
+        sendResponse({ ok: true });
+      }).catch(() => sendResponse({ok:false, error:'session_restore_failed'}));
       return true;
 
     case "TP_LOCATION_CHANGED":
@@ -192,9 +392,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (isMangaDexPageUrl(msg?.href || sender?.tab?.url || "")) {
           // Only TP_MD_CHAPTER_CHANGED cancels MangaDex work; its URL also changes while scrolling one chapter.
           ensureTabSession(tabId, msg?.href);
+        } else if (preservesXPhotoTarget(msg?.previousHref, msg?.href)) {
+          ensureTabSession(tabId, msg?.href);
         } else {
-          cancelTabWork(tabId, "spa_navigation");
-          bumpTabSession(tabId, msg?.href);
+          sessionLifecycle.onLocationChanged(tabId, msg?.href);
         }
       }
       sendResponse({ ok: true });
@@ -203,8 +404,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     case "TP_MD_CHAPTER_CHANGED": {
       const tabId = sender?.tab?.id;
       if (Number.isFinite(tabId)) {
-        cancelTabWork(tabId, "chapter_change");
-        bumpTabSession(tabId, sender?.tab?.url || "");
+        sessionLifecycle.onMangaDexChapterChanged(
+          tabId,
+          sender?.tab?.url || "",
+        );
       }
       sendResponse({ ok: true });
       return true;
@@ -232,6 +435,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             pendingByJob.delete(jid);
           }
         }
+        traceNote(
+          "background/index.js",
+          "batchCancellation",
+          {
+            reason: "user_cancelled",
+            batchId: bid,
+            jobIds,
+            serverCancellation: "requested",
+          },
+          bid,
+        );
         cancelJobsViaRest({ jobIds, batchId: bid });
       }
       sendResponse({ success: true });
@@ -257,7 +471,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         await onContextMenuClicked({ menuItemId: "img_all", frameId: 0 }, tab);
       })()
         .then(() => sendResponse({ ok: true }))
-        .catch((e) => sendResponse({ ok: false, error: e?.message || String(e) }));
+        .catch((e) =>
+          sendResponse({ ok: false, error: e?.message || String(e) }),
+        );
       return true;
     }
 
@@ -277,16 +493,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       // (the Auto translate tab does this). `debug` asks the extension route to
       // keep the Lens material it would otherwise drop after decoding.
       onContextMenuClicked(menuInfo, tab, {
-        overrides: msg?.overrides && typeof msg.overrides === "object" ? msg.overrides : null,
+        overrides:
+          msg?.overrides && typeof msg.overrides === "object"
+            ? msg.overrides
+            : null,
         debug: msg?.debug && typeof msg.debug === "object" ? msg.debug : null,
         propagateErrors: true,
       })
         .then(() => sendResponse({ ok: true }))
-        .catch((e) => sendResponse({
-          ok: false,
-          error: e?.message || String(e),
-          tpError: publicTpError(e),
-        }));
+        .catch((e) =>
+          sendResponse({
+            ok: false,
+            error: e?.message || String(e),
+            tpError: publicTpError(e),
+          }),
+        );
       return true;
     }
 
@@ -303,7 +524,10 @@ function collectMdCacheItems(msg) {
   if (!lang || !mode) return {};
 
   const includeNewImg = Boolean(msg?.includeNewImg);
-  const keys = (Array.isArray(msg?.keys) ? msg.keys : []).slice(0, includeNewImg ? 6 : 600);
+  const keys = (Array.isArray(msg?.keys) ? msg.keys : []).slice(
+    0,
+    includeNewImg ? 6 : 600,
+  );
 
   const items = {};
   for (const mdKey of keys) {
@@ -318,13 +542,19 @@ function collectMdCacheItems(msg) {
       rec?.result?.imageUrl ||
       null;
     const cachedResult = stripImageFields(rec.result);
-    const sourceImageDataUri = getCachedDataUri(String(rec?.result?.sourceImageKey || ""));
+    const sourceImageDataUri = getCachedDataUri(
+      String(rec?.result?.sourceImageKey || ""),
+    );
     if (rec?.result?.sourceImageKey && !sourceImageDataUri) continue;
-    if (cachedResult && typeof cachedResult === "object") delete cachedResult.sourceImageKey;
+    if (cachedResult && typeof cachedResult === "object")
+      delete cachedResult.sourceImageKey;
     items[String(mdKey)] = {
       hasNewImg: Boolean(newImg),
       result: cachedResult
-        ? { ...cachedResult, ...(sourceImageDataUri ? { sourceImageDataUri } : {}) }
+        ? {
+            ...cachedResult,
+            ...(sourceImageDataUri ? { sourceImageDataUri } : {}),
+          }
         : cachedResult,
       ...(includeNewImg ? { newImg } : {}),
     };
@@ -358,7 +588,10 @@ async function fetchImageBlob(msg) {
 function bootstrap() {
   recreateMenus();
   ensureThunderbirdMessageScripts().catch((error) => {
-    log.warn("Thunderbird message scripts unavailable", error?.message || String(error));
+    log.warn(
+      "Thunderbird message scripts unavailable",
+      error?.message || String(error),
+    );
   });
   getApiBase()
     .then((b) => warmupApi(b))
@@ -372,7 +605,10 @@ bootstrap();
 getStorage({ maxConcurrency: 0 }).then(({ maxConcurrency }) => {
   setMaxConcurrency(maxConcurrency);
   log.info("concurrency limits", describeLimits());
-  resumePendingRestJobs().catch((e) => log.warn("resume pending jobs failed", e?.message || String(e)));
+  Promise.all([restoreSettingsEpoch(), restoreTabSessions()]).then(async () => {
+    await resumePendingRestJobs();
+    await repairCoordinator.resume();
+  }).catch(e => log.warn("resume pending jobs failed", e?.message || String(e)));
 });
 
 reportOnStartup().catch((e) =>

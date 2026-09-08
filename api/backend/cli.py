@@ -1,6 +1,5 @@
 """Local-file pipeline runner + debug dumper.
 
-
 Runs the full translation pipeline on an image file **without starting the
 HTTP server**, and writes every intermediate artefact to a directory so the
 Lens trees and the generated AI tree can be inspected and compared.
@@ -21,7 +20,8 @@ Usage::
 Outputs (in ``--out-dir``, default ``debug/``):
 
     lens_raw.json            raw Google Lens response (replayable)
-    original_tree.json       Lens "original" render tree
+    original_tree.json       canonical source tree used by AI
+    original_tree_raw.json   untouched Lens "original" render tree
     translated_tree.json     Lens "translated" render tree
     ai_tree.json             the AI tree this pipeline built
     original_text.txt        }
@@ -41,29 +41,127 @@ Outputs (in ``--out-dir``, default ``debug/``):
 
 from __future__ import annotations
 
-import argparse
-import base64
-import json
-import sys
-import time
 from pathlib import Path
 from typing import Any
 
-from backend.ai.translate import AiConfig
+import base64, argparse, json, mimetypes, re, subprocess, sys, tempfile, time
+
+from backend.ai.translation.contracts import AiConfig
 from backend.config import settings
-from backend.jobs.pipeline import process_image
-from backend.lens import client as lens_client
 from backend.lens.languages import normalize as normalize_lang
 from backend.lens.tree import tree_stats
-
 
 def _write_json(path: Path, obj: Any) -> None:
     path.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
 
-
 def _write_text(path: Path, text: str) -> None:
     path.write_text(str(text or ""), encoding="utf-8")
 
+def _bounded_diagnostics(value: Any, depth: int = 0) -> Any:
+    """Make exception diagnostics safe and finite for a durable CLI artifact."""
+    if depth >= 6:
+        return "[TRUNCATED_DEPTH]"
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for index, (raw_key, child) in enumerate(value.items()):
+            if index >= 64:
+                result["_truncated_keys"] = len(value) - 64
+                break
+            key = str(raw_key)[:160]
+            normalized = key.lower().replace("-", "_")
+            if any(secret in normalized for secret in ("api_key", "authorization", "credential", "secret", "token")):
+                result[key] = "[REDACTED]"
+            else:
+                result[key] = _bounded_diagnostics(child, depth + 1)
+        return result
+    if isinstance(value, (list, tuple, set)):
+        sequence = list(value)
+        result = [_bounded_diagnostics(child, depth + 1) for child in sequence[:128]]
+        if len(sequence) > 128:
+            result.append({"_truncated_items": len(sequence) - 128})
+        return result
+    if isinstance(value, str):
+        return value if len(value) <= 2000 else value[:2000] + "[TRUNCATED]"
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return str(value)[:2000]
+
+def _safe_error_message(exc: BaseException) -> str:
+    """Keep useful local context without persisting credentials from errors."""
+    message = str(exc)
+    if type(exc).__name__ == "DetectorFreeGroupingError":
+        return message
+    message = re.sub(r"https?://[^\s]+", "[REDACTED_URL]", message, flags=re.IGNORECASE)
+    message = re.sub(
+        r"(?i)\b(api[_-]?key|authorization|credential|secret|token)\b\s*[:=]\s*[^\s,;]+",
+        lambda match: f"{match.group(1)}=[REDACTED]",
+        message,
+    )
+    message = re.sub(r"(?i)\bbearer\s+[^\s,;]+", "Bearer [REDACTED]", message)
+    return message[:2000] + ("[TRUNCATED]" if len(message) > 2000 else "")
+
+def _write_failure(
+    out_dir: Path,
+    lens_data: Any,
+    exc: BaseException,
+    *,
+    engine: str,
+    stage: str,
+) -> None:
+    """Persist a failed diagnostic run without disguising it as a result."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if isinstance(lens_data, dict):
+        _write_json(out_dir / "lens_raw.json", lens_data)
+    details: dict[str, Any] = {}
+    diagnostics = getattr(exc, "details", None)
+    if isinstance(diagnostics, dict) and diagnostics:
+        details = _bounded_diagnostics(diagnostics)
+    grouping_failure = type(exc).__name__ == "DetectorFreeGroupingError"
+    error = {
+        "schema": "tp.cli-error/1",
+        "engine": engine,
+        "stage": stage,
+        "code": "grouping_failed" if grouping_failure else "pipeline_failed",
+        "exception": type(exc).__name__,
+        "message": _safe_error_message(exc),
+        "details": details,
+        "retryable": False,
+    }
+    _write_json(out_dir / "error.json", error)
+    _write_text(
+        out_dir / "summary.txt",
+        "TextPhantom diagnostic run: FAILED\n"
+        f"engine : {engine}\n"
+        f"stage  : {stage}\n"
+        f"code   : {error['code']}\n"
+        f"error  : {error['message']}\n"
+        "See error.json and lens_raw.json. The CLI did not fall back to the other engine.\n",
+    )
+
+def _prewarm_fonts(lang: str) -> tuple[bool, str, str]:
+    """Warm CLI fonts without letting missing glyph coverage abort startup."""
+    from backend.jobs.fonts import resolve_font_pair
+    from backend.render.fonts import UnsupportedFontError, is_truetype, pick_font
+
+    thai_font, latin_font = resolve_font_pair(lang)
+    try:
+        probe = pick_font("กa", thai_font, latin_font, 64)
+    except UnsupportedFontError as exc:
+        print(
+            f"[cli] WARNING: font prewarm degraded ({exc}); continuing with "
+            "geometry-only layout fallback for unsupported text.",
+            file=sys.stderr,
+        )
+        return False, thai_font, latin_font
+    if not is_truetype(probe):
+        print(
+            "[cli] WARNING: font prewarm produced no validated scalable font; "
+            "continuing with geometry-only layout fallback.",
+            file=sys.stderr,
+        )
+        return False, thai_font, latin_font
+    print(f"[cli] fonts ok: thai={thai_font} latin={latin_font}")
+    return True, thai_font, latin_font
 
 def _data_uri_to_bytes(data_uri: str) -> bytes:
     """Decode a ``data:...;base64,`` URI to raw bytes (empty on failure)."""
@@ -75,7 +173,6 @@ def _data_uri_to_bytes(data_uri: str) -> bytes:
         return base64.b64decode(b64 + "=" * ((4 - len(b64) % 4) % 4))
     except Exception:
         return b""
-
 
 def _standalone_html(title: str, bg_data_uri: str, overlay_html: str, css: str, base_w: int, base_h: int) -> str:
     """Wrap a layer's overlay markup + erased background into a viewable HTML file."""
@@ -95,10 +192,14 @@ def _standalone_html(title: str, bg_data_uri: str, overlay_html: str, css: str, 
   <div class="tp-ol-root"><div class="tp-ol-scope">{overlay_html}</div></div>
 </div></body></html>"""
 
-
-def _dump(result: dict[str, Any], lens_data: dict[str, Any], out_dir: Path) -> None:
+def _dump(
+    result: dict[str, Any], lens_data: dict[str, Any], out_dir: Path, *, source: str
+) -> None:
     """Write every inspectable artefact from a pipeline result."""
     out_dir.mkdir(parents=True, exist_ok=True)
+    # A successful rerun must not inherit the failure verdict from an older
+    # invocation that used the same diagnostic directory.
+    (out_dir / "error.json").unlink(missing_ok=True)
 
     _write_json(out_dir / "lens_raw.json", lens_data)
 
@@ -106,7 +207,15 @@ def _dump(result: dict[str, Any], lens_data: dict[str, Any], out_dir: Path) -> N
     translated = result.get("translated") or {}
     ai = result.get("Ai") or {}
 
-    _write_json(out_dir / "original_tree.json", original.get("originalTree") or {})
+    raw_original_tree = original.get("originalTree") or {}
+    canonical_original_tree = result.get("canonicalOriginalTree") or {}
+    # ``original_tree.json`` is the logical, grouped source tree used by AI.
+    # Raw Lens geometry remains available explicitly for fingerprint/erase QA.
+    _write_json(
+        out_dir / "original_tree.json",
+        canonical_original_tree or raw_original_tree,
+    )
+    _write_json(out_dir / "original_tree_raw.json", raw_original_tree)
     _write_json(out_dir / "translated_tree.json", translated.get("translatedTree") or {})
     _write_json(out_dir / "ai_tree.json", ai.get("aiTree") or {})
 
@@ -190,7 +299,25 @@ def _dump(result: dict[str, Any], lens_data: dict[str, Any], out_dir: Path) -> N
             summary.append(f"  P{i:02d}: {len(tr):4d} -> {len(aip):4d}  {mark}")
 
     _write_text(out_dir / "summary.txt", "\n".join(summary) + "\n")
-
+    ai_selected = source == "ai"
+    _write_json(out_dir / "run_status.json", {
+        "schema": "tp.cli-run-status/1",
+        "engine": "runsapi",
+        "source": source,
+        "structuralOk": True,
+        # A translated/original structural run must never be reported as an AI
+        # end-to-end success merely because its geometry can render.
+        "aiEndToEnd": (
+            "completed_to_render_artifact_browser_insertion_not_tested"
+            if ai_selected else "not_tested_source_not_ai"
+        ),
+        "providerGenerationAttempts": (
+            int(meta.get("generationAttempts") or 0) if ai_selected else 0
+        ),
+        "browserDom": "not_tested_requires_browser",
+        "serviceWorkerSession": "not_tested_requires_browser",
+        "deliveryInsertion": "not_tested_requires_browser",
+    })
 
 def _resolve_path_template(template: str, stem: str, multi: bool, base: str) -> Path:
     """Resolve a per-image output path.
@@ -207,13 +334,11 @@ def _resolve_path_template(template: str, stem: str, multi: bool, base: str) -> 
         return Path(base) / stem
     return Path(base)
 
-
 def _ai_tree_of(result: dict[str, Any]) -> dict[str, Any]:
     """The AI render tree of a pipeline result (empty dict when absent)."""
     ai = result.get("Ai") or {}
     tree = ai.get("aiTree")
     return tree if isinstance(tree, dict) else {}
-
 
 # Map an image filename stem to a language code.  The 6-way cross run infers
 # each image's source language from its filename ("eng.jpg" -> en, …).
@@ -224,7 +349,6 @@ _LANG_BY_STEM: dict[str, str] = {
     "zh": "zh", "cn": "zh", "chinese": "zh",
     "ko": "ko", "kr": "ko", "korean": "ko",
 }
-
 
 def _infer_lang(stem: str) -> str:
     """Best-effort language code for an image whose name encodes its language.
@@ -242,7 +366,6 @@ def _infer_lang(stem: str) -> str:
         if s.startswith(key):
             return code
     return normalize_lang(s)
-
 
 def _para_aabb_px(para: dict[str, Any]) -> tuple[float, float, float, float] | None:
     """Axis-aligned bounding box of a paragraph in image pixels.
@@ -271,7 +394,6 @@ def _para_aabb_px(para: dict[str, Any]) -> tuple[float, float, float, float] | N
     if xs and ys:
         return min(xs), min(ys), max(xs), max(ys)
     return None
-
 
 def _box_rows(tree: dict[str, Any], img_w: float, img_h: float) -> list[dict[str, Any]]:
     """Per-box layout summary of a render tree — position, line-breaks, text.
@@ -314,7 +436,6 @@ def _box_rows(tree: dict[str, Any], img_w: float, img_h: float) -> list[dict[str
         })
     return rows
 
-
 def _fmt_box_row(label: str, row: dict[str, Any] | None) -> str:
     """One aligned line describing a box for the pairwise comparison."""
     if row is None:
@@ -328,12 +449,10 @@ def _fmt_box_row(label: str, row: dict[str, Any] | None) -> str:
         f"pos=({row['cx']:>5.1f}%,{row['cy']:>5.1f}%) {flags} \"{text}\""
     )
 
-
 def _dims_of(result: dict[str, Any]) -> tuple[float, float]:
     """Image pixel size of a pipeline result (from ``htmlMeta``)."""
     meta = result.get("htmlMeta") or {}
     return float(meta.get("baseW") or 1) or 1.0, float(meta.get("baseH") or 1) or 1.0
-
 
 def _write_comparison(
     runs: list[dict[str, Any]],
@@ -483,7 +602,6 @@ def _write_comparison(
     }
     _write_json(path.with_suffix(".json"), json_obj)
 
-
 def _lens_data_for(image_path: Path, lens_json_tmpl: str, fetch_lang: str) -> Any:
     """Replay a saved Lens response, or fetch one live, for ``image_path``."""
     stem = image_path.stem
@@ -491,11 +609,79 @@ def _lens_data_for(image_path: Path, lens_json_tmpl: str, fetch_lang: str) -> An
         lens_file = Path(lens_json_tmpl.replace("{name}", stem))
         print(f"[cli] {stem}: loaded Lens response from {lens_file}")
         return json.loads(lens_file.read_text(encoding="utf-8"))
+    from backend.lens import client as lens_client
+
     print(f"[cli] {stem}: fetching Lens data …")
     return lens_client.fetch_lens_data(
         str(image_path), normalize_lang(fetch_lang), settings.firebase_url
     )
 
+def _run_extension(args: argparse.Namespace, image_path: Path) -> int:
+    """Dispatch one image to the real JavaScript extension pipeline modules."""
+    if args.mode != "lens_text":
+        print("error: --engine extension currently supports only --mode lens_text", file=sys.stderr)
+        return 2
+    if not str(args.api_url or "").strip():
+        print("error: --engine extension requires --api-url", file=sys.stderr)
+        return 2
+    try:
+        from PIL import Image
+        with Image.open(image_path) as image:
+            width, height = image.size
+    except Exception as exc:
+        print(f"error: could not read image dimensions: {exc}", file=sys.stderr)
+        return 2
+
+    stem = image_path.stem
+    out_dir = _resolve_path_template(args.out_dir, stem, False, args.out_dir)
+    lens_replay = None
+    if args.lens_json:
+        replay_path = Path(args.lens_json.replace("{name}", stem))
+        try:
+            lens_replay = json.loads(replay_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            print(f"error: could not load --lens-json {replay_path}: {exc}", file=sys.stderr)
+            return 2
+
+    mime = mimetypes.guess_type(image_path.name)[0] or "image/jpeg"
+    config = {
+        "outDir": str(out_dir.resolve()),
+        "apiUrl": str(args.api_url).strip().rstrip("/"),
+        "imageName": image_path.name,
+        "imageBase64": base64.b64encode(image_path.read_bytes()).decode("ascii"),
+        "mime": mime,
+        "width": int(width),
+        "height": int(height),
+        "lensReplay": lens_replay,
+        "mode": args.mode,
+        "source": args.source.strip().lower(),
+        "lang": normalize_lang(args.lang),
+        "ai": {
+            "api_key": args.ai_key.strip(),
+            "model": args.ai_model,
+            "provider": args.ai_provider,
+            "base_url": args.ai_base_url,
+            "prompt": args.ai_prompt,
+            "thinking": args.ai_thinking,
+        },
+    }
+    project_root = Path(__file__).resolve().parents[2]
+    driver = project_root / "scripts" / "cli-extension-driver.mjs"
+    with tempfile.TemporaryDirectory(prefix="textphantom-cli-") as temp_dir:
+        config_path = Path(temp_dir) / "request.json"
+        config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+        command = ["node", str(driver), str(config_path)]
+        print(f"[cli] {stem}: running extension-owned pipeline …")
+        try:
+            completed = subprocess.run(command, cwd=project_root, check=False)
+        except FileNotFoundError:
+            print("error: Node.js was not found; --engine extension requires Node.js 18+", file=sys.stderr)
+            return 2
+    if completed.returncode:
+        print(f"[cli] {stem}: extension diagnostics failed; inspect {out_dir.resolve() / 'error.json'}", file=sys.stderr)
+        return int(completed.returncode)
+    print(f"[cli] {stem}: wrote extension debug artefacts to {out_dir.resolve()}")
+    return 0
 
 def _run_cross(args: argparse.Namespace, image_paths: list[Path], ai_cfg: AiConfig) -> int:
     """6-way cross translation in a single invocation.
@@ -506,6 +692,8 @@ def _run_cross(args: argparse.Namespace, image_paths: list[Path], ai_cfg: AiConf
     debug folder, and a comparison report lines each run up against the real
     page that already exists in the target language.
     """
+    from backend.jobs.pipeline import process_image
+
     img_lang = {p.stem: _infer_lang(p.stem) for p in image_paths}
     print("[cli] inferred languages: "
           + ", ".join(f"{s}={l}" for s, l in img_lang.items()))
@@ -531,18 +719,37 @@ def _run_cross(args: argparse.Namespace, image_paths: list[Path], ai_cfg: AiConf
                 continue
             runname = f"{src.stem}2{tgt.stem}"
             print(f"[cli] {runname}: translating {src.name} -> {tgt_lang} …")
-            lens_data = _lens(src)
+            out_dir = _resolve_path_template(args.out_dir, runname, True, args.out_dir)
+            try:
+                lens_data = _lens(src)
+            except Exception as exc:
+                _write_failure(out_dir, {}, exc, engine="runsapi", stage="lens")
+                print(
+                    f"[cli] {runname}: FAILED [{type(exc).__name__}] {_safe_error_message(exc)}\n"
+                    f"[cli] diagnostic evidence: {out_dir.resolve()}",
+                    file=sys.stderr,
+                )
+                return 1
             t0 = time.perf_counter()
-            result = process_image(
-                str(src), tgt_lang, args.mode, ai_cfg,
-                source="ai",
-                lens_data=lens_data, capture_ai_request=True,
-            )
+            try:
+                result = process_image(
+                    str(src), tgt_lang, args.mode, ai_cfg,
+                    source="ai",
+                    lens_data=lens_data, capture_ai_request=True,
+                )
+            except Exception as exc:
+                failure_stage = "grouping" if type(exc).__name__ == "DetectorFreeGroupingError" else "pipeline"
+                _write_failure(out_dir, lens_data, exc, engine="runsapi", stage=failure_stage)
+                print(
+                    f"[cli] {runname}: FAILED [{type(exc).__name__}] {_safe_error_message(exc)}\n"
+                    f"[cli] diagnostic evidence: {out_dir.resolve()}",
+                    file=sys.stderr,
+                )
+                return 1
             result.setdefault("perf", {})["cli_total_ms"] = round(
                 (time.perf_counter() - t0) * 1000, 1
             )
-            out_dir = _resolve_path_template(args.out_dir, runname, True, args.out_dir)
-            _dump(result, lens_data if isinstance(lens_data, dict) else {}, out_dir)
+            _dump(result, lens_data if isinstance(lens_data, dict) else {}, out_dir, source="ai")
             print(f"[cli] {runname}: wrote debug artefacts to {out_dir.resolve()}")
 
             dims[src.stem] = _dims_of(result)
@@ -569,23 +776,46 @@ def _run_cross(args: argparse.Namespace, image_paths: list[Path], ai_cfg: AiConf
     print(cmp_path.read_text(encoding="utf-8").rstrip())
     return 0
 
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="backend.cli",
         description="Run the TextPhantom pipeline on one or more local images. "
                     "Pass several images with --source ai to translate every "
                     "image into every other image's language (6-way cross run).",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""engine examples:
+  runs:API server (default; Python owns the complete pipeline):
+    python -m backend.cli 6.jpg --engine api --lang th --out-dir debug-api-6
+
+  runs:Extension (real extension JS decode/group/Cloud-AI modules and canonical routes):
+    python -m backend.cli 6.jpg --engine extension --api-url http://127.0.0.1:7860 --lang th --out-dir debug-extension-6
+
+  Reuse identical Lens input when comparing the two engines:
+    python -m backend.cli 6.jpg --engine extension --api-url http://127.0.0.1:7860 --lens-json debug-api-6/lens_raw.json --lang th --out-dir debug-extension-6
+
+limits:
+  Extension mode is headless. It does not test browser DOM rendering, service-worker
+  session ownership, page insertion, or direct Local-AI runtime. Test those boundaries
+  in the installed extension. The CLI never falls back from one engine to the other.
+""",
     )
     parser.add_argument("image", nargs="+", help="path(s) to image file(s)")
+    parser.add_argument("--engine", default="api", choices=["api", "extension"],
+                        help="pipeline owner: api=runs:API server, extension=runs:Extension (default: api)")
+    parser.add_argument("--api-url", default="",
+                        help="TextPhantom API base URL; required by --engine extension")
     parser.add_argument("--lang", default="th", help="target language for single-image runs (default: th)")
     parser.add_argument("--mode", default="lens_text", choices=["lens_text", "lens_images"])
-    parser.add_argument("--source", default="translated", help="original | translated | ai")
+    parser.add_argument("--source", default="translated", choices=["original", "translated", "ai"])
     parser.add_argument("--ai-key", default="", help="AI API key (required for --source ai)")
     parser.add_argument("--ai-model", default="auto")
     parser.add_argument("--ai-provider", default="auto")
     parser.add_argument("--ai-base-url", default="auto")
-    parser.add_argument("--ai-prompt", default="", help="optional editable style prompt")
+    parser.add_argument("--ai-thinking", default="off")
+    parser.add_argument(
+        "--ai-prompt", default="",
+        help="style prompt required by --source ai; no built-in fallback is used",
+    )
     parser.add_argument(
         "--out-dir", default="debug",
         help="where to write the dump.  A {name} placeholder expands per run "
@@ -607,26 +837,29 @@ def main(argv: list[str] | None = None) -> int:
     multi = len(image_paths) > 1
     source = args.source.strip().lower()
 
+    if source == "ai" and not args.ai_prompt.strip():
+        print(
+            "error: --source ai requires --ai-prompt; no prompt fallback is used",
+            file=sys.stderr,
+        )
+        return 2
+
+    if args.engine == "extension":
+        if multi:
+            print("error: --engine extension currently accepts exactly one image per invocation", file=sys.stderr)
+            return 2
+        return _run_extension(args, image_paths[0])
+
+    # Keep the extension diagnostic path independent from the Python renderer's
+    # native dependencies. The full API engine imports them only when selected.
+    from backend.jobs.pipeline import process_image
+
     # --- Font pre-warm ------------------------------------------------------
     # Without a real TTF, Pillow falls back to a bitmap font whose textbbox
     # ignores the requested size, which makes the fit-size calculation
     # explode (a 139px-tall box ends up with fs=688). Warm the fonts and
     # surface the situation loud and clear.
-    from backend.jobs.fonts import resolve_font_pair
-    from backend.render.fonts import is_truetype, pick_font
-
-    thai_font, latin_font = resolve_font_pair(args.lang)
-    probe = pick_font("กa", thai_font, latin_font, 64)
-    if not is_truetype(probe):
-        print(
-            "[cli] WARNING: Noto fonts are not available — text will not lay out"
-            f" correctly. Place the TTF/OTF files next to the working dir "
-            f"({Path('.').resolve()}) or fix network access for the auto-download "
-            f"and re-run.",
-            file=sys.stderr,
-        )
-    else:
-        print(f"[cli] fonts ok: thai={thai_font} latin={latin_font}")
+    # _fonts_ok, thai_font, latin_font = _prewarm_fonts(args.lang)
 
     # --- AI config ----------------------------------------------------------
     ai_cfg = None
@@ -644,6 +877,8 @@ def main(argv: list[str] | None = None) -> int:
             provider=args.ai_provider,
             base_url=args.ai_base_url,
             prompt_editable=args.ai_prompt,
+            prompt_mode="replace",
+            thinking=args.ai_thinking,
         )
 
     # --- 6-way cross translation (several images + AI) ----------------------
@@ -653,22 +888,40 @@ def main(argv: list[str] | None = None) -> int:
     # --- Single-image / non-AI runs -----------------------------------------
     for image_path in image_paths:
         stem = image_path.stem
-        lens_data = _lens_data_for(image_path, args.lens_json, args.lang)
+        out_dir = _resolve_path_template(args.out_dir, stem, multi, args.out_dir)
+        try:
+            lens_data = _lens_data_for(image_path, args.lens_json, args.lang)
+        except Exception as exc:
+            _write_failure(out_dir, {}, exc, engine="runsapi", stage="lens")
+            print(
+                f"[cli] {stem}: FAILED [{type(exc).__name__}] {_safe_error_message(exc)}\n"
+                f"[cli] diagnostic evidence: {out_dir.resolve()}",
+                file=sys.stderr,
+            )
+            return 1
         print(f"[cli] {stem}: running pipeline (mode={args.mode}, lang={args.lang}, source={source}) …")
         t0 = time.perf_counter()
-        result = process_image(
-            str(image_path), args.lang, args.mode, ai_cfg,
-            source=source,
-            lens_data=lens_data, capture_ai_request=True,
-        )
+        try:
+            result = process_image(
+                str(image_path), args.lang, args.mode, ai_cfg,
+                source=source,
+                lens_data=lens_data, capture_ai_request=True,
+            )
+        except Exception as exc:
+            failure_stage = "grouping" if type(exc).__name__ == "DetectorFreeGroupingError" else "pipeline"
+            _write_failure(out_dir, lens_data, exc, engine="runsapi", stage=failure_stage)
+            print(
+                f"[cli] {stem}: FAILED [{type(exc).__name__}] {_safe_error_message(exc)}\n"
+                f"[cli] diagnostic evidence: {out_dir.resolve()}",
+                file=sys.stderr,
+            )
+            return 1
         result.setdefault("perf", {})["cli_total_ms"] = round((time.perf_counter() - t0) * 1000, 1)
-        out_dir = _resolve_path_template(args.out_dir, stem, multi, args.out_dir)
-        _dump(result, lens_data if isinstance(lens_data, dict) else {}, out_dir)
+        _dump(result, lens_data if isinstance(lens_data, dict) else {}, out_dir, source=source)
         print(f"[cli] {stem}: wrote debug artefacts to {out_dir.resolve()}")
         print((out_dir / "summary.txt").read_text(encoding="utf-8").rstrip())
 
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

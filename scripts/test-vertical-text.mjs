@@ -3,7 +3,7 @@
 // The bug this guards: a vertical CJK column was measured with the HORIZONTAL
 // fitter, which divides the box's narrow side by the glyph count. Every column
 // collapsed to the 9 px floor. The numbers below are the shared contract with
-// `fit_item_font_size_vertical` in api/backend/render/tp_html.py - the same
+// `fit_item_font_size_vertical` in api/backend/render/components/typography.py - the same
 // table is asserted in api/tests/test_font_parity.py, so if either side drifts
 // one of the two fails.
 import assert from "node:assert/strict";
@@ -81,7 +81,11 @@ for (const [w, h, text, expected] of TABLE) {
   const path = await import("node:path");
   const { fileURLToPath } = await import("node:url");
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-  const overlay = await readFile(path.join(root, "src/processors/render-overlay.js"), "utf8");
+  const overlay = [
+    await readFile(path.join(root, "src/processors/render/renderer.js"), "utf8"),
+    await readFile(path.join(root, "src/processors/render/vertical-layout.js"), "utf8"),
+    await readFile(path.join(root, "src/processors/render/line-renderer.js"), "utf8"),
+  ].join("\n");
   assert.match(
     overlay,
     /upright:\s*true/,

@@ -1,14 +1,13 @@
 """Short-lived batch cancellation state for synchronous split routes."""
 from __future__ import annotations
 
-import threading
-import time
 from typing import Any
+
+import time, threading
 
 _TTL = 30 * 60.0
 _lock = threading.Lock()
 _batches: dict[tuple[str, str], float] = {}
-
 
 def batch_id_of(payload: dict[str, Any]) -> str:
     metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
@@ -21,7 +20,6 @@ def batch_id_of(payload: dict[str, Any]) -> str:
         or ""
     ).strip()
 
-
 def scope_of(payload: dict[str, Any]) -> str:
     """Browser-owner scope; empty retains compatibility for legacy clients."""
     context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
@@ -29,7 +27,6 @@ def scope_of(payload: dict[str, Any]) -> str:
         payload.get("tp_tab_session") or payload.get("session")
         or context.get("tp_tab_session") or ""
     ).strip()[:128]
-
 
 def mark_batch(batch_id: str, scope: str = "") -> None:
     value = str(batch_id or "").strip()
@@ -41,7 +38,6 @@ def mark_batch(batch_id: str, scope: str = "") -> None:
             if now - _batches[key] > _TTL:
                 _batches.pop(key, None)
         _batches[(str(scope or ""), value)] = now
-
 
 def is_cancelled(payload: dict[str, Any]) -> bool:
     value = batch_id_of(payload)

@@ -8,7 +8,23 @@
   // because requestAnimationFrame does not fire in a background tab.
   function onNextFrame(fn) {
     if (document.visibilityState === "hidden") return setTimeout(fn, 0);
-    return requestAnimationFrame(fn);
+    let frame = 0, timer = 0, completed = false;
+    const run = (timestamp) => {
+      if (completed) return;
+      completed = true;
+      if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(frame);
+      if (timer) clearTimeout(timer);
+      document.removeEventListener?.("visibilitychange", onVisibility);
+      fn(timestamp);
+    };
+    // The page can become hidden AFTER the frame was queued. Release that
+    // wait as a task instead of waiting indefinitely for a foreground frame.
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden" && !timer) timer = setTimeout(run, 0);
+    };
+    document.addEventListener?.("visibilitychange", onVisibility);
+    frame = requestAnimationFrame(run);
+    return frame;
   }
 
   // Awaits the next frame, or the next task while the tab is hidden.
@@ -43,7 +59,9 @@
   function getBestImgUrl(img) {
     const tp =
       img?.dataset?.tpOriginal ||
-      (typeof img?.getAttribute === "function" ? img.getAttribute("data-tp-original") : "");
+      (typeof img?.getAttribute === "function"
+        ? img.getAttribute("data-tp-original")
+        : "");
     if (tp && /^https?:/i.test(tp)) return tp;
     return (
       img.currentSrc ||
@@ -60,7 +78,8 @@
     return new Promise((resolve) => {
       try {
         const reader = new FileReader();
-        reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
+        reader.onload = () =>
+          resolve(typeof reader.result === "string" ? reader.result : "");
         reader.onerror = () => resolve("");
         reader.readAsDataURL(blob);
       } catch {
@@ -78,15 +97,19 @@
       img.classList.remove("lazyload", "lazy", "lazyloaded");
       if (img.dataset.src) img.src = img.dataset.src;
     });
-    TP.log.info("lazy removed + src forced", { lazyScripts: lazyScripts.length });
+    TP.log.info("lazy removed + src forced", {
+      lazyScripts: lazyScripts.length,
+    });
   }
 
   // Promotes lazy data attributes to real src/srcset and switches images to eager loading.
   function normalizeLazyImages() {
     document.querySelectorAll("img").forEach((img) => {
-      const candSet = img.getAttribute("data-srcset") || img.getAttribute("data-lazy-srcset");
+      const candSet =
+        img.getAttribute("data-srcset") || img.getAttribute("data-lazy-srcset");
       if (candSet && !img.srcset) img.srcset = candSet;
-      const candSrc = img.getAttribute("data-original") || img.getAttribute("data-lazy-src");
+      const candSrc =
+        img.getAttribute("data-original") || img.getAttribute("data-lazy-src");
       if (candSrc && !img.src) img.src = candSrc;
       img.loading = "eager";
       img.decoding = "sync";
@@ -94,7 +117,10 @@
   }
 
   // Builds a pipeline-event object for payload metadata.
-  const buildPipelineEvent = (stage) => ({ stage, at: new Date().toISOString() });
+  const buildPipelineEvent = (stage) => ({
+    stage,
+    at: new Date().toISOString(),
+  });
 
   // Captures an image's on-screen position and viewport context.
   function buildPositionFromElement(img) {
@@ -116,12 +142,28 @@
     const rect = imgElement.getBoundingClientRect();
     const cw = preferRect
       ? rect.width || 1
-      : imgElement.offsetWidth || imgElement.clientWidth || imgElement.width || rect.width || 1;
+      : imgElement.offsetWidth ||
+        imgElement.clientWidth ||
+        imgElement.width ||
+        rect.width ||
+        1;
     const ch = preferRect
       ? rect.height || 1
-      : imgElement.offsetHeight || imgElement.clientHeight || imgElement.height || rect.height || 1;
-    const nw = (Number.isFinite(baseW) && baseW > 0 ? baseW : imgElement.naturalWidth) || cw || 1;
-    const nh = (Number.isFinite(baseH) && baseH > 0 ? baseH : imgElement.naturalHeight) || ch || 1;
+      : imgElement.offsetHeight ||
+        imgElement.clientHeight ||
+        imgElement.height ||
+        rect.height ||
+        1;
+    const nw =
+      (Number.isFinite(baseW) && baseW > 0 ? baseW : imgElement.naturalWidth) ||
+      cw ||
+      1;
+    const nh =
+      (Number.isFinite(baseH) && baseH > 0
+        ? baseH
+        : imgElement.naturalHeight) ||
+      ch ||
+      1;
 
     const cs = getComputedStyle(imgElement);
     const fit = cs.objectFit || "fill";
@@ -138,7 +180,9 @@
       return Number.isFinite(n) ? Math.min(pad, Math.max(0, n)) : pad * 0.5;
     };
 
-    const [posX, posYRaw] = (cs.objectPosition || "50% 50%").trim().split(/\s+/);
+    const [posX, posYRaw] = (cs.objectPosition || "50% 50%")
+      .trim()
+      .split(/\s+/);
     const posY = posYRaw || posX;
 
     let sx = cw / nw;
@@ -177,24 +221,17 @@
 
   let toastEl = null;
   let toastTimer = 0;
+  const liveToasts = new Map();
+  const toastVersions = new Map();
+  let toastPageStarted = 0;
 
-  // Shows a transient message in the corner of the page.
-  function showToast(text, ms = 2000) {
-    if (!text) return;
+  function paintToast(text, ms) {
     if (!toastEl) {
       toastEl = document.createElement("div");
       Object.assign(toastEl.style, {
-        position: "fixed",
-        right: "10px",
-        bottom: "10px",
-        zIndex: 2147483647,
-        padding: "8px 10px",
-        borderRadius: "10px",
-        background: "rgba(0,0,0,.75)",
-        color: "#fff",
-        fontSize: "12px",
-        lineHeight: "1.2",
-        maxWidth: "68vw",
+        position: "fixed", right: "10px", bottom: "10px", zIndex: 2147483647,
+        padding: "8px 10px", borderRadius: "10px", background: "rgba(0,0,0,.75)",
+        color: "#fff", fontSize: "12px", lineHeight: "1.2", maxWidth: "68vw",
         pointerEvents: "none",
       });
       document.documentElement.appendChild(toastEl);
@@ -202,20 +239,70 @@
     toastEl.textContent = String(text);
     toastEl.style.display = "block";
     if (toastTimer) clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => {
-      if (toastEl) toastEl.style.display = "none";
-    }, Math.max(800, Number(ms) || 0));
+    toastTimer = 0;
+    if (ms > 0) toastTimer = setTimeout(() => {
+      toastTimer = 0;
+      if (!liveToasts.size && toastEl) toastEl.style.display = "none";
+    }, Math.max(800, ms));
   }
 
+  function showToast(text, ms = 2000, progress = null) {
+    if (!text) return;
+    const id = String(progress?.batchId || "");
+    if (id) {
+      if (progress.pageInstanceId && TP.pageInstanceId &&
+          progress.pageInstanceId !== TP.pageInstanceId) return;
+      if (Number(progress.startedAt) < toastPageStarted) return;
+      const seq = Number(progress.sequence) || 0;
+      if (seq && seq <= (toastVersions.get(id) || 0)) return;
+      if (seq) toastVersions.set(id, seq);
+      while (toastVersions.size > 128) toastVersions.delete(toastVersions.keys().next().value);
+      if (progress.active) {
+        liveToasts.delete(id);
+        liveToasts.set(id, String(text));
+      } else liveToasts.delete(id);
+    }
+    const active = [...liveToasts.values()].at(-1);
+    if (active) return paintToast(active, 0);
+    paintToast(text, Math.max(800, Number(ms) || 2000));
+  }
+
+  TP.clearToasts = () => {
+    toastPageStarted = Date.now();
+    liveToasts.clear(); toastVersions.clear();
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = 0;
+    if (toastEl) toastEl.style.display = "none";
+  };
+
+  // Stable identity for X media variants; keep normUrl strict elsewhere.
+  function imageIdentity(u) {
+    const normalized = normUrl(u);
+    if (!normalized) return "";
+    try {
+      const x = new URL(normalized);
+      if (
+        x.hostname.toLowerCase() === "pbs.twimg.com" &&
+        x.pathname.startsWith("/media/")
+      ) {
+        const format = String(x.searchParams.get("format") || "").toLowerCase();
+        return `${x.origin}${x.pathname}${format ? `?format=${format}` : ""}`;
+      }
+    } catch {}
+    return normalized;
+  }
+
+  const isXHost = () => /^(?:x|twitter)\.com$/i.test(location.hostname || "");
 
   // Dispatches a textphantom:* CustomEvent that the local viewer listens for.
   function emitViewerEvent(type, detail) {
     try {
       window.dispatchEvent(
-        new CustomEvent(type, { detail: detail && typeof detail === "object" ? detail : {} }),
+        new CustomEvent(type, {
+          detail: detail && typeof detail === "object" ? detail : {},
+        }),
       );
-    } catch {
-    }
+    } catch {}
   }
 
   // Sends a message to the service worker, resolving null on error.
@@ -253,6 +340,8 @@
     sendBg,
     getSettings,
     normUrl,
+    imageIdentity,
+    isXHost,
     isHttpish,
     isInlineableImageUrl,
     getBestImgUrl,

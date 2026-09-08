@@ -1,28 +1,11 @@
-"""Async split job queue + worker pools.
-
-
-``/translate`` enqueues a payload and returns a job id immediately; the
-client then uses long-polling to receive updates.  Jobs are split into two
-lanes so cheap Lens-direct work is not blocked by the heavy self-block/AI
-pipeline:
-
-- direct: ``lens_images``, ``lens_text.original``, ``lens_text.translated``
-- ai:     ``lens_text.ai`` (the only lane allowed to use ONNX/self blocks)
-
-The total worker budget is still controlled by ``SERVER_MAX_WORKERS``.  Use
-``TP_DIRECT_MAX_CONCURRENCY`` and ``TP_AI_MAX_CONCURRENCY`` to override the
-automatic split.
-"""
+"""Bounded direct/AI job queues with cancellation and long-poll updates."""
 
 from __future__ import annotations
 
-import asyncio
-import hashlib
-import re
-import time
-import traceback
-import uuid
 from typing import Any, Callable
+from concurrent.futures import ThreadPoolExecutor
+
+import hashlib, asyncio, re, time, traceback, uuid
 
 from backend.config import settings
 from backend.log import dbg, event
@@ -31,27 +14,25 @@ from backend.ai.failure_reason import retry_after_sec as _ai_retry_after_sec
 from backend.ai.rategate import rate_gate, RateGateTimeout, RateGateRejected
 from backend.ai.errors import ModelOutputContractError
 from backend.ai.failure_reason import classify as classify_ai_failure
-from backend.ai.providers import resolve_provider
+from backend.ai.provider_resolution import resolve_provider
+from backend.ai.rate_policy import is_local_target
 from backend import cancellation, trace
 
 Job = dict[str, Any]
-
 
 def _opaque_selector(value: Any) -> str:
     raw = str(value or "").strip()
     return hashlib.sha256(raw.encode("utf-8")).hexdigest() if raw else ""
 
-
 def _provider_attempted(exc: BaseException) -> bool:
     """True only when the exception proves a generation request was made."""
-    if isinstance(exc, ModelOutputContractError):
+    if getattr(exc, "requestDispatched", False) or isinstance(exc, ModelOutputContractError):
         return True
     message = str(exc).lower()
     return any(token in message for token in (
         " http ", "http 4", "http 5", "transport error", "provider timeout",
         "finish_reason", "stop_reason", "empty response", "empty text",
     ))
-
 
 def _result_generation_attempts(result: Any) -> int:
     """Prove a successful provider call from the pipeline result metadata."""
@@ -62,8 +43,43 @@ def _result_generation_attempts(result: Any) -> int:
         return 0
     ai_result = result.get("Ai") if isinstance(result.get("Ai"), dict) else {}
     ai_meta = ai_result.get("meta") if isinstance(ai_result.get("meta"), dict) else {}
-    return 1 if (ai_meta.get("provider") or ai_meta.get("model")) else 0
+    if isinstance(ai_meta.get("usage"), dict) and isinstance(ai_meta["usage"].get("generations"), list):
+        return len(ai_meta["usage"]["generations"])
+    return max(1, int(ai_meta.get("generation_attempts") or 1)) if (ai_meta.get("provider") or ai_meta.get("model")) else 0
 
+def _exception_generation_attempts(exc: BaseException) -> int:
+    meta = getattr(exc, "generationMeta", None)
+    usage = meta.get("usage") if isinstance(meta, dict) else None
+    if isinstance(usage, dict) and isinstance(usage.get("generations"), list):
+        return len(usage["generations"])
+    return 1 if _provider_attempted(exc) else 0
+
+def _queue_error(exc, payload, *, cancelled=False, generation_meta=None):
+    """Preserve server-observed receipts even after render/validation cancellation."""
+    meta = generation_meta or getattr(exc, "generationMeta", None)
+    if not isinstance(meta, dict) or not isinstance(meta.get("usage"), dict):
+        return "cancelled" if cancelled else str(exc)
+    usage = meta["usage"]
+    ai = payload.get("ai") or {}
+    count = len(usage["generations"]) if isinstance(usage.get("generations"), list) else 1
+    safe = {"provider": meta.get("provider") or usage.get("provider") or ai.get("provider"),
+            "model": meta.get("model") or usage.get("model") or ai.get("model"), "usage": usage}
+    return {"code": "cancelled" if cancelled else "PROCESSING_FAILED",
+            "message": "Translation cancelled." if cancelled else "Translation failed after provider execution.",
+            "generationAttempts": count, "requestDispatched": True,
+            "structuralDetails": {"generationMeta": safe}}
+
+def _uses_local_ai_generation(payload: dict[str, Any]) -> bool:
+    """Return whether local generation owns cancellation instead of a read timeout."""
+    if str(payload.get("mode") or "").strip().lower() != "lens_text":
+        return False
+    if str(payload.get("source") or "").strip().lower() != "ai":
+        return False
+    ai = payload.get("ai") if isinstance(payload.get("ai"), dict) else {}
+    return is_local_target(
+        str(ai.get("provider") or "auto"),
+        str(ai.get("base_url") or ""),
+    )
 
 def _trace_ai_terminal(
     payload: dict, job_id: str, event_name: str, *, exc: BaseException | None = None,
@@ -100,7 +116,7 @@ def _trace_ai_terminal(
     if exc is not None:
         data["failureKind"] = classify_ai_failure(exc)
         data["errorType"] = type(exc).__name__
-        if isinstance(exc, ModelOutputContractError):
+        if isinstance(getattr(exc, "structural_details", None), dict):
             data.update(dict(exc.structural_details))
     trace.write(
         "api", "jobs/queue.py", "JobQueue._worker_loop",
@@ -108,24 +124,19 @@ def _trace_ai_terminal(
     )
     trace.flush()
 
-
 class QueueFull(Exception):
     """Raised by :meth:`JobQueue.enqueue` when the pending queue is saturated."""
-
 
 class IdempotencyConflict(Exception):
     """A scoped retry key was reused for different semantic input."""
 
-
-# Feeds the adaptive rate gate from the legacy queue, so the server-side pipeline
-# learns a key's real speed exactly like the v1 route does.
+# Feed verified provider outcomes to the adaptive rate gate.
 def _report_rate_outcome(payload: dict, *, ok: bool, exc: BaseException | None = None) -> None:
     ai = payload.get("ai") if isinstance(payload.get("ai"), dict) else {}
     rate = JobQueue._rate_options(payload)
     if not rate["enabled"] or (rate["rpm"] or 0) > 0:
         return  # pacing off, or the user pinned a number we must not move
-    # The gate keyed the bucket on the RESOLVED provider; feeding it the raw
-    # "auto" would address a bucket that does not exist and learn nothing.
+    # Buckets use the resolved provider, never the request's "auto" alias.
     api_key = str(ai.get("api_key") or "")
     provider = resolve_provider(str(ai.get("provider") or "auto"), api_key)
     model = str(ai.get("model") or "auto")
@@ -135,7 +146,6 @@ def _report_rate_outcome(payload: dict, *, ok: bool, exc: BaseException | None =
         rate_gate.report_rate_limited(
             provider, model, api_key, retry_after_sec=_ai_retry_after_sec(exc)
         )
-
 
 class JobQueue:
     """Owns the job registry, split queues, worker tasks and job events."""
@@ -155,6 +165,11 @@ class JobQueue:
             self.AI: asyncio.Queue(maxsize=qmax),
         }
         self._started = False
+        self._tasks: set[asyncio.Task[Any]] = set()
+        self._executor = ThreadPoolExecutor(
+            max_workers=max(1, int(settings.max_workers)),
+            thread_name_prefix="tp-job",
+        )
         self._ai_workers, self._direct_workers = self._worker_split()
 
     # --- lifecycle ---------------------------------------------------------
@@ -166,12 +181,7 @@ class JobQueue:
         if configured_ai > 0:
             ai_workers = max(1, configured_ai)
         else:
-            # AI lane workers spend almost all their time WAITING — on the rate
-            # gate (async, free) and on the provider HTTP call (network). Heavy
-            # CPU is bounded separately by the pipeline's _CPU_GATE and provider
-            # RPM by the rate gate, so a wider lane is safe and directly cuts
-            # the measured queue_wait_ms (which reached 90s+ with 4 workers on
-            # multi-image AI batches). Raise/lower via TP_AI_MAX_CONCURRENCY.
+            # CPU and provider RPM are bounded independently from this I/O lane.
             ai_workers = max(4, min(12, total // 2))
 
         if configured_direct > 0:
@@ -179,8 +189,7 @@ class JobQueue:
         else:
             direct_workers = max(1, total - ai_workers)
 
-        # If the user only set SERVER_MAX_WORKERS, keep the sum within it.  If
-        # they explicitly set both lane env vars, still avoid accidental runaway.
+        # The two lanes must remain within the total worker budget.
         if direct_workers + ai_workers > total:
             overflow = direct_workers + ai_workers - total
             direct_workers = max(1, direct_workers - overflow)
@@ -194,10 +203,10 @@ class JobQueue:
             return
         self._started = True
         for i in range(self._direct_workers):
-            asyncio.create_task(self._worker_loop(i, self.DIRECT))
+            self._tasks.add(asyncio.create_task(self._worker_loop(i, self.DIRECT)))
         for i in range(self._ai_workers):
-            asyncio.create_task(self._worker_loop(i, self.AI))
-        asyncio.create_task(self._cleanup_loop())
+            self._tasks.add(asyncio.create_task(self._worker_loop(i, self.AI)))
+        self._tasks.add(asyncio.create_task(self._cleanup_loop()))
         dbg(
             "jobs.start",
             {
@@ -206,6 +215,33 @@ class JobQueue:
                 "ai_workers": self._ai_workers,
                 "max_queue_size": settings.max_queue_size,
             },
+        )
+
+    async def shutdown(self, timeout: float = 5.0) -> None:
+        """Cancel and join queue-owned tasks within a bounded shutdown window."""
+        if not self._started:
+            return
+        self._started = False
+        tasks = tuple(task for task in self._tasks if not task.done())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            done, pending = await asyncio.wait(tasks, timeout=max(0.0, timeout))
+            for task in pending:
+                task.cancel()
+            if done:
+                await asyncio.gather(*done, return_exceptions=True)
+        self._tasks.clear()
+        self._executor.shutdown(wait=False, cancel_futures=True)
+
+    async def _run_processor(self, payload: dict) -> dict:
+        """Run sync pipeline work without borrowing asyncio's default pool."""
+        loop = asyncio.get_running_loop()
+        work = loop.run_in_executor(self._executor, self._processor, payload)
+        if _uses_local_ai_generation(payload):
+            return await work
+        return await asyncio.wait_for(
+            work, timeout=max(10.0, settings.job_run_timeout_sec)
         )
 
     # --- public API --------------------------------------------------------
@@ -646,8 +682,9 @@ class JobQueue:
             if str((self._jobs.get(job_id) or {}).get("status") or "") == "aborted":
                 if kind == self.AI:
                     _trace_ai_terminal(
-                        payload, job_id, "cancelled_in_queue",
+                        payload, job_id, "aborted",
                         exc=RuntimeError("cancelled before AI started"), attempts=0,
+                        attempt_state="cancelled_in_queue",
                     )
                 queue.task_done()
                 continue
@@ -678,8 +715,9 @@ class JobQueue:
                          "ts": time.time(), "queue_kind": kind},
                     )
                     _trace_ai_terminal(
-                        payload, job_id, "cancelled_at_rate_gate",
+                        payload, job_id, "aborted",
                         exc=RuntimeError("cancelled before AI started"), attempts=0,
+                        attempt_state="cancelled_at_rate_gate",
                     )
                     queue.task_done()
                     continue
@@ -707,10 +745,21 @@ class JobQueue:
             try:
                 prev = dict(self._jobs.get(job_id) or {})
                 await self._set_job(job_id, {**prev, "status": "running", "ts": time.time(), "queue_kind": kind})
-                result = await asyncio.wait_for(
-                    asyncio.to_thread(self._processor, payload),
-                    timeout=max(10.0, settings.job_run_timeout_sec),
-                )
+                result = await self._run_processor(payload)
+                if cancellation.is_cancelled(payload):
+                    prev = dict(self._jobs.get(job_id) or {})
+                    await self._set_job(job_id, {**prev, "status": "aborted", "result": _queue_error(RuntimeError("cancelled"), payload, cancelled=True,
+                                                     generation_meta=(result.get("Ai") or {}).get("meta") if isinstance(result, dict) else None),
+                                                 "ts": time.time(), "queue_kind": kind})
+                    event("translate.cancelled", {**summary, "providerAbortObservedAt": time.time(),
+                                                   "staleDrawPrevented": True})
+                    if kind == self.AI:
+                        _trace_ai_terminal(
+                            payload, job_id, "aborted", exc=RuntimeError("cancelled"), attempts=_result_generation_attempts(result),
+                            attempt_state="cancelled_after_processor",
+                            duration_ms=(time.perf_counter() - t0) * 1000,
+                        )
+                    continue
                 # Surface both waits in the result the client receives, so the
                 # extension's own timing report can separate "server was busy"
                 # from "your provider's rate limit paced this request".
@@ -748,24 +797,31 @@ class JobQueue:
                     )
             except Exception as e:  # noqa: BLE001
                 tb = traceback.format_exc()
+                cancelled = cancellation.is_cancelled(payload) or str(e).lower() == "cancelled"
                 dbg("jobs.error", {"job_id": job_id, "error": str(e), "traceback": tb})
-                event(
-                    "translate.error",
-                    {**summary, "dt_ms": round((time.perf_counter() - t0) * 1000, 1), "error": str(e)[:240]},
-                    ok=False,
-                )
+                event("translate.cancelled" if cancelled else "translate.error", {
+                    **summary, "dt_ms": round((time.perf_counter() - t0) * 1000, 1),
+                    "error": "cancelled" if cancelled else str(e)[:240],
+                    **({"providerAbortObservedAt": time.time()} if cancelled else {}),
+                }, ok=cancelled)
                 prev = dict(self._jobs.get(job_id) or {})
-                await self._set_job(
-                    job_id,
-                    {**prev, "status": "error", "result": str(e), "traceback": tb, "ts": time.time(), "queue_kind": kind},
-                )
+                await self._set_job(job_id, {
+                    **prev, "status": "aborted" if cancelled else "error",
+                    "result": _queue_error(e, payload, cancelled=cancelled), "traceback": tb,
+                    "ts": time.time(), "queue_kind": kind,
+                })
                 if kind == self.AI:
-                    _report_rate_outcome(payload, ok=False, exc=e)
-                    _trace_ai_terminal(
-                        payload, job_id, "processing", exc=e,
-                        attempts=1 if _provider_attempted(e) else 0,
-                        duration_ms=(time.perf_counter() - t0) * 1000,
-                    )
+                    if cancelled:
+                        _trace_ai_terminal(payload, job_id, "aborted", exc=e, attempts=_exception_generation_attempts(e),
+                                           attempt_state="cancelled",
+                                           duration_ms=(time.perf_counter() - t0) * 1000)
+                    else:
+                        _report_rate_outcome(payload, ok=False, exc=e)
+                        _trace_ai_terminal(
+                            payload, job_id, "processing", exc=e,
+                            attempts=_exception_generation_attempts(e),
+                            duration_ms=(time.perf_counter() - t0) * 1000,
+                        )
             finally:
                 queue.task_done()
 

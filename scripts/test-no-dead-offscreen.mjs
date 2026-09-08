@@ -63,15 +63,23 @@ async function walk(root) {
 
 // --- and the one route that exists is stated, not assumed ---------------------
 {
-  const aiLocal = await readFile(path.join(projectRoot, "src/background/ai-local.js"), "utf8");
+  const aiLocal = await readFile(path.join(projectRoot, "src/background/ai/translation-service.js"), "utf8");
   assert.match(
     aiLocal,
     /unknown AI route \$\{JSON\.stringify\(route\)\}/,
     "an unknown route must throw by name, not fall off the end of translateUnits",
   );
   const jobs = await readFile(path.join(projectRoot, "src/background/jobs.js"), "utf8");
-  assert.match(jobs, /shouldUseDirectLocalAi\(/,
-    "AI routing must use the explicit API-vs-extension Local AI route matrix");
+  const aiExecution = await readFile(
+    path.join(projectRoot, "src/background/pipeline/ai-execution.js"),
+    "utf8",
+  );
+  assert.match(aiExecution, /shouldUseDirectLocalAi\(/,
+    "the AI execution owner must use the explicit API-vs-extension Local AI route matrix");
+  assert.doesNotMatch(jobs, /shouldUseDirectLocalAi\(/,
+    "jobs.js must not duplicate the AI route decision");
+  assert.match(jobs, /createAiExecution\(\{/,
+    "jobs.js must compose the AI execution owner");
 }
 
 console.log("Dead-offscreen test passed: no files, no callers, no permission, unknown routes throw.");

@@ -29,7 +29,8 @@ export const MEMO_MARKER = "<<TP_MEMO>>";
 // layout boundary, matching the legacy server renderer. This matters because
 // stored AI text is semantic data; changing it while parsing a provider answer
 // makes later exports/debugging disagree with the answer that was received.
-const THAI_WORD_GAP_RE = /([\u0E01-\u0E2E\u0E30-\u0E3A\u0E40-\u0E45\u0E47-\u0E4E])\s+(?=[\u0E01-\u0E2E\u0E30-\u0E3A\u0E40-\u0E45\u0E47-\u0E4E])/gu;
+const THAI_WORD_GAP_RE =
+  /([\u0E01-\u0E2E\u0E30-\u0E3A\u0E40-\u0E45\u0E47-\u0E4E])\s+(?=[\u0E01-\u0E2E\u0E30-\u0E3A\u0E40-\u0E45\u0E47-\u0E4E])/gu;
 
 /** Layout-only equivalent of the legacy API's collapse_intra_script_spaces. */
 export function collapseThaiWordGaps(text) {
@@ -48,10 +49,12 @@ export function normalizeAiUnitText(text) {
 export function applyMarkers(paragraphs) {
   if (!Array.isArray(paragraphs) || !paragraphs.length) return "";
   return paragraphs
-    .map((text, i) => `${MARKER_PREFIX}${i}${MARKER_SUFFIX}\n${String(text ?? "").trim()}`)
+    .map(
+      (text, i) =>
+        `${MARKER_PREFIX}${i}${MARKER_SUFFIX}\n${String(text ?? "").trim()}`,
+    )
     .join("\n\n");
 }
-
 
 /**
  * Split a marked answer back into paragraphs.
@@ -67,7 +70,8 @@ export function applyMarkers(paragraphs) {
  */
 export function extractParagraphs(text, expected) {
   const source = String(text || "");
-  if (!source || !(expected > 0) || !source.includes(MARKER_PREFIX)) return null;
+  if (!source || !(expected > 0) || !source.includes(MARKER_PREFIX))
+    return null;
 
   const matches = [...source.matchAll(MARKER_RE)];
   if (!matches.length) return null;
@@ -107,8 +111,14 @@ export function extractDirectParagraphs(text, expected) {
     return { parsed: extractParagraphs(source, expected), memo: "none" };
   }
 
-  const lastExpected = expected > 0 ? source.lastIndexOf(`${MARKER_PREFIX}${expected - 1}${MARKER_SUFFIX}`) : -1;
-  const markerAfterMemo = source.indexOf(MARKER_PREFIX, memoAt + MEMO_MARKER.length);
+  const lastExpected =
+    expected > 0
+      ? source.lastIndexOf(`${MARKER_PREFIX}${expected - 1}${MARKER_SUFFIX}`)
+      : -1;
+  const markerAfterMemo = source.indexOf(
+    MARKER_PREFIX,
+    memoAt + MEMO_MARKER.length,
+  );
   if (lastExpected < 0 || memoAt < lastExpected || markerAfterMemo >= 0) {
     return { parsed: null, memo: "rejected" };
   }

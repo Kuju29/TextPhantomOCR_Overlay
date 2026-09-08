@@ -1,6 +1,5 @@
 """Diagnostic log ingest.
 
-
 The extension cannot write files. Its console is the only record of what it
 decided, and that console is not being watched at the moment a problem
 happens — which is how three regressions in a row ended up being diagnosed by
@@ -19,11 +18,14 @@ endpoint that can be filled by a loop is a disk-space bug.
 from __future__ import annotations
 
 from typing import Any
-
 from fastapi import APIRouter, HTTPException
+from starlette.concurrency import run_in_threadpool
+from backend.trace_shipping import shipping_metadata
+
+import json
 
 from backend import logfile, trace
-from backend.config import settings
+# from backend.config import settings
 from backend.trace_dedupe import TraceIngestDedupe, legacy_shipment_id
 from backend.api.errors import payload as error_payload
 
@@ -33,12 +35,12 @@ MAX_RECORDS_PER_BATCH = 500
 # Trace lines are one per function call, so a batch is far bigger than a log
 # batch. Still bounded: an endpoint that can be filled by a loop is a disk bug.
 MAX_TRACE_PER_BATCH = 4000
+MAX_TRACE_RECORD_BYTES = 16 * 1024
+MAX_TRACE_REQUEST_BYTES = 512 * 1024
 TRACE_DEDUPE_TTL_SEC = 10 * 60
 TRACE_DEDUPE_MAX = 100_000
 
-
 _trace_dedupe = TraceIngestDedupe(TRACE_DEDUPE_TTL_SEC, TRACE_DEDUPE_MAX)
-
 
 @router.post("/v1/logs")
 async def ingest(payload: dict[str, Any]) -> dict:
@@ -66,9 +68,13 @@ async def ingest(payload: dict[str, Any]) -> dict:
     written = logfile.client(records)
     return {"ok": True, "written": written, "dir": str(logfile.log_dir())}
 
-
 @router.post("/v1/trace")
 async def ingest_trace(payload: dict[str, Any]) -> dict:
+    # File/lock waits and privacy formatting must not occupy the API event loop.
+    return await run_in_threadpool(_ingest_trace, payload)
+
+
+def _ingest_trace(payload: dict[str, Any]) -> dict:
     """Append a batch of browser-side TRACE lines to the shared trace file.
 
     Separate from ``/v1/logs`` because the two are different things with
@@ -110,6 +116,15 @@ async def ingest_trace(payload: dict[str, Any]) -> dict:
             status_code=413,
             detail=f"{len(records)} trace records in one batch (max {MAX_TRACE_PER_BATCH})",
         )
+    try:
+        payload_bytes = len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        record_bytes = [len(json.dumps(record, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) for record in records]
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="trace payload is not JSON serializable") from None
+    if payload_bytes > MAX_TRACE_REQUEST_BYTES:
+        raise HTTPException(status_code=413, detail="trace request exceeds byte limit")
+    if any(size > MAX_TRACE_RECORD_BYTES for size in record_bytes):
+        raise HTTPException(status_code=413, detail="trace record exceeds byte limit")
 
     original_records = records
     payload_producer = str(payload.get("producerId") or "").strip()
@@ -143,6 +158,15 @@ async def ingest_trace(payload: dict[str, Any]) -> dict:
         )
 
     written = trace.client(records)
+    health = shipping_metadata(payload.get("shipping"))
+    transport = health.get("transport", {})
+    if transport.get("totalFailures", 0) > 0:
+        fresh, _ = _trace_dedupe.filter_new(current_session, [{
+            "side": "shipping", "trace": "", "producerId": payload_producer,
+            "eventId": f"{transport.get('totalFailures')}:{transport.get('consecutiveFailures')}",
+        }])
+        if fresh:
+            trace.write("api", "api/routes/logs.py", "traceShipping", "note", health)
     return {
         "ok": True,
         "written": written,
@@ -153,7 +177,6 @@ async def ingest_trace(payload: dict[str, Any]) -> dict:
         # absolute directory structure.
         "file": trace.file_name(),
     }
-
 
 @router.get("/v1/logs/where")
 async def where() -> dict:

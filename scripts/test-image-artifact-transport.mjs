@@ -4,7 +4,7 @@ globalThis.chrome = {
   storage: { local: { get: (_keys, cb) => cb({}), set: (_value, cb) => cb?.() } },
 };
 
-const { groupParagraphsWithArtifactFallback } = await import("../src/background/transport.js");
+const { groupParagraphsWithArtifactFallback } = await import("../src/background/transports/groups.js");
 const calls = [];
 let replies = [];
 globalThis.fetch = async (url, init = {}) => {
@@ -21,14 +21,17 @@ const options = {
   imageArtifactToken: "artifact-1",
   imageDataUri: "data:image/png;base64,AQ==",
   tree: { paragraphs: [] },
+  rawToDocument: { raw0: "p0" },
   context: { tp_tab_session: "session-1" },
 };
 
 replies = [{ status: 200, body: { ok: true } }];
 await groupParagraphsWithArtifactFallback("http://localhost:7860", options);
 assert.equal(calls.length, 1);
-assert.equal(calls[0].url.endsWith("/v1/groups"), true);
-assert.deepEqual(Object.keys(calls[0].body).sort(), ["context", "imageArtifactToken", "tree"]);
+assert.equal(calls[0].url.endsWith("/v2/engine/runsextension/groups"), true);
+assert.deepEqual(Object.keys(calls[0].body).sort(), ["context", "imageArtifactToken", "rawToDocument", "tree"]);
+assert.deepEqual(calls[0].body.rawToDocument, options.rawToDocument);
+assert.deepEqual(calls[0].body.tree, options.tree);
 
 for (const code of ["artifact_expired", "artifact_unavailable"]) {
   calls.length = 0;
@@ -42,6 +45,11 @@ for (const code of ["artifact_expired", "artifact_unavailable"]) {
   assert.equal("imageDataUri" in calls[0].body, false);
   assert.equal(calls[1].body.imageDataUri, options.imageDataUri);
   assert.equal("imageArtifactToken" in calls[1].body, false);
+  assert.deepEqual(calls.map(({ body }) => body.rawToDocument), [
+    options.rawToDocument,
+    options.rawToDocument,
+  ], `${code} must preserve the raw-to-document identity map on the byte retry`);
+  assert.deepEqual(calls.map(({ body }) => body.tree), [options.tree, options.tree]);
 }
 
 for (const [status, code] of [
@@ -64,4 +72,4 @@ await assert.rejects(
 );
 assert.equal(calls.length, 0);
 
-console.log("Image artifact transport test passed: token-first, bounded legacy retry, and abort hold.");
+console.log("Image artifact transport test passed: canonical grouping, raw-to-document body, token fallback, and abort hold.");

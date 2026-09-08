@@ -3,6 +3,8 @@
  *
  */
 
+import { cloudRatePresets } from "./ai/providers/cloud-registry.js";
+
 /** REST/meta endpoints on the TextPhantom API. */
 export const API_PATHS = {
   HEALTH: "/health",
@@ -25,14 +27,25 @@ export const API_PATHS = {
   // the service worker can decode it with `src/shared/lens-tree.js`. A browser
   // cannot do this upload itself; see `README.md#architecture-and-ownership`.
   LENS_RAW: "/v1/lens/raw",
-  // ONNX + the paragraph merge, for vertical pages only.
-  GROUPS: "/v1/groups",
   // Service 3: text units only. The image/tree stays in the extension.
   AI_TRANSLATE_V1: "/v1/ai/translate",
+  // Canonical engine-owned routes. Grouping has no compatibility alias: its
+  // raw-to-document contract belongs exclusively to runs:Extension.
+  ENGINE_EXTENSION_LENS_RAW: "/v2/engine/runsextension/lens/raw",
+  ENGINE_EXTENSION_GROUPS: "/v2/engine/runsextension/groups",
+  ENGINE_EXTENSION_AI_TRANSLATE: "/v2/engine/runsextension/ai/translate",
+  ENGINE_API_TRANSLATE: "/v2/engine/runsapi/translate",
   AI_RESOLVE: "/ai/resolve",
   AI_PROBE: "/ai/probe",
   AI_PROMPT_DEFAULT: "/ai/prompt/default",
 };
+
+/** Select an engine-owned route only when the server explicitly advertises it. */
+export function engineApiPath(capabilities, canonicalPath, compatibilityAlias) {
+  return capabilities?.engineRoutesV2 === true
+    ? canonicalPath
+    : compatibilityAlias;
+}
 
 /** Translation modes shown in the popup. */
 export const MODES = [
@@ -83,10 +96,10 @@ export const UPLOAD_FORMATS = ["webp", "png", "jpeg"];
 export const DEFAULT_RELAYOUT_TRANSLATED = true;
 
 /**
- * Cloud AI starts with a conservative, explicit cost guard. Users can opt out,
- * but a fresh install must not fan out an entire chapter against a paid key.
+ * Manual Cloud-AI request pacing is opt-in. Provider quotas, the image queue,
+ * bounded concurrency and real 429 responses remain active on a fresh install.
  */
-export const DEFAULT_RATE_LIMIT_ENABLED = true;
+export const DEFAULT_RATE_LIMIT_ENABLED = false;
 export const DEFAULT_RATE_RPM = 30;
 export const DEFAULT_RATE_BURST = 4;
 
@@ -101,22 +114,7 @@ export const RATE_RPM_MAX = 600;
 export const RATE_BURST_MIN = 1;
 export const RATE_BURST_MAX = 60;
 
-/**
- * Optional manual pacing presets. Auto/empty does NOT apply these values;
- * TextPhantom lets the provider enforce its real quota and adapts to actual
- * backpressure. These are only references for users who deliberately opt in.
- * @type {Record<string, {rpm:number, burst:number, note?:string}>}
- */
-export const RATE_PRESETS = {
-  gemini: { rpm: 12, burst: 4, note: "free tier is ~15/min" },
-  openai: { rpm: 60, burst: 8 },
-  anthropic: { rpm: 50, burst: 8 },
-  openrouter: { rpm: 60, burst: 8, note: "free models are much lower" },
-  groq: { rpm: 30, burst: 6 },
-  together: { rpm: 60, burst: 8 },
-  deepseek: { rpm: 60, burst: 8 },
-  featherless: { rpm: 30, burst: 6 },
-};
+export const RATE_PRESETS = Object.freeze(cloudRatePresets());
 
 /** Fallback policy for providers not listed above. */
 export const RATE_PRESET_DEFAULT = { rpm: 30, burst: 4 };
@@ -246,33 +244,39 @@ export const FALLBACK_LANGS = [
   { code: "ny", name: "Chichewa" },
 ];
 
-// AI providers that run on the user's own machine; nothing about them is metered.
-export const LOCAL_AI_PROVIDERS = new Set([
-  "ollama", "lmstudio", "localai", "jan", "textgen",
-  "koboldcpp", "vllm", "llamafile", "gpt4all", "llamacpp",
-  "customlocal", "local", "llama",
-]);
+import { isNamedLocalProvider } from "./ai/providers/local-registry.js";
+import { isLocalHostUrl as providerLocalHostUrl } from "./ai/providers/local-spec.js";
 
-// Returns whether a provider id names a runtime on the user's own machine.
 export function isLocalAiProvider(provider) {
-  return LOCAL_AI_PROVIDERS.has(String(provider || "").trim().toLowerCase());
+  const id = String(provider || "")
+    .trim()
+    .toLowerCase();
+  return isNamedLocalProvider(id) || id === "customlocal";
+}
+
+// Mirrors the API server's is_local_target(): named local providers or an
+// exact loopback destination. This intentionally excludes bind addresses,
+// LAN suffix guesses and hostnames that merely contain "localhost".
+export function isLocalAiTarget(provider, baseUrl = "") {
+  if (isLocalAiProvider(provider)) return true;
+  let host = "";
+  try {
+    host = new URL(String(baseUrl || "").trim()).hostname
+      .toLowerCase()
+      .replace(/\.$/, "");
+  } catch {
+    return false;
+  }
+  if (host === "localhost" || host === "::1" || host === "[::1]") return true;
+  const parts = host.split(".");
+  return (
+    parts.length === 4 &&
+    parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255) &&
+    Number(parts[0]) === 127
+  );
 }
 
 // Returns whether a URL points at this machine or the local network.
 export function isLocalHostUrl(url) {
-  const raw = String(url || "").trim();
-  if (!raw) return false;
-  let host = "";
-  try {
-    host = new URL(raw).hostname.toLowerCase();
-  } catch {
-    return false;
-  }
-  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) return true;
-  if (host === "::1" || host === "[::1]" || host === "0.0.0.0") return true;
-  if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
-  if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
-  if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
-  if (/^172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}$/.test(host)) return true;
-  return false;
+  return providerLocalHostUrl(url);
 }

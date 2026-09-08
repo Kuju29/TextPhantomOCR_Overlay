@@ -9,8 +9,8 @@ raw exception/provider response text must never be passed as ``extra``.
 from __future__ import annotations
 
 from typing import Any
-import re
-import socket
+
+import socket, re
 
 from backend.log import event
 
@@ -20,7 +20,6 @@ _RESERVED = {
     "failedStage", "category", "retryable", "httpStatus", "traceId",
     "upstreamStatus",
 }
-
 
 def payload(
     *, code: str, message: str, user_message: str, origin: str, stage: str,
@@ -57,7 +56,6 @@ def payload(
         out.update({key: value for key, value in extra.items() if key not in _RESERVED})
     return out
 
-
 def failure_event(route: str, detail: dict[str, Any], **safe_meta: Any) -> None:
     """Emit exactly the fields an operator needs in one short terminal line."""
     event(
@@ -82,14 +80,15 @@ def failure_event(route: str, detail: dict[str, Any], **safe_meta: Any) -> None:
         ok=False,
     )
 
-
 def provider_status(exc: BaseException) -> int | None:
     """Extract an upstream HTTP status from the clients' sanitised messages."""
+    typed = getattr(exc, "status", None)
+    if isinstance(typed, int) and 100 <= typed <= 599:
+        return typed
     import re
 
     match = re.search(r"\bHTTP\s+(\d{3})\b", str(exc), re.IGNORECASE)
     return int(match.group(1)) if match else None
-
 
 def provider_http_semantics(status: int | None) -> tuple[str, bool]:
     """Stable code/retry decision for an upstream HTTP response.
@@ -105,7 +104,6 @@ def provider_http_semantics(status: int | None) -> tuple[str, bool]:
         return "provider_http", False
     return "provider_http", status in (408, 425, 429, 500, 502, 503, 504)
 
-
 def origin_for(stage: str, code: str = "") -> str:
     """Infer provenance from the failing pipeline stage before generic code."""
     value = str(stage or "").lower()
@@ -118,7 +116,6 @@ def origin_for(stage: str, code: str = "") -> str:
     if str(code).startswith("provider_") and not value:
         return "upstream_ai"
     return "api"
-
 
 def stage_failure_semantics(
     stage: str, *, default_code: str, default_message: str,
@@ -161,12 +158,10 @@ def stage_failure_semantics(
         "httpStatus": None,
     }
 
-
 def ai_rate_feedback_allowed(stage: str) -> bool:
     """Only an identified AI/provider stage may tune the AI quota gate."""
     value = str(stage or "").lower()
     return any(marker in value for marker in ("provider", "ai_", "model"))
-
 
 def future_result_with_stage(future: Any, stage: str) -> Any:
     """Return a worker result, stamping its exception only when still unnamed.
@@ -184,7 +179,6 @@ def future_result_with_stage(future: Any, stage: str) -> Any:
             except Exception:
                 pass
         raise
-
 
 def safe_cause_class(exc: BaseException) -> str:
     """Coarse, non-secret diagnostic class for an internal exception."""
@@ -204,7 +198,6 @@ def safe_cause_class(exc: BaseException) -> str:
         return "decode_or_value"
     return "internal"
 
-
 def safe_validation_reason(detail: Any) -> dict[str, str]:
     """Return bounded validation metadata without rejected input values."""
     if isinstance(detail, list) and detail and isinstance(detail[0], dict):
@@ -222,7 +215,6 @@ def safe_validation_reason(detail: Any) -> dict[str, str]:
         "invalid"
     )
     return {"field": field_match.group(1) if field_match else "", "reason": reason}
-
 
 def validation_error_payload(
     errors: Any, *, trace_id: str = "",
@@ -248,7 +240,6 @@ def validation_error_payload(
         correlation=correlation,
     )
 
-
 def request_correlation(request: Any) -> dict[str, str]:
     """Correlation available without consuming or logging a request body."""
     headers = getattr(request, "headers", {})
@@ -261,7 +252,6 @@ def request_correlation(request: Any) -> dict[str, str]:
         "clientVersion": headers.get("x-tp-client-version") or headers.get("x-client-version"),
     }
     return {key: str(value)[:160] for key, value in pairs.items() if value not in (None, "")}
-
 
 def merged_request_correlation(
     request: Any, fallback: dict[str, Any] | None = None,
@@ -281,7 +271,6 @@ def merged_request_correlation(
     }
     merged.update(request_correlation(request))
     return merged
-
 
 def cancelled_payload(*, trace_id: str = "", stage: str = "cancel",
                       correlation: dict[str, Any] | None = None) -> dict[str, Any]:

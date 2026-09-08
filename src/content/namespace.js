@@ -37,13 +37,13 @@
         },
         () => void chrome.runtime.lastError,
       );
-    } catch {
-    }
+    } catch {}
   }
 
   // Converts a log argument into something that survives being flattened to text.
   function readable(value) {
-    if (typeof value === "string" || value === null || value === undefined) return value;
+    if (typeof value === "string" || value === null || value === undefined)
+      return value;
     if (typeof value !== "object") return value;
     try {
       return JSON.stringify(value);
@@ -65,8 +65,12 @@
     error: (...a) => emit("error", a),
   };
   TP.setLogLevel = (name) => {
-    const next = String(name || "").trim().toLowerCase();
-    currentLevelName = Object.prototype.hasOwnProperty.call(LEVELS, next) ? next : "warn";
+    const next = String(name || "")
+      .trim()
+      .toLowerCase();
+    currentLevelName = Object.prototype.hasOwnProperty.call(LEVELS, next)
+      ? next
+      : "warn";
     currentLevel = LEVELS[currentLevelName];
     return currentLevelName;
   };
@@ -100,28 +104,66 @@
 
   try {
     chrome.runtime.sendMessage(
-      { type: "TP_CONTENT_READY", href: location.href, ver: TP.version, top: TP.isTop },
+      {
+        type: "TP_CONTENT_READY",
+        href: location.href,
+        ver: TP.version,
+        top: TP.isTop,
+      },
       () => void chrome.runtime.lastError,
     );
-  } catch {
-  }
+  } catch {}
 
   if (TP.isTop && !globalThis.__tpLocationNotifyInstalled) {
     globalThis.__tpLocationNotifyInstalled = true;
     let lastHref = location.href;
     let canSend = true;
+    const xStatusRoute = (href) => {
+      try {
+        const u = new URL(href);
+        if (!/^(?:x|twitter)\.com$/i.test(u.hostname)) return null;
+        const m = u.pathname.match(
+          /^\/([^/]+)\/status\/(\d+)(?:\/photo\/(\d+))?\/?$/,
+        );
+        return m ? { status: m[2], photo: m[3] || "" } : null;
+      } catch {
+        return null;
+      }
+    };
+    const preservesXPhotoTarget = (before, after) => {
+      const a = xStatusRoute(before);
+      const b = xStatusRoute(after);
+      return Boolean(
+        a &&
+        b &&
+        a.status === b.status &&
+        Boolean(a.photo) !== Boolean(b.photo),
+      );
+    };
     const notify = () => {
       if (location.href === lastHref) return;
+      const previousHref = lastHref;
       lastHref = location.href;
-      try {
-        TP.resetForNavigation?.("spa_navigation");
-      } catch (e) {
-        TP.log.warn("navigation reset failed", { error: e?.message || String(e) });
+      const preserveTarget = preservesXPhotoTarget(previousHref, location.href);
+      if (!preserveTarget) {
+        try {
+          TP.resetForNavigation?.("spa_navigation");
+        } catch (e) {
+          TP.log.warn("navigation reset failed", {
+            error: e?.message || String(e),
+          });
+        }
       }
       if (!canSend) return;
       try {
         chrome.runtime.sendMessage(
-          { type: "TP_LOCATION_CHANGED", href: location.href, top: true, ver: TP.version },
+          {
+            type: "TP_LOCATION_CHANGED",
+            href: location.href,
+            previousHref,
+            top: true,
+            ver: TP.version,
+          },
           () => void chrome.runtime.lastError,
         );
       } catch {
@@ -142,5 +184,9 @@
     addEventListener("hashchange", notify, { passive: true });
   }
 
-  TP.log.info("loaded", { href: location.href, ver: TP.version, top: TP.isTop });
+  TP.log.info("loaded", {
+    href: location.href,
+    ver: TP.version,
+    top: TP.isTop,
+  });
 })();

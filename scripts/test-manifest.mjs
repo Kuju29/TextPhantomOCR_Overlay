@@ -54,6 +54,9 @@ const mustPrecede = [
   ["content/target-key.js", "content/overlay.js"],
   ["content/image-finder.js", "content/overlay.js"],
   ["content/erase-canvas.js", "content/overlay.js"],
+  ["content/sites/mangadex/adapter.js", "content/mangadex.js"],
+  ["content/sites/mangadex/adapter.js", "content/sites/mangadex/collector.js"],
+  ["content/sites/mangadex/collector.js", "content/mangadex.js"],
   ["content/overlay.js", "content/mangadex.js"],
   ["content/overlay.js", "content/messaging.js"],
   ["content/messaging.js", "content/index.js"],
@@ -73,14 +76,14 @@ for (const [first, second] of mustPrecede) {
   for (const name of ["onNextFrame", "nextFrame"]) {
     check(domUtils.includes(name), `dom-utils.js must export ${name} for hidden-tab scheduling`);
   }
-  const overlay = await readFile(path.join(sourceRoot, "content/overlay.js"), "utf8");
+  const overlay = await readFile(path.join(sourceRoot, "content/overlay/mount.js"), "utf8");
   check(
     !/requestAnimationFrame/.test(overlay),
-    "overlay.js must schedule through TP.onNextFrame, not requestAnimationFrame directly",
+    "overlay mount must schedule through TP.onNextFrame, not requestAnimationFrame directly",
   );
   check(
     overlay.includes("resetForNavigation"),
-    "overlay.js must expose resetForNavigation for client-side route changes",
+    "overlay mount must expose resetForNavigation for client-side route changes",
   );
 }
 

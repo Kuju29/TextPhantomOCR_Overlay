@@ -14,16 +14,19 @@
   padding: 4px 7px;
   word-break: break-word;
 }
+
 .tp-field-msg[data-type="error"] {
   color: #ffd7d2;
   background: color-mix(in srgb, #c0392b 26%, transparent);
   border: 1px solid color-mix(in srgb, #c0392b 55%, transparent);
 }
+
 .tp-field-msg[data-type="warn"] {
   color: #ffe6b3;
   background: color-mix(in srgb, #d29a2b 22%, transparent);
   border: 1px solid color-mix(in srgb, #d29a2b 50%, transparent);
 }
+
 .tp-field-msg[data-type="info"] {
   color: var(--tp-muted);
   background: var(--tp-surface);
@@ -168,6 +171,7 @@ body {
     opacity: 0;
     transform: translateY(3px);
   }
+
   to {
     opacity: 1;
     transform: none;
@@ -218,6 +222,20 @@ label {
 
 .label-row {
   justify-content: space-between;
+}
+
+.label-row--inline {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 4px;
+  min-width: 0;
+}
+
+.label-row--inline a {
+  font-size: 12px;
+  line-height: 1.2;
+  white-space: nowrap;
 }
 
 .label-actions {
@@ -285,6 +303,147 @@ textarea {
   font-size: 11px;
   color: var(--tp-muted);
   line-height: 1.45;
+}
+
+.engine-mode-availability {
+  color: var(--tp-warn);
+  font-weight: 600;
+}
+
+.ai-usage-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 9px;
+  border: 1px solid var(--tp-line);
+  border-radius: var(--tp-radius-sm);
+  background: var(--tp-surface);
+}
+
+.ai-usage-summary {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 3px 6px;
+  font-size: 10.5px;
+}
+
+.ai-usage-summary>span:first-child {
+  color: var(--tp-accent);
+  font-weight: 700;
+}
+
+.ai-usage-summary strong {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.ai-usage-summary>span:last-child {
+  color: var(--tp-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-usage-reset {
+  flex: 0 0 auto;
+  width: auto;
+  padding: 4px 7px;
+  font-size: 10px;
+}
+
+.ai-usage-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ai-usage-history-dialog {
+  width: min(320px, calc(100vw - 20px));
+  max-height: min(520px, calc(100vh - 20px));
+  padding: 0;
+  color: var(--tp-text);
+  background: var(--tp-bg);
+  border: 1px solid var(--tp-line);
+  border-radius: var(--tp-radius);
+  box-shadow: 0 16px 40px rgb(0 0 0 / 45%);
+}
+
+.ai-usage-history-dialog::backdrop {
+  background: rgb(0 0 0 / 58%);
+}
+
+.ai-usage-history-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 11px;
+  background: var(--tp-bg);
+  border-bottom: 1px solid var(--tp-line);
+}
+
+.ai-usage-history-head h2 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.ai-usage-history-close {
+  width: auto;
+  padding: 4px 7px;
+  font-size: 10px;
+}
+
+.ai-usage-history-list {
+  max-height: min(450px, calc(100vh - 80px));
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.ai-usage-history-item {
+  display: grid;
+  gap: 3px;
+  padding: 8px;
+  font-size: 10.5px;
+  line-height: 1.35;
+  background: var(--tp-surface);
+  border: 1px solid var(--tp-line);
+  border-radius: var(--tp-radius-sm);
+}
+
+.ai-usage-history-item+.ai-usage-history-item {
+  margin-top: 6px;
+}
+
+.ai-usage-history-item-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 6px;
+}
+
+.ai-usage-history-item-title span {
+  color: var(--tp-accent);
+  font-weight: 700;
+}
+
+.ai-usage-history-item-title strong {
+  overflow-wrap: anywhere;
+}
+
+.ai-usage-history-period,
+.ai-usage-history-engines,
+.ai-usage-history-empty {
+  color: var(--tp-muted);
+}
+
+.ai-usage-history-empty {
+  margin: 12px;
+  text-align: center;
 }
 
 .note {
@@ -478,3 +637,16 @@ textarea {
   margin-left: 4px;
   cursor: default;
 }
+
+.api-offline-gate {
+  margin-bottom: 12px;
+  padding: 10px;
+  border: 1px solid color-mix(in srgb, var(--danger, #ef4444) 65%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--danger, #ef4444) 12%, transparent);
+  line-height: 1.45;
+}
+
+.api-offline-gate[hidden] { display: none; }
+.api-offline-gate strong { display: block; margin-bottom: 3px; }
+.api-offline-gate button { margin-top: 8px; }

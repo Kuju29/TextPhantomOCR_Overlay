@@ -55,7 +55,9 @@ export async function begin({ itemId, request, generation }) {
 function step(state, { reason = "", operation } = {}) {
   return (workflowId) => {
     if (!workflowId) return Promise.resolve(null);
-    return track(`advance:${state}`, () => store.advance(workflowId, state, { reason, operation }));
+    return track(`advance:${state}`, () =>
+      store.advance(workflowId, state, { reason, operation }),
+    );
   };
 }
 
@@ -85,8 +87,8 @@ export const aiDegraded = (workflowId, reason) =>
 export const textReady = (workflowId) => step(STATES.TEXT_READY)(workflowId);
 
 // Records that the overlay's markup or canvas exists.
-export const renderReady = (workflowId) => step(STATES.RENDER_READY)(workflowId);
-
+export const renderReady = (workflowId) =>
+  step(STATES.RENDER_READY)(workflowId);
 
 // Records the apply request before the overlay is handed to the page.
 export const applyRequested = (workflowId, operation) =>
@@ -95,9 +97,9 @@ export const applyRequested = (workflowId, operation) =>
 // Records that the page accepted the overlay, the workflow's only success state.
 export const applied = (workflowId) => step(STATES.APPLIED)(workflowId);
 
-
 // Records that the workflow ended unsuccessfully, with its reason.
-export const failed = (workflowId, reason) => step(STATES.FAILED, { reason })(workflowId);
+export const failed = (workflowId, reason) =>
+  step(STATES.FAILED, { reason })(workflowId);
 
 // Cancels every workflow belonging to a tab.
 export function cancelTab(tabId, reason = "navigation") {

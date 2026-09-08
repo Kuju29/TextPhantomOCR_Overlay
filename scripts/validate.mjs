@@ -1,12 +1,18 @@
 import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isForbiddenProjectArchiveEntry } from "./source-package-policy.mjs";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const distRoot = path.join(projectRoot, "dist");
 const packageRoot = path.join(projectRoot, "packages");
 const targets = ["chrome", "edge", "opera", "firefox", "thunderbird"];
 const failures = [];
+const baseManifest = JSON.parse(
+  await readFile(path.join(projectRoot, "platform", "base.json"), "utf8"),
+);
+const version = baseManifest.version;
+const releaseName = "TextPhantom-V3";
 
 function assert(condition, message) {
   if (!condition) failures.push(message);
@@ -28,6 +34,26 @@ async function walk(root) {
     else if (entry.isFile()) result.push(absolute);
   }
   return result;
+}
+
+function zipEntryNames(buffer) {
+  const names = [];
+  const endSignature = Buffer.from([0x50, 0x4b, 0x05, 0x06]);
+  const endOffset = buffer.lastIndexOf(endSignature);
+  if (endOffset < 0 || endOffset + 22 > buffer.length) return names;
+  const entryCount = buffer.readUInt16LE(endOffset + 10);
+  let offset = buffer.readUInt32LE(endOffset + 16);
+  for (let index = 0; index < entryCount && offset + 46 <= buffer.length; index += 1) {
+    if (buffer.readUInt32LE(offset) !== 0x02014b50) break;
+    const nameLength = buffer.readUInt16LE(offset + 28);
+    const extraLength = buffer.readUInt16LE(offset + 30);
+    const commentLength = buffer.readUInt16LE(offset + 32);
+    const end = offset + 46 + nameLength + extraLength + commentLength;
+    if (end > endOffset) break;
+    names.push(buffer.subarray(offset + 46, offset + 46 + nameLength).toString("utf8"));
+    offset = end;
+  }
+  return names;
 }
 
 function collectManifestFiles(manifest) {
@@ -68,6 +94,7 @@ for (const target of targets) {
   }
 
   assert(manifest.manifest_version === 3, `${target}: manifest_version must be 3`);
+  assert(manifest.version === version, `${target}: version must be ${version}`);
   for (const file of collectManifestFiles(manifest)) {
     assert(await exists(path.join(root, file)), `${target}: missing ${file}`);
   }
@@ -154,19 +181,26 @@ for (const target of targets) {
 
 const packageFiles = await readdir(packageRoot);
 for (const target of [
-  "Chrome-Web-Store",
-  "Microsoft-Edge-Add-ons",
-  "Opera-Add-ons",
-  "Firefox-AMO",
-  "Thunderbird-ATN",
-  "Cross-Browser-Project",
+  `${releaseName}-Chrome-Web-Store-${version}.zip`,
+  `${releaseName}-Microsoft-Edge-Add-ons-${version}.zip`,
+  `${releaseName}-Opera-Add-ons-${version}.zip`,
+  `${releaseName}-Firefox-AMO-${version}.zip`,
+  `${releaseName}-Thunderbird-ATN-${version}.zip`,
+  `${releaseName}-${version}.zip`,
 ]) {
-  assert(
-    packageFiles.some((name) => name.includes(target) && name.endsWith(".zip")),
-    `package missing: ${target}`,
-  );
+  assert(packageFiles.includes(target), `package missing: ${target}`);
 }
 assert(packageFiles.includes("SHA256SUMS.txt"), "SHA256SUMS.txt is missing");
+
+const expectedProjectZipName = `${releaseName}-${version}.zip`;
+const projectZipName = packageFiles.find((name) => name === expectedProjectZipName);
+if (projectZipName) {
+  const entries = zipEntryNames(await readFile(path.join(packageRoot, projectZipName)));
+  assert(entries.includes("api/README.md"), "project package missing: api/README.md");
+  for (const entry of entries) {
+    assert(!isForbiddenProjectArchiveEntry(entry), `project package contains excluded project path: ${entry}`);
+  }
+}
 
 if (failures.length) {
   console.error("Validation failed:");

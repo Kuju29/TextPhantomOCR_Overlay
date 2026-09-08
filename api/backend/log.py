@@ -1,6 +1,5 @@
 """Small logging helpers used across the backend.
 
-
 Production defaults are intentionally quiet: no uvicorn access spam, no health
 polls, and no debug payload dumps.  ``event`` emits one compact JSON line for
 important outcomes only (for example a translation job finishing or failing).
@@ -9,9 +8,10 @@ important outcomes only (for example a translation job finishing or failing).
 
 from __future__ import annotations
 
-import json
-from datetime import datetime, timedelta, timezone
 from typing import Any
+from datetime import datetime, timedelta, timezone
+
+import json
 
 from backend import logfile
 from backend.config import settings
@@ -32,11 +32,9 @@ _ERROR_ONLY_MODES = {"errors", "error", "err", "warn", "warnings"}
 # Thailand is UTC+7 year-round (no DST).
 _TH_TZ = timezone(timedelta(hours=7))
 
-
 def _ts() -> str:
     """Current time in Thailand, e.g. ``[2026-06-11 01:41:11]``."""
     return datetime.now(_TH_TZ).strftime("[%Y-%m-%d %H:%M:%S]")
-
 
 def _json(data: Any) -> str:
     # Use the exact same redaction for stdout and JSONL. Keeping two sanitisers
@@ -45,7 +43,6 @@ def _json(data: Any) -> str:
     if len(text) > _MAX_PAYLOAD_CHARS:
         text = text[:_MAX_PAYLOAD_CHARS] + "…"
     return text
-
 
 def event(tag: str, data: Any | None = None, *, ok: bool = True) -> None:
     """Emit one compact production log line for an important outcome.
@@ -80,7 +77,6 @@ def event(tag: str, data: Any | None = None, *, ok: bool = True) -> None:
     except Exception:
         # Logging must never break request handling.
         pass
-
 
 def dbg(tag: str, data: Any | None = None) -> None:
     """Print a tagged debug line only when ``TP_DEBUG`` is enabled.

@@ -1,6 +1,5 @@
 """Google Lens HTTP client.
 
-
 Two-step flow:
 1. ``POST https://lens.google.com/v3/upload`` with the image — Lens responds
    with a 302 redirect to a result URL.
@@ -10,18 +9,11 @@ Two-step flow:
 
 from __future__ import annotations
 
-import base64
-import copy
-import hashlib
-import json
-import os
-import threading
-import time
 from collections import OrderedDict
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
-import httpx
+import httpx, copy, base64, hashlib, json, os, threading, time
 
 from backend.lens import cookie
 from backend import trace
@@ -55,13 +47,11 @@ _client: httpx.Client | None = None
 _client_jar_key = ""
 _limits = httpx.Limits(max_connections=32, max_keepalive_connections=16)
 
-
 def _jar_key(ck: dict) -> str:
     """Identity of a cookie jar, so a refresh is noticed and nothing else is."""
     return hashlib.sha256(
         json.dumps(ck or {}, sort_keys=True, default=str).encode("utf-8")
     ).hexdigest()
-
 
 def _session(ck: dict) -> httpx.Client:
     """The pooled client for this cookie jar, rebuilt when the jar changes.
@@ -92,7 +82,6 @@ def _session(ck: dict) -> httpx.Client:
             pass
     return _client
 
-
 def close_session() -> None:
     """Drop the pooled client. For tests and shutdown."""
     global _client, _client_jar_key
@@ -113,25 +102,21 @@ _LENS_CACHE_TTL_SEC = 600.0
 _lens_cache: OrderedDict[str, tuple[float, dict[str, Any]]] = OrderedDict()
 _lens_cache_lock = threading.Lock()
 
-
 class _Flight:
     def __init__(self) -> None:
         self.done = threading.Event()
         self.data: dict[str, Any] | None = None
         self.error: BaseException | None = None
 
-
 _FLIGHT_MAX = max(1, int(os.environ.get("TP_LENS_SINGLEFLIGHT_MAX", "128")))
 _flights: dict[str, _Flight] = {}
 _flights_lock = threading.Lock()
-
 
 def _cookie_trace(state: str, **data: Any) -> None:
     """Emit compact recovery telemetry when the active trace build supports it."""
     note = getattr(trace, "note", None)
     if callable(note):
         note("lens_cookie", {"state": state, **data}, file="lens/client.py")
-
 
 def _lens_cache_get(key: str) -> dict[str, Any] | None:
     with _lens_cache_lock:
@@ -146,7 +131,6 @@ def _lens_cache_get(key: str) -> dict[str, Any] | None:
         # Deep-copy out so callers can never mutate the cached response.
         return copy.deepcopy(data)
 
-
 def _lens_cache_set(key: str, data: dict[str, Any]) -> None:
     with _lens_cache_lock:
         _lens_cache[key] = (time.time(), copy.deepcopy(data))
@@ -154,10 +138,8 @@ def _lens_cache_set(key: str, data: dict[str, Any]) -> None:
         while len(_lens_cache) > _LENS_CACHE_MAX:
             _lens_cache.popitem(last=False)
 
-
 class LensSessionError(RuntimeError):
     """The Lens redirect lacked session params (stale/rejected cookie)."""
-
 
 def _to_translated_url(redirect_url: str, lang: str) -> str:
     """Rewrite a Lens result URL into its ``translatedimage`` equivalent.
@@ -185,7 +167,6 @@ def _to_translated_url(redirect_url: str, lang: str) -> str:
     }
     return "https://lens.google.com/translatedimage?" + urlencode(params)
 
-
 def _has_lens_text(data: dict[str, Any]) -> bool:
     """Whether a Lens response actually carries OCR text/paragraphs.
 
@@ -198,7 +179,6 @@ def _has_lens_text(data: dict[str, Any]) -> bool:
         or data.get("translatedParagraphs")
         or str(data.get("originalTextFull") or "").strip()
     )
-
 
 def _fetch_lens_once(img_bytes: bytes, lang: str, ck: dict) -> dict[str, Any]:
     """One upload+fetch round trip against Lens with the given cookie jar.
@@ -227,7 +207,6 @@ def _fetch_lens_once(img_bytes: bytes, lang: str, ck: dict) -> dict[str, Any]:
     if body.startswith(")]}'"):
         body = body[5:]
     return json.loads(body)
-
 
 def fetch_lens_data(image_path: str, lang: str, firebase_url: str | None = None) -> dict[str, Any]:
     """Upload ``image_path`` to Lens and return the parsed translation JSON.
@@ -314,10 +293,8 @@ def fetch_lens_data(image_path: str, lang: str, firebase_url: str | None = None)
             with _flights_lock:
                 _flights.pop(cache_key, None)
 
-
 def _b64_pad(s: str) -> str:
     return s + "=" * ((4 - (len(s) % 4)) % 4)
-
 
 def decode_image_url_to_data_uri(image_url: str | None) -> str | None:
     """Best-effort decode of the Lens ``imageUrl`` field into a data URI.

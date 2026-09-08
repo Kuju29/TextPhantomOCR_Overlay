@@ -6,14 +6,12 @@ from backend.render.region import box_rotation_deg
 
 VERTICAL_TILT_DEG = 78.0
 
-
 def presentation_rotation_copy(tree: dict | None) -> tuple[dict | None, dict]:
     """Return a normalized deep copy and its traceable normalization stats."""
     result = copy.deepcopy(tree)
     stats = {}
     normalize_group_rotation_signs(result, stats=stats)
     return result, stats
-
 
 def normalize_group_rotation_signs(
     tree: dict | None, *, stats: dict | None = None

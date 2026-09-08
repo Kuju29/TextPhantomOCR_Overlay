@@ -29,16 +29,21 @@ import {
   normalizeAiModel,
   normalizePrompt,
 } from "./prompt.js";
-import { localAiPreset, normalizeLocalAiAdapter } from "./local-ai-config.js";
-import { isLocalAiProvider, isLocalHostUrl } from "./constants.js";
+import {
+  localAiPreset,
+  normalizeLocalAiAdapter,
+} from "./ai/providers/local-registry.js";
+import { classifyAiRuntime } from "./ai-settings-contract.js";
+import { normalizeEngineModePreference } from "./engine-mode.js";
+
+// aiProfilesV1 is intentionally not read here yet. readFullSettings() remains
+// the compatibility boundary until the popup/background activation stage.
 
 /** @returns {"lens_images"|"lens_text"} */
 export function normalizeMode(value) {
   const v = String(value || "").trim();
   return v === "lens_images" || v === "lens_text" ? v : DEFAULT_MODE;
 }
-
-
 
 /**
  * Read a stored boolean that has a non-false default.
@@ -70,7 +75,9 @@ function readCount(value, fallback) {
  * the default moved off PNG.
  */
 export function normalizeUploadFormat(value) {
-  const v = String(value || "").trim().toLowerCase();
+  const v = String(value || "")
+    .trim()
+    .toLowerCase();
   return UPLOAD_FORMATS.includes(v) ? v : DEFAULT_UPLOAD_FORMAT;
 }
 
@@ -86,7 +93,14 @@ export function normalizeUploadQuality(value) {
  *   uploadFormat:string, uploadQuality:number}>}
  */
 export async function readCoreSettings() {
-  const it = await getStorage(["mode", "lang", "sources", "aiKey", "uploadFormat", "uploadQuality"]);
+  const it = await getStorage([
+    "mode",
+    "lang",
+    "sources",
+    "aiKey",
+    "uploadFormat",
+    "uploadQuality",
+  ]);
   return {
     mode: normalizeMode(it.mode),
     lang: typeof it.lang === "string" && it.lang ? it.lang : DEFAULT_LANG,
@@ -136,7 +150,6 @@ export async function readFullSettings(options = {}) {
     "rateProfile",
     "rateRpm",
     "rateBurst",
-    "aiLocalUnlimited",
     "aiLocalCapacityMode",
     "aiLocalManualConcurrency",
     "aiLocalCapabilityHint",
@@ -149,10 +162,18 @@ export async function readFullSettings(options = {}) {
   // that effective language too; otherwise an Auto Thai request can silently
   // receive (and cache) the popup's English prompt.
   const requestedLang = String(options?.lang || "").trim();
-  const lang = requestedLang || (typeof it.lang === "string" && it.lang ? it.lang : DEFAULT_LANG);
-  const aiModel = normalizeAiModel(typeof it.aiModel === "string" ? it.aiModel : "auto");
-  const aiProvider = typeof it.aiProvider === "string" ? it.aiProvider.trim().toLowerCase() : "";
-  const localAi = isLocalAiProvider(aiProvider) || isLocalHostUrl(it.aiBaseUrl);
+  const lang =
+    requestedLang ||
+    (typeof it.lang === "string" && it.lang ? it.lang : DEFAULT_LANG);
+  const aiModel = normalizeAiModel(
+    typeof it.aiModel === "string" ? it.aiModel : "auto",
+  );
+  const aiProvider =
+    typeof it.aiProvider === "string" ? it.aiProvider.trim().toLowerCase() : "";
+  const localAi = classifyAiRuntime({
+    aiProvider,
+    aiBaseUrl: it.aiBaseUrl,
+  }).local;
   let localAiAdapter = null;
   if (localAi) {
     try {
@@ -160,18 +181,22 @@ export async function readFullSettings(options = {}) {
       // user currently sees. Only Custom Local owns a stored JSON adapter.
       // This prevents a stale adapter URL from silently winning over a newly
       // typed aiBaseUrl when the popup closes before blur.
-      const adapterSource = aiProvider === "customlocal"
-        ? it.localAiAdapter
-        : { ...(localAiPreset(aiProvider) || {}), baseUrl: it.aiBaseUrl };
-      localAiAdapter = normalizeLocalAiAdapter(
-        adapterSource,
-        { provider: aiProvider },
-      );
-    } catch { localAiAdapter = null; }
+      const adapterSource =
+        aiProvider === "customlocal"
+          ? it.localAiAdapter
+          : { ...(localAiPreset(aiProvider) || {}), baseUrl: it.aiBaseUrl };
+      localAiAdapter = normalizeLocalAiAdapter(adapterSource, {
+        provider: aiProvider,
+      });
+    } catch {
+      localAiAdapter = null;
+    }
   }
 
   const migration = migratePromptMap(
-    it.aiPromptByLang && typeof it.aiPromptByLang === "object" ? it.aiPromptByLang : {},
+    it.aiPromptByLang && typeof it.aiPromptByLang === "object"
+      ? it.aiPromptByLang
+      : {},
   );
   const map = migration.map;
   let changed = migration.changed;
@@ -180,7 +205,9 @@ export async function readFullSettings(options = {}) {
   // to the legacy single `aiPrompt` field.
   const key = makePromptKey(lang, aiModel);
   const autoKey = makePromptKey(lang, "auto");
-  let aiPrompt = Object.prototype.hasOwnProperty.call(map, key) ? String(map[key] || "") : "";
+  let aiPrompt = Object.prototype.hasOwnProperty.call(map, key)
+    ? String(map[key] || "")
+    : "";
 
   if (!aiPrompt && Object.prototype.hasOwnProperty.call(map, autoKey)) {
     aiPrompt = String(map[autoKey] || "");
@@ -208,8 +235,16 @@ export async function readFullSettings(options = {}) {
     mode: normalizeMode(it.mode),
     lang,
     sources: typeof it.sources === "string" ? it.sources : DEFAULT_SOURCE,
-    maxConcurrency: Number.isFinite(Number(it.maxConcurrency)) ? Number(it.maxConcurrency) : DEFAULT_MAX_CONCURRENCY,
-    aiKey: localAi ? "" : (typeof it.aiCloudKey === "string" ? it.aiCloudKey : (typeof it.aiKey === "string" ? it.aiKey : "")),
+    maxConcurrency: Number.isFinite(Number(it.maxConcurrency))
+      ? Number(it.maxConcurrency)
+      : DEFAULT_MAX_CONCURRENCY,
+    aiKey: localAi
+      ? ""
+      : typeof it.aiCloudKey === "string"
+        ? it.aiCloudKey
+        : typeof it.aiKey === "string"
+          ? it.aiKey
+          : "",
     aiModel,
     aiProvider,
     aiBaseUrl: typeof it.aiBaseUrl === "string" ? it.aiBaseUrl : "",
@@ -241,40 +276,54 @@ export async function readFullSettings(options = {}) {
     // Text overlays are extension-first. Ignore the hidden legacy false value;
     // it caused an entire batch to fall back to server erase/render/PNG.
     clientBackground: true,
-    // Reasoning control (Gemini): "default" = think normally, "off" = fastest.
-    aiThinking: it.aiThinking === "off" ? "off" : "default",
+    // Reasoning is opt-in. Legacy/default values migrate to Off; models that
+    // require reasoning are surfaced explicitly by capability metadata.
+    aiThinking: it.aiThinking === "on" ? "on" : "off",
     // Kept separate from cloud thinking so enabling/disabling a local model
     // never silently changes Gemini. New Local AI installs default to off.
-    aiLocalThinking: ["default", "off", "on"].includes(it.aiLocalThinking)
-      ? it.aiLocalThinking
-      : "off",
+    aiLocalThinking: it.aiLocalThinking === "on" ? "on" : "off",
     aiPrompt,
     // Orientation relayout for the Translated overlay. Default ON.
-    relayoutTranslated: readBool(it.relayoutTranslated, DEFAULT_RELAYOUT_TRANSLATED),
+    relayoutTranslated: readBool(
+      it.relayoutTranslated,
+      DEFAULT_RELAYOUT_TRANSLATED,
+    ),
     // Optional AI pacing. 0 for rpm/burst = provider-managed; no TextPhantom RPM cap.
     rateLimitEnabled: readBool(it.rateLimitEnabled, DEFAULT_RATE_LIMIT_ENABLED),
-    // Local pacing defaults off, while concurrency remains bounded by the
-    // scheduler/runtime. Preserve an explicitly stored false value.
     // "extension" is the current engine; "api" restores the pre-v2 split where
-    // the server ran Lens, ONNX, AI and rendering.
-    engineMode: it.engineMode === "api" ? "api" : "extension",
-    aiLocalUnlimited: readBool(it.aiLocalUnlimited, true),
-    // Capacity is independent from time/RPM pacing. Legacy "unlimited" only
-    // removed delays and must never turn into unbounded parallel generation.
-    aiLocalCapacityMode: ["auto", "safe", "manual"].includes(it.aiLocalCapacityMode)
+    // the server ran Lens, Lens graph grouping, AI and rendering.
+    engineMode: normalizeEngineModePreference(it.engineMode),
+    // Local time/RPM pacing is always disabled. Capacity remains bounded.
+    aiLocalCapacityMode: ["auto", "safe", "manual"].includes(
+      it.aiLocalCapacityMode,
+    )
       ? it.aiLocalCapacityMode
       : "auto",
-    aiLocalManualConcurrency: Math.min(4, Math.max(1, readCount(it.aiLocalManualConcurrency, 1))),
-    aiLocalCapabilityHint: it.aiLocalCapabilityHint && typeof it.aiLocalCapabilityHint === "object"
-      ? it.aiLocalCapabilityHint
-      : null,
+    aiLocalManualConcurrency: Math.min(
+      4,
+      Math.max(1, readCount(it.aiLocalManualConcurrency, 1)),
+    ),
+    aiLocalCapabilityHint:
+      it.aiLocalCapabilityHint && typeof it.aiLocalCapabilityHint === "object"
+        ? it.aiLocalCapabilityHint
+        : null,
     apiLocalUnlimited: readBool(it.apiLocalUnlimited, true),
-    rateProfile: ["auto", "stable", "balanced", "fast", "custom"].includes(it.rateProfile)
+    rateProfile: ["auto", "stable", "balanced", "fast", "custom"].includes(
+      it.rateProfile,
+    )
       ? it.rateProfile
-      : (readBool(it.rateLimitEnabled, DEFAULT_RATE_LIMIT_ENABLED) ? "custom" : "auto"),
-    rateRpm: readBool(it.rateLimitEnabled, DEFAULT_RATE_LIMIT_ENABLED) && readCount(it.rateRpm, DEFAULT_RATE_RPM) === 0
-      ? DEFAULT_RATE_RPM : readCount(it.rateRpm, DEFAULT_RATE_RPM),
-    rateBurst: readBool(it.rateLimitEnabled, DEFAULT_RATE_LIMIT_ENABLED) && readCount(it.rateBurst, DEFAULT_RATE_BURST) === 0
-      ? DEFAULT_RATE_BURST : readCount(it.rateBurst, DEFAULT_RATE_BURST),
+      : readBool(it.rateLimitEnabled, DEFAULT_RATE_LIMIT_ENABLED)
+        ? "custom"
+        : "auto",
+    rateRpm:
+      readBool(it.rateLimitEnabled, DEFAULT_RATE_LIMIT_ENABLED) &&
+      readCount(it.rateRpm, DEFAULT_RATE_RPM) === 0
+        ? DEFAULT_RATE_RPM
+        : readCount(it.rateRpm, DEFAULT_RATE_RPM),
+    rateBurst:
+      readBool(it.rateLimitEnabled, DEFAULT_RATE_LIMIT_ENABLED) &&
+      readCount(it.rateBurst, DEFAULT_RATE_BURST) === 0
+        ? DEFAULT_RATE_BURST
+        : readCount(it.rateBurst, DEFAULT_RATE_BURST),
   };
 }

@@ -15,8 +15,10 @@
 
     TP.showToast("TextPhantom: loading MangaDex pages…", 2600);
 
-    if (typeof TP.mdSiteCollect === "function") {
-      const viaAdapter = await TP.mdSiteCollect(mode, lang).catch(() => null);
+    if (typeof TP.collectMangaDexPages === "function") {
+      const viaAdapter = await TP.collectMangaDexPages(mode, lang).catch(
+        () => null,
+      );
       if (Array.isArray(viaAdapter) && viaAdapter.length) return viaAdapter;
     }
 
@@ -44,7 +46,7 @@
       }
     });
 
-    const urls = (await TP.fetchMangaDexChapterUrls())?.urls || [];
+    const urls = (await TP.getMangaDexManifest())?.urls || [];
     for (const src of urls) {
       const u = TP.normUrl(src);
       if (!TP.isHttpish(u) || isCached(u) || seen.has(u)) continue;
@@ -76,7 +78,13 @@
     return {
       ok: true,
       items,
-      stats: { candidates: urls.length + posBySrc.size, accepted: items.length, skipped: 0, duplicates: 0, reasons: {} },
+      stats: {
+        candidates: urls.length + posBySrc.size,
+        accepted: items.length,
+        skipped: 0,
+        duplicates: 0,
+        reasons: {},
+      },
     };
   }
 
@@ -86,22 +94,28 @@
 
       if (type === "TP_PING") return sendResponse({ ok: true });
       if (type === "TP_DIAGNOSTICS_STATE") {
-        const detail = msg?.detail === "full" ? "full" : msg?.enabled ? "compact" : "off";
+        const detail =
+          msg?.detail === "full" ? "full" : msg?.enabled ? "compact" : "off";
         TP.setLogLevel?.(msg?.consoleLevel || "warn");
         TP.setTracingEnabled?.(Boolean(msg?.enabled), detail);
-        const wrapped = detail === "full" ? (TP.installTrace?.() || 0) : 0;
-        return sendResponse({ ok: true, detail, consoleLevel: TP.getLogLevel?.() || "warn", wrapped });
+        const wrapped = detail === "full" ? TP.installTrace?.() || 0 : 0;
+        return sendResponse({
+          ok: true,
+          detail,
+          consoleLevel: TP.getLogLevel?.() || "warn",
+          wrapped,
+        });
       }
       if (type === "TP_KEEPALIVE_START") {
-        TP.keepAlive.start(msg?.ms);
+        TP.keepAlive.start(msg?.ms, msg?.batchId);
         return sendResponse({ ok: true });
       }
       if (type === "TP_KEEPALIVE_STOP") {
-        TP.keepAlive.stop();
+        TP.keepAlive.stop(msg?.batchId);
         return sendResponse({ ok: true });
       }
       if (type === "TP_TOAST") {
-        TP.showToast(msg?.text || msg?.message || "", msg?.ms || 1600);
+        TP.showToast(msg?.text || msg?.message || "", msg?.ms ?? 1600, msg?.progress);
         return sendResponse({ ok: true });
       }
       if (type === "BATCH_STATUS_UPDATE") {
@@ -113,17 +127,29 @@
         return sendResponse({ ok: true });
       }
       if (type === "TP_BULK_INSERT") {
-        const r = await TP.applyInsertBatch?.(msg?.items || [], { chunkSize: msg?.chunkSize });
-        return sendResponse(r || { ok: false, bulk: true, error: "bulk insert unavailable" });
+        const r = await TP.applyInsertBatch?.(msg?.items || [], {
+          chunkSize: msg?.chunkSize,
+        });
+        return sendResponse(
+          r || { ok: false, bulk: true, error: "bulk insert unavailable" },
+        );
       }
 
       const { mode, lang } = await TP.getSettings();
 
       if (type === "GET_IMAGES") {
         const resp = await collectImages(mode, lang);
-        const items = Array.isArray(resp) ? resp : Array.isArray(resp?.items) ? resp.items : [];
+        const items = Array.isArray(resp)
+          ? resp
+          : Array.isArray(resp?.items)
+            ? resp.items
+            : [];
         const stats = Array.isArray(resp) ? null : resp?.stats || null;
-        TP.log.info("GET_IMAGES", { returned: items.length, skipped: stats?.skipped || 0, host: location.host });
+        TP.log.info("GET_IMAGES", {
+          returned: items.length,
+          skipped: stats?.skipped || 0,
+          host: location.host,
+        });
         return sendResponse({ ok: true, items, stats });
       }
 
@@ -140,9 +166,20 @@
         const wantMode = String(msg?.overrides?.mode || "").trim() || mode;
         const wantLang = String(msg?.overrides?.lang || "").trim() || lang;
         const payload = img
-          ? await TP.buildPayloadFromImage(img, wantMode, wantLang, "img_one", "context_menu_single", true)
+          ? await TP.buildPayloadFromImage(
+              img,
+              wantMode,
+              wantLang,
+              "img_one",
+              "context_menu_single",
+              true,
+            )
           : null;
         return sendResponse({ ok: Boolean(payload), payload });
+      }
+
+      if (type === "TP_IMAGE_STATUS") {
+        return sendResponse(TP.updateImageStatus?.(msg) || {ok:false});
       }
 
       if (type === "REPLACE_IMAGE") {
@@ -160,7 +197,7 @@
         return sendResponse(r || { ok: true });
       }
 
-      if (type === "OVERLAY_HTML") {
+      if (type === "OVERLAY_HTML" || type === "TP_TRANSLATION_BIND") {
         const r = await TP.applyInsertMessage?.(msg);
         return sendResponse(r || { ok: false, error: "overlay unavailable" });
       }
@@ -169,15 +206,22 @@
         try {
           const url = String(msg?.url || "").trim();
           if (!url) return sendResponse({ ok: false, error: "no url" });
-          const res = await fetch(url, { credentials: "include", redirect: "follow" });
-          if (!res.ok) return sendResponse({ ok: false, error: `HTTP ${res.status}` });
-          const mime = String(res.headers.get("content-type") || "").split(";")[0].trim();
+          const res = await fetch(url, {
+            credentials: "include",
+            redirect: "follow",
+          });
+          if (!res.ok)
+            return sendResponse({ ok: false, error: `HTTP ${res.status}` });
+          const mime = String(res.headers.get("content-type") || "")
+            .split(";")[0]
+            .trim();
           if (mime && !mime.toLowerCase().startsWith("image/")) {
             return sendResponse({ ok: false, error: `Not an image: ${mime}` });
           }
           const ab = await res.arrayBuffer();
           const bytes = new Uint8Array(ab);
-          if (bytes.length < 64) return sendResponse({ ok: false, error: "Image too small" });
+          if (bytes.length < 64)
+            return sendResponse({ ok: false, error: "Image too small" });
           if (bytes.length > 25 * 1024 * 1024) {
             return sendResponse({ ok: false, error: "Image too large" });
           }
@@ -185,7 +229,10 @@
           const CHUNK = 0x8000;
           for (let i = 0; i < bytes.length; i += CHUNK)
             bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
-          return sendResponse({ ok: true, dataUri: `data:${mime || "image/jpeg"};base64,${btoa(bin)}` });
+          return sendResponse({
+            ok: true,
+            dataUri: `data:${mime || "image/jpeg"};base64,${btoa(bin)}`,
+          });
         } catch (e) {
           return sendResponse({ ok: false, error: e?.message || String(e) });
         }

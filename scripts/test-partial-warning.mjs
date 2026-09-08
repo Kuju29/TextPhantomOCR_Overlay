@@ -13,8 +13,11 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-const renderer = await readFile(new URL("../src/processors/render-overlay.js", import.meta.url), "utf8");
-const overlay = await readFile(new URL("../src/content/overlay.js", import.meta.url), "utf8");
+const renderer = await readFile(new URL("../src/processors/render/renderer.js", import.meta.url), "utf8");
+const overlay = [
+  await readFile(new URL("../src/content/overlay.js", import.meta.url), "utf8"),
+  await readFile(new URL("../src/content/overlay/local-render.js", import.meta.url), "utf8"),
+].join("\n");
 
 // --- the report distinguishes them ------------------------------------------
 {
@@ -70,7 +73,7 @@ const overlay = await readFile(new URL("../src/content/overlay.js", import.meta.
   // would raise both warnings and look like two problems.
   assert.match(
     overlay,
-    /const structural = report\.missingLayer\.filter\(\(id\) => !unanswered\.includes\(id\)\)/,
+    /const structural\s*=\s*report\.missingLayer\.filter\(\s*\(id\)\s*=>\s*!unanswered\.includes\(id\),?\s*\)/,
     "the two lists must not overlap in the log",
   );
 }

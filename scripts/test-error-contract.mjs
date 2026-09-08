@@ -32,6 +32,7 @@ assert.equal(makeTpError({ message: "Failed to fetch", stage: "translate" }).cod
 assert.equal(makeTpError({ message: "timed out", stage: "translate" }).code, "NET_TIMEOUT");
 assert.equal(makeTpError({ message: "cancelled", stage: "poll" }).code, "CANCELLED");
 assert.equal(makeTpError({ message: "HTTP 404", stage: "lens" }).code, "LENS_FAILED");
+assert.equal(makeTpError({ message: "group failure", stage: "grouping" }).code, "GROUP_FAILED");
 assert.equal(makeTpError({ code: "AI_MODEL_UNAVAILABLE", message: "HTTP 404", stage: "ai" }).code, "AI_MODEL_UNAVAILABLE");
 
 for (const code of [
@@ -52,14 +53,19 @@ for (const code of [
   "provider_timeout", "provider_http", "unsupported_provider",
   "generation_stopped", "empty_output", "invalid_output_contract",
   "incomplete_output", "ai_not_configured", "unsafe_base_url",
-  "provider_key_mismatch", "image_blocked", "onnx_failed",
+  "provider_key_mismatch", "image_blocked",
   "provider_quota_exhausted", "billing_required",
   "provider_auth_failed", "provider_payload_too_large", "model_output_contract", "local_ai_error",
+  "provider_model_not_found", "provider_model_access_denied", "provider_content_blocked",
+  "provider_client_contract_error", "provider_failed",
+  "api_unreachable", "api_starting", "api_caps_legacy", "api_http_error",
 ]) {
   const error = makeTpError({ code, origin: "api", stage: "ai" });
   assert.notEqual(error.userMessage, "เกิดข้อผิดพลาดที่ไม่ทราบสาเหตุ", `${code} needs a public message`);
   assert.equal(error.code, code, "normalising display text must not change the retry machine code");
 }
+assert.match(makeTpError({ code: "provider_client_contract_error" }).userMessage, /TextPhantom|Provider/);
+assert.match(makeTpError({ code: "provider_model_not_found" }).userMessage, /โมเดล/);
 for (const code of ["provider_quota_exhausted", "billing_required"]) {
   const publicError = publicTpError({ code, origin: "upstream_ai", stage: "provider_request", httpStatus: 502, upstreamStatus: 403 });
   assert.equal(publicError.code, code);

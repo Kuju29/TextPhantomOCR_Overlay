@@ -1,0 +1,72 @@
+{
+  "purpose": "Manual six-direction semantic evaluation, not exact-match gold translations. Supplied aligned translations can disagree; judge each source independently. No model evaluation has been run.",
+  "directions": [
+    {
+      "source": "en",
+      "target": "ja"
+    },
+    {
+      "source": "en",
+      "target": "th"
+    },
+    {
+      "source": "ja",
+      "target": "en"
+    },
+    {
+      "source": "ja",
+      "target": "th"
+    },
+    {
+      "source": "th",
+      "target": "en"
+    },
+    {
+      "source": "th",
+      "target": "ja"
+    }
+  ],
+  "targetCriteria": {
+    "th": "Omit obvious person pronouns and possessives; preserve needed register without guessed gender or particle quotas.",
+    "ja": "Omit recoverable subjects while preserving contrast and evidenced politeness; no invented gender or rank.",
+    "en": "Use necessary grammatical subjects/pronouns and natural fragments; preserve meaning."
+  },
+  "cases": [
+    {
+      "page": 4,
+      "sources": {
+        "en": "PUSH, DUNT PULL.",
+        "ja": "引くんじゃない押すんだ",
+        "th": "แค่ดันเข้ามา ก็เข้ามาได้แล้ว"
+      },
+      "criteria": "English contains evident DUNT OCR noise; EN/JA explicitly contrast push with do not pull. Preserve negation for these sources. Thai source has different detail: do not hallucinate missing negation from another language."
+    },
+    {
+      "page": 4,
+      "sources": {
+        "en": "HAPPY BIRTHDAY.",
+        "ja": "お誕生日おめでとうございます",
+        "th": "สุขสันต์ วันเกิดนะคะ"
+      },
+      "criteria": "Keep birthday greeting and source-supported politeness; do not infer speaker gender from Japanese politeness."
+    },
+    {
+      "page": 4,
+      "sources": {
+        "en": "THANK YOU.",
+        "ja": "ありがとう",
+        "th": "ขอบคุณ มากนะ"
+      },
+      "criteria": "Keep gratitude, with no invented cause or unnecessary speaker/listener pronouns."
+    },
+    {
+      "page": 7,
+      "sources": {
+        "en": "WHAT DO YOU WANT?",
+        "ja": "なんの用だ",
+        "th": "เธอมา หาฉัน ทําไม"
+      },
+      "criteria": "Keep question about purpose; preserve source-supported directness without adding hostility."
+    }
+  ]
+}

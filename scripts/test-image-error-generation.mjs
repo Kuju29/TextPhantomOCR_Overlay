@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { imageErrorMessage } from "../src/background/error-message.js";
 
-const overlay = await readFile(new URL("../src/content/overlay.js", import.meta.url), "utf8");
+const overlay = await readFile(new URL("../src/content/overlay/message-controller.js", import.meta.url), "utf8");
 
 const generationA = { pageInstanceId: "page-A", targetKey: "image", targetRevision: 0 };
 const messageA = imageErrorMessage(

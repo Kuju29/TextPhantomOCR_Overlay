@@ -19,7 +19,9 @@
 // Reported as: two Thai blocks printed on top of each other in the white space
 // between two speech balloons on a vertical Japanese page.
 import assert from "node:assert/strict";
-import { renderOverlay } from "../src/processors/render-overlay.js";
+import { readFile } from "node:fs/promises";
+import { OVERLAY_CSS, renderOverlay } from "../src/processors/render/renderer.js";
+import { OVERLAY_CLASSES } from "../src/processors/render/markup.js";
 
 // --- the smallest DOM this renderer needs ------------------------------------
 function makeEl() {
@@ -101,6 +103,7 @@ function render(specs) {
       const top = (pct("top") / 100) * H;
       boxes.push({
         text: el.textContent,
+        classes: [...el._cls],
         left,
         top,
         right: left + (pct("width") / 100) * W,
@@ -110,6 +113,32 @@ function render(specs) {
     for (const child of el.children || []) walk(child);
   })(root);
   return { boxes, report };
+}
+
+// Host pages commonly own the generic `.bubble` class. A rule such as
+// `.bubble { position:static!important; left:0!important; top:0!important }`
+// must not select TextPhantom's blocks and collapse their inline geometry.
+{
+  const { boxes } = render([
+    { id: "A", columns: [[1155, 870, 1200, 1050]], source: "待って", ai: "รอก่อน" },
+    { id: "B", columns: [[915, 1105, 960, 1220]], source: "行こう", ai: "ไปกันเถอะ" },
+  ]);
+  assert.equal(boxes.length, 2);
+  assert.ok(boxes.every((box) => box.classes.includes("tp-bubble")));
+  assert.ok(boxes.every((box) => !box.classes.includes("bubble")),
+    "host `.bubble!important` selectors must not match overlay blocks");
+  assert.ok(OVERLAY_CLASSES.includes("tp-bubble"));
+  assert.ok(!OVERLAY_CLASSES.includes("bubble"));
+  assert.match(OVERLAY_CSS, /\.tp-line\.tp-bubble\{/);
+  assert.doesNotMatch(OVERLAY_CSS, /\.tp-line\.bubble\{/);
+
+  const pythonRenderer = await readFile(
+    new URL("../api/backend/render/html/css.py", import.meta.url), "utf8",
+  );
+  assert.match(pythonRenderer, /\.tp-line\.tp-bubble\{/,
+    "server CSS must use the browser renderer's namespaced class");
+  assert.doesNotMatch(pythonRenderer, /class=["']tp-line bubble\b/,
+    "server markup must not expose the host-owned generic bubble class");
 }
 
 const overlapArea = (a, b) => (

@@ -60,7 +60,10 @@
     if (ics.visibility !== "visible" || Number(ics.opacity) === 0) return null;
 
     const r0 = img.getBoundingClientRect();
-    let left = r0.left, top = r0.top, right = r0.right, bottom = r0.bottom;
+    let left = r0.left,
+      top = r0.top,
+      right = r0.right,
+      bottom = r0.bottom;
     let node = img.parentElement;
     for (let i = 0; node && i < CLIP_WALK_MAX; i++, node = node.parentElement) {
       const cs = getComputedStyle(node);
@@ -75,7 +78,14 @@
         if (right <= left || bottom <= top) return null;
       }
     }
-    return { left, top, right, bottom, width: right - left, height: bottom - top };
+    return {
+      left,
+      top,
+      right,
+      bottom,
+      width: right - left,
+      height: bottom - top,
+    };
   }
 
   // Returns a button's viewport placement, or null when it should stay hidden.
@@ -91,7 +101,10 @@
       r.top > window.innerHeight ||
       r.left > window.innerWidth;
     if (tooSmall || offScreen) return null;
-    return { left: Math.round(r.right - BTN_SIZE - 6), top: Math.round(r.top + 6) };
+    return {
+      left: Math.round(r.right - BTN_SIZE - 6),
+      top: Math.round(r.top + 6),
+    };
   }
 
   // Writes a placement onto a button, or hides it.
@@ -139,18 +152,25 @@
     btn.textContent = "⏳";
 
     TP.setLastRightClick?.(img);
-    const srcUrl = TP.normUrl(TP.getBestImgUrl(img)) || img.currentSrc || img.src || "";
+    const srcUrl =
+      TP.normUrl(TP.getBestImgUrl(img)) || img.currentSrc || img.src || "";
 
-    chrome.runtime.sendMessage({ type: "TP_RUN_TRANSLATE_ONE", srcUrl }, (resp) => {
-      void chrome.runtime.lastError;
-      setTimeout(() => {
-        btn.dataset.busy = "";
-        btn.textContent = "🔍";
-      }, 4000);
-      if (resp && resp.ok === false) {
-        TP.showToast?.("TextPhantom: " + (resp.error || "translate failed"), 4000);
-      }
-    });
+    chrome.runtime.sendMessage(
+      { type: "TP_RUN_TRANSLATE_ONE", srcUrl },
+      (resp) => {
+        void chrome.runtime.lastError;
+        setTimeout(() => {
+          btn.dataset.busy = "";
+          btn.textContent = "🔍";
+        }, 4000);
+        if (resp && resp.ok === false) {
+          TP.showToast?.(
+            "TextPhantom: " + (resp.error || "translate failed"),
+            4000,
+          );
+        }
+      },
+    );
   }
 
   function makeButton(img) {
@@ -201,7 +221,10 @@
       }
       if (!enabled) return;
       rescan();
-      window.addEventListener("scroll", scheduleReposition, { passive: true, capture: true });
+      window.addEventListener("scroll", scheduleReposition, {
+        passive: true,
+        capture: true,
+      });
       window.addEventListener("resize", scheduleReposition, { passive: true });
       window.addEventListener("load", scheduleRescan, true);
       observer = new MutationObserver(scheduleRescan);
@@ -247,6 +270,5 @@
       if (changes[STORAGE_KEY].newValue) enable();
       else disable();
     });
-  } catch {
-  }
+  } catch {}
 })();

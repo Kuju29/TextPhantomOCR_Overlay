@@ -1,0 +1,154 @@
+{
+  "original": {
+    "lines": [
+      {
+        "paragraph": "horizontal",
+        "classes": "tp-line",
+        "style": "left:10.0000%;top:13.7500%;width:30.0000%;height:2.5000%;transform:rotate(0.0000deg);font-size:calc(var(--tp-font-scale,1) * 17px);line-height:calc(var(--tp-font-scale,1) * 18px);",
+        "text": "原文<&>"
+      },
+      {
+        "paragraph": "vertical-right",
+        "classes": "tp-line vert",
+        "style": "left:73.2000%;top:25.0000%;width:9.6000%;height:30.0000%;font-size:calc(var(--tp-font-scale,1) * 46px);line-height:calc(var(--tp-font-scale,1) * 48px);",
+        "text": "日本"
+      },
+      {
+        "paragraph": "vertical-left",
+        "classes": "tp-line vert",
+        "style": "left:61.2000%;top:25.0000%;width:9.6000%;height:30.0000%;font-size:calc(var(--tp-font-scale,1) * 46px);line-height:calc(var(--tp-font-scale,1) * 48px);",
+        "text": "語文"
+      },
+      {
+        "paragraph": "",
+        "classes": "tp-line tp-gtext tp-bubble",
+        "style": "left:61.2000%;top:25.0000%;width:21.6000%;height:30.0000%;transform:rotate(0.0000deg);font-size:calc(var(--tp-font-scale,1) * 70px);line-height:calc(var(--tp-font-scale,1) * 74px);",
+        "text": "日本語文"
+      },
+      {
+        "paragraph": "",
+        "classes": "tp-line tp-gtext tp-bubble",
+        "style": "left:10.0000%;top:13.7500%;width:30.0000%;height:2.5000%;transform:rotate(0.0000deg);font-size:calc(var(--tp-font-scale,1) * 16px);line-height:calc(var(--tp-font-scale,1) * 17px);",
+        "text": "原文<&>"
+      }
+    ],
+    "report": {
+      "source": "original",
+      "paragraphs": 3,
+      "lines": 3,
+      "skippedNoText": 0,
+      "skippedNoGeometry": 0,
+      "missingLayer": [],
+      "aiUnanswered": [],
+      "coveredByGroup": 0,
+      "groupsDrawn": 0,
+      "aiBlocksOverlapping": 0,
+      "aiBlocksOverlappingIds": [],
+      "approximate": false,
+      "rotationMixedGroups": 0,
+      "rotationFlips": 0
+    }
+  },
+  "translated": {
+    "lines": [
+      {
+        "paragraph": "horizontal",
+        "classes": "tp-line",
+        "style": "left:10.0000%;top:13.7500%;width:30.0000%;height:2.5000%;transform:rotate(0.0000deg);font-size:calc(var(--tp-font-scale,1) * 17px);line-height:calc(var(--tp-font-scale,1) * 18px);",
+        "text": "ข้อความแปล<&>"
+      },
+      {
+        "paragraph": "vertical-right",
+        "classes": "tp-line",
+        "style": "left:54.0000%;top:37.0000%;width:48.0000%;height:6.0000%;transform:rotate(-90.0000deg);font-size:calc(var(--tp-font-scale,1) * 35px);line-height:calc(var(--tp-font-scale,1) * 37px);",
+        "text": "ภาษา"
+      },
+      {
+        "paragraph": "vertical-left",
+        "classes": "tp-line",
+        "style": "left:42.0000%;top:37.0000%;width:48.0000%;height:6.0000%;transform:rotate(-90.0000deg);font-size:calc(var(--tp-font-scale,1) * 35px);line-height:calc(var(--tp-font-scale,1) * 37px);",
+        "text": "ไทย"
+      }
+    ],
+    "report": {
+      "source": "translated",
+      "paragraphs": 3,
+      "lines": 3,
+      "skippedNoText": 0,
+      "skippedNoGeometry": 0,
+      "missingLayer": [],
+      "aiUnanswered": [],
+      "coveredByGroup": 0,
+      "groupsDrawn": 0,
+      "aiBlocksOverlapping": 0,
+      "aiBlocksOverlappingIds": [],
+      "approximate": false,
+      "rotationMixedGroups": 0,
+      "rotationFlips": 2
+    }
+  },
+  "translatedGrouped": {
+    "lines": [
+      {
+        "paragraph": "horizontal",
+        "classes": "tp-line",
+        "style": "left:10.0000%;top:13.7500%;width:30.0000%;height:2.5000%;transform:rotate(0.0000deg);font-size:calc(var(--tp-font-scale,1) * 17px);line-height:calc(var(--tp-font-scale,1) * 18px);",
+        "text": "ข้อความแปล<&>"
+      },
+      {
+        "paragraph": "vertical-right",
+        "classes": "tp-line tp-bubble",
+        "style": "left:61.2000%;top:25.0000%;width:21.6000%;height:30.0000%;transform:rotate(0.0000deg);font-size:calc(var(--tp-font-scale,1) * 58px);line-height:calc(var(--tp-font-scale,1) * 61px);",
+        "text": "ภาษา ไทย"
+      }
+    ],
+    "report": {
+      "source": "translated",
+      "paragraphs": 2,
+      "lines": 2,
+      "skippedNoText": 0,
+      "skippedNoGeometry": 0,
+      "missingLayer": [],
+      "aiUnanswered": [],
+      "coveredByGroup": 1,
+      "groupsDrawn": 1,
+      "aiBlocksOverlapping": 0,
+      "aiBlocksOverlappingIds": [],
+      "approximate": false,
+      "rotationMixedGroups": 0,
+      "rotationFlips": 0
+    }
+  },
+  "ai": {
+    "lines": [
+      {
+        "paragraph": "horizontal",
+        "classes": "tp-line tp-bubble",
+        "style": "left:10.0000%;top:13.7500%;width:30.0000%;height:2.5000%;transform:rotate(0.0000deg);font-size:calc(var(--tp-font-scale,1) * 11px);line-height:calc(var(--tp-font-scale,1) * 12px);",
+        "text": "ข้อความ AI <script>alert(1)</script>"
+      },
+      {
+        "paragraph": "vertical-right",
+        "classes": "tp-line tp-bubble",
+        "style": "left:52.2820%;top:25.0000%;width:39.4360%;height:30.0000%;transform:rotate(0.0000deg);font-size:calc(var(--tp-font-scale,1) * 48px);line-height:calc(var(--tp-font-scale,1) * 50px);",
+        "text": "ข้อความแนวตั้ง"
+      }
+    ],
+    "report": {
+      "source": "ai",
+      "paragraphs": 2,
+      "lines": 2,
+      "skippedNoText": 0,
+      "skippedNoGeometry": 0,
+      "missingLayer": [],
+      "aiUnanswered": [],
+      "coveredByGroup": 1,
+      "groupsDrawn": 1,
+      "aiBlocksOverlapping": 0,
+      "aiBlocksOverlappingIds": [],
+      "approximate": false,
+      "rotationMixedGroups": 0,
+      "rotationFlips": 0
+    }
+  }
+}

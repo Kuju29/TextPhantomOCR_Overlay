@@ -19,18 +19,31 @@ const {
   describe,
   reset,
   restoredWindowForPolicy,
+  restoredLocalAutoLearning,
 } = await import("../src/background/scheduler.js");
 
-const jobsSource = await readFile(new URL("../src/background/jobs.js", import.meta.url), "utf8");
+const jobsSource = await readFile(new URL("../src/background/pipeline/server-translation.js", import.meta.url), "utf8");
 assert.match(jobsSource,
   /const requestLane = laneKeyFor\(outbound\);[\s\S]{0,400}configureLocalCapacityForPayload\(outbound\);[\s\S]{0,900}await acquire\(requestLane/,
   "API-engine path must configure local capacity before its first acquire");
-assert.match(jobsSource,
-  /if \(gated\) releaseGated\(requestLane,[\s\S]{0,180}else if \(localRequest\) releaseLocalFailure\(requestLane, e, retryAfterMs\)/,
+const safeDeferredStart = jobsSource.indexOf("const safeDeferred =");
+const safeDeferredContinue = jobsSource.indexOf("continue;", safeDeferredStart);
+const safeDeferredEnd = jobsSource.indexOf("if (slotHeld) {", safeDeferredContinue);
+assert.ok(safeDeferredStart >= 0 && safeDeferredContinue > safeDeferredStart && safeDeferredEnd > safeDeferredContinue,
+  "API-local safe-deferred catch must remain present");
+const safeDeferredCatch = jobsSource.slice(safeDeferredStart, safeDeferredEnd);
+assert.match(safeDeferredCatch,
+  /generationAttempts\s*===\s*0[\s\S]*if\s*\(isBusy\s*&&\s*safeDeferred\)/,
+  "API-local safe-deferred catch must require zero generation attempts");
+assert.match(safeDeferredCatch,
+  /if\s*\(gated\)\s*releaseGated\(requestLane,\s*retryAfterMs\);\s*else\s+if\s*\(localRequest\)\s*releaseLocalFailure\(requestLane,\s*error,\s*retryAfterMs\)/,
   "API-local safe-deferred catch must classify by generation evidence");
 assert.match(jobsSource,
-  /if \(slotHeld\) \{\s*if \(localRequest\) releaseLocalFailure\(requestLane, e, retryAfterMs\);\s*else if \(isBusy\) releaseRejected/,
+  /if \(slotHeld\) \{\s*if \(localRequest\) releaseLocalFailure\(requestLane, error, retryAfterMs\);\s*else if \(isBusy\) releaseRejected/,
   "API-local terminal catch must not reject from HTTP status alone");
+assert.match(jobsSource,
+  /localProviderMs[\s\S]{0,220}releaseSuccess\(requestLane, localRequest && localProviderMs > 0 \? localProviderMs : requestMs\)/,
+  "Local Auto must learn provider execution latency when the API reports it, not browser HTTP overhead");
 
 const { localCapacityConfig, isLocalCapacityFailure } = await import(
   "../src/background/local-capacity.js"
@@ -67,7 +80,7 @@ const { localCapacityConfig, isLocalCapacityFailure } = await import(
   );
 }
 
-// --- local capacity is per runtime endpoint + model and starts safely -------
+// --- local capacity is per runtime endpoint + model and provider-managed ----
 reset();
 {
   const local = (model, limits = {}, base_url = "http://localhost:11434") => ({
@@ -82,8 +95,26 @@ reset();
   assert.notEqual(key, laneKeyFor(local("qwen3.8:27b", {}, "http://192.168.1.9:11434")),
     "runtime endpoints must not share learning");
   configureLocalCapacityForPayload(qwen);
-  assert.equal(describe(key).effectiveMax, 1, "unknown Auto capacity must stay at one");
+  assert.equal(describe(key).effectiveMax, localCapacityConfig(qwen).ceiling,
+    "Auto uses the runtime CPU safety ceiling, not a hard-coded minimum of eight");
+  assert.ok(describe(key).effectiveMax >= 2 && describe(key).effectiveMax <= 24);
+  assert.equal(Math.floor(describe(key).window), 1,
+    "unknown Auto runtime must begin with one conservative generation");
   assert.equal(describe(key).unlimited, false, "remove time pacing must not remove capacity");
+  const boundedCapacity = describe(key).effectiveMax;
+  const first = await acquire(key);
+  assert.ok(first.waitMs < 100, "the conservative first generation must have no time/RPM delay");
+  const second = acquire(key);
+  await Promise.resolve();
+  assert.equal(describe(key).queued, 1,
+    "unknown runtime must not burst a second generation before success evidence");
+  releaseSuccess(key, 1);
+  await second;
+  assert.equal(Math.floor(describe(key).window), 2,
+    "one successful execution must ramp Auto capacity additively");
+  releaseSuccess(key, 1);
+  assert.ok(describe(key).window <= boundedCapacity,
+    "successful ramp-up must remain inside the browser safety ceiling");
 
   reset();
   const evidenced = local("small", {
@@ -91,8 +122,10 @@ reset();
   });
   const evidenceKey = laneKeyFor(evidenced);
   configureLocalCapacityForPayload(evidenced);
-  assert.equal(Math.floor(describe(evidenceKey).window), 1, "Auto must begin at one");
-  assert.equal(describe(evidenceKey).effectiveMax, 2, "runtime evidence may permit conservative growth");
+  assert.equal(describe(evidenceKey).effectiveMax, localCapacityConfig(evidenced).ceiling,
+    "runtime metadata must not override the runtime CPU safety ceiling");
+  assert.equal(Math.floor(describe(evidenceKey).window), 1,
+    "metadata alone must not count as successful execution evidence");
   await acquire(evidenceKey);
   releaseSuccess(evidenceKey, 1000);
   assert.ok(describe(evidenceKey).window > 1, "a real successful generation may grow evidenced Auto");
@@ -121,12 +154,17 @@ reset();
   assert.equal(isLocalCapacityFailure({ generationAttempts: 1, code: "local_timeout" }), true,
     "a real generation timeout is model capacity evidence");
 
-  assert.equal(restoredWindowForPolicy("auto", 2, 2), 2,
+  assert.equal(restoredWindowForPolicy("auto", 8, 2), 2,
     "evidenced Auto restores its learned safe window after worker restart");
   assert.equal(restoredWindowForPolicy("auto", 1, 2), 1,
     "unknown Auto clamps stale learning to one");
   assert.equal(restoredWindowForPolicy("safe", 1, 2), 1,
     "Safe never borrows an Auto window");
+  assert.equal(restoredLocalAutoLearning({ window:9, updatedAt:Date.now() }, 24).valid, false,
+    "pre-.54 success-only Local Auto learning must not survive as a proven capacity");
+  assert.deepEqual(restoredLocalAutoLearning({ window:2, localAutoVersion:1, localBestLatencyMs:12000, localBestScore:0.00016 }, 24),
+    { valid:true, window:2, latencyMs:12000, score:0.00016 },
+    "throughput-proven Local Auto learning may survive a worker restart");
 
   // evidenceKey was reset above, so create a fresh evidenced lane for replay.
   reset();
@@ -153,9 +191,43 @@ reset();
   await acquire(failureKey);
   assert.equal(releaseLocalFailure(failureKey, {
     status: 503, generationAttempts: 1, code: "local_oom",
-  }), "rejected");
+  }, 5000), "rejected");
   assert.ok(describe(failureKey).window < beforeAdmission503,
     "post-generation local OOM/503 must narrow capacity");
+  assert.equal(describe(failureKey).pausedMs, 0,
+    "direct-local Retry-After must not install time pacing");
+
+  reset();
+  const saturated = local("gemma-saturated", { aiLocalCapacityMode: "auto" });
+  const saturatedKey = laneKeyFor(saturated);
+  configureLocalCapacityForPayload(saturated);
+  await acquire(saturatedKey);
+  releaseSuccess(saturatedKey, 10000);
+  assert.equal(Math.floor(describe(saturatedKey).window), 2,
+    "Auto should probe one step above its first measured baseline");
+  const slowProbeA = acquire(saturatedKey), slowProbeB = acquire(saturatedKey);
+  await Promise.all([slowProbeA, slowProbeB]);
+  releaseSuccess(saturatedKey, 30000);
+  releaseSuccess(saturatedKey, 30000);
+  assert.equal(Math.floor(describe(saturatedKey).window), 1,
+    "a higher window with worse throughput and 3x latency must fall back to the proven model-specific window");
+  assert.equal(describe(saturatedKey).localBestWindow, 1);
+  assert.equal(describe(saturatedKey).localStable, true);
+
+  reset();
+  const scalable = local("gemma-scalable", { aiLocalCapacityMode: "auto" });
+  const scalableKey = laneKeyFor(scalable);
+  configureLocalCapacityForPayload(scalable);
+  await acquire(scalableKey);
+  releaseSuccess(scalableKey, 10000);
+  const goodProbeA = acquire(scalableKey), goodProbeB = acquire(scalableKey);
+  await Promise.all([goodProbeA, goodProbeB]);
+  releaseSuccess(scalableKey, 15000);
+  releaseSuccess(scalableKey, 15000);
+  assert.equal(describe(scalableKey).localBestWindow, 2,
+    "a higher window may become the new baseline only when throughput actually improves");
+  assert.equal(Math.floor(describe(scalableKey).window), 3,
+    "after a proven gain Auto may probe exactly one further step");
 }
 
 // --- the AI window must actually grow --------------------------------------

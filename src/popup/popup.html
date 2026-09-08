@@ -1,71 +1,84 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <title>TextPhantom OCR</title>
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <link rel="stylesheet" href="../shared/theme.css" />
-    <link rel="stylesheet" href="popup.css" />
-  </head>
-  <body>
-    <div class="app">
-      <!-- ============ HEADER ============ -->
-      <header class="app-head">
-        <div class="brand">
-          <img class="brand-icon" src="../icons/48.png" alt="" />
-          <div class="brand-text">
-            <h1>TextPhantom</h1>
-            <span class="brand-sub">Manga image translator</span>
-          </div>
+
+<head>
+  <meta charset="utf-8" />
+  <title>TextPhantom OCR</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link rel="stylesheet" href="../shared/theme.css" />
+  <link rel="stylesheet" href="popup.css" />
+</head>
+
+<body>
+  <div class="app">
+    <!-- ============ HEADER ============ -->
+    <header class="app-head">
+      <div class="brand">
+        <img class="brand-icon" src="../icons/48.png" alt="" />
+        <div class="brand-text">
+          <h1>TextPhantom</h1>
+          <span class="brand-sub">Manga image translator</span>
         </div>
-        <span id="api-status-emoji" class="api-dot" aria-live="polite" title="Loading…">⏳</span>
-      </header>
+      </div>
+      <span id="api-status-emoji" class="api-dot" aria-live="polite" title="Loading…">⏳</span>
+    </header>
 
-      <!-- ============ TABS ============ -->
-      <nav class="tabs" role="tablist" aria-label="Sections">
-        <button type="button" class="tab" id="tab-translate" data-tab="translate" role="tab" aria-controls="panel-translate" aria-selected="true">Translate</button>
-        <button type="button" class="tab" id="tab-ai" data-tab="ai" role="tab" aria-controls="panel-ai" aria-selected="false">Ai option</button>
-        <button type="button" class="tab" id="tab-tools" data-tab="tools" role="tab" aria-controls="panel-tools" aria-selected="false">Tools</button>
-      </nav>
+    <!-- ============ TABS ============ -->
+    <nav class="tabs" role="tablist" aria-label="Sections">
+      <button type="button" class="tab" id="tab-translate" data-tab="translate" role="tab"
+        aria-controls="panel-translate" aria-selected="true">Translate</button>
+      <button type="button" class="tab" id="tab-ai" data-tab="ai" role="tab" aria-controls="panel-ai"
+        aria-selected="false">Ai option</button>
+      <button type="button" class="tab" id="tab-tools" data-tab="tools" role="tab" aria-controls="panel-tools"
+        aria-selected="false">Tools</button>
+    </nav>
 
-      <div class="panels">
-        <!-- ============ 1. TRANSLATE ============ -->
-        <section class="panel" id="panel-translate" role="tabpanel" aria-labelledby="tab-translate">
-          <div class="field">
-            <label for="mode">Mode</label>
-            <select id="mode" aria-label="Mode"></select>
-          </div>
+    <div class="panels">
+      <!-- ============ 1. TRANSLATE ============ -->
+      <section class="panel" id="panel-translate" role="tabpanel" aria-labelledby="tab-translate">
+        <div id="api-gate-translate" class="api-offline-gate" role="alert" hidden>
+          <strong>API server is offline.</strong>
+          Translation is paused. Check the API URL or start the server, then this page will recover automatically.
+          <button type="button" id="api-gate-translate-open" class="secondary-btn">Open API settings</button>
+        </div>
+        <div class="field">
+          <label for="mode">Mode</label>
+          <select id="mode" aria-label="Mode"></select>
+        </div>
 
-          <div class="field" id="lang-wrap">
-            <label for="lang">Language</label>
-            <select id="lang" aria-label="Language"></select>
-          </div>
+        <div class="field" id="lang-wrap">
+          <label for="lang">Language</label>
+          <select id="lang" aria-label="Language"></select>
+        </div>
 
-          <div class="field" id="sources-wrap" style="display: none">
-            <label for="sources">Source</label>
-            <select id="sources" aria-label="Source"></select>
-          </div>
+        <div class="field" id="sources-wrap" style="display: none">
+          <label for="sources">Source</label>
+          <select id="sources" aria-label="Source"></select>
+        </div>
 
-          <div class="note">💡 Right-click any image on a page to translate it — or use the Page actions below on sites that block right-click.</div>
+        <div class="note">💡 Right-click any image on a page to translate it — or use the Page actions below on sites
+          that block right-click.</div>
 
-          <!-- Reading direction: rebuild text boxes when the page reads on a
+        <!-- Reading direction: rebuild text boxes when the page reads on a
                different axis than the target language. Only shown for the text
                overlay modes, where there is a layout to rebuild. -->
-          <div id="relayout-wrap" class="relayout-wrap" style="display: none">
-            <div class="divider" role="separator"></div>
-            <div class="section-title">Reading direction</div>
-            <div class="action-box">
-              <label class="label-row toggle-row">
-                <span>↔️ Rotate Translated to fit language</span>
-                <input type="checkbox" id="relayout-translated" />
-              </label>
-              <div class="hint">Vertical Japanese into horizontal Thai/English gets rebuilt into lines that read the right way instead of sideways columns. Only runs on pages that actually change direction. Turn off to keep Google Lens's original boxes.</div>
-            </div>
+        <div id="relayout-wrap" class="relayout-wrap" style="display: none">
+          <div class="divider" role="separator"></div>
+          <div class="section-title">Reading direction</div>
+          <div class="action-box">
+            <label class="label-row toggle-row">
+              <span>↔️ Rotate Translated to fit language</span>
+              <input type="checkbox" id="relayout-translated" />
+            </label>
+            <div class="hint">Vertical Japanese into horizontal Thai/English gets rebuilt into lines that read the right
+              way instead of sideways columns. Only runs on pages that actually change direction. Turn off to keep
+              Google Lens's original boxes.</div>
           </div>
+        </div>
 
-          <!-- Display applies to text overlays only — hidden in Google Lens
+        <!-- Display applies to text overlays only — hidden in Google Lens
                (image) mode, where the translation is baked into the image. -->
-          <div id="display-wrap" class="display-wrap">
+        <div id="display-wrap" class="display-wrap">
           <div class="divider" role="separator"></div>
           <div class="section-title">Display</div>
 
@@ -75,320 +88,310 @@
               <span id="font-scale-value" class="font-scale-value" aria-live="polite">100%</span>
             </label>
             <div class="font-scale-row">
-              <button type="button" id="font-scale-down" class="action-btn secondary" aria-label="Decrease overlay font size" title="Smaller (−10%)">−</button>
-              <input type="range" id="font-scale-range" min="50" max="200" step="5" value="100" aria-label="Overlay font size scale" />
-              <button type="button" id="font-scale-up" class="action-btn secondary" aria-label="Increase overlay font size" title="Larger (+10%)">+</button>
-              <button type="button" id="font-scale-reset" class="icon-btn" title="Reset to 100%" aria-label="Reset font size">⟲</button>
+              <button type="button" id="font-scale-down" class="action-btn secondary"
+                aria-label="Decrease overlay font size" title="Smaller (−10%)">−</button>
+              <input type="range" id="font-scale-range" min="50" max="200" step="5" value="100"
+                aria-label="Overlay font size scale" />
+              <button type="button" id="font-scale-up" class="action-btn secondary"
+                aria-label="Increase overlay font size" title="Larger (+10%)">+</button>
+              <button type="button" id="font-scale-reset" class="icon-btn" title="Reset to 100%"
+                aria-label="Reset font size">⟲</button>
             </div>
             <div class="hint">Scales every translated line across all overlays at once.</div>
           </div>
-          </div>
+        </div>
 
-          <!-- Page actions: translate without the context menu (sits where
+        <!-- Page actions: translate without the context menu (sits where
                the old Status box used to be — its own separate card). -->
-          <div class="divider" role="separator"></div>
-          <div class="section-title">Page actions</div>
-          <div class="action-box">
-            <button type="button" id="translate-page-btn" class="action-btn primary">🔍 Translate all images on this page</button>
-            <label class="label-row toggle-row">
-              <span>🔘 Translate buttons on images</span>
-              <input type="checkbox" id="img-buttons-toggle" />
-            </label>
-            <div class="hint">Shows a small 🔍 button on the top-right corner of every image so you can translate a single image without right-clicking.</div>
+        <div class="divider" role="separator"></div>
+        <div class="section-title">Page actions</div>
+        <div class="action-box">
+          <button type="button" id="translate-page-btn" class="action-btn primary">🔍 Translate all images on this
+            page</button>
+          <label class="label-row toggle-row">
+            <span>🔘 Translate buttons on images</span>
+            <input type="checkbox" id="img-buttons-toggle" />
+          </label>
+          <div class="hint">Shows a small 🔍 button on the top-right corner of every image so you can translate a single
+            image without right-clicking.</div>
+        </div>
+      </section>
+
+      <!-- ============ 2. AI ENGINE ============ -->
+      <section class="panel" id="panel-ai" role="tabpanel" aria-labelledby="tab-ai">
+        <div id="api-gate-ai" class="api-offline-gate" role="alert" hidden>
+          <strong>API server is offline.</strong>
+          AI options are paused until the API URL responds. Local AI connection is checked separately.
+          <button type="button" id="api-gate-ai-open" class="secondary-btn">Open API settings</button>
+        </div>
+        <section id="ai-group" class="ai-group" style="display: none">
+          <div class="ai-usage-strip" id="ai-usage-wrap" style="display: none" aria-live="polite">
+            <div class="ai-usage-summary">
+              <span id="ai-usage-kind">Cloud</span>
+              <strong id="ai-usage-model">Provider / Model</strong>
+              <span id="ai-usage-counts">0 requests · 0 tokens</span>
+            </div>
+            <div class="ai-usage-actions">
+              <button type="button" id="ai-usage-reset" class="secondary-btn ai-usage-reset">Reset</button>
+              <button type="button" id="ai-usage-history" class="secondary-btn ai-usage-reset"
+                aria-haspopup="dialog">History</button>
+            </div>
           </div>
-        </section>
-
-        <!-- ============ 2. AI ENGINE ============ -->
-        <section class="panel" id="panel-ai" role="tabpanel" aria-labelledby="tab-ai">
-          <section id="ai-group" class="ai-group" style="display: none">
-            <div class="field" id="ai-provider-wrap">
-              <label for="ai-provider">Provider</label>
-              <select id="ai-provider" aria-label="AI provider">
-                <option value="" disabled selected>Select provider…</option>
-                <optgroup label="Cloud (needs API key)">
-                  <option value="gemini">Google Gemini</option>
-                  <option value="openai">OpenAI</option>
-                  <option value="openrouter">OpenRouter</option>
-                  <option value="anthropic">Anthropic</option>
-                  <option value="groq">Groq</option>
-                  <option value="deepseek">DeepSeek</option>
-                  <option value="together">Together</option>
-                  <option value="huggingface">HuggingFace</option>
-                  <option value="featherless">Featherless</option>
-                </optgroup>
-                <optgroup label="Local (runs on your PC — no key)">
-                  <option value="ollama">Ollama</option>
-                  <option value="lmstudio">LM Studio</option>
-                  <option value="localai">LocalAI</option>
-                  <option value="jan">Jan</option>
-                  <option value="textgen">text-generation-webui</option>
-                  <option value="koboldcpp">KoboldCpp</option>
-                  <option value="vllm">vLLM</option>
-                  <option value="llamafile">llamafile</option>
-                  <option value="gpt4all">GPT4All</option>
-                  <option value="llamacpp">llama.cpp</option>
-                  <option value="customlocal">Custom local adapter</option>
-                </optgroup>
-              </select>
+          <dialog id="ai-usage-history-dialog" class="ai-usage-history-dialog" aria-labelledby="ai-usage-history-title">
+            <div class="ai-usage-history-head">
+              <h2 id="ai-usage-history-title">AI usage history</h2>
+              <button type="button" id="ai-usage-history-close" class="secondary-btn ai-usage-history-close"
+                aria-label="Close usage history">Close</button>
             </div>
+            <div id="ai-usage-history-list" class="ai-usage-history-list"></div>
+          </dialog>
+          <div class="field" id="ai-provider-wrap">
+            <label for="ai-provider">Provider</label>
+            <select id="ai-provider" aria-label="AI provider">
+              <option value="" disabled selected>Select provider…</option>
+              <optgroup id="ai-cloud-provider-options" label="Cloud (needs API key)"></optgroup>
+              <optgroup id="ai-local-provider-options" label="Local (runs on your PC — no key)">
+                <option value="customlocal">Custom local adapter</option>
+              </optgroup>
+            </select>
+          </div>
 
-            <!-- Local endpoint: shown only for local providers -->
-            <div class="field" id="ai-endpoint-wrap" style="display: none">
-              <label for="ai-base-url">Local server URL</label>
-              <input
-                type="text"
-                id="ai-base-url"
-                placeholder="http://localhost:11434"
-              />
-              <div class="hint">Your local AI server's OpenAI-compatible endpoint. No API key needed. For Custom Local Adapter this field is read-only—edit <code>baseUrl</code> in the JSON below.</div>
-              <button type="button" id="ai-local-test" class="secondary-btn">Connect &amp; load models</button>
-              <div class="hint" id="ai-local-status">Start the local runtime, then connect. Ollama may need OLLAMA_ORIGINS configured for this extension; LM Studio may need CORS enabled.</div>
-              <div id="ai-local-adapter-wrap" style="display: none; margin-top: 10px">
-                <label for="ai-local-adapter">Custom adapter JSON</label>
-                <textarea id="ai-local-adapter" rows="9" spellcheck="false" placeholder='{"version":1,"protocol":"openai","baseUrl":"http://localhost:8000/v1","modelsPath":"/models","chatPath":"/chat/completions","modelsResponsePath":"data.*.id","chatResponsePath":"choices.0.message.content"}'></textarea>
-                <div class="hint">Declarative JSON only. Supports OpenAI-compatible or Ollama protocol, local/private URLs and response paths. Scripts, API keys, headers and prompt templates are rejected.</div>
-              </div>
+          <!-- Local endpoint: shown only for local providers -->
+          <div class="field" id="ai-endpoint-wrap" style="display: none">
+            <label for="ai-base-url">Local server URL</label>
+            <input type="text" id="ai-base-url" placeholder="http://localhost:11434" />
+            <div class="hint">Local server address. No API key.</div>
+            <button type="button" id="ai-local-test" class="secondary-btn">Connect &amp; load models</button>
+            <div class="hint" id="ai-local-status">Start Local AI, then connect.</div>
+            <div id="ai-local-adapter-wrap" style="display: none; margin-top: 10px">
+              <label for="ai-local-adapter">Custom adapter JSON</label>
+              <textarea id="ai-local-adapter" rows="9" spellcheck="false"
+                placeholder='{"version":1,"protocol":"openai","baseUrl":"http://localhost:8000/v1","modelsPath":"/models","chatPath":"/chat/completions","modelsResponsePath":"data.*.id","chatResponsePath":"choices.0.message.content"}'></textarea>
+              <div class="hint">Adapter settings only. No keys or scripts.</div>
             </div>
+          </div>
 
-            <!-- API key: shown only for cloud providers -->
-            <div class="field" id="ai-key-wrap">
+          <!-- API key: shown only for cloud providers -->
+          <div class="field" id="ai-key-wrap">
+            <div class="label-row label-row--inline">
               <label for="ai-key">API key</label>
-              <input
-                type="password"
-                id="ai-key"
-                placeholder="Paste your API key"
-              />
-              <div class="hint">Leave empty to use the non-AI translated overlay.</div>
+              <a id="ai-key-get" href="#" target="_blank" rel="noopener noreferrer">(get key)</a>
             </div>
+            <input type="password" id="ai-key" aria-describedby="ai-key-hint" placeholder="Paste your API key" />
+            <div class="hint" id="ai-key-hint">Required for this Cloud provider.</div>
+          </div>
 
-            <div class="field" id="ai-model-wrap" style="display: none">
-              <label for="ai-model">Model <span aria-hidden="true">(required)</span></label>
-              <select id="ai-model" aria-label="AI Model"></select>
-              <input id="ai-local-model-id" type="text" aria-label="Exact Local AI model ID" placeholder="Model not listed? Type its exact ID" style="display: none; margin-top: 6px" />
-              <div class="hint" id="ai-local-model-hint" style="display: none">The URL chooses the Local AI server; the Model chooses which installed model on that server translates the text. Connect to load the list, or type the exact ID if the runtime cannot list models.</div>
-              <div id="ai-local-unlimited-wrap" style="display: none; margin-top: 10px">
-                <label class="label-row" style="cursor: pointer">
-                  <span>Remove time/RPM delays for this local AI</span>
-                  <input type="checkbox" id="ai-local-unlimited" />
-                </label>
-                <div class="hint">
-                  On by default. This removes delays between requests only. The capacity setting below still limits simultaneous work so a chapter cannot flood RAM/VRAM.
-                </div>
-              </div>
-              <div id="ai-local-capacity-wrap" style="display: none; margin-top: 10px">
-                <label for="ai-local-capacity-mode">Local AI capacity</label>
-                <select id="ai-local-capacity-mode" aria-label="Local AI capacity mode">
-                  <option value="auto" selected>Auto (recommended)</option>
-                  <option value="safe">Safe — 1 request</option>
-                  <option value="manual">Manual</option>
-                </select>
-                <div id="ai-local-manual-concurrency-wrap" style="display: none; margin-top: 6px">
-                  <label for="ai-local-manual-concurrency">Simultaneous requests</label>
-                  <select id="ai-local-manual-concurrency" aria-label="Local AI simultaneous requests">
-                    <option value="1">1</option>
-                    <option value="2">2</option>
-                    <option value="3">3</option>
-                    <option value="4">4</option>
-                  </select>
-                </div>
-                <div class="hint" id="ai-local-capacity-hint">Auto starts safely and adapts separately for each runtime and model. Large or CPU/GPU-split models normally stay at 1.</div>
-              </div>
-            </div>
-
-            <div class="field" id="ai-thinking-wrap" style="display: none">
-              <label for="ai-thinking">AI thinking</label>
-              <select id="ai-thinking" aria-label="AI thinking mode">
-                <option value="default">Runtime/model default</option>
-                <option value="off" selected>Thinking off (recommended for translation)</option>
-                <option value="on">Thinking on</option>
+          <div class="field" id="ai-model-wrap" style="display: none">
+            <label for="ai-model">Model <span aria-hidden="true">(required)</span></label>
+            <select id="ai-model" aria-label="AI Model"></select>
+            <input id="ai-local-model-id" type="text" aria-label="Exact Local AI model ID"
+              placeholder="Model not listed? Type its exact ID" style="display: none; margin-top: 6px" />
+            <div class="hint" id="ai-local-model-hint" style="display: none">Reconnect after changing models. Use a model your PC can handle, or translation may fail or hang.</div>
+            <div id="ai-local-capacity-wrap" style="display: none; margin-top: 10px">
+              <label for="ai-local-capacity-mode">Local AI capacity</label>
+              <select id="ai-local-capacity-mode" aria-label="Local AI capacity mode">
+                <option value="auto" selected>Auto (recommended)</option>
+                <option value="safe">Safe — 1 request</option>
+                <option value="manual">Manual</option>
               </select>
-              <div class="hint" id="ai-thinking-hint"></div>
-            </div>
-
-            <div class="field" id="ai-prompt-wrap" style="display: none">
-              <label for="ai-prompt" class="label-row">
-                <span>AI Style (optional)</span>
-                <span class="label-actions">
-                  <button
-                    type="button"
-                    id="ai-prompt-back"
-                    class="icon-btn"
-                    title="Back to the previous prompt version"
-                    aria-label="Back to the previous prompt version"
-                  >↶</button>
-                  <button
-                    type="button"
-                    id="ai-prompt-forward"
-                    class="icon-btn"
-                    title="Forward to the next prompt version"
-                    aria-label="Forward to the next prompt version"
-                  >↷</button>
-                  <button
-                    type="button"
-                    id="ai-prompt-studio"
-                    class="icon-btn"
-                    title="Open full-page editor (Prompt Studio)"
-                    aria-label="Open full-page prompt editor"
-                  >🗗</button>
-                  <button
-                    type="button"
-                    id="ai-prompt-expand"
-                    class="icon-btn"
-                    title="Expand editor"
-                    aria-label="Expand the style editor"
-                    aria-pressed="false"
-                  >⤢</button>
-                  <button
-                    type="button"
-                    id="ai-prompt-reset"
-                    class="icon-btn"
-                    title="Reset style for this language"
-                    aria-label="Reset style for this language"
-                  >⟲</button>
-                </span>
-              </label>
-              <textarea
-                id="ai-prompt"
-                rows="8"
-                placeholder="Your translation style notes (terms, tone, pronouns…). Drag the bottom edge to resize, or use the ⤢ button to expand. Leave empty to use language defaults."
-              ></textarea>
-              <div id="ai-prompt-count" class="prompt-count" aria-live="polite"></div>
-            </div>
-
-            <div class="field" id="ai-characters-wrap" style="display: none">
-              <label class="label-row">
-                <span>Series memory</span>
-                <button type="button" id="ai-characters-clear" class="icon-btn" title="Clear this series' memory" aria-label="Clear this series' memory">🗑</button>
-              </label>
-              <label class="label-row" style="cursor: pointer">
-                <span>Mode</span>
-                <select id="ai-memory-mode">
-                  <option value="off">Off</option>
-                  <option value="terms">Terms only</option>
-                  <option value="full">Full (+ characters)</option>
+              <div id="ai-local-manual-concurrency-wrap" style="display: none; margin-top: 6px">
+                <label for="ai-local-manual-concurrency">Simultaneous requests</label>
+                <select id="ai-local-manual-concurrency" aria-label="Local AI simultaneous requests">
+                  <option value="1">1</option>
+                  <option value="2">2</option>
+                  <option value="3">3</option>
+                  <option value="4">4</option>
                 </select>
-              </label>
-              <div id="ai-characters-count" class="hint">No memory for this series yet</div>
-              <div id="ai-memory-hint" class="hint">Off: each page translates cleanly (recommended). Terms only: keep names/terms spelled the same across pages. Full: also remember each character's gender &amp; speech — this can push pronouns/particles back, so use it only if you want gendered speech. Kept per series (auto-detected from the page URL); a new series starts fresh.</div>
+              </div>
+              <div class="hint" id="ai-local-capacity-hint">Auto adapts to this model.</div>
             </div>
+          </div>
 
-            <div class="field" id="ai-page-image-wrap" style="display: none">
-              <label class="label-row" style="cursor: pointer">
-                <span>Page image to AI</span>
-                <input type="checkbox" id="ai-page-image" />
-              </label>
-              <div class="hint">Sends the page image with the text so the model can infer speakers, mood and replies. With Extension + Local AI it goes directly to your PC; with API mode it goes through that API server. Enable only for a vision-capable model—text-only models may reject the request. Uses more memory and time; off by default.</div>
-            </div>
+          <div class="field" id="ai-thinking-wrap" style="display: none">
+            <label for="ai-thinking">AI thinking</label>
+            <select id="ai-thinking" aria-label="AI thinking mode">
+              <option value="off" selected>Thinking off (recommended for translation)</option>
+              <option value="on">Thinking on</option>
+            </select>
+            <div class="hint" id="ai-thinking-hint"></div>
+          </div>
 
-            <!-- Rate limit: pace requests to the user's own model quota. -->
-            <div class="field" id="ai-rate-wrap" style="display: none">
-              <label class="label-row" style="cursor: pointer">
-                <span>Use a manual AI request-rate cap</span>
-                <input type="checkbox" id="rate-limit-enabled" />
+          <div class="field" id="ai-prompt-wrap" style="display: none">
+            <label for="ai-prompt" class="label-row">
+              <span>AI Style</span>
+              <span class="label-actions">
+                <button type="button" id="ai-prompt-back" class="icon-btn" title="Back to the previous prompt version"
+                  aria-label="Back to the previous prompt version">↶</button>
+                <button type="button" id="ai-prompt-forward" class="icon-btn" title="Forward to the next prompt version"
+                  aria-label="Forward to the next prompt version">↷</button>
+                <button type="button" id="ai-prompt-studio" class="icon-btn"
+                  title="Open full-page editor (Prompt Studio)" aria-label="Open full-page prompt editor">🗗</button>
+                <button type="button" id="ai-prompt-expand" class="icon-btn" title="Expand editor"
+                  aria-label="Expand the style editor" aria-pressed="false">⤢</button>
+                <button type="button" id="ai-prompt-reset" class="icon-btn" title="Reload built-in style"
+                  aria-label="Reload built-in style">⟲</button>
+              </span>
+            </label>
+            <textarea id="ai-prompt" rows="8"
+              placeholder="Full AI translation style. Click Reload to restore the built-in prompt."></textarea>
+            <div id="ai-prompt-count" class="prompt-count" aria-live="polite"></div>
+          </div>
+
+          <div class="field" id="ai-characters-wrap" style="display: none">
+            <label class="label-row">
+              <span>Series memory</span>
+              <button type="button" id="ai-characters-clear" class="icon-btn" title="Clear this series' memory"
+                aria-label="Clear this series' memory">🗑</button>
+            </label>
+            <label class="label-row" style="cursor: pointer">
+              <span>Mode</span>
+              <select id="ai-memory-mode">
+                <option value="off">Off</option>
+                <option value="terms">Terms only</option>
+                <option value="full">Full (+ characters)</option>
+              </select>
+            </label>
+            <div id="ai-characters-count" class="hint">No memory for this series yet</div>
+            <div id="ai-memory-hint" class="hint">Off, terms, or full character context.</div>
+          </div>
+
+          <div class="field" id="ai-page-image-wrap" style="display: none">
+            <label class="label-row" style="cursor: pointer">
+              <span>Page image to AI</span>
+              <input type="checkbox" id="ai-page-image" />
+            </label>
+            <div class="hint">For vision models. Uses more time and memory.</div>
+          </div>
+
+          <!-- Rate limit: pace requests to the user's own model quota. -->
+          <div class="field" id="ai-rate-wrap" style="display: none">
+            <label class="label-row" style="cursor: pointer">
+              <span>Use a manual AI request-rate cap</span>
+              <input type="checkbox" id="rate-limit-enabled" />
+            </label>
+            <label class="rate-field">
+              <span>Speed profile</span>
+              <select id="rate-profile">
+                <option value="auto">Provider managed (recommended)</option>
+                <option value="stable">Stable</option>
+                <option value="balanced">Balanced</option>
+                <option value="fast">Fast</option>
+                <option value="custom">Custom</option>
+              </select>
+            </label>
+            <div class="inline-row rate-row" id="rate-custom-fields">
+              <label class="rate-field">
+                <span>Images sent to AI / minute</span>
+                <input type="number" id="rate-rpm" min="1" max="600" step="1" placeholder="Auto" />
               </label>
               <label class="rate-field">
-                <span>Speed profile</span>
-                <select id="rate-profile">
-                  <option value="auto">Provider managed (recommended)</option>
-                  <option value="stable">Stable</option>
-                  <option value="balanced">Balanced</option>
-                  <option value="fast">Fast</option>
-                  <option value="custom">Custom</option>
-                </select>
+                <span>Images allowed back-to-back</span>
+                <input type="number" id="rate-burst" min="1" max="60" step="1" placeholder="Auto" />
               </label>
-              <div class="inline-row rate-row" id="rate-custom-fields">
-                <label class="rate-field">
-                  <span>Images sent to AI / minute</span>
-                  <input type="number" id="rate-rpm" min="1" max="600" step="1" placeholder="Auto" />
-                </label>
-                <label class="rate-field">
-                  <span>Images allowed back-to-back</span>
-                  <input type="number" id="rate-burst" min="1" max="60" step="1" placeholder="Auto" />
-                </label>
-              </div>
-              <div id="rate-preset-hint" class="hint rate-preset" aria-live="polite"></div>
-              <div class="hint">
-                <strong>Provider managed</strong> applies no TextPhantom requests-per-minute cap. A fresh key starts at the server's real active AI capacity, and only a real provider 429/503 reduces the learned speed for this provider/model/key. Shared-server busy responses stay in your browser with backoff instead of becoming a hidden server queue.<br />
-                Turn this switch on only when you deliberately want TextPhantom to pace a known quota. <strong>Stable / Balanced / Fast</strong> are reference presets; <strong>Custom</strong> pins your exact values.<br />
-                <strong>Requests / min:</strong> copy it from your provider's rate-limit page. It is per API key, not per page.<br />
-                <strong>Burst:</strong> when manual pacing is enabled, this is also the maximum AI concurrency for this key (and the token-bucket burst).
-                Setting a number higher than the provider really allows cannot increase throughput; the provider will return backpressure and the lane will reduce concurrency.
-              </div>
-              <div class="hint">On by default at 30 requests/minute with burst 4 to reduce accidental paid-token spikes. Adjust it to your provider plan.</div>
             </div>
-          </section>
-        </section>
-
-        <!-- ============ 3. TOOLS ============ -->
-        <section class="panel" id="panel-tools" role="tabpanel" aria-labelledby="tab-tools">
-          <div class="section-title">Local viewer</div>
-          <div class="field">
-            <div class="file-actions">
-              <button type="button" id="open-local-images" class="action-btn primary">Select a image</button>
-              <button type="button" id="open-local-folder" class="action-btn secondary">Select folder</button>
-            </div>
-            <div class="hint">
-              <strong>Select a image</strong> takes any number of image files. <strong>Select folder</strong> uses the native File System Access picker and opens only image files directly in the folder — subfolders are not entered. In Brave, enable <code>brave://flags/#file-system-access-api</code> once and Relaunch Brave.<br />
-              Both open your pages in a reader tab. Right-click a page to translate, then download the image (text baked in) or HTML.
-            </div>
-            <div id="local-picker-msg" class="hint local-picker-msg" role="status" aria-live="polite"></div>
-            <input id="local-images-input" type="file" accept="image/*" multiple hidden />
-          </div>
-
-          <div class="divider" role="separator"></div>
-          <div class="section-title">Auto translate</div>
-          <div class="field">
-            <div class="file-actions">
-              <button type="button" id="open-auto-translate" class="action-btn primary">Auto translate</button>
-            </div>
-            <div class="hint">
-              Opens a full-page tab where you drop, paste (Ctrl+V) or upload one image and it translates immediately. Dropping another image replaces it and translates again.<br />
-              That tab keeps its <strong>own</strong> mode / language / source, so experimenting there never changes the settings this popup uses for web pages.
-            </div>
-          </div>
-
-          <div class="divider" role="separator"></div>
-          <div class="section-title">Advanced</div>
-
-          <div class="field">
-            <label for="api-url">Custom API URL <span id="api-status-emoji-2" class="api-dot-inline" aria-live="polite" title="Loading…">⏳</span></label>
-            <div class="inline-row">
-              <input type="text" id="api-url" placeholder="https://plan291037-api-ocr-test.hf.space" />
-              <button id="reset-api" class="icon-btn" aria-label="Reset to default" title="Reset to default API">⟲</button>
-            </div>
-            <div class="hint">Leave empty to use the managed default server.</div>
-            <div id="api-local-unlimited-wrap" style="display: none">
-              <label class="label-row" style="cursor: pointer; margin-top: 8px">
-                <span>Remove server pacing for this local API</span>
-                <input type="checkbox" id="api-local-unlimited" />
-              </label>
-              <div class="hint">
-                On by default and only applied when this URL is on your machine or private network. It removes server time/RPM admission delays; browser concurrency and the server's CPU/GPU safety bounds remain active.<br />
-                Two things stay paced on purpose: <strong>Google Lens</strong> is still a remote service, so the extension keeps spacing uploads to it, and <strong>ONNX grouping</strong> is bound by your real CPU cores, where more parallelism is slower, not faster.
-              </div>
-            </div>
-          </div>
-
-          <div class="field">
-            <label for="engine-mode">Where the work runs</label>
-            <select id="engine-mode">
-              <option value="extension">Extension (default)</option>
-              <option value="api">API server</option>
-            </select>
-            <div class="hint" id="engine-mode-hint">
-              <strong>Extension</strong> decodes Lens, builds the layout, samples colours and draws the overlay in your browser. The API only does three things: the Lens upload, ONNX bubble grouping, and the AI translation call.<br />
-              <strong>API server</strong> is the older split: the server runs Lens, ONNX, the AI call, the erase, the fonts and the HTML, and sends back a finished overlay or image. Slower per page and it uploads the whole picture, but it needs almost nothing from the browser — useful when a site fights the overlay, when a page is too large for the local renderer, or to compare the two.<br />
-              Both engines use the same AI contract, the same Lens client and the same per-key pacing, so switching does not change the translation you get.
-              <br /><strong>Custom Local Adapter</strong> is Extension-only. Built-in Local AI providers, including llama.cpp, also work with a self-hosted API when the runtime is on that API machine.
-            </div>
+            <div id="rate-preset-hint" class="hint rate-preset" aria-live="polite"></div>
+            <div class="hint">Optional Cloud-only cap. Off means provider managed.</div>
           </div>
         </section>
-      </div>
+      </section>
 
+      <!-- ============ 3. TOOLS ============ -->
+      <section class="panel" id="panel-tools" role="tabpanel" aria-labelledby="tab-tools">
+        <div class="section-title">Local viewer</div>
+        <div class="field">
+          <div class="file-actions">
+            <button type="button" id="open-local-images" class="action-btn primary">Select a image</button>
+            <button type="button" id="open-local-folder" class="action-btn secondary">Select folder</button>
+          </div>
+          <div class="hint">
+            <strong>Select a image</strong> takes any number of image files. <strong>Select folder</strong> uses the
+            native File System Access picker and opens only image files directly in the folder — subfolders are not
+            entered. In Brave, enable <code>brave://flags/#file-system-access-api</code> once and Relaunch Brave.<br />
+            Both open your pages in a reader tab. Right-click a page to translate, then download the image (text baked
+            in) or HTML.
+          </div>
+          <div id="local-picker-msg" class="hint local-picker-msg" role="status" aria-live="polite"></div>
+          <input id="local-images-input" type="file" accept="image/*" multiple hidden />
+        </div>
+
+        <div class="divider" role="separator"></div>
+        <div class="section-title">Auto translate</div>
+        <div class="field">
+          <div class="file-actions">
+            <button type="button" id="open-auto-translate" class="action-btn primary">Auto translate</button>
+          </div>
+          <div class="hint">
+            Opens a full-page tab where you drop, paste (Ctrl+V) or upload one image and it translates immediately.
+            Dropping another image replaces it and translates again.<br />
+            That tab keeps its <strong>own</strong> mode / language / source, so experimenting there never changes the
+            settings this popup uses for web pages.
+          </div>
+        </div>
+
+        <div class="divider" role="separator"></div>
+        <div class="section-title">Advanced</div>
+        <div class="field" id="translation-session-panel" hidden>
+          <label>Translation session / Repair</label>
+          <div class="hint" id="translation-session-status" role="status" aria-live="polite"></div>
+          <button id="translation-session-resume" type="button" hidden>Resume saved repair</button>
+          <div class="hint">Resumes saved receipts and unsent repair work. Interrupted generations are not sent again automatically.</div>
+        </div>
+
+        <div class="field">
+          <label for="api-url">Custom API URL <span id="api-status-emoji-2" class="api-dot-inline" aria-live="polite"
+              title="Loading…">⏳</span></label>
+          <div class="inline-row">
+            <input type="text" id="api-url" placeholder="https://plan291037-api-ocr-test.hf.space" />
+            <button id="reset-api" class="icon-btn" aria-label="Reset to default"
+              title="Reset to default API">⟲</button>
+          </div>
+          <div class="hint">Leave empty to use the managed default server.</div>
+          <div id="api-local-unlimited-wrap" style="display: none">
+            <label class="label-row" style="cursor: pointer; margin-top: 8px">
+              <span>Remove server pacing for this local API</span>
+              <input type="checkbox" id="api-local-unlimited" />
+            </label>
+            <div class="hint">
+              On by default and only applied when this URL is on your machine or private network. It removes server
+              time/RPM admission delays; browser concurrency and the server's CPU/GPU safety bounds remain active.<br />
+              Two things stay paced on purpose: <strong>Google Lens</strong> is still a remote service, so the extension
+              keeps spacing uploads to it. Canonical Lens graph grouping remains bounded by server safety limits.
+            </div>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="engine-mode">Where the work runs</label>
+          <select id="engine-mode" aria-describedby="engine-mode-availability engine-mode-hint">
+            <option value="extension">Extension (default)</option>
+            <option value="api" disabled aria-disabled="true">API server (temporarily unavailable)</option>
+          </select>
+          <div class="hint engine-mode-availability" id="engine-mode-availability" role="status">
+            API server execution is temporarily unavailable. Work will run in the extension.
+          </div>
+          <div class="hint" id="engine-mode-hint">
+            <strong>Extension</strong> decodes Lens, builds the layout, samples colours and draws the overlay in your
+            browser. The API only does three things: the Lens upload, Lens graph grouping, and the AI translation
+            call.<br />
+            <strong>API server</strong> is the older split: the server runs Lens, Lens graph grouping, the AI call, the erase, the
+            fonts and the HTML, and sends back a finished overlay or image. Slower per page and it uploads the whole
+            picture, but it needs almost nothing from the browser — useful when a site fights the overlay, when a page
+            is too large for the local renderer, or to compare the two.<br />
+            Both engines use the same AI contract, the same Lens client and the same per-key pacing, so switching does
+            not change the translation you get.
+            <br /><strong>Custom Local Adapter</strong> is Extension-only. Built-in Local AI providers, including
+            llama.cpp, also work with a self-hosted API when the runtime is on that API machine.
+          </div>
+        </div>
+
+      </section>
     </div>
 
-    <script src="../shared/compat.js"></script>
-    <script src="tabs.js"></script>
-    <script type="module" src="popup.js"></script>
-  </body>
+  </div>
+
+  <script src="../shared/compat.js"></script>
+  <script src="tabs.js"></script>
+  <script type="module" src="popup.js"></script>
+</body>
+
 </html>

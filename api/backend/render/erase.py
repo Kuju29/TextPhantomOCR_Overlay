@@ -1,6 +1,5 @@
 """Remove the original text from an image so translated text can be drawn.
 
-
 Several strategies are available; the public entry point is
 :func:`erase_text_with_boxes`, which dispatches on ``mode``:
 
@@ -14,10 +13,9 @@ Several strategies are available; the public entry point is
 """
 
 from __future__ import annotations
-
-import cv2
-import numpy as np
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
+
+import numpy as np, cv2
 
 from backend.render.colors import sample_bg_color_from_quad
 from backend.render.geometry import (
@@ -48,7 +46,6 @@ INPAINT_RADIUS = 3
 INPAINT_METHOD = "telea"  # "telea" or "ns"
 INPAINT_DILATE_PX = 1
 
-
 # --- Small image utilities -------------------------------------------------
 
 def _pixelate(img: Image.Image, block_px: int) -> Image.Image:
@@ -60,7 +57,6 @@ def _pixelate(img: Image.Image, block_px: int) -> Image.Image:
     sw = max(1, w // block_px)
     sh = max(1, h // block_px)
     return img.resize((sw, sh), Image.NEAREST).resize((w, h), Image.NEAREST)
-
 
 def _mean_abs_diff(a: Image.Image, b: Image.Image) -> float:
     """Mean per-channel absolute difference between two equal-size images."""
@@ -75,7 +71,6 @@ def _mean_abs_diff(a: Image.Image, b: Image.Image) -> float:
         total += abs(ar - br) + abs(ag - bg) + abs(ab - bb)
     return total / (len(da) * 3)
 
-
 def _resize_small(img: Image.Image, max_w: int = 64, max_h: int = 64) -> Image.Image:
     """Shrink ``img`` to fit ``max_w`` x ``max_h`` (never upscales)."""
     w, h = img.size
@@ -83,7 +78,6 @@ def _resize_small(img: Image.Image, max_w: int = 64, max_h: int = 64) -> Image.I
         return img
     scale = min(max_w / w, max_h / h, 1.0)
     return img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.BILINEAR)
-
 
 # --- Clone strategy --------------------------------------------------------
 
@@ -111,7 +105,6 @@ def _clone_candidate_score(base: Image.Image, rect: Rect, cand_rect: Rect, direc
 
     return _mean_abs_diff(_resize_small(a, 64, 16), _resize_small(d, 64, 16))
 
-
 def _choose_clone_rect(base: Image.Image, rect: Rect, gap_px: int, border_px: int) -> Rect | None:
     """Pick the best-matching neighbouring rectangle to clone from."""
     W, H = base.size
@@ -137,7 +130,6 @@ def _choose_clone_rect(base: Image.Image, rect: Rect, gap_px: int, border_px: in
     scored.sort(key=lambda x: x[0])
     return scored[0][1]
 
-
 def _erase_with_clone(base: Image.Image, rect: Rect, mask: Image.Image, gap_px: int, border_px: int, feather_px: int) -> bool:
     """Composite a cloned donor patch over ``rect``. Returns False if no donor."""
     l, t, r, b = rect
@@ -149,7 +141,6 @@ def _erase_with_clone(base: Image.Image, rect: Rect, mask: Image.Image, gap_px: 
     m = mask.filter(ImageFilter.GaussianBlur(radius=feather_px)) if feather_px > 0 else mask
     base.paste(Image.composite(donor, region, m), (l, t))
     return True
-
 
 def _erase_with_blend_patches(base: Image.Image, rect: Rect, mask: Image.Image, gap_px: int = 3, feather_px: int = 4) -> bool:
     """Average up to 8 neighbouring patches and composite over ``rect``."""
@@ -185,7 +176,6 @@ def _erase_with_blend_patches(base: Image.Image, rect: Rect, mask: Image.Image, 
     base.paste(Image.composite(blended, region, m), (l, t))
     return True
 
-
 # --- Inpaint strategy ------------------------------------------------------
 
 def _token_mask_quad(token: dict, W: int, H: int, pad_px: int):
@@ -201,7 +191,6 @@ def _token_mask_quad(token: dict, W: int, H: int, pad_px: int):
         l, t, r, b = rect
         return [(l, t), (r, t), (r, b), (l, b)]
     return None
-
 
 def _erase_with_inpaint(base: Image.Image, box_tokens: list[dict], pad_px: int = 2) -> Image.Image:
     """OpenCV inpaint every token region. Returns a new image."""
@@ -247,7 +236,6 @@ def _erase_with_inpaint(base: Image.Image, box_tokens: list[dict], pad_px: int =
     out.paste(Image.fromarray(out_rgb), (l, t))
     return out
 
-
 # --- Public entry point ----------------------------------------------------
 
 def restore_token_regions(
@@ -285,7 +273,6 @@ def restore_token_regions(
         region.paste(src.crop((left, top, right, bottom)), mask=mask)
         base.paste(region, (left, top))
     return base
-
 
 def erase_text_with_boxes(
     img: Image.Image,

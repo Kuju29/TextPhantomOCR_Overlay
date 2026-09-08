@@ -8,25 +8,22 @@ wire protocol as TextPhantom's translation clients, but a tiny prompt/output.
 
 from __future__ import annotations
 
-import hashlib
-import time
 from typing import Any, TypedDict
 
-import httpx
+import httpx, time, hashlib
 
-from backend.ai.clients.ollama import _extract_text as extract_ollama_text
-from backend.ai.clients.ollama import normalize_base_url as normalize_ollama_base_url
-from backend.ai.clients.openai_compat import _uses_reasoning_safe_parameters
-from backend.ai.config import PROVIDER_DEFAULTS, PROVIDER_PROTOCOLS
-from backend.ai.providers import (
-    _safe_error_text,
+# from backend.ai import providers as _provider_modules  # noqa: F401
+from backend.ai.provider_contract import ProbeRequest
+from backend.ai.provider_registry import provider_registry
+from backend.ai.provider_resolution import (
     canonical_provider,
     detect_provider_from_key,
-    is_local_provider,
     provider_key_mismatch,
     resolve_base_url,
     resolve_model,
+    discovered_model_capabilities,
 )
+from backend.ai.rate_policy import is_local_target
 from backend.config import settings
 from backend.security import assert_ai_base_url_allowed
 
@@ -41,7 +38,6 @@ PROBE_CACHE_TTL_SEC = 15 * 60
 PROBE_FAILURE_CACHE_TTL_SEC = 30
 _PROBE_CACHE: dict[str, tuple[float, dict[str, Any], float]] = {}
 
-
 class ProbeResult(TypedDict, total=False):
     ok: bool
     provider: str
@@ -53,11 +49,9 @@ class ProbeResult(TypedDict, total=False):
     cached: bool
     error: str
 
-
 def _cache_key(provider: str, model: str, base_url: str, api_key: str) -> str:
     raw = f"{provider}|{model}|{base_url}|{hashlib.sha256(api_key.encode()).hexdigest()}"
     return hashlib.sha256(raw.encode()).hexdigest()
-
 
 def _classify_status(code: int) -> str:
     if code == 401:
@@ -72,74 +66,13 @@ def _classify_status(code: int) -> str:
         return "rejected"
     return "provider_error"
 
-
-def _post(provider: str, api_key: str, base_url: str, model: str) -> httpx.Response:
-    if provider == "gemini":
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-        payload = {
-            "contents": [{"role": "user", "parts": [{"text": "Reply only OK."}]}],
-            "generationConfig": {"maxOutputTokens": 8},
-        }
-        with httpx.Client(timeout=PROBE_TIMEOUT_SEC) as client:
-            return client.post(url, json=payload)
-
-    if provider == "anthropic":
-        url = "https://api.anthropic.com/v1/messages"
-        headers = {
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        }
-        payload = {
-            "model": model,
-            "max_tokens": 8,
-            "messages": [{"role": "user", "content": "Reply only OK."}],
-        }
-        with httpx.Client(timeout=PROBE_TIMEOUT_SEC) as client:
-            return client.post(url, headers=headers, json=payload)
-
-    if provider == "ollama":
-        # Probe the exact native contract used by generation. Do not attach a
-        # cloud/server key to a local runtime, even if the caller supplied one.
-        url = normalize_ollama_base_url(base_url) + "/api/chat"
-        payload = {
-            "model": model,
-            "messages": [{"role": "user", "content": "Reply only OK."}],
-            "stream": False,
-            "think": False,
-            "options": {"num_predict": 8},
-        }
-        with httpx.Client(timeout=PROBE_TIMEOUT_SEC) as client:
-            return client.post(url, headers={"Content-Type": "application/json"}, json=payload)
-
-    url = base_url.rstrip("/") + "/chat/completions"
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    payload: dict[str, Any] = {
-        "model": model,
-        "messages": [{"role": "user", "content": "Reply only OK."}],
-    }
-    if _uses_reasoning_safe_parameters(base_url, model):
-        payload["max_completion_tokens"] = 8
-    else:
-        payload["max_tokens"] = 8
-    with httpx.Client(timeout=PROBE_TIMEOUT_SEC) as client:
-        return client.post(url, headers=headers, json=payload)
-
-
 def probe(payload: dict[str, Any]) -> ProbeResult:
     supplied_key = str(payload.get("api_key") or "").strip()
     server_key = str(settings.ai_api_key or "").strip()
     candidate_key = supplied_key or server_key
     provider = canonical_provider(str(payload.get("provider") or "auto"))
-    base_hint = str(payload.get("base_url") or "").strip().lower()
-    looks_local = (
-        is_local_provider(provider)
-        or "localhost" in base_hint
-        or "127.0.0.1" in base_hint
-        or "0.0.0.0" in base_hint
-    )
+    base_hint = str(payload.get("base_url") or "").strip()
+    looks_local = is_local_target(provider, base_hint)
 
     if provider in ("", "auto"):
         if candidate_key:
@@ -151,7 +84,8 @@ def probe(payload: dict[str, Any]) -> ProbeResult:
                     http_status=0, cached=False,
                 )
         elif looks_local:
-            provider = "ollama"
+            default_local = next((item for item in provider_registry if item.default_local), None)
+            provider = default_local.provider_id if default_local else ""
         else:
             return ProbeResult(
                 ok=False,
@@ -164,8 +98,9 @@ def probe(payload: dict[str, Any]) -> ProbeResult:
                 cached=False,
             )
 
-    protocol = str(PROVIDER_PROTOCOLS.get(provider) or "")
-    backend_supported = bool(provider in PROVIDER_DEFAULTS and protocol)
+    spec = provider_registry.get(provider)
+    protocol = spec.protocol if spec else ""
+    backend_supported = bool(spec and spec.adapter and protocol)
     if not backend_supported:
         return ProbeResult(
             ok=False,
@@ -178,7 +113,7 @@ def probe(payload: dict[str, Any]) -> ProbeResult:
             cached=False,
         )
 
-    local = is_local_provider(provider)
+    local = is_local_target(provider, base_hint)
     # A server-owned cloud key must never be sent to a caller-selected local
     # endpoint. Local providers need no real key.
     api_key = "" if local else (supplied_key or server_key)
@@ -220,8 +155,19 @@ def probe(payload: dict[str, Any]) -> ProbeResult:
         out["cached"] = True
         return ProbeResult(**out)
 
+    # Reuse only capabilities learned from this exact provider/base/account
+    # catalogue. This lets provider-owned probes suppress optional hidden
+    # reasoning without guessing from model names.
+    _, probe_capabilities = discovered_model_capabilities(
+        provider, base_url, model, api_key
+    )
+
     try:
-        response = _post(provider, api_key, base_url, model)
+        response = spec.adapter.probe(ProbeRequest(
+            api_key=api_key, base_url=base_url, model=model,
+            timeout_sec=PROBE_TIMEOUT_SEC,
+            model_capabilities=probe_capabilities,
+        ))
     except httpx.RequestError as exc:
         result = ProbeResult(
             ok=False,
@@ -235,17 +181,7 @@ def probe(payload: dict[str, Any]) -> ProbeResult:
             error=type(exc).__name__,
         )
     else:
-        ollama_response_error = ""
-        if response.is_success and provider == "ollama":
-            try:
-                data = response.json()
-                if not isinstance(data, dict):
-                    raise RuntimeError("Ollama returned an invalid response shape")
-                extract_ollama_text(data)
-            except (ValueError, RuntimeError) as exc:
-                ollama_response_error = str(exc)[:240]
-
-        if response.is_success and not ollama_response_error:
+        if response.ok:
             result = ProbeResult(
                 ok=True,
                 provider=provider,
@@ -253,20 +189,20 @@ def probe(payload: dict[str, Any]) -> ProbeResult:
                 backend_supported=True,
                 provider_protocol=protocol,
                 status="passed",
-                http_status=response.status_code,
+                http_status=response.http_status,
                 cached=False,
             )
-        elif ollama_response_error:
+        elif response.status:
             result = ProbeResult(
                 ok=False,
                 provider=provider,
                 model=model,
                 backend_supported=True,
                 provider_protocol=protocol,
-                status="invalid_model_output",
-                http_status=response.status_code,
+                status=response.status,
+                http_status=response.http_status,
                 cached=False,
-                error=ollama_response_error,
+                error=response.error,
             )
         else:
             result = ProbeResult(
@@ -275,12 +211,12 @@ def probe(payload: dict[str, Any]) -> ProbeResult:
                 model=model,
                 backend_supported=True,
                 provider_protocol=protocol,
-                status=_classify_status(response.status_code),
-                http_status=response.status_code,
+                status=_classify_status(response.http_status),
+                http_status=response.http_status,
                 cached=False,
                 # The provider said why. Dropping it left the settings panel
                 # with a bare number and no way to act on it.
-                error=_safe_error_text(response),
+                error=response.error,
             )
 
     ttl = PROBE_CACHE_TTL_SEC if result["ok"] else PROBE_FAILURE_CACHE_TTL_SEC

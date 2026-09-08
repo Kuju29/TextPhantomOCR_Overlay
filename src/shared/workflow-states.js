@@ -63,7 +63,11 @@ export const IN_FLIGHT = new Set([
 /** Every legal move. Anything not listed here is a bug, not a variation. */
 const TRANSITIONS = {
   [STATES.CREATED]: [STATES.MEDIA_READY, STATES.FAILED, STATES.CANCELLED],
-  [STATES.MEDIA_READY]: [STATES.LENS_REQUESTED, STATES.FAILED, STATES.CANCELLED],
+  [STATES.MEDIA_READY]: [
+    STATES.LENS_REQUESTED,
+    STATES.FAILED,
+    STATES.CANCELLED,
+  ],
   [STATES.LENS_REQUESTED]: [
     STATES.LENS_READY,
     STATES.LENS_DEGRADED,
@@ -72,7 +76,11 @@ const TRANSITIONS = {
   ],
   // Degraded is not a dead end: it re-enters the request with a different
   // adapter pinned. The attempt counter is what stops that being a loop.
-  [STATES.LENS_DEGRADED]: [STATES.LENS_REQUESTED, STATES.FAILED, STATES.CANCELLED],
+  [STATES.LENS_DEGRADED]: [
+    STATES.LENS_REQUESTED,
+    STATES.FAILED,
+    STATES.CANCELLED,
+  ],
   [STATES.LENS_READY]: [
     STATES.TEXT_READY,
     STATES.AI_REQUESTED,
@@ -86,9 +94,22 @@ const TRANSITIONS = {
     STATES.CANCELLED,
   ],
   [STATES.AI_DEGRADED]: [STATES.AI_REQUESTED, STATES.FAILED, STATES.CANCELLED],
-  [STATES.TEXT_READY]: [STATES.RENDER_READY, STATES.RENDER_DEGRADED, STATES.FAILED, STATES.CANCELLED],
-  [STATES.RENDER_DEGRADED]: [STATES.RENDER_READY, STATES.FAILED, STATES.CANCELLED],
-  [STATES.RENDER_READY]: [STATES.APPLY_REQUESTED, STATES.FAILED, STATES.CANCELLED],
+  [STATES.TEXT_READY]: [
+    STATES.RENDER_READY,
+    STATES.RENDER_DEGRADED,
+    STATES.FAILED,
+    STATES.CANCELLED,
+  ],
+  [STATES.RENDER_DEGRADED]: [
+    STATES.RENDER_READY,
+    STATES.FAILED,
+    STATES.CANCELLED,
+  ],
+  [STATES.RENDER_READY]: [
+    STATES.APPLY_REQUESTED,
+    STATES.FAILED,
+    STATES.CANCELLED,
+  ],
   [STATES.APPLY_REQUESTED]: [
     STATES.APPLIED,
     STATES.APPLY_PENDING,
@@ -97,7 +118,11 @@ const TRANSITIONS = {
   ],
   // The target left the DOM (a virtualised reader recycled the node). The work
   // is finished and valid; it just has nowhere to go yet.
-  [STATES.APPLY_PENDING]: [STATES.APPLY_REQUESTED, STATES.EXPIRED, STATES.CANCELLED],
+  [STATES.APPLY_PENDING]: [
+    STATES.APPLY_REQUESTED,
+    STATES.EXPIRED,
+    STATES.CANCELLED,
+  ],
   [STATES.APPLIED]: [],
   [STATES.FAILED]: [],
   [STATES.CANCELLED]: [],
@@ -159,7 +184,11 @@ export function createWorkflow({
  *
  * @returns {{ok: true, record: object} | {ok: false, reason: string}}
  */
-export function transition(record, to, { reason = "", now = Date.now(), operation } = {}) {
+export function transition(
+  record,
+  to,
+  { reason = "", now = Date.now(), operation } = {},
+) {
   const from = record?.state;
   if (!from) return { ok: false, reason: "record has no state" };
   if (from === to) return { ok: false, reason: `already in ${to}` };
@@ -183,7 +212,12 @@ export function transition(record, to, { reason = "", now = Date.now(), operatio
     // The reason is stored, not logged and forgotten. A page that degraded
     // once is noise; a fleet that degrades every time is an outage, and only
     // the stored reason can tell those apart after the fact.
-    next.degradations.push({ stage, reason: String(reason || "unspecified"), at: now, attempts });
+    next.degradations.push({
+      stage,
+      reason: String(reason || "unspecified"),
+      at: now,
+      attempts,
+    });
   }
 
   // Write-ahead: the operation id is committed BEFORE the call it identifies,
@@ -213,8 +247,14 @@ export function stageExhausted(record, stage, max = MAX_STAGE_ATTEMPTS) {
 export function isCurrent(record, generation) {
   const g = record?.generation || {};
   if (!generation) return false;
-  if (g.pageInstanceId && g.pageInstanceId !== generation.pageInstanceId) return false;
-  if (g.targetKey && generation.targetKey && g.targetKey !== generation.targetKey) return false;
+  if (g.pageInstanceId && g.pageInstanceId !== generation.pageInstanceId)
+    return false;
+  if (
+    g.targetKey &&
+    generation.targetKey &&
+    g.targetKey !== generation.targetKey
+  )
+    return false;
   if (
     Number.isFinite(g.targetRevision) &&
     Number.isFinite(generation.targetRevision) &&
@@ -233,7 +273,9 @@ export function describeWorkflow(record) {
     itemId: record?.itemId,
     state: record?.state,
     v: record?.stateVersion,
-    degradations: (record?.degradations || []).map((d) => `${d.stage}:${d.reason}`),
+    degradations: (record?.degradations || []).map(
+      (d) => `${d.stage}:${d.reason}`,
+    ),
     ageMs: record?.updatedAt ? Date.now() - record.updatedAt : null,
   };
 }

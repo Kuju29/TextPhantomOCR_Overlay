@@ -32,8 +32,11 @@ function automaticMax() {
 }
 
 function effectiveMax() {
-  const clientMax = userMaxConcurrency > 0 ? userMaxConcurrency : automaticMax();
-  return serverMaxConcurrency > 0 ? Math.min(clientMax, serverMaxConcurrency) : clientMax;
+  const clientMax =
+    userMaxConcurrency > 0 ? userMaxConcurrency : automaticMax();
+  return serverMaxConcurrency > 0
+    ? Math.min(clientMax, serverMaxConcurrency)
+    : clientMax;
 }
 
 function skipTask(task) {
@@ -66,8 +69,12 @@ function pump() {
 
 // Optional admission guards preserve addTask(fn) compatibility while allowing
 // callers to cancel or reject stale work before it starts.
-export function addTask(fn, { signal = null, shouldStart = null, laneManaged = false } = {}) {
-  if (typeof fn !== "function") throw new TypeError("addTask requires a function");
+export function addTask(
+  fn,
+  { signal = null, shouldStart = null, laneManaged = false } = {},
+) {
+  if (typeof fn !== "function")
+    throw new TypeError("addTask requires a function");
   const task = { fn, signal, shouldStart, laneManaged: Boolean(laneManaged) };
 
   // Extension-first jobs already acquire separate Lens / AI / server capacity
@@ -96,9 +103,8 @@ export function addTask(fn, { signal = null, shouldStart = null, laneManaged = f
 // 0/invalid restores hardware-aware automatic admission.
 export function setMaxConcurrency(value) {
   const n = Number(value);
-  userMaxConcurrency = Number.isFinite(n) && n > 0
-    ? clampInteger(n, 1, EXPLICIT_MAX)
-    : 0;
+  userMaxConcurrency =
+    Number.isFinite(n) && n > 0 ? clampInteger(n, 1, EXPLICIT_MAX) : 0;
   pump();
 }
 

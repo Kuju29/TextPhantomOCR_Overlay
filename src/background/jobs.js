@@ -1,3 +1,6 @@
+import { applyRuntimeCapacityHints } from "./jobs/capacity-policy.js";
+import { reportTranslationFailure } from "../shared/diagnostic-policy.js";
+import { repairCoordinator } from "./repair/coordinator.js";
 // Orchestrates a translation job from enqueue through submit, result handling and batch finalisation.
 
 import { createLogger, setLogLevel } from "../shared/logger.js";
@@ -8,6 +11,7 @@ import {
   getBatch,
   batchMark,
   markImagePhase,
+  markBatchInitialAi,
   batchUpdateToast,
   batchStopKeepAlive,
   batchPassStats,
@@ -20,7 +24,14 @@ import {
 } from "./images.js";
 import { addTask } from "./job-queue.js";
 import { imageKeyFromPayload, normImgSrc } from "./job-keys.js";
-import { pendingByJob, pendingByImage, findContext, removeJob, rememberJob, restorePendingJobs } from "./job-registry.js";
+import {
+  pendingByJob,
+  pendingByImage,
+  findContext,
+  removeJob,
+  rememberJob,
+  restorePendingJobs,
+} from "./job-registry.js";
 import {
   getCachedDataUri,
   setCachedDataUri,
@@ -30,24 +41,23 @@ import {
   setCachedResult,
   stripImageFields,
 } from "./mangadex.js";
-import { accumulateSeriesMemory, getSeriesMemory, selectPromptMemory } from "./series-memory.js";
+import { accumulateSeriesMemory } from "./series-memory.js";
 import { resolveSeriesKey } from "../shared/series.js";
 import { bumpTabSession, getTabSessionId } from "./tab-sessions.js";
-import {
-  sendToTab,
-  } from "./tabs-messaging.js";
+import { sendToTab } from "./tabs-messaging.js";
 import { enqueueDomInsert } from "./insert-queue.js";
 import { imageErrorMessage } from "./error-message.js";
 import { attachTpError } from "../shared/error-contract.js";
+import { pollJobViaRest } from "./transports/polling.js";
+import { cancelJobsViaRest } from "./transports/cancel.js";
+import { groupParagraphsWithArtifactFallback } from "./transports/groups.js";
+import { fetchLensRawViaRest } from "./transports/lens.js";
 import {
-  submitJobViaRest,
-  pollJobViaRest,
-  cancelJobsViaRest,
-  translateViaSyncRest,
-  groupParagraphsWithArtifactFallback,
-  fetchLensRawViaRest,
-} from "./transport.js";
-import { engineCompatibilityIssue, forgetCapabilities, getCapabilities } from "./capabilities.js";
+  capabilityFailureDetails,
+  engineCompatibilityIssue,
+  forgetCapabilities,
+  getCapabilities,
+} from "./capabilities.js";
 import {
   getTrace,
   newTraceId,
@@ -57,68 +67,156 @@ import {
 } from "../shared/trace.js";
 import * as wf from "./workflow-track.js";
 import {
-  translateUnits,
-  getCanonicalPrompt,
-  getPromptAudit,
-} from "./ai-local.js";
-import { shouldUseDirectLocalAi } from "../shared/local-ai-adapter.js";
-import {
-  applyTranslations,
-  attachBubbleGroups,
   canRenderFaithfully,
-  classifyAiTranslationReport,
-  requireAiLensDocument,
   translationUnits,
 } from "../shared/lens-document.js";
-import { eraseBoxesForAiPartial } from "../shared/erase-boxes.js";
-import {
-  authoritativeLensImageSize,
-  decodeLensResponse,
-  remapRawBubbleGroups,
-} from "../shared/lens-decode.js";
-import { decideVerticalMerge } from "../shared/vertical-verdict.js";
 import { aiLayoutDecision } from "../shared/lens-axis.js";
 import {
   acquire,
   releaseSuccess,
-  releaseReplay,
   releaseRejected,
-  releaseDeferred,
   releaseGated,
   releaseFailed,
-  releaseLocalFailure,
-  laneKeyFor,
-  describe as describeLane,
-  setLaneCapacityHint,
-  setLaneSlotCeiling,
-  setLaneUnlimited,
-  configureLocalCapacityForPayload,
 } from "./scheduler.js";
-import { isLocalAiPayload } from "./local-capacity.js";
+import {
+  isTextNoOverlaySkippable as evaluateTextNoOverlaySkippable,
+  markNoTranslatableText,
+  summarizeResultPresentation,
+  aiPageFailure,
+} from "./pipeline/result-policy.js";
+import {
+  isUrlOnlyPayload,
+  shouldPrefetchDataUri as evaluateDataUriPrefetch,
+} from "./pipeline/image-routing.js";
+import {
+  dispatchPreparedJob,
+  payloadForFullServer as buildFullServerPayload,
+} from "./pipeline/engine-routing.js";
+import { buildEnqueuePolicy } from "./pipeline/enqueue-policy.js";
+import { createJobPreparation } from "./pipeline/job-preparation.js";
+import { createLensDirectPath } from "./pipeline/lens-direct.js";
+import { createAiExecution } from "./pipeline/ai-execution.js";
+import {
+  runServerTranslation,
+  submitAndPollServer,
+} from "./pipeline/server-translation.js";
+import {
+  releaseBatchImageJobs,
+  releaseTabImageJobs,
+  scheduleOwnedImageJob,
+  abortBatchInFlight,
+  abortTabInFlight,
+  beginInFlight,
+  bumpSettingsEpoch,
+  endInFlight,
+  getCurrentBatchId,
+  getSettingsEpoch,
+  setCurrentBatchId,
+} from "./jobs/lifecycle.js";
+import { idempotencyKeyForPayload } from "./jobs/idempotency.js";
+import {
+  markDomainNeedsDataUri,
+  shouldPrefetchDataUri as applyImageSourcePolicy,
+} from "./jobs/image-source-policy.js";
+import { createBatchRetryCoordinator } from "./jobs/batch-retry.js";
+import { createResultDelivery } from "./jobs/result-delivery.js";
+
+export { bumpSettingsEpoch, markDomainNeedsDataUri, setCurrentBatchId };
 
 const log = createLogger("SW.jobs");
+const reportFailure = (message, error, details = {}, traceId = "") =>
+  reportTranslationFailure(log, (event, data, id) =>
+    traceNote("background/jobs.js", event, data, id), message, error, details, traceId);
+
+// Structural trace only: IDs, reading order and geometry. Never include OCR
+// or translated strings, so TP_TRACE can diagnose reversal and rotation signs
+// without exporting page dialogue.
+function traceUnitLayout(doc, traceId, phase, imageId = "") {
+  if (!traceId) return;
+  const paragraphs = Array.isArray(doc?.paragraphs) ? doc.paragraphs : [];
+  const paragraphById = new Map(
+    paragraphs.map((paragraph) => [String(paragraph?.id || ""), paragraph]),
+  );
+  const groupByMember = new Map();
+  for (const group of Array.isArray(doc?.canonicalOriginalTree?.paragraphs)
+    ? doc.canonicalOriginalTree.paragraphs
+    : []) {
+    for (const id of group?.source?.documentParagraphIds || [])
+      groupByMember.set(String(id), group);
+  }
+  const units = translationUnits(doc);
+  for (let offset = 0; offset < units.length; offset += 10) {
+    traceNote(
+      "background/jobs.js",
+      "unitLayout",
+      {
+        phase,
+        imageId: String(imageId || ""),
+        offset,
+        units: units.slice(offset, offset + 10).map((unit, localIndex) => {
+          const paragraphIds = (unit?.paragraphIds || []).map(String);
+          const group = paragraphIds
+            .map((id) => groupByMember.get(id))
+            .find(Boolean);
+          const members = paragraphIds.map((paragraphId) => {
+            const paragraph = paragraphById.get(paragraphId);
+            const rotations = (paragraph?.items || paragraph?.lensItems || [])
+              .map((item) => Number(item?.box?.rotation_deg ?? item?.rotation))
+              .filter(Number.isFinite);
+            return {
+              paragraphId,
+              inputRotations: rotations,
+              inputSigns: rotations.map((rotation) => Math.sign(rotation)),
+            };
+          });
+          const memberRotations = members.flatMap(
+            (member) => member.inputRotations,
+          );
+          const groupRotation = Number(group?.rotation);
+          // Groups carry the server-selected output rotation. Ungrouped units
+          // preserve Lens geometry, so the first finite member rotation is the
+          // renderer's input rather than reporting an unhelpful null.
+          const outputRotation = Number.isFinite(groupRotation)
+            ? groupRotation
+            : memberRotations[0];
+          return {
+            index: offset + localIndex,
+            id: String(unit?.id || ""),
+            paragraphIds,
+            readingOrder: paragraphIds,
+            members,
+            direction: String(group?.direction || ""),
+            outputRotation: Number.isFinite(outputRotation)
+              ? outputRotation
+              : null,
+            outputSign: Number.isFinite(outputRotation)
+              ? Math.sign(outputRotation)
+              : null,
+            outputRotationSource: Number.isFinite(groupRotation)
+              ? "group"
+              : "lens",
+          };
+        }),
+      },
+      traceId,
+    );
+  }
+}
 
 // Advances the canonical per-image progress record for a registered job.
 // Keeping this lookup here lets stage owners report their real boundary without
-// threading batch UI objects through Lens/ONNX/AI internals.
+// threading batch UI objects through Lens/grouping/AI internals.
 function markJobPhase(jobId, phase, details = {}) {
   const ctx = pendingByJob.get(jobId);
   const batchId = String(ctx?.batchId || ctx?.metadata?.batch_id || "").trim();
-  const imageKey = String(ctx?.imageKey || ctx?.metadata?.image_id || "").trim();
+  const imageKey = String(
+    ctx?.imageKey || ctx?.metadata?.image_id || "",
+  ).trim();
   if (!batchId || !imageKey) return null;
   return markImagePhase(batchId, imageKey, phase, details);
 }
 
-// Whether a 429 came from the API's per-key AI rate gate rather than from the
-// provider or from server overload. Read from the response body's `code`, not
-// guessed from the status: the three arrive as the same 429 and only one of
-// them means "narrow your concurrency".
-function isRateGateBusy(error) {
-  const code = String(error?.code || "");
-  return code === "rate_gate_busy" || code === "local_rate_gate_busy";
-}
-
-// Lens/ONNX admission failures are safe to retry because the rejected request
+// Lens/grouping admission failures are safe to retry because the rejected request
 // never entered the stage. Keep that backlog in the browser that owns the page
 // instead of turning another user's burst into a permanent image error.
 function isStageBackpressure(error) {
@@ -126,21 +224,38 @@ function isStageBackpressure(error) {
   if (status !== 429 && status !== 503) return false;
   if (error?.permanent === true) return false;
   const code = String(error?.code || "");
-  return error?.retryable === true || code === "server_busy" ||
-    code === "lens_session_unavailable" || code === "API_5XX" ||
-    code === "API_BAD_RESPONSE" || !code;
+  return (
+    error?.retryable === true ||
+    code === "server_busy" ||
+    code === "lens_session_unavailable" ||
+    code === "API_5XX" ||
+    code === "API_BAD_RESPONSE" ||
+    !code
+  );
 }
 
 // Runs one extension-owned server stage in its own lane. A rejected admission
 // releases the slot, observes Retry-After, and re-acquires later; it never holds
-// a Lens slot while ONNX waits or vice versa.
-async function runStageInLane(key, work, { signal = null, stage = "", imageId = "", traceId = "" } = {}) {
+// a Lens slot while grouping waits or vice versa.
+async function runStageInLane(
+  key,
+  work,
+  { signal = null, stage = "", imageId = "", traceId = "", onGranted = null } = {},
+) {
   let accumulatedQueueWaitMs = 0;
   let attempt = 0;
   while (true) {
     attempt++;
     const granted = await acquire(key, signal);
     accumulatedQueueWaitMs += Number(granted?.waitMs) || 0;
+    if (typeof onGranted === "function") {
+      try {
+        await onGranted({
+          lane: key, attempt, queueWaitMs: Number(granted?.waitMs) || 0,
+          accumulatedQueueWaitMs,
+        });
+      } catch {}
+    }
     const started = Date.now();
     try {
       const value = await work();
@@ -164,543 +279,112 @@ async function runStageInLane(key, work, { signal = null, stage = "", imageId = 
         // not evidence that client concurrency itself was too high.
         releaseGated(key, retryAfterMs);
       }
-      traceNote("background/jobs.js", "imageStage", {
-        stage, state: "requeued", imageId, lane: key, attempt,
-        queueWaitMs: Number(granted?.waitMs) || 0, accumulatedQueueWaitMs,
-        status: Number(error?.status) || 0, code, retryAfterMs,
-        error: error?.message || String(error),
-      }, traceId);
+      traceNote(
+        "background/jobs.js",
+        "imageStage",
+        {
+          stage,
+          state: "requeued",
+          imageId,
+          lane: key,
+          attempt,
+          queueWaitMs: Number(granted?.waitMs) || 0,
+          accumulatedQueueWaitMs,
+          status: Number(error?.status) || 0,
+          code,
+          retryAfterMs,
+          errorType: error?.name || "Error",
+        },
+        traceId,
+      );
       await waitForRetry(retryAfterMs, signal);
     }
   }
 }
 
+const runLensDirectPath = createLensDirectPath({
+  fetchFromUrl: fetchImageDataUriFromUrl,
+  fetchFromTab: fetchImageDataUriFromTab,
+  fetchLensRaw: fetchLensRawViaRest,
+  groupParagraphs: groupParagraphsWithArtifactFallback,
+  runStage: runStageInLane,
+  markPhase: markJobPhase,
+  trace: (event, data, traceId) =>
+    traceNote("background/pipeline/lens-direct.js", event, data, traceId),
+  traceLayout: traceUnitLayout,
+  getTrace,
+  log,
+});
+
 const MAX_FIRST_TRY_RETRIES = 2;
 const FIRST_TRY_GAP_MS = 3000;
-const BATCH_RETRY_GAP_MS = 1800;
+const { finalizeBatch } = createBatchRetryCoordinator({
+  retryGapMs: 1800,
+  batchPassStats,
+  selectRetryCandidates: selectBatchRetryCandidates,
+  updateToast: batchUpdateToast,
+  stopKeepAlive: batchStopKeepAlive,
+  markImagePhase,
+  batchMark,
+  addTask,
+  imageKeyFromPayload,
+  normalizeImageKey: normImgSrc,
+  getCachedDataUri,
+  fetchImageDataUriFromUrl,
+  setCachedDataUri,
+  classifyJobError,
+  enqueue,
+  onComplete: async (batch, label) => {
+    const owned = await repairCoordinator.finishInitial(batch);
+    if (!owned) { batchUpdateToast(batch, batch.repair?.phase === 'unavailable'
+      ? `${label}; repair unavailable: ${batch.repair.code || 'API/session error'}` : label, true); await batchStopKeepAlive(batch); }
+  },
+});
+export { finalizeBatch };
 
-let settingsEpoch = 0;
-// Invalidates in-flight results after the user changes mode, language or source.
-export const bumpSettingsEpoch = () => {
-  settingsEpoch = (settingsEpoch + 1) >>> 0;
-};
+const { failJobImmediately, handleStaleJob, handleJobError, handleResult } =
+  createResultDelivery({
+    accumulateSeriesMemory,
+    batchUpdateToast,
+    classifyJobError,
+    enqueueDomInsert,
+    ensureBatch,
+    evaluateTextNoOverlaySkippable,
+    finalizeBatch,
+    findContext,
+    getSettingsEpoch,
+    getTabSessionId,
+    imageErrorMessage,
+    isUrlOnlyPayload,
+    markDomainNeedsDataUri,
+    markImagePhase,
+    mdCacheKey,
+    mdKeyFromUrl,
+    normImgSrc,
+    pendingByJob,
+    removeJob,
+    resolveSeriesKey,
+    sendToTab,
+    setCachedDataUri,
+    setCachedResult,
+    stripImageFields,
+    summarizeResultPresentation,
+    traceNote,
+    workflow: wf,
+    onDelivered: (ctx, ok) => repairCoordinator.markDelivered(ctx, ok),
+    log,
+  });
+export { handleStaleJob, handleJobError, handleResult };
 
-// Maps jobId to { tabId, ctrl } for requests that can still be aborted.
-const inFlight = new Map();
+const { planLocalAi, runLocalAiInLane, waitForRetry } = createAiExecution({
+  onCheckpoint: (batchId, data) => repairCoordinator.capture(batchId, data),
+  log,
+  markJobPhase,
+  traceUnitLayout,
+});
 
-// Registers an abort controller for a job and returns it.
-function beginInFlight(jobId, tabId) {
-  const ctrl = new AbortController();
-  inFlight.set(jobId, { tabId: Number(tabId) || 0, ctrl });
-  return ctrl;
-}
-
-function endInFlight(jobId) {
-  inFlight.delete(jobId);
-}
-
-// Aborts every request belonging to a tab and returns how many were stopped.
-function abortTabInFlight(tabId, reason) {
-  let stopped = 0;
-  for (const [jobId, rec] of Array.from(inFlight.entries())) {
-    if (rec.tabId !== tabId) continue;
-    inFlight.delete(jobId);
-    stopped += 1;
-    try {
-      rec.ctrl.abort(reason);
-    } catch (e) {
-      log.warn("could not abort an in-flight request", { jobId, error: e?.message || String(e) });
-    }
-  }
-  return stopped;
-}
-
-let currentBatchId = null;
-// Sets the batch id new jobs are attributed to.
-export const setCurrentBatchId = (id) => {
-  currentBatchId = id;
-};
-
-// Tells a tab an image failed when there is no job context to clean up.
-function failJobImmediately(tabId, imgUrl, message, frameId = 0, traceId = "") {
-  if (tabId) {
-    sendToTab(tabId, imageErrorMessage({ imgUrl, traceId }, message), frameId);
-  }
-}
-
-// Aborts a job whose tab session went stale, updating its batch.
-export function handleStaleJob(jobId) {
-  const ctx = pendingByJob.get(jobId);
-  if (!ctx) return;
-  removeJob(jobId, ctx?.metadata?.image_id);
-  const batchId = String(ctx?.batchId || ctx?.metadata?.batch_id || "").trim();
-  const imageKey = String(ctx?.imageKey || ctx?.metadata?.image_id || "").trim();
-  const batch = batchId ? ensureBatch(batchId, ctx.tabId || 0, ctx.frameId || 0) : null;
-  if (batch && imageKey) {
-    markImagePhase(batchId, imageKey, "cancelled", { lastError: "navigation" });
-    batchUpdateToast(batch, "Cancelled", true);
-    finalizeBatch(batch);
-  }
-}
-
-// Reports a job error to its tab and marks the failure on its batch.
-export function handleJobError(jobId, error = { code: "PROCESSING_FAILED", message: "Job failed without error detail" }) {
-  const ctx = pendingByJob.get(jobId);
-  const errMsg = error?.message || String(error || "PROCESSING_FAILED");
-  const aiGenerationAttempted = Boolean(ctx?.aiGenerationAttempted);
-  let cls = classifyJobError(error, { aiGenerationAttempted });
-  const terminalAiError = aiGenerationAttempted || /(?:ai text was incomplete; no automatic retry was made|ai text layer cannot be rendered faithfully)/i.test(
-    String(errMsg || ""),
-  );
-  const curSession = ctx?.tabId ? getTabSessionId(ctx.tabId) : "";
-  const isStale = Boolean(ctx?.sessionId && curSession && ctx.sessionId !== curSession);
-
-  const batchId = String(ctx?.batchId || ctx?.metadata?.batch_id || "").trim();
-  const imageKey = String(ctx?.imageKey || ctx?.metadata?.image_id || "").trim();
-  const batch = batchId ? ensureBatch(batchId, ctx?.tabId || 0, ctx?.frameId || 0) : null;
-
-  const item = batch && imageKey ? batch.items.get(imageKey) : null;
-  if (item?.payload && isUrlOnlyPayload(item.payload) && !terminalAiError) {
-    markDomainNeedsDataUri(item.payload.src);
-    if (cls.permanent) cls = { permanent: false };
-  }
-
-  if (ctx?.tabId && !isStale) {
-    sendToTab(
-      ctx.tabId,
-      imageErrorMessage(ctx, error),
-      ctx.frameId || 0,
-    );
-  }
-
-  removeJob(jobId, ctx?.metadata?.image_id);
-
-  if (batch && imageKey) {
-    markImagePhase(batchId, imageKey, "error", {
-      lastError: errMsg,
-      permanent: !!cls.permanent,
-    });
-    batchUpdateToast(batch, cls.permanent ? "Error (permanent)" : "Error");
-    finalizeBatch(batch);
-  }
-}
-
-
-// Records on a result that Lens found nothing a translator can act on, so the image is skipped.
-function markNoTranslatableText(result, reason) {
-  result.meta = { ...(result.meta || {}), skipped_reason: reason };
-}
-
-// Returns the explicit reason an engine gave for intentionally producing no
-// text layer. Keep this shared by result handling and the visible page badge so
-// "no text" can never silently fall through to the old "No AI key" label.
-function textSkipReason(result) {
-  return String(
-    result?.meta?.skipped_reason ||
-      result?.metadata?.skipped_reason ||
-      result?.Ai?.meta?.skipped_reason ||
-      result?.ai?.meta?.skipped_reason ||
-      result?.translated?.meta?.skipped_reason ||
-      result?.original?.meta?.skipped_reason ||
-      ""
-  ).trim().toLowerCase();
-}
-
-// Returns whether an overlay-less Lens text result counts as a skipped image rather than an error.
-function isTextNoOverlaySkippable(mode, source, result) {
-  if (String(mode || "") !== "lens_text") return false;
-  const src = String(source || "").toLowerCase();
-  const reason = textSkipReason(result);
-  // AI is only skippable on an explicit reason: a silent empty AI result is still a failure.
-  if (src === "ai") return /no[_ -]?text|no[_ -]?translatable[_ -]?text/.test(reason);
-  return !reason || /no[_ -]?text|empty|no[_ -]?overlay|no[_ -]?paragraph/.test(reason);
-}
-
-// Returns the replacement-image URL carried by a result, or null.
-function extractNewImage(result) {
-  return (
-    result?.imageDataUri ||
-    result?.imageDataURI ||
-    result?.image ||
-    result?.imageUrl ||
-    result?.image_url ||
-    result?.imageURL ||
-    null
-  );
-}
-
-// Returns the AI, translated and original overlay markup carried by a result.
-function extractHtml(result) {
-  return {
-    aiHtml: result?.Ai?.aihtml || result?.ai?.aihtml || null,
-    translatedHtml: result?.translated?.translatedhtml || result?.translatedhtml || null,
-    originalHtml: result?.original?.originalhtml || result?.originalhtml || null,
-  };
-}
-
-// Caches a finished job's result and injects it into the tab as an image swap and/or overlay.
-export async function handleResult(jobId, result) {
-  const ctx = findContext(jobId, result?.metadata?.image_id);
-  if (!ctx) {
-    log.warn("result for unknown job", { id: jobId });
-    return;
-  }
-
-  const { imgUrl, tabId } = ctx;
-  const frameId = ctx.frameId || 0;
-  const mode = ctx.mode || ctx.metadata?.mode || null;
-
-  const batchId = String(ctx.batchId || ctx.metadata?.batch_id || "").trim();
-  const imageKey = String(
-    ctx.imageKey || ctx.metadata?.image_id || result?.metadata?.image_id || "",
-  ).trim();
-  const batch = batchId ? ensureBatch(batchId, tabId, frameId) : null;
-
-  const newImg = extractNewImage(result);
-  const { aiHtml, translatedHtml, originalHtml } = extractHtml(result);
-  void (async () => {
-    try {
-      const key =
-        (ctx.seriesKey && String(ctx.seriesKey)) ||
-        (await resolveSeriesKey(ctx.pageUrl || "")) ||
-        "default";
-      await accumulateSeriesMemory(key, result);
-    } catch {
-    }
-  })();
-  const hasHtml = Boolean(
-    aiHtml || translatedHtml || originalHtml || result?.lensDocument?.paragraphs?.length,
-  );
-  const skipReason = textSkipReason(result);
-  const shouldShowSkipBadge = mode === "lens_text" && Boolean(skipReason);
-
-  const cacheKey = mdCacheKey(
-    mdKeyFromUrl(imgUrl),
-    ctx.lang || ctx.metadata?.lang,
-    mode,
-    ctx.source || ctx.metadata?.source,
-  );
-  if (cacheKey && (newImg || hasHtml)) {
-    const sourceImageKey = result?.sourceImageDataUri ? normImgSrc(imgUrl) : "";
-    if (sourceImageKey) setCachedDataUri(sourceImageKey, result.sourceImageDataUri);
-    setCachedResult(cacheKey, {
-      newImg: newImg || null,
-      result: hasHtml
-        ? { ...stripImageFields(result), ...(sourceImageKey ? { sourceImageKey } : {}) }
-        : null,
-    });
-  }
-
-  const curSession = getTabSessionId(tabId);
-  const settingsStale =
-    typeof ctx.settingsEpoch === "number" && ctx.settingsEpoch !== settingsEpoch;
-  const isStale =
-    Boolean(ctx.sessionId && curSession && ctx.sessionId !== curSession) || settingsStale;
-
-  if (isStale) {
-    await wf.failed(
-      String(ctx.workflowId || ""),
-      settingsStale ? "settings changed while the job was in flight" : "tab navigated away",
-    );
-    removeJob(jobId, result?.metadata?.image_id);
-    if (batch && imageKey) {
-      if (ctx.keepCacheOnStale) {
-        markImagePhase(batchId, imageKey, "done", { cachedOnly: true });
-        batchUpdateToast(batch, "Saved", true);
-      } else {
-        markImagePhase(batchId, imageKey, "cancelled", { lastError: "navigation" });
-        batchUpdateToast(batch, "Cancelled", true);
-      }
-      finalizeBatch(batch);
-    }
-    return;
-  }
-
-  if (batch && imageKey) {
-    markImagePhase(batchId, imageKey, "rendering");
-    batchUpdateToast(batch, "Inserting");
-  }
-
-  const workflowId = String(ctx.workflowId || "");
-  await wf.renderReady(workflowId);
-  await wf.applyRequested(workflowId, `apply:${jobId}`);
-
-  let replaceOk = null;
-  if (newImg && mode !== "lens_text") {
-    replaceOk = await enqueueDomInsert(
-      tabId,
-      { type: "REPLACE_IMAGE", original: imgUrl, newSrc: newImg, tpTrace: ctx.traceId || "" },
-      frameId,
-    );
-  }
-
-  let overlayOk = null;
-  if (hasHtml || shouldShowSkipBadge) {
-    overlayOk = await enqueueDomInsert(
-      tabId,
-      {
-        type: "OVERLAY_HTML",
-        original: imgUrl,
-        result,
-        mode: mode || "",
-        source: ctx.source || "",
-        generation: ctx.generation || null,
-        tpTrace: ctx.traceId || "",
-      },
-      frameId,
-    );
-  }
-
-  let ok = true;
-  let errMsg = "";
-  if (!hasHtml && !(newImg && mode !== "lens_text")) {
-    if (!newImg) {
-      if (isTextNoOverlaySkippable(mode, ctx.source || result?.source || "", result)) {
-        const item = batch && imageKey ? batch.items.get(imageKey) : null;
-        // An explicit reason is the extension's own verdict on decoded text; re-running Lens cannot change it.
-        const decided = Boolean(skipReason);
-        if (!decided && item && Number(item.attempt || 1) < 2) {
-          ok = false;
-          errMsg = "No text detected (retrying)";
-        } else {
-          ok = true;
-          errMsg = "No text detected";
-        }
-      } else {
-        await enqueueDomInsert(
-          tabId,
-          imageErrorMessage(ctx, "API returned no overlay data"),
-          frameId,
-        );
-        ok = false;
-        errMsg = "API returned no overlay data";
-      }
-    }
-  }
-  if (newImg && mode !== "lens_text" && !replaceOk?.ok) {
-    ok = false;
-    errMsg = "DOM replace failed";
-  }
-  if (hasHtml && !overlayOk?.ok) {
-    ok = false;
-    errMsg = "Overlay insert failed";
-  }
-
-  if (ok) await wf.applied(workflowId);
-  else await wf.failed(workflowId, errMsg || "the page did not take the overlay");
-  traceNote("background/jobs.js", "imageStage", {
-    stage: "insert", state: ok ? "finished" : "failed", imageId: imageKey, error: errMsg,
-  }, String(ctx.traceId || ""));
-
-  removeJob(jobId, result?.metadata?.image_id);
-
-  if (batch && imageKey) {
-    if (ok) {
-      const skipped = errMsg === "No text detected";
-      markImagePhase(batchId, imageKey, "done", {
-        status: skipped ? "skipped" : "done",
-        lastError: skipped ? errMsg : "",
-      });
-      batchUpdateToast(batch, skipped ? "Skipped: no text" : "1 image done");
-    } else {
-      const cls = classifyJobError(errMsg, {
-        aiRouteEntered: Boolean(ctx?.aiRouteEntered),
-        aiGenerationAttempted: Boolean(ctx?.aiGenerationAttempted),
-      });
-      markImagePhase(batchId, imageKey, "error", {
-        lastError: errMsg || "PROCESSING_FAILED",
-        permanent: !!cls.permanent,
-      });
-      batchUpdateToast(batch, cls.permanent ? "Error (permanent)" : "Error");
-    }
-    finalizeBatch(batch);
-  }
-}
-
-// Closes a batch pass: schedules the single retry pass after pass 1, announces completion after pass 2.
-export function finalizeBatch(b) {
-  if (!b) return;
-  const s = batchPassStats(b);
-  if (!s.total || s.finished < s.total) return;
-
-  if (b.pass === 1) {
-    if (b.retryScheduled) return;
-
-    const { failed, permanentErrors } = selectBatchRetryCandidates(b.items);
-
-    if (!failed.length) {
-      batchUpdateToast(b, permanentErrors ? `Done (${permanentErrors} errors)` : "Done", true);
-      void batchStopKeepAlive(b);
-      return;
-    }
-
-    b.retryScheduled = true;
-    b.pass = 2;
-    b.total2 = failed.length;
-    for (const k of failed) {
-      const it = b.items.get(k);
-      if (!it) continue;
-      markImagePhase(b.id, k, "waiting", {
-        attempt: 2,
-        lastError: "",
-        permanent: false,
-        phaseAt: Date.now(),
-      });
-      batchMark(b.id, k, {
-        payload: withPipelineStage(it.payload, "retry_failed_once"),
-      });
-    }
-    batchUpdateToast(b, `Retrying ${failed.length} failed image(s) shortly`, true);
-    addTask(() => runRetryPass(b));
-    return;
-  }
-
-  batchUpdateToast(b, s.error ? `Done (${s.error} errors)` : "Done", true);
-  void batchStopKeepAlive(b);
-}
-
-// Returns a copy of a payload with a pipeline stage marker appended to its metadata.
-function withPipelineStage(payload, stage) {
-  const meta = payload?.metadata && typeof payload.metadata === "object" ? payload.metadata : {};
-  const pipeline = Array.isArray(meta.pipeline) ? meta.pipeline : [];
-  return {
-    ...payload,
-    metadata: {
-      ...meta,
-      pipeline: pipeline.concat({ stage, at: new Date().toISOString() }),
-      timestamp: new Date().toISOString(),
-    },
-  };
-}
-
-// Re-runs the failed images of a batch as pass 2, re-attaching data URIs.
-async function runRetryPass(b) {
-  await new Promise((r) => setTimeout(r, BATCH_RETRY_GAP_MS));
-
-  const payloads = [];
-  for (const it of b.items.values()) {
-    if (it?.attempt === 2 && it.status === "queued" && it.payload) payloads.push(it.payload);
-  }
-  batchUpdateToast(b, "Starting retry pass", true);
-
-  for (const pl of payloads) {
-    let next = pl;
-    let skip = false;
-    try {
-      const src = String(pl?.src || "").trim();
-      if (src && /^https?:/i.test(src) && !pl?.imageDataUri) {
-        const pageUrl = pl?.context?.page_url || "";
-        const key = normImgSrc(src);
-        const du = getCachedDataUri(key) || (await fetchImageDataUriFromUrl(src, pageUrl));
-        if (du) {
-          next = withPipelineStage({ ...pl, imageDataUri: du }, "retry_attach_datauri");
-          setCachedDataUri(key, du);
-          const k = imageKeyFromPayload(next);
-          if (k && b.items.has(k)) b.items.set(k, { ...b.items.get(k), payload: next });
-        }
-      }
-    } catch (e) {
-      const msg = String(e?.message || e);
-      const cls = /\bHTTP 403\b/i.test(msg) ? { permanent: false } : classifyJobError(msg);
-      const k = imageKeyFromPayload(pl);
-      if (k && b.items.has(k)) {
-        const it = b.items.get(k);
-        if (cls.permanent) {
-          markImagePhase(b.id, k, "error", { lastError: msg, permanent: true });
-        } else {
-          b.items.set(k, { ...it, lastError: msg, permanent: false });
-        }
-        if (cls.permanent) {
-          batchUpdateToast(b, "Error (permanent)");
-          finalizeBatch(b);
-        }
-      }
-      if (cls.permanent) skip = true;
-    }
-    if (!skip) enqueue(next, b.tabId, b.frameId || 0);
-  }
-}
-
-// Serialises a value with object keys sorted, so equal values hash equally.
-function stableString(value) {
-  if (value === null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return "[" + value.map(stableString).join(",") + "]";
-  const keys = Object.keys(value).sort();
-  return "{" + keys.map((k) => JSON.stringify(k) + ":" + stableString(value[k])).join(",") + "}";
-}
-
-// Returns the hex SHA-256 digest of a string.
-async function sha256Hex(text) {
-  const bytes = new TextEncoder().encode(String(text || ""));
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
-}
-
-// Builds the idempotency key identifying a payload's mode, language, source, image and AI settings.
-async function idempotencyKeyForPayload(payload) {
-  const mode = String(payload?.mode || "");
-  const lang = String(payload?.lang || "");
-  const source = String(payload?.source || "");
-  const src = normImgSrc(payload?.src || "");
-  const dataUri = typeof payload?.imageDataUri === "string" ? payload.imageDataUri : "";
-  const dataFingerprint = dataUri
-    ? await sha256Hex(`${dataUri.length}:${dataUri.slice(0, 4096)}:${dataUri.slice(-4096)}`)
-    : "";
-  const ai = payload?.ai && typeof payload.ai === "object"
-    ? { model: payload.ai.model || "", provider: payload.ai.provider || "", prompt: payload.ai.prompt || "" }
-    : null;
-  return sha256Hex(stableString({ mode, lang, source, src, dataFingerprint, ai }));
-}
-
-// Registrable domains whose images must be fetched in the browser; seeded with CDNs that reject datacenter IPs.
-const dataUriDomains = new Set([
-  "uploads.mangadex.org",
-]);
-
-// Returns the hostname of a URL, or "" when unparseable.
-function hostOf(u) {
-  try {
-    return new URL(String(u || "")).hostname;
-  } catch {
-    return "";
-  }
-}
-
-// Exact hostname is the domain-memory key.  Collapsing to the last two labels
-// is unsafe for public suffixes such as co.uk and can make an unrelated site
-// inherit another host's anti-hotlink workaround.
-function domainKeyOf(u) {
-  return hostOf(u).toLowerCase();
-}
-
-// Records that this image's domain needs browser-side bytes.
-export function markDomainNeedsDataUri(src) {
-  const key = domainKeyOf(src);
-  if (key) dataUriDomains.add(key);
-}
-
-// Returns whether this payload's image must be downloaded in the browser as a data URI.
 function shouldPrefetchDataUri(payload) {
-  if (payload?.imageDataUri) return false;
-  const src = String(payload?.src || "").trim();
-  if (!src) return false;
-  if (/^(?:blob:|data:|file:|chrome-extension:)/i.test(src)) return true;
-  if (/^https?:/i.test(src)) {
-    return dataUriDomains.has(domainKeyOf(src));
-  }
-  return (
-    payload?.mode === "lens_text" &&
-    String(payload?.source || "").toLowerCase() === "ai"
-  );
-}
-
-// Returns whether a payload carries only an image URL and no inlined bytes.
-function isUrlOnlyPayload(payload) {
-  return Boolean(
-    payload &&
-    !payload.imageDataUri &&
-    /^https?:/i.test(String(payload.src || "").trim()),
-  );
+  return applyImageSourcePolicy(payload, evaluateDataUriPrefetch);
 }
 
 // Processes one image payload end to end, from data-URI prefetch to the translate call.
@@ -712,8 +396,11 @@ export async function processJob(payload, tabId, frameId = 0) {
 async function processJobInner(payload, tabId, frameId = 0) {
   if (!payload || typeof payload !== "object") return;
 
-  if (!payload.metadata || typeof payload.metadata !== "object") payload.metadata = {};
-  const batchId = String(payload.metadata.batch_id || currentBatchId || "").trim();
+  if (!payload.metadata || typeof payload.metadata !== "object")
+    payload.metadata = {};
+  const batchId = String(
+    payload.metadata.batch_id || getCurrentBatchId() || "",
+  ).trim();
   if (batchId) payload.metadata.batch_id = batchId;
   // A batch may be cancelled after leaving the page but before this queued
   // function is admitted. Do not recreate workflow/status or contact Lens/AI.
@@ -732,7 +419,9 @@ async function processJobInner(payload, tabId, frameId = 0) {
   const curSession = getTabSessionId(tabId);
   if (originSession && curSession && originSession !== curSession && !isMd) {
     if (batch && imageKey) {
-      markImagePhase(batchId, imageKey, "cancelled", { lastError: "navigation" });
+      markImagePhase(batchId, imageKey, "cancelled", {
+        lastError: "navigation",
+      });
       batchUpdateToast(batch, "Cancelled");
       finalizeBatch(batch);
       batchStopKeepAlive(batch);
@@ -761,13 +450,53 @@ async function processJobInner(payload, tabId, frameId = 0) {
     },
   });
 
-  // CANCEL_BATCH can run while wf.begin yields. Close the workflow record but
-  // do not register the image or begin any API/image request for this job.
-  const stopIfBatchWasCancelled = async () => {
-    if (!(batchId && getBatch(batchId)?.cancelled)) return false;
-    await wf.failed(workflowId, "cancelled with batch");
-    return true;
-  };
+  const preparation = createJobPreparation({
+    batchIsCancelled: () => Boolean(batchId && getBatch(batchId)?.cancelled),
+    failWorkflow: (reason) => wf.failed(workflowId, reason),
+    shouldPrefetch: shouldPrefetchDataUri,
+    fetchFromTab: fetchImageDataUriFromTab,
+    fetchFromUrl: fetchImageDataUriFromUrl,
+    getCached: getCachedDataUri,
+    setCached: setCachedDataUri,
+    normalizeImageKey: normImgSrc,
+    classifyError: classifyJobError,
+    onDownloadStarted: () => {
+      if (batch && imageKey) markImagePhase(batchId, imageKey, "downloading");
+    },
+    onPayloadUpdated: () => {
+      if (batch && imageKey) batchMark(batchId, imageKey, { payload });
+    },
+    onPermanentReadError: async ({ message, code }) => {
+      if (payload?.metadata?.image_id)
+        pendingByImage.delete(payload.metadata.image_id);
+      if (batch && imageKey) {
+        markImagePhase(batchId, imageKey, "error", {
+          lastError: message,
+          permanent: true,
+        });
+        batchUpdateToast(batch, "Error (permanent)");
+        finalizeBatch(batch);
+      }
+      await wf.failed(workflowId, `image could not be fetched: ${message}`);
+      failJobImmediately(
+        tabId,
+        payload?.src || null,
+        attachTpError(new Error(message), {
+          code,
+          origin: "extension",
+          stage: "image_read",
+          category: "input",
+          retryable: false,
+          diagnostic: message,
+        }),
+        frameId,
+        traceId,
+      );
+    },
+    logInfo: (message, details) => log.info(message, details),
+    logWarn: (message, details) => log.warn(message, details),
+  });
+  const { stopIfBatchWasCancelled } = preparation;
   if (await stopIfBatchWasCancelled()) return;
 
   const base = await getApiBase();
@@ -777,96 +506,12 @@ async function processJobInner(payload, tabId, frameId = 0) {
   if (await stopIfBatchWasCancelled()) return;
 
   if (shouldPrefetchDataUri(payload)) {
-    if (batch && imageKey) markImagePhase(batchId, imageKey, "downloading");
-    const src = String(payload.src || "").trim();
-    const key = normImgSrc(src);
-    const cached = getCachedDataUri(key);
-    if (cached) {
-      payload.imageDataUri = cached;
-    } else {
-      const tPrefetch = Date.now();
-      const browserOnlySrc = /^(?:blob:|file:|chrome-extension:|moz-extension:)/i.test(src);
-      try {
-        const du = src.startsWith("data:")
-          ? src
-          : browserOnlySrc
-            ? await fetchImageDataUriFromTab(tabId, src, frameId || 0)
-            : await fetchImageDataUriFromUrl(src, pageUrl || "");
-        if (du) {
-          log.info("datauri prefetch ok", {
-            ms: Date.now() - tPrefetch,
-            kb: Math.round(du.length / 1024),
-          });
-          payload.imageDataUri = du;
-          if (key) setCachedDataUri(key, du);
-          const meta = payload.metadata;
-          meta.pipeline = (Array.isArray(meta.pipeline) ? meta.pipeline : []).concat({
-            stage: "prefetch_datauri",
-            at: new Date().toISOString(),
-          });
-          meta.timestamp = new Date().toISOString();
-          if (batch && imageKey) batchMark(batchId, imageKey, { payload });
-        }
-      } catch (e) {
-        let errMsg = e?.message || String(e);
-        if (!browserOnlySrc && /\bHTTP 403\b/i.test(errMsg) && tabId) {
-          try {
-            const du = await fetchImageDataUriFromTab(tabId, src, frameId || 0);
-            if (du) {
-              log.info("datauri prefetch ok (tab fallback)", {
-                ms: Date.now() - tPrefetch,
-                kb: Math.round(du.length / 1024),
-              });
-              payload.imageDataUri = du;
-              if (key) setCachedDataUri(key, du);
-              const meta = payload.metadata;
-              meta.pipeline = (Array.isArray(meta.pipeline) ? meta.pipeline : []).concat({
-                stage: "prefetch_datauri_tab",
-                at: new Date().toISOString(),
-              });
-              meta.timestamp = new Date().toISOString();
-              if (batch && imageKey) batchMark(batchId, imageKey, { payload });
-              errMsg = null;
-            }
-          } catch (e2) {
-            errMsg = e2?.message || String(e2);
-            log.warn("datauri prefetch tab fallback failed", { err: errMsg });
-          }
-        }
-        if (errMsg) {
-          // blob:/file:/extension URLs are meaningful only inside the browser.
-          // If the owning tab cannot provide bytes, sending that URL to the
-          // server can only produce a guaranteed 400 and must never happen.
-          const cls = browserOnlySrc ? { permanent: true } : classifyJobError(errMsg);
-          log.warn("datauri prefetch failed", { err: errMsg, permanent: cls.permanent });
-          if (cls.permanent) {
-            if (payload?.metadata?.image_id) pendingByImage.delete(payload.metadata.image_id);
-            if (batch && imageKey) {
-              markImagePhase(batchId, imageKey, "error", { lastError: errMsg, permanent: true });
-              batchUpdateToast(batch, "Error (permanent)");
-              finalizeBatch(batch);
-            }
-            await wf.failed(workflowId, `image could not be fetched: ${errMsg}`);
-            // Same rule: name the reason in the contract, not only in the log.
-            const readCode = browserOnlySrc ? "IMG_BLOCKED"
-              : /not an image/i.test(errMsg) ? "IMG_INVALID"
-                : /too large/i.test(errMsg) ? "IMG_TOO_LARGE"
-                  : "IMG_READ_FAILED";
-            failJobImmediately(
-              tabId,
-              payload?.src || null,
-              attachTpError(new Error(errMsg), {
-                code: readCode, origin: "extension", stage: "image_read",
-                category: "input", retryable: false, diagnostic: errMsg,
-              }),
-              frameId,
-              traceId,
-            );
-            return;
-          }
-        }
-      }
-    }
+    const outcome = await preparation.prefetchDataUri(payload, {
+      tabId,
+      frameId,
+      pageUrl,
+    });
+    if (outcome.stopped) return;
   }
 
   await wf.mediaReady(workflowId);
@@ -891,7 +536,7 @@ async function processJobInner(payload, tabId, frameId = 0) {
     sessionId: originSession || sessionId,
     workflowId,
     keepCacheOnStale: isMd,
-    settingsEpoch,
+    settingsEpoch: getSettingsEpoch(),
     traceId,
     ...extra,
   });
@@ -900,7 +545,8 @@ async function processJobInner(payload, tabId, frameId = 0) {
   // stop and the registry context are correlated just like a request that
   // reaches either engine.
   traceId = newTraceId();
-  if (!payload.context || typeof payload.context !== "object") payload.context = {};
+  if (!payload.context || typeof payload.context !== "object")
+    payload.context = {};
   payload.context.tp_trace = traceId;
   setTrace(traceId);
 
@@ -909,6 +555,18 @@ async function processJobInner(payload, tabId, frameId = 0) {
   }
 
   const caps = await getCapabilities(base);
+  traceNote(
+    "background/capabilities.js",
+    "capabilityProbe",
+    {
+      origin: caps?.probe?.origin || "",
+      durationMs: Number(caps?.probe?.durationMs) || 0,
+      outcome: caps?.probe?.outcome || (caps?.reason ? "unavailable" : "ok"),
+      status: Number(caps?.probe?.status) || 0,
+      errorName: caps?.probe?.errorName || "",
+    },
+    traceId,
+  );
   // Configure tracing from this API response before emitting a first-job
   // compatibility stop. Otherwise that event is lost until the second job.
   setLogLevel(caps.consoleLevel || "warn");
@@ -928,15 +586,30 @@ async function processJobInner(payload, tabId, frameId = 0) {
 
   const compatibilityIssue = engineCompatibilityIssue(payload, caps);
   if (compatibilityIssue) {
-    traceNote("background/jobs.js", "engineRoute", {
-      engine: "extension", outcome: "stopped", reason: compatibilityIssue,
-      mode: payload.mode, source: payload.source, syncPath: false,
-    }, traceId);
-    log.error("extension route stopped before legacy submit", { reason: compatibilityIssue });
+    traceNote(
+      "background/jobs.js",
+      "engineRoute",
+      {
+        engine: "extension",
+        outcome: "stopped",
+        reason: compatibilityIssue,
+        mode: payload.mode,
+        source: payload.source,
+        syncPath: false,
+      },
+      traceId,
+    );
+    log.error("extension route stopped before legacy submit", {
+      reason: compatibilityIssue,
+    });
     await wf.failed(workflowId, compatibilityIssue);
-    if (payload?.metadata?.image_id) pendingByImage.delete(payload.metadata.image_id);
+    if (payload?.metadata?.image_id)
+      pendingByImage.delete(payload.metadata.image_id);
     if (batch && imageKey) {
-      markImagePhase(batchId, imageKey, "error", { lastError: compatibilityIssue, permanent: true });
+      markImagePhase(batchId, imageKey, "error", {
+        lastError: compatibilityIssue,
+        permanent: true,
+      });
       batchUpdateToast(batch, "Compatibility error");
       finalizeBatch(batch);
     }
@@ -948,876 +621,104 @@ async function processJobInner(payload, tabId, frameId = 0) {
       tabId,
       payload?.src || null,
       attachTpError(new Error(compatibilityIssue), {
-        code: "API_CAPS_UNAVAILABLE", origin: "api", stage: "capabilities",
-        category: "service", retryable: true, diagnostic: compatibilityIssue,
+        ...capabilityFailureDetails(caps),
+        diagnostic: compatibilityIssue,
       }),
       frameId,
       traceId,
     );
     return;
   }
-  // The API reports the slots each of its lanes currently holds. Matching the
-  // Lens lane to that number keeps the queue on this side, where it is visible,
-  // instead of inside the API where the extension cannot see or measure it.
-  const lensSlots = Number(caps?.adaptive?.lens?.limit) || Number(caps?.capacity?.limit) || 0;
-  if (lensSlots > 0) setLaneSlotCeiling("lens:direct", lensSlots);
-  const aiSlots = Number(caps?.adaptive?.ai?.limit) || Number(caps?.capacityAi?.limit) || 0;
-  if (aiSlots > 0 && payload?.mode === "lens_text" && payload?.source === "ai") {
-    const activeBurst = payload?.rate?.enabled === true ? Number(payload?.rate?.burst) || 0 : 0;
-    setLaneCapacityHint(laneKeyFor(payload), aiSlots, activeBurst);
-  }
-  const onnxSlots = Number(caps?.adaptive?.onnx?.limit) || 0;
-  if (onnxSlots > 0) setLaneSlotCeiling("onnx:groups", onnxSlots);
-  await sendToTab(tabId, {
-    type: "TP_DIAGNOSTICS_STATE",
-    enabled: caps.trace,
-    detail: caps.traceDetail,
-    consoleLevel: caps.consoleLevel || "warn",
-  }, frameId);
+  applyRuntimeCapacityHints(caps, payload);
+  await sendToTab(
+    tabId,
+    {
+      type: "TP_DIAGNOSTICS_STATE",
+      enabled: caps.trace,
+      detail: caps.traceDetail,
+      consoleLevel: caps.consoleLevel || "warn",
+    },
+    frameId,
+  );
 
-  traceNote("background/jobs.js", "runTranslateJob", {
-    clientBuild: String(chrome?.runtime?.getManifest?.()?.version || "unknown"),
-    traceClientSchema: 2,
-    mode: payload.mode,
-    source: payload.source,
-    // Which engine actually ran. Without this in the trace there is no way to
-    // tell a working switch from a setting nothing read.
-    engine: payload?.engine === "api" ? "api" : "extension",
-    imageKey,
-    batchId,
-    workflowId,
-    syncPath: caps.syncTranslate,
-    background: payload?.render?.background,
-    lensDocument: payload?.render?.lensDocument,
-    pageImageToAi: Boolean(payload?.ai?.send_image),
-    seriesMemoryMode: String(payload?.ai?.memory_mode || "off"),
-  }, traceId);
+  traceNote(
+    "background/jobs.js",
+    "runTranslateJob",
+    {
+      clientBuild: String(
+        chrome?.runtime?.getManifest?.()?.version || "unknown",
+      ),
+      traceClientSchema: 2,
+      mode: payload.mode,
+      source: payload.source,
+      // Which engine actually ran. Without this in the trace there is no way to
+      // tell a working switch from a setting nothing read.
+      engine: payload?.engine === "api" ? "api" : "extension",
+      imageKey,
+      batchId,
+      workflowId,
+      syncPath: caps.syncTranslate,
+      background: payload?.render?.background,
+      lensDocument: payload?.render?.lensDocument,
+      pageImageToAi: Boolean(payload?.ai?.send_image),
+      seriesMemoryMode: String(payload?.ai?.memory_mode || "off"),
+      removeServerPacing: payload?.limits?.apiUnlimited === true,
+      localAiCapacity: Number(payload?.limits?.manualConcurrency) || 1,
+      aiThinking: String(payload?.ai?.thinking || "off") === "on",
+      aiStyle: String(payload?.ai?.prompt || "").trim() ? "custom" : "empty",
+    },
+    traceId,
+  );
 
-  if (caps.syncTranslate) {
-    await runSyncTranslate(base, payload, makeContext, {
-      tabId, frameId, batch, batchId, imageKey, workflowId,
-    });
-    return;
-  }
-
-  await submitAndPollRest(base, payload, makeContext, {
-    tabId, frameId, batch, batchId, imageKey, workflowId,
-  });
-}
-
-// Returns a payload's image as compact binary bytes with its mime type and data URI.
-async function imageBytesFor(payload, tabId, frameId) {
-  const inline = String(payload?.imageDataUri || "").trim();
-  if (inline.startsWith("data:")) {
-    const res = await fetch(inline);
-    const buffer = await res.arrayBuffer();
-    return {
-      bytes: new Uint8Array(buffer),
-      mime: res.headers.get("content-type") || "image/jpeg",
-      dataUri: inline,
-    };
-  }
-
-  const src = String(payload?.src || "").trim();
-  if (!src) return null;
-  const dataUri = await fetchImageDataUriFromUrl(src, payload?.context?.page_url || "").catch(
-    async (e) => {
-      if (/\bHTTP 403\b/i.test(e?.message || "") && tabId) {
-        return fetchImageDataUriFromTab(tabId, src, frameId || 0);
-      }
-      throw e;
+  await dispatchPreparedJob(
+    {
+      base,
+      payload,
+      makeContext,
+      capabilities: caps,
+      dispatchOptions: { tabId, frameId, batch, batchId, imageKey, workflowId },
+    },
+    {
+      dispatchSync: runSyncTranslate,
+      dispatchLegacy: (legacyBase, legacyPayload, legacyMakeContext, options) =>
+        submitAndPollServer(
+          {
+            base: legacyBase,
+            payload: legacyPayload,
+            makeContext: legacyMakeContext,
+            ...options,
+          },
+          {
+            batchUpdateToast,
+            classifyJobError,
+            failJobImmediately,
+            finalizeBatch,
+            handleJobError,
+            markImagePhase,
+            rememberJob,
+          },
+        ),
     },
   );
-  if (!dataUri) return null;
-  const res = await fetch(dataUri);
-  const buffer = await res.arrayBuffer();
-  return {
-    bytes: new Uint8Array(buffer),
-    mime: res.headers.get("content-type") || "image/jpeg",
-    dataUri,
-  };
 }
 
-// Decodes and lays out one image locally from `/v1/lens/raw`, returning a result, or null with
-// `decline.reason` set to the reason this image could not be drawn in the browser.
-// The API owns the Lens upload because Lens rejects extension-origin uploads.
-async function runLensDirectPath(base, payload, { tabId, frameId, jobId = "", signal = null, decline = {} }) {
-  const stop = (reason) => {
-    if (reason instanceof Error) decline.error = reason;
-    decline.reason = String(reason?.message || reason || "the local route declined this image");
-    return null;
-  };
-  if (payload?.mode !== "lens_text") return stop("not a lens_text job");
-
-  if (!payload?.render?.lensDocument) return stop("this job did not ask for a local document");
-
-  const size = payload?.naturalSize;
-  if (!(size?.width > 0) || !(size?.height > 0)) {
-    log.info("lens path skipped: the page did not report the image size", {
-      src: payload?.src,
-    });
-    return stop("the page did not report the image size");
-  }
-
-  let image;
-  try {
-    image = await imageBytesFor(payload, tabId, frameId);
-  } catch (e) {
-    log.info("lens path skipped: could not read the image bytes", {
-      error: e?.message || String(e),
-    });
-    return stop(`could not read the image bytes: ${e?.message || String(e)}`);
-  }
-  if (!image) return stop("the image reader returned nothing to upload");
-
-  let lens;
-  let lensImageSize;
-  let imageArtifactToken = "";
-  try {
-    markJobPhase(jobId, "lens");
-    const stageTrace = String(payload?.context?.tp_trace || "");
-    traceNote("background/jobs.js", "imageStage", {
-      stage: "lens", state: "started", imageId: payload?.metadata?.image_id || "",
-    }, stageTrace);
-    const answer = await runStageInLane("lens:direct", () => fetchLensRawViaRest(base, {
-      imageBytes: image.bytes,
-      mime: image.mime,
-      lang: payload.lang,
-      signal,
-      traceId: String(payload?.context?.tp_trace || getTrace() || ""),
-      batchId: String(payload?.metadata?.batch_id || ""),
-      jobId,
-      imageId: String(payload?.metadata?.image_id || ""),
-      tabSession: String(payload?.context?.tp_tab_session || ""),
-      apiUnlimited: payload?.limits?.apiUnlimited === true,
-    }), {
-      signal, stage: "lens", imageId: payload?.metadata?.image_id || "", traceId: stageTrace,
-    });
-    traceNote("background/jobs.js", "imageStage", {
-      stage: "lens", state: "finished", imageId: payload?.metadata?.image_id || "",
-    }, stageTrace);
-    lens = answer?.lens;
-    if (!lens || typeof lens !== "object") {
-      throw new Error("the raw Lens reply carried no `lens` object");
-    }
-    lensImageSize = authoritativeLensImageSize(answer?.image);
-    imageArtifactToken = String(answer?.imageArtifact?.token || "").trim();
-    traceNote("background/jobs.js", "lensImageDimensions", {
-      authoritative: lensImageSize,
-      domNatural: { width: Number(size.width), height: Number(size.height) },
-      mismatch: lensImageSize.width !== Number(size.width) || lensImageSize.height !== Number(size.height),
-      artifactToken: imageArtifactToken ? "present" : "absent",
-    }, stageTrace);
-  } catch (e) {
-    if (e?.name === "AbortError") throw e;
-    log.warn("lens upload failed for this image; extension route stopped", {
-      error: e?.message || String(e),
-      permanent: Boolean(e?.permanent),
-    });
-    log.info("tp.route", {
-      stage: "lens",
-      outcome: "stopped",
-      reason: `/v1/lens/raw failed: ${e?.message || String(e)}`,
-      source: payload.source,
-    });
-    return stop(e);
-  }
-
-  let decoded;
-  try {
-    decoded = decodeLensResponse(lens, {
-      width: lensImageSize.width,
-      height: lensImageSize.height,
-      targetLang: payload.lang,
-    });
-  } catch (e) {
-    log.warn("local lens decode failed; extension route stopped", {
-      error: e?.message || String(e),
-      name: e?.name || "Error",
-    });
-    log.info("tp.route", {
-      stage: "lens",
-      outcome: "stopped",
-      reason: `local decode threw ${e?.name || "Error"}: ${e?.message || String(e)}`,
-      source: payload.source,
-    });
-    return stop(`local Lens decode threw ${e?.name || "Error"}: ${e?.message || String(e)}`);
-  }
-
-  if (decoded.warnings.length) {
-    log.warn("lens decode dropped part of this page", {
-      src: payload?.src,
-      warnings: decoded.warnings,
-    });
-  }
-
-  log.info("lens axis decided here", {
-    src: payload?.src,
-    needsGroups: decoded.groups.needed,
-    reason: decoded.groups.reason,
-    counts: decoded.groups.counts,
-  });
-  let document = decoded.document;
-  if (decoded.groups.needed) {
-    let grouped;
-    try {
-      markJobPhase(jobId, "grouping");
-      if (!image.dataUri) {
-        throw new Error("the image reader returned no data URI to group with");
-      }
-      const stageTrace = String(payload?.context?.tp_trace || "");
-      traceNote("background/jobs.js", "imageStage", {
-        stage: "onnx", state: "started", imageId: payload?.metadata?.image_id || "",
-      }, stageTrace);
-      grouped = await runStageInLane("onnx:groups", () => groupParagraphsWithArtifactFallback(base, {
-        imageDataUri: image.dataUri,
-        imageArtifactToken,
-        tree: decoded.trees.grouping,
-        context: {
-          tp_trace: String(payload?.context?.tp_trace || ""),
-          tp_tab_session: String(payload?.context?.tp_tab_session || ""),
-          batch_id: String(payload?.metadata?.batch_id || ""),
-        },
-        jobId,
-        imageId: String(payload?.metadata?.image_id || ""),
-        batchId: String(payload?.metadata?.batch_id || ""),
-        signal,
-        apiUnlimited: payload?.limits?.apiUnlimited === true,
-      }), {
-        signal, stage: "onnx", imageId: payload?.metadata?.image_id || "", traceId: stageTrace,
-      });
-      traceNote("background/jobs.js", "imageStage", {
-        stage: "onnx", state: "finished", imageId: payload?.metadata?.image_id || "",
-        coverage: grouped?.coverage || null,
-        mergeApplied: Boolean(grouped?.merge?.applied),
-        mergeUsable: grouped?.merge?.usable === true,
-        mergeOutcome: String(grouped?.merge?.outcome || ""),
-        mergeAuthority: String(grouped?.merge?.authority || ""),
-        uncovered: grouped?.merge?.uncovered || null,
-        retry: grouped?.retry || null,
-      }, stageTrace);
-    } catch (e) {
-      if (e?.name === "AbortError") throw e;
-      log.warn("grouping failed for this vertical page; extension route stopped", {
-        error: e?.message || String(e),
-        permanent: Boolean(e?.permanent),
-      });
-      log.info("tp.route", {
-        stage: "lens",
-        outcome: "stopped",
-        reason: `/v1/groups failed: ${e?.message || String(e)}`,
-        source: payload.source,
-      });
-      return stop(e);
-    }
-
-    // The detector deliberately saw the raw Lens paragraph set. Convert its
-    // memberships back to the furigana-filtered document before deciding
-    // usability; otherwise a ruby-only accepted group could make AI appear
-    // grouped even though attach would produce no translation unit.
-    if (Array.isArray(grouped?.tree?.bubble_groups)) {
-      grouped.tree.bubble_groups = remapRawBubbleGroups(
-        grouped.tree.bubble_groups,
-        decoded.groupingRawToDocument,
-      );
-    }
-    const coverage = grouped?.coverage || {};
-    const mergeContract = decideVerticalMerge(grouped, payload?.source);
-    const mergeUsable = mergeContract.usable;
-    const mergeOutcome = String(grouped?.merge?.outcome || "unusable");
-    const uncovered = grouped?.merge?.uncovered || {};
-    const uncoveredIndices = Array.isArray(uncovered?.indices)
-      ? uncovered.indices.map((value) => Number(value)).filter(Number.isInteger)
-      : [];
-    const isAiSource = mergeContract.ai;
-    traceNote("background/jobs.js", "verticalVerdict", {
-      outcome: mergeOutcome,
-      usable: mergeUsable,
-      contract: mergeContract.contract,
-      malformed: mergeContract.malformed,
-      authority: String(grouped?.merge?.authority || ""),
-      uncoveredDisposition: String(uncovered?.disposition || ""),
-      uncoveredIndices,
-      source: String(payload?.source || ""),
-      decision: mergeContract.decision,
-    }, String(payload?.context?.tp_trace || ""));
-
-    if (!mergeUsable && isAiSource) {
-      log.info("tp.route", {
-        stage: "lens",
-        outcome: "stopped",
-        reason: `vertical grouping is unusable: ${grouped?.merge?.reason || "no reason given"}`,
-        source: payload.source,
-        uncoveredIndices,
-      });
-      return stop(
-        "ONNX grouped nothing on this vertical page " +
-        `(columns ${Number(coverage.vertical) || 0}, stamped ${Number(coverage.stampedVertical) || 0}, ` +
-        `uncovered [${uncoveredIndices.join(", ") || "unknown"}]): ` +
-        `${grouped?.merge?.reason || "the merge did not apply"}`,
-      );
-    }
-    if (!mergeUsable) {
-      log.warn("vertical grouping unusable; final Lens text continues ungrouped", {
-        src: payload?.src,
-        source: payload?.source,
-        outcome: mergeOutcome,
-        uncoveredIndices,
-        reason: grouped?.merge?.reason || "no reason given",
-      });
-    } else if (mergeOutcome === "partial") {
-      log.warn("using verified ONNX groups with isolated uncovered units", {
-        src: payload?.src,
-        coverage,
-        reason: grouped?.merge?.reason || "partial ONNX coverage",
-      });
-    }
-    if (grouped.warnings?.length) {
-      log.warn("grouping came back partial", {
-        src: payload?.src,
-        warnings: grouped.warnings,
-      });
-    }
-
-    try {
-      if (mergeUsable) document = attachBubbleGroups(document, grouped.tree?.bubble_groups);
-    } catch (e) {
-      log.warn("the grouping does not fit this document; extension route stopped", {
-        error: e?.message || String(e),
-      });
-      log.info("tp.route", {
-        stage: "lens",
-        outcome: "stopped",
-        reason: `grouping did not fit the document: ${e?.message || String(e)}`,
-        source: payload.source,
-      });
-      return stop(`the ONNX grouping does not fit this document: ${e?.message || String(e)}`);
-    }
-    log.info(mergeUsable ? "vertical page grouped before translation" : "vertical page kept ungrouped", {
-      src: payload?.src,
-      paragraphs: document.paragraphs.length,
-      units: translationUnits(document).length,
-    });
-  }
-
-  const requestedSource = String(payload.source || "translated");
-  const fidelitySource = requestedSource === "ai" ? "original" : requestedSource;
-  const fidelity = canRenderFaithfully(document, fidelitySource);
-  if (!fidelity.ok) {
-    log.info("tp.route", {
-      stage: "lens",
-      outcome: "stopped",
-      reason: `lens-direct produced a document the renderer cannot draw: ${fidelity.reason}`,
-      source: payload.source,
-    });
-    return stop(`the local renderer cannot draw this document: ${fidelity.reason}`);
-  }
-
-  return {
-    mode: payload.mode,
-    backgroundMode: "boxes",
-    eraseBoxes: decoded.eraseBoxes,
-    // sourceImageDataUri is an internal extension hand-off and is never sent to the API.
-    sourceImageDataUri: image.dataUri,
-    lensDocument: document,
-    layout: payload?.layout || null,
-    htmlMeta: { baseW: size.width, baseH: size.height, format: "tp", path: "lens_direct" },
-    originalTextFull: String(lens?.originalTextFull || ""),
-    metadata: payload.metadata,
-    perf: { path: "lens_raw" },
-    // Opt-in inspection material for a page that asked to see the two ends of
-    // this route: `lensRaw` is the answer from `/v1/lens/raw` exactly as it
-    // arrived (still-encoded paragraph blobs and all), `lensTrees` is what the
-    // decoder made of it. Both are heavy, so they travel only when the caller
-    // asked; every other job carries the result alone, as before.
-    ...(payload?.debug?.raw === true
-      ? {
-          debugLens: {
-            imageSize: lensImageSize,
-            raw: lens,
-            trees: decoded.trees,
-            groups: decoded.groups,
-            warnings: decoded.warnings,
-          },
-        }
-      : {}),
-  };
-}
-
-// Builds the extension-first AI route plan for a payload, or null when the payload is not an AI text job.
-async function planLocalAi(payload) {
-  if (payload?.mode !== "lens_text" || payload?.source !== "ai") return null;
-  if (!payload?.render?.lensDocument) return null;
-
-  const ai = payload.ai && typeof payload.ai === "object" ? payload.ai : null;
-  const direct = shouldUseDirectLocalAi(payload?.engine, ai?.provider, ai?.base_url);
-  const route = direct ? "direct-local" : "server";
-  const reason = direct
-    ? "Local AI translation runs directly from the extension to the user's PC"
-    : "AI text translation is API-owned; geometry and HTML are extension-owned";
-  const plan = { route, reason, ai, originalSource: payload.source };
-  log.info(route === "server" ? "AI will use the text-only API" : "AI will run in the browser", {
-    route,
-    reason,
-  });
-  return plan;
-}
-
-// Returns a payload copy that asks the full server endpoint to render the background image.
 function payloadForFullServer(payload) {
-  // `debug` is an extension-side request for material the LOCAL route keeps
-  // after decoding. The API has no such field and never answers it, so it is
-  // dropped here rather than sent to a schema that did not ask for it.
-  const { debug: _debug, ...rest } = payload || {};
-  return {
-    ...rest,
-    render: {
-      ...(payload?.render || {}),
-      background: "image",
-      // On the API engine the server also owns the document, so it must not be
-      // asked for one the extension would then have to render itself.
-      ...(payload?.engine === "api" ? { lensDocument: false } : {}),
-    },
-  };
+  const renderPolicy = payload?.engine === "api" ? { lensDocument: false } : {};
+  return buildFullServerPayload(payload, renderPolicy);
 }
-
-// Translates the result's LensDocument and patches it back, returning true when the AI text is complete.
-// No retry: an incomplete AI answer is reported, not re-requested.
-async function runLocalAi(
-  base, payload, result, plan, cancelBatchId = "", signal = null,
-  telemetry = null, onGenerationAttempt = null, jobId = "",
-) {
-  const doc = requireAiLensDocument(result);
-  const units = translationUnits(doc);
-  // Units Lens read as digits, punctuation or symbols only are kept verbatim and never sent.
-  const sendable = units.filter((u) => u.translatable);
-  const passthrough = units
-    .filter((u) => !u.translatable)
-    .map((u) => ({ id: u.id, text: u.text }));
-  if (!units.length) {
-    log.info("no text to translate; nothing for the AI layer to do");
-    markNoTranslatableText(result, "no_text");
-    return { usable: true, complete: true, skipped: true, translated: 0, missing: [] };
-  }
-  if (!sendable.length) {
-    log.info("no translatable text; every unit is digits or symbols", { units: units.length });
-    markNoTranslatableText(result, "no_translatable_text");
-    return { usable: true, complete: true, skipped: true, translated: 0, missing: [] };
-  }
-
-  const memoryMode = String(plan.ai?.memory_mode || "off");
-  const seriesKey = String(payload?.context?.series_key || "");
-  if (seriesKey && memoryMode !== "off") {
-    const recent = selectPromptMemory(await getSeriesMemory(seriesKey));
-    const pageIndex = Number(payload?.context?.page_index);
-    const memoryBatchId = String(payload?.context?.batch_id || payload?.metadata?.batch_id || "");
-    const previousPage = Number.isInteger(pageIndex) && pageIndex > 0
-      ? recent.pageContexts?.[memoryBatchId]?.[String(pageIndex - 1)] || []
-      : [];
-    plan.ai = {
-      ...plan.ai,
-      glossary: memoryMode === "terms" || memoryMode === "full" ? recent.glossary : [],
-      characters: memoryMode === "full" ? recent.characters : [],
-      series_state: memoryMode === "full" ? recent.state : "",
-      prev_context: memoryMode === "full" ? previousPage : [],
-    };
-  }
-
-  // Cloud/API routes compose their prompt server-side. Direct Local AI fetches
-  // the same public default once, then sends it from the browser to the local
-  // runtime; the translation itself never passes through TextPhantom API.
-  const canonicalPrompt = plan.route === "direct-local"
-    ? await getCanonicalPrompt(base, String(payload.lang || ""), { wantMemo: false })
-    : null;
-  if (plan.route === "direct-local" && !canonicalPrompt) {
-    throw Object.assign(new Error("Could not load the Local AI translation prompt"), {
-      code: "local_prompt_unavailable", generationAttempts: 0, providerAttempts: 0,
-    });
-  }
-  const promptAudit = plan.route === "direct-local"
-    ? getPromptAudit(base, String(payload.lang || ""), { wantMemo: false })
-    : null;
-
-  const operationBase = `ai:${String(payload?.idempotency_key || payload?.metadata?.image_id || "")}`;
-  const translate = (selectedUnits, operationId) => translateUnits(selectedUnits, {
-    route: plan.route,
-    ai: plan.ai,
-    rate: payload?.rate || null,
-    unlimited: payload?.limits?.aiUnlimited === true,
-    imageDataUri: plan.ai?.send_image ? String(result?.sourceImageDataUri || payload?.imageDataUri || "") : "",
-    targetLang: String(payload.lang || ""),
-    sourceLang: String(doc?.languages?.source || ""),
-    canonicalPrompt,
-    promptAudit,
-    base,
-    operationId,
-    batchId: cancelBatchId,
-    jobId,
-    imageId: String(payload?.metadata?.image_id || ""),
-    signal,
-    traceId: String(payload?.context?.tp_trace || getTrace() || ""),
-    trace: (event, data) => traceNote(
-      "background/ai-local.js",
-      "translateUnits",
-      { event, ...data },
-      String(payload?.context?.tp_trace || getTrace() || ""),
-    ),
-  });
-
-  let outcome;
-  const memoryCharacters = [];
-  const memoryGlossary = [];
-  const collectMemoryDelta = (answer) => {
-    const delta = answer?.memoryDelta || {};
-    if (Array.isArray(delta.characters)) memoryCharacters.push(...delta.characters);
-    if (Array.isArray(delta.glossary)) memoryGlossary.push(...delta.glossary);
-  };
-  try {
-    outcome = await translate(sendable, operationBase);
-    if (Number(outcome?.meta?.generationAttempts || 0) > 0) onGenerationAttempt?.();
-    collectMemoryDelta(outcome);
-  } catch (e) {
-    // A request can fail BEFORE the model was ever called (server admission, an
-    // optional rate gate, cancellation). Preserve that distinction so the lane
-    // may safely re-submit the same idempotency key without spending another
-    // generation. Only mark a generation when the server explicitly says a
-    // model generation occurred.
-    if (Number(e?.generationAttempts || 0) > 0) onGenerationAttempt?.();
-    log.warn("text-only AI failed", {
-      route: plan.route,
-      code: e?.code,
-      providerAttempts: Number(e?.providerAttempts || 0),
-      error: e?.message || String(e),
-      willRetryFullPipeline: false,
-    });
-    const traceId = String(payload?.context?.tp_trace || getTrace() || "");
-    traceNote("background/jobs.js", "imageStage", {
-      stage: "ai",
-      state: e?.name === "AbortError" ? "cancelled" : "failed",
-      imageId: String(payload?.metadata?.image_id || ""),
-      failureKind: e?.name === "AbortError" ? "cancelled" :
-        (Number(e?.status) ? "http_or_provider" : "transport_or_output_contract"),
-      status: Number(e?.status) || 0,
-      code: String(e?.code || ""),
-      providerAttempts: Number(e?.providerAttempts || 0),
-      errorType: e?.name || "Error",
-      error: e?.message || String(e),
-      automaticContentRetry: false,
-    }, traceId);
-    throw e;
-  }
-
-  if (telemetry) {
-    const m = outcome?.meta || {};
-    telemetry.providerMs = Number(m.providerMs);
-    telemetry.serverTotalMs = Number(m.dt_ms);
-    telemetry.replayed = outcome?.replayed === true;
-    telemetry.rateWaitMs = Number(m.rateWaitMs);
-    telemetry.admissionWaitMs = Number(m.admissionWaitMs);
-    telemetry.rate = m.rate && typeof m.rate === "object" ? m.rate : null;
-  }
-  let mergedTranslations = Array.isArray(outcome.translations) ? [...outcome.translations] : [];
-  if (passthrough.length) mergedTranslations.push(...passthrough);
-  let applied = applyTranslations(doc, mergedTranslations);
-  const missingUnitIds = applied.report.missing.map(String);
-  const missingUnits = missingUnitIds.map((id) => {
-    const unit = sendable.find((candidate) => candidate.id === id);
-    return { id, paragraphIds: (unit?.paragraphIds || []).map(String) };
-  });
-  const translatedCount = sendable.length - missingUnitIds.length;
-  // `outcome.missing` is the SERVER's list of units with no usable text — the
-  // same set as `missingUnitIds`. Logging it under `omittedByProvider` named
-  // the effect after a cause it had not established, and made every partial
-  // page read as a broken output contract. The provider's own two answers come
-  // from meta: `omittedIds` (the entry was never returned) and `declinedIds`
-  // (the entry came back holding an empty string).
-  const omittedByProvider = Array.isArray(outcome?.meta?.omittedIds)
-    ? outcome.meta.omittedIds.map(String) : [];
-  const declinedByProvider = Array.isArray(outcome?.meta?.declinedIds)
-    ? outcome.meta.declinedIds.map(String) : [];
-  if (missingUnitIds.length) {
-    const traceId = String(payload?.context?.tp_trace || getTrace() || "");
-    // A partial answer is drawn as far as it goes; the units the model skipped are named, not filled.
-    log.warn("AI answered part of this page; the rest is left untranslated", {
-      route: plan.route,
-      expected: sendable.length,
-      translated: translatedCount,
-      missing: missingUnitIds.length,
-      missingUnitIds,
-      missingUnits,
-      omittedByProvider,
-      declinedByProvider,
-    });
-    traceNote("background/jobs.js", "imageStage", {
-      stage: "ai",
-      state: translatedCount > 0 ? "partial" : "empty",
-      imageId: String(payload?.metadata?.image_id || ""),
-      failureKind: "missing_translation_units",
-      expected: sendable.length,
-      translated: translatedCount,
-      missing: missingUnitIds.length,
-      missingUnitIds,
-      missingSourceText: missingUnitIds.map((id) => {
-        const unit = sendable.find((u) => u.id === id);
-        return { id, chars: String(unit?.text || "").length };
-      }),
-      omittedByProvider,
-      declinedByProvider,
-      passthroughUnits: passthrough.length,
-      automaticContentRetry: false,
-    }, traceId);
-  }
-  if (translatedCount <= 0) {
-    log.warn("AI returned nothing usable for this page", { route: plan.route, expected: sendable.length });
-    return {
-      usable: false, complete: false, translated: 0, missing: missingUnitIds,
-      reason: "AI returned no usable translations",
-    };
-  }
-  const { document: patched, report } = applied;
-  result.lensDocument = patched;
-  const pageIndex = Number(payload?.context?.page_index);
-  if (
-    memoryCharacters.length ||
-    memoryGlossary.length ||
-    memoryMode === "full" ||
-    Boolean(outcome?.meta?.vision)
-  ) {
-    result.Ai = {
-      ...(result.Ai || {}),
-      characters: memoryCharacters,
-      glossary: memoryGlossary,
-      meta: {
-        ...(result.Ai?.meta || {}),
-        vision: Boolean(outcome?.meta?.vision),
-        ...(Number.isInteger(pageIndex) ? { pageIndex } : {}),
-        ...(payload?.metadata?.batch_id ? { batchId: String(payload.metadata.batch_id) } : {}),
-      },
-    };
-  }
-  result.aiRoute = { ...plan, ...outcome.meta, ...report };
-  delete result.aiRoute.ai;
-
-  if (report.missing.length) {
-    const safeErase = eraseBoxesForAiPartial(result.lensDocument, result.eraseBoxes);
-    if (!safeErase.ok) {
-      return {
-        usable: false,
-        complete: false,
-        translated: report.translated,
-        missing: report.missing.map(String),
-        reason: safeErase.reason,
-      };
-    }
-    result.eraseBoxes = safeErase.eraseBoxes;
-    log.warn("text-only AI answered only part of the page", {
-      route: plan.route,
-      translated: report.translated,
-      missing: report.missing.length,
-    });
-    result.aiPartial = {
-      partial: true,
-      translated: report.translated,
-      missing: report.missing.map(String),
-      missingUnits,
-      omitted: omittedByProvider,
-      declined: declinedByProvider,
-    };
-    // Say WHICH failure it was. "Unanswered" covers two causes with two
-    // different fixes, and the page looks identical either way.
-    const cause = declinedByProvider.length && !omittedByProvider.length
-      ? "the model returned them empty"
-      : omittedByProvider.length && !declinedByProvider.length
-        ? "the model did not return them at all"
-        : "the model returned some empty and left others out";
-    result.warnings = [...(Array.isArray(result.warnings) ? result.warnings : []),
-      `AI left ${report.missing.length} translation unit(s) unanswered (${cause}): ` +
-      `${report.missing.join(", ")}`];
-  }
-  return classifyAiTranslationReport(report);
-}
-
-const PROVIDER_BACKPRESSURE_MAX_WAIT_MS = 90_000;
-
-// Abortable delay used only for safe no-generation orchestration retries.
-async function waitForRetry(ms, signal) {
-  const base = Math.max(0, Math.floor(Number(ms) || 0));
-  if (base <= 0) return;
-  // A small positive jitter prevents many browsers rejected by the same full HF
-  // worker pool from waking on the same millisecond and recreating the burst.
-  // Keep it small enough that it never becomes meaningful user-visible pacing.
-  const jitter = base >= 100 ? Math.floor(Math.random() * Math.min(500, base * 0.2)) : 0;
-  const delay = base + jitter;
-  await new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(new DOMException("The operation was aborted", "AbortError"));
-      return;
-    }
-    const timer = setTimeout(() => {
-      signal?.removeEventListener?.("abort", onAbort);
-      resolve();
-    }, delay);
-    const onAbort = () => {
-      clearTimeout(timer);
-      signal?.removeEventListener?.("abort", onAbort);
-      reject(new DOMException("The operation was aborted", "AbortError"));
-    };
-    signal?.addEventListener?.("abort", onAbort, { once: true });
-  });
-}
-
-// True only when the server says the model was NOT called. These are safe
-// orchestration retries with the same Idempotency-Key, not model retries.
-function isSafeNoGenerationBackpressure(error) {
-  if (Number(error?.generationAttempts || 0) !== 0) return false;
-  const code = String(error?.code || "");
-  return code === "rate_gate_busy" || code === "local_rate_gate_busy" ||
-    code === "server_busy" || code === "provider_rate_limited";
-}
-
-// Runs runLocalAi inside the payload's scheduler lane. Pre-provider admission
-// backpressure is re-queued indefinitely (until cancellation) with the SAME
-// operation id; a real provider/model attempt is never generated again here.
-async function runLocalAiInLane(base, payload, result, plan, batchId, signal, onGenerationAttempt = null, jobId = "") {
-  const key = laneKeyFor(payload);
-  // Removing RPM/time pacing is independent from generation concurrency.
-  // Capacity is selected per runtime endpoint + model, never globally.
-  const localCapacity = configureLocalCapacityForPayload(payload);
-  if (!localCapacity) {
-    setLaneUnlimited(key, false);
-    setLaneSlotCeiling(key, 0);
-  }
-  const unlimited = false;
-  const traceId = String(payload?.context?.tp_trace || getTrace() || "");
-  const imageId = String(payload?.metadata?.image_id || "");
-  let orchestrationAttempts = 0;
-  let accumulatedQueueWaitMs = 0;
-  let providerBackpressureSince = 0;
-
-  while (true) {
-    orchestrationAttempts++;
-    markJobPhase(jobId, "ai_queued");
-    traceNote("background/jobs.js", "imageStage", {
-      stage: "ai", state: "queued", route: "extension", imageId,
-      orchestrationAttempts,
-    }, traceId);
-
-    const slot = await acquire(key, signal);
-    markJobPhase(jobId, "ai_generating");
-    const queueWaitMs = Number(slot?.waitMs) || 0;
-    accumulatedQueueWaitMs += queueWaitMs;
-    traceNote("background/jobs.js", "imageStage", {
-      stage: "ai", state: "started", route: "extension", imageId,
-      queueWaitMs, accumulatedQueueWaitMs,
-      window: Number(slot?.window) || 0,
-      maxWindow: Number(slot?.maxWindow) || 0,
-      unlimited, orchestrationAttempts,
-    }, traceId);
-
-    const started = Date.now();
-    const telemetry = {};
-    try {
-      const done = await runLocalAi(
-        base, payload, result, plan, batchId, signal, telemetry, onGenerationAttempt, jobId,
-      );
-      const roundTripMs = Date.now() - started;
-      const serverWaitMs =
-        (Number.isFinite(telemetry.rateWaitMs) ? telemetry.rateWaitMs : 0) +
-        (Number.isFinite(telemetry.admissionWaitMs) ? telemetry.admissionWaitMs : 0);
-      const replayed = telemetry.replayed === true;
-      const reportedProviderMs = Number.isFinite(telemetry.providerMs) && telemetry.providerMs > 0
-        ? telemetry.providerMs : 0;
-      const providerMs = replayed
-        ? 0
-        : (reportedProviderMs > 0 ? reportedProviderMs : Math.max(1, roundTripMs - serverWaitMs));
-      const serverTotalMs = Number.isFinite(telemetry.serverTotalMs) && telemetry.serverTotalMs > 0
-        ? telemetry.serverTotalMs : 0;
-      const transportProxyMs = replayed || serverTotalMs <= 0
-        ? 0
-        : Math.max(0, roundTripMs - serverTotalMs);
-      const latencySource = replayed
-        ? "idempotent-replay"
-        : (reportedProviderMs > 0 ? "server.providerMs" : "roundTrip-minus-serverWait");
-      // A ledger replay did not call the provider now. Do not pollute the
-      // scheduler's latency telemetry with the original generation's duration.
-      if (replayed) releaseReplay(key);
-      else releaseSuccess(key, providerMs);
-      const rpmNow = Number(telemetry.rate?.rpm) || 0;
-      const ceiling = Number(describeLane(key)?.effectiveMax) || 0;
-      traceNote("background/jobs.js", "imageStage", {
-        stage: "ai", state: "finished", route: "extension", imageId,
-        queueWaitMs, accumulatedQueueWaitMs, providerMs, reportedProviderMs,
-        roundTripMs, serverWaitMs, serverTotalMs, transportProxyMs, replayed,
-        latencySource, rpmNow, laneCeiling: ceiling, orchestrationAttempts,
-        usable: done?.usable === true,
-        complete: done?.complete === true,
-        missingUnitIds: Array.isArray(done?.missing) ? done.missing : [],
-      }, traceId);
-      return done;
-    } catch (e) {
-      const status = Number(e?.status) || 0;
-      const code = String(e?.code || "");
-      const gated = isRateGateBusy(e);
-      const providerBackpressure = code === "provider_rate_limited";
-      const serverDeferred = code === "server_busy";
-      if (providerBackpressure && !providerBackpressureSince) providerBackpressureSince = Date.now();
-      if (!providerBackpressure) providerBackpressureSince = 0;
-      const providerBackpressureMs = providerBackpressureSince
-        ? Math.max(0, Date.now() - providerBackpressureSince)
-        : 0;
-      const providerBackpressureExpired = providerBackpressure &&
-        providerBackpressureMs >= PROVIDER_BACKPRESSURE_MAX_WAIT_MS;
-      const retryableBeforeProvider = isSafeNoGenerationBackpressure(e) && !providerBackpressureExpired;
-      const backpressure = status === 429 || status === 503 || providerBackpressure;
-      const retryAfterMs = Math.max(50, Number(e?.retryAfterMs) || 250);
-      // A full shared HF process should never become a hot 503 loop across many
-      // browsers. Keep the work client-side, preserve provider concurrency, and
-      // spread retries exponentially (capped) until a real server slot opens.
-      const serverRetryMs = serverDeferred
-        ? Math.min(5000, Math.max(retryAfterMs, 300 * (2 ** Math.min(4, orchestrationAttempts - 1))))
-        : retryAfterMs;
-
-      const generationAttempts = Number(e?.generationAttempts || e?.providerAttempts || 0);
-      if (gated) releaseGated(key, retryAfterMs);
-      else if (isLocalAiPayload(payload)) releaseLocalFailure(key, e, retryAfterMs);
-      else if (generationAttempts === 0 && backpressure) releaseDeferred(key, retryAfterMs);
-      else if (providerBackpressure) releaseRejected(key, retryAfterMs);
-      else if (serverDeferred) releaseDeferred(key, serverRetryMs);
-      else if (backpressure) releaseRejected(key, retryAfterMs);
-      else releaseFailed(key);
-
-      if (providerBackpressureExpired) {
-        e.message = `${e?.message || "AI provider rate limited"} (provider backpressure persisted for ${Math.round(providerBackpressureMs / 1000)}s)`;
-      }
-
-      traceNote("background/jobs.js", "imageStage", {
-        stage: "ai",
-        state: retryableBeforeProvider ? "requeued" : "failed",
-        route: "extension", imageId,
-        queueWaitMs, accumulatedQueueWaitMs,
-        providerMs: Date.now() - started,
-        status, backpressure, gated, retryableBeforeProvider,
-        providerBackpressure, providerBackpressureMs, providerBackpressureExpired,
-        retryAfterMs, serverRetryMs, orchestrationAttempts,
-        code,
-        providerAttempts: Number(e?.providerAttempts || 0),
-        generationAttempts: Number(e?.generationAttempts || 0),
-        error: e?.message || String(e),
-      }, traceId);
-
-      if (!retryableBeforeProvider || signal?.aborted) throw e;
-      // The lane itself may already be paused until Retry-After. Shared-server
-      // pressure gets a progressively wider client-side retry delay so many
-      // browsers do not synchronize into a hot 503 loop.
-      await waitForRetry(serverDeferred ? serverRetryMs : retryAfterMs, signal);
-    }
-  }
-}
-
-// Translates one image with `POST /v1/translate`, taking a scheduler slot and reporting how it was released.
 async function runSyncTranslate(
-  base, payload, makeContext,
-  { tabId, frameId, batch, batchId, imageKey, workflowId = "" },
+  base,
+  payload,
+  makeContext,
+  {
+    tabId,
+    frameId,
+    batch,
+    batchId,
+    imageKey,
+    workflowId = "",
+    capabilities = null,
+  },
 ) {
   const aiPlan = await planLocalAi(payload).catch((e) => {
     log.warn("could not plan extension-first AI; this image will stop", {
@@ -1830,8 +731,7 @@ async function runSyncTranslate(
 
   try {
     payload.idempotency_key = await idempotencyKeyForPayload(payload);
-  } catch {
-  }
+  } catch {}
   rememberJob(
     jobId,
     makeContext({
@@ -1847,7 +747,8 @@ async function runSyncTranslate(
   // The user can put the whole pipeline back on the API. The extension then only
   // captures the image and inserts the result, exactly as the pre-v2 build did.
   const apiEngine = payload?.engine === "api";
-  const mayUseLensDirect = !apiEngine && (payload.source !== "ai" || Boolean(plan));
+  const mayUseLensDirect =
+    !apiEngine && (payload.source !== "ai" || Boolean(plan));
   // Why the browser could not draw this image, filled in by runLensDirectPath.
   const decline = { reason: "" };
 
@@ -1861,23 +762,37 @@ async function runSyncTranslate(
   try {
     if (!mayUseLensDirect) {
       if (apiEngine) {
-        traceNote("background/jobs.js", "engineRoute", {
-          engine: "api", reason: "user selected the API server engine",
-          mode: payload.mode, source: payload.source,
-        }, String(payload?.context?.tp_trace || getTrace() || ""));
+        traceNote(
+          "background/jobs.js",
+          "engineRoute",
+          {
+            engine: "api",
+            reason: "user selected the API server engine",
+            mode: payload.mode,
+            source: payload.source,
+          },
+          String(payload?.context?.tp_trace || getTrace() || ""),
+        );
       }
       throw Object.assign(
-        new Error(apiEngine ? "API engine selected" : "AI has no text-only route"),
+        new Error(
+          apiEngine ? "API engine selected" : "AI has no text-only route",
+        ),
         { skipDirect: true },
       );
     }
-    const lensCtrl = beginInFlight(jobId, tabId);
+    const lensCtrl = beginInFlight(jobId, tabId, batchId);
     let direct;
     try {
       const directPayload = payload;
       decline.reason = "";
       direct = await runLensDirectPath(base, directPayload, {
-        tabId, frameId, jobId, signal: lensCtrl.signal, decline,
+        tabId,
+        frameId,
+        jobId,
+        signal: lensCtrl.signal,
+        decline,
+        capabilities,
       });
     } finally {
       endInFlight(jobId);
@@ -1890,7 +805,10 @@ async function runSyncTranslate(
         const aiContext = pendingByJob.get(jobId);
         if (aiContext) aiContext.aiRouteEntered = true;
         await wf.aiRequested(workflowId, `ai-route:${jobId}`);
-        const layoutDecision = aiLayoutDecision(direct.lensDocument, payload.lang);
+        const layoutDecision = aiLayoutDecision(
+          direct.lensDocument,
+          payload.lang,
+        );
         log.info("AI layout stays in the extension", {
           ...layoutDecision,
           route: plan.route,
@@ -1900,31 +818,49 @@ async function runSyncTranslate(
         // supplied the authoritative units here, so zero translatable units is
         // a terminal skip and needs neither a scheduler slot nor a provider call.
         const preAiUnits = translationUnits(direct.lensDocument);
-        const hasTranslatableAiText = preAiUnits.some((unit) => unit?.translatable);
+        const hasTranslatableAiText = preAiUnits.some(
+          (unit) => unit?.translatable,
+        );
         if (!preAiUnits.length || !hasTranslatableAiText) {
           markNoTranslatableText(
             direct,
             preAiUnits.length ? "no_translatable_text" : "no_text",
           );
-          traceNote("background/jobs.js", "imageStage", {
-            stage: "ai", state: "skipped", route: "extension", imageId: imageKey,
-            reason: direct.meta.skipped_reason, queueWaitMs: 0, providerMs: 0,
-          }, String(payload?.context?.tp_trace || ""));
+          traceNote(
+            "background/jobs.js",
+            "imageStage",
+            {
+              stage: "ai",
+              state: "skipped",
+              route: "extension",
+              imageId: imageKey,
+              reason: direct.meta.skipped_reason,
+              queueWaitMs: 0,
+              providerMs: 0,
+            },
+            String(payload?.context?.tp_trace || ""),
+          );
+          markBatchInitialAi(batchId, imageKey);
           await wf.textReady(workflowId);
           await handleResult(jobId, direct);
           return;
         }
 
-        const aiCtrl = beginInFlight(jobId, tabId);
+        const aiCtrl = beginInFlight(jobId, tabId, batchId);
         const aiRunning = runLocalAiInLane(
-          base, payload, direct, plan, batchId, aiCtrl.signal,
+          base,
+          payload,
+          direct,
+          plan,
+          batchId,
+          aiCtrl.signal,
           () => {
             const c = pendingByJob.get(jobId);
             if (c) c.aiGenerationAttempted = true;
           },
           jobId,
-        )
-          .finally(() => endInFlight(jobId));
+          capabilities,
+        ).finally(() => endInFlight(jobId));
         aiRunning.catch(() => {});
 
         const aiOutcome = await aiRunning;
@@ -1936,31 +872,48 @@ async function runSyncTranslate(
         }
         const finalFidelity = aiOutcome?.usable
           ? canRenderFaithfully(direct.lensDocument, "ai")
-          : { ok: false, reason: aiOutcome?.reason || "AI produced no usable translation" };
+          : {
+              ok: false,
+              reason: aiOutcome?.reason || "AI produced no usable translation",
+            };
         if (!aiOutcome?.usable || !finalFidelity.ok) {
           const reason = aiOutcome?.usable
             ? `extension AI geometry was not faithful: ${finalFidelity.reason}`
-            : aiOutcome?.reason || "AI produced no usable translation; no automatic retry was made";
-          log.warn("extension-first AI stopped without invoking the full image pipeline", { reason });
+            : aiOutcome?.reason ||
+              "AI produced no usable translation; no automatic retry was made";
+          const failure = aiPageFailure(aiOutcome);
+          reportFailure(
+            "extension-first AI stopped without invoking the full image pipeline",
+            {code: failure.code}, {reason, stage: failure.stage, jobId},
+          );
           await wf.failed(workflowId, reason);
-          handleJobError(jobId, attachTpError(new Error(reason), {
-            code: aiOutcome?.usable ? "RENDER_FAILED" : "AI_OUTPUT_INVALID",
-            origin: "extension",
-            stage: aiOutcome?.usable ? "render" : "ai",
-            retryable: false,
-          }));
+          handleJobError(
+            jobId,
+            attachTpError(new Error(reason), {
+              code: failure.code,
+              origin: "extension",
+              stage: failure.stage,
+              retryable: false,
+            }),
+          );
           return;
         }
         if (!aiOutcome.complete) {
-          log.warn("extension-first AI is inserting a partial single response", {
-            translated: aiOutcome.translated,
-            missingUnitIds: aiOutcome.missing,
-            automaticContentRetry: false,
-          });
+          traceNote("background/jobs.js", "aiPartial", {
+              event: "extension-first AI is inserting a partial single response",
+              translated: aiOutcome.translated,
+              missingUnitIds: aiOutcome.missing,
+              automaticContentRetry: false,
+            },
+          );
         }
         log.info("tp.route", {
-          stage: "text", outcome: "new", reason: "",
-          route: plan.route, source: plan.originalSource, lens: "direct",
+          stage: "text",
+          outcome: "new",
+          reason: "",
+          route: plan.route,
+          source: plan.originalSource,
+          lens: "direct",
         });
       }
       directStage = "postprocess";
@@ -1979,11 +932,12 @@ async function runSyncTranslate(
     // thinking-without-final-answer, so the image badge fell back to UNKNOWN.
     decline.error = e;
     if (!e?.skipDirect) {
-      log.warn("the extension route threw before it could draw", {
+      reportFailure("the extension route threw before it could draw", e, {
         stage: directStage,
         error: e?.message || String(e),
       });
-      if (!decline.reason) decline.reason = `the extension route threw: ${e?.message || String(e)}`;
+      if (!decline.reason)
+        decline.reason = `the extension route threw: ${e?.message || String(e)}`;
     }
     const failureReason = e?.message || String(e);
     if (directStage === "ai") {
@@ -1997,7 +951,10 @@ async function runSyncTranslate(
       // Lens and AI have already completed. An insertion/preparation failure is
       // terminal and must not masquerade as either route degrading or trigger a
       // second pipeline.
-      await wf.failed(workflowId, `extension postprocess threw: ${failureReason}`);
+      await wf.failed(
+        workflowId,
+        `extension postprocess threw: ${failureReason}`,
+      );
       handleJobError(jobId, e);
       return;
     }
@@ -2006,326 +963,62 @@ async function runSyncTranslate(
   // The extension engine does not quietly hand a text page to the server. When the
   // browser cannot draw it, that is a failure with a reason, not a different engine:
   // a page that silently arrives rendered by the API looks like the engine switch did
-  // nothing, and the ONNX miss behind it never gets seen. `lens_images` is unaffected
+  // nothing, and the grouping failure behind it never gets seen. `lens_images` is unaffected
   // (its only route has always been `/v1/translate`), and so is the API engine, where
   // the server owning the whole pipeline is the point.
   if (!apiEngine && payload.mode === "lens_text") {
-    const reason = decline.reason ||
+    const reason =
+      decline.reason ||
       (payload.source === "ai"
         ? "extension-first AI could not obtain a faithful LensDocument"
         : "the extension route declined this image");
-    traceNote("background/jobs.js", "engineRoute", {
-      engine: "extension", outcome: "stopped", reason,
-      mode: payload.mode, source: payload.source,
-    }, String(payload?.context?.tp_trace || getTrace() || ""));
+    traceNote(
+      "background/jobs.js",
+      "engineRoute",
+      {
+        engine: "extension",
+        outcome: "stopped",
+        reason,
+        mode: payload.mode,
+        source: payload.source,
+      },
+      String(payload?.context?.tp_trace || getTrace() || ""),
+    );
     await wf.failed(workflowId, reason);
     handleJobError(jobId, decline.error || reason);
     return;
   }
 
-  let browserImageFallbackUsed = false;
-  let syncProviderBackpressureSince = 0;
-  // A transient wait retries the same committed operation. Re-entering a
-  // REQUESTED state on every loop was both semantically wrong and an illegal
-  // X_REQUESTED -> X_REQUESTED workflow transition.
-  let serverRequestTracked = false;
-  for (let attempt = 0; ; attempt++) {
-    const serverPayload = payloadForFullServer(payload);
-    const outbound = serverPayload;
-    try {
-      outbound.idempotency_key = await idempotencyKeyForPayload(outbound);
-    } catch {
-      delete outbound.idempotency_key;
-    }
-    const requestLane = laneKeyFor(outbound);
-    const localRequest = isLocalAiPayload(outbound);
-    // API-engine Local AI uses the same per-runtime+endpoint+model capacity
-    // policy as direct-local before it can acquire its first slot.
-    configureLocalCapacityForPayload(outbound);
-    const ctrl = beginInFlight(jobId, tabId);
-    let slotHeld = false;
-    let queueWaitMs = 0;
-    const t0 = Date.now();
-    let requestStartedAt = 0;
-    const serverTraceId = String(payload?.context?.tp_trace || getTrace() || "");
-    const serverImageId = String(payload?.metadata?.image_id || "");
-    traceNote("background/jobs.js", "imageStage", {
-      stage: "ai", state: "queued", route: "api", imageId: serverImageId,
-    }, serverTraceId);
-    try {
-      if (apiEngine && !lensDone) {
-        markJobPhase(jobId, "server_processing", { stage: "Server processing (Lens/AI)" });
-      } else {
-        markJobPhase(jobId, lensDone ? "ai_queued" : "lens");
-      }
-      const slot = await acquire(requestLane, ctrl.signal);
-      if (lensDone) markJobPhase(jobId, "ai_generating");
-      queueWaitMs = Number(slot?.waitMs) || 0;
-      requestStartedAt = Date.now();
-      slotHeld = true;
-      traceNote("background/jobs.js", "imageStage", {
-        stage: "ai", state: "started", route: "api", imageId: serverImageId,
-        queueWaitMs, window: Number(slot?.window) || 0,
-        maxWindow: Number(slot?.maxWindow) || 0,
-        unlimited: slot?.unlimited === true,
-      }, serverTraceId);
-      if (!serverRequestTracked) {
-        if (lensDone) await wf.aiRequested(workflowId, `ai-server:${jobId}`);
-        else await wf.lensRequested(workflowId, `sync:${jobId}`);
-        serverRequestTracked = true;
-      }
-      let result;
-      try {
-        result = await translateViaSyncRest(base, outbound, {
-          signal: ctrl.signal,
-          jobId,
-          imageId: serverImageId,
-          batchId,
-        });
-      } finally {
-        endInFlight(jobId);
-      }
-      const requestMs = Date.now() - requestStartedAt;
-      const serverProcessingMs = Number(result?.perf?.total_ms) || 0;
-      // On plain-http localhost Chrome normally exposes only a handful of
-      // HTTP/1.1 connections per origin. requestMs - serverProcessingMs makes
-      // that browser/proxy transport wait visible instead of misdiagnosing it
-      // as an API scheduler queue. On an HTTP/2 HF front door this should be
-      // close to ordinary network overhead.
-      const transportProxyMs = serverProcessingMs > 0
-        ? Math.max(0, requestMs - serverProcessingMs) : 0;
-      const replayed = result?.replayed === true || result?.perf?.replayed === true ||
-        result?.perf?.replayedFromLedger === true;
-      if (replayed) releaseReplay(requestLane);
-      else releaseSuccess(requestLane, requestMs);
-      slotHeld = false;
-      traceNote("background/jobs.js", "imageStage", {
-        stage: "ai", state: "finished", route: "api", imageId: serverImageId,
-        queueWaitMs, requestMs, serverProcessingMs, transportProxyMs,
-        totalElapsedMs: Date.now() - t0,
-        laneCeiling: Number(describeLane(requestLane)?.effectiveMax) || 0,
-      }, serverTraceId);
-      if (!lensDone) {
-        await wf.lensReady(workflowId);
-        lensDone = true;
-      }
-      await wf.textReady(workflowId);
-      await handleResult(jobId, result);
-      return;
-    } catch (e) {
-      endInFlight(jobId);
-      traceNote("background/jobs.js", "imageStage", {
-        stage: "ai", state: e?.name === "AbortError" ? "cancelled" : "failed",
-        route: "api", imageId: serverImageId, queueWaitMs,
-        status: Number(e?.status) || 0,
-        retryAfterMs: Number(e?.retryAfterMs) || 0,
-      }, serverTraceId);
-      if (e?.cancelled || e?.name === "AbortError") {
-        if (slotHeld) releaseFailed(requestLane);
-        log.info("request cancelled with the tab", { jobId });
-        await wf.failed(workflowId, "cancelled with the tab");
-        markJobPhase(jobId, "cancelled", { lastError: "cancelled with the tab" });
-        removeJob(jobId, payload?.metadata?.image_id);
-        return;
-      }
-
-      const retryAfterMs = Number(e?.retryAfterMs) || 0;
-      const status = Number(e?.status) || 0;
-      const failedStage = String(e?.failedStage || "");
-
-      // Server-side URL downloads can be rejected by anti-hotlink/CDN rules
-      // even while the page is visibly displaying the image. Recover only when
-      // the server explicitly says it failed before Lens/AI at image_fetch.
-      // This is NOT an AI retry: the first request never reached OCR/model work.
-      if (
-        !browserImageFallbackUsed &&
-        failedStage === "image_fetch" &&
-        !payload.imageDataUri &&
-        /^https?:/i.test(String(payload?.src || ""))
-      ) {
-        browserImageFallbackUsed = true;
-        if (slotHeld) {
-          releaseFailed(requestLane);
-          slotHeld = false;
-        }
-        const src = String(payload.src || "").trim();
-        let browserFetchError = "";
-        try {
-          let du = "";
-          if (tabId) {
-            try {
-              du = await fetchImageDataUriFromTab(tabId, src, frameId || 0);
-            } catch (tabError) {
-              browserFetchError = tabError?.message || String(tabError);
-            }
-          }
-          if (!du) {
-            // Still browser-side (extension service worker / user's IP). Useful
-            // when the CDN blocks datacenter IPs but does not require page cookies.
-            du = await fetchImageDataUriFromUrl(src, payload?.context?.page_url || "");
-          }
-          if (du) {
-            payload.imageDataUri = du;
-            const key = normImgSrc(src);
-            if (key) setCachedDataUri(key, du);
-            markDomainNeedsDataUri(src);
-            payload = withPipelineStage(payload, "server_image_fetch_browser_fallback");
-            log.info("server image fetch failed; recovered bytes in browser", {
-              src: src.slice(0, 180),
-              kb: Math.round(du.length / 1024),
-              tabFallbackError: browserFetchError || "",
-            });
-            await wf.lensDegraded(workflowId, "server image fetch failed; browser supplied bytes");
-            // This is a real Lens-route change, unlike admission backpressure.
-            // The next loop therefore commits one new Lens operation.
-            serverRequestTracked = false;
-            continue;
-          }
-        } catch (browserError) {
-          browserFetchError = browserError?.message || String(browserError);
-        }
-        log.warn("browser image fallback failed", {
-          src: src.slice(0, 180),
-          failedStage,
-          error: browserFetchError || "browser returned no image bytes",
-        });
-      }
-
-      // Backpressure is a response contract, not the presence of an optional
-      // Retry-After header. A bare 429/503 must narrow the lane as well —
-      // unless it came from the API's own rate gate, which is pacing this API
-      // key rather than protecting the server, and hands back the exact wait.
-      const isBusy = status === 429 || status === 503 || retryAfterMs > 0;
-      const gated = isRateGateBusy(e);
-      const code = String(e?.code || "");
-      const generationAttempts = Number(e?.generationAttempts || 0);
-      const safeDeferred = generationAttempts === 0 && (
-        code === "server_busy" || code === "local_rate_gate_busy" ||
-        code === "lens_session_unavailable" || code === "provider_rate_limited"
-      );
-
-      if (isBusy && safeDeferred) {
-        const serverRetryMs = code === "server_busy"
-          ? Math.min(5000, Math.max(retryAfterMs, 300 * (2 ** Math.min(4, attempt))))
-          : retryAfterMs;
-        if (slotHeld) {
-          if (gated) releaseGated(requestLane, retryAfterMs);
-          else if (localRequest) releaseLocalFailure(requestLane, e, retryAfterMs);
-          else if (code === "provider_rate_limited") releaseRejected(requestLane, retryAfterMs);
-          else releaseDeferred(requestLane, serverRetryMs);
-          slotHeld = false;
-        }
-
-        if (code === "provider_rate_limited") {
-          if (!syncProviderBackpressureSince) syncProviderBackpressureSince = Date.now();
-          if (Date.now() - syncProviderBackpressureSince >= PROVIDER_BACKPRESSURE_MAX_WAIT_MS) {
-            const msg = "AI provider stayed rate limited for 90s; the request was never generated.";
-            await wf.failed(workflowId, msg);
-            handleJobError(jobId, attachTpError(new Error(msg), {
-              code: "provider_rate_limited",
-              origin: "upstream_ai",
-              stage: "provider_request",
-              retryable: true,
-            }));
-            return;
-          }
-        } else {
-          syncProviderBackpressureSince = 0;
-        }
-
-        log.info(
-          gated ? "this API key is out of tokens; the image waits its turn"
-                : code === "lens_session_unavailable"
-                  ? "Lens session is refreshing; the image stays with us"
-                  : code === "provider_rate_limited"
-                    ? "AI provider rejected before generation; the image stays with us"
-                    : "server busy; the image stays with us",
-          { laneKey: requestLane, attempt: attempt + 1, retryAfterMs, serverRetryMs, gated, code, generationAttempts },
-        );
-        traceNote("background/jobs.js", "imageStage", {
-          stage: "ai", state: "requeued", route: "api", imageId: serverImageId,
-          queueWaitMs, status, retryAfterMs, serverRetryMs, code, generationAttempts, attempt: attempt + 1,
-        }, serverTraceId);
-        const why = gated
-          ? `AI key paced by the server's rate gate (wait ${retryAfterMs}ms)`
-          : `${code || "server busy"} (retry-after ${retryAfterMs}ms)`;
-        // Admission backpressure is a transient wait, not a route degradation.
-        // Keep the workflow in REQUESTED so repeated waits and later success
-        // retain a legal REQUESTED -> READY transition.
-        // Keep the rejected work in this browser. Shared-server pressure gets
-        // an exponential client-side retry delay; provider/rate signals keep
-        // their own advertised delay. Only a REAL provider rejection is allowed
-        // to reduce learned provider concurrency.
-        await waitForRetry(code === "server_busy" ? serverRetryMs : retryAfterMs, ctrl.signal);
-        continue;
-      }
-
-      if (slotHeld) {
-        if (localRequest) releaseLocalFailure(requestLane, e, retryAfterMs);
-        else if (isBusy) releaseRejected(requestLane, retryAfterMs);
-        else releaseFailed(requestLane);
-      }
-
-      const msg = e?.message || String(e);
-      await wf.failed(workflowId, msg);
-      handleJobError(jobId, e);
-      return;
-    }
-  }
-}
-
-// Submits a job over REST and long-polls it to completion.
-async function submitAndPollRest(
-  base, payload, makeContext,
-  { tabId, frameId, batch, batchId, imageKey, workflowId = "" },
-) {
-  let jobId = "";
-  try {
-    const idempotencyKey = await idempotencyKeyForPayload(payload);
-    payload.idempotency_key = idempotencyKey;
-    await wf.lensRequested(workflowId, `rest:${idempotencyKey}`);
-    if (batch && imageKey) {
-      if (payload?.engine === "api") {
-        markImagePhase(batchId, imageKey, "server_processing", {
-          stage: "Server processing (Lens/AI)",
-        });
-      } else {
-        markImagePhase(batchId, imageKey, "lens");
-      }
-    }
-    const submitted = await submitJobViaRest(base, payload, { idempotencyKey });
-    jobId = String(submitted.id || "");
-    const ctx = makeContext({
-      startedAt: Date.now(),
+  return runServerTranslation(
+    {
       base,
-      idempotencyKey,
-      serverHints: submitted,
-    });
-    rememberJob(jobId, ctx);
-    await pollJobViaRest(base, jobId, {
-      session: String(ctx?.sessionId || payload?.context?.tp_tab_session || ""),
-    });
-  } catch (e) {
-    const msg = e?.message || String(e);
-    if (jobId) {
-      handleJobError(jobId, e);
-      return;
-    }
-    if (payload?.metadata?.image_id) pendingByImage.delete(payload.metadata.image_id);
-    if (batch && imageKey) {
-      const cls = classifyJobError(e);
-      markImagePhase(batchId, imageKey, "error", { lastError: msg, permanent: !!cls.permanent });
-      batchUpdateToast(batch, cls.permanent ? "Error (permanent)" : "Error");
-      finalizeBatch(batch);
-    }
-    failJobImmediately(
+      payload,
+      jobId,
       tabId,
-      payload?.src || null,
-      e,
       frameId,
-      String(payload?.context?.tp_trace || ""),
-    );
-  }
+      batchId,
+      imageKey,
+      workflowId,
+      capabilities,
+      lensDone,
+      apiEngine,
+    },
+    {
+      beginInFlight,
+      endInFlight,
+      fetchImageDataUriFromTab,
+      fetchImageDataUriFromUrl,
+      handleJobError,
+      handleResult,
+      log,
+      markDomainNeedsDataUri,
+      markJobPhase,
+      payloadForFullServer,
+      rememberJob,
+      releaseJob: removeJob,
+      waitForRetry,
+    },
+  );
 }
 
 // Resumes REST long-polls after a Manifest V3 service-worker restart.
@@ -2335,9 +1028,20 @@ export async function resumePendingRestJobs() {
     const ctx = pendingByJob.get(jobId);
     const base = String(ctx?.base || "").trim();
     if (!base) continue;
+    // Synchronous extension/cloud calls are not JobQueue IDs. Never long-poll
+    // a synthetic ID or resend a generation after a worker restart.
+    if (ctx.transport === "sync") {
+      traceNote("background/jobs.js", "translationInterrupted", {
+        jobId, batchId:ctx.batchId, stage:"worker_restarted", automaticResend:false,
+      }, String(ctx.traceId || ""));
+      removeJob(jobId, ctx.metadata?.image_id);
+      continue;
+    }
     addTask(
-      () => pollJobViaRest(base, jobId, { session: String(ctx?.sessionId || "") })
-        .catch((e) => handleJobError(jobId, e)),
+      () =>
+        pollJobViaRest(base, jobId, {
+          session: String(ctx?.sessionId || ""),
+        }).catch((e) => handleJobError(jobId, e)),
       { shouldStart: () => pendingByJob.has(jobId) },
     );
   }
@@ -2345,44 +1049,66 @@ export async function resumePendingRestJobs() {
 
 // Queues a payload for processing, skipping it when its tab session is already stale.
 export function enqueue(payload, tabId, frameId = 0) {
-  const expected = String(
-    payload?.context?.tp_tab_session || payload?.metadata?.tp_tab_session || "",
-  ).trim();
-  const sessionIsCurrent = () => {
-    const cur = getTabSessionId(tabId);
-    return !(expected && (!cur || expected !== cur));
-  };
-  const queuedBatchId = String(payload?.metadata?.batch_id || "").trim();
-  const isAdmissible = () => (
-    sessionIsCurrent() && !(queuedBatchId && getBatch(queuedBatchId)?.cancelled)
-  );
-  addTask(() => {
-    if (!isAdmissible()) return;
-    return processJob(payload, tabId, frameId);
-  }, {
-    shouldStart: isAdmissible,
-    // In runs:Extension the image is only orchestration; Lens and AI each have
-    // their own scheduler lanes. Do not let an image waiting for AI consume the
-    // top-level slot that a later image needs in order to start Lens.
+  const enqueuePolicy = buildEnqueuePolicy(payload, tabId, {
+    getTabSessionId,
+    getBatch,
+  });
+  const isAdmissible = enqueuePolicy.shouldStart;
+  return scheduleOwnedImageJob({
+    identity: {
+      batchId: String(payload?.metadata?.batch_id || getCurrentBatchId() || ""),
+      imageKey: imageKeyFromPayload(payload),
+      sessionId: String(payload?.context?.tp_tab_session ||
+        payload?.metadata?.tp_tab_session || getTabSessionId(tabId) || ""),
+      engine: payload?.engine === "api" ? "api" : "extension",
+      settingsEpoch: getSettingsEpoch(),
+      tabId,
+    },
+    isAdmissible,
+    schedule: addTask,
+    work: () => processJob(payload, tabId, frameId),
+    // Extension orchestration is governed by its Lens/AI lanes.
     laneManaged: payload?.engine !== "api",
   });
 }
 
 // Cancels every in-flight job for a tab, on the extension and on the server.
-export function cancelTabWork(tabId, reason = "navigation") {
+export function cancelTabWork(tabId, reason = "navigation", sessionId = "") {
   if (!Number.isFinite(tabId)) return;
+  void repairCoordinator.cancelTab(tabId, reason);
+  releaseTabImageJobs(tabId);
   const msg = String(reason || "navigation");
   const cancelledJobIds = [];
   const cancelledBatchIds = new Set();
 
   for (const [jobId, ctx] of Array.from(pendingByJob.entries())) {
     if ((ctx?.tabId || 0) !== tabId) continue;
-    const batchId = String(ctx?.batchId || ctx?.metadata?.batch_id || "").trim();
-    const imageKey = String(ctx?.imageKey || ctx?.metadata?.image_id || "").trim();
-    const batch = batchId ? ensureBatch(batchId, tabId, ctx?.frameId || 0) : null;
+    const batchId = String(
+      ctx?.batchId || ctx?.metadata?.batch_id || "",
+    ).trim();
+    const imageKey = String(
+      ctx?.imageKey || ctx?.metadata?.image_id || "",
+    ).trim();
+    const batch = batchId
+      ? ensureBatch(batchId, tabId, ctx?.frameId || 0)
+      : null;
     if (batchId) cancelledBatchIds.add(batchId);
 
     cancelledJobIds.push(jobId);
+    traceNote(
+      "background/jobs.js",
+      "jobCancellation",
+      {
+        reason: msg,
+        jobId: String(jobId),
+        batchId,
+        imageId: String(ctx?.metadata?.image_id || ""),
+        cancelRequestedAt: Date.now(),
+        extensionAbortRequested: true,
+        serverCancellation: "requested_after_local_cleanup",
+      },
+      String(ctx?.traceId || ""),
+    );
     removeJob(jobId, ctx?.metadata?.image_id);
 
     if (batch && imageKey) {
@@ -2398,17 +1124,39 @@ export function cancelTabWork(tabId, reason = "navigation") {
   }
 
   const stopped = abortTabInFlight(tabId, "tp:cancelled");
-  if (stopped) log.info("stopped in-flight requests for a gone tab", { tabId, stopped, reason: msg });
+  if (!cancelledJobIds.length && stopped) {
+    traceNote("background/jobs.js", "jobCancellation", {
+      reason: msg,
+      tabId,
+      extensionAbortRequested: true,
+      abortedInFlight: stopped,
+      providerAbortObservedAt: Date.now(),
+      serverCancellation: "not_correlatable_no_registered_job",
+    });
+  }
+  if (stopped)
+    log.info("stopped in-flight requests for a gone tab", {
+      tabId,
+      stopped,
+      reason: msg,
+    });
 
   wf.cancelTab(tabId, msg);
 
   if (cancelledJobIds.length || cancelledBatchIds.size) {
     if (cancelledBatchIds.size) {
       for (const batchId of cancelledBatchIds) {
-        cancelJobsViaRest({ jobIds: cancelledJobIds, batchId, session: getTabSessionId(tabId) || "" });
+        cancelJobsViaRest({
+          jobIds: cancelledJobIds,
+          batchId,
+          session: sessionId || getTabSessionId(tabId) || "",
+        });
       }
     } else {
-      cancelJobsViaRest({ jobIds: cancelledJobIds, session: getTabSessionId(tabId) || "" });
+      cancelJobsViaRest({
+        jobIds: cancelledJobIds,
+        session: sessionId || getTabSessionId(tabId) || "",
+      });
     }
   }
 }
@@ -2417,10 +1165,15 @@ export function cancelTabWork(tabId, reason = "navigation") {
 export function discardBatchResults(batchId, reason = "user_cancelled") {
   const bid = String(batchId || "").trim();
   if (!bid) return;
+  void repairCoordinator.cancelBatch(bid, reason);
+  releaseBatchImageJobs(bid);
   const batch = ensureBatch(bid, 0, 0);
   batch.cancelled = true;
+  batch.cancelRequestedAt = Date.now();
+  abortBatchInFlight(bid, "tp:cancelled");
   for (const [key, item] of batch.items.entries()) {
-    if (["done", "error", "aborted", "skipped"].includes(item?.status)) continue;
+    if (["done", "error", "aborted", "skipped"].includes(item?.status))
+      continue;
     markImagePhase(bid, key, "cancelled", { lastError: reason });
   }
   batchUpdateToast(batch, "Cancelled", true);

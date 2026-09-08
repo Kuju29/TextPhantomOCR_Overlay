@@ -1,0 +1,22 @@
+{
+  "source": "user debug-api-6.zip original_tree selected groups plus failed P18 recovery neighbours",
+  "paragraphs": [
+    {"para_index":0,"text":"お前らももう3年だ","bounds_px":[535.0,43.0,567.0,111.0],"items":[{"text":"お前らも","bounds_px":[554.99,44.0,567.0,98.0],"box":{"height":0.06,"rotation_deg":90}},{"text":"もう3年だ","bounds_px":[535.0,43.0,550.01,111.0],"box":{"height":0.07556,"rotation_deg":90}}]},
+    {"para_index":1,"text":"一生で一番","bounds_px":[532.0,131.98,551.01,198.0],"items":[{"text":"しょういちばん","bounds_px":[543.0,146.0,551.01,197.0],"box":{"height":0.05667,"rotation_deg":90}},{"text":"一生で一番","bounds_px":[532.0,131.98,545.09,198.0],"box":{"height":0.07333,"rotation_deg":90}}]},
+    {"para_index":2,"text":"大事な時期って言っても過言じゃないぞ","bounds_px":[475.99,131.0,526.27,224.0],"items":[{"text":"大事な時期って","bounds_px":[512.0,131.96,526.27,224.0],"box":{"height":0.10222,"rotation_deg":90}},{"text":"言っても過言","bounds_px":[491.98,131.0,506.0,212.0],"box":{"height":0.09,"rotation_deg":90}},{"text":"じゃないぞ","bounds_px":[475.99,131.0,487.0,198.0],"box":{"height":0.07444,"rotation_deg":90}}]},
+    {"para_index":3,"text":"一分一秒を","bounds_px":[326.0,48.0,347.0,118.0],"items":[{"text":"ぶんびょう","bounds_px":[338.98,59.0,347.0,104.0],"box":{"height":0.05,"rotation_deg":90}},{"text":"一分一秒を","bounds_px":[326.0,48.0,342.02,118.0],"box":{"height":0.07778,"rotation_deg":90}}]},
+    {"para_index":4,"text":"大事に過ごせ","bounds_px":[301.95,43.0,318.0,148.01],"items":[{"text":"大事に過ごせ","bounds_px":[301.95,43.0,318.0,148.01],"box":{"height":0.11668,"rotation_deg":90}}]},
+    {"para_index":5,"text":"自分を大事に","bounds_px":[225.0,38.0,246.0,125.0],"items":[{"text":"じぶんだいじ","bounds_px":[237.0,43.0,246.0,107.0],"box":{"height":0.07111,"rotation_deg":90}},{"text":"自分を大事に","bounds_px":[225.0,38.0,239.02,125.0],"box":{"height":0.09667,"rotation_deg":90}}]},
+    {"para_index":6,"text":"するにはまず周りを大事に","bounds_px":[183.99,37.0,221.03,134.0],"items":[{"text":"するにはまず","bounds_px":[207.0,37.0,221.03,134.0],"box":{"height":0.10778,"rotation_deg":90}},{"text":"周りを大事に","bounds_px":[183.99,38.0,198.0,125.0],"box":{"height":0.09667,"rotation_deg":90}}]},
+    {"para_index":7,"text":"すること","bounds_px":[167.0,37.0,181.02,111.0],"items":[{"text":"すること","bounds_px":[167.0,37.0,181.02,111.0],"box":{"height":0.08222,"rotation_deg":90}}]},
+    {"para_index":8,"text":"見知った顔も","bounds_px":[117.98,45.0,134.0,135.0],"items":[{"text":"見知った顔も","bounds_px":[117.98,45.0,134.0,135.0],"box":{"height":0.1,"rotation_deg":90}}]},
+    {"para_index":9,"text":"あるだろうけど改めて自己紹介をしようと思う","bounds_px":[59.0,46.0,113.0,163.0],"items":[{"text":"あるだろうけど","bounds_px":[102.0,47.0,113.0,148.0],"box":{"height":0.11222,"rotation_deg":90}},{"text":"改めて自己紹介を","bounds_px":[77.97,46.0,94.0,163.0],"box":{"height":0.13,"rotation_deg":90}},{"text":"しようと思う","bounds_px":[59.0,47.0,71.01,148.0],"box":{"height":0.11222,"rotation_deg":90}}]},
+    {"para_index":15,"text":"っす! うぃ","bounds_px":[545.0,528.98,557.05,633.0],"items":[{"text":"っす! うぃ","bounds_px":[545.0,528.98,557.05,633.0],"box":{"height":0.11558,"rotation_deg":90}}]},
+    {"para_index":18,"text":"ハーカ!","bounds_px":[565.97,733.0,583.0,787.01],"items":[{"text":"ハーカ!","bounds_px":[565.97,733.0,583.0,787.01],"box":{"height":0.06001,"rotation_deg":90}}]},
+    {"para_index":22,"text":"将来の夢は億万長者","bounds_px":[183.0,531.97,202.0,649.0],"items":[{"text":"将来の夢は億万長者","bounds_px":[183.0,531.97,197.22,649.0],"box":{"height":0.13,"rotation_deg":90}}]},
+    {"para_index":23,"text":"IT社長目指して","bounds_px":[164.0,530.99,177.09,634.0],"items":[{"text":"IT社長目指して","bounds_px":[164.0,530.99,177.09,634.0],"box":{"height":0.11446,"rotation_deg":90}}]},
+    {"para_index":24,"text":"修行中でいいっす","bounds_px":[142.99,530.0,157.0,647.0],"items":[{"text":"修行中でいいっす","bounds_px":[142.99,530.0,157.0,647.0],"box":{"height":0.13,"rotation_deg":90}}]},
+    {"para_index":25,"text":"彼女常に募集中なんで可愛い子","bounds_px":[74.0,551.96,114.04,652.0],"items":[{"text":"彼女常に募集中","bounds_px":[94.0,551.96,109.27,652.0],"box":{"height":0.11116,"rotation_deg":90}},{"text":"なんで可愛い子","bounds_px":[74.0,551.98,88.15,644.0],"box":{"height":0.10224,"rotation_deg":90}}]},
+    {"para_index":26,"text":"シクヨロ","bounds_px":[59.0,551.98,70.18,642.0],"items":[{"text":"シクヨロ","bounds_px":[59.0,551.98,70.18,642.0],"box":{"height":0.10002,"rotation_deg":90}}]}
+  ]
+}

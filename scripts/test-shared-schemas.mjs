@@ -8,9 +8,12 @@ const {
   LENS_DOCUMENT_SCHEMA,
   hasTranslatableText,
   translationUnits,
+  translationConservation,
+  requireTranslationConservation,
+  attachCanonicalOriginalTree,
   applyTranslations,
 } = await import("../src/shared/lens-document.js");
-const { isLocalAiProvider, isLocalHostUrl } = await import("../src/shared/constants.js");
+const { isLocalAiProvider, isLocalAiTarget, isLocalHostUrl } = await import("../src/shared/constants.js");
 
 // --- erase boxes -----------------------------------------------------------
 {
@@ -31,6 +34,58 @@ const { isLocalAiProvider, isLocalHostUrl } = await import("../src/shared/consta
   ]);
   assert.equal(built.schema, ERASE_BOXES_SCHEMA);
   assert.equal(built.boxes.length, 1, "unusable boxes are dropped, not emitted at the origin");
+}
+
+// --- OCR -> canonical Original tree -> AI units is a lossless partition ---
+{
+  const paragraphs = [
+    { id: "p0", sourceText: "右", items: [] },
+    { id: "p1", sourceText: "列", items: [] },
+    { id: "p2", sourceText: "左", items: [] },
+    { id: "p3", sourceText: "単独", items: [] },
+    { id: "p4", sourceText: "   ", items: [] },
+  ];
+  const adjacentGroups = attachCanonicalOriginalTree({ paragraphs }, {
+    schema: "tp.canonical-original-tree/1",
+    coverage: { complete: true },
+    paragraphs: [
+      { id: "as0", text: "右列", ai_eligible: true,
+        source: { contract: "tp.ai-source-members/1", rawParagraphIndices: [0, 1], documentParagraphIds: ["p0", "p1"] } },
+      { id: "p2", text: "左", ai_eligible: true,
+        source: { contract: "tp.ai-source-members/1", rawParagraphIndices: [2], documentParagraphIds: ["p2"] } },
+      { id: "p3", text: "単独", ai_eligible: true,
+        source: { contract: "tp.ai-source-members/1", rawParagraphIndices: [3], documentParagraphIds: ["p3"] } },
+    ],
+  });
+  const units = translationUnits(adjacentGroups);
+  assert.deepEqual(
+    units.map((unit) => unit.paragraphIds),
+    [["p0", "p1"], ["p2"], ["p3"]],
+    "adjacent vertical groups and a standalone paragraph each survive once",
+  );
+  const report = requireTranslationConservation(adjacentGroups, units);
+  assert.equal(report.ok, true);
+  assert.equal(report.eligibleParagraphCount, 4);
+  assert.equal(report.excludedBlankParagraphCount, 1);
+  assert.deepEqual(report.expectedRequestIds, ["g0", "g1", "g2"]);
+
+  const lost = translationConservation(adjacentGroups, units.slice(1));
+  assert.equal(lost.ok, false);
+  assert.deepEqual(lost.missingParagraphIds, ["p0", "p1"]);
+  assert.throws(
+    () => requireTranslationConservation(adjacentGroups, units.slice(1)),
+    /OCR-to-AI unit conservation failed/,
+    "paragraph loss stops before either AI provider is called",
+  );
+
+  const duplicated = translationConservation(adjacentGroups, [units[0], units[0], ...units.slice(1)]);
+  assert.equal(duplicated.ok, false);
+  assert.deepEqual(duplicated.duplicateParagraphIds, ["p0", "p1"]);
+  assert.deepEqual(duplicated.duplicateUnitIds, ["g0"]);
+
+  const invalid = structuredClone(adjacentGroups);
+  invalid.canonicalOriginalTree.coverage.complete = false;
+  assert.throws(() => translationUnits(invalid), /no complete tp\.canonical-original-tree\/1/);
 }
 
 // --- the translatable rule, mirrored in api/backend/ai/markers.py ----------
@@ -107,6 +162,16 @@ const { isLocalAiProvider, isLocalHostUrl } = await import("../src/shared/consta
   ]) {
     assert.equal(isLocalHostUrl(u), false, `${u} is not local`);
   }
+  for (const u of [
+    "http://localhost:11434/v1", "http://127.0.0.1:8080/v1",
+    "http://127.255.10.9:8080/v1", "http://[::1]:11434/v1",
+  ]) assert.equal(isLocalAiTarget("openai", u), true, `${u} is an exact loopback AI target`);
+  for (const u of [
+    "http://evil-localhost.example/v1", "http://127.0.0.1.attacker.example/v1",
+    "http://localhost.evil/v1", "http://0.0.0.0:11434/v1", "http://[::]:11434/v1",
+  ]) assert.equal(isLocalAiTarget("openai", u), false, `${u} is not a local AI destination`);
+  assert.equal(isLocalAiTarget("ollama", "http://0.0.0.0:11434"), true,
+    "an explicit local provider remains local independently of its bind-style URL");
 }
 
 console.log("Shared schema test passed: erase boxes, translation units, local detection.");

@@ -8,9 +8,7 @@ from fastapi.responses import JSONResponse
 from backend.ai.rategate import rate_gate
 from backend.config import settings
 
-
 router = APIRouter()
-
 
 @router.get("/health")
 async def health(request: Request, detail: bool = False) -> dict:
@@ -46,7 +44,6 @@ def _readiness(request: Request) -> dict:
             "acceptsUserCredential": True,
             "rateGate": "busy" if int(rate_stats.get("waiting", 0)) else "available",
         },
-        "detector": lane("cpu_admission_gate", "cpu_executor_workers"),
     }
     return {
         "ok": True,  # liveness remains backward-compatible
@@ -54,13 +51,11 @@ def _readiness(request: Request) -> dict:
         "components": components,
     }
 
-
 @router.get("/ready")
 async def ready(request: Request):
     """Operational detail only; performs no paid/network provider probes."""
     result = _readiness(request)
     return JSONResponse(status_code=200 if result["ready"] else 503, content=result)
-
 
 @router.get("/version")
 async def version() -> dict:

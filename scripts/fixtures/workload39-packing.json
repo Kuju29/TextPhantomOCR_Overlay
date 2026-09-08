@@ -1,0 +1,5588 @@
+{
+  "basis": "Actual released .39 takeWorkloadBatch executed on deterministic inputs; no provider or semantic-quality claim",
+  "cases": [
+    {
+      "units": [
+        {
+          "id": "g0",
+          "pattern": "Hello world.",
+          "repeats": 70
+        },
+        {
+          "id": "g1",
+          "pattern": "คำพูด",
+          "repeats": 29
+        },
+        {
+          "id": "g2",
+          "pattern": "Hello world.",
+          "repeats": 3
+        },
+        {
+          "id": "g3",
+          "pattern": "本文",
+          "repeats": 39
+        },
+        {
+          "id": "g4",
+          "pattern": "本文",
+          "repeats": 49
+        },
+        {
+          "id": "g5",
+          "pattern": "Hello world.",
+          "repeats": 52
+        },
+        {
+          "id": "g6",
+          "pattern": "คำพูด",
+          "repeats": 30
+        },
+        {
+          "id": "g7",
+          "pattern": "Hello world.",
+          "repeats": 28
+        },
+        {
+          "id": "g8",
+          "pattern": "本文",
+          "repeats": 66
+        },
+        {
+          "id": "g9",
+          "pattern": "คำพูด",
+          "repeats": 54
+        },
+        {
+          "id": "g10",
+          "pattern": "คำพูด",
+          "repeats": 52
+        },
+        {
+          "id": "g11",
+          "pattern": "本文",
+          "repeats": 30
+        },
+        {
+          "id": "g12",
+          "pattern": "คำพูด",
+          "repeats": 70
+        },
+        {
+          "id": "g13",
+          "pattern": "Hello world.",
+          "repeats": 68
+        },
+        {
+          "id": "g14",
+          "pattern": "Hello world.",
+          "repeats": 1
+        },
+        {
+          "id": "g15",
+          "pattern": "คำพูด",
+          "repeats": 19
+        },
+        {
+          "id": "g16",
+          "pattern": "คำพูด",
+          "repeats": 13
+        },
+        {
+          "id": "g17",
+          "pattern": "Hello world.",
+          "repeats": 16
+        },
+        {
+          "id": "g18",
+          "pattern": "คำพูด",
+          "repeats": 22
+        },
+        {
+          "id": "g19",
+          "pattern": "Hello world.",
+          "repeats": 8
+        },
+        {
+          "id": "g20",
+          "pattern": "Hello world.",
+          "repeats": 31
+        },
+        {
+          "id": "g21",
+          "pattern": "คำพูด",
+          "repeats": 54
+        },
+        {
+          "id": "g22",
+          "pattern": "本文",
+          "repeats": 54
+        },
+        {
+          "id": "g23",
+          "pattern": "本文",
+          "repeats": 21
+        },
+        {
+          "id": "g24",
+          "pattern": "Hello world.",
+          "repeats": 17
+        },
+        {
+          "id": "g25",
+          "pattern": "本文",
+          "repeats": 1
+        },
+        {
+          "id": "g26",
+          "pattern": "Hello world.",
+          "repeats": 61
+        },
+        {
+          "id": "g27",
+          "pattern": "Hello world.",
+          "repeats": 56
+        },
+        {
+          "id": "g28",
+          "pattern": "คำพูด",
+          "repeats": 59
+        },
+        {
+          "id": "g29",
+          "pattern": "คำพูด",
+          "repeats": 11
+        },
+        {
+          "id": "g30",
+          "pattern": "Hello world.",
+          "repeats": 5
+        },
+        {
+          "id": "g31",
+          "pattern": "คำพูด",
+          "repeats": 36
+        },
+        {
+          "id": "g32",
+          "pattern": "Hello world.",
+          "repeats": 53
+        },
+        {
+          "id": "g33",
+          "pattern": "本文",
+          "repeats": 45
+        },
+        {
+          "id": "g34",
+          "pattern": "Hello world.",
+          "repeats": 58
+        },
+        {
+          "id": "g35",
+          "pattern": "Hello world.",
+          "repeats": 21
+        },
+        {
+          "id": "g36",
+          "pattern": "本文",
+          "repeats": 50
+        },
+        {
+          "id": "g37",
+          "pattern": "Hello world.",
+          "repeats": 25
+        },
+        {
+          "id": "g38",
+          "pattern": "本文",
+          "repeats": 51
+        },
+        {
+          "id": "g39",
+          "pattern": "本文",
+          "repeats": 68
+        },
+        {
+          "id": "g40",
+          "pattern": "本文",
+          "repeats": 53
+        },
+        {
+          "id": "g41",
+          "pattern": "Hello world.",
+          "repeats": 52
+        },
+        {
+          "id": "g42",
+          "pattern": "Hello world.",
+          "repeats": 16
+        },
+        {
+          "id": "g43",
+          "pattern": "本文",
+          "repeats": 62
+        },
+        {
+          "id": "g44",
+          "pattern": "Hello world.",
+          "repeats": 50
+        },
+        {
+          "id": "g45",
+          "pattern": "本文",
+          "repeats": 44
+        },
+        {
+          "id": "g46",
+          "pattern": "本文",
+          "repeats": 25
+        },
+        {
+          "id": "g47",
+          "pattern": "คำพูด",
+          "repeats": 42
+        },
+        {
+          "id": "g48",
+          "pattern": "คำพูด",
+          "repeats": 2
+        },
+        {
+          "id": "g49",
+          "pattern": "คำพูด",
+          "repeats": 64
+        },
+        {
+          "id": "g50",
+          "pattern": "Hello world.",
+          "repeats": 4
+        },
+        {
+          "id": "g51",
+          "pattern": "Hello world.",
+          "repeats": 7
+        },
+        {
+          "id": "g52",
+          "pattern": "คำพูด",
+          "repeats": 59
+        },
+        {
+          "id": "g53",
+          "pattern": "Hello world.",
+          "repeats": 5
+        },
+        {
+          "id": "g54",
+          "pattern": "คำพูด",
+          "repeats": 45
+        },
+        {
+          "id": "g55",
+          "pattern": "คำพูด",
+          "repeats": 70
+        },
+        {
+          "id": "g56",
+          "pattern": "本文",
+          "repeats": 29
+        },
+        {
+          "id": "g57",
+          "pattern": "คำพูด",
+          "repeats": 33
+        },
+        {
+          "id": "g58",
+          "pattern": "Hello world.",
+          "repeats": 41
+        },
+        {
+          "id": "g59",
+          "pattern": "คำพูด",
+          "repeats": 37
+        },
+        {
+          "id": "g60",
+          "pattern": "本文",
+          "repeats": 60
+        },
+        {
+          "id": "g61",
+          "pattern": "本文",
+          "repeats": 32
+        },
+        {
+          "id": "g62",
+          "pattern": "คำพูด",
+          "repeats": 50
+        },
+        {
+          "id": "g63",
+          "pattern": "本文",
+          "repeats": 17
+        },
+        {
+          "id": "g64",
+          "pattern": "Hello world.",
+          "repeats": 9
+        },
+        {
+          "id": "g65",
+          "pattern": "Hello world.",
+          "repeats": 22
+        },
+        {
+          "id": "g66",
+          "pattern": "คำพูด",
+          "repeats": 42
+        },
+        {
+          "id": "g67",
+          "pattern": "本文",
+          "repeats": 48
+        },
+        {
+          "id": "g68",
+          "pattern": "Hello world.",
+          "repeats": 34
+        },
+        {
+          "id": "g69",
+          "pattern": "คำพูด",
+          "repeats": 69
+        },
+        {
+          "id": "g70",
+          "pattern": "คำพูด",
+          "repeats": 28
+        },
+        {
+          "id": "g71",
+          "pattern": "Hello world.",
+          "repeats": 50
+        }
+      ],
+      "context": {
+        "contract": "compact_markers",
+        "fixedInput": 366,
+        "reasoningActive": true,
+        "limits": {
+          "contextTokens": 4096,
+          "maxOutputTokens": 2048
+        }
+      },
+      "profile": {
+        "target": 240,
+        "records": 12,
+        "ratios": [
+          0.7,
+          1.1,
+          1.25
+        ]
+      },
+      "expected": [
+        1,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        2,
+        1,
+        2,
+        1,
+        1,
+        3,
+        1,
+        1,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "units": [
+        {
+          "id": "g0",
+          "pattern": "คำพูด",
+          "repeats": 47
+        },
+        {
+          "id": "g1",
+          "pattern": "Hello world.",
+          "repeats": 57
+        },
+        {
+          "id": "g2",
+          "pattern": "本文",
+          "repeats": 53
+        },
+        {
+          "id": "g3",
+          "pattern": "本文",
+          "repeats": 59
+        }
+      ],
+      "context": {
+        "contract": "tp.translation.schema-object/1",
+        "fixedInput": 819,
+        "reasoningActive": false,
+        "limits": {
+          "contextTokens": 4096,
+          "maxOutputTokens": 4096
+        }
+      },
+      "profile": {},
+      "expected": [
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "units": [
+        {
+          "id": "g0",
+          "pattern": "Hello world.",
+          "repeats": 41
+        },
+        {
+          "id": "g1",
+          "pattern": "Hello world.",
+          "repeats": 61
+        },
+        {
+          "id": "g2",
+          "pattern": "คำพูด",
+          "repeats": 4
+        },
+        {
+          "id": "g3",
+          "pattern": "คำพูด",
+          "repeats": 1
+        },
+        {
+          "id": "g4",
+          "pattern": "本文",
+          "repeats": 7
+        },
+        {
+          "id": "g5",
+          "pattern": "本文",
+          "repeats": 33
+        },
+        {
+          "id": "g6",
+          "pattern": "本文",
+          "repeats": 45
+        },
+        {
+          "id": "g7",
+          "pattern": "คำพูด",
+          "repeats": 41
+        },
+        {
+          "id": "g8",
+          "pattern": "คำพูด",
+          "repeats": 34
+        },
+        {
+          "id": "g9",
+          "pattern": "คำพูด",
+          "repeats": 7
+        },
+        {
+          "id": "g10",
+          "pattern": "Hello world.",
+          "repeats": 21
+        },
+        {
+          "id": "g11",
+          "pattern": "คำพูด",
+          "repeats": 54
+        },
+        {
+          "id": "g12",
+          "pattern": "本文",
+          "repeats": 60
+        }
+      ],
+      "context": {
+        "contract": "compact_markers",
+        "fixedInput": 81,
+        "reasoningActive": false,
+        "limits": {
+          "contextTokens": 4096,
+          "maxOutputTokens": 4096
+        }
+      },
+      "profile": {},
+      "expected": [
+        1,
+        1,
+        3,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "units": [
+        {
+          "id": "g0",
+          "pattern": "本文",
+          "repeats": 41
+        },
+        {
+          "id": "g1",
+          "pattern": "Hello world.",
+          "repeats": 51
+        },
+        {
+          "id": "g2",
+          "pattern": "คำพูด",
+          "repeats": 70
+        },
+        {
+          "id": "g3",
+          "pattern": "Hello world.",
+          "repeats": 39
+        },
+        {
+          "id": "g4",
+          "pattern": "Hello world.",
+          "repeats": 40
+        },
+        {
+          "id": "g5",
+          "pattern": "本文",
+          "repeats": 14
+        },
+        {
+          "id": "g6",
+          "pattern": "คำพูด",
+          "repeats": 20
+        },
+        {
+          "id": "g7",
+          "pattern": "คำพูด",
+          "repeats": 3
+        },
+        {
+          "id": "g8",
+          "pattern": "คำพูด",
+          "repeats": 44
+        },
+        {
+          "id": "g9",
+          "pattern": "คำพูด",
+          "repeats": 57
+        },
+        {
+          "id": "g10",
+          "pattern": "คำพูด",
+          "repeats": 68
+        },
+        {
+          "id": "g11",
+          "pattern": "Hello world.",
+          "repeats": 62
+        },
+        {
+          "id": "g12",
+          "pattern": "Hello world.",
+          "repeats": 42
+        },
+        {
+          "id": "g13",
+          "pattern": "Hello world.",
+          "repeats": 10
+        },
+        {
+          "id": "g14",
+          "pattern": "Hello world.",
+          "repeats": 51
+        },
+        {
+          "id": "g15",
+          "pattern": "คำพูด",
+          "repeats": 14
+        },
+        {
+          "id": "g16",
+          "pattern": "本文",
+          "repeats": 22
+        },
+        {
+          "id": "g17",
+          "pattern": "本文",
+          "repeats": 40
+        },
+        {
+          "id": "g18",
+          "pattern": "本文",
+          "repeats": 39
+        },
+        {
+          "id": "g19",
+          "pattern": "Hello world.",
+          "repeats": 9
+        },
+        {
+          "id": "g20",
+          "pattern": "Hello world.",
+          "repeats": 23
+        },
+        {
+          "id": "g21",
+          "pattern": "คำพูด",
+          "repeats": 66
+        },
+        {
+          "id": "g22",
+          "pattern": "คำพูด",
+          "repeats": 67
+        },
+        {
+          "id": "g23",
+          "pattern": "本文",
+          "repeats": 15
+        },
+        {
+          "id": "g24",
+          "pattern": "Hello world.",
+          "repeats": 6
+        },
+        {
+          "id": "g25",
+          "pattern": "本文",
+          "repeats": 6
+        },
+        {
+          "id": "g26",
+          "pattern": "本文",
+          "repeats": 34
+        },
+        {
+          "id": "g27",
+          "pattern": "本文",
+          "repeats": 34
+        },
+        {
+          "id": "g28",
+          "pattern": "Hello world.",
+          "repeats": 19
+        },
+        {
+          "id": "g29",
+          "pattern": "Hello world.",
+          "repeats": 8
+        },
+        {
+          "id": "g30",
+          "pattern": "Hello world.",
+          "repeats": 36
+        },
+        {
+          "id": "g31",
+          "pattern": "คำพูด",
+          "repeats": 36
+        },
+        {
+          "id": "g32",
+          "pattern": "Hello world.",
+          "repeats": 41
+        },
+        {
+          "id": "g33",
+          "pattern": "Hello world.",
+          "repeats": 40
+        },
+        {
+          "id": "g34",
+          "pattern": "Hello world.",
+          "repeats": 30
+        },
+        {
+          "id": "g35",
+          "pattern": "本文",
+          "repeats": 8
+        },
+        {
+          "id": "g36",
+          "pattern": "本文",
+          "repeats": 54
+        },
+        {
+          "id": "g37",
+          "pattern": "本文",
+          "repeats": 21
+        },
+        {
+          "id": "g38",
+          "pattern": "本文",
+          "repeats": 1
+        },
+        {
+          "id": "g39",
+          "pattern": "本文",
+          "repeats": 68
+        },
+        {
+          "id": "g40",
+          "pattern": "คำพูด",
+          "repeats": 69
+        },
+        {
+          "id": "g41",
+          "pattern": "本文",
+          "repeats": 17
+        },
+        {
+          "id": "g42",
+          "pattern": "本文",
+          "repeats": 18
+        },
+        {
+          "id": "g43",
+          "pattern": "คำพูด",
+          "repeats": 70
+        },
+        {
+          "id": "g44",
+          "pattern": "本文",
+          "repeats": 28
+        },
+        {
+          "id": "g45",
+          "pattern": "คำพูด",
+          "repeats": 68
+        },
+        {
+          "id": "g46",
+          "pattern": "คำพูด",
+          "repeats": 29
+        },
+        {
+          "id": "g47",
+          "pattern": "คำพูด",
+          "repeats": 43
+        },
+        {
+          "id": "g48",
+          "pattern": "Hello world.",
+          "repeats": 20
+        },
+        {
+          "id": "g49",
+          "pattern": "Hello world.",
+          "repeats": 5
+        },
+        {
+          "id": "g50",
+          "pattern": "คำพูด",
+          "repeats": 27
+        },
+        {
+          "id": "g51",
+          "pattern": "คำพูด",
+          "repeats": 50
+        },
+        {
+          "id": "g52",
+          "pattern": "Hello world.",
+          "repeats": 13
+        },
+        {
+          "id": "g53",
+          "pattern": "本文",
+          "repeats": 21
+        },
+        {
+          "id": "g54",
+          "pattern": "本文",
+          "repeats": 28
+        },
+        {
+          "id": "g55",
+          "pattern": "คำพูด",
+          "repeats": 37
+        },
+        {
+          "id": "g56",
+          "pattern": "Hello world.",
+          "repeats": 44
+        },
+        {
+          "id": "g57",
+          "pattern": "คำพูด",
+          "repeats": 43
+        },
+        {
+          "id": "g58",
+          "pattern": "本文",
+          "repeats": 5
+        },
+        {
+          "id": "g59",
+          "pattern": "本文",
+          "repeats": 18
+        },
+        {
+          "id": "g60",
+          "pattern": "本文",
+          "repeats": 67
+        },
+        {
+          "id": "g61",
+          "pattern": "本文",
+          "repeats": 66
+        },
+        {
+          "id": "g62",
+          "pattern": "Hello world.",
+          "repeats": 46
+        },
+        {
+          "id": "g63",
+          "pattern": "คำพูด",
+          "repeats": 41
+        },
+        {
+          "id": "g64",
+          "pattern": "本文",
+          "repeats": 44
+        },
+        {
+          "id": "g65",
+          "pattern": "คำพูด",
+          "repeats": 59
+        },
+        {
+          "id": "g66",
+          "pattern": "คำพูด",
+          "repeats": 52
+        }
+      ],
+      "context": {
+        "contract": "tp.translation.schema-object/1",
+        "fixedInput": 473,
+        "reasoningActive": false,
+        "limits": {
+          "contextTokens": 4096,
+          "maxOutputTokens": 4096
+        }
+      },
+      "profile": {
+        "target": 240,
+        "records": 12,
+        "ratios": [
+          0.7,
+          1.1,
+          1.25
+        ]
+      },
+      "expected": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        1,
+        2,
+        1,
+        1,
+        1,
+        3,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        1,
+        2,
+        1,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        1,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "units": [
+        {
+          "id": "g0",
+          "pattern": "本文",
+          "repeats": 47
+        },
+        {
+          "id": "g1",
+          "pattern": "Hello world.",
+          "repeats": 63
+        },
+        {
+          "id": "g2",
+          "pattern": "本文",
+          "repeats": 12
+        },
+        {
+          "id": "g3",
+          "pattern": "Hello world.",
+          "repeats": 21
+        },
+        {
+          "id": "g4",
+          "pattern": "本文",
+          "repeats": 45
+        },
+        {
+          "id": "g5",
+          "pattern": "Hello world.",
+          "repeats": 67
+        },
+        {
+          "id": "g6",
+          "pattern": "本文",
+          "repeats": 21
+        },
+        {
+          "id": "g7",
+          "pattern": "Hello world.",
+          "repeats": 55
+        },
+        {
+          "id": "g8",
+          "pattern": "Hello world.",
+          "repeats": 50
+        },
+        {
+          "id": "g9",
+          "pattern": "本文",
+          "repeats": 16
+        },
+        {
+          "id": "g10",
+          "pattern": "本文",
+          "repeats": 41
+        },
+        {
+          "id": "g11",
+          "pattern": "本文",
+          "repeats": 46
+        },
+        {
+          "id": "g12",
+          "pattern": "本文",
+          "repeats": 11
+        },
+        {
+          "id": "g13",
+          "pattern": "Hello world.",
+          "repeats": 10
+        },
+        {
+          "id": "g14",
+          "pattern": "คำพูด",
+          "repeats": 30
+        },
+        {
+          "id": "g15",
+          "pattern": "คำพูด",
+          "repeats": 12
+        },
+        {
+          "id": "g16",
+          "pattern": "Hello world.",
+          "repeats": 13
+        },
+        {
+          "id": "g17",
+          "pattern": "คำพูด",
+          "repeats": 70
+        },
+        {
+          "id": "g18",
+          "pattern": "Hello world.",
+          "repeats": 32
+        },
+        {
+          "id": "g19",
+          "pattern": "คำพูด",
+          "repeats": 63
+        },
+        {
+          "id": "g20",
+          "pattern": "คำพูด",
+          "repeats": 70
+        },
+        {
+          "id": "g21",
+          "pattern": "คำพูด",
+          "repeats": 34
+        },
+        {
+          "id": "g22",
+          "pattern": "Hello world.",
+          "repeats": 64
+        },
+        {
+          "id": "g23",
+          "pattern": "คำพูด",
+          "repeats": 57
+        },
+        {
+          "id": "g24",
+          "pattern": "本文",
+          "repeats": 18
+        },
+        {
+          "id": "g25",
+          "pattern": "Hello world.",
+          "repeats": 68
+        },
+        {
+          "id": "g26",
+          "pattern": "Hello world.",
+          "repeats": 42
+        },
+        {
+          "id": "g27",
+          "pattern": "本文",
+          "repeats": 22
+        },
+        {
+          "id": "g28",
+          "pattern": "本文",
+          "repeats": 52
+        },
+        {
+          "id": "g29",
+          "pattern": "本文",
+          "repeats": 46
+        },
+        {
+          "id": "g30",
+          "pattern": "本文",
+          "repeats": 66
+        },
+        {
+          "id": "g31",
+          "pattern": "Hello world.",
+          "repeats": 69
+        },
+        {
+          "id": "g32",
+          "pattern": "คำพูด",
+          "repeats": 33
+        },
+        {
+          "id": "g33",
+          "pattern": "คำพูด",
+          "repeats": 34
+        },
+        {
+          "id": "g34",
+          "pattern": "Hello world.",
+          "repeats": 30
+        },
+        {
+          "id": "g35",
+          "pattern": "คำพูด",
+          "repeats": 9
+        },
+        {
+          "id": "g36",
+          "pattern": "本文",
+          "repeats": 68
+        },
+        {
+          "id": "g37",
+          "pattern": "Hello world.",
+          "repeats": 60
+        },
+        {
+          "id": "g38",
+          "pattern": "Hello world.",
+          "repeats": 30
+        },
+        {
+          "id": "g39",
+          "pattern": "คำพูด",
+          "repeats": 18
+        },
+        {
+          "id": "g40",
+          "pattern": "Hello world.",
+          "repeats": 2
+        },
+        {
+          "id": "g41",
+          "pattern": "Hello world.",
+          "repeats": 18
+        },
+        {
+          "id": "g42",
+          "pattern": "Hello world.",
+          "repeats": 14
+        },
+        {
+          "id": "g43",
+          "pattern": "Hello world.",
+          "repeats": 16
+        },
+        {
+          "id": "g44",
+          "pattern": "Hello world.",
+          "repeats": 42
+        },
+        {
+          "id": "g45",
+          "pattern": "Hello world.",
+          "repeats": 38
+        },
+        {
+          "id": "g46",
+          "pattern": "คำพูด",
+          "repeats": 23
+        },
+        {
+          "id": "g47",
+          "pattern": "Hello world.",
+          "repeats": 22
+        },
+        {
+          "id": "g48",
+          "pattern": "本文",
+          "repeats": 9
+        },
+        {
+          "id": "g49",
+          "pattern": "Hello world.",
+          "repeats": 12
+        },
+        {
+          "id": "g50",
+          "pattern": "Hello world.",
+          "repeats": 26
+        },
+        {
+          "id": "g51",
+          "pattern": "Hello world.",
+          "repeats": 2
+        },
+        {
+          "id": "g52",
+          "pattern": "Hello world.",
+          "repeats": 12
+        },
+        {
+          "id": "g53",
+          "pattern": "Hello world.",
+          "repeats": 16
+        },
+        {
+          "id": "g54",
+          "pattern": "本文",
+          "repeats": 66
+        },
+        {
+          "id": "g55",
+          "pattern": "Hello world.",
+          "repeats": 53
+        },
+        {
+          "id": "g56",
+          "pattern": "คำพูด",
+          "repeats": 19
+        },
+        {
+          "id": "g57",
+          "pattern": "คำพูด",
+          "repeats": 9
+        },
+        {
+          "id": "g58",
+          "pattern": "本文",
+          "repeats": 66
+        },
+        {
+          "id": "g59",
+          "pattern": "本文",
+          "repeats": 18
+        },
+        {
+          "id": "g60",
+          "pattern": "คำพูด",
+          "repeats": 16
+        },
+        {
+          "id": "g61",
+          "pattern": "本文",
+          "repeats": 26
+        },
+        {
+          "id": "g62",
+          "pattern": "Hello world.",
+          "repeats": 17
+        },
+        {
+          "id": "g63",
+          "pattern": "本文",
+          "repeats": 63
+        },
+        {
+          "id": "g64",
+          "pattern": "คำพูด",
+          "repeats": 41
+        },
+        {
+          "id": "g65",
+          "pattern": "Hello world.",
+          "repeats": 59
+        },
+        {
+          "id": "g66",
+          "pattern": "本文",
+          "repeats": 46
+        },
+        {
+          "id": "g67",
+          "pattern": "本文",
+          "repeats": 56
+        },
+        {
+          "id": "g68",
+          "pattern": "Hello world.",
+          "repeats": 39
+        }
+      ],
+      "context": {
+        "contract": "compact_markers",
+        "fixedInput": 648,
+        "reasoningActive": false,
+        "limits": {
+          "contextTokens": 4096,
+          "maxOutputTokens": 4096
+        }
+      },
+      "profile": {},
+      "expected": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "units": [
+        {
+          "id": "g0",
+          "pattern": "คำพูด",
+          "repeats": 11
+        },
+        {
+          "id": "g1",
+          "pattern": "本文",
+          "repeats": 45
+        },
+        {
+          "id": "g2",
+          "pattern": "Hello world.",
+          "repeats": 7
+        },
+        {
+          "id": "g3",
+          "pattern": "Hello world.",
+          "repeats": 43
+        },
+        {
+          "id": "g4",
+          "pattern": "Hello world.",
+          "repeats": 32
+        },
+        {
+          "id": "g5",
+          "pattern": "คำพูด",
+          "repeats": 33
+        },
+        {
+          "id": "g6",
+          "pattern": "Hello world.",
+          "repeats": 36
+        },
+        {
+          "id": "g7",
+          "pattern": "Hello world.",
+          "repeats": 15
+        },
+        {
+          "id": "g8",
+          "pattern": "คำพูด",
+          "repeats": 64
+        },
+        {
+          "id": "g9",
+          "pattern": "本文",
+          "repeats": 13
+        },
+        {
+          "id": "g10",
+          "pattern": "Hello world.",
+          "repeats": 7
+        }
+      ],
+      "context": {
+        "contract": "tp.translation.schema-object/1",
+        "fixedInput": 882,
+        "reasoningActive": true,
+        "limits": {
+          "contextTokens": 4096,
+          "maxOutputTokens": 4096
+        }
+      },
+      "profile": {},
+      "expected": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2
+      ]
+    },
+    {
+      "units": [
+        {
+          "id": "g0",
+          "pattern": "本文",
+          "repeats": 49
+        },
+        {
+          "id": "g1",
+          "pattern": "本文",
+          "repeats": 61
+        },
+        {
+          "id": "g2",
+          "pattern": "本文",
+          "repeats": 26
+        },
+        {
+          "id": "g3",
+          "pattern": "Hello world.",
+          "repeats": 44
+        },
+        {
+          "id": "g4",
+          "pattern": "Hello world.",
+          "repeats": 23
+        },
+        {
+          "id": "g5",
+          "pattern": "คำพูด",
+          "repeats": 67
+        },
+        {
+          "id": "g6",
+          "pattern": "Hello world.",
+          "repeats": 29
+        },
+        {
+          "id": "g7",
+          "pattern": "Hello world.",
+          "repeats": 45
+        },
+        {
+          "id": "g8",
+          "pattern": "本文",
+          "repeats": 35
+        },
+        {
+          "id": "g9",
+          "pattern": "Hello world.",
+          "repeats": 12
+        },
+        {
+          "id": "g10",
+          "pattern": "Hello world.",
+          "repeats": 43
+        },
+        {
+          "id": "g11",
+          "pattern": "本文",
+          "repeats": 40
+        },
+        {
+          "id": "g12",
+          "pattern": "คำพูด",
+          "repeats": 10
+        },
+        {
+          "id": "g13",
+          "pattern": "本文",
+          "repeats": 22
+        },
+        {
+          "id": "g14",
+          "pattern": "本文",
+          "repeats": 52
+        },
+        {
+          "id": "g15",
+          "pattern": "คำพูด",
+          "repeats": 68
+        },
+        {
+          "id": "g16",
+          "pattern": "本文",
+          "repeats": 1
+        }
+      ],
+      "context": {
+        "contract": "compact_markers",
+        "fixedInput": 411,
+        "reasoningActive": false,
+        "limits": {
+          "contextTokens": 4096,
+          "maxOutputTokens": 4096
+        }
+      },
+      "profile": {
+        "target": 240,
+        "records": 12,
+        "ratios": [
+          0.7,
+          1.1,
+          1.25
+        ]
+      },
+      "expected": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        1,
+        1,
+        2,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "units": [
+        {
+          "id": "g0",
+          "pattern": "本文",
+          "repeats": 17
+        },
+        {
+          "id": "g1",
+          "pattern": "Hello world.",
+          "repeats": 14
+        },
+        {
+          "id": "g2",
+          "pattern": "本文",
+          "repeats": 22
+        },
+        {
+          "id": "g3",
+          "pattern": "คำพูด",
+          "repeats": 31
+        },
+        {
+          "id": "g4",
+          "pattern": "Hello world.",
+          "repeats": 67
+        },
+        {
+          "id": "g5",
+          "pattern": "本文",
+          "repeats": 9
+        },
+        {
+          "id": "g6",
+          "pattern": "本文",
+          "repeats": 58
+        },
+        {
+          "id": "g7",
+          "pattern": "本文",
+          "repeats": 57
+        },
+        {
+          "id": "g8",
+          "pattern": "Hello world.",
+          "repeats": 5
+        },
+        {
+          "id": "g9",
+          "pattern": "Hello world.",
+          "repeats": 29
+        },
+        {
+          "id": "g10",
+          "pattern": "คำพูด",
+          "repeats": 23
+        },
+        {
+          "id": "g11",
+          "pattern": "本文",
+          "repeats": 9
+        },
+        {
+          "id": "g12",
+          "pattern": "คำพูด",
+          "repeats": 29
+        },
+        {
+          "id": "g13",
+          "pattern": "本文",
+          "repeats": 52
+        },
+        {
+          "id": "g14",
+          "pattern": "Hello world.",
+          "repeats": 14
+        },
+        {
+          "id": "g15",
+          "pattern": "本文",
+          "repeats": 47
+        },
+        {
+          "id": "g16",
+          "pattern": "本文",
+          "repeats": 5
+        },
+        {
+          "id": "g17",
+          "pattern": "本文",
+          "repeats": 53
+        },
+        {
+          "id": "g18",
+          "pattern": "本文",
+          "repeats": 36
+        },
+        {
+          "id": "g19",
+          "pattern": "本文",
+          "repeats": 39
+        },
+        {
+          "id": "g20",
+          "pattern": "คำพูด",
+          "repeats": 20
+        },
+        {
+          "id": "g21",
+          "pattern": "Hello world.",
+          "repeats": 65
+        },
+        {
+          "id": "g22",
+          "pattern": "Hello world.",
+          "repeats": 25
+        },
+        {
+          "id": "g23",
+          "pattern": "本文",
+          "repeats": 6
+        },
+        {
+          "id": "g24",
+          "pattern": "คำพูด",
+          "repeats": 49
+        },
+        {
+          "id": "g25",
+          "pattern": "คำพูด",
+          "repeats": 10
+        },
+        {
+          "id": "g26",
+          "pattern": "本文",
+          "repeats": 28
+        },
+        {
+          "id": "g27",
+          "pattern": "本文",
+          "repeats": 11
+        },
+        {
+          "id": "g28",
+          "pattern": "Hello world.",
+          "repeats": 60
+        },
+        {
+          "id": "g29",
+          "pattern": "คำพูด",
+          "repeats": 9
+        },
+        {
+          "id": "g30",
+          "pattern": "คำพูด",
+          "repeats": 63
+        },
+        {
+          "id": "g31",
+          "pattern": "คำพูด",
+          "repeats": 18
+        },
+        {
+          "id": "g32",
+          "pattern": "本文",
+          "repeats": 9
+        },
+        {
+          "id": "g33",
+          "pattern": "คำพูด",
+          "repeats": 50
+        },
+        {
+          "id": "g34",
+          "pattern": "คำพูด",
+          "repeats": 66
+        },
+        {
+          "id": "g35",
+          "pattern": "Hello world.",
+          "repeats": 29
+        },
+        {
+          "id": "g36",
+          "pattern": "Hello world.",
+          "repeats": 58
+        },
+        {
+          "id": "g37",
+          "pattern": "Hello world.",
+          "repeats": 61
+        },
+        {
+          "id": "g38",
+          "pattern": "คำพูด",
+          "repeats": 1
+        },
+        {
+          "id": "g39",
+          "pattern": "Hello world.",
+          "repeats": 62
+        },
+        {
+          "id": "g40",
+          "pattern": "Hello world.",
+          "repeats": 47
+        },
+        {
+          "id": "g41",
+          "pattern": "Hello world.",
+          "repeats": 44
+        },
+        {
+          "id": "g42",
+          "pattern": "คำพูด",
+          "repeats": 64
+        },
+        {
+          "id": "g43",
+          "pattern": "本文",
+          "repeats": 47
+        },
+        {
+          "id": "g44",
+          "pattern": "Hello world.",
+          "repeats": 44
+        },
+        {
+          "id": "g45",
+          "pattern": "คำพูด",
+          "repeats": 46
+        },
+        {
+          "id": "g46",
+          "pattern": "คำพูด",
+          "repeats": 61
+        },
+        {
+          "id": "g47",
+          "pattern": "Hello world.",
+          "repeats": 62
+        },
+        {
+          "id": "g48",
+          "pattern": "Hello world.",
+          "repeats": 70
+        },
+        {
+          "id": "g49",
+          "pattern": "Hello world.",
+          "repeats": 62
+        },
+        {
+          "id": "g50",
+          "pattern": "本文",
+          "repeats": 12
+        },
+        {
+          "id": "g51",
+          "pattern": "本文",
+          "repeats": 63
+        },
+        {
+          "id": "g52",
+          "pattern": "คำพูด",
+          "repeats": 55
+        },
+        {
+          "id": "g53",
+          "pattern": "Hello world.",
+          "repeats": 50
+        },
+        {
+          "id": "g54",
+          "pattern": "คำพูด",
+          "repeats": 60
+        },
+        {
+          "id": "g55",
+          "pattern": "คำพูด",
+          "repeats": 20
+        },
+        {
+          "id": "g56",
+          "pattern": "本文",
+          "repeats": 35
+        },
+        {
+          "id": "g57",
+          "pattern": "Hello world.",
+          "repeats": 12
+        },
+        {
+          "id": "g58",
+          "pattern": "Hello world.",
+          "repeats": 68
+        },
+        {
+          "id": "g59",
+          "pattern": "本文",
+          "repeats": 42
+        },
+        {
+          "id": "g60",
+          "pattern": "คำพูด",
+          "repeats": 9
+        },
+        {
+          "id": "g61",
+          "pattern": "Hello world.",
+          "repeats": 59
+        },
+        {
+          "id": "g62",
+          "pattern": "คำพูด",
+          "repeats": 66
+        },
+        {
+          "id": "g63",
+          "pattern": "Hello world.",
+          "repeats": 69
+        },
+        {
+          "id": "g64",
+          "pattern": "Hello world.",
+          "repeats": 40
+        },
+        {
+          "id": "g65",
+          "pattern": "本文",
+          "repeats": 42
+        },
+        {
+          "id": "g66",
+          "pattern": "คำพูด",
+          "repeats": 24
+        },
+        {
+          "id": "g67",
+          "pattern": "本文",
+          "repeats": 39
+        },
+        {
+          "id": "g68",
+          "pattern": "本文",
+          "repeats": 16
+        },
+        {
+          "id": "g69",
+          "pattern": "คำพูด",
+          "repeats": 13
+        },
+        {
+          "id": "g70",
+          "pattern": "Hello world.",
+          "repeats": 69
+        }
+      ],
+      "context": {
+        "contract": "tp.translation.schema-object/1",
+        "fixedInput": 145,
+        "reasoningActive": false,
+        "limits": {
+          "contextTokens": 4096,
+          "maxOutputTokens": 2048
+        }
+      },
+      "profile": {},
+      "expected": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "units": [
+        {
+          "id": "g0",
+          "pattern": "本文",
+          "repeats": 69
+        },
+        {
+          "id": "g1",
+          "pattern": "Hello world.",
+          "repeats": 40
+        },
+        {
+          "id": "g2",
+          "pattern": "Hello world.",
+          "repeats": 20
+        },
+        {
+          "id": "g3",
+          "pattern": "คำพูด",
+          "repeats": 44
+        },
+        {
+          "id": "g4",
+          "pattern": "Hello world.",
+          "repeats": 41
+        },
+        {
+          "id": "g5",
+          "pattern": "本文",
+          "repeats": 7
+        },
+        {
+          "id": "g6",
+          "pattern": "本文",
+          "repeats": 1
+        },
+        {
+          "id": "g7",
+          "pattern": "本文",
+          "repeats": 15
+        },
+        {
+          "id": "g8",
+          "pattern": "Hello world.",
+          "repeats": 8
+        },
+        {
+          "id": "g9",
+          "pattern": "คำพูด",
+          "repeats": 40
+        },
+        {
+          "id": "g10",
+          "pattern": "Hello world.",
+          "repeats": 14
+        },
+        {
+          "id": "g11",
+          "pattern": "คำพูด",
+          "repeats": 44
+        },
+        {
+          "id": "g12",
+          "pattern": "Hello world.",
+          "repeats": 2
+        },
+        {
+          "id": "g13",
+          "pattern": "本文",
+          "repeats": 66
+        },
+        {
+          "id": "g14",
+          "pattern": "Hello world.",
+          "repeats": 41
+        },
+        {
+          "id": "g15",
+          "pattern": "คำพูด",
+          "repeats": 21
+        },
+        {
+          "id": "g16",
+          "pattern": "本文",
+          "repeats": 21
+        },
+        {
+          "id": "g17",
+          "pattern": "คำพูด",
+          "repeats": 2
+        },
+        {
+          "id": "g18",
+          "pattern": "Hello world.",
+          "repeats": 9
+        },
+        {
+          "id": "g19",
+          "pattern": "Hello world.",
+          "repeats": 7
+        },
+        {
+          "id": "g20",
+          "pattern": "本文",
+          "repeats": 1
+        },
+        {
+          "id": "g21",
+          "pattern": "คำพูด",
+          "repeats": 60
+        },
+        {
+          "id": "g22",
+          "pattern": "Hello world.",
+          "repeats": 4
+        },
+        {
+          "id": "g23",
+          "pattern": "本文",
+          "repeats": 29
+        },
+        {
+          "id": "g24",
+          "pattern": "คำพูด",
+          "repeats": 12
+        },
+        {
+          "id": "g25",
+          "pattern": "本文",
+          "repeats": 2
+        },
+        {
+          "id": "g26",
+          "pattern": "Hello world.",
+          "repeats": 5
+        },
+        {
+          "id": "g27",
+          "pattern": "本文",
+          "repeats": 7
+        },
+        {
+          "id": "g28",
+          "pattern": "Hello world.",
+          "repeats": 64
+        },
+        {
+          "id": "g29",
+          "pattern": "คำพูด",
+          "repeats": 44
+        },
+        {
+          "id": "g30",
+          "pattern": "คำพูด",
+          "repeats": 65
+        },
+        {
+          "id": "g31",
+          "pattern": "本文",
+          "repeats": 7
+        },
+        {
+          "id": "g32",
+          "pattern": "Hello world.",
+          "repeats": 65
+        },
+        {
+          "id": "g33",
+          "pattern": "Hello world.",
+          "repeats": 16
+        },
+        {
+          "id": "g34",
+          "pattern": "本文",
+          "repeats": 23
+        },
+        {
+          "id": "g35",
+          "pattern": "คำพูด",
+          "repeats": 5
+        },
+        {
+          "id": "g36",
+          "pattern": "本文",
+          "repeats": 22
+        },
+        {
+          "id": "g37",
+          "pattern": "คำพูด",
+          "repeats": 32
+        },
+        {
+          "id": "g38",
+          "pattern": "คำพูด",
+          "repeats": 9
+        },
+        {
+          "id": "g39",
+          "pattern": "Hello world.",
+          "repeats": 45
+        },
+        {
+          "id": "g40",
+          "pattern": "本文",
+          "repeats": 46
+        },
+        {
+          "id": "g41",
+          "pattern": "本文",
+          "repeats": 42
+        },
+        {
+          "id": "g42",
+          "pattern": "本文",
+          "repeats": 57
+        },
+        {
+          "id": "g43",
+          "pattern": "本文",
+          "repeats": 43
+        },
+        {
+          "id": "g44",
+          "pattern": "本文",
+          "repeats": 28
+        },
+        {
+          "id": "g45",
+          "pattern": "คำพูด",
+          "repeats": 57
+        },
+        {
+          "id": "g46",
+          "pattern": "คำพูด",
+          "repeats": 25
+        },
+        {
+          "id": "g47",
+          "pattern": "Hello world.",
+          "repeats": 63
+        }
+      ],
+      "context": {
+        "contract": "compact_markers",
+        "fixedInput": 706,
+        "reasoningActive": false,
+        "limits": {
+          "contextTokens": 4096,
+          "maxOutputTokens": 4096
+        }
+      },
+      "profile": {},
+      "expected": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        3,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "units": [
+        {
+          "id": "g0",
+          "pattern": "Hello world.",
+          "repeats": 21
+        },
+        {
+          "id": "g1",
+          "pattern": "คำพูด",
+          "repeats": 23
+        },
+        {
+          "id": "g2",
+          "pattern": "คำพูด",
+          "repeats": 22
+        },
+        {
+          "id": "g3",
+          "pattern": "คำพูด",
+          "repeats": 13
+        },
+        {
+          "id": "g4",
+          "pattern": "Hello world.",
+          "repeats": 15
+        },
+        {
+          "id": "g5",
+          "pattern": "Hello world.",
+          "repeats": 26
+        },
+        {
+          "id": "g6",
+          "pattern": "本文",
+          "repeats": 10
+        },
+        {
+          "id": "g7",
+          "pattern": "คำพูด",
+          "repeats": 54
+        },
+        {
+          "id": "g8",
+          "pattern": "คำพูด",
+          "repeats": 29
+        },
+        {
+          "id": "g9",
+          "pattern": "Hello world.",
+          "repeats": 64
+        },
+        {
+          "id": "g10",
+          "pattern": "คำพูด",
+          "repeats": 39
+        },
+        {
+          "id": "g11",
+          "pattern": "Hello world.",
+          "repeats": 62
+        },
+        {
+          "id": "g12",
+          "pattern": "本文",
+          "repeats": 3
+        },
+        {
+          "id": "g13",
+          "pattern": "Hello world.",
+          "repeats": 22
+        },
+        {
+          "id": "g14",
+          "pattern": "Hello world.",
+          "repeats": 57
+        },
+        {
+          "id": "g15",
+          "pattern": "本文",
+          "repeats": 46
+        },
+        {
+          "id": "g16",
+          "pattern": "คำพูด",
+          "repeats": 58
+        },
+        {
+          "id": "g17",
+          "pattern": "คำพูด",
+          "repeats": 10
+        },
+        {
+          "id": "g18",
+          "pattern": "Hello world.",
+          "repeats": 21
+        },
+        {
+          "id": "g19",
+          "pattern": "Hello world.",
+          "repeats": 12
+        },
+        {
+          "id": "g20",
+          "pattern": "本文",
+          "repeats": 26
+        },
+        {
+          "id": "g21",
+          "pattern": "本文",
+          "repeats": 70
+        },
+        {
+          "id": "g22",
+          "pattern": "本文",
+          "repeats": 26
+        },
+        {
+          "id": "g23",
+          "pattern": "本文",
+          "repeats": 6
+        },
+        {
+          "id": "g24",
+          "pattern": "Hello world.",
+          "repeats": 1
+        },
+        {
+          "id": "g25",
+          "pattern": "本文",
+          "repeats": 30
+        },
+        {
+          "id": "g26",
+          "pattern": "本文",
+          "repeats": 68
+        },
+        {
+          "id": "g27",
+          "pattern": "คำพูด",
+          "repeats": 38
+        },
+        {
+          "id": "g28",
+          "pattern": "คำพูด",
+          "repeats": 54
+        },
+        {
+          "id": "g29",
+          "pattern": "本文",
+          "repeats": 19
+        },
+        {
+          "id": "g30",
+          "pattern": "คำพูด",
+          "repeats": 9
+        },
+        {
+          "id": "g31",
+          "pattern": "Hello world.",
+          "repeats": 25
+        },
+        {
+          "id": "g32",
+          "pattern": "Hello world.",
+          "repeats": 60
+        },
+        {
+          "id": "g33",
+          "pattern": "คำพูด",
+          "repeats": 24
+        },
+        {
+          "id": "g34",
+          "pattern": "คำพูด",
+          "repeats": 14
+        },
+        {
+          "id": "g35",
+          "pattern": "คำพูด",
+          "repeats": 43
+        },
+        {
+          "id": "g36",
+          "pattern": "本文",
+          "repeats": 10
+        },
+        {
+          "id": "g37",
+          "pattern": "本文",
+          "repeats": 21
+        },
+        {
+          "id": "g38",
+          "pattern": "本文",
+          "repeats": 70
+        },
+        {
+          "id": "g39",
+          "pattern": "Hello world.",
+          "repeats": 33
+        },
+        {
+          "id": "g40",
+          "pattern": "คำพูด",
+          "repeats": 30
+        },
+        {
+          "id": "g41",
+          "pattern": "คำพูด",
+          "repeats": 67
+        },
+        {
+          "id": "g42",
+          "pattern": "本文",
+          "repeats": 46
+        },
+        {
+          "id": "g43",
+          "pattern": "本文",
+          "repeats": 28
+        },
+        {
+          "id": "g44",
+          "pattern": "本文",
+          "repeats": 34
+        },
+        {
+          "id": "g45",
+          "pattern": "Hello world.",
+          "repeats": 59
+        },
+        {
+          "id": "g46",
+          "pattern": "คำพูด",
+          "repeats": 26
+        },
+        {
+          "id": "g47",
+          "pattern": "Hello world.",
+          "repeats": 40
+        },
+        {
+          "id": "g48",
+          "pattern": "本文",
+          "repeats": 61
+        },
+        {
+          "id": "g49",
+          "pattern": "คำพูด",
+          "repeats": 6
+        },
+        {
+          "id": "g50",
+          "pattern": "คำพูด",
+          "repeats": 62
+        },
+        {
+          "id": "g51",
+          "pattern": "Hello world.",
+          "repeats": 49
+        },
+        {
+          "id": "g52",
+          "pattern": "本文",
+          "repeats": 50
+        }
+      ],
+      "context": {
+        "contract": "tp.translation.schema-object/1",
+        "fixedInput": 451,
+        "reasoningActive": false,
+        "limits": {
+          "contextTokens": 4096,
+          "maxOutputTokens": 4096
+        }
+      },
+      "profile": {
+        "target": 240,
+        "records": 12,
+        "ratios": [
+          0.7,
+          1.1,
+          1.25
+        ]
+      },
+      "expected": [
+        1,
+        1,
+        1,
+        2,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        1,
+        1,
+        1,
+        2,
+        2,
+        1,
+        3,
+        1,
+        1,
+        1,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "units": [
+        {
+          "id": "g0",
+          "pattern": "คำพูด",
+          "repeats": 61
+        },
+        {
+          "id": "g1",
+          "pattern": "คำพูด",
+          "repeats": 10
+        },
+        {
+          "id": "g2",
+          "pattern": "本文",
+          "repeats": 9
+        },
+        {
+          "id": "g3",
+          "pattern": "本文",
+          "repeats": 49
+        },
+        {
+          "id": "g4",
+          "pattern": "本文",
+          "repeats": 6
+        },
+        {
+          "id": "g5",
+          "pattern": "Hello world.",
+          "repeats": 22
+        },
+        {
+          "id": "g6",
+          "pattern": "本文",
+          "repeats": 37
+        },
+        {
+          "id": "g7",
+          "pattern": "Hello world.",
+          "repeats": 46
+        },
+        {
+          "id": "g8",
+          "pattern": "คำพูด",
+          "repeats": 17
+        },
+        {
+          "id": "g9",
+          "pattern": "Hello world.",
+          "repeats": 29
+        },
+        {
+          "id": "g10",
+          "pattern": "Hello world.",
+          "repeats": 56
+        },
+        {
+          "id": "g11",
+          "pattern": "คำพูด",
+          "repeats": 10
+        },
+        {
+          "id": "g12",
+          "pattern": "Hello world.",
+          "repeats": 65
+        },
+        {
+          "id": "g13",
+          "pattern": "คำพูด",
+          "repeats": 32
+        },
+        {
+          "id": "g14",
+          "pattern": "本文",
+          "repeats": 13
+        },
+        {
+          "id": "g15",
+          "pattern": "คำพูด",
+          "repeats": 33
+        },
+        {
+          "id": "g16",
+          "pattern": "本文",
+          "repeats": 6
+        },
+        {
+          "id": "g17",
+          "pattern": "本文",
+          "repeats": 44
+        },
+        {
+          "id": "g18",
+          "pattern": "คำพูด",
+          "repeats": 70
+        },
+        {
+          "id": "g19",
+          "pattern": "本文",
+          "repeats": 32
+        },
+        {
+          "id": "g20",
+          "pattern": "Hello world.",
+          "repeats": 29
+        },
+        {
+          "id": "g21",
+          "pattern": "คำพูด",
+          "repeats": 68
+        },
+        {
+          "id": "g22",
+          "pattern": "Hello world.",
+          "repeats": 20
+        },
+        {
+          "id": "g23",
+          "pattern": "Hello world.",
+          "repeats": 33
+        },
+        {
+          "id": "g24",
+          "pattern": "คำพูด",
+          "repeats": 48
+        },
+        {
+          "id": "g25",
+          "pattern": "本文",
+          "repeats": 24
+        },
+        {
+          "id": "g26",
+          "pattern": "Hello world.",
+          "repeats": 5
+        },
+        {
+          "id": "g27",
+          "pattern": "Hello world.",
+          "repeats": 56
+        },
+        {
+          "id": "g28",
+          "pattern": "本文",
+          "repeats": 44
+        },
+        {
+          "id": "g29",
+          "pattern": "本文",
+          "repeats": 50
+        },
+        {
+          "id": "g30",
+          "pattern": "本文",
+          "repeats": 44
+        },
+        {
+          "id": "g31",
+          "pattern": "本文",
+          "repeats": 22
+        },
+        {
+          "id": "g32",
+          "pattern": "Hello world.",
+          "repeats": 61
+        },
+        {
+          "id": "g33",
+          "pattern": "本文",
+          "repeats": 55
+        },
+        {
+          "id": "g34",
+          "pattern": "Hello world.",
+          "repeats": 31
+        },
+        {
+          "id": "g35",
+          "pattern": "本文",
+          "repeats": 41
+        },
+        {
+          "id": "g36",
+          "pattern": "คำพูด",
+          "repeats": 39
+        },
+        {
+          "id": "g37",
+          "pattern": "คำพูด",
+          "repeats": 60
+        },
+        {
+          "id": "g38",
+          "pattern": "คำพูด",
+          "repeats": 2
+        },
+        {
+          "id": "g39",
+          "pattern": "คำพูด",
+          "repeats": 7
+        },
+        {
+          "id": "g40",
+          "pattern": "本文",
+          "repeats": 55
+        },
+        {
+          "id": "g41",
+          "pattern": "Hello world.",
+          "repeats": 9
+        },
+        {
+          "id": "g42",
+          "pattern": "本文",
+          "repeats": 35
+        },
+        {
+          "id": "g43",
+          "pattern": "Hello world.",
+          "repeats": 67
+        },
+        {
+          "id": "g44",
+          "pattern": "Hello world.",
+          "repeats": 66
+        },
+        {
+          "id": "g45",
+          "pattern": "Hello world.",
+          "repeats": 12
+        },
+        {
+          "id": "g46",
+          "pattern": "Hello world.",
+          "repeats": 6
+        },
+        {
+          "id": "g47",
+          "pattern": "本文",
+          "repeats": 55
+        },
+        {
+          "id": "g48",
+          "pattern": "คำพูด",
+          "repeats": 51
+        },
+        {
+          "id": "g49",
+          "pattern": "คำพูด",
+          "repeats": 57
+        },
+        {
+          "id": "g50",
+          "pattern": "Hello world.",
+          "repeats": 20
+        }
+      ],
+      "context": {
+        "contract": "compact_markers",
+        "fixedInput": 615,
+        "reasoningActive": true,
+        "limits": {
+          "contextTokens": 4096,
+          "maxOutputTokens": 4096
+        }
+      },
+      "profile": {},
+      "expected": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "units": [
+        {
+          "id": "g0",
+          "pattern": "คำพูด",
+          "repeats": 5
+        }
+      ],
+      "context": {
+        "contract": "tp.translation.schema-object/1",
+        "fixedInput": 376,
+        "reasoningActive": false,
+        "limits": {
+          "contextTokens": 4096,
+          "maxOutputTokens": 4096
+        }
+      },
+      "profile": {},
+      "expected": [
+        1
+      ]
+    },
+    {
+      "units": [
+        {
+          "id": "g0",
+          "pattern": "คำพูด",
+          "repeats": 1
+        },
+        {
+          "id": "g1",
+          "pattern": "本文",
+          "repeats": 30
+        },
+        {
+          "id": "g2",
+          "pattern": "คำพูด",
+          "repeats": 63
+        },
+        {
+          "id": "g3",
+          "pattern": "Hello world.",
+          "repeats": 62
+        },
+        {
+          "id": "g4",
+          "pattern": "本文",
+          "repeats": 29
+        },
+        {
+          "id": "g5",
+          "pattern": "本文",
+          "repeats": 8
+        },
+        {
+          "id": "g6",
+          "pattern": "本文",
+          "repeats": 41
+        },
+        {
+          "id": "g7",
+          "pattern": "本文",
+          "repeats": 21
+        },
+        {
+          "id": "g8",
+          "pattern": "Hello world.",
+          "repeats": 36
+        },
+        {
+          "id": "g9",
+          "pattern": "คำพูด",
+          "repeats": 39
+        },
+        {
+          "id": "g10",
+          "pattern": "Hello world.",
+          "repeats": 22
+        },
+        {
+          "id": "g11",
+          "pattern": "Hello world.",
+          "repeats": 17
+        },
+        {
+          "id": "g12",
+          "pattern": "คำพูด",
+          "repeats": 56
+        },
+        {
+          "id": "g13",
+          "pattern": "คำพูด",
+          "repeats": 17
+        },
+        {
+          "id": "g14",
+          "pattern": "Hello world.",
+          "repeats": 19
+        },
+        {
+          "id": "g15",
+          "pattern": "Hello world.",
+          "repeats": 39
+        },
+        {
+          "id": "g16",
+          "pattern": "Hello world.",
+          "repeats": 33
+        },
+        {
+          "id": "g17",
+          "pattern": "Hello world.",
+          "repeats": 30
+        },
+        {
+          "id": "g18",
+          "pattern": "คำพูด",
+          "repeats": 38
+        },
+        {
+          "id": "g19",
+          "pattern": "Hello world.",
+          "repeats": 3
+        },
+        {
+          "id": "g20",
+          "pattern": "本文",
+          "repeats": 38
+        },
+        {
+          "id": "g21",
+          "pattern": "Hello world.",
+          "repeats": 21
+        },
+        {
+          "id": "g22",
+          "pattern": "คำพูด",
+          "repeats": 65
+        },
+        {
+          "id": "g23",
+          "pattern": "คำพูด",
+          "repeats": 32
+        },
+        {
+          "id": "g24",
+          "pattern": "本文",
+          "repeats": 60
+        },
+        {
+          "id": "g25",
+          "pattern": "Hello world.",
+          "repeats": 27
+        },
+        {
+          "id": "g26",
+          "pattern": "คำพูด",
+          "repeats": 37
+        }
+      ],
+      "context": {
+        "contract": "compact_markers",
+        "fixedInput": 695,
+        "reasoningActive": false,
+        "limits": {
+          "contextTokens": 4096,
+          "maxOutputTokens": 4096
+        }
+      },
+      "profile": {
+        "target": 240,
+        "records": 12,
+        "ratios": [
+          0.7,
+          1.1,
+          1.25
+        ]
+      },
+      "expected": [
+        2,
+        1,
+        1,
+        2,
+        2,
+        1,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "units": [
+        {
+          "id": "g0",
+          "pattern": "คำพูด",
+          "repeats": 50
+        },
+        {
+          "id": "g1",
+          "pattern": "Hello world.",
+          "repeats": 27
+        },
+        {
+          "id": "g2",
+          "pattern": "คำพูด",
+          "repeats": 9
+        },
+        {
+          "id": "g3",
+          "pattern": "Hello world.",
+          "repeats": 36
+        },
+        {
+          "id": "g4",
+          "pattern": "Hello world.",
+          "repeats": 36
+        },
+        {
+          "id": "g5",
+          "pattern": "คำพูด",
+          "repeats": 11
+        },
+        {
+          "id": "g6",
+          "pattern": "本文",
+          "repeats": 30
+        },
+        {
+          "id": "g7",
+          "pattern": "本文",
+          "repeats": 25
+        },
+        {
+          "id": "g8",
+          "pattern": "本文",
+          "repeats": 9
+        },
+        {
+          "id": "g9",
+          "pattern": "本文",
+          "repeats": 11
+        },
+        {
+          "id": "g10",
+          "pattern": "本文",
+          "repeats": 5
+        },
+        {
+          "id": "g11",
+          "pattern": "คำพูด",
+          "repeats": 54
+        },
+        {
+          "id": "g12",
+          "pattern": "Hello world.",
+          "repeats": 70
+        },
+        {
+          "id": "g13",
+          "pattern": "Hello world.",
+          "repeats": 9
+        },
+        {
+          "id": "g14",
+          "pattern": "คำพูด",
+          "repeats": 30
+        },
+        {
+          "id": "g15",
+          "pattern": "Hello world.",
+          "repeats": 70
+        },
+        {
+          "id": "g16",
+          "pattern": "Hello world.",
+          "repeats": 15
+        },
+        {
+          "id": "g17",
+          "pattern": "本文",
+          "repeats": 7
+        },
+        {
+          "id": "g18",
+          "pattern": "คำพูด",
+          "repeats": 24
+        },
+        {
+          "id": "g19",
+          "pattern": "本文",
+          "repeats": 2
+        },
+        {
+          "id": "g20",
+          "pattern": "本文",
+          "repeats": 21
+        },
+        {
+          "id": "g21",
+          "pattern": "คำพูด",
+          "repeats": 51
+        },
+        {
+          "id": "g22",
+          "pattern": "Hello world.",
+          "repeats": 36
+        },
+        {
+          "id": "g23",
+          "pattern": "คำพูด",
+          "repeats": 65
+        },
+        {
+          "id": "g24",
+          "pattern": "คำพูด",
+          "repeats": 56
+        },
+        {
+          "id": "g25",
+          "pattern": "本文",
+          "repeats": 62
+        },
+        {
+          "id": "g26",
+          "pattern": "Hello world.",
+          "repeats": 57
+        },
+        {
+          "id": "g27",
+          "pattern": "คำพูด",
+          "repeats": 17
+        },
+        {
+          "id": "g28",
+          "pattern": "Hello world.",
+          "repeats": 54
+        },
+        {
+          "id": "g29",
+          "pattern": "Hello world.",
+          "repeats": 48
+        },
+        {
+          "id": "g30",
+          "pattern": "คำพูด",
+          "repeats": 23
+        },
+        {
+          "id": "g31",
+          "pattern": "本文",
+          "repeats": 70
+        },
+        {
+          "id": "g32",
+          "pattern": "Hello world.",
+          "repeats": 66
+        },
+        {
+          "id": "g33",
+          "pattern": "Hello world.",
+          "repeats": 45
+        },
+        {
+          "id": "g34",
+          "pattern": "本文",
+          "repeats": 23
+        },
+        {
+          "id": "g35",
+          "pattern": "Hello world.",
+          "repeats": 53
+        },
+        {
+          "id": "g36",
+          "pattern": "本文",
+          "repeats": 60
+        },
+        {
+          "id": "g37",
+          "pattern": "คำพูด",
+          "repeats": 25
+        },
+        {
+          "id": "g38",
+          "pattern": "คำพูด",
+          "repeats": 65
+        },
+        {
+          "id": "g39",
+          "pattern": "คำพูด",
+          "repeats": 11
+        },
+        {
+          "id": "g40",
+          "pattern": "本文",
+          "repeats": 49
+        },
+        {
+          "id": "g41",
+          "pattern": "คำพูด",
+          "repeats": 21
+        },
+        {
+          "id": "g42",
+          "pattern": "คำพูด",
+          "repeats": 45
+        },
+        {
+          "id": "g43",
+          "pattern": "คำพูด",
+          "repeats": 48
+        },
+        {
+          "id": "g44",
+          "pattern": "本文",
+          "repeats": 67
+        },
+        {
+          "id": "g45",
+          "pattern": "本文",
+          "repeats": 4
+        },
+        {
+          "id": "g46",
+          "pattern": "Hello world.",
+          "repeats": 48
+        },
+        {
+          "id": "g47",
+          "pattern": "Hello world.",
+          "repeats": 53
+        },
+        {
+          "id": "g48",
+          "pattern": "本文",
+          "repeats": 69
+        },
+        {
+          "id": "g49",
+          "pattern": "Hello world.",
+          "repeats": 59
+        },
+        {
+          "id": "g50",
+          "pattern": "คำพูด",
+          "repeats": 11
+        },
+        {
+          "id": "g51",
+          "pattern": "Hello world.",
+          "repeats": 12
+        },
+        {
+          "id": "g52",
+          "pattern": "本文",
+          "repeats": 15
+        },
+        {
+          "id": "g53",
+          "pattern": "本文",
+          "repeats": 23
+        },
+        {
+          "id": "g54",
+          "pattern": "本文",
+          "repeats": 1
+        },
+        {
+          "id": "g55",
+          "pattern": "คำพูด",
+          "repeats": 57
+        },
+        {
+          "id": "g56",
+          "pattern": "本文",
+          "repeats": 26
+        },
+        {
+          "id": "g57",
+          "pattern": "คำพูด",
+          "repeats": 51
+        },
+        {
+          "id": "g58",
+          "pattern": "本文",
+          "repeats": 54
+        },
+        {
+          "id": "g59",
+          "pattern": "คำพูด",
+          "repeats": 51
+        },
+        {
+          "id": "g60",
+          "pattern": "คำพูด",
+          "repeats": 23
+        },
+        {
+          "id": "g61",
+          "pattern": "本文",
+          "repeats": 22
+        },
+        {
+          "id": "g62",
+          "pattern": "Hello world.",
+          "repeats": 15
+        },
+        {
+          "id": "g63",
+          "pattern": "Hello world.",
+          "repeats": 30
+        },
+        {
+          "id": "g64",
+          "pattern": "คำพูด",
+          "repeats": 62
+        },
+        {
+          "id": "g65",
+          "pattern": "本文",
+          "repeats": 7
+        },
+        {
+          "id": "g66",
+          "pattern": "本文",
+          "repeats": 46
+        },
+        {
+          "id": "g67",
+          "pattern": "คำพูด",
+          "repeats": 40
+        },
+        {
+          "id": "g68",
+          "pattern": "Hello world.",
+          "repeats": 25
+        },
+        {
+          "id": "g69",
+          "pattern": "本文",
+          "repeats": 70
+        },
+        {
+          "id": "g70",
+          "pattern": "Hello world.",
+          "repeats": 21
+        },
+        {
+          "id": "g71",
+          "pattern": "本文",
+          "repeats": 68
+        },
+        {
+          "id": "g72",
+          "pattern": "本文",
+          "repeats": 60
+        }
+      ],
+      "context": {
+        "contract": "tp.translation.schema-object/1",
+        "fixedInput": 593,
+        "reasoningActive": false,
+        "limits": {
+          "contextTokens": 4096,
+          "maxOutputTokens": 4096
+        }
+      },
+      "profile": {},
+      "expected": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        3,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "units": [
+        {
+          "id": "g0",
+          "pattern": "Hello world.",
+          "repeats": 8
+        },
+        {
+          "id": "g1",
+          "pattern": "Hello world.",
+          "repeats": 60
+        },
+        {
+          "id": "g2",
+          "pattern": "คำพูด",
+          "repeats": 39
+        },
+        {
+          "id": "g3",
+          "pattern": "Hello world.",
+          "repeats": 42
+        },
+        {
+          "id": "g4",
+          "pattern": "คำพูด",
+          "repeats": 55
+        },
+        {
+          "id": "g5",
+          "pattern": "คำพูด",
+          "repeats": 35
+        },
+        {
+          "id": "g6",
+          "pattern": "คำพูด",
+          "repeats": 46
+        },
+        {
+          "id": "g7",
+          "pattern": "本文",
+          "repeats": 28
+        },
+        {
+          "id": "g8",
+          "pattern": "本文",
+          "repeats": 23
+        },
+        {
+          "id": "g9",
+          "pattern": "本文",
+          "repeats": 7
+        },
+        {
+          "id": "g10",
+          "pattern": "本文",
+          "repeats": 13
+        }
+      ],
+      "context": {
+        "contract": "compact_markers",
+        "fixedInput": 303,
+        "reasoningActive": false,
+        "limits": {
+          "contextTokens": 4096,
+          "maxOutputTokens": 2048
+        }
+      },
+      "profile": {},
+      "expected": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2
+      ]
+    },
+    {
+      "units": [
+        {
+          "id": "g0",
+          "pattern": "คำพูด",
+          "repeats": 38
+        },
+        {
+          "id": "g1",
+          "pattern": "本文",
+          "repeats": 1
+        },
+        {
+          "id": "g2",
+          "pattern": "本文",
+          "repeats": 43
+        },
+        {
+          "id": "g3",
+          "pattern": "本文",
+          "repeats": 4
+        },
+        {
+          "id": "g4",
+          "pattern": "本文",
+          "repeats": 19
+        },
+        {
+          "id": "g5",
+          "pattern": "คำพูด",
+          "repeats": 26
+        },
+        {
+          "id": "g6",
+          "pattern": "คำพูด",
+          "repeats": 21
+        },
+        {
+          "id": "g7",
+          "pattern": "Hello world.",
+          "repeats": 11
+        },
+        {
+          "id": "g8",
+          "pattern": "本文",
+          "repeats": 37
+        },
+        {
+          "id": "g9",
+          "pattern": "Hello world.",
+          "repeats": 56
+        },
+        {
+          "id": "g10",
+          "pattern": "Hello world.",
+          "repeats": 52
+        },
+        {
+          "id": "g11",
+          "pattern": "Hello world.",
+          "repeats": 20
+        },
+        {
+          "id": "g12",
+          "pattern": "Hello world.",
+          "repeats": 27
+        },
+        {
+          "id": "g13",
+          "pattern": "Hello world.",
+          "repeats": 49
+        },
+        {
+          "id": "g14",
+          "pattern": "คำพูด",
+          "repeats": 41
+        },
+        {
+          "id": "g15",
+          "pattern": "本文",
+          "repeats": 20
+        },
+        {
+          "id": "g16",
+          "pattern": "本文",
+          "repeats": 48
+        },
+        {
+          "id": "g17",
+          "pattern": "本文",
+          "repeats": 48
+        },
+        {
+          "id": "g18",
+          "pattern": "本文",
+          "repeats": 41
+        },
+        {
+          "id": "g19",
+          "pattern": "本文",
+          "repeats": 39
+        },
+        {
+          "id": "g20",
+          "pattern": "Hello world.",
+          "repeats": 38
+        },
+        {
+          "id": "g21",
+          "pattern": "本文",
+          "repeats": 26
+        },
+        {
+          "id": "g22",
+          "pattern": "Hello world.",
+          "repeats": 12
+        },
+        {
+          "id": "g23",
+          "pattern": "คำพูด",
+          "repeats": 20
+        },
+        {
+          "id": "g24",
+          "pattern": "คำพูด",
+          "repeats": 50
+        },
+        {
+          "id": "g25",
+          "pattern": "คำพูด",
+          "repeats": 32
+        },
+        {
+          "id": "g26",
+          "pattern": "คำพูด",
+          "repeats": 2
+        },
+        {
+          "id": "g27",
+          "pattern": "คำพูด",
+          "repeats": 65
+        },
+        {
+          "id": "g28",
+          "pattern": "本文",
+          "repeats": 51
+        },
+        {
+          "id": "g29",
+          "pattern": "Hello world.",
+          "repeats": 13
+        },
+        {
+          "id": "g30",
+          "pattern": "Hello world.",
+          "repeats": 28
+        },
+        {
+          "id": "g31",
+          "pattern": "本文",
+          "repeats": 1
+        },
+        {
+          "id": "g32",
+          "pattern": "Hello world.",
+          "repeats": 62
+        },
+        {
+          "id": "g33",
+          "pattern": "本文",
+          "repeats": 4
+        },
+        {
+          "id": "g34",
+          "pattern": "คำพูด",
+          "repeats": 9
+        },
+        {
+          "id": "g35",
+          "pattern": "คำพูด",
+          "repeats": 25
+        },
+        {
+          "id": "g36",
+          "pattern": "Hello world.",
+          "repeats": 67
+        },
+        {
+          "id": "g37",
+          "pattern": "คำพูด",
+          "repeats": 58
+        },
+        {
+          "id": "g38",
+          "pattern": "คำพูด",
+          "repeats": 49
+        },
+        {
+          "id": "g39",
+          "pattern": "คำพูด",
+          "repeats": 27
+        },
+        {
+          "id": "g40",
+          "pattern": "คำพูด",
+          "repeats": 60
+        },
+        {
+          "id": "g41",
+          "pattern": "Hello world.",
+          "repeats": 67
+        },
+        {
+          "id": "g42",
+          "pattern": "Hello world.",
+          "repeats": 63
+        },
+        {
+          "id": "g43",
+          "pattern": "คำพูด",
+          "repeats": 2
+        },
+        {
+          "id": "g44",
+          "pattern": "คำพูด",
+          "repeats": 70
+        },
+        {
+          "id": "g45",
+          "pattern": "本文",
+          "repeats": 11
+        },
+        {
+          "id": "g46",
+          "pattern": "本文",
+          "repeats": 27
+        },
+        {
+          "id": "g47",
+          "pattern": "Hello world.",
+          "repeats": 48
+        },
+        {
+          "id": "g48",
+          "pattern": "คำพูด",
+          "repeats": 35
+        },
+        {
+          "id": "g49",
+          "pattern": "Hello world.",
+          "repeats": 34
+        },
+        {
+          "id": "g50",
+          "pattern": "本文",
+          "repeats": 8
+        },
+        {
+          "id": "g51",
+          "pattern": "本文",
+          "repeats": 47
+        },
+        {
+          "id": "g52",
+          "pattern": "本文",
+          "repeats": 16
+        },
+        {
+          "id": "g53",
+          "pattern": "本文",
+          "repeats": 37
+        },
+        {
+          "id": "g54",
+          "pattern": "本文",
+          "repeats": 30
+        },
+        {
+          "id": "g55",
+          "pattern": "本文",
+          "repeats": 63
+        },
+        {
+          "id": "g56",
+          "pattern": "Hello world.",
+          "repeats": 47
+        },
+        {
+          "id": "g57",
+          "pattern": "本文",
+          "repeats": 7
+        },
+        {
+          "id": "g58",
+          "pattern": "คำพูด",
+          "repeats": 10
+        },
+        {
+          "id": "g59",
+          "pattern": "本文",
+          "repeats": 61
+        },
+        {
+          "id": "g60",
+          "pattern": "คำพูด",
+          "repeats": 34
+        },
+        {
+          "id": "g61",
+          "pattern": "Hello world.",
+          "repeats": 6
+        },
+        {
+          "id": "g62",
+          "pattern": "本文",
+          "repeats": 21
+        },
+        {
+          "id": "g63",
+          "pattern": "คำพูด",
+          "repeats": 2
+        },
+        {
+          "id": "g64",
+          "pattern": "本文",
+          "repeats": 5
+        }
+      ],
+      "context": {
+        "contract": "tp.translation.schema-object/1",
+        "fixedInput": 843,
+        "reasoningActive": true,
+        "limits": {
+          "contextTokens": 4096,
+          "maxOutputTokens": 4096
+        }
+      },
+      "profile": {
+        "target": 240,
+        "records": 12,
+        "ratios": [
+          0.7,
+          1.1,
+          1.25
+        ]
+      },
+      "expected": [
+        1,
+        3,
+        1,
+        1,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        1,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        1,
+        1,
+        2,
+        2,
+        1,
+        1,
+        1,
+        1,
+        2,
+        1,
+        1,
+        4
+      ]
+    },
+    {
+      "units": [
+        {
+          "id": "g0",
+          "pattern": "本文",
+          "repeats": 55
+        },
+        {
+          "id": "g1",
+          "pattern": "คำพูด",
+          "repeats": 25
+        },
+        {
+          "id": "g2",
+          "pattern": "本文",
+          "repeats": 55
+        },
+        {
+          "id": "g3",
+          "pattern": "本文",
+          "repeats": 5
+        },
+        {
+          "id": "g4",
+          "pattern": "本文",
+          "repeats": 56
+        },
+        {
+          "id": "g5",
+          "pattern": "本文",
+          "repeats": 26
+        },
+        {
+          "id": "g6",
+          "pattern": "Hello world.",
+          "repeats": 4
+        },
+        {
+          "id": "g7",
+          "pattern": "คำพูด",
+          "repeats": 70
+        },
+        {
+          "id": "g8",
+          "pattern": "คำพูด",
+          "repeats": 3
+        },
+        {
+          "id": "g9",
+          "pattern": "本文",
+          "repeats": 24
+        },
+        {
+          "id": "g10",
+          "pattern": "本文",
+          "repeats": 16
+        },
+        {
+          "id": "g11",
+          "pattern": "คำพูด",
+          "repeats": 15
+        },
+        {
+          "id": "g12",
+          "pattern": "Hello world.",
+          "repeats": 58
+        },
+        {
+          "id": "g13",
+          "pattern": "Hello world.",
+          "repeats": 62
+        },
+        {
+          "id": "g14",
+          "pattern": "本文",
+          "repeats": 27
+        },
+        {
+          "id": "g15",
+          "pattern": "คำพูด",
+          "repeats": 53
+        },
+        {
+          "id": "g16",
+          "pattern": "Hello world.",
+          "repeats": 64
+        },
+        {
+          "id": "g17",
+          "pattern": "Hello world.",
+          "repeats": 58
+        },
+        {
+          "id": "g18",
+          "pattern": "本文",
+          "repeats": 53
+        },
+        {
+          "id": "g19",
+          "pattern": "Hello world.",
+          "repeats": 63
+        },
+        {
+          "id": "g20",
+          "pattern": "คำพูด",
+          "repeats": 16
+        },
+        {
+          "id": "g21",
+          "pattern": "本文",
+          "repeats": 31
+        },
+        {
+          "id": "g22",
+          "pattern": "คำพูด",
+          "repeats": 9
+        },
+        {
+          "id": "g23",
+          "pattern": "Hello world.",
+          "repeats": 10
+        },
+        {
+          "id": "g24",
+          "pattern": "Hello world.",
+          "repeats": 21
+        },
+        {
+          "id": "g25",
+          "pattern": "คำพูด",
+          "repeats": 63
+        },
+        {
+          "id": "g26",
+          "pattern": "本文",
+          "repeats": 67
+        },
+        {
+          "id": "g27",
+          "pattern": "คำพูด",
+          "repeats": 46
+        },
+        {
+          "id": "g28",
+          "pattern": "Hello world.",
+          "repeats": 42
+        },
+        {
+          "id": "g29",
+          "pattern": "本文",
+          "repeats": 12
+        },
+        {
+          "id": "g30",
+          "pattern": "本文",
+          "repeats": 27
+        },
+        {
+          "id": "g31",
+          "pattern": "本文",
+          "repeats": 1
+        },
+        {
+          "id": "g32",
+          "pattern": "Hello world.",
+          "repeats": 48
+        },
+        {
+          "id": "g33",
+          "pattern": "คำพูด",
+          "repeats": 5
+        },
+        {
+          "id": "g34",
+          "pattern": "本文",
+          "repeats": 66
+        },
+        {
+          "id": "g35",
+          "pattern": "Hello world.",
+          "repeats": 20
+        },
+        {
+          "id": "g36",
+          "pattern": "Hello world.",
+          "repeats": 6
+        },
+        {
+          "id": "g37",
+          "pattern": "本文",
+          "repeats": 55
+        },
+        {
+          "id": "g38",
+          "pattern": "คำพูด",
+          "repeats": 14
+        },
+        {
+          "id": "g39",
+          "pattern": "คำพูด",
+          "repeats": 20
+        },
+        {
+          "id": "g40",
+          "pattern": "คำพูด",
+          "repeats": 6
+        },
+        {
+          "id": "g41",
+          "pattern": "คำพูด",
+          "repeats": 40
+        },
+        {
+          "id": "g42",
+          "pattern": "本文",
+          "repeats": 7
+        },
+        {
+          "id": "g43",
+          "pattern": "คำพูด",
+          "repeats": 24
+        },
+        {
+          "id": "g44",
+          "pattern": "คำพูด",
+          "repeats": 15
+        },
+        {
+          "id": "g45",
+          "pattern": "Hello world.",
+          "repeats": 60
+        },
+        {
+          "id": "g46",
+          "pattern": "Hello world.",
+          "repeats": 18
+        },
+        {
+          "id": "g47",
+          "pattern": "本文",
+          "repeats": 13
+        },
+        {
+          "id": "g48",
+          "pattern": "本文",
+          "repeats": 52
+        },
+        {
+          "id": "g49",
+          "pattern": "Hello world.",
+          "repeats": 46
+        },
+        {
+          "id": "g50",
+          "pattern": "คำพูด",
+          "repeats": 64
+        },
+        {
+          "id": "g51",
+          "pattern": "Hello world.",
+          "repeats": 22
+        },
+        {
+          "id": "g52",
+          "pattern": "คำพูด",
+          "repeats": 49
+        },
+        {
+          "id": "g53",
+          "pattern": "คำพูด",
+          "repeats": 13
+        },
+        {
+          "id": "g54",
+          "pattern": "本文",
+          "repeats": 56
+        },
+        {
+          "id": "g55",
+          "pattern": "本文",
+          "repeats": 40
+        }
+      ],
+      "context": {
+        "contract": "compact_markers",
+        "fixedInput": 1075,
+        "reasoningActive": false,
+        "limits": {
+          "contextTokens": 4096,
+          "maxOutputTokens": 4096
+        }
+      },
+      "profile": {},
+      "expected": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "units": [
+        {
+          "id": "g0",
+          "pattern": "本文",
+          "repeats": 66
+        }
+      ],
+      "context": {
+        "contract": "tp.translation.schema-object/1",
+        "fixedInput": 724,
+        "reasoningActive": false,
+        "limits": {
+          "contextTokens": 4096,
+          "maxOutputTokens": 4096
+        }
+      },
+      "profile": {},
+      "expected": [
+        1
+      ]
+    },
+    {
+      "units": [
+        {
+          "id": "g0",
+          "pattern": "Hello world.",
+          "repeats": 2
+        },
+        {
+          "id": "g1",
+          "pattern": "Hello world.",
+          "repeats": 17
+        },
+        {
+          "id": "g2",
+          "pattern": "Hello world.",
+          "repeats": 2
+        },
+        {
+          "id": "g3",
+          "pattern": "本文",
+          "repeats": 25
+        },
+        {
+          "id": "g4",
+          "pattern": "คำพูด",
+          "repeats": 20
+        },
+        {
+          "id": "g5",
+          "pattern": "คำพูด",
+          "repeats": 12
+        },
+        {
+          "id": "g6",
+          "pattern": "Hello world.",
+          "repeats": 51
+        },
+        {
+          "id": "g7",
+          "pattern": "本文",
+          "repeats": 61
+        },
+        {
+          "id": "g8",
+          "pattern": "คำพูด",
+          "repeats": 64
+        },
+        {
+          "id": "g9",
+          "pattern": "本文",
+          "repeats": 24
+        },
+        {
+          "id": "g10",
+          "pattern": "คำพูด",
+          "repeats": 35
+        },
+        {
+          "id": "g11",
+          "pattern": "คำพูด",
+          "repeats": 44
+        },
+        {
+          "id": "g12",
+          "pattern": "คำพูด",
+          "repeats": 29
+        },
+        {
+          "id": "g13",
+          "pattern": "Hello world.",
+          "repeats": 13
+        },
+        {
+          "id": "g14",
+          "pattern": "本文",
+          "repeats": 16
+        },
+        {
+          "id": "g15",
+          "pattern": "本文",
+          "repeats": 59
+        },
+        {
+          "id": "g16",
+          "pattern": "Hello world.",
+          "repeats": 22
+        },
+        {
+          "id": "g17",
+          "pattern": "Hello world.",
+          "repeats": 11
+        },
+        {
+          "id": "g18",
+          "pattern": "คำพูด",
+          "repeats": 57
+        },
+        {
+          "id": "g19",
+          "pattern": "คำพูด",
+          "repeats": 18
+        },
+        {
+          "id": "g20",
+          "pattern": "Hello world.",
+          "repeats": 46
+        },
+        {
+          "id": "g21",
+          "pattern": "Hello world.",
+          "repeats": 39
+        },
+        {
+          "id": "g22",
+          "pattern": "Hello world.",
+          "repeats": 70
+        },
+        {
+          "id": "g23",
+          "pattern": "本文",
+          "repeats": 53
+        },
+        {
+          "id": "g24",
+          "pattern": "Hello world.",
+          "repeats": 58
+        },
+        {
+          "id": "g25",
+          "pattern": "本文",
+          "repeats": 17
+        },
+        {
+          "id": "g26",
+          "pattern": "คำพูด",
+          "repeats": 46
+        },
+        {
+          "id": "g27",
+          "pattern": "คำพูด",
+          "repeats": 45
+        },
+        {
+          "id": "g28",
+          "pattern": "Hello world.",
+          "repeats": 42
+        },
+        {
+          "id": "g29",
+          "pattern": "本文",
+          "repeats": 8
+        },
+        {
+          "id": "g30",
+          "pattern": "Hello world.",
+          "repeats": 13
+        },
+        {
+          "id": "g31",
+          "pattern": "คำพูด",
+          "repeats": 58
+        },
+        {
+          "id": "g32",
+          "pattern": "Hello world.",
+          "repeats": 42
+        },
+        {
+          "id": "g33",
+          "pattern": "本文",
+          "repeats": 30
+        },
+        {
+          "id": "g34",
+          "pattern": "本文",
+          "repeats": 31
+        },
+        {
+          "id": "g35",
+          "pattern": "本文",
+          "repeats": 53
+        },
+        {
+          "id": "g36",
+          "pattern": "Hello world.",
+          "repeats": 1
+        },
+        {
+          "id": "g37",
+          "pattern": "คำพูด",
+          "repeats": 61
+        },
+        {
+          "id": "g38",
+          "pattern": "Hello world.",
+          "repeats": 56
+        },
+        {
+          "id": "g39",
+          "pattern": "คำพูด",
+          "repeats": 16
+        },
+        {
+          "id": "g40",
+          "pattern": "本文",
+          "repeats": 45
+        },
+        {
+          "id": "g41",
+          "pattern": "Hello world.",
+          "repeats": 41
+        },
+        {
+          "id": "g42",
+          "pattern": "本文",
+          "repeats": 47
+        },
+        {
+          "id": "g43",
+          "pattern": "本文",
+          "repeats": 67
+        },
+        {
+          "id": "g44",
+          "pattern": "คำพูด",
+          "repeats": 16
+        },
+        {
+          "id": "g45",
+          "pattern": "本文",
+          "repeats": 55
+        },
+        {
+          "id": "g46",
+          "pattern": "คำพูด",
+          "repeats": 10
+        },
+        {
+          "id": "g47",
+          "pattern": "本文",
+          "repeats": 67
+        },
+        {
+          "id": "g48",
+          "pattern": "คำพูด",
+          "repeats": 9
+        },
+        {
+          "id": "g49",
+          "pattern": "本文",
+          "repeats": 32
+        },
+        {
+          "id": "g50",
+          "pattern": "คำพูด",
+          "repeats": 14
+        },
+        {
+          "id": "g51",
+          "pattern": "คำพูด",
+          "repeats": 56
+        },
+        {
+          "id": "g52",
+          "pattern": "本文",
+          "repeats": 25
+        },
+        {
+          "id": "g53",
+          "pattern": "Hello world.",
+          "repeats": 42
+        },
+        {
+          "id": "g54",
+          "pattern": "Hello world.",
+          "repeats": 70
+        },
+        {
+          "id": "g55",
+          "pattern": "คำพูด",
+          "repeats": 43
+        },
+        {
+          "id": "g56",
+          "pattern": "本文",
+          "repeats": 53
+        },
+        {
+          "id": "g57",
+          "pattern": "Hello world.",
+          "repeats": 34
+        },
+        {
+          "id": "g58",
+          "pattern": "คำพูด",
+          "repeats": 43
+        },
+        {
+          "id": "g59",
+          "pattern": "คำพูด",
+          "repeats": 62
+        },
+        {
+          "id": "g60",
+          "pattern": "คำพูด",
+          "repeats": 50
+        },
+        {
+          "id": "g61",
+          "pattern": "本文",
+          "repeats": 44
+        },
+        {
+          "id": "g62",
+          "pattern": "Hello world.",
+          "repeats": 3
+        }
+      ],
+      "context": {
+        "contract": "compact_markers",
+        "fixedInput": 969,
+        "reasoningActive": false,
+        "limits": {
+          "contextTokens": 4096,
+          "maxOutputTokens": 4096
+        }
+      },
+      "profile": {
+        "target": 240,
+        "records": 12,
+        "ratios": [
+          0.7,
+          1.1,
+          1.25
+        ]
+      },
+      "expected": [
+        3,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        1,
+        1,
+        2,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2
+      ]
+    },
+    {
+      "units": [
+        {
+          "id": "g0",
+          "pattern": "คำพูด",
+          "repeats": 69
+        },
+        {
+          "id": "g1",
+          "pattern": "本文",
+          "repeats": 42
+        },
+        {
+          "id": "g2",
+          "pattern": "คำพูด",
+          "repeats": 34
+        },
+        {
+          "id": "g3",
+          "pattern": "คำพูด",
+          "repeats": 43
+        },
+        {
+          "id": "g4",
+          "pattern": "คำพูด",
+          "repeats": 2
+        },
+        {
+          "id": "g5",
+          "pattern": "คำพูด",
+          "repeats": 44
+        },
+        {
+          "id": "g6",
+          "pattern": "本文",
+          "repeats": 4
+        },
+        {
+          "id": "g7",
+          "pattern": "本文",
+          "repeats": 67
+        },
+        {
+          "id": "g8",
+          "pattern": "本文",
+          "repeats": 29
+        },
+        {
+          "id": "g9",
+          "pattern": "Hello world.",
+          "repeats": 4
+        },
+        {
+          "id": "g10",
+          "pattern": "Hello world.",
+          "repeats": 48
+        },
+        {
+          "id": "g11",
+          "pattern": "本文",
+          "repeats": 70
+        },
+        {
+          "id": "g12",
+          "pattern": "本文",
+          "repeats": 57
+        },
+        {
+          "id": "g13",
+          "pattern": "本文",
+          "repeats": 38
+        },
+        {
+          "id": "g14",
+          "pattern": "Hello world.",
+          "repeats": 25
+        },
+        {
+          "id": "g15",
+          "pattern": "本文",
+          "repeats": 14
+        }
+      ],
+      "context": {
+        "contract": "tp.translation.schema-object/1",
+        "fixedInput": 566,
+        "reasoningActive": false,
+        "limits": {
+          "contextTokens": 4096,
+          "maxOutputTokens": 4096
+        }
+      },
+      "profile": {},
+      "expected": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "units": [
+        {
+          "id": "g0",
+          "pattern": "本文",
+          "repeats": 13
+        },
+        {
+          "id": "g1",
+          "pattern": "Hello world.",
+          "repeats": 52
+        },
+        {
+          "id": "g2",
+          "pattern": "คำพูด",
+          "repeats": 38
+        },
+        {
+          "id": "g3",
+          "pattern": "คำพูด",
+          "repeats": 48
+        },
+        {
+          "id": "g4",
+          "pattern": "Hello world.",
+          "repeats": 24
+        }
+      ],
+      "context": {
+        "contract": "compact_markers",
+        "fixedInput": 162,
+        "reasoningActive": true,
+        "limits": {
+          "contextTokens": 4096,
+          "maxOutputTokens": 4096
+        }
+      },
+      "profile": {},
+      "expected": [
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "units": [
+        {
+          "id": "g0",
+          "pattern": "本文",
+          "repeats": 2
+        }
+      ],
+      "context": {
+        "contract": "tp.translation.schema-object/1",
+        "fixedInput": 790,
+        "reasoningActive": false,
+        "limits": {
+          "contextTokens": 4096,
+          "maxOutputTokens": 2048
+        }
+      },
+      "profile": {
+        "target": 240,
+        "records": 12,
+        "ratios": [
+          0.7,
+          1.1,
+          1.25
+        ]
+      },
+      "expected": [
+        1
+      ]
+    },
+    {
+      "units": [
+        {
+          "id": "g0",
+          "pattern": "Hello world.",
+          "repeats": 22
+        },
+        {
+          "id": "g1",
+          "pattern": "本文",
+          "repeats": 7
+        },
+        {
+          "id": "g2",
+          "pattern": "คำพูด",
+          "repeats": 70
+        },
+        {
+          "id": "g3",
+          "pattern": "คำพูด",
+          "repeats": 43
+        },
+        {
+          "id": "g4",
+          "pattern": "本文",
+          "repeats": 60
+        },
+        {
+          "id": "g5",
+          "pattern": "Hello world.",
+          "repeats": 13
+        },
+        {
+          "id": "g6",
+          "pattern": "本文",
+          "repeats": 20
+        },
+        {
+          "id": "g7",
+          "pattern": "Hello world.",
+          "repeats": 5
+        },
+        {
+          "id": "g8",
+          "pattern": "本文",
+          "repeats": 33
+        },
+        {
+          "id": "g9",
+          "pattern": "คำพูด",
+          "repeats": 35
+        },
+        {
+          "id": "g10",
+          "pattern": "Hello world.",
+          "repeats": 14
+        },
+        {
+          "id": "g11",
+          "pattern": "Hello world.",
+          "repeats": 23
+        },
+        {
+          "id": "g12",
+          "pattern": "Hello world.",
+          "repeats": 39
+        },
+        {
+          "id": "g13",
+          "pattern": "Hello world.",
+          "repeats": 33
+        },
+        {
+          "id": "g14",
+          "pattern": "本文",
+          "repeats": 19
+        },
+        {
+          "id": "g15",
+          "pattern": "คำพูด",
+          "repeats": 30
+        },
+        {
+          "id": "g16",
+          "pattern": "本文",
+          "repeats": 19
+        },
+        {
+          "id": "g17",
+          "pattern": "Hello world.",
+          "repeats": 14
+        },
+        {
+          "id": "g18",
+          "pattern": "คำพูด",
+          "repeats": 60
+        },
+        {
+          "id": "g19",
+          "pattern": "本文",
+          "repeats": 38
+        },
+        {
+          "id": "g20",
+          "pattern": "本文",
+          "repeats": 26
+        },
+        {
+          "id": "g21",
+          "pattern": "คำพูด",
+          "repeats": 12
+        },
+        {
+          "id": "g22",
+          "pattern": "Hello world.",
+          "repeats": 38
+        },
+        {
+          "id": "g23",
+          "pattern": "คำพูด",
+          "repeats": 41
+        },
+        {
+          "id": "g24",
+          "pattern": "Hello world.",
+          "repeats": 48
+        },
+        {
+          "id": "g25",
+          "pattern": "คำพูด",
+          "repeats": 26
+        },
+        {
+          "id": "g26",
+          "pattern": "คำพูด",
+          "repeats": 26
+        },
+        {
+          "id": "g27",
+          "pattern": "Hello world.",
+          "repeats": 21
+        },
+        {
+          "id": "g28",
+          "pattern": "คำพูด",
+          "repeats": 37
+        },
+        {
+          "id": "g29",
+          "pattern": "Hello world.",
+          "repeats": 45
+        },
+        {
+          "id": "g30",
+          "pattern": "คำพูด",
+          "repeats": 58
+        },
+        {
+          "id": "g31",
+          "pattern": "本文",
+          "repeats": 28
+        },
+        {
+          "id": "g32",
+          "pattern": "本文",
+          "repeats": 61
+        },
+        {
+          "id": "g33",
+          "pattern": "Hello world.",
+          "repeats": 26
+        },
+        {
+          "id": "g34",
+          "pattern": "คำพูด",
+          "repeats": 48
+        },
+        {
+          "id": "g35",
+          "pattern": "Hello world.",
+          "repeats": 21
+        },
+        {
+          "id": "g36",
+          "pattern": "Hello world.",
+          "repeats": 24
+        },
+        {
+          "id": "g37",
+          "pattern": "本文",
+          "repeats": 39
+        },
+        {
+          "id": "g38",
+          "pattern": "Hello world.",
+          "repeats": 50
+        },
+        {
+          "id": "g39",
+          "pattern": "Hello world.",
+          "repeats": 69
+        },
+        {
+          "id": "g40",
+          "pattern": "Hello world.",
+          "repeats": 70
+        },
+        {
+          "id": "g41",
+          "pattern": "Hello world.",
+          "repeats": 4
+        },
+        {
+          "id": "g42",
+          "pattern": "คำพูด",
+          "repeats": 4
+        },
+        {
+          "id": "g43",
+          "pattern": "คำพูด",
+          "repeats": 16
+        },
+        {
+          "id": "g44",
+          "pattern": "本文",
+          "repeats": 70
+        },
+        {
+          "id": "g45",
+          "pattern": "Hello world.",
+          "repeats": 20
+        },
+        {
+          "id": "g46",
+          "pattern": "คำพูด",
+          "repeats": 39
+        },
+        {
+          "id": "g47",
+          "pattern": "本文",
+          "repeats": 9
+        },
+        {
+          "id": "g48",
+          "pattern": "Hello world.",
+          "repeats": 1
+        },
+        {
+          "id": "g49",
+          "pattern": "คำพูด",
+          "repeats": 7
+        },
+        {
+          "id": "g50",
+          "pattern": "本文",
+          "repeats": 60
+        },
+        {
+          "id": "g51",
+          "pattern": "Hello world.",
+          "repeats": 69
+        },
+        {
+          "id": "g52",
+          "pattern": "Hello world.",
+          "repeats": 32
+        },
+        {
+          "id": "g53",
+          "pattern": "คำพูด",
+          "repeats": 10
+        }
+      ],
+      "context": {
+        "contract": "compact_markers",
+        "fixedInput": 940,
+        "reasoningActive": false,
+        "limits": {
+          "contextTokens": 4096,
+          "maxOutputTokens": 4096
+        }
+      },
+      "profile": {},
+      "expected": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
+    },
+    {
+      "units": [
+        {
+          "id": "g0",
+          "pattern": "本文",
+          "repeats": 34
+        },
+        {
+          "id": "g1",
+          "pattern": "Hello world.",
+          "repeats": 37
+        },
+        {
+          "id": "g2",
+          "pattern": "คำพูด",
+          "repeats": 22
+        },
+        {
+          "id": "g3",
+          "pattern": "คำพูด",
+          "repeats": 31
+        },
+        {
+          "id": "g4",
+          "pattern": "Hello world.",
+          "repeats": 8
+        },
+        {
+          "id": "g5",
+          "pattern": "Hello world.",
+          "repeats": 10
+        },
+        {
+          "id": "g6",
+          "pattern": "Hello world.",
+          "repeats": 53
+        },
+        {
+          "id": "g7",
+          "pattern": "本文",
+          "repeats": 3
+        },
+        {
+          "id": "g8",
+          "pattern": "คำพูด",
+          "repeats": 69
+        },
+        {
+          "id": "g9",
+          "pattern": "Hello world.",
+          "repeats": 39
+        },
+        {
+          "id": "g10",
+          "pattern": "คำพูด",
+          "repeats": 66
+        },
+        {
+          "id": "g11",
+          "pattern": "本文",
+          "repeats": 64
+        },
+        {
+          "id": "g12",
+          "pattern": "本文",
+          "repeats": 69
+        },
+        {
+          "id": "g13",
+          "pattern": "คำพูด",
+          "repeats": 61
+        },
+        {
+          "id": "g14",
+          "pattern": "本文",
+          "repeats": 23
+        },
+        {
+          "id": "g15",
+          "pattern": "คำพูด",
+          "repeats": 24
+        },
+        {
+          "id": "g16",
+          "pattern": "本文",
+          "repeats": 8
+        },
+        {
+          "id": "g17",
+          "pattern": "คำพูด",
+          "repeats": 25
+        },
+        {
+          "id": "g18",
+          "pattern": "Hello world.",
+          "repeats": 70
+        },
+        {
+          "id": "g19",
+          "pattern": "Hello world.",
+          "repeats": 67
+        },
+        {
+          "id": "g20",
+          "pattern": "คำพูด",
+          "repeats": 17
+        }
+      ],
+      "context": {
+        "contract": "tp.translation.schema-object/1",
+        "fixedInput": 519,
+        "reasoningActive": false,
+        "limits": {
+          "contextTokens": 4096,
+          "maxOutputTokens": 4096
+        }
+      },
+      "profile": {},
+      "expected": [
+        1,
+        1,
+        1,
+        1,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ]
+    }
+  ]
+}

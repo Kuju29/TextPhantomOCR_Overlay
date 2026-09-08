@@ -45,24 +45,20 @@ journey together across both sides; ``seq`` orders it within one process.
 
 from __future__ import annotations
 
-import atexit
-import functools
-import inspect
-import json
-import os
-import re
-import threading
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, TypeVar
+
+import time, atexit, threading, re, os, math, json, inspect, functools
 
 _TZ = timezone(timedelta(hours=7))
 
 _explicit_trace = os.environ.get("TP_TRACE")
 if _explicit_trace is None:
-    _profile = (os.environ.get("TP_DIAGNOSTICS", "normal") or "normal").strip().lower()
-    _RAW_MODE = "full" if _profile in ("deep", "full") else "1" if _profile in ("activity", "summary", "1") else "0"
+    _profile = (os.environ.get("TP_DIAGNOSTICS", "normal")
+                or "normal").strip().lower()
+    _RAW_MODE = "full" if _profile in ("deep", "full") else "1" if _profile in (
+        "activity", "summary", "1") else "0"
 else:
     # Existing deployments keep exact TP_TRACE behaviour. In particular an
     # explicit TP_TRACE=0 disables tracing even under a diagnostics profile.
@@ -79,7 +75,8 @@ _RAW_NAME = str(os.environ.get("TP_TRACE_FILE") or "trace").replace("\\", "/")
 # Prefix only, never a path.  Apart from preventing accidental writes outside
 # TP_TRACE_DIR this keeps generated names valid on Windows even when an env
 # file contains punctuation copied from a label.
-_NAME = re.sub(r"[^A-Za-z0-9._-]+", "_", _RAW_NAME.rsplit("/", 1)[-1]).strip(" .") or "trace"
+_NAME = re.sub(r"[^A-Za-z0-9._-]+", "_",
+               _RAW_NAME.rsplit("/", 1)[-1]).strip(" .") or "trace"
 _NAME = _NAME[:80]
 _NAMING = (os.environ.get("TP_TRACE_NAMING") or "session").strip().lower()
 if _NAMING not in ("session", "daily"):
@@ -116,13 +113,18 @@ _MAX_DICT_ITEMS = 48
 
 # Anything whose name looks like a credential is replaced, never truncated.
 # A trace file gets pasted into chat windows and issue trackers.
-_SECRET_HINTS = ("api_key", "apikey", "key", "token", "secret", "password", "cookie", "auth")
+_SECRET_HINTS = ("api_key", "apikey", "key", "token",
+                 "secret", "password", "cookie", "auth")
+_NUMERIC_TOKEN_COUNTERS = {
+    "requestedoutputtokens", "inputtokens", "outputtokens", "totaltokens", "thinkingtokens",
+    "sourcechars", "targetsourcechars", "estimatedresponsechars",
+}
 _PRIVATE_CONTENT_NAMES = {
     "ai_text", "body", "character_sheet", "content", "input", "memo",
     "messages", "original_text_full", "paragraphs", "prev_context", "prompt",
     "prompt_editable", "prompt_override", "raw", "series_state", "source_text",
     "speakers", "system_dynamic", "system_static", "system_text", "text",
-    "translated_text", "user_parts",
+    "translated_text", "user_parts", "source_chars", "target_source_chars", "estimated_response_chars",
 }
 _PUBLIC_PROMPT_METADATA = {
     "prompthash", "promptversion", "promptchars", "promptsource",
@@ -150,9 +152,11 @@ _COOKIE_FIELD_RE = re.compile(
 )
 _KNOWN_TOKEN_RE = re.compile(
     r"\b(?:sk-[A-Za-z0-9_-]{12,}|hf_[A-Za-z0-9]{12,}|AIza[0-9A-Za-z_-]{20,}|"
-    r"gh[pousr]_[A-Za-z0-9]{20,})\b"
+    r"gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|"
+    r"eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,})\b"
 )
-_URL_USERINFO_RE = re.compile(r"\b(https?://)[^/@\s:]+:[^/@\s]+@", re.IGNORECASE)
+_URL_USERINFO_RE = re.compile(
+    r"\b(https?://)[^/@\s:]+:[^/@\s]+@", re.IGNORECASE)
 
 _LOCK = threading.Lock()
 _seq = 0
@@ -187,20 +191,16 @@ _handle_path: Path | None = None
 # looks like buffering that does not work.
 _last_flush = time.monotonic()
 
-
 def enabled() -> bool:
     return _ENABLED
-
 
 def mode() -> str:
     """Configured detail level: ``off``, ``compact`` or ``full``."""
     return _MODE
 
-
 def full_enabled() -> bool:
     """Whether automatic function entry/return wrapping is requested."""
     return _MODE == "full"
-
 
 def _allocate_session_path() -> Path:
     """Reserve one collision-safe filename for this API process."""
@@ -239,12 +239,10 @@ def _allocate_session_path() -> Path:
         _session_id = f"{_SESSION_STAMP}-{os.getpid()}"
         return _session_path
 
-
 def path() -> Path:
     if _NAMING == "daily":
         return _ROOT / f"{_NAME}-{datetime.now(_TZ).strftime('%Y%m%d')}.jsonl"
     return _allocate_session_path()
-
 
 def session_id() -> str:
     global _active_day, _session_id
@@ -262,14 +260,11 @@ def session_id() -> str:
         path()  # allocate the collision suffix before returning the id
     return _session_id
 
-
 def started_at() -> str:
     return _SESSION_STARTED.isoformat(timespec="seconds")
 
-
 def file_name() -> str:
     return path().name if _ENABLED else ""
-
 
 def _write_latest_pointer(target: Path) -> None:
     """Atomically point humans at the active file; never affects tracing."""
@@ -281,7 +276,6 @@ def _write_latest_pointer(target: Path) -> None:
     except Exception:  # noqa: BLE001 - a convenience pointer cannot break work
         pass
 
-
 def _apply_retention(current: Path) -> int:
     """Delete old trace files only when the operator explicitly opted in."""
     if _KEEP_DAYS <= 0:
@@ -290,9 +284,11 @@ def _apply_retention(current: Path) -> int:
     cutoff = time.time() - (_KEEP_DAYS * 24 * 60 * 60)
     previous_latest: Path | None = None
     try:
-        latest_name = (_ROOT / "trace-latest.txt").read_text(encoding="utf-8").strip()
+        latest_name = (
+            _ROOT / "trace-latest.txt").read_text(encoding="utf-8").strip()
         if latest_name:
-            previous_latest = _ROOT / latest_name.replace("\\", "/").rsplit("/", 1)[-1]
+            previous_latest = _ROOT / \
+                latest_name.replace("\\", "/").rsplit("/", 1)[-1]
     except OSError:
         previous_latest = None
     try:
@@ -314,7 +310,6 @@ def _apply_retention(current: Path) -> int:
     except OSError:
         return removed
     return removed
-
 
 def _session_header(target: Path, retention_deleted: int = 0) -> dict[str, Any]:
     global _seq
@@ -340,21 +335,20 @@ def _session_header(target: Path, retention_deleted: int = 0) -> dict[str, Any]:
         }),
     }
 
-
 def _queue_locked(target: Path, text: str, *, header: bool = False) -> None:
     """Add one pending line while bounding memory under a broken trace sink."""
     global _buffer_dropped
     if len(_buffer) >= _MAX_PENDING_LINES:
         # Preserve session headers: after disk recovery every file must still
         # begin with its identity. Discard the oldest ordinary record instead.
-        drop_at = next((i for i, item in enumerate(_buffer) if not item[2]), None)
+        drop_at = next(
+            (i for i, item in enumerate(_buffer) if not item[2]), None)
         if drop_at is None:
             _buffer_dropped += 1
             return
         del _buffer[drop_at]
         _buffer_dropped += 1
     _buffer.append((target, text, header))
-
 
 def _ensure_session_header() -> Path | None:
     """Make the current file self-describing before any ordinary record."""
@@ -369,7 +363,8 @@ def _ensure_session_header() -> Path | None:
             _write_latest_pointer(target)
             _queue_locked(
                 target,
-                json.dumps(_session_header(target, deleted), ensure_ascii=False) + "\n",
+                json.dumps(_session_header(target, deleted),
+                           ensure_ascii=False) + "\n",
                 header=True,
             )
             _header_paths.add(target)
@@ -378,29 +373,24 @@ def _ensure_session_header() -> Path | None:
     except Exception:  # noqa: BLE001 - a trace sink never blocks API startup
         return None
 
-
 def start_session() -> None:
     """Write one self-describing first record for this API process."""
     if not _ENABLED:
         return
     _ensure_session_header()
 
-
 # --- the current trace id ----------------------------------------------------
 # Thread-local: the pipeline hands one image to a worker thread and the AI layer
 # to another, and both must stamp the same id. `set_trace` returns the previous
 # value so a caller can restore it, which is what makes nesting safe.
-
 
 def set_trace(trace_id: str) -> str:
     previous = getattr(_local, "trace", "")
     _local.trace = str(trace_id or "")
     return previous
 
-
 def current_trace() -> str:
     return getattr(_local, "trace", "")
-
 
 class scope:
     """``with trace.scope(id):`` — stamp every line in this block."""
@@ -419,7 +409,6 @@ class scope:
         set_trace(self._previous)
         return False
 
-
 def inherit(trace_id: str) -> Callable[[Callable], Callable]:
     """Give a function submitted to another thread the caller's trace id."""
 
@@ -433,9 +422,7 @@ def inherit(trace_id: str) -> Callable[[Callable], Callable]:
 
     return wrap
 
-
 # --- value shortening --------------------------------------------------------
-
 
 def _sanitize_string(value: str) -> str:
     """Remove credentials embedded in otherwise ordinary trace strings."""
@@ -444,8 +431,10 @@ def _sanitize_string(value: str) -> str:
     text = _SECRET_QUERY_RE.sub(lambda m: f"{m.group(1)}<redacted>", text)
     # Error strings often embed raw request headers. Redact the complete value,
     # including multi-token schemes (Basic/Digest/Negotiate), and all cookies.
-    text = _AUTH_FIELD_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}<redacted>", text)
-    text = _COOKIE_FIELD_RE.sub(lambda m: f"{m.group(1)}{m.group(2)}<redacted>", text)
+    text = _AUTH_FIELD_RE.sub(
+        lambda m: f"{m.group(1)}{m.group(2)}<redacted>", text)
+    text = _COOKIE_FIELD_RE.sub(
+        lambda m: f"{m.group(1)}{m.group(2)}<redacted>", text)
     text = _BEARER_RE.sub("Bearer <redacted>", text)
     text = _KNOWN_TOKEN_RE.sub("<redacted>", text)
     text = _SECRET_ASSIGN_RE.sub(
@@ -453,8 +442,10 @@ def _sanitize_string(value: str) -> str:
     )
     return text
 
-
 def _short(value: Any, depth: int = 0) -> Any:
+    if isinstance(value, dict) and value.get("schema") == "tp.audit/1":
+        from .diagnostic_schema import sanitize_audit
+        return sanitize_audit(value)
     """A value small enough to read, with its shape intact."""
     if value is None or isinstance(value, (bool, int)):
         return value
@@ -465,16 +456,26 @@ def _short(value: Any, depth: int = 0) -> Any:
         return safe if len(safe) <= _MAX_STR else f"{safe[:_MAX_STR]}…(+{len(safe) - _MAX_STR})"
     if isinstance(value, bytes):
         return f"<{len(value)} bytes>"
-    if depth >= 3:
+    # Preserve the bounded nested fields used by unit-layout and wrong-script
+    # diagnostics in compact traces.
+    if depth >= 4:
         return f"<{type(value).__name__}>"
     if isinstance(value, dict):
         out = {}
-        for index, (k, v) in enumerate(value.items()):
+        priority = {
+            "wrongLanguageIds", "missingIds", "languageDiagnostics", "detectedScripts", "unitLayout", "units", "readingOrder", "members",
+            "inputRotations", "inputSigns", "outputRotation", "outputSign", "outputRotationSource",
+        }
+        entries = sorted(value.items(), key=lambda item: str(
+            item[0]) not in priority)
+        for index, (k, v) in enumerate(entries):
             if index >= _MAX_DICT_ITEMS:
                 out["…"] = f"+{len(value) - _MAX_DICT_ITEMS} more keys"
                 break
             key = str(k)
-            if _is_secret(key):
+            if _is_safe_numeric_token_counter(key, v):
+                out[key] = _short(v, depth + 1)
+            elif _is_secret(key):
                 out[key] = "<redacted>"
             elif _is_private_content(key):
                 out[key] = "<redacted-content>"
@@ -495,23 +496,33 @@ def _short(value: Any, depth: int = 0) -> Any:
     except TypeError:
         return f"<{name}>"
 
-
 def _is_secret(name: str) -> bool:
     low = name.lower()
     return any(hint in low for hint in _SECRET_HINTS)
 
+def _is_safe_numeric_token_counter(name: str, value: Any) -> bool:
+    """Expose finite numeric billing/workload counters, never string contents."""
+    normalized = re.sub(r"[^a-z0-9]", "", str(name).lower())
+    return (
+        normalized in _NUMERIC_TOKEN_COUNTERS
+        and isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+        and float(value) >= 0
+    )
 
 def _is_private_content(name: str) -> bool:
     """Whether a named field can carry copyrighted/private page or prompt text."""
     low = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+    compact = low.replace("_", "")
     if low.replace("_", "") in _PUBLIC_PROMPT_METADATA:
         return False
     return (
         low in _PRIVATE_CONTENT_NAMES
+        or compact in {item.replace("_", "") for item in _PRIVATE_CONTENT_NAMES}
         or "prompt" in low
         or low.endswith(("_content", "_text"))
     )
-
 
 def _return_summary(value: Any) -> Any:
     """Keep full-trace return shape without serialising generated/source text."""
@@ -527,9 +538,7 @@ def _return_summary(value: Any) -> Any:
         return f"<{type(value).__name__} len={len(value)}>"
     return f"<{type(value).__name__}>"
 
-
 # --- writing -----------------------------------------------------------------
-
 
 def _open(target: Path):
     """The open handle, reopened only when the selected target changes."""
@@ -550,7 +559,6 @@ def _open(target: Path):
         _handle = None
     return _handle
 
-
 def _reset_handle_locked() -> None:
     """Forget a failed handle so the next flush performs a clean reopen."""
     global _handle, _handle_path
@@ -561,7 +569,6 @@ def _reset_handle_locked() -> None:
             pass
     _handle = None
     _handle_path = None
-
 
 def _drain_locked() -> bool:
     """Write the buffer out. Caller holds _LOCK."""
@@ -611,19 +618,16 @@ def _drain_locked() -> bool:
     # after the older file has succeeded, preserving their order and identity.
     return _drain_locked() if _buffer else True
 
-
 def _emit_locked(text: str, target: Path | None = None) -> None:
     """Buffer one line and maybe drain it. Caller holds ``_LOCK``."""
     _queue_locked(target or path(), text)
     if len(_buffer) >= _BUFFER_LINES or (time.monotonic() - _last_flush) >= _FLUSH_AFTER_SEC:
         _drain_locked()
 
-
-def _emit(text: str, target: Path | None = None) -> None:
-    """Buffer one line; write a batch out when it is time."""
-    with _LOCK:
-        _emit_locked(text, target)
-
+# def _emit(text: str, target: Path | None = None) -> None:
+#     """Buffer one line; write a batch out when it is time."""
+#     with _LOCK:
+#         _emit_locked(text, target)
 
 def flush() -> None:
     """Write out whatever is buffered. Called per request and at process exit."""
@@ -634,7 +638,6 @@ def flush() -> None:
             _drain_locked()
     except Exception:  # noqa: BLE001
         pass
-
 
 def write(side: str, file: str, fn: str, ev: str, data: Any = None, trace_id: str = "") -> None:
     """Append one trace line. Never raises, never prints."""
@@ -657,17 +660,16 @@ def write(side: str, file: str, fn: str, ev: str, data: Any = None, trace_id: st
             _seq += 1
             line["seq"] = _seq
             line["at"] = datetime.now(_TZ).isoformat(timespec="milliseconds")
-            _emit_locked(json.dumps(line, ensure_ascii=False, default=str) + "\n", target)
+            _emit_locked(json.dumps(line, ensure_ascii=False,
+                         default=str) + "\n", target)
     except Exception:  # noqa: BLE001 - a trace that can fail a request is worse than none
         pass
-
 
 def note(fn: str, data: Any = None, *, file: str = "") -> None:
     """A hand-placed line at a decision point. `ev` is `..`."""
     if not _ENABLED:
         return
     write("api", file or _caller_file(), fn, "..", data)
-
 
 def _caller_file() -> str:
     try:
@@ -676,9 +678,7 @@ def _caller_file() -> str:
     except Exception:  # noqa: BLE001
         return "?"
 
-
 F = TypeVar("F", bound=Callable[..., Any])
-
 
 def traced(fn: F) -> F:
     """Wrap one function so entering, returning and raising are all recorded.
@@ -730,7 +730,6 @@ def traced(fn: F) -> F:
 
     return run  # type: ignore[return-value]
 
-
 def wrap_module(module: Any, *, skip: tuple[str, ...] = ()) -> int:
     """Wrap every public function a module defines. Returns how many.
 
@@ -758,9 +757,7 @@ def wrap_module(module: Any, *, skip: tuple[str, ...] = ()) -> int:
         count += 1
     return count
 
-
 # --- lines shipped by the extension ------------------------------------------
-
 
 def client(records: list[dict[str, Any]]) -> int:
     """Write a batch of browser-side trace lines into the same file.
@@ -780,7 +777,8 @@ def client(records: list[dict[str, Any]]) -> int:
         try:
             stamped = record.get("t")
             event_at = (
-                datetime.fromtimestamp(float(stamped) / 1000, _TZ).isoformat(timespec="milliseconds")
+                datetime.fromtimestamp(
+                    float(stamped) / 1000, _TZ).isoformat(timespec="milliseconds")
                 if isinstance(stamped, (int, float)) and stamped > 0
                 else None
             )
@@ -807,16 +805,17 @@ def client(records: list[dict[str, Any]]) -> int:
                 line["d"] = _short(record.get("d"))
             with _LOCK:
                 _seq += 1
-                ingested_at = datetime.now(_TZ).isoformat(timespec="milliseconds")
+                ingested_at = datetime.now(_TZ).isoformat(
+                    timespec="milliseconds")
                 line["seq"] = _seq
                 line["at"] = ingested_at
                 line["ingestedAt"] = ingested_at
-                _emit_locked(json.dumps(line, ensure_ascii=False, default=str) + "\n", target)
+                _emit_locked(json.dumps(line, ensure_ascii=False,
+                             default=str) + "\n", target)
             written += 1
         except Exception:  # noqa: BLE001
             continue
     return written
-
 
 # A trace file missing its last batch because the process ended is a trace
 # file that stops mid-sentence exactly when something went wrong.

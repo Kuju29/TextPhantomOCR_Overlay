@@ -1,6 +1,5 @@
 """Deterministic text-region geometry for the AI overlay layer.
 
-
 Ported from manga-image-translator (textblock.py + rendering). Every
 decision here is a closed-form computation. The model has three pieces:
 
@@ -12,8 +11,11 @@ decision here is a closed-form computation. The model has three pieces:
 
 from __future__ import annotations
 
-import math
 from typing import Any, Final, NamedTuple
+
+import unicodedata, math
+
+from backend.render.components.typography import is_cjk_char
 
 # Reading direction per target language. "h" horizontal, "v" vertical,
 # "hr" horizontal right-to-left, "auto" decide by region aspect.
@@ -39,13 +41,6 @@ RTL_LANGUAGES: Final[frozenset[str]] = frozenset(
     code for code, d in LANGUAGE_DIRECTION.items() if d == "hr"
 )
 
-# CJK Unicode ranges - used to resolve "auto" and to classify text.
-_CJK_RANGES: Final[tuple[tuple[int, int], ...]] = (
-    (0x2E80, 0x2EFF), (0x3000, 0x303F), (0x3040, 0x309F), (0x30A0, 0x30FF),
-    (0x3100, 0x312F), (0x3130, 0x318F), (0x31F0, 0x31FF), (0x3400, 0x4DBF),
-    (0x4E00, 0x9FFF), (0xAC00, 0xD7AF), (0xF900, 0xFAFF), (0xFF00, 0xFFEF),
-)
-
 # Average glyph advance as a fraction of font size.
 _GLYPH_RATIO_CJK: Final[float] = 1.0
 _GLYPH_RATIO_NARROW: Final[float] = 0.55
@@ -59,6 +54,10 @@ _ASPECT_VERTICAL: Final[float] = 0.72
 
 _MIN_FONT_PX: Final[int] = 12
 
+# Lens commonly reports an upright/absent rotation for Japanese columns even
+# though their item rectangle is unmistakably vertical.  Keep this threshold
+# in one place so the grouping gate and translated-tree relayout agree.
+_PORTRAIT_CJK_RATIO: Final[float] = 2.2
 
 class RegionGeometry(NamedTuple):
     """Deterministic geometry derived from a group of Lens items."""
@@ -71,14 +70,9 @@ class RegionGeometry(NamedTuple):
     src_width: float
     src_height: float
 
-
-def _is_cjk_char(ch: str) -> bool:
-    o = ord(ch)
-    for lo, hi in _CJK_RANGES:
-        if lo <= o <= hi:
-            return True
-    return False
-
+def _is_meaningful_cjk_char(ch: str) -> bool:
+    """CJK-range Unicode Letter; symbols, numbers and punctuation are not evidence."""
+    return is_cjk_char(ch) and unicodedata.category(ch).startswith("L")
 
 def is_cjk_text(text: str, threshold: float = 0.45) -> bool:
     """True when at least threshold of the visible glyphs are CJK."""
@@ -87,19 +81,22 @@ def is_cjk_text(text: str, threshold: float = 0.45) -> bool:
         if ch.isspace():
             continue
         visible += 1
-        if _is_cjk_char(ch):
+        if is_cjk_char(ch):
             cjk += 1
     return visible > 0 and (cjk / visible) >= threshold
 
+def _cjk_char_count(text: str) -> int:
+    return sum(
+        1 for ch in (text or "")
+        if not ch.isspace() and _is_meaningful_cjk_char(ch)
+    )
 
 def glyph_ratio(text: str) -> float:
     """Average glyph width / font-size for text (CJK vs narrow scripts)."""
     return _GLYPH_RATIO_CJK if is_cjk_text(text) else _GLYPH_RATIO_NARROW
 
-
 def _normalise_lang(lang: str) -> str:
     return (lang or "").strip().lower().replace("_", "-")
-
 
 def direction_preset(lang: str) -> str:
     """LANGUAGE_DIRECTION entry for *lang*, or ``""`` when it is unlisted.
@@ -127,7 +124,6 @@ def direction_preset(lang: str) -> str:
     primary = code.split("-", 1)[0]
     return LANGUAGE_DIRECTION.get(primary, "")
 
-
 def resolve_text_direction(target_lang: str, text: str = "") -> str:
     """Return "h" or "v" for the target language - deterministic.
 
@@ -142,7 +138,6 @@ def resolve_text_direction(target_lang: str, text: str = "") -> str:
         return "v"
     return "v" if is_cjk_text(text) else "h"
 
-
 def is_rtl(target_lang: str) -> bool:
     """True when ``target_lang`` is written right-to-left (Arabic/Hebrew/…).
 
@@ -153,7 +148,6 @@ def is_rtl(target_lang: str) -> bool:
     if code in RTL_LANGUAGES:
         return True
     return code.split("-", 1)[0] in RTL_LANGUAGES
-
 
 def box_rotation_deg(box: Any) -> float:
     """The rotation of one box, in degrees.
@@ -166,8 +160,8 @@ def box_rotation_deg(box: Any) -> float:
     exactly 0 and silently answers with the OTHER key. The two are written
     together everywhere today, so nothing is currently wrong; the failure it
     sets up is that the day they diverge, an upright box reports the css value
-    and a whole page picks the wrong reading axis — surfacing as "ONNX ran on a
-    horizontal page", four files away from the lookup that caused it.
+    and a whole page picks the wrong reading axis — surfacing as an incorrect
+    graph partition decision, far from the lookup that caused it.
 
     Absent from BOTH is 0°: an upright box legitimately omits the field, and
     "unset" and "0°" are the same intent. A present-but-unreadable value is
@@ -189,6 +183,46 @@ def box_rotation_deg(box: Any) -> float:
         raise ValueError(f"box.{key} is not a number: {source[key]!r}")
     return value
 
+def _item_rect(item: dict) -> tuple[float, float, float, float] | None:
+    """Finite item rectangle, preferring Lens' normalised box geometry."""
+    box = item.get("box") if isinstance(item.get("box"), dict) else {}
+    try:
+        left = float(box.get("left"))
+        top = float(box.get("top"))
+        width = float(box.get("width"))
+        height = float(box.get("height"))
+        values = (left, top, width, height)
+        if all(math.isfinite(value) for value in values) and width > 0 and height > 0:
+            return left, top, left + width, top + height
+    except (TypeError, ValueError):
+        pass
+    bounds = item.get("bounds_px")
+    if not (isinstance(bounds, (list, tuple)) and len(bounds) == 4):
+        return None
+    try:
+        left, top, right, bottom = (float(value) for value in bounds)
+    except (TypeError, ValueError):
+        return None
+    values = (left, top, right, bottom)
+    if not all(math.isfinite(value) for value in values) or right <= left or bottom <= top:
+        return None
+    return left, top, right, bottom
+
+def _is_portrait_rect(width: float, height: float) -> bool:
+    """Stable inclusive 2.2 ratio test (avoid 2.2 * 100 rounding above 220)."""
+    return width > 0.0 and height > 0.0 and (height / width) + 1e-12 >= _PORTRAIT_CJK_RATIO
+
+def _is_portrait_cjk_item(item: dict) -> bool:
+    """Whether item geometry is strong evidence of an unrotated CJK column."""
+    text = str(item.get("text") or "")
+    if _cjk_char_count(text) < 2 or not is_cjk_text(text):
+        return False
+    rect = _item_rect(item)
+    if rect is None:
+        return False
+    width = rect[2] - rect[0]
+    height = rect[3] - rect[1]
+    return _is_portrait_rect(width, height)
 
 def classify_item_axis(item: dict, tilt_tol: float = 12.0) -> str:
     """Classify one item's reading axis from its baseline rotation.
@@ -205,8 +239,13 @@ def classify_item_axis(item: dict, tilt_tol: float = 12.0) -> str:
     r = rot % 180.0
     if r > 90.0:
         r -= 180.0
+    # Do this before the ordinary near-zero horizontal answer. Lens may omit
+    # rotation or write 0 for a vertical Japanese/Chinese column. Geometry is
+    # only allowed to override near-zero CJK: explicit near-90 and decorative
+    # free angles remain authoritative, while tall Latin labels stay h.
+    if abs(r) <= tilt_tol and _is_portrait_cjk_item(item):
+        return "v"
     return "v" if abs(r) > 45.0 else "h"
-
 
 def paragraph_reading_axis(items: list[dict], tilt_tol: float = 12.0) -> str:
     """Majority reading axis of a paragraph's text items.
@@ -226,6 +265,36 @@ def paragraph_reading_axis(items: list[dict], tilt_tol: float = 12.0) -> str:
             n_h += 1
         else:
             n_t += 1
+    text_items = [it for it in (items or []) if str(it.get("text") or "").strip()]
+    # Lens may split one vertical column into several short upright items. No
+    # item is portrait alone, but their complete union is. Require multiple
+    # items, aggregate CJK evidence, valid geometry for every member, and only
+    # near-zero rotations; incomplete/mixed geometry never manufactures a vote.
+    if n_v == 0 and n_t == 0 and len(text_items) > 1:
+        joined = "".join(str(it.get("text") or "") for it in text_items)
+        if _cjk_char_count(joined) >= 2 and is_cjk_text(joined):
+            rects: list[tuple[float, float, float, float]] = []
+            valid = True
+            for it in text_items:
+                try:
+                    rot = box_rotation_deg(it.get("box"))
+                except ValueError:
+                    valid = False
+                    break
+                folded = abs(((rot + 90.0) % 180.0) - 90.0)
+                rect = _item_rect(it)
+                if folded > tilt_tol or rect is None:
+                    valid = False
+                    break
+                rects.append(rect)
+            if valid:
+                left = min(rect[0] for rect in rects)
+                top = min(rect[1] for rect in rects)
+                right = max(rect[2] for rect in rects)
+                bottom = max(rect[3] for rect in rects)
+                if _is_portrait_rect(right - left, bottom - top):
+                    return "v"
+
     total = n_h + n_v + n_t
     if not total:
         return "h"
@@ -242,7 +311,6 @@ def paragraph_reading_axis(items: list[dict], tilt_tol: float = 12.0) -> str:
         return "tilted"
     return "v" if n_v >= n_h else "h"
 
-
 def _circular_mean_deg(angles: list[float]) -> float:
     """Mean of angles that live on a 180deg circle (text orientation)."""
     if not angles:
@@ -252,7 +320,6 @@ def _circular_mean_deg(angles: list[float]) -> float:
     if abs(xs) < 1e-9 and abs(ys) < 1e-9:
         return 0.0
     return math.degrees(math.atan2(ys, xs)) / 2.0
-
 
 def orientation_mean_deg(angles: list[float]) -> float:
     """Representative orientation of a set of text baselines, in degrees.
@@ -267,7 +334,6 @@ def orientation_mean_deg(angles: list[float]) -> float:
     """
     return _circular_mean_deg(list(angles or []))
 
-
 def _decompose_rotation(rot_deg: float) -> tuple[float, bool]:
     """Split a Lens rotation into (residual_tilt, source_vertical)."""
     r = ((rot_deg + 90.0) % 180.0) - 90.0
@@ -275,7 +341,6 @@ def _decompose_rotation(rot_deg: float) -> tuple[float, bool]:
         return r, False
     base = 90.0 if r > 0 else -90.0
     return r - base, True
-
 
 def compute_region_geometry(
     items: list[dict], img_w: int, img_h: int
@@ -337,7 +402,6 @@ def compute_region_geometry(
         src_width=src_width,
         src_height=src_height,
     )
-
 
 def fit_render_box(
     region: RegionGeometry,

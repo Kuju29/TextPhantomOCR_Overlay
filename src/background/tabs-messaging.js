@@ -48,13 +48,15 @@ export async function sendToTab(tabId, message, frameId = 0) {
 
   let r = await attemptSend(tabId, message, opts);
   if (r.ok) return true;
-  if (opts.frameId && (await attemptSend(tabId, message, { frameId: 0 })).ok) return true;
+  if (opts.frameId && (await attemptSend(tabId, message, { frameId: 0 })).ok)
+    return true;
 
   if (!(await ensureContentScript(tabId))) return false;
 
   r = await attemptSend(tabId, message, opts);
   if (r.ok) return true;
-  if (opts.frameId && (await attemptSend(tabId, message, { frameId: 0 })).ok) return true;
+  if (opts.frameId && (await attemptSend(tabId, message, { frameId: 0 })).ok)
+    return true;
 
   log.warn("sendToTab failed", { tabId, type: message?.type, err: r.err });
   return false;
@@ -81,15 +83,14 @@ export async function requestFromTabEnsured(tabId, message, frameId = 0) {
 }
 
 // Shows a toast inside a tab.
-export function sendToastToTab(tabId, frameId, text, ms = 1600) {
+export function sendToastToTab(tabId, frameId, text, ms = 1600, progress = null) {
   if (!tabId || !text) return;
   try {
     chrome.tabs.sendMessage(
       tabId,
-      { type: "TP_TOAST", text, ms },
+      { type: "TP_TOAST", text, ms, ...(progress ? { progress } : {}) },
       { frameId: Number(frameId) || 0 },
       () => void chrome.runtime.lastError,
     );
-  } catch {
-  }
+  } catch {}
 }

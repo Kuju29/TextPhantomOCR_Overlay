@@ -1,6 +1,5 @@
 """Orientation-matching relayout — turn a Lens tree into the target's axis.
 
-
 Why this module exists
 ---------------------
 Google Lens returns its ``translated`` layer by re-labelling the **original**
@@ -9,7 +8,7 @@ vertical Japanese page that means the Thai/English translation is handed back
 in 90°-rotated columns — technically positioned correctly, visually unreadable.
 
 ``lens_text.ai`` already solves this by discarding Lens geometry and building
-fresh boxes with :func:`backend.render.build_ai_tree.build_ai_tree`.  But AI
+fresh boxes with :func:`backend.render.ai_tree.builder.build_ai_tree`.  But AI
 needs an API key and a token budget, so users without quota fall back to
 ``lens_text.translated`` and get the unreadable rotated columns.
 
@@ -21,44 +20,43 @@ relayout for the machine translation, with no provider call.
 
 Contract
 --------
-Two decisions, both cheap and both made from Lens JSON only (no image decode,
-no ONNX):
+Two orientation decisions are cheap and made from Lens JSON only (no image
+decode or provider call):
 
 1. :func:`scan_tree_orientation` — is this tree's text vertical or horizontal?
 2. :func:`relayout_decision` — does the target language want the other axis,
    and did the user leave the switch on?
 
-Only when the answer is yes does the caller pay for grouping / bubble
-detection and call :func:`rebuild_tree_for_target`.  Same-orientation pages
-keep the untouched Lens fast path.
+The shared Lens graph partition happens upstream for every page. Only when the
+answer is yes does the caller rebuild boxes with
+:func:`rebuild_tree_for_target`; same-orientation pages keep the untouched Lens
+geometry.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from backend.render.build_ai_tree import build_ai_tree
-from backend.render.region import direction_preset
-from backend.render.rotation_signs import normalize_group_rotation_signs
-
+from backend.render.ai_tree.builder import build_ai_tree
+from backend.render.region import (
+    box_rotation_deg,
+    classify_item_axis,
+    direction_preset,
+    is_cjk_text,
+    paragraph_reading_axis,
+)
 # An item within this many degrees of 0/90 counts as axis-aligned and is
 # allowed to vote on the tree's reading axis.  Anything further off the grid is
 # decorative / art-aligned text and must not decide the page's orientation.
 _AXIS_TOLERANCE_DEG = 12.0
 
-# Portrait ratio at which a rotation-less Lens item still votes vertical.
-# Lens sometimes omits ``rotation_deg``; a text box more than this much taller
-# than it is wide can only be a vertical column.
-_PORTRAIT_RATIO = 2.2
-
 # How many rotation values to keep in the debug meta (log-line friendly).
 _ROTATION_SAMPLE_LIMIT = 12
-
 
 def target_orientation_for_lang(target_lang: str) -> str:
     """Reading axis wanted by *target_lang* — ``"h"`` or ``"v"``.
 
-    Mirrors :func:`backend.render.build_ai_tree.build_ai_tree` exactly: CJK and
+    Mirrors :func:`backend.render.ai_tree.builder.build_ai_tree` exactly: CJK and
     ``auto`` targets are typeset vertically in manga, Thai/Latin/Cyrillic and
     unknown languages stay horizontal.
 
@@ -75,7 +73,6 @@ def target_orientation_for_lang(target_lang: str) -> str:
         return "v"
     return "h"
 
-
 def _item_axis(it: dict) -> tuple[str | None, float]:
     """Reading axis of one Lens item plus its glyph size in pixels-normalised.
 
@@ -86,39 +83,22 @@ def _item_axis(it: dict) -> tuple[str | None, float]:
     """
     box = it.get("box") or {}
     try:
-        rot = float(box.get("rotation_deg") or box.get("rotation_deg_css") or 0.0)
-    except (TypeError, ValueError):
-        rot = 0.0
-    try:
         font_norm = float(box.get("height") or 0.0)
     except (TypeError, ValueError):
         font_norm = 0.0
 
-    residual = ((rot + 45.0) % 90.0) - 45.0
-    if abs(residual) <= _AXIS_TOLERANCE_DEG:
-        r_mod = rot % 180.0
-        if r_mod > 90.0:
-            r_mod -= 180.0
-        return ("v" if abs(r_mod) > 45.0 else "h"), font_norm
-
-    bpx = it.get("bounds_px")
-    if isinstance(bpx, (list, tuple)) and len(bpx) == 4:
-        try:
-            w = float(bpx[2]) - float(bpx[0])
-            h = float(bpx[3]) - float(bpx[1])
-        except (TypeError, ValueError):
-            w = h = 0.0
-        if w > 0 and h > _PORTRAIT_RATIO * w:
-            return "v", font_norm
-    return None, font_norm
-
+    try:
+        axis = classify_item_axis(it, _AXIS_TOLERANCE_DEG)
+    except ValueError:
+        return None, font_norm
+    return (None if axis == "tilted" else axis), font_norm
 
 def scan_tree_orientation(tree: dict | None) -> tuple[str, dict[str, Any]]:
     """Classify a Lens tree's reading axis from item geometry alone.
 
     Returns ``(orientation, meta)`` where orientation is ``"h"`` or ``"v"``.
-    Intentionally cheap: reads only the decoded JSON, never the image and never
-    ONNX, so it is safe to call before deciding whether to do expensive work.
+    Intentionally cheap: reads only the decoded JSON and never the image, so it
+    is safe to call before deciding whether to rebuild layout.
 
     ``meta`` reports the vote counts and a rotation sample.  A caller must NOT
     read ``orientation`` alone to conclude "this page is horizontal": when
@@ -131,39 +111,36 @@ def scan_tree_orientation(tree: dict | None) -> tuple[str, dict[str, Any]]:
         for para in tree.get("paragraphs") or []:
             if not isinstance(para, dict):
                 continue
-            for it in para.get("items") or []:
+            para_items = [
+                it for it in (para.get("items") or [])
+                if isinstance(it, dict) and str(it.get("text") or "").strip()
+            ]
+            para_axis = paragraph_reading_axis(para_items, _AXIS_TOLERANCE_DEG)
+            item_axes: list[str | None] = []
+            for it in para_items:
                 if not isinstance(it, dict) or not str(it.get("text") or "").strip():
                     continue
                 n_items += 1
                 box = it.get("box") or {}
                 try:
-                    rot = float(box.get("rotation_deg") or box.get("rotation_deg_css") or 0.0)
-                except (TypeError, ValueError):
+                    rot = box_rotation_deg(box)
+                except ValueError:
                     rot = 0.0
                 rot_samples.append(rot)
-                residual = ((rot + 45.0) % 90.0) - 45.0
-                if abs(residual) <= _AXIS_TOLERANCE_DEG:
-                    n_axis += 1
-                    r_mod = rot % 180.0
-                    if r_mod > 90.0:
-                        r_mod -= 180.0
-                    if abs(r_mod) > 45.0:
-                        n_v += 1
-                    else:
-                        n_h += 1
+                axis, _font_norm = _item_axis(it)
+                item_axes.append(axis)
+            # Preserve the shared paragraph-union verdict. If every short item
+            # looked horizontal alone but their complete union is a vertical
+            # CJK column, relayout must see the same source axis as lens grouping.
+            union_vertical = para_axis == "v" and "v" not in item_axes
+            for axis in item_axes:
+                if axis is None:
                     continue
-                # Rotation missing/unusable — a clearly portrait text box is
-                # still unambiguous evidence of a vertical column.
-                bpx = it.get("bounds_px")
-                if isinstance(bpx, (list, tuple)) and len(bpx) == 4:
-                    try:
-                        w = float(bpx[2]) - float(bpx[0])
-                        h = float(bpx[3]) - float(bpx[1])
-                    except (TypeError, ValueError):
-                        w = h = 0.0
-                    if w > 0 and h > _PORTRAIT_RATIO * w:
-                        n_axis += 1
-                        n_v += 1
+                n_axis += 1
+                if axis == "v" or union_vertical:
+                    n_v += 1
+                else:
+                    n_h += 1
     orient = "v" if n_axis > 0 and n_v * 2 >= n_axis else "h"
     return orient, {
         "orientation": orient,
@@ -173,7 +150,6 @@ def scan_tree_orientation(tree: dict | None) -> tuple[str, dict[str, Any]]:
         "items": n_items,
         "rotation_samples": [round(x, 1) for x in rot_samples[:_ROTATION_SAMPLE_LIMIT]],
     }
-
 
 def relayout_decision(
     tree: dict | None,
@@ -215,7 +191,6 @@ def relayout_decision(
     meta["reason"] = "direction_change"
     return True, meta
 
-
 def _merge_rects(rects: list[tuple[float, float, float, float]]) -> list[tuple[float, float, float, float]]:
     """Union every group of touching/overlapping rectangles. O(n^2), n is tiny."""
     out: list[list[float]] = []
@@ -238,7 +213,6 @@ def _merge_rects(rects: list[tuple[float, float, float, float]]) -> list[tuple[f
         out.append(cur)
     return [(r[0], r[1], r[2], r[3]) for r in out]
 
-
 def build_vertical_rois(
     tree: dict | None,
     img_w: int,
@@ -248,22 +222,12 @@ def build_vertical_rois(
 ) -> list[tuple[float, float, float, float]]:
     """Regions of the page that Lens says contain vertical text.
 
-    Used to crop the input for the text-block model instead of feeding it the
-    whole page. Each vertical item's bounds are padded (by two glyph heights,
-    or ``margin_ratio`` of the region's own size, whichever is larger) so the
-    crop keeps the surrounding bubble outline, then overlapping regions are
-    merged.
+    Legacy-compatible regions derived from vertical Lens items. Each item's
+    bounds are padded by two glyph heights, or ``margin_ratio`` of the region's
+    own size, whichever is larger, and overlapping regions are merged. Current
+    graph partitioning does not consume these regions.
 
-    IMPORTANT — this does NOT make inference cheaper. The detector resizes any
-    input to a fixed 1280x1280, so one crop costs exactly as much as one full
-    page, and N crops cost N times as much. The reason to crop is RESOLUTION:
-    a small vertical column blown up to 1280 is far easier for the model to
-    read than the same column inside a downscaled full page. Callers must apply
-    their own budget for how many crops are worth it (see
-    :func:`backend.render.textblocks.detect_text_blocks_in_rois`).
-
-    Returns ``[]`` when there is no vertical text — the caller should then run
-    on the full page (or, better, not run the detector at all).
+    Returns ``[]`` when there is no vertical text.
     """
     if not isinstance(tree, dict) or img_w <= 0 or img_h <= 0:
         return []
@@ -271,11 +235,16 @@ def build_vertical_rois(
     for para in tree.get("paragraphs") or []:
         if not isinstance(para, dict):
             continue
-        for it in para.get("items") or []:
+        para_items = para.get("items") or []
+        para_vertical = paragraph_reading_axis(para_items) == "v"
+        for it in para_items:
             if not isinstance(it, dict) or not str(it.get("text") or "").strip():
                 continue
             axis, font_norm = _item_axis(it)
-            if axis != "v":
+            # When a column is fragmented into short upright CJK items, the
+            # paragraph union supplies the vertical evidence. Include those
+            # members in the ROI without treating unrelated Latin labels as v.
+            if axis != "v" and not (para_vertical and axis == "h" and is_cjk_text(str(it.get("text") or ""))):
                 continue
             bpx = it.get("bounds_px")
             if not (isinstance(bpx, (list, tuple)) and len(bpx) == 4):
@@ -298,7 +267,6 @@ def build_vertical_rois(
         return []
     return _merge_rects(padded)
 
-
 def rebuild_tree_for_target(
     tree: dict | None,
     target_lang: str,
@@ -308,14 +276,14 @@ def rebuild_tree_for_target(
     """Rebuild *tree* with fresh boxes at the target language's orientation.
 
     Requires ``tree["bubble_groups"]`` (see
-    :func:`backend.render.groups.group_paragraphs_into_bubbles`) — each group's
+    canonical detector-free grouping service) — each group's
     own ``text`` is what gets re-laid out, so the caller must pass the tree
     whose text it wants rendered (the *translated* tree for Lens MT).
 
     Returns ``None`` when there are no groups to work with, so the caller can
     keep the original tree instead of rendering an empty layer. The returned
     tree keeps ``side == "Ai"``: that is the flag
-    :func:`backend.render.tp_html.render_tree_overlay` uses to select the
+    :func:`backend.render.html.overlay.render_tree_overlay` uses to select the
     deterministic bubble-block renderer, which is the whole point of rebuilding
     the geometry. Pass ``target_lang`` to the renderer for this tree.
     """

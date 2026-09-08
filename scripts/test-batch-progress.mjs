@@ -9,11 +9,12 @@ globalThis.chrome = {
 
 const {
   IMAGE_PHASES, batchMark, batchPassStats, batchProgressSnapshot, batchUpdateToast, ensureBatch, markImagePhase,
+  markLocalAiStreamProgress,
   restoreBatchSnapshot, serializeBatchSnapshot,
 } = await import("../src/background/batches.js");
 
 assert.deepEqual(IMAGE_PHASES, [
-  "waiting", "scanning", "downloading", "lens", "grouping", "ai_queued",
+  "waiting", "scanning", "downloading", "lens_queued", "lens", "grouping_queued", "grouping", "ai_queued",
   "ai_generating", "server_processing", "rendering", "done", "error", "cancelled",
 ]);
 const batch = ensureBatch("progress-contract", 17, 0);
@@ -28,6 +29,20 @@ markImagePhase("progress-contract", "a", "ai_generating");
 batchUpdateToast(batch, "AI is generating", true);
 assert.match(String(tabMessages.filter((msg) => msg?.type === "TP_TOAST").at(-1)?.text), /0\/1.*AI is generating/,
   "the original compact toast must show both progress and the current image phase");
+for (const [state, label] of [
+  ["connecting", "Connecting to Local AI"],
+  ["waiting_for_model", "Waiting for Local AI model"],
+  ["thinking", "Local AI is thinking"],
+  ["first_response", "Local AI responded"],
+  ["generating", "Local AI is generating"],
+  ["completed", "Local AI response complete"],
+]) {
+  markLocalAiStreamProgress("progress-contract", "a", state);
+  const status = tabMessages.filter((msg) => msg?.type === "BATCH_STATUS_UPDATE").at(-1);
+  assert.match(String(status?.batch?.message), new RegExp(label), `${state} must reach the real batch status message`);
+}
+assert.equal(markLocalAiStreamProgress("progress-contract", "a", "raw model text"), null,
+  "provider content can never become a visible progress state");
 let item = batch.items.get("a");
 assert.equal(item.status, "processing");
 assert.ok(Number(item.phaseAt) > 0);
@@ -68,8 +83,8 @@ multi.total1 = 2;
 multi.items.set("m1", { attempt: 1, status: "done", phase: "done", payload: { context: { page_index: 0 } } });
 multi.items.set("m2", { attempt: 1, status: "processing", phase: "ai_generating", payload: { context: { page_index: 1 } } });
 batchUpdateToast(multi, "AI is generating", true);
-assert.match(String(tabMessages.filter((msg) => msg?.type === "TP_TOAST").at(-1)?.text), /1\/2.*Image 2: AI is generating/,
-  "translate-all must show the current image and aggregate progress in the same compact toast");
+assert.match(String(tabMessages.filter((msg) => msg?.type === "TP_TOAST").at(-1)?.text), /1\/2.*AI 1 active/,
+  "translate-all must summarize active pipeline stages without pretending images run serially");
 
 const domUtils = await readFile(new URL("../src/content/dom-utils.js", import.meta.url), "utf8");
 const messaging = await readFile(new URL("../src/content/messaging.js", import.meta.url), "utf8");

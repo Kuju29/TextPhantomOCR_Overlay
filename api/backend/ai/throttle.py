@@ -1,6 +1,5 @@
 """Rate-limit handling for the Hugging Face router.
 
-
 Optional Hugging Face account pacing around the OpenAI-compatible client.
 
 By default TextPhantom imposes NO HF-specific concurrency or spacing limit; the
@@ -21,20 +20,19 @@ The table is bounded and keyed by a hash rather than the secret itself.
 
 from __future__ import annotations
 
-import hashlib
-import time
 from collections import OrderedDict
 from threading import Lock, Semaphore
 
-from backend.ai.clients import openai_compat
+import time, hashlib
+
 from backend.ai.clients.base import ChatResult
+from backend.ai.provider_contract import GenerationRequest
 from backend.config import settings
 
 # How many distinct keys keep their own gate. Past this the least recently used
 # entry is dropped; the only cost of a drop is that key briefly getting a fresh
 # spacing clock.
 _MAX_TRACKED_KEYS = 512
-
 
 class _KeyGate:
     """One account's concurrency slot and spacing clock."""
@@ -46,10 +44,8 @@ class _KeyGate:
         self.interval_lock = Lock()
         self.last_call_ts = 0.0
 
-
 _gates: "OrderedDict[str, _KeyGate]" = OrderedDict()
 _gates_lock = Lock()
-
 
 def _gate_for(api_key: str) -> _KeyGate:
     """The gate for one key. Hashed, so no key is held in a live dict."""
@@ -65,11 +61,10 @@ def _gate_for(api_key: str) -> _KeyGate:
             _gates.move_to_end(ident)
         return gate
 
-
 def _reset_for_tests() -> None:
+    """Clear process-local account gates between isolated test cases."""
     with _gates_lock:
         _gates.clear()
-
 
 def is_rate_limited_error(message: str) -> bool:
     """True when an error string looks like an HF throttle/overload response."""
@@ -82,7 +77,6 @@ def is_rate_limited_error(message: str) -> bool:
         return True
     return False
 
-
 def _wait_for_interval(gate: _KeyGate) -> None:
     """Space THIS key's calls at least ``hf_min_interval_sec`` apart."""
     if settings.hf_min_interval_sec <= 0:
@@ -93,7 +87,6 @@ def _wait_for_interval(gate: _KeyGate) -> None:
         if wait > 0:
             time.sleep(wait)
         gate.last_call_ts = time.time()
-
 
 def generate_with_backoff(
     api_key: str,
@@ -106,6 +99,9 @@ def generate_with_backoff(
     image_b64: str = "",
     image_mime: str = "image/jpeg",
     response_schema: dict | None = None,
+    cancel_check=None,
+    expected_ids: list[str] | None = None,
+    unit_count: int | None = None,
 ) -> ChatResult:
     """Call the HF OpenAI-compatible client exactly once behind its rate gate.
 
@@ -117,17 +113,18 @@ def generate_with_backoff(
 
     def _call() -> ChatResult:
         _wait_for_interval(gate)
-        return openai_compat.generate(
-            api_key,
-            base_url,
-            model,
-            system_text,
-            user_parts,
-            allow_hf_fallback=allow_hf_fallback,
-            image_b64=image_b64,
-            image_mime=image_mime,
-            response_schema=response_schema,
-        )
+        # The rate gate selects no wire policy. Hugging Face owns payload and
+        # transport selection through its registered provider adapter.
+        from backend.ai.providers.cloud_huggingface import SPEC
+        _ = allow_hf_fallback  # historical no-retry flag, intentionally inert
+        assert SPEC.adapter is not None
+        return SPEC.adapter.generate(GenerationRequest(
+            provider=SPEC.provider_id, api_key=api_key, base_url=base_url,
+            model=model, system_text=system_text, user_parts=tuple(user_parts),
+            image_b64=image_b64, image_mime=image_mime,
+            response_schema=response_schema, cancel_check=cancel_check,
+            expected_ids=tuple(expected_ids or ()), unit_count=unit_count,
+        ))
 
     if gate.semaphore is None:
         return _call()

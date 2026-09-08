@@ -1,6 +1,5 @@
 """AI configuration endpoints used by the extension's settings UI.
 
-
 ``/ai/resolve``        — given an API key (and optional provider/model),
                          return the resolved provider + selectable models.
 ``/ai/prompt/default`` — return the default editable prompt for a language.
@@ -8,10 +7,10 @@
 
 from __future__ import annotations
 
-import time
 from typing import Any
-
 from fastapi import APIRouter, Response
+
+import time
 
 from backend.ai import probe as ai_probe
 from backend.ai import resolve as ai_resolve
@@ -19,7 +18,6 @@ from backend.log import event
 from backend.security import SecurityError
 
 router = APIRouter()
-
 
 def _refused_base_url(payload: dict[str, Any], exc: SecurityError) -> dict:
     """Report a refused AI endpoint as data, not as a 500.
@@ -49,7 +47,6 @@ def _refused_base_url(payload: dict[str, Any], exc: SecurityError) -> dict:
         "http_status": 0,
         "cached": False,
     }
-
 
 @router.post("/ai/resolve")
 async def resolve(payload: dict[str, Any]) -> dict:
@@ -88,7 +85,6 @@ async def resolve(payload: dict[str, Any]) -> dict:
     except Exception as exc:
         raise
 
-
 @router.post("/ai/probe")
 async def probe(payload: dict[str, Any]) -> dict:
     """Run one tiny real provider call for the selected model (cached)."""
@@ -120,7 +116,6 @@ async def probe(payload: dict[str, Any]) -> dict:
         ok=bool(result.get("ok")),
     )
     return result
-
 
 @router.get("/ai/prompt/default")
 async def prompt_default(

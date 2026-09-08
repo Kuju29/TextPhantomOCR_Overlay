@@ -7,10 +7,9 @@ foreground colour.  Both jobs live here.
 """
 
 from __future__ import annotations
-
-import cv2
-import numpy as np
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
+
+import numpy as np, cv2
 
 RGB = tuple[int, int, int]
 RGBA = tuple[int, int, int, int]
@@ -22,7 +21,6 @@ TEXT_COLOR_LIGHT: RGBA = (255, 255, 255, 255)
 Rect = tuple[int, int, int, int]
 Quad = list[tuple[float, float]]
 
-
 def median_rgba(pixels: list) -> RGBA | None:
     """Channel-wise median of a list of RGB(A) pixels."""
     if not pixels:
@@ -33,7 +31,6 @@ def median_rgba(pixels: list) -> RGBA | None:
     mid = len(rs) // 2
     return (rs[mid], gs[mid], bs[mid], 255)
 
-
 def relative_luminance(rgb: RGB) -> float:
     """WCAG relative luminance of an sRGB colour."""
     def lin(c: float) -> float:
@@ -43,13 +40,11 @@ def relative_luminance(rgb: RGB) -> float:
     r, g, b = rgb
     return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
 
-
 def contrast_ratio(l1: float, l2: float) -> float:
     """WCAG contrast ratio between two luminance values."""
     a = max(l1, l2) + 0.05
     b = min(l1, l2) + 0.05
     return a / b
-
 
 def pick_bw_text_color(bg_rgb: RGB) -> RGBA:
     """Pick black or white text — whichever contrasts better with ``bg_rgb``."""
@@ -57,7 +52,6 @@ def pick_bw_text_color(bg_rgb: RGB) -> RGBA:
     if contrast_ratio(lum_bg, 1.0) >= contrast_ratio(lum_bg, 0.0):
         return TEXT_COLOR_LIGHT
     return TEXT_COLOR_DARK
-
 
 def region_is_dark(base_rgb: Image.Image, rect: Rect) -> bool:
     """True when the area inside ``rect`` reads as a DARK background.
@@ -110,7 +104,6 @@ def region_is_dark(base_rgb: Image.Image, rect: Rect) -> bool:
     dark_votes = sum(pick_bw_text_color(rgb) == TEXT_COLOR_LIGHT for rgb in readings)
     return dark_votes * 2 >= len(readings)
 
-
 def sample_bg_color(base_rgb: Image.Image, rect: Rect, margin_px: int) -> RGB:
     """Median colour of a thin frame just *outside* ``rect``."""
     W, H = base_rgb.size
@@ -133,7 +126,6 @@ def sample_bg_color(base_rgb: Image.Image, rect: Rect, margin_px: int) -> RGB:
     if med:
         return med[:3]
     return base_rgb.getpixel((max(0, min(W - 1, l)), max(0, min(H - 1, t))))  # type: ignore[return-value]
-
 
 def sample_bg_color_from_quad(
     base_rgb: Image.Image,
@@ -170,7 +162,6 @@ def sample_bg_color_from_quad(
 
     med = median_rgba(samples)
     return med[:3] if med else sample_bg_color(base_rgb, rect, margin_px)
-
 
 def sample_bg_color_from_quad_ring(
     base_rgb: Image.Image,

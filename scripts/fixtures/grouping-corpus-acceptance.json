@@ -1,0 +1,170 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Acceptance annotations for vertical manga grouping. Visual-only entries never assign OCR paragraph IDs.",
+  "coordinateSystem": "normalized_xywh_0_to_1",
+  "rolePolicy": {
+    "lexical": "dialogue and narration expected to become translation units",
+    "preservedNonlexical": "ellipsis and SFX remain independent and may be excluded from AI",
+    "excluded": "page numbers, credits, chapter titles and decorative cover typography"
+  },
+  "exact": [
+    {
+      "id": "page117-touching-balloons",
+      "image": {
+        "canonicalFile": "4f470983-08bb-44bf-aa46-4df1b4d468d6.png",
+        "sha256": "24988668ffbd7fb0c5e93d00daf418fd15f34a67005174ce1ca19cfe6671d6e2",
+        "aliases": [
+          "1e0dc006-2064-4202-9024-7ff7b5c30a6b.png",
+          "27d583c1-30d5-4476-b299-cdefddd85aa0.png",
+          "a4719fdb-409a-43b3-a2bc-76762240a5a5.png"
+        ]
+      },
+      "evidence": {
+        "rawArchives": ["debug-api-6.zip", "debug.zip"],
+        "reducedFixture": "scripts/fixtures/vertical-debug-api-6.json",
+        "test": "scripts/test-lens-graph-partition.py"
+      },
+      "membershipCoverage": "selected_paragraphs_only",
+      "approvedSelectedMemberships": [
+        [0], [1, 2], [3, 4], [5, 6, 7], [8, 9], [15], [18],
+        [22, 23, 24], [25, 26]
+      ],
+      "cannotLink": [[7, 8], [24, 25]],
+      "wholePageCount": null,
+      "wholePageCountReason": "Only selected raw memberships have human-approved ground truth; archived runs disagree on whole-page units."
+    }
+  ],
+  "visualOnly": [
+    {
+      "id": "touching-round-balloons-and-captions",
+      "file": "09ce8574-e1c1-4da3-985e-b45e3a4dcc39.png",
+      "sha256": "238bea92001cd411dcda190c54d90472b5f007f2436d075e16a92fdb82967304",
+      "expected": {"lexicalContainers": 5, "preservedNonlexical": 0},
+      "regions": [
+        {"label": "top_balloon", "box": [0.68, 0.04, 0.25, 0.22]},
+        {"label": "middle_balloon_upper", "box": [0.55, 0.30, 0.22, 0.22]},
+        {"label": "middle_balloon_lower", "box": [0.34, 0.39, 0.24, 0.23]},
+        {"label": "bottom_caption_left", "box": [0.08, 0.79, 0.25, 0.18]},
+        {"label": "bottom_caption_right", "box": [0.82, 0.80, 0.12, 0.16]}
+      ],
+      "cannotLinkLabels": [["middle_balloon_upper", "middle_balloon_lower"]]
+    },
+    {
+      "id": "chapter-title-with-caption-boxes",
+      "file": "e95f732a-6515-46ab-8dc3-1001e79d5df6.png",
+      "sha256": "e9a1201d89d7ce22090dcbc2c01b1b7468dc7f159f24d5d3d92b7dd0c1b52508",
+      "expected": {"lexicalContainers": 4, "excludedDisplayRegions": 2},
+      "criticalRelations": ["each rectangle is independent", "chapter title never bridges captions"]
+    },
+    {
+      "id": "dense-balloons-with-large-sfx",
+      "file": "0afeb229-0ad3-4dc5-b886-52b009bd83b5.png",
+      "sha256": "97dcaab72465c7c2684c2370aa8e757db5ddb485797ae7fa9264c163335c0965",
+      "expected": {"lexicalContainers": 8, "preservedNonlexicalMin": 1},
+      "criticalRelations": ["SFX is never a bridge", "tiny ellipsis balloon remains independent"]
+    },
+    {
+      "id": "cover-title-zero-dialogue",
+      "file": "8451886a-6e81-415a-ac49-0f138f6b97b0.png",
+      "sha256": "5a655d613499550dbee8ffd689dadcdb2f01862b91bf35d2e2d9740ea5500f98",
+      "expected": {"lexicalContainers": 0, "excludedDisplayRegionsMin": 2},
+      "criticalRelations": ["decorative vertical title is not dialogue"]
+    },
+    {
+      "id": "adjacent-narrow-balloons-and-ellipsis",
+      "file": "08814fb5-6194-438a-b10f-9e9da2a1a08c.png",
+      "sha256": "f3c61eecd81930e64aa1ea7e94031b68e76eaa7582be2dc6882f5e8c55fb7610",
+      "expected": {"lexicalContainers": 5, "preservedNonlexical": 1},
+      "criticalRelations": ["the two small middle balloons are separate", "panel edges do not close a speech contour"]
+    },
+    {
+      "id": "jagged-rounded-and-tiny-balloons",
+      "file": "bbc30d11-8c63-4a72-a0e6-4fac43f8d05c.png",
+      "sha256": "06ab6d962137f1354f8851bdcab1b85df656a079a0ee8434b0a695bb82194d61",
+      "expected": {"lexicalContainersMin": 10, "lexicalContainersMax": 12},
+      "criticalRelations": ["jagged outline is still one semantic container", "punctuation bubble cannot bridge"]
+    },
+    {
+      "id": "color-cover-zero-dialogue",
+      "file": "1f286cec-a1a8-4aba-9c8b-e9f005ebbbf2.png",
+      "sha256": "120a7d225a681e2d56a27c2269e681502e453d93a470de36255701773c74db01",
+      "expected": {"lexicalContainers": 0, "excludedDisplayRegionsMin": 2},
+      "criticalRelations": ["colored decorative typography is not dialogue"]
+    },
+    {
+      "id": "balloons-ruby-and-oversized-sfx",
+      "file": "0aa1bd4b-b6ca-4093-bf55-ce9bcafbe87d.png",
+      "sha256": "8ab8a99351fa417232996ea9314b3cf227cefdb50ac84d5945ce33cc94e0b625",
+      "expected": {"lexicalContainersMin": 9, "lexicalContainersMax": 11},
+      "criticalRelations": ["ruby attaches to a base column or is excluded", "oversized SFX never bridges balloons"]
+    },
+    {
+      "id": "dense-aligned-balloons-captions-sfx",
+      "file": "dc48452c-6d32-436b-bfbe-eb09620e39a7.png",
+      "sha256": "ebcfb9af43d584f9746a7f325c8d4444cf5f82cb5aca810e6455685d75093c4f",
+      "expected": {"lexicalContainersMin": 12, "lexicalContainersMax": 15},
+      "criticalRelations": ["similar head rows across separate balloons never imply union", "no transitive merge through an SFX region"]
+    },
+    {
+      "id": "open-dark-text-and-adjacent-balloons",
+      "file": "8e74c7f9-cf1e-45e5-b12c-6dafe72e2105.png",
+      "sha256": "e016be1fc57f0427ca8238aa3c692466b42050df50bc8bdbd4953bb3a0414721",
+      "aliases": ["0f4573b7-5cce-4187-9966-279d5c4d6034.png"],
+      "expected": {"lexicalContainers": 9, "preservedNonlexical": 4},
+      "criticalRelations": ["two upper-left white text islands on dark art are separate", "three upper-right balloons are separate", "three lower-right balloons are separate", "SFX and ellipsis never bridge"]
+    },
+    {
+      "id": "sparse-page-with-open-edge-balloons",
+      "file": "50cd600b-16de-41fa-b3c4-fac601acb23c.png",
+      "sha256": "5b63064b0d98aedf4ddcb6bdb5a7f4e7204eaf0319bed9643c3541ff7ff09435",
+      "expected": {"lexicalContainers": 2, "preservedNonlexicalMin": 1},
+      "criticalRelations": ["bottom dialogue regions stay separate", "panel border is not a speech-box border"]
+    },
+    {
+      "id": "open-text-without-balloon-contours",
+      "file": "71210281-60a8-4397-b347-71033dd4782e.png",
+      "sha256": "8284e51548fdfef58d88070af7e47403aac28c03dc2252c79130d5338dad0fa0",
+      "expected": {"lexicalContainersMin": 6, "lexicalContainersMax": 8},
+      "criticalRelations": ["open text must be grouped from local envelopes", "panel rules and character art never bridge text", "mixed horizontal and vertical regions remain independent"]
+    },
+    {
+      "id": "overlapping-rectangular-narration",
+      "file": "755aeb9f-6294-4205-b7ba-0aa14cc48fe9.png",
+      "sha256": "a8558e1bd2d9f4bddb9902eb070b8a98147c9df01eb41c2704451af57ff9c7a6",
+      "aliases": ["0fed61e5-4e8b-481f-b3f0-730ecc3f4f18.png"],
+      "expected": {"lexicalContainers": 7, "preservedNonlexical": 1, "excludedPageNumbers": 1},
+      "criticalRelations": ["the two overlapping top-right rectangles remain separate", "ruby never becomes an independent group", "each rectangle groups its internal columns right-to-left"]
+    }
+  ],
+  "falseDecisionReport": {
+    "requiredFields": [
+      "fixtureId", "imageSha256", "decisionType", "leftLabelOrParagraphId",
+      "rightLabelOrParagraphId", "expectedRelation", "actualRelation",
+      "evidence", "stage", "algorithmVersion"
+    ],
+    "decisionTypeValues": ["false_merge", "false_split", "missing_member", "duplicate_member", "wrong_order", "wrong_role"],
+    "evidenceFields": [
+      "lensGraphComponent", "containerLabels", "separatorType", "separatorScore",
+      "gapGlyph", "topDeltaGlyph", "fontScaleRatio", "verticalOverlap",
+      "rubyParent", "reasonCode"
+    ],
+    "privacy": "Do not include OCR or translated text; use IDs, geometry, counts and hashes."
+  },
+  "debugOverlay": {
+    "layers": [
+      "source image",
+      "OCR paragraph boxes with stable IDs and axis",
+      "main-glyph scale and ruby-parent links",
+      "Lens graph components and their supporting edges",
+      "detected contour, panel and separator primitives with type",
+      "candidate merge graph",
+      "cannot-link edges in red and must-link edges in green",
+      "final container polygons with unique colors and labels",
+      "right-to-left column arrows and page-order arrows",
+      "AI unit IDs with member IDs",
+      "conservation summary: source, grouped, excluded, missing and duplicate counts"
+    ],
+    "requiredExports": ["overlay.png", "decisions.json", "conservation.json"],
+    "checkpoint": "Generate before AI dispatch so grouping failures cannot be confused with provider failures."
+  }
+}

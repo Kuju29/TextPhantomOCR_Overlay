@@ -5,17 +5,18 @@ globalThis.chrome = {
   storage: { local: { get: (_keys, cb) => cb({}), set: (_value, cb) => cb?.() } },
 };
 
-const { fetchLensRawViaRest, groupParagraphsViaRest, translateViaSyncRest } =
-  await import("../src/background/transport.js");
-const { translateUnits } = await import("../src/background/ai-local.js");
+const { fetchLensRawViaRest } = await import("../src/background/transports/lens.js");
+const { groupParagraphsViaRest } = await import("../src/background/transports/groups.js");
+const { translateViaSyncRest } = await import("../src/background/transports/translate.js");
+const { translateUnits } = await import("../src/background/ai/translation-service.js");
 
 const requests = [];
 globalThis.fetch = async (url, init = {}) => {
   const record = { url: String(url), headers: new Headers(init.headers), body: init.body };
   requests.push(record);
   let body = { ok: true };
-  if (record.url.endsWith("/v1/lens/raw")) body = { lens: {} };
-  if (record.url.endsWith("/v1/ai/translate")) {
+  if (record.url.endsWith("/v1/lens/raw") || record.url.endsWith("/v2/engine/runsextension/lens/raw")) body = { lens: {} };
+  if (record.url.endsWith("/v1/ai/translate") || record.url.endsWith("/v2/engine/runsextension/ai/translate")) {
     body = { schema: "tp.ai.result/1", translations: [{ id: "p0", text: "แปล" }], missing: [] };
   }
   return new Response(JSON.stringify(body), {
@@ -32,7 +33,7 @@ await groupParagraphsViaRest("https://api.test", {
 });
 await translateViaSyncRest("https://api.test", { metadata: {} }, { ...common });
 await translateUnits([{ id: "p0", text: "text" }], {
-  route: "server", ai: {}, base: "https://api.test", targetLang: "th",
+  route: "server", ai: { prompt: "full style" }, base: "https://api.test", targetLang: "th",
   sourceLang: "en", operationId: "operation-1", ...common,
 });
 

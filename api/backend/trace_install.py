@@ -1,6 +1,5 @@
 """Wrap every backend module's functions for tracing, in one place.
 
-
 ``TP_TRACE=1`` deliberately keeps only explicit route/stage decision notes.
 Those notes retain the workflow and timings without turning every helper call
 into browser/API/file-I/O load during a large batch.
@@ -23,8 +22,7 @@ answer in the source rather than in someone's memory.
 
 from __future__ import annotations
 
-import importlib
-import pkgutil
+import pkgutil, importlib
 
 from backend import trace
 
@@ -37,8 +35,7 @@ MODULES: tuple[str, ...] = (
     "backend.api.routes.ai_v1",
     "backend.api.routes.ai",
     "backend.api.routes.lens_v1",
-    "backend.api.routes.blocks_v1",
-    "backend.api.routes.groups_v1",
+    "backend.api.routes.lens_groups",
     "backend.api.routes.logs",
     "backend.api.routes.health",
     "backend.api.routes.meta",
@@ -59,37 +56,43 @@ MODULES: tuple[str, ...] = (
     "backend.lens.proto",
     "backend.lens.tree",
     # ai
-    "backend.ai.translate",
+    "backend.ai.translation.invocation",
     "backend.ai.resolve",
-    "backend.ai.providers",
+    "backend.ai.provider_resolution",
     "backend.ai.prompts",
     "backend.ai.parsing",
     "backend.ai.markers",
     "backend.ai.rategate",
     "backend.ai.throttle",
-    "backend.ai.config",
-    "backend.ai.clients.openai_compat",
-    "backend.ai.clients.gemini",
-    "backend.ai.clients.anthropic",
+    "backend.ai.provider_registry",
+    "backend.ai.transports.openai_chat",
+    "backend.ai.providers.local_openai_runtime",
+    "backend.ai.providers.cloud_gemini",
+    "backend.ai.providers.cloud_anthropic",
     "backend.ai.clients.base",
     # render
-    "backend.render.build_ai_tree",
-    "backend.render.bubble",
+    "backend.render.ai_tree.builder",
+    "backend.render.ai_tree.geometry",
+    "backend.render.ai_tree.orientation",
+    "backend.render.ai_tree.spans",
     "backend.render.colors",
     "backend.render.erase",
     "backend.render.erase_boxes",
     "backend.render.font_config",
     "backend.render.fonts",
     "backend.render.geometry",
-    "backend.render.groups",
     "backend.render.layout",
     "backend.render.patch",
     "backend.render.region",
     "backend.render.relayout",
     "backend.render.text_metrics",
     "backend.render.text_utils",
-    "backend.render.textblocks",
-    "backend.render.tp_html",
+    "backend.render.components.typography",
+    "backend.render.html.ai",
+    "backend.render.html.css",
+    "backend.render.html.geometry",
+    "backend.render.html.lens",
+    "backend.render.html.overlay",
     # utils
     "backend.utils.images",
     "backend.utils.text",
@@ -119,7 +122,7 @@ HOT_FUNCTIONS: dict[str, tuple[str, ...]] = {
     # counts and outcomes without serialising source or translated dialogue.
     "backend.api.routes.ai_v1": ("ai_translate_v1",),
     "backend.api.routes.ai": ("resolve", "prompt_default"),
-    "backend.ai.translate": ("translate",),
+    "backend.ai.translation.invocation": ("translate",),
     "backend.ai.resolve": ("resolve", "prompt_default"),
     "backend.ai.prompts": (
         "lang_style", "build_glossary_block", "build_series_block",
@@ -131,20 +134,18 @@ HOT_FUNCTIONS: dict[str, tuple[str, ...]] = {
         "parse_speaker_pairs", "parse_text",
     ),
     "backend.ai.markers": (
-        "apply", "expected_count", "translation_schema", "parse_translation_object",
+        "apply", "expected_count", "translation_schema",
         "extract_indices", "split_memo", "has_complete_sequence",
         "normalize_unit_text", "sanitize", "extract_paragraphs",
         "has_meaningful_text", "clamp_runaway_repeats",
         "clamp_output_repeats",
     ),
     "backend.ai.throttle": ("generate_with_backoff",),
-    "backend.ai.clients.openai_compat": ("generate",),
-    "backend.ai.clients.gemini": ("generate",),
-    "backend.ai.clients.anthropic": ("generate",),
-    "backend.render.tp_html": (
-        "fit_item_font_size", "render_tree_overlay", "ai_tree_to_tp_html",
-        "lens_tree_to_lens_html",
-    ),
+    "backend.ai.transports.openai_chat": ("execute_chat_completion",),
+    "backend.ai.providers.cloud_gemini": ("generate",),
+    "backend.ai.providers.cloud_anthropic": ("generate",),
+    "backend.render.components.typography": ("fit_item_font_size",),
+    "backend.render.html.overlay": ("render_tree_overlay",),
     # Returns the raw Lens Cookie header. Function-level return tracing would
     # put AEC/NID values under the generic key `ret`, bypassing name-based
     # secret redaction. Route/stage notes still record cookie refresh outcome.
@@ -164,7 +165,6 @@ HOT_FUNCTIONS: dict[str, tuple[str, ...]] = {
     "backend.render.colors": (
         "relative_luminance", "contrast_ratio", "pick_bw_text_color", "median_rgba",
     ),
-    "backend.render.groups": ("direction_is_vertical_hint", "canvas_is_oversized"),
     # The protobuf decoder, called per FIELD and per BYTE. Measured on a real
     # 26-image run: 64,464 lines from `read_varint` and 10,384 from `parse` —
     # 36% of a 43 MB file — and every one of them said the same thing. Worse,
@@ -183,7 +183,6 @@ HOT_FUNCTIONS: dict[str, tuple[str, ...]] = {
     ),
 }
 
-
 def install() -> dict[str, int]:
     """Wrap everything. Returns module -> number of functions wrapped."""
     if not trace.full_enabled():
@@ -200,7 +199,6 @@ def install() -> dict[str, int]:
     trace.write("api", "trace_install.py", "install", "..",
                 {"modules": len(wrapped), "functions": sum(wrapped.values())})
     return wrapped
-
 
 def all_backend_modules() -> set[str]:
     """Every module under ``backend`` — what the coverage test compares against."""

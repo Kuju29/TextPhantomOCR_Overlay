@@ -5,7 +5,20 @@
   if (!TP || TP.bail) return;
 
   // Builds a payload from raw fields.
-  function buildPayload({ original_image_url, position, imageDataUri, background, generation, naturalSize }, mode, lang, menuSource = "page_scan", customStage) {
+  function buildPayload(
+    {
+      original_image_url,
+      position,
+      imageDataUri,
+      background,
+      generation,
+      naturalSize,
+    },
+    mode,
+    lang,
+    menuSource = "page_scan",
+    customStage,
+  ) {
     const payload = {
       mode,
       lang,
@@ -54,11 +67,16 @@
       try {
         chrome.storage.local.get(["uploadFormat", "uploadQuality"], (it) => {
           void chrome.runtime.lastError;
-          const fmt = String(it?.uploadFormat || "").trim().toLowerCase();
+          const fmt = String(it?.uploadFormat || "")
+            .trim()
+            .toLowerCase();
           const q = Number(it?.uploadQuality);
           resolve({
             format: UPLOAD_FORMATS.has(fmt) ? fmt : UPLOAD_DEFAULTS.format,
-            quality: Number.isFinite(q) && q > 0 && q <= 1 ? q : UPLOAD_DEFAULTS.quality,
+            quality:
+              Number.isFinite(q) && q > 0 && q <= 1
+                ? q
+                : UPLOAD_DEFAULTS.quality,
           });
         });
       } catch (e) {
@@ -74,11 +92,13 @@
 
   try {
     chrome.storage.onChanged.addListener((changes, area) => {
-      if (area === "local" && ("uploadFormat" in changes || "uploadQuality" in changes))
+      if (
+        area === "local" &&
+        ("uploadFormat" in changes || "uploadQuality" in changes)
+      )
         uploadPrefsPromise = null;
     });
-  } catch {
-  }
+  } catch {}
 
   // Encodes a canvas, reporting when the browser could not honour the format.
   function encodeCanvas(canvas, prefs) {
@@ -87,10 +107,13 @@
     const du = canvas.toDataURL(mime, prefs.quality);
     if (du && !du.startsWith(`data:${mime}`) && !encodeFallbackWarned) {
       encodeFallbackWarned = true;
-      TP.log.warn("canvas cannot encode requested format; browser produced PNG instead", {
-        requested: mime,
-        got: du.slice(5, du.indexOf(";")),
-      });
+      TP.log.warn(
+        "canvas cannot encode requested format; browser produced PNG instead",
+        {
+          requested: mime,
+          got: du.slice(5, du.indexOf(";")),
+        },
+      );
     }
     return du;
   }
@@ -115,15 +138,13 @@
           if (du && du.startsWith("data:image/")) return du;
         }
       }
-    } catch {
-    }
+    } catch {}
 
     try {
       const res = await fetch(src, { cache: "force-cache" });
       const du = await TP.blobToDataUri(await res.blob());
       if (du) return du;
-    } catch {
-    }
+    } catch {}
     return "";
   }
 
@@ -135,10 +156,10 @@
       TP.localRenderEnabled = it?.localRender === true;
       TP.clientBackgroundEnabled = true;
       if (TP.localRenderEnabled) TP.log.info("local overlay rendering is ON");
-      if (TP.clientBackgroundEnabled) TP.log.info("client-painted background is ON");
+      if (TP.clientBackgroundEnabled)
+        TP.log.info("client-painted background is ON");
     });
-  } catch {
-  }
+  } catch {}
 
   // Returns "boxes" when this page will paint the erased background itself, else "image".
   function chooseBackgroundMode(img, mode) {
@@ -149,10 +170,19 @@
   }
 
   // Builds a payload from an image element, optionally inlining its bytes.
-  async function buildPayloadFromImage(img, mode, lang, menuSource = "page_scan", customStage, includeDataUri = false) {
+  async function buildPayloadFromImage(
+    img,
+    mode,
+    lang,
+    menuSource = "page_scan",
+    customStage,
+    includeDataUri = false,
+  ) {
     const src = TP.normUrl(TP.getBestImgUrl(img));
     const imageDataUri =
-      includeDataUri && TP.isInlineableImageUrl(src) ? await getImageDataUriFromElement(img) : "";
+      includeDataUri && TP.isInlineableImageUrl(src)
+        ? await getImageDataUriFromElement(img)
+        : "";
     if (!src && !imageDataUri) return null;
     return buildPayload(
       {
@@ -172,8 +202,6 @@
       customStage,
     );
   }
-
-
 
   const SKIP_URL_RE =
     /\b(?:favicon|sprites?|icons?|logos?|avatars?|emojis?|badges?|buttons?|spinner|loaders?|placeholder|blank|pixel|tracking|analytics|ads?|adverts?|banners?|doubleclick|googletag|gravatar)\b/i;
@@ -212,29 +240,55 @@
       img.getAttribute?.("aria-label") || "",
     ].join(" ");
 
-    if (!src && !img.getAttribute?.("data-src") && !img.getAttribute?.("data-original")) return "no_src";
-    if (src && /^(?:chrome-extension:|moz-extension:|about:|javascript:)/i.test(src)) return "internal_url";
+    if (
+      !src &&
+      !img.getAttribute?.("data-src") &&
+      !img.getAttribute?.("data-original")
+    )
+      return "no_src";
+    if (
+      src &&
+      /^(?:chrome-extension:|moz-extension:|about:|javascript:)/i.test(src)
+    )
+      return "internal_url";
     if (src && BAD_EXT_RE.test(src)) return "vector_icon";
     if (
       (src && (SKIP_URL_RE.test(src) || isReactionAssetUrl(src))) ||
       SKIP_CLASS_RE.test(classText)
-    ) return "ui_asset";
+    )
+      return "ui_asset";
 
-    const r = typeof img.getBoundingClientRect === "function" ? img.getBoundingClientRect() : null;
-    const cssW = Math.max(0, Number(r?.width) || Number(img.width) || Number(img.clientWidth) || 0);
-    const cssH = Math.max(0, Number(r?.height) || Number(img.height) || Number(img.clientHeight) || 0);
+    const r =
+      typeof img.getBoundingClientRect === "function"
+        ? img.getBoundingClientRect()
+        : null;
+    const cssW = Math.max(
+      0,
+      Number(r?.width) || Number(img.width) || Number(img.clientWidth) || 0,
+    );
+    const cssH = Math.max(
+      0,
+      Number(r?.height) || Number(img.height) || Number(img.clientHeight) || 0,
+    );
     const natW = Math.max(0, Number(img.naturalWidth) || 0);
     const natH = Math.max(0, Number(img.naturalHeight) || 0);
-    const w = Math.max(cssW, natW);
-    const h = Math.max(cssH, natH);
+    // Prefer the actual rendered footprint when the element participates in
+    // layout. A tiny thumbnail can point at a large source image; natural
+    // dimensions must not promote that UI thumbnail into a page translation
+    // candidate. Fall back to natural size only when rendered geometry is not
+    // available (for example, a lazy/offscreen image whose layout is not ready).
+    const hasRenderedSize = cssW > 1 && cssH > 1;
+    const w = hasRenderedSize ? cssW : natW;
+    const h = hasRenderedSize ? cssH : natH;
 
     const lazyManaged = Boolean(
       img.getAttribute?.("data-src") ||
-        img.getAttribute?.("data-original") ||
-        img.getAttribute?.("data-lazy-src"),
+      img.getAttribute?.("data-original") ||
+      img.getAttribute?.("data-lazy-src"),
     );
 
-    if ((cssW <= 1 || cssH <= 1) && (!natW || !natH) && !lazyManaged) return "not_visible";
+    if ((cssW <= 1 || cssH <= 1) && (!natW || !natH) && !lazyManaged)
+      return "not_visible";
 
     const { minSide, minArea } = scanMinSizeForMode(mode);
     if (w && h) {
@@ -242,7 +296,13 @@
       if (w * h < minArea) return "too_small_area";
     }
 
-    if (!img.complete && !natW && !natH && !src.startsWith("data:") && !lazyManaged)
+    if (
+      !img.complete &&
+      !natW &&
+      !natH &&
+      !src.startsWith("data:") &&
+      !lazyManaged
+    )
       return "not_loaded";
 
     return "";
@@ -259,7 +319,13 @@
   async function collectImagesForScan(mode, lang, sourceTag) {
     const seen = new Set();
     const out = [];
-    const stats = { candidates: 0, accepted: 0, skipped: 0, duplicates: 0, reasons: {} };
+    const stats = {
+      candidates: 0,
+      accepted: 0,
+      skipped: 0,
+      duplicates: 0,
+      reasons: {},
+    };
     for (const img of Array.from(document.images || [])) {
       stats.candidates++;
       const reason = imageSkipReason(img, mode);
@@ -268,7 +334,8 @@
         continue;
       }
       const payload = await buildPayloadFromImage(img, mode, lang, sourceTag);
-      const key = TP.normUrl(payload?.src) || String(payload?.metadata?.image_id || "");
+      const key =
+        TP.normUrl(payload?.src) || String(payload?.metadata?.image_id || "");
       if (!key) {
         rememberScanSkip(stats, "no_payload");
         continue;

@@ -43,7 +43,9 @@ export async function fetchImageDataUriFromUrl(url, pageUrl) {
   });
   if (!res.ok) throw new Error("HTTP " + res.status);
 
-  const mime = String(res.headers.get("content-type") || "").split(";")[0].trim();
+  const mime = String(res.headers.get("content-type") || "")
+    .split(";")[0]
+    .trim();
   if (mime && !mime.toLowerCase().startsWith("image/")) {
     const body = await readLimitedText(res);
     throw new Error(`Not an image: ${mime}${body ? ` - ${body}` : ""}`);
@@ -71,7 +73,11 @@ export async function fetchImageDataUriFromTab(tabId, url, frameId = 0) {
 
 // Decides whether a job error is permanent or transient.
 export function classifyJobError(msg, context = {}) {
-  const structured = msg?.tpError || (msg && typeof msg === "object" && msg.schema === "tp.error/1" ? msg : null);
+  const structured =
+    msg?.tpError ||
+    (msg && typeof msg === "object" && msg.schema === "tp.error/1"
+      ? msg
+      : null);
   if (structured && typeof structured.retryable === "boolean") {
     return { permanent: !structured.retryable };
   }
@@ -86,17 +92,22 @@ export function classifyJobError(msg, context = {}) {
   if (m.includes("no image data")) return { permanent: true };
   if (/\b(401|403|404|410)\b/.test(m)) return { permanent: true };
   if (m.includes("not an image")) return { permanent: true };
-  if (m.includes("cannot identify image") || m.includes("image file is truncated")) {
+  if (
+    m.includes("cannot identify image") ||
+    m.includes("image file is truncated")
+  ) {
     return { permanent: true };
   }
-  if (m.includes("unsupported") && m.includes("image")) return { permanent: true };
+  if (m.includes("unsupported") && m.includes("image"))
+    return { permanent: true };
   if (
     m.includes("incomplete single ai response") ||
     m.includes("ai text was incomplete; no automatic retry was made")
   ) {
     return { permanent: true };
   }
-  if (m.includes("ai text layer cannot be rendered faithfully")) return { permanent: true };
+  if (m.includes("ai text layer cannot be rendered faithfully"))
+    return { permanent: true };
 
   return { permanent: false };
 }

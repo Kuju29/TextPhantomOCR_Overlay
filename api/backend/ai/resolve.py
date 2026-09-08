@@ -15,31 +15,26 @@ model, the popup must not promise that model will work.
 
 from __future__ import annotations
 
-import hashlib
 from typing import Any, TypedDict
 
+import hashlib
+
 from backend.ai import prompts
-from backend.ai.clients import ollama as ollama_client
-from backend.ai.config import (
-    PROVIDER_DEFAULTS,
-    PROVIDER_PROTOCOLS,
-)
-from backend.ai.providers import (
-    anthropic_models_status,
+# from backend.ai import providers as _provider_modules  # noqa: F401
+from backend.ai.provider_registry import provider_registry
+from backend.ai.provider_resolution import (
     canonical_provider,
     detect_provider_from_key,
-    filter_chat_models,
-    gemini_models_status,
+    default_local_provider,
     is_local_provider,
-    openai_compat_models_status,
     provider_key_mismatch,
     resolve_base_url,
     resolve_model,
 )
+from backend.ai.rate_policy import is_local_target
 from backend.config import settings
 from backend.lens.languages import normalize as normalize_lang
 from backend.security import assert_ai_base_url_allowed
-
 
 class ResolveResult(TypedDict, total=False):
     ok: bool
@@ -64,7 +59,7 @@ class ResolveResult(TypedDict, total=False):
     models_http_status: int
     models_error: str
     model_status: str
-
+    model_capabilities: dict[str, Any]
 
 class EnumerationResult(TypedDict):
     models: list[str]
@@ -73,7 +68,7 @@ class EnumerationResult(TypedDict):
     status: str
     http_status: int
     error: str
-
+    capabilities: dict[str, dict[str, Any]]
 
 def _dedupe_sorted(models: list[str]) -> list[str]:
     """Case-insensitively dedupe and sort a model list."""
@@ -82,40 +77,26 @@ def _dedupe_sorted(models: list[str]) -> list[str]:
         key=str.lower,
     )
 
-
 def _enumerate_models_detailed(provider: str, api_key: str, base_url: str) -> EnumerationResult:
     """Return only a live model list plus authentication/network status.
 
     Static/fallback IDs are intentionally excluded from the selectable list.
     """
-    local = is_local_provider(provider)
+    local = is_local_target(provider, base_url)
 
-    if provider == "gemini":
-        live = gemini_models_status(api_key)
-    elif provider == "anthropic":
-        live = anthropic_models_status(api_key)
-    elif provider == "ollama":
-        from backend.ai.providers import LOCAL_LIST_TIMEOUT_SEC
-
-        live = ollama_client.models_status(base_url, timeout_sec=LOCAL_LIST_TIMEOUT_SEC)
-    else:
-        # Every other provider in PROVIDER_PROTOCOLS uses the OpenAI-compatible
-        # /models + /chat/completions dialect. Local servers receive no
-        # credential or placeholder Authorization header at all.
-        key_for_list = "" if local else api_key
-        from backend.ai.providers import LIST_TIMEOUT_SEC, LOCAL_LIST_TIMEOUT_SEC
-
-        live = openai_compat_models_status(
-            key_for_list,
-            base_url,
-            timeout_sec=LOCAL_LIST_TIMEOUT_SEC if local else LIST_TIMEOUT_SEC,
-            provider=provider,
-        )
-        if live["status"] == "valid":
-            live["models"] = filter_chat_models(provider, live["models"])
+    spec = provider_registry.require(provider)
+    listed = spec.adapter.list_models(api_key="" if local else api_key, base_url=base_url)
+    from backend.ai.provider_resolution import remember_model_capabilities
+    remember_model_capabilities(provider, base_url, api_key, dict(listed.capabilities))
+    live = {"models": list(listed.models), "status": listed.status,
+            "http_status": listed.http_status, "error": listed.error,
+            "capabilities": dict(listed.capabilities)}
 
     usable_live = _dedupe_sorted(live["models"])
-    if usable_live:
+    if live["status"] == "valid":
+        # A successful provider catalogue is authoritative even when filtering
+        # leaves zero translation-compatible models. Do not turn an empty valid
+        # list into an "unverified" state and then resurrect static guesses.
         return EnumerationResult(
             models=usable_live,
             source="live",
@@ -123,6 +104,7 @@ def _enumerate_models_detailed(provider: str, api_key: str, base_url: str) -> En
             status=live["status"],
             http_status=live["http_status"],
             error=live["error"],
+            capabilities=dict(live.get("capabilities") or {}),
         )
 
     # Do not put guessed/static models in the picker. A cloud model appears only
@@ -134,8 +116,8 @@ def _enumerate_models_detailed(provider: str, api_key: str, base_url: str) -> En
         status=live["status"],
         http_status=live["http_status"],
         error=live["error"],
+        capabilities={},
     )
-
 
 def resolve(payload: dict[str, Any]) -> ResolveResult:
     """Resolve provider/model while keeping support/auth/list status explicit."""
@@ -147,13 +129,8 @@ def resolve(payload: dict[str, Any]) -> ResolveResult:
     style_default = prompts.lang_style(lang)
 
     prov_hint = canonical_provider(str(payload.get("provider") or "auto"))
-    base_hint = str(payload.get("base_url") or "").strip().lower()
-    looks_local = (
-        is_local_provider(prov_hint)
-        or "localhost" in base_hint
-        or "127.0.0.1" in base_hint
-        or "0.0.0.0" in base_hint
-    )
+    base_hint = str(payload.get("base_url") or "").strip()
+    looks_local = is_local_target(prov_hint, base_hint)
 
     provider = prov_hint
     if provider in ("", "auto"):
@@ -179,7 +156,7 @@ def resolve(payload: dict[str, Any]) -> ResolveResult:
                     model_status="unverified",
                 )
         elif looks_local:
-            provider = "ollama"
+            provider = default_local_provider()
         else:
             return ResolveResult(
                 ok=False,
@@ -200,13 +177,13 @@ def resolve(payload: dict[str, Any]) -> ResolveResult:
                 model_status="unverified",
             )
 
-    if not candidate_key and looks_local and provider not in PROVIDER_DEFAULTS:
-        provider = "ollama"
+    if not candidate_key and looks_local and provider not in provider_registry:
+        provider = default_local_provider()
 
     # Never send a server-owned cloud key to a local/self-hosted endpoint.
     # Local providers use no credential (the model-list helper supplies only a
     # harmless placeholder header when required by an OpenAI-compatible server).
-    local = is_local_provider(provider)
+    local = is_local_target(provider, base_hint)
     api_key = "" if local else (supplied_key or server_key)
     key_source = "none" if local else ("user" if supplied_key else ("env" if api_key else "none"))
 
@@ -222,7 +199,7 @@ def resolve(payload: dict[str, Any]) -> ResolveResult:
             lang=lang,
             prompt_editable_default=style_default,
             backend_supported=True,
-            provider_protocol=str(PROVIDER_PROTOCOLS.get(provider) or ""),
+            provider_protocol=(provider_registry.get(provider).protocol if provider_registry.get(provider) else ""),
             key_status="mismatch",
             key_source=key_source,
             key_verified=False,
@@ -232,8 +209,9 @@ def resolve(payload: dict[str, Any]) -> ResolveResult:
             model_status="unverified",
         )
 
-    protocol = str(PROVIDER_PROTOCOLS.get(provider) or "")
-    backend_supported = bool(provider in PROVIDER_DEFAULTS and protocol)
+    spec = provider_registry.get(provider)
+    protocol = spec.protocol if spec else ""
+    backend_supported = bool(spec and spec.adapter and protocol)
     if not backend_supported:
         return ResolveResult(
             ok=False,
@@ -254,7 +232,7 @@ def resolve(payload: dict[str, Any]) -> ResolveResult:
             model_status="unsupported",
         )
 
-    preset = PROVIDER_DEFAULTS.get(provider, {})
+    preset = {"model": spec.default_model, "base_url": spec.default_base_url} if spec else {}
     requested_model = str(payload.get("model") or "auto").strip() or "auto"
     requested_is_auto = requested_model.lower() in ("", "auto")
     resolved_model = resolve_model(provider, requested_model)
@@ -300,16 +278,13 @@ def resolve(payload: dict[str, Any]) -> ResolveResult:
         key_status = "unverified"
         key_verified = False
 
-    # Only a LIVE provider list is authoritative enough to replace an explicit
-    # stored model. Fallback/known models must never reset a user's pinned id.
-    if live_verified and models and resolved_model not in models:
-        if requested_is_auto:
-            preset_model = str(preset.get("model", "") or "")
-            resolved_model = preset_model if preset_model in models else models[0]
-        else:
-            preset_model = str(preset.get("model", "") or "")
-            resolved_model = preset_model if preset_model in models else models[0]
-            remap_reason = remap_reason or "not_in_live_list"
+    # Auto may choose from the authoritative live list. An explicit user model
+    # is never silently swapped to another model: missing means unavailable and
+    # the popup must ask the user to choose one of the verified entries.
+    if live_verified and requested_is_auto and resolved_model not in models and models:
+        preset_model = str(preset.get("model", "") or "")
+        resolved_model = preset_model if preset_model in models else models[0]
+        remap_reason = remap_reason or "auto_live_selection"
 
     if live_verified:
         model_status = "available" if resolved_model in models else "unavailable"
@@ -318,10 +293,11 @@ def resolve(payload: dict[str, Any]) -> ResolveResult:
 
     # Authentication/plan failure is a real failure and never unlocks an
     # unverified fallback model list.
-    ok = key_status not in ("invalid", "forbidden")
+    ok = key_status not in ("invalid", "forbidden") and model_status != "unavailable"
     error = (
         "invalid_api_key" if key_status == "invalid"
         else "provider_access_forbidden" if key_status == "forbidden"
+        else "model_unavailable" if model_status == "unavailable"
         else ""
     )
 
@@ -348,8 +324,8 @@ def resolve(payload: dict[str, Any]) -> ResolveResult:
         models_http_status=enumeration["http_status"],
         models_error=enumeration["error"],
         model_status=model_status,
+        model_capabilities=dict(enumeration["capabilities"].get(resolved_model) or {}),
     )
-
 
 def prompt_default(lang: str, *, want_memo: bool = True) -> dict[str, Any]:
     """Return the default prompt pieces for ``lang`` (for ``/ai/prompt/default``)."""

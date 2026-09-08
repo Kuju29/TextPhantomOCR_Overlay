@@ -1,6 +1,5 @@
 """Low-level text classification / sanitisation used by the renderer.
 
-
 Kept separate from :mod:`backend.utils.text` because these helpers are tied
 to *drawing* concerns (Thai-vs-Latin font selection, control-char stripping)
 rather than general text munging.
@@ -17,16 +16,13 @@ _THAI_END = 0x0E7F
 # A run is a (text, is_thai) pair — used to switch fonts mid-string.
 Run = tuple[str, bool | None]
 
-
 def is_thai_char(ch: str) -> bool:
     """True if ``ch`` is in the Thai Unicode block."""
     return bool(ch) and _THAI_START <= ord(ch) <= _THAI_END
 
-
 def contains_thai(text: str) -> bool:
     """True if ``text`` contains at least one Thai character."""
     return any(is_thai_char(ch) for ch in text or "")
-
 
 # Right-to-left Unicode ranges: Hebrew, Arabic (+ supplements) and the
 # Arabic presentation forms blocks.
@@ -41,7 +37,6 @@ _RTL_RANGES = (
     (0xFE70, 0xFEFF),  # Arabic presentation forms-B
 )
 
-
 def is_rtl_char(ch: str) -> bool:
     """True if ``ch`` belongs to a right-to-left script block."""
     if not ch:
@@ -49,11 +44,9 @@ def is_rtl_char(ch: str) -> bool:
     o = ord(ch)
     return any(lo <= o <= hi for lo, hi in _RTL_RANGES)
 
-
 def contains_rtl(text: str) -> bool:
     """True if ``text`` contains at least one right-to-left character."""
     return any(is_rtl_char(ch) for ch in text or "")
-
 
 def sanitize_draw_text(s: str) -> str:
     """Strip characters Pillow cannot render.
@@ -66,7 +59,6 @@ def sanitize_draw_text(s: str) -> str:
     return "".join(
         ch for ch in t if ch == "\n" or unicodedata.category(ch)[0] != "C"
     )
-
 
 def split_runs_for_fallback(text: str) -> list[Run]:
     """Split ``text`` into maximal Thai / non-Thai runs.

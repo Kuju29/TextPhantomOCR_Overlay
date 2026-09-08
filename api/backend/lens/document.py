@@ -33,7 +33,6 @@ SCHEMA = "tp.lens-document/1"
 # and roughly a third of the payload of full float repr.
 _PRECISION = 5
 
-
 def _round(value: Any) -> float | None:
     """Round to the wire precision, or ``None`` when there is no number here.
 
@@ -50,7 +49,6 @@ def _round(value: Any) -> float | None:
         return None
     return rounded
 
-
 def _point(raw: Any) -> list[float] | None:
     if not isinstance(raw, dict):
         return None
@@ -61,7 +59,6 @@ def _point(raw: Any) -> list[float] | None:
     if x is None or y is None:
         return None
     return [x, y]
-
 
 def _items(para_id: str, raw_items: Any, *, layer: str = "") -> tuple[list[dict[str, Any]], int]:
     """Every usable item of one paragraph, and how many were unusable."""
@@ -78,7 +75,6 @@ def _items(para_id: str, raw_items: Any, *, layer: str = "") -> tuple[list[dict[
             continue
         out.append(item)
     return out, dropped
-
 
 def _item(para_id: str, index: int, raw: dict) -> dict[str, Any] | None:
     """One baseline segment, or None when its geometry is unusable.
@@ -133,7 +129,6 @@ def _item(para_id: str, index: int, raw: dict) -> dict[str, Any] | None:
         item["spans"] = spans
     return item
 
-
 def build(
     original_tree: dict | None,
     translated_tree: dict | None,
@@ -156,7 +151,17 @@ def build(
     dropped_items = 0
 
     original_paras = (original_tree or {}).get("paragraphs") or []
-    translated_paras = (translated_tree or {}).get("paragraphs") or []
+    target_paras = (translated_tree or {}).get("paragraphs") or []
+    source_map = ((original_tree or {}).get("furigana_filter") or {}).get("rawToFiltered")
+    translated_paras = target_paras
+    if isinstance(source_map, list) and None in source_map:
+        # Preserve existing pairing only if the original paragraph counts match.
+        # Standalone Translated rendering is not filtered or reindexed here.
+        translated_paras = [None] * len(original_paras)
+        if len(target_paras) == len(source_map):
+            for before, after in enumerate(source_map):
+                if isinstance(after, int) and not isinstance(after, bool) and 0 <= after < len(original_paras):
+                    translated_paras[after] = target_paras[before]
 
     for index, raw in enumerate(original_paras):
         if not isinstance(raw, dict):
@@ -229,7 +234,6 @@ def build(
 
     return document
 
-
 def attach_ai_layer(document: dict | None, ai_tree: dict | None) -> int:
     """Give each paragraph the AI layer's own lines. Returns how many got them.
 
@@ -294,7 +298,6 @@ def attach_ai_layer(document: dict | None, ai_tree: dict | None) -> int:
         document.pop("warnings", None)
     return attached
 
-
 def translation_units(document: dict | None) -> list[dict[str, Any]]:
     """The text worth sending to a translator, as addressable units.
 
@@ -317,3 +320,11 @@ def translation_units(document: dict | None) -> list[dict[str, Any]]:
             }
         )
     return units
+
+
+def build_translated(translated_tree, *, width, height, source_lang="", target_lang=""):
+    """Translated display document; never positional Original-to-target mapping."""
+    placeholders = [{"text": "", "items": [], "text_light": bool(p.get("text_light"))}
+                    for p in (translated_tree or {}).get("paragraphs", [])]
+    return build({"paragraphs": placeholders}, translated_tree, width=width, height=height,
+                 source_lang=source_lang, target_lang=target_lang)

@@ -11,26 +11,37 @@
   let port = null;
   let timer = null;
   let stopAt = 0;
+  const activeBatches = new Set();
 
   // Closes the port and timer while keeping the deadline so it can resume.
-  function teardownPort() {
+  function teardownPort({ graceful = false } = {}) {
     if (timer) {
       clearInterval(timer);
       timer = null;
     }
     if (port) {
       try {
-        port.disconnect();
-      } catch {
-      }
+        if (graceful)
+          port.postMessage({ type: "TP_KEEPALIVE_GRACEFUL_STOP" });
+      } catch {}
+      const closing = port;
       port = null;
+      setTimeout(() => {
+        try {
+          closing.disconnect();
+        } catch {}
+      }, 0);
     }
   }
 
   // Stops the keep-alive and forgets the deadline.
-  function stop() {
+  function stop(batchId = "") {
+    const id = String(batchId || "").trim();
+    if (id) activeBatches.delete(id);
+    else activeBatches.clear();
+    if (activeBatches.size) return;
     stopAt = 0;
-    teardownPort();
+    teardownPort({ graceful: true });
   }
 
   // Acknowledges a close from the other end and keeps the deadline for a later restore.
@@ -40,7 +51,9 @@
   }
 
   // Starts or extends the keep-alive for the given number of milliseconds.
-  function start(ms) {
+  function start(ms, batchId = "") {
+    const id = String(batchId || "").trim();
+    if (id) activeBatches.add(id);
     const duration = Number(ms) > 0 ? Number(ms) : DEFAULT_DURATION_MS;
     stopAt = Math.max(stopAt || 0, Date.now() + duration);
 
@@ -72,11 +85,19 @@
 
   window.addEventListener("pagehide", (e) => {
     if (e.persisted) teardownPort();
-    else stop();
+    else {
+      try {
+        port?.postMessage({ type: "TP_KEEPALIVE_PAGE_UNLOAD" });
+      } catch {}
+      activeBatches.clear();
+      stopAt = 0;
+      teardownPort();
+    }
   });
   window.addEventListener("pageshow", (e) => {
-    if (e.persisted && stopAt && Date.now() < stopAt) start(stopAt - Date.now());
+    if (e.persisted && stopAt && Date.now() < stopAt)
+      start(stopAt - Date.now());
   });
 
-  TP.keepAlive = { start, stop };
+  TP.keepAlive = { start, stop, activeCount: () => activeBatches.size };
 })();

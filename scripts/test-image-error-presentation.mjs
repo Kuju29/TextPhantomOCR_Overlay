@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 
 const read = (name) => readFile(new URL(`../${name}`, import.meta.url), "utf8");
 const [finder, overlay, auto, viewer, viewerDom, viewerCss] = await Promise.all([
-  read("src/content/image-finder.js"), read("src/content/overlay.js"),
+  read("src/content/image-finder.js"), read("src/content/overlay/message-controller.js"),
   read("src/auto/auto.js"), read("src/viewer/viewer.js"),
   read("src/viewer/dom.js"), read("src/viewer/viewer.css"),
 ]);

@@ -1,6 +1,5 @@
 """Pixel-accurate measurement of a single rendered line of text.
 
-
 Both helpers walk the Thai/Latin runs of a string, measure each run with its
 own font, and aggregate the result.  They share the same scan loop — the only
 difference is what they return.
@@ -10,12 +9,11 @@ from __future__ import annotations
 
 from PIL import Image, ImageDraw
 
-from backend.render.fonts import font_pair
+from backend.render.fonts import UnsupportedFontError, font_pair
 from backend.render.text_utils import sanitize_draw_text, split_runs_for_fallback
 
 # A scratch canvas reused for all text measurement (Pillow needs a draw ctx).
 _SCRATCH = ImageDraw.Draw(Image.new("RGBA", (16, 16), (0, 0, 0, 0)))
-
 
 def _scan_runs(text: str, thai_path: str, latin_path: str, size: int):
     """Measure ``text`` run by run.
@@ -27,7 +25,10 @@ def _scan_runs(text: str, thai_path: str, latin_path: str, size: int):
     if not t:
         return None
 
-    f_thai, f_latin = font_pair(thai_path, latin_path, size)
+    try:
+        f_thai, f_latin = font_pair(thai_path, latin_path, size)
+    except UnsupportedFontError:
+        return None
     x = 0.0
     min_top = 0.0
     max_bottom = 0.0
@@ -42,7 +43,7 @@ def _scan_runs(text: str, thai_path: str, latin_path: str, size: int):
             max_bottom = max(max_bottom, float(bb[3]))
             x = float(bb[2])
         except Exception:
-            # Very old Pillow / bitmap font fallback.
+            # Very old Pillow measurement API fallback for a validated font.
             try:
                 w, h = _SCRATCH.textsize(run, font=font)  # type: ignore[attr-defined]
             except Exception:
@@ -52,7 +53,6 @@ def _scan_runs(text: str, thai_path: str, latin_path: str, size: int):
             x += float(w)
 
     return x, min_top, max_bottom
-
 
 def baseline_offset_px(text: str, thai_path: str, latin_path: str, size: int) -> tuple[float, float] | None:
     """Return ``(baseline_offset, total_height)`` for one line of ``text``.
@@ -67,7 +67,6 @@ def baseline_offset_px(text: str, thai_path: str, latin_path: str, size: int) ->
     total_h = max(1.0, max_bottom - min_top)
     baseline_offset = -(total_h / 2.0) - min_top
     return baseline_offset, total_h
-
 
 def line_metrics_px(text: str, thai_path: str, latin_path: str, size: int) -> tuple[float, float, float] | None:
     """Return ``(width, total_height, baseline_to_center)`` for one line."""

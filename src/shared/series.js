@@ -31,8 +31,12 @@ export function seriesSlugFromTitle(rawTitle) {
     " ",
   );
   // Split on common separators; the series name is usually the longest chunk.
-  const parts = t.split(/[|•·—–:]+|\s-\s/).map((s) => s.trim()).filter(Boolean);
-  if (parts.length) t = parts.reduce((a, b) => (b.length > a.length ? b : a), "");
+  const parts = t
+    .split(/[|•·—–:]+|\s-\s/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (parts.length)
+    t = parts.reduce((a, b) => (b.length > a.length ? b : a), "");
   const slug = t
     .toLowerCase()
     .normalize("NFC")
@@ -76,7 +80,9 @@ export async function resolveSeriesKey(url) {
   try {
     const store = await getStorage([MD_MAP_KEY]);
     const map =
-      store[MD_MAP_KEY] && typeof store[MD_MAP_KEY] === "object" ? store[MD_MAP_KEY] : {};
+      store[MD_MAP_KEY] && typeof store[MD_MAP_KEY] === "object"
+        ? store[MD_MAP_KEY]
+        : {};
     if (map[chapterId]) return `mangadex.org/title/${map[chapterId]}`;
 
     const ctrl = new AbortController();
@@ -86,7 +92,9 @@ export async function resolveSeriesKey(url) {
     }).finally(() => clearTimeout(timer));
     if (!r.ok) return base;
     const data = await r.json();
-    const rel = (data?.data?.relationships || []).find((x) => x?.type === "manga");
+    const rel = (data?.data?.relationships || []).find(
+      (x) => x?.type === "manga",
+    );
     const mangaId = String(rel?.id || "").toLowerCase();
     if (!mangaId) return base;
 
@@ -113,7 +121,10 @@ export function seriesKeyFromUrl(url) {
       // Pure number (chapter/page id).
       if (/^\d+([._-]\d+)*$/.test(t)) break;
       // chapter-12 / ch_3 / episode-5 / ep12 / page-2 / vol-4 …
-      if (/(^|[-_])(ch(apter)?|ep(isode)?|page|pg|vol(ume)?)([-_.]?\d+|$)/.test(t)) break;
+      if (
+        /(^|[-_])(ch(apter)?|ep(isode)?|page|pg|vol(ume)?)([-_.]?\d+|$)/.test(t)
+      )
+        break;
       kept.push(t);
       if (kept.length >= 3) break;
     }

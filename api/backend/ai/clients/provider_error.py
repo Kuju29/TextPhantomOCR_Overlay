@@ -1,12 +1,9 @@
 """Safe, bounded diagnostics for errors returned by AI providers."""
 
 from __future__ import annotations
-
-import json
-import re
 from typing import Any
 
-import httpx
+import json, re, httpx
 
 _MAX_DETAIL = 320
 _SECRET_PATTERNS = (
@@ -20,6 +17,28 @@ _SECRET_PATTERNS = (
     ),
 )
 
+class ProviderFailure(RuntimeError):
+    """Safe provider failure carrying only bounded, public diagnostics."""
+
+    def __init__(self, message: str, *, provider: str, model: str,
+                 status: int | None = None, provider_code: str = "",
+                 provider_type: str = "", provider_message: str = "") -> None:
+        super().__init__(message)
+        self.provider = _scrub(provider)[:64]
+        self.model = _scrub(model)[:160]
+        self.status = status
+        self.provider_code = _scrub(provider_code)[:80]
+        self.provider_type = _scrub(provider_type)[:80]
+        self.provider_message = _scrub(provider_message)
+
+class ProviderHttpError(ProviderFailure):
+    """The upstream provider returned a non-success HTTP response."""
+
+class ProviderTransportError(ProviderFailure):
+    """The provider could not be reached or timed out."""
+
+class ProviderAdapterContractError(RuntimeError):
+    """TextPhantom's provider adapter interface is internally inconsistent."""
 
 def _scrub(value: Any) -> str:
     text = " ".join(str(value or "").split())
@@ -31,7 +50,6 @@ def _scrub(value: Any) -> str:
         else:
             text = pattern.sub("[redacted]", text)
     return text[:_MAX_DETAIL]
-
 
 def _error_fields(data: Any) -> tuple[str, str, str]:
     if not isinstance(data, dict):
@@ -46,8 +64,7 @@ def _error_fields(data: Any) -> tuple[str, str, str]:
     message = _scrub(error.get("message") or error.get("detail"))
     return code, kind, message
 
-
-def safe_http_error(provider: str, response: httpx.Response, model: str) -> RuntimeError:
+def safe_http_error(provider: str, response: httpx.Response, model: str) -> ProviderHttpError:
     """Build a useful exception without exposing headers or an unbounded body."""
     try:
         data = response.json()
@@ -61,4 +78,8 @@ def safe_http_error(provider: str, response: httpx.Response, model: str) -> Runt
         fields.append(f"providerType={kind}")
     if message:
         fields.append(f"detail={message}")
-    return RuntimeError(fields[0] + " (" + ", ".join(fields[1:]) + ")")
+    return ProviderHttpError(
+        fields[0] + " (" + ", ".join(fields[1:]) + ")",
+        provider=provider, model=model, status=int(response.status_code),
+        provider_code=code, provider_type=kind, provider_message=message,
+    )

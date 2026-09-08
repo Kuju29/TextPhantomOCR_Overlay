@@ -5,7 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from backend.ai.errors import ModelOutputContractError
-
+from backend.ai.clients.provider_error import (
+    ProviderAdapterContractError, ProviderHttpError, ProviderTransportError,
+)
 
 def classify(exc: BaseException) -> str:
     """Return a stable reason code while the trace keeps the original message.
@@ -15,7 +17,18 @@ def classify(exc: BaseException) -> str:
     Hugging Face and local models without pretending the providers are alike.
     """
     if isinstance(exc, ModelOutputContractError):
+        code = getattr(exc, "code", "")
+        if code in {"wrong_language_output", "AI_OUTPUT_CONTRACT_MISMATCH"}:
+            return code
         return "invalid_model_output"
+    if isinstance(exc, ProviderAdapterContractError):
+        return "provider_client_contract_error"
+    if isinstance(exc, ProviderTransportError):
+        return "provider_transport"
+    if isinstance(exc, ProviderHttpError):
+        message = str(exc).lower()
+        # Continue through the provider-code/message classifiers below before
+        # falling back to provider_http.
     message = str(exc).lower()
     if any(marker in message for marker in (
         "billing required", "billing_required", "billing is past due",
@@ -56,12 +69,11 @@ def classify(exc: BaseException) -> str:
         return "provider_timeout"
     if "transport error" in message:
         return "provider_transport"
-    if "http " in message:
+    if isinstance(exc, ProviderHttpError) or "http " in message:
         return "provider_http"
     if "json" in message or "schema" in message or "structured" in message:
         return "invalid_output_contract"
     return "provider_or_output_contract"
-
 
 _RATE_LIMIT_MARKERS = (
     "429",
@@ -74,12 +86,10 @@ _RATE_LIMIT_MARKERS = (
     "overloaded",
 )
 
-
 def is_rate_limited(exc: BaseException) -> bool:
     """Whether the provider itself refused for rate or quota reasons."""
     message = str(exc).lower()
     return any(marker in message for marker in _RATE_LIMIT_MARKERS)
-
 
 def retry_after_sec(exc: BaseException) -> float:
     """Seconds the provider asked us to wait, or 0 when it did not say."""
@@ -88,7 +98,6 @@ def retry_after_sec(exc: BaseException) -> float:
     match = re.search(r"retry[-_ ]?after[\"\':= ]+(\d+(?:\.\d+)?)", str(exc), re.IGNORECASE)
     return float(match.group(1)) if match else 0.0
 
-
 @dataclass(frozen=True)
 class ProviderHttpFailure:
     status: int
@@ -96,7 +105,6 @@ class ProviderHttpFailure:
     message: str
     retryable: bool
     retry_after: int = 0
-
 
 def provider_http_failure(exc: BaseException) -> ProviderHttpFailure:
     """Map an upstream/provider failure without returning its raw message."""
@@ -116,8 +124,11 @@ def provider_http_failure(exc: BaseException) -> ProviderHttpFailure:
     # A permanent upstream 4xx must not invite an identical retry.  Keep the
     # existing outer 502 behaviour; upstreamStatus carries the real response.
     import re
+    typed_status = getattr(exc, "status", None)
     match = re.search(r"\bHTTP\s+(\d{3})\b", str(exc), re.IGNORECASE)
-    upstream_status = int(match.group(1)) if match else None
+    upstream_status = int(typed_status) if isinstance(typed_status, int) else (
+        int(match.group(1)) if match else None
+    )
     if upstream_status == 413:
         return ProviderHttpFailure(
             502, "provider_payload_too_large",
@@ -137,6 +148,11 @@ def provider_http_failure(exc: BaseException) -> ProviderHttpFailure:
         return ProviderHttpFailure(
             502, reason, "The AI provider refused this content.", False,
         )
+    if reason == "provider_client_contract_error":
+        return ProviderHttpFailure(
+            500, reason,
+            "A TextPhantom provider adapter is incompatible with the router.", False,
+        )
     if upstream_status in (401, 403):
         return ProviderHttpFailure(
             502, "provider_auth_failed",
@@ -153,7 +169,7 @@ def provider_http_failure(exc: BaseException) -> ProviderHttpFailure:
         "model output", "model response", "no candidates", "finishreason",
     ))
     if reason in {
-        "invalid_model_output", "incomplete_output", "generation_stopped",
+        "invalid_model_output", "wrong_language_output", "incomplete_output", "generation_stopped",
         "empty_output", "provider_timeout", "provider_transport",
         "provider_http", "invalid_output_contract",
     } or (reason == "provider_or_output_contract" and provider_marked):

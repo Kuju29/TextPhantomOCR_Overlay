@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import threading
-import time
 
-import httpx
+import httpx, threading, time
 
 from backend.config import settings
 
@@ -17,10 +15,8 @@ _refreshing = False
 _refresh_error: BaseException | None = None
 _condition = threading.Condition()
 
-
 class CookieRefreshTimeout(RuntimeError):
     """A concurrent cookie refresh did not finish within the bounded wait."""
-
 
 @dataclass(frozen=True)
 class CookieState:
@@ -28,7 +24,6 @@ class CookieState:
     generation: int
     refresh_epoch: int
     coalesced: bool = False
-
 
 def _url(firebase_url: str | None) -> str:
     url = (firebase_url or settings.firebase_url or "").strip()
@@ -39,14 +34,12 @@ def _url(firebase_url: str | None) -> str:
         )
     return url
 
-
 def _fresh(url: str, now: float) -> bool:
     return bool(
         _cache.get("data")
         and _cache.get("url") == url
         and (now - float(_cache.get("ts") or 0.0)) < settings.firebase_cookie_ttl_sec
     )
-
 
 def _fetch(url: str) -> dict:
     response = httpx.get(url, timeout=30)
@@ -55,7 +48,6 @@ def _fetch(url: str) -> dict:
     if not isinstance(value, dict) or not value:
         raise RuntimeError("Lens cookie source returned no usable cookie jar")
     return value
-
 
 def _refresh(url: str, *, observed_epoch: int, timeout_sec: float) -> CookieState:
     """Refresh once, or share a refresh completed after the caller's snapshot."""
@@ -95,7 +87,6 @@ def _refresh(url: str, *, observed_epoch: int, timeout_sec: float) -> CookieStat
             _refresh_epoch += 1
             _condition.notify_all()
 
-
 def state(firebase_url: str | None = None, *, timeout_sec: float = 30.0) -> CookieState:
     """Return a fresh snapshot, coalescing a cold-cache fetch as well."""
     url = _url(firebase_url)
@@ -105,7 +96,6 @@ def state(firebase_url: str | None = None, *, timeout_sec: float = 30.0) -> Cook
         epoch = _refresh_epoch
     return _refresh(url, observed_epoch=epoch, timeout_sec=timeout_sec)
 
-
 def refresh_after(
     prior: CookieState, firebase_url: str | None = None, *, timeout_sec: float = 30.0
 ) -> CookieState:
@@ -114,7 +104,6 @@ def refresh_after(
         _url(firebase_url), observed_epoch=prior.refresh_epoch, timeout_sec=timeout_sec
     )
 
-
 def get(firebase_url: str | None = None, *, force_refresh: bool = False) -> dict:
     """Backward-compatible cookie-only API."""
     current = state(firebase_url)
@@ -122,13 +111,12 @@ def get(firebase_url: str | None = None, *, force_refresh: bool = False) -> dict
         current = refresh_after(current, firebase_url)
     return current.data
 
-
-def _reset_for_tests() -> None:
-    global _generation, _refresh_epoch, _refreshing, _refresh_error
-    with _condition:
-        _cache.update(ts=0.0, url="", data=None)
-        _generation = 0
-        _refresh_epoch = 0
-        _refreshing = False
-        _refresh_error = None
-        _condition.notify_all()
+# def _reset_for_tests() -> None:
+#     global _generation, _refresh_epoch, _refreshing, _refresh_error
+#     with _condition:
+#         _cache.update(ts=0.0, url="", data=None)
+#         _generation = 0
+#         _refresh_epoch = 0
+#         _refreshing = False
+#         _refresh_error = None
+#         _condition.notify_all()

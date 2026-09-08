@@ -1,7 +1,9 @@
-// Paces outgoing work per resource lane. AI lanes are intentionally provider-driven:
-// start fast, learn the last clean concurrency for this exact provider/model/key,
-// and only narrow when the PROVIDER itself pushes back. Server admission pressure
-// is not provider evidence and must leave the provider window alone.
+import { note } from "../shared/trace.js";
+// Paces outgoing work per resource lane. Cloud AI lanes remain provider-driven:
+// server admission pressure is not provider evidence, while provider backpressure
+// narrows the exact provider/model/key lane. Local Auto is different: one machine
+// owns the model, so it probes endpoint+model throughput/latency and keeps the best
+// measured window instead of widening forever on eventual success.
 
 import { getStorage, setStorage } from "../shared/storage.js";
 import {
@@ -21,6 +23,11 @@ const DEFAULT_MAX_WINDOW = 32;
 const AI_START_WINDOW = 8;
 const AI_MAX_WINDOW = 64;
 const BACKOFF_FACTOR = 0.5;
+const LOCAL_AUTO_PROBE_SAMPLES = 2;
+const LOCAL_AUTO_MIN_THROUGHPUT_GAIN = 1.08;
+const LOCAL_AUTO_MAX_LATENCY_RATIO = 1.75;
+const LOCAL_AUTO_REPROBE_SUCCESSES = 12;
+const LOCAL_AUTO_LEARNING_VERSION = 1;
 
 // Learned concurrency is local to the user's browser and contains only the
 // already-hashed lane id, never the API key. Two hours is long enough to avoid
@@ -33,6 +40,17 @@ let learningCache = null;
 let learningLoadPromise = null;
 
 const lanes = new Map();
+let diagnosticLaneSequence = 0;
+function auditCapacity(l, reason, evidence = null) {
+  const next={window:l.window,ceiling:effectiveMax(l),pausedUntil:l.pausedUntil,unlimited:l.unlimited};
+  const before=l.auditPolicy;
+  l.auditPolicy=next;
+  if (!before || JSON.stringify(before)===JSON.stringify(next)) return;
+  const view=v=>({window:v.window,ceiling:v.ceiling,pauseMs:Math.max(0,v.pausedUntil-Date.now()),unlimited:v.unlimited});
+  note("background/scheduler.js","capacityDecision",{schema:"tp.audit/1",event:"capacity_changed",reason,
+    scope:{id:l.diagnosticLaneId},before:view(before),after:view(next),
+    ...(evidence ? {evidence} : {}), effectiveFrom:"next_request",persistence:"memory_only"});
+}
 
 // Returns the initial and maximum window for a lane key.
 function lanePolicy(key) {
@@ -48,6 +66,8 @@ function makeLane(key) {
   const policy = lanePolicy(key);
   return {
     key,
+    diagnosticLaneId:`c${++diagnosticLaneSequence}`,
+    auditPolicy:{window:policy.initialWindow,ceiling:policy.maxWindow,pausedUntil:0,unlimited:false},
     window: policy.initialWindow,
     maxWindow: policy.maxWindow,
     running: 0,
@@ -73,22 +93,57 @@ function makeLane(key) {
     slowStart: true,
     unlimited: false,
     localCapacity: null,
-    stats: { ok: 0, rejected: 0, failed: 0, backoffs: 0, ceilingHits: 0, gated: 0 },
+    localAuto: {
+      bestWindow: 0,
+      bestLatencyMs: 0,
+      bestScore: 0,
+      probeWindow: 0,
+      probeSamples: 0,
+      probeTotalMs: 0,
+      stable: false,
+      cooldownSuccesses: 0,
+    },
+    stats: {
+      ok: 0,
+      rejected: 0,
+      failed: 0,
+      backoffs: 0,
+      ceilingHits: 0,
+      gated: 0,
+    },
   };
 }
 
 // Applies the local-runtime capacity policy without changing time/RPM pacing.
-// Auto starts at one and may grow only when runtime discovery supplied an
-// executable concurrency limit. Safe is fixed at one; Manual is explicitly 1-4.
+// Auto starts at one and widens only after successful provider execution. Its
+// browser-capacity ceiling is a resource bound, never initial burst permission.
+// Runtime metadata is telemetry, not a second hard cap. Safe remains one;
+// Manual remains explicitly 1-4.
 export function setLocalCapacityPolicy(key, config = {}) {
   const l = lane(key);
-  const mode = ["auto", "safe", "manual"].includes(config.mode) ? config.mode : "auto";
-  const ceiling = Math.max(1, Math.min(4, Math.floor(Number(config.ceiling) || 1)));
-  const initial = Math.max(1, Math.min(ceiling, Math.floor(Number(config.initial) || 1)));
+  const mode = ["auto", "safe", "manual"].includes(config.mode)
+    ? config.mode
+    : "auto";
+  const modeMax = mode === "auto" ? AI_MAX_WINDOW : 4;
+  const ceiling = Math.max(
+    1,
+    Math.min(modeMax, Math.floor(Number(config.ceiling) || 1)),
+  );
+  const initial = Math.max(
+    1,
+    Math.min(ceiling, Math.floor(Number(config.initial) || 1)),
+  );
   const evidence = Math.max(0, Number(config.evidence) || 0);
-  const samePolicy = l.localCapacity?.mode === mode &&
-    l.localCapacity?.evidence === evidence && l.localCapacity?.ceiling === ceiling;
-  l.localCapacity = { mode, evidence, ceiling };
+  const samePolicy =
+    l.localCapacity?.mode === mode &&
+    l.localCapacity?.evidence === evidence &&
+    l.localCapacity?.ceiling === ceiling;
+  l.localCapacity = {
+    mode,
+    evidence,
+    ceiling,
+    capacitySource: String(config.capacitySource || "user_selected"),
+  };
   l.unlimited = false;
   l.ceiling = ceiling;
   l.userCeiling = ceiling;
@@ -100,10 +155,13 @@ export function setLocalCapacityPolicy(key, config = {}) {
   if (!samePolicy) {
     if (mode === "manual") l.window = ceiling;
     else l.window = initial;
+    l.localAuto = { bestWindow: 0, bestLatencyMs: 0, bestScore: 0,
+      probeWindow: Math.floor(l.window), probeSamples: 0, probeTotalMs: 0,
+      stable: false, cooldownSuccesses: 0 };
   } else if (l.window > ceiling) {
     l.window = ceiling;
   }
-  pump(l);
+  pump(l,"user_policy");
   return { ...l.localCapacity, ceiling, initial };
 }
 
@@ -149,9 +207,25 @@ function pruneLearning(cache) {
   }
   const entries = Object.entries(cache);
   if (entries.length <= AI_LEARNING_MAX_ENTRIES) return;
-  entries.sort((a, b) => (Number(b[1]?.updatedAt) || 0) - (Number(a[1]?.updatedAt) || 0));
-  const keep = new Set(entries.slice(0, AI_LEARNING_MAX_ENTRIES).map(([key]) => key));
+  entries.sort(
+    (a, b) => (Number(b[1]?.updatedAt) || 0) - (Number(a[1]?.updatedAt) || 0),
+  );
+  const keep = new Set(
+    entries.slice(0, AI_LEARNING_MAX_ENTRIES).map(([key]) => key),
+  );
   for (const key of Object.keys(cache)) if (!keep.has(key)) delete cache[key];
+}
+
+export function restoredLocalAutoLearning(saved, ceiling) {
+  const cap = Math.max(MIN_WINDOW, Math.floor(Number(ceiling) || 1));
+  const learned = Math.max(0, Math.floor(Number(saved?.window) || 0));
+  const latency = Math.max(0, Number(saved?.localBestLatencyMs) || 0);
+  const score = Math.max(0, Number(saved?.localBestScore) || 0);
+  const valid = Number(saved?.localAutoVersion) === LOCAL_AUTO_LEARNING_VERSION &&
+    learned >= MIN_WINDOW && latency > 0 && score > 0;
+  return valid
+    ? { valid:true, window:Math.min(cap, learned), latencyMs:latency, score }
+    : { valid:false, window:MIN_WINDOW, latencyMs:0, score:0 };
 }
 
 async function ensureLearningLoaded(l) {
@@ -163,23 +237,44 @@ async function ensureLearningLoaded(l) {
   const saved = cache[l.key];
   const at = Number(saved?.updatedAt) || 0;
   const learned = Number(saved?.window) || 0;
-  if (!at || Date.now() - at > AI_LEARNING_TTL_MS || learned < MIN_WINDOW) return;
+  if (!at || Date.now() - at > AI_LEARNING_TTL_MS || learned < MIN_WINDOW)
+    return;
   l.learnedWindow = learned;
   l.learnedUpdatedAt = at;
   // Preserve whether the saved window came from provider backpressure. A lane
   // that was forced into additive recovery must not become slow-start merely
   // because the service worker/browser restarted.
   if (saved?.slowStart === false) l.slowStart = false;
-  // setLaneCapacityHint() may have optimistically opened a fresh lane to the
-  // server's capacity before async storage finished loading. A saved provider
-  // limit is authoritative and may therefore LOWER that fresh window.
-  if (!l.backpressured) {
-    if (l.localCapacity?.mode === "auto") {
-      l.window = restoredWindowForPolicy("auto", effectiveMax(l), learned);
-    } else if (!l.localCapacity && l.userCeiling <= 0) {
-      l.window = Math.min(effectiveMax(l), Math.max(MIN_WINDOW, learned));
+  if (l.localCapacity?.mode === "auto") {
+    const restored = restoredLocalAutoLearning(saved, effectiveMax(l));
+    if (!restored.valid) {
+      // Pre-.54 Local Auto learned from successful completions alone. Those
+      // windows can be badly over-wide for a large local model, so never treat
+      // them as throughput-proven after upgrading. Cloud learning is untouched.
+      l.learnedWindow = 0;
+      l.learnedUpdatedAt = 0;
+      l.window = MIN_WINDOW;
+      l.localAuto = { bestWindow:0, bestLatencyMs:0, bestScore:0,
+        probeWindow:MIN_WINDOW, probeSamples:0, probeTotalMs:0, stable:false, cooldownSuccesses:0 };
+      note("background/scheduler.js","capacityDecision",{schema:"tp.audit/1",event:"capacity_profile_reset",
+        reason:"legacy_local_success_only_learning",scope:{id:l.diagnosticLaneId},
+        before:{storedWindow:learned},after:{window:MIN_WINDOW},effectiveFrom:"next_request",persistence:"memory_only"});
+      return;
     }
+    l.localAuto.bestWindow = restored.window;
+    l.localAuto.bestLatencyMs = restored.latencyMs;
+    l.localAuto.bestScore = restored.score;
+    l.localAuto.probeWindow = restored.window;
+    l.localAuto.probeSamples = 0;
+    l.localAuto.probeTotalMs = 0;
+    l.localAuto.stable = true;
+    l.localAuto.cooldownSuccesses = 0;
+    if (!l.backpressured) l.window = restored.window;
+  } else if (!l.backpressured && !l.localCapacity && l.userCeiling <= 0) {
+    // Cloud/provider-managed learning keeps its existing behavior.
+    l.window = Math.min(effectiveMax(l), Math.max(MIN_WINDOW, learned));
   }
+  auditCapacity(l,"stored_capacity");
 }
 
 // Pure seam used by restore and regression tests. Safe/Manual are explicit
@@ -192,20 +287,32 @@ export function restoredWindowForPolicy(mode, ceiling, learned) {
 
 function persistLearning(l, { force = false } = {}) {
   if (!isLearnedAiLane(l.key) || !storageAvailable()) return;
-  const safe = Math.max(MIN_WINDOW, Math.floor(Math.min(l.window, effectiveMax(l))));
+  const learnedCandidate = l.localCapacity?.mode === "auto" && l.localAuto?.bestWindow > 0
+    ? l.localAuto.bestWindow : l.window;
+  const safe = Math.max(
+    MIN_WINDOW,
+    Math.floor(Math.min(learnedCandidate, effectiveMax(l))),
+  );
   if (!force && safe === l.lastPersistedWindow) return;
   l.lastPersistedWindow = safe;
   l.learnedWindow = safe;
   l.learnedUpdatedAt = Date.now();
-  void loadLearningCache().then((cache) => {
-    cache[l.key] = {
-      window: safe,
-      updatedAt: l.learnedUpdatedAt,
-      slowStart: l.slowStart !== false,
-    };
-    pruneLearning(cache);
-    return setStorage({ [AI_LEARNING_STORAGE_KEY]: cache });
-  }).catch(() => {});
+  void loadLearningCache()
+    .then((cache) => {
+      cache[l.key] = {
+        window: safe,
+        updatedAt: l.learnedUpdatedAt,
+        slowStart: l.slowStart !== false,
+        ...(l.localCapacity?.mode === "auto" ? {
+          localAutoVersion: LOCAL_AUTO_LEARNING_VERSION,
+          localBestLatencyMs: Math.max(0, Math.round(Number(l.localAuto?.bestLatencyMs) || 0)),
+          localBestScore: Math.max(0, Number(l.localAuto?.bestScore) || 0),
+        } : {}),
+      };
+      pruneLearning(cache);
+      return setStorage({ [AI_LEARNING_STORAGE_KEY]: cache });
+    })
+    .catch(() => {});
 }
 
 // Returns the lane for a key, creating it when absent.
@@ -220,7 +327,8 @@ function lane(key) {
 }
 
 // Admits waiters while the lane has room and is not paused.
-function pump(l) {
+function pump(l, reason="unchanged", evidence=null) {
+  auditCapacity(l,reason,evidence);
   if (l.unlimited) {
     while (l.waiters.length) {
       l.running++;
@@ -250,7 +358,8 @@ function pump(l) {
 export function setLaneUnlimited(key, on) {
   const l = lane(key);
   l.unlimited = Boolean(on);
-  if (l.unlimited) pump(l);
+  if (l.unlimited) pump(l,"user_policy");
+  else auditCapacity(l, "user_policy");
   return l.unlimited;
 }
 
@@ -260,10 +369,19 @@ export async function acquire(key, signal = null) {
   await ensureLearningLoaded(l);
   if (l.unlimited) {
     if (signal?.aborted) {
-      return Promise.reject(new DOMException("The operation was aborted", "AbortError"));
+      return Promise.reject(
+        new DOMException("The operation was aborted", "AbortError"),
+      );
     }
     l.running++;
-    return Promise.resolve({ waitMs: 0, maxWindow: 0, window: 0, running: l.running, unlimited: true });
+    return Promise.resolve({
+      diagnosticLaneId: l.diagnosticLaneId,
+      waitMs: 0,
+      maxWindow: 0,
+      window: 0,
+      running: l.running,
+      unlimited: true,
+    });
   }
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
@@ -272,12 +390,14 @@ export async function acquire(key, signal = null) {
     }
     const queuedAt = Date.now();
     const waiter = {
-      resolve: () => resolve({
-        waitMs: Math.max(0, Date.now() - queuedAt),
-        maxWindow: effectiveMax(l),
-        window: Math.floor(l.window),
-        running: l.running,
-      }),
+      resolve: () =>
+        resolve({
+          diagnosticLaneId: l.diagnosticLaneId,
+          waitMs: Math.max(0, Date.now() - queuedAt),
+          maxWindow: effectiveMax(l),
+          window: Math.floor(l.window),
+          running: l.running,
+        }),
       reject,
       cleanup: null,
     };
@@ -295,8 +415,124 @@ export async function acquire(key, signal = null) {
   });
 }
 
-// Returns a slot after a successful round trip and widens the window. Provider
-// latency is not backpressure: the API already meters this key.
+function resetLocalProbe(l, window = Math.floor(l.window)) {
+  l.localAuto.probeWindow = Math.max(MIN_WINDOW, Math.floor(window || 1));
+  l.localAuto.probeSamples = 0;
+  l.localAuto.probeTotalMs = 0;
+}
+
+function localAutoSuccess(l, latency) {
+  const state = l.localAuto;
+  const cap = effectiveMax(l);
+  const current = Math.max(MIN_WINDOW, Math.floor(l.window));
+  if (!(latency > 0)) {
+    pump(l, "local_success_no_latency");
+    return;
+  }
+  if (state.probeWindow !== current) resetLocalProbe(l, current);
+  state.probeSamples += 1;
+  state.probeTotalMs += latency;
+  const sampleLatency = state.probeTotalMs / state.probeSamples;
+
+  // First positive execution establishes a machine+endpoint+model baseline and
+  // permits exactly one higher-concurrency probe. No CPU-thread count is used
+  // as proof that the model can actually run that many generations.
+  if (state.bestWindow <= 0) {
+    state.bestWindow = current;
+    state.bestLatencyMs = sampleLatency;
+    state.bestScore = current / sampleLatency;
+    state.stable = false;
+    state.cooldownSuccesses = 0;
+    if (current < cap) {
+      l.window = current + 1;
+      resetLocalProbe(l, l.window);
+      persistLearning(l, { force: true });
+      pump(l, "local_throughput_probe", {bestWindow:state.bestWindow, baselineMs:Math.round(state.bestLatencyMs)});
+    } else {
+      persistLearning(l, { force: true });
+      pump(l, "local_capacity_ceiling");
+    }
+    return;
+  }
+
+  if (current === state.bestWindow) {
+    // Keep the baseline responsive to the current machine load, but only probe
+    // upward periodically after a previously rejected probe.
+    state.bestLatencyMs = state.bestLatencyMs > 0
+      ? state.bestLatencyMs * 0.8 + latency * 0.2 : latency;
+    state.bestScore = current / state.bestLatencyMs;
+    if (state.stable) {
+      state.cooldownSuccesses += 1;
+      if (state.cooldownSuccesses < LOCAL_AUTO_REPROBE_SUCCESSES || current >= cap) {
+        persistLearning(l);
+        pump(l, "local_stable_capacity");
+        return;
+      }
+      state.stable = false;
+      state.cooldownSuccesses = 0;
+    }
+    if (current < cap) {
+      l.window = current + 1;
+      resetLocalProbe(l, l.window);
+      persistLearning(l);
+      pump(l, "local_throughput_probe", {bestWindow:state.bestWindow, baselineMs:Math.round(state.bestLatencyMs)});
+    } else {
+      persistLearning(l);
+      pump(l, "local_capacity_ceiling");
+    }
+    return;
+  }
+
+  // Higher windows are experiments. Require more than one completion because
+  // manga units vary in size. Accept only a real throughput gain without a
+  // disproportionate latency increase; otherwise return to the best window.
+  if (state.probeSamples < LOCAL_AUTO_PROBE_SAMPLES) {
+    pump(l, "local_probe_collecting");
+    return;
+  }
+  const probeLatency = sampleLatency;
+  const probeScore = current / probeLatency;
+  const baselineLatency = Math.max(1, state.bestLatencyMs || probeLatency);
+  const baselineScore = Math.max(Number.EPSILON, state.bestScore || state.bestWindow / baselineLatency);
+  const throughputGain = probeScore / baselineScore;
+  const latencyRatio = probeLatency / baselineLatency;
+  const evidence = {
+    bestWindow: state.bestWindow, probeWindow: current,
+    baselineMs: Math.round(baselineLatency), probeMs: Math.round(probeLatency),
+    throughputGain: Math.round(throughputGain * 1000) / 1000,
+    latencyRatio: Math.round(latencyRatio * 1000) / 1000,
+    samples: state.probeSamples,
+  };
+  if (throughputGain >= LOCAL_AUTO_MIN_THROUGHPUT_GAIN &&
+      latencyRatio <= LOCAL_AUTO_MAX_LATENCY_RATIO) {
+    state.bestWindow = current;
+    state.bestLatencyMs = probeLatency;
+    state.bestScore = probeScore;
+    state.stable = false;
+    state.cooldownSuccesses = 0;
+    if (current < cap) {
+      l.window = current + 1;
+      resetLocalProbe(l, l.window);
+      persistLearning(l, { force: true });
+      pump(l, "local_throughput_gain", evidence);
+    } else {
+      persistLearning(l, { force: true });
+      pump(l, "local_capacity_ceiling", evidence);
+    }
+    return;
+  }
+  l.window = Math.max(MIN_WINDOW, Math.min(cap, state.bestWindow));
+  state.stable = true;
+  state.cooldownSuccesses = 0;
+  resetLocalProbe(l, l.window);
+  persistLearning(l, { force: true });
+  pump(l, "local_throughput_no_gain", evidence);
+}
+
+// Returns a slot after a successful round trip and widens the window. Cloud
+// lanes remain provider-backpressure driven. Local Auto additionally learns
+// machine+endpoint+model throughput so a successful-but-saturated model does
+// not keep widening merely because it eventually answered.
 export function releaseSuccess(key, ms = 0) {
   const l = lane(key);
   l.running = Math.max(0, l.running - 1);
@@ -318,10 +554,14 @@ export function releaseSuccess(key, ms = 0) {
     }
   }
   if (l.window >= cap) l.stats.ceilingHits++;
+  if (l.localCapacity?.mode === "auto") {
+    localAutoSuccess(l, latency);
+    return;
+  }
   const growth = l.slowStart ? 1 : 1 / Math.max(1, l.window);
   l.window = Math.min(cap, l.window + growth);
   persistLearning(l);
-  pump(l);
+  pump(l,"provider_success");
 }
 
 // Releases an idempotent/cache replay. No model generation completed now, so
@@ -346,10 +586,19 @@ export function releaseRejected(key, retryAfterMs = 0) {
   l.slowStart = false;
   l.recoverySuccesses = 0;
   l.stats.backoffs++;
+  if (l.localCapacity?.mode === "auto") {
+    const safe = Math.max(MIN_WINDOW, Math.floor(l.window));
+    l.localAuto.bestWindow = Math.min(l.localAuto.bestWindow || safe, safe);
+    l.localAuto.bestLatencyMs = 0;
+    l.localAuto.bestScore = 0;
+    l.localAuto.stable = true;
+    l.localAuto.cooldownSuccesses = 0;
+    resetLocalProbe(l, safe);
+  }
   const pause = Number(retryAfterMs) || 0;
   if (pause > 0) l.pausedUntil = Math.max(l.pausedUntil, Date.now() + pause);
   persistLearning(l, { force: true });
-  pump(l);
+  pump(l,"provider_backpressure");
 }
 
 // Returns a slot rejected by TextPhantom admission before provider generation.
@@ -362,7 +611,7 @@ export function releaseDeferred(key, retryAfterMs = 0) {
   l.stats.deferred = (l.stats.deferred || 0) + 1;
   const pause = Number(retryAfterMs) || 0;
   if (pause > 0) l.pausedUntil = Math.max(l.pausedUntil, Date.now() + pause);
-  pump(l);
+  pump(l,"server_admission_defer");
 }
 
 // Returns a slot after the API's own rate gate refused a token: waits out the
@@ -391,7 +640,7 @@ export function releaseGated(key, retryAfterMs = 0) {
   // bucket. Nothing else changes — not the window, not the backpressure flag.
   const pause = Number(retryAfterMs) || 0;
   if (pause > 0) l.pausedUntil = Math.max(l.pausedUntil, Date.now() + pause);
-  pump(l);
+  pump(l,"rate_gate_defer");
 }
 
 // Returns a slot after a failure that is not backpressure, leaving the window unchanged.
@@ -405,14 +654,21 @@ export function releaseFailed(key) {
 // Releases a direct/API local-runtime attempt using generation evidence rather
 // than HTTP status alone. Admission failures did not exercise model capacity.
 export function releaseLocalFailure(key, error, retryAfterMs = 0) {
-  const attempts = Number(error?.generationAttempts || error?.providerAttempts || 0);
+  // Local generations are protected by slot capacity, not time pacing. Never
+  // carry Retry-After into the lane: a real OOM/overload still narrows the
+  // concurrency window, while the next queued request can start as soon as a
+  // slot is free. The caller's one-provider-call contract remains unchanged.
+  void retryAfterMs;
+  const attempts = Number(
+    error?.generationAttempts || error?.providerAttempts || 0,
+  );
   if (attempts < 1) {
-    releaseDeferred(key, retryAfterMs);
+    releaseDeferred(key, 0);
     return "deferred";
   }
   const status = Number(error?.status) || 0;
   if (status === 429 || status === 503 || isLocalCapacityFailure(error)) {
-    releaseRejected(key, retryAfterMs);
+    releaseRejected(key, 0);
     return "rejected";
   }
   releaseFailed(key);
@@ -437,6 +693,7 @@ export function setLaneSlotCeiling(key, slots) {
   const n = Number(slots) || 0;
   l.ceiling = n > 0 ? Math.max(MIN_WINDOW, Math.floor(n)) : 0;
   if (l.window > effectiveMax(l)) l.window = effectiveMax(l);
+  auditCapacity(l,"runtime_capacity_hint");
   return l.ceiling;
 }
 
@@ -457,15 +714,19 @@ export function setLaneCapacityHint(key, slots, burst = 0) {
   l.userCeiling = b > 0 ? Math.max(MIN_WINDOW, b) : 0;
   const hard = effectiveMax(l);
   const learned = l.learnedWindow > 0 ? Math.floor(l.learnedWindow) : 0;
-  l.capacityTarget = b > 0
-    ? Math.min(hard, b)
-    // Fresh provider-managed work starts at the real executable capacity. If
-    // this exact key/model already learned a smaller safe value after provider
-    // backpressure, that learned value wins once storage has loaded.
-    : (learned > 0 ? Math.min(hard, learned) : hard);
+  l.capacityTarget =
+    b > 0
+      ? Math.min(hard, b)
+      : // Fresh provider-managed work starts at the real executable capacity. If
+        // this exact key/model already learned a smaller safe value after provider
+        // backpressure, that learned value wins once storage has loaded.
+        learned > 0
+        ? Math.min(hard, learned)
+        : hard;
   if (l.window > hard) l.window = hard;
-  if (!l.backpressured && l.window < l.capacityTarget) l.window = l.capacityTarget;
-  pump(l);
+  if (!l.backpressured && l.window < l.capacityTarget)
+    l.window = l.capacityTarget;
+  pump(l,"runtime_capacity_hint");
   return l.capacityTarget;
 }
 
@@ -476,6 +737,7 @@ export function describe(key = "") {
     if (!l) return null;
     return {
       key: l.key,
+      diagnosticLaneId: l.diagnosticLaneId,
       window: Math.round(l.window * 100) / 100,
       maxWindow: l.maxWindow,
       unlimited: l.unlimited,
@@ -484,13 +746,22 @@ export function describe(key = "") {
       capacityTarget: l.capacityTarget,
       userCeiling: l.userCeiling,
       learnedWindow: l.learnedWindow,
-      learnedAgeMs: l.learnedUpdatedAt ? Math.max(0, Date.now() - l.learnedUpdatedAt) : 0,
+      learnedAgeMs: l.learnedUpdatedAt
+        ? Math.max(0, Date.now() - l.learnedUpdatedAt)
+        : 0,
       backpressured: l.backpressured,
       slowStart: l.slowStart,
       effectiveMax: effectiveMax(l),
       running: l.running,
       queued: l.waiters.length,
       avgMs: Math.round(l.avgMs),
+      ...(l.localCapacity?.mode === "auto" ? {
+        localBestWindow: l.localAuto.bestWindow,
+        localBestLatencyMs: Math.round(l.localAuto.bestLatencyMs || 0),
+        localProbeWindow: l.localAuto.probeWindow,
+        localProbeSamples: l.localAuto.probeSamples,
+        localStable: l.localAuto.stable,
+      } : {}),
       pausedMs: Math.max(0, l.pausedUntil - Date.now()),
       ...l.stats,
     };
@@ -517,13 +788,21 @@ function aiKeyLane(apiKey) {
 
 // Returns the scheduler lane a job payload belongs to.
 export function laneKeyFor(payload) {
-  const mode = String(payload?.mode || "").trim().toLowerCase();
-  const source = String(payload?.source || "").trim().toLowerCase();
+  const mode = String(payload?.mode || "")
+    .trim()
+    .toLowerCase();
+  const source = String(payload?.source || "")
+    .trim()
+    .toLowerCase();
   if (mode === "lens_text" && source === "ai") {
     // AI lanes must stay keyed on (provider, model, key) to match the API's rate_gate metering.
     const ai = payload?.ai || {};
-    const provider = String(ai.provider || "auto").trim().toLowerCase();
-    const model = String(ai.model || "auto").trim().toLowerCase();
+    const provider = String(ai.provider || "auto")
+      .trim()
+      .toLowerCase();
+    const model = String(ai.model || "auto")
+      .trim()
+      .toLowerCase();
     if (isLocalAiPayload(payload)) {
       const identity = localRuntimeIdentity(payload);
       return `ai-local:${identity.protocol}:${aiKeyLane(identity.endpoint)}:${model}`;
