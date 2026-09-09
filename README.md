@@ -1,5 +1,9 @@
 [![Website](https://img.shields.io/badge/Website-kuju29.github.io-blue?style=flat-square&logo=github&logoColor=white)](https://kuju29.github.io/)
 
+### Note: 
+- text.Ai โมเดลที่ผมใช้ทดสอบ HuggingFace/(deepseek-ai/DeepSeek-V4-Pro)"ฟรี" | OpenRouter/(deepseek/deepseek-v4-flash-0731)"เสียเงิน" | Google Gemini/gemini-2.5-flash"ใช้เยอะเสียเงิน" | Ollama(qwen3.5:9b)"ฟรี" 
+- text.Ai ปัญหาที่ยังพบคือช้า, Ai ไม่รองรับการส่งแบบหลาย id+unit ที่ต้องการความแม่นยำ ยังไม่มีไอเดียตอนนี้ทำได้แค่แบ่งส่ง unitย่อยๆพร้อมกัน เลยทำให้เปลืองโทเค็นกว่าส่งแปลครั้งเดียวทั้งภาพ
+
 ![Desktop2026 02 06-08 11 52 01-ezgif com-video-to-gif-converter](https://github.com/user-attachments/assets/43cc9a1e-eb79-46f0-b4a1-08ca9bcd49f5)
 
 # ✨ TextPhantomOCR Overlay 
