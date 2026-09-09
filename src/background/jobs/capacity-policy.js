@@ -7,8 +7,9 @@ export function applyRuntimeCapacityHints(caps, payload) {
   const lensSlots =
     Number(caps?.adaptive?.lens?.limit) || Number(caps?.capacity?.limit) || 0;
   if (lensSlots > 0) setLaneCapacityHint("lens:direct", lensSlots);
-  // Grouping has its own CPU lane. A measured runtime hint opens a fresh
-  // lane immediately but never overrides learned server backpressure.
+  // Grouping is a server-owned detector-free stage. Mirror its advertised
+  // admission width so this browser keeps only its own backlog; cross-user
+  // fairness remains authoritative on the API and is never duplicated here.
   const groupSlots = Number(caps?.capacityGroups?.limit) || 0;
   if (Number.isSafeInteger(groupSlots) && groupSlots > 0)
     setLaneCapacityHint("groups:partition", groupSlots);

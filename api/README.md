@@ -96,6 +96,34 @@ extensions and saved configurations. A client selects v2 only when
 `/v1/capabilities` advertises `engineRoutesV2=true`; it never falls back from
 one engine to the other.
 
+### Shared capacity does not merge the engines
+
+The three API execution stages share **capacity only**. Lens, detector-free
+Grouping and server-executed AI use one process-wide admission gate per stage,
+so `runs:Extension`, `runs:API server`, and the legacy `/translate` carrier
+compete fairly for the same physical work slots. Sharing a gate does **not**
+share pipeline state, route ownership, render ownership, repair ownership,
+idempotency records, or result delivery. A `runs:Extension` request never turns
+into `runs:API`, and a legacy queued request remains a legacy queued request.
+
+`runs:API` has an additional wide `capacityPipeline` dispatch gate only to bound
+resident full-pipeline worker threads. It is not Lens/Grouping/AI capacity and
+does not replace any of the three shared stage gates. Modern requests carrying
+`context.tp_tab_session` use that same session identity across all three stages;
+legacy requests carrying the same session join that same fairness bucket. Truly
+old legacy clients without a tab session retain an opaque HTTP-caller bucket so
+multiple users sharing one server AI key are not mistaken for one person.
+
+Direct Local AI is the deliberate exception: in `runs:Extension` the browser
+owns the local model socket, so that provider generation does not traverse the
+API AI admission gate. Lens and API grouping still use their normal API routes.
+
+The current browser build also keeps `RUNS_API_AVAILABLE=false` in
+`src/shared/engine-mode.js`. That existing switch means normal extension
+surfaces currently execute `runs:Extension` even if an older saved preference
+says `api`; the `runs:API` HTTP route and CLI remain present and independently
+testable. This shared-capacity change does not alter that product switch.
+
 Both execution engines use the same detector-free Lens graph partition and
 the same `tp.canonical-original-tree/1` contract. Raw Lens trees remain
 immutable evidence for fingerprints, erasure and source rendering. For a
@@ -133,6 +161,21 @@ not reliably distinguish CORS, DNS, TLS, and connection refusal. Compact trace
 events contain only the API origin, duration, outcome, status, and error name.
 
 ## Current AI behavior
+
+### Selected-model Thinking capability
+
+Model-list presence proves candidate eligibility, not native reasoning controls.
+When an account catalogue supplies exact reasoning metadata, TextPhantom keeps
+using that provider-owned metadata. If a provider such as OpenAI does not expose
+the control in its model list, the tiny generation probe feature-detects the
+**selected exact model** instead of inferring support from its name: it first
+tries a native Off control (`reasoning_effort=none`), then a low-cost On control
+(`reasoning_effort=low`). Only controls that succeed are returned as
+`model_capabilities` and persisted for that provider/account/model. A model that
+rejects the control still receives an ordinary health probe and remains usable;
+the popup simply does not invent a Thinking switch. For a verified levels model
+with native `none` plus a non-none effort, the existing Off/On UI maps to those
+verified values.
 
 - **runs: Extension:** the browser owns translation units, AI orchestration,
   layout, and overlay. Lens/grouping and server-mediated Cloud AI use the
@@ -253,11 +296,15 @@ responses as a new feature.
 is Direct Local, the extension owns the Ollama/LM Studio socket and relays each
 sanitized lifecycle stage to the API's capability-protected internal endpoint.
 The API therefore writes the same staged folder under `logs/ai-wire/` for both
-Cloud and Direct Local, including failures before a provider response. Start the
-API with `$env:TP_AI_WIRE_TRACE="1"`, restart the extension (or wait for its
-capability cache to refresh), then run the translation normally. A Direct Local
-folder has `"runtime": "direct-local"` in `00_identity.json`. No diagnostics
-checkbox is required. If the API is offline, Direct Local translation still
+Cloud and Direct Local, including failures before a provider response. Start the API with `$env:TP_AI_WIRE_TRACE="1"` and run the translation normally.
+Wire tracing now implies the compact main E2E trace unless `TP_TRACE=0` was
+explicitly set. Each new translation batch performs one coalesced fresh
+`/v1/capabilities` read before routing, so a ten-minute capability cache from a
+previous API process cannot silently keep trace/wire relay disabled. The API
+creates `logs/ai-wire/_session-<pid>.json` at startup as process-level proof,
+and split/full HTTP requests carry `X-TP-Trace-Id` so API ingress can be tied to
+the same browser image trace. A Direct Local folder has `"runtime":
+"direct-local"` in `00_identity.json`. No diagnostics checkbox is required. If the API is offline, Direct Local translation still
 runs but on-disk API trace relay is necessarily unavailable.
 The relay has a short bounded timeout, so an unavailable diagnostics endpoint
 cannot hang the provider request. Unknown lifecycle stages remain rejected.
@@ -486,11 +533,13 @@ browser. The API stores repair claim/results in `data/repair-pool.sqlite3`.
 Recovered provider receipts are counted once even when the original HTTP reply
 never reached the Extension. Receiving a saved result is not a new generation.
 
-The **standalone runs:API server** full-image pipeline keeps its own existing
-bounded per-image validation/repair policy; it does not participate in the
-browser's registered-image barrier (32 images is only an example) merely because both use this server. Any actual repair
-invocation has its own observed usage; unknown sub-request usage remains unknown
-inside the aggregate instead of inheriting another generation's subtotal.
+The **standalone runs:API server** full-image pipeline and the legacy queued
+carrier do **not** join the browser pooled-repair registry. Their current AI
+stage enforces one provider generation per image (`repair_enabled=False`), then
+validates that answer and preserves attributable partial units or returns the
+typed failure. They do not silently dispatch a second provider generation.
+This keeps repair ownership separate from `runs:Extension` and preserves the
+one-generation-per-image contract.
 
 Cancellation remains cooperative. Result/image delivery can be discarded after
 navigation, but already-observed Provider usage must be retained. No missing

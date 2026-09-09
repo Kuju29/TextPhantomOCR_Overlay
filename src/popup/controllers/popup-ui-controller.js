@@ -59,10 +59,16 @@ export function createPopupUiController({
     });
     const reasoningSupported =
       reasoning?.supported === true || reasoning?.mandatory === true;
-    // The popup exposes only a truthful binary control. Models that use
-    // provider-specific thinking levels are not shown as On/Off-capable.
+    // The popup exposes Off/On only when both states have a verified native
+    // representation. Level-based providers may opt in after the selected-model
+    // probe proves `none` plus at least one non-none effort.
+    const efforts = Array.isArray(reasoning?.supported_efforts)
+      ? reasoning.supported_efforts.map((value) => String(value).toLowerCase())
+      : [];
+    const verifiedLevelToggle = reasoning?.control === "levels" &&
+      efforts.includes("none") && efforts.some((value) => value !== "none");
     const configurableThinking = reasoningSupported &&
-      ["toggle", "boolean"].includes(reasoning?.control);
+      (["toggle", "boolean"].includes(reasoning?.control) || verifiedLevelToggle);
     const showAi =
       (els.mode.value || "lens_text") === "lens_text" &&
       (els.sources.value || "") === "ai";
@@ -87,7 +93,9 @@ export function createPopupUiController({
       els.aiThinkingHint.textContent = configurableThinking
         ? (reasoning?.mandatory === true
             ? "This model requires thinking; it cannot be turned off."
-            : "Thinking is Off by default. Turn it On only when you want reasoning.")
+            : verifiedLevelToggle
+              ? "Off and On use reasoning levels verified for this selected model."
+              : "Thinking is Off by default. Turn it On only when you want reasoning.")
         : "";
     }
     updatePromptWarning();

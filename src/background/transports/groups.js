@@ -23,6 +23,7 @@ export async function groupParagraphsViaRest(
     jobId = "",
     imageId = "",
     batchId = "",
+    traceId = "",
   },
 ) {
   const imageInput = imageArtifactToken
@@ -37,7 +38,7 @@ export async function groupParagraphsViaRest(
         method: "POST",
         headers: limitHeaders(base, apiUnlimited, {
           "Content-Type": "application/json",
-          ...correlationHeaders({ jobId, imageId, batchId }),
+          ...correlationHeaders({ jobId, imageId, batchId, traceId }),
         }),
         cache: "no-store",
         signal,

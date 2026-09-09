@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from typing import Any, Callable
+import inspect
 from concurrent.futures import ThreadPoolExecutor
 
 import hashlib, asyncio, re, time, traceback, uuid
+from collections import deque
 
 from backend.config import settings
 from backend.log import dbg, event
@@ -17,12 +19,86 @@ from backend.ai.failure_reason import classify as classify_ai_failure
 from backend.ai.provider_resolution import resolve_provider
 from backend.ai.rate_policy import is_local_target
 from backend import cancellation, trace
+from backend.jobs.admission import identity_of, ANONYMOUS
 
 Job = dict[str, Any]
+
+
+class FairIdentityQueue(asyncio.Queue):
+    """Bounded async queue that round-robins opaque owners, not raw jobs.
+
+    One user's large chapter may fill its own bucket, but once another owner
+    arrives the next free legacy worker alternates between owners. Existing
+    running work is never preempted.
+    """
+
+    def _init(self, maxsize: int) -> None:
+        self._buckets: dict[str, deque] = {}
+        self._owners: deque[str] = deque()
+        self._size = 0
+
+    def qsize(self) -> int:
+        # Python 3.13's asyncio.Queue.qsize()/empty() read ``_queue``
+        # directly instead of delegating to an overridable ``_qsize`` hook.
+        # This queue stores per-owner buckets rather than one deque, so expose
+        # the authoritative aggregate count explicitly.
+        return self._size
+
+    def empty(self) -> bool:
+        return self._size == 0
+
+    def _put(self, item) -> None:
+        owner = str(item[2] or "anon")
+        bucket = self._buckets.get(owner)
+        if bucket is None:
+            bucket = deque()
+            self._buckets[owner] = bucket
+            self._owners.append(owner)
+        bucket.append(item)
+        self._size += 1
+
+    def _get(self):
+        owner = self._owners.popleft()
+        bucket = self._buckets[owner]
+        item = bucket.popleft()
+        self._size -= 1
+        if bucket:
+            self._owners.append(owner)
+        else:
+            self._buckets.pop(owner, None)
+        return item
+
+    def snapshot(self) -> list[tuple[str, dict, str]]:
+        """Return the current fair service order without mutating the queue."""
+        owners = deque(self._owners)
+        buckets = {owner: deque(rows) for owner, rows in self._buckets.items()}
+        rows: list[tuple[str, dict, str]] = []
+        while owners:
+            owner = owners.popleft()
+            bucket = buckets.get(owner)
+            if not bucket:
+                continue
+            rows.append(bucket.popleft())
+            if bucket:
+                owners.append(owner)
+        return rows
 
 def _opaque_selector(value: Any) -> str:
     raw = str(value or "").strip()
     return hashlib.sha256(raw.encode("utf-8")).hexdigest() if raw else ""
+
+def _fair_stage_identity(payload: dict | None, caller_scope: str = "") -> str:
+    """Use the same tab-session identity as modern routes when available.
+
+    ``caller_scope`` remains the legacy access-control owner and is intentionally
+    not exposed.  Old clients that do not carry ``context.tp_tab_session`` keep
+    that opaque owner as their fairness identity; this avoids collapsing many
+    users onto one shared server API key.
+    """
+    modern = identity_of(payload)
+    if modern.startswith("s:"):
+        return modern
+    return str(caller_scope or modern or ANONYMOUS)
 
 def _provider_attempted(exc: BaseException) -> bool:
     """True only when the exception proves a generation request was made."""
@@ -155,22 +231,28 @@ class JobQueue:
 
     def __init__(self, processor: Callable[[dict], dict]) -> None:
         self._processor = processor
+        try:
+            self._processor_accepts_admission_identity = (
+                "admission_identity" in inspect.signature(processor).parameters
+            )
+        except (TypeError, ValueError):
+            self._processor_accepts_admission_identity = False
         self._jobs: dict[str, Job] = {}
         self._idempotency: dict[str, str] = {}
         self._conditions: dict[str, asyncio.Condition] = {}
         self._subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = {}
         qmax = max(1, settings.max_queue_size)
-        self._queues: dict[str, asyncio.Queue[tuple[str, dict]]] = {
-            self.DIRECT: asyncio.Queue(maxsize=qmax),
-            self.AI: asyncio.Queue(maxsize=qmax),
+        self._queues: dict[str, FairIdentityQueue] = {
+            self.DIRECT: FairIdentityQueue(maxsize=qmax),
+            self.AI: FairIdentityQueue(maxsize=qmax),
         }
         self._started = False
         self._tasks: set[asyncio.Task[Any]] = set()
+        self._ai_workers, self._direct_workers = self._worker_split()
         self._executor = ThreadPoolExecutor(
-            max_workers=max(1, int(settings.max_workers)),
+            max_workers=max(1, self._direct_workers + self._ai_workers),
             thread_name_prefix="tp-job",
         )
-        self._ai_workers, self._direct_workers = self._worker_split()
 
     # --- lifecycle ---------------------------------------------------------
     def _worker_split(self) -> tuple[int, int]:
@@ -178,23 +260,18 @@ class JobQueue:
         configured_ai = int(getattr(settings, "ai_max_concurrency", 0) or 0)
         configured_direct = int(getattr(settings, "direct_max_concurrency", 0) or 0)
 
+        # Legacy transport workers are only dispatch carriers now; real resource
+        # ownership is enforced by the shared Lens/Grouping/AI stage gates. Do
+        # not split SERVER_MAX_WORKERS in half and recreate the old 8/7 funnel.
         if configured_ai > 0:
-            ai_workers = max(1, configured_ai)
+            ai_workers = max(1, min(configured_ai, int(settings.ai_thread_workers)))
         else:
-            # CPU and provider RPM are bounded independently from this I/O lane.
-            ai_workers = max(4, min(12, total // 2))
+            ai_workers = max(1, int(settings.ai_thread_workers))
 
         if configured_direct > 0:
             direct_workers = max(1, configured_direct)
         else:
-            direct_workers = max(1, total - ai_workers)
-
-        # The two lanes must remain within the total worker budget.
-        if direct_workers + ai_workers > total:
-            overflow = direct_workers + ai_workers - total
-            direct_workers = max(1, direct_workers - overflow)
-            if direct_workers + ai_workers > total:
-                ai_workers = max(1, total - direct_workers)
+            direct_workers = total
         return ai_workers, direct_workers
 
     def start(self) -> None:
@@ -234,10 +311,22 @@ class JobQueue:
         self._tasks.clear()
         self._executor.shutdown(wait=False, cancel_futures=True)
 
-    async def _run_processor(self, payload: dict) -> dict:
-        """Run sync pipeline work without borrowing asyncio's default pool."""
+    async def _run_processor(self, payload: dict, *, admission_identity: str = "anon") -> dict:
+        """Run sync pipeline work without borrowing asyncio's default pool.
+
+        The production pipeline accepts an explicit opaque admission identity so
+        legacy queued work joins the same Lens/Grouping/AI fairness buckets as
+        modern routes. Test/custom processors keep their original one-argument
+        contract.
+        """
         loop = asyncio.get_running_loop()
-        work = loop.run_in_executor(self._executor, self._processor, payload)
+        if self._processor_accepts_admission_identity:
+            work = loop.run_in_executor(
+                self._executor,
+                lambda: self._processor(payload, admission_identity=admission_identity),
+            )
+        else:
+            work = loop.run_in_executor(self._executor, self._processor, payload)
         if _uses_local_ai_generation(payload):
             return await work
         return await asyncio.wait_for(
@@ -307,7 +396,8 @@ class JobQueue:
         self._jobs[job_id] = rec
 
         try:
-            self._queues[kind].put_nowait((job_id, payload))
+            fair_owner = _fair_stage_identity(payload, str(caller_scope or ""))
+            self._queues[kind].put_nowait((job_id, payload, fair_owner))
         except asyncio.QueueFull as exc:
             self._jobs.pop(job_id, None)
             if idem:
@@ -597,10 +687,10 @@ class JobQueue:
         kinds = [kind] if kind in self._queues else [self.DIRECT, self.AI]
         for k in kinds:
             try:
-                queued = list(self._queues[k]._queue)  # noqa: SLF001 - asyncio has no public queue snapshot.
+                queued = self._queues[k].snapshot()
             except Exception:
                 continue
-            for idx, (jid, _payload) in enumerate(queued, start=1):
+            for idx, (jid, _payload, _owner) in enumerate(queued, start=1):
                 if jid == job_id:
                     return idx
         return None
@@ -676,7 +766,7 @@ class JobQueue:
     async def _worker_loop(self, worker_id: int, kind: str) -> None:
         queue = self._queues[kind]
         while True:
-            job_id, payload = await queue.get()
+            job_id, payload, _owner = await queue.get()
 
             # Skip jobs cancelled while still queued (see cancel()).
             if str((self._jobs.get(job_id) or {}).get("status") or "") == "aborted":
@@ -745,7 +835,7 @@ class JobQueue:
             try:
                 prev = dict(self._jobs.get(job_id) or {})
                 await self._set_job(job_id, {**prev, "status": "running", "ts": time.time(), "queue_kind": kind})
-                result = await self._run_processor(payload)
+                result = await self._run_processor(payload, admission_identity=_owner)
                 if cancellation.is_cancelled(payload):
                     prev = dict(self._jobs.get(job_id) or {})
                     await self._set_job(job_id, {**prev, "status": "aborted", "result": _queue_error(RuntimeError("cancelled"), payload, cancelled=True,

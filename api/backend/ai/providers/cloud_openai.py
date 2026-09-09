@@ -62,6 +62,30 @@ def _reasoning_family(model: str) -> bool:
         re.match(r"^o(?:1|3|4)(?:-|$)", value)
     )
 
+def _verified_reasoning_mapping(request: GenerationRequest) -> tuple[str | None, list[str]]:
+    reasoning = request.model_capabilities.get("reasoning", {})
+    reasoning = reasoning if isinstance(reasoning, dict) else {}
+    efforts = [
+        str(value).strip().lower()
+        for value in reasoning.get("supported_efforts", [])
+        if isinstance(value, str)
+    ]
+    if reasoning.get("supported") is not True or reasoning.get("control") != "levels":
+        return None, efforts
+    if request.thinking == "off" and "none" in efforts:
+        return "none", efforts
+    if request.thinking == "on":
+        for effort in ("low", "medium", "high", "xhigh", "max"):
+            if effort in efforts:
+                return effort, efforts
+    return None, efforts
+
+def _probe_effort(request: ProbeRequest, effort: str) -> ProbeResponse:
+    return openai_chat_probe(
+        request,
+        payload_extra={"max_completion_tokens": 256, "reasoning_effort": effort},
+    )
+
 def _native_schema(model: str) -> bool:
     value = model.lower()
     snapshot = re.fullmatch(r"gpt-4o(?:-mini)?-(\d{4})-(\d{2})-(\d{2})", value)
@@ -91,10 +115,15 @@ def prepare_payload(request: GenerationRequest) -> dict[str, Any]:
     else:
         if source_text:
             messages.append({"role": "user", "content": source_text})
-    reasoning = _reasoning_family(model)
+    verified_effort, _ = _verified_reasoning_mapping(request)
+    reasoning_capability = request.model_capabilities.get("reasoning", {})
+    verified_reasoning = isinstance(reasoning_capability, dict) and reasoning_capability.get("supported") is True
+    reasoning = _reasoning_family(model) or verified_reasoning
     payload: dict[str, Any] = {"model": model, "messages": messages}
     if reasoning:
         payload["max_completion_tokens"] = _budget(request, True)
+        if verified_effort:
+            payload["reasoning_effort"] = verified_effort
     else:
         payload.update(temperature=TEMPERATURE, max_tokens=_budget(request, False))
     if request.response_schema:
@@ -109,8 +138,46 @@ def prepare_payload(request: GenerationRequest) -> dict[str, Any]:
 
 class OpenAIAdapter:
     def probe(self, request: ProbeRequest) -> ProbeResponse:
-        extra = {"max_completion_tokens": 256} if _reasoning_family(resolve_model(request.model)) else {}
-        return openai_chat_probe(request, payload_extra=extra or None)
+        # OpenAI's /models catalogue does not expose reasoning controls. Do not
+        # infer them from the model name: feature-detect only the exact selected
+        # model. First prove a native Off (`none`), then a low-cost native On
+        # (`low`). A model that rejects those controls still gets an ordinary
+        # health probe, so control discovery can never make a usable model look
+        # unavailable.
+        off = _probe_effort(request, "none")
+        if off.ok:
+            on = _probe_effort(request, "low")
+            if on.ok:
+                return ProbeResponse(
+                    True, off.http_status, capabilities={
+                        "reasoning": {
+                            "supported": True,
+                            "mandatory": False,
+                            "control": "levels",
+                            "supported_efforts": ["none", "low"],
+                            "dynamic": True,
+                        }
+                    },
+                )
+            # Off was proved, but a safe On value was not. Keep the health
+            # result and do not invent an On control.
+            return ProbeResponse(
+                True, off.http_status, capabilities={
+                    "reasoning": {
+                        "supported": True,
+                        "mandatory": False,
+                        "control": "provider",
+                        "supported_efforts": ["none"],
+                    }
+                },
+            )
+        if off.http_status == 400:
+            # `none` is unsupported for this reasoning model. Verify ordinary
+            # generation so model health is not confused with control support.
+            return openai_chat_probe(
+                request, payload_extra={"max_completion_tokens": 256}
+            )
+        return off
 
     def generate(self, request: GenerationRequest):
         model = resolve_model(request.model)
@@ -126,7 +193,10 @@ class OpenAIAdapter:
             expected_ids=list(request.expected_ids), cancel_check=request.cancel_check,
             trace_event="openai.generate", trace_file="ai/providers/cloud_openai.py",
             trace_fields={"requestedOutputTokens": payload.get("max_completion_tokens", payload.get("max_tokens")),
-                          "reasoningPolicyApplied": "reasoning_budget" if _reasoning_family(model) else "standard"},
+                          "reasoningPolicyApplied": "reasoning_effort" if "reasoning_effort" in payload else ("reasoning_budget" if _reasoning_family(model) else "standard"),
+                          "reasoningEffortSent": payload.get("reasoning_effort"),
+                          "thinkingMode": request.thinking,
+                          "capabilityKnown": bool(request.model_capabilities)},
         )
 
     def list_models(self, *, api_key: str, base_url: str) -> ModelListResult:

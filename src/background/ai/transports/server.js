@@ -42,6 +42,7 @@ export async function translateViaServer(
     jobId = "",
     signal = null,
     traceId = "",
+    tabSession = "",
     trace = null,
     capabilities = null,
     wireTrace = null,
@@ -60,7 +61,10 @@ export async function translateViaServer(
     schema: "tp.ai.request/1",
     operationId,
     ...(batchId ? { batchId } : {}),
-    context: { tp_trace: traceId },
+    context: {
+      tp_trace: traceId,
+      ...(tabSession ? { tp_tab_session: String(tabSession) } : {}),
+    },
     units: units.map(({ id, text }) => ({ id, text })),
     targetLang,
     sourceLang,
@@ -101,6 +105,7 @@ export async function translateViaServer(
     ...(jobId ? { "X-TP-Job-Id": String(jobId) } : {}),
     ...(imageId ? { "X-TP-Image-Id": String(imageId) } : {}),
     ...(batchId ? { "X-TP-Batch-Id": String(batchId) } : {}),
+    ...(traceId ? { "X-TP-Trace-Id": String(traceId) } : {}),
   };
   try {
     const version = String(chrome?.runtime?.getManifest?.()?.version || "");

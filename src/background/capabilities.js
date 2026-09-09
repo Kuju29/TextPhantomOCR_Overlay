@@ -19,6 +19,7 @@ const CACHE_TTL_MS = 10 * 60 * 1000;
 const FAILED_CACHE_TTL_MS = 15 * 1000;
 
 const cache = new Map();
+const freshScopes = new Map();
 
 // Returns the capability set assumed for a server that never answered /v1/capabilities.
 function legacyCapabilities(reason, probe = {}) {
@@ -245,7 +246,7 @@ export function capabilityFailureDetails(caps) {
 }
 
 // Returns the capabilities of an API base, probing at most once per TTL and reporting an unreachable server as legacy.
-export async function getCapabilities(base) {
+export async function getCapabilities(base, { forceRefresh = false } = {}) {
   const key = String(base || "").replace(/\/+$/, "");
   if (!key)
     return legacyCapabilities("no api base configured", {
@@ -257,6 +258,7 @@ export async function getCapabilities(base) {
   // is a guess we made because the probe failed".
   const hit = cache.get(key);
   if (
+    !forceRefresh &&
     hit &&
     Date.now() - hit.at < (hit.caps.reason ? FAILED_CACHE_TTL_MS : CACHE_TTL_MS)
   ) {
@@ -352,10 +354,38 @@ export async function getCapabilities(base) {
   return caps;
 }
 
+/**
+ * Return one authoritative fresh capability snapshot for a logical translation
+ * scope (normally one batch/pass). Concurrent images in that scope share the
+ * same probe instead of issuing one /v1/capabilities request per image.
+ */
+export async function getFreshCapabilitiesForScope(base, scope = "") {
+  const normalizedBase = String(base || "").replace(/\/+$/, "");
+  const normalizedScope = String(scope || "").trim();
+  if (!normalizedBase) return getCapabilities(normalizedBase, { forceRefresh: true });
+  if (!normalizedScope) return getCapabilities(normalizedBase, { forceRefresh: true });
+  const key = `${normalizedBase}\n${normalizedScope}`;
+  const current = freshScopes.get(key);
+  if (current) return current;
+  const promise = getCapabilities(normalizedBase, { forceRefresh: true }).catch((error) => {
+    freshScopes.delete(key);
+    throw error;
+  });
+  freshScopes.set(key, promise);
+  return promise;
+}
+
 // Drops the cached capabilities for one base, or for every base when none is given.
 export function forgetCapabilities(base = "") {
-  if (base) cache.delete(String(base).replace(/\/+$/, ""));
-  else cache.clear();
+  if (base) {
+    const normalized = String(base).replace(/\/+$/, "");
+    cache.delete(normalized);
+    for (const key of freshScopes.keys())
+      if (key.startsWith(`${normalized}\n`)) freshScopes.delete(key);
+  } else {
+    cache.clear();
+    freshScopes.clear();
+  }
 }
 
 // Returns a user-facing compatibility failure when the selected engine cannot

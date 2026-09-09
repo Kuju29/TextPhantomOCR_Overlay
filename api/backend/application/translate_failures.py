@@ -66,8 +66,9 @@ def raise_mapped(exc: BaseException, *, prepared, ai_cfg, paced, rate_provider,
         raise HTTPException(409, detail={"code": "cancelled", "message": "Translation was cancelled.", "traceId": trace_id,
             **(terminal_metadata(exc, ai_cfg=ai_cfg, engine="runsapi", is_local_target=is_local_target) if getattr(exc,"requestDispatched",False) else {})}) from exc
     if isinstance(exc, AdmissionRejected):
+        admission_stage = str(getattr(exc, "tp_stage", "") or f"{lane}_admission")
         detail = error_payload(code="server_busy", message=str(exc), user_message="The server is busy. Please try this image again shortly.",
-            origin="api", stage=f"{lane}_admission", category="capacity", retryable=True, http_status=503, trace_id=trace_id,
+            origin="api", stage=admission_stage, category="capacity", retryable=True, http_status=503, trace_id=trace_id,
             extra={"retryAfterMs": int(exc.retry_after_sec * 1000), "generationAttempts": 0}, correlation=prepared.correlation)
         failure_event(route, detail, lane=lane, **common)
         raise HTTPException(503, detail=detail, headers={"Retry-After": str(exc.retry_after_sec)}) from exc

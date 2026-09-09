@@ -57,6 +57,7 @@ import {
   engineCompatibilityIssue,
   forgetCapabilities,
   getCapabilities,
+  getFreshCapabilitiesForScope,
 } from "./capabilities.js";
 import {
   getTrace,
@@ -554,7 +555,10 @@ async function processJobInner(payload, tabId, frameId = 0) {
     pendingByImage.set(payload.metadata.image_id, makeContext());
   }
 
-  const caps = await getCapabilities(base);
+  const capabilityScope = batchId
+    ? `translation:${batchId}:pass:${Number(batch?.pass) || 1}`
+    : `translation:${workflowId || traceId}`;
+  const caps = await getFreshCapabilitiesForScope(base, capabilityScope);
   traceNote(
     "background/capabilities.js",
     "capabilityProbe",
@@ -580,7 +584,7 @@ async function processJobInner(payload, tabId, frameId = 0) {
     caps.traceSession,
     async () => {
       forgetCapabilities(base);
-      return getCapabilities(base);
+      return getCapabilities(base, { forceRefresh: true });
     },
   );
 

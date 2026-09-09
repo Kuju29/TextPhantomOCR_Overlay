@@ -225,6 +225,7 @@ export function createLensDirectPath({
               jobId,
               imageId,
               batchId,
+              traceId,
               signal,
               apiUnlimited: payload?.limits?.apiUnlimited === true,
               capabilities,

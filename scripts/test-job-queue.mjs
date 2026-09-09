@@ -295,7 +295,7 @@ const firstPrefetch = jobsSource.indexOf("if (shouldPrefetchDataUri(payload))", 
 const mediaReady = jobsSource.indexOf("await wf.mediaReady(workflowId);", firstPrefetch);
 const mediaRecheck = jobsSource.indexOf("if (await stopIfBatchWasCancelled()) return;", mediaReady);
 const pendingRegistration = jobsSource.indexOf("pendingByImage.set", mediaRecheck);
-const capabilitiesProbe = jobsSource.indexOf("await getCapabilities(base)", mediaRecheck);
+const capabilitiesProbe = jobsSource.indexOf("await getFreshCapabilitiesForScope(base", mediaRecheck);
 assert.ok(beginRecheck > 0 && beginRecheck < baseLookup,
   "cancellation must be rechecked immediately after wf.begin yields");
 assert.ok(baseRecheck > baseLookup && baseRecheck < firstPrefetch,

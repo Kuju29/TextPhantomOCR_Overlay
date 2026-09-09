@@ -27,6 +27,12 @@ export async function submitJobViaRest(
   const t0 = Date.now();
   const headers = limitHeaders(base, payload?.limits?.apiUnlimited === true, {
     "Content-Type": "application/json",
+    ...correlationHeaders({
+      jobId: payload?.context?.jobId || payload?.jobId || "",
+      imageId: payload?.metadata?.image_id || "",
+      batchId: payload?.metadata?.batch_id || payload?.context?.batch_id || "",
+      traceId: payload?.context?.tp_trace || "",
+    }),
   });
   if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
   const ctrl = new AbortController();
@@ -252,6 +258,7 @@ export async function translateViaSyncRest(
           jobId,
           imageId: imageId || payload?.metadata?.image_id,
           batchId: batchId || payload?.metadata?.batch_id,
+          traceId,
         }),
       }),
       cache: "no-store",

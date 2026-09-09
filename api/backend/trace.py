@@ -54,11 +54,16 @@ import time, atexit, threading, re, os, math, json, inspect, functools
 _TZ = timezone(timedelta(hours=7))
 
 _explicit_trace = os.environ.get("TP_TRACE")
+_wire_trace_requested = os.environ.get("TP_AI_WIRE_TRACE", "").strip().lower() in {"1", "true", "yes", "on"}
 if _explicit_trace is None:
     _profile = (os.environ.get("TP_DIAGNOSTICS", "normal")
                 or "normal").strip().lower()
-    _RAW_MODE = "full" if _profile in ("deep", "full") else "1" if _profile in (
-        "activity", "summary", "1") else "0"
+    # A raw provider capture without the compact stage timeline is incomplete
+    # evidence. TP_AI_WIRE_TRACE therefore implies compact TP_TRACE unless the
+    # operator explicitly set TP_TRACE=0.
+    _RAW_MODE = "full" if _profile in ("deep", "full") else "1" if (
+        _profile in ("activity", "summary", "1") or _wire_trace_requested
+    ) else "0"
 else:
     # Existing deployments keep exact TP_TRACE behaviour. In particular an
     # explicit TP_TRACE=0 disables tracing even under a diagnostics profile.
@@ -327,6 +332,7 @@ def _session_header(target: Path, retention_deleted: int = 0) -> dict[str, Any]:
             "startedAt": started_at(),
             "fileStartedAt": datetime.now(_TZ).isoformat(timespec="seconds"),
             "mode": _MODE,
+            "aiWireTrace": _wire_trace_requested,
             "pid": os.getpid(),
             "file": target.name,
             "naming": _NAMING,

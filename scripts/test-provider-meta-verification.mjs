@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createProviderMetaController } from "../src/popup/controllers/provider-meta-controller.js";
 
 const val = (value = "") => ({ value });
-function fixture({ provider = "huggingface", model = "stale-model", resolveModels = ["good-model"], probeStatus = "passed" } = {}) {
+function fixture({ provider = "huggingface", model = "stale-model", resolveModels = ["good-model"], probeStatus = "passed", probeCapabilities = null } = {}) {
   const els = {
     mode: val("lens_text"), sources: val("ai"), lang: val("th"), apiUrl: val("http://api.local"),
     aiProvider: val(provider), aiBaseUrl: val(provider === "huggingface" ? "https://router.huggingface.co/v1" : ""),
@@ -21,7 +21,7 @@ function fixture({ provider = "huggingface", model = "stale-model", resolveModel
       models_source:"live", models:[...resolveModels], model:String(els.aiModel.value || model), model_status:resolveModels.includes(String(els.aiModel.value || model))?"available":"unavailable",
       model_capabilities:{},
     };
-    if (url.endsWith("/probe")) return { ok:probeStatus === "passed", provider, model:String(els.aiModel.value), status:probeStatus, cached:false };
+    if (url.endsWith("/probe")) return { ok:probeStatus === "passed", provider, model:String(els.aiModel.value), status:probeStatus, cached:false, ...(probeCapabilities ? { model_capabilities: structuredClone(probeCapabilities) } : {}) };
     throw new Error("unexpected URL");
   }};
   const setModelOptions=(models,{keepValue="",placeholder="",selectFirst=true}={})=>{
@@ -62,6 +62,16 @@ function fixture({ provider = "huggingface", model = "stale-model", resolveModel
   assert.equal(t.state.aiModelBlocked,false);
 }
 
+
+// A selected-model probe may supplement a catalogue that could not describe
+// native reasoning controls. The exact verified capability must reach popup
+// state instead of being lost after the health probe.
+{
+  const reasoning={ supported:true, mandatory:false, control:"levels", supported_efforts:["none","low"], dynamic:true };
+  const t=fixture({provider:"openai",model:"good-model",resolveModels:["good-model"],probeCapabilities:{reasoning}});
+  await t.controller.refresh();
+  assert.deepEqual(t.state.lastAiResolve.model_capabilities.reasoning, reasoning);
+}
 
 // Changing provider/account/model closes the translate gate immediately, before
 // the asynchronous catalogue request resolves. A previously verified model

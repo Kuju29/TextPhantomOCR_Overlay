@@ -44,12 +44,11 @@ So slots are handed out per identity, max-min fair:
   to that as its own jobs finish. Nothing is preempted: work already running
   always finishes, so nobody's page is thrown away to make room.
 
-Identity is the AI key when the request carries one, else the tab session.
-That is "different person OR different key" — the two things that have
-separate provider budgets. It is deliberately NOT the model: the provider's
-per-model budget is the rate gate's job (it buckets by provider+model+key),
-and folding the model in here would let one person take two shares by running
-two models.
+Identity is the tab session when the request carries one, else the AI key.
+The session is the person/workflow identity shared by Lens, Grouping and AI;
+using the server-owned provider key first would collapse every user onto one
+identity.  The key remains a compatibility fallback for older clients that do
+not send a tab session.  Provider/model quotas remain the rate gate's job.
 
 Requests with no identity at all share a single bucket. They cannot be told
 apart, so they are not pretended to be different — and ``stats()`` reports how
@@ -75,19 +74,20 @@ class AdmissionRejected(RuntimeError):
 def identity_of(payload: dict | None) -> str:
     """Who this request belongs to, for the purpose of sharing capacity.
 
-    The AI key first, because that is the thing with a provider budget behind
-    it; the tab session otherwise. Keys are hashed — an identity used as a dict
-    key and printed in ``stats()`` must not be a secret.
+    Prefer the tab session so all three API stages share the same user identity.
+    Older clients that do not send a session fall back to the AI key. Keys are
+    hashed — an identity used as a dict key and printed in ``stats()`` must not
+    be a secret.
     """
     data = payload if isinstance(payload, dict) else {}
-    ai = data.get("ai") if isinstance(data.get("ai"), dict) else {}
-    key = str(ai.get("api_key") or "").strip()
-    if key:
-        return "k:" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
     ctx = data.get("context") if isinstance(data.get("context"), dict) else {}
     session = str(ctx.get("tp_tab_session") or "").strip()
     if session:
         return "s:" + session[:32]
+    ai = data.get("ai") if isinstance(data.get("ai"), dict) else {}
+    key = str(ai.get("api_key") or "").strip()
+    if key:
+        return "k:" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
     return ANONYMOUS
 
 @dataclass(frozen=True)
@@ -179,11 +179,13 @@ class AdmissionGate:
     def _share(self) -> int:
         """How many slots one identity may hold right now.
 
-        Floor division, but never below one: with sixteen identities on a
-        fifteen-slot server, ``15 // 16 == 0`` would admit nobody at all — a
-        fairness rule that starves everyone equally is not fairness.
+        Ceiling division keeps every physical slot usable. For example a
+        fifteen-slot lane shared by four identities may settle at 4/4/4/3
+        instead of wasting three slots at 3/3/3/3. The global limit still
+        prevents the temporary per-identity ceiling from over-admitting.
         """
-        return max(1, self._limit // self._active_identities())
+        identities = self._active_identities()
+        return max(1, (self._limit + identities - 1) // identities)
 
     def _waiting_share(self) -> int:
         """How many of one identity's requests may queue for a slot.
@@ -195,7 +197,13 @@ class AdmissionGate:
         2026-08-07 with the running slots already shared: A held 15 running
         plus all 8 waiting, and B's single page was still refused.
         """
-        return max(1, self._max_waiters // self._active_identities())
+        # Running capacity may be fully borrowed by one user when nobody else
+        # is active. Waiting capacity is different: deferred work adds no
+        # throughput, so letting one user fill every waiter would prevent a
+        # newly arriving user from entering the fairness hand-off at all. Keep
+        # at least half of the small cushion available for a second identity.
+        identities = max(2, self._active_identities())
+        return max(1, (self._max_waiters + identities - 1) // identities)
 
     def stats(self) -> GateStats:
         return GateStats(

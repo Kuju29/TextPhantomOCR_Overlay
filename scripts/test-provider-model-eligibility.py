@@ -35,6 +35,45 @@ openai_ids = cloud_openai.filter_model_items([
 ])
 assert openai_ids == ["gpt-4o", "gpt-5.6-luna", "o4-mini"], openai_ids
 
+# OpenAI /models has no reasoning-control metadata. The selected-model probe
+# must feature-detect the exact model rather than trusting a static name list.
+_openai_probe_payloads = []
+def _openai_selected_probe(request, **kwargs):
+    extra = dict(kwargs.get("payload_extra") or {})
+    _openai_probe_payloads.append(extra)
+    if extra.get("reasoning_effort") in {"none", "low"}:
+        return ProbeResponse(True, 200)
+    return ProbeResponse(True, 200)
+with patch.object(cloud_openai, "openai_chat_probe", _openai_selected_probe):
+    future = cloud_openai.ADAPTER.probe(ProbeRequest(
+        model="gpt-future-reasoner-snapshot", api_key="sk-fixture",
+        base_url=cloud_openai.DEFAULT_BASE_URL, model_capabilities={},
+    ))
+assert future.ok is True
+assert [item.get("reasoning_effort") for item in _openai_probe_payloads] == ["none", "low"], _openai_probe_payloads
+assert future.capabilities["reasoning"]["control"] == "levels"
+assert future.capabilities["reasoning"]["supported_efforts"] == ["none", "low"]
+
+# A normal chat model that rejects reasoning_effort must remain usable and must
+# not gain a fabricated Thinking control.
+_openai_probe_payloads.clear()
+def _openai_nonreasoning_probe(request, **kwargs):
+    extra = dict(kwargs.get("payload_extra") or {})
+    _openai_probe_payloads.append(extra)
+    if extra.get("reasoning_effort") == "none":
+        return ProbeResponse(False, 400, error="unsupported parameter")
+    return ProbeResponse(True, 200)
+with patch.object(cloud_openai, "openai_chat_probe", _openai_nonreasoning_probe):
+    ordinary = cloud_openai.ADAPTER.probe(ProbeRequest(
+        model="gpt-4o", api_key="sk-fixture", base_url=cloud_openai.DEFAULT_BASE_URL,
+        model_capabilities={},
+    ))
+assert ordinary.ok is True and not ordinary.capabilities
+assert _openai_probe_payloads == [
+    {"max_completion_tokens": 256, "reasoning_effort": "none"},
+    {"max_completion_tokens": 256},
+], _openai_probe_payloads
+
 # OpenRouter: account/plan + chat + text in/out are all required when published.
 router = cloud_openrouter.filter_model_items([
     {"id":"ok", "available_on_current_plan":True, "type":"chat", "architecture":{"input_modalities":["text"], "output_modalities":["text"]}},

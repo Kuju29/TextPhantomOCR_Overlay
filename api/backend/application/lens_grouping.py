@@ -28,7 +28,8 @@ from backend.grouping.detector_free_service import (
     group_vertical_lens,
 )
 from backend.grouping.ai_source_tree import AiSourceTreeError, build_ai_source_tree
-from backend.jobs.admission import identity_of
+from backend.jobs.admission import AdmissionRejected, identity_of
+from backend.api.local_client import wants_unlimited
 from backend.log import event
 
 
@@ -100,10 +101,9 @@ def _decode_image(raw: bytes):
 
 
 def _group_on_worker(tree, image, raw_to_document):
-    from backend.jobs.runtime import cpu_slot
-    with cpu_slot():
-        return group_vertical_lens(tree, *image.size, image=image,
-                                   raw_to_document=raw_to_document)
+    return group_vertical_lens(
+        tree, *image.size, image=image, raw_to_document=raw_to_document
+    )
 
 
 async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict[str, Any]:
@@ -177,10 +177,34 @@ async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict[st
         ) from exc
     width, height = image.size
 
+    identity = identity_of(payload)
     try:
-        service_result = await run_in_threadpool(
-            _group_on_worker, tree, image, raw_to_document,
+        loop = __import__("asyncio").get_running_loop()
+        if wants_unlimited(request):
+            service_result = await loop.run_in_executor(
+                request.app.state.grouping_executor,
+                _group_on_worker, tree, image, raw_to_document,
+            )
+        else:
+            async with request.app.state.grouping_admission_gate.slot(identity):
+                service_result = await loop.run_in_executor(
+                    request.app.state.grouping_executor,
+                    _group_on_worker, tree, image, raw_to_document,
+                )
+    except AdmissionRejected as exc:
+        detail = error_payload(
+            code="server_busy", message=str(exc),
+            user_message="The grouping stage is busy. Please try this image again shortly.",
+            origin="api", stage="grouping_admission", category="capacity",
+            retryable=True, http_status=503, trace_id=trace_id,
+            extra={"retryAfterMs": int(exc.retry_after_sec * 1000)},
+            correlation=correlation,
         )
+        failure_event(requested_route, detail, **route_meta)
+        raise HTTPException(
+            status_code=503, detail=detail,
+            headers={"Retry-After": str(exc.retry_after_sec)},
+        ) from exc
     except DetectorFreeGroupingError as exc:
         status = 422
         safe_failure = _safe_failure_details(exc)
@@ -211,7 +235,10 @@ async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict[st
 
     grouping_result = service_result["grouping_result"]
     try:
-        ai_source_tree = await run_in_threadpool(build_ai_source_tree, tree, grouping_result)
+        loop = __import__("asyncio").get_running_loop()
+        ai_source_tree = await loop.run_in_executor(
+            request.app.state.grouping_executor, build_ai_source_tree, tree, grouping_result
+        )
     except AiSourceTreeError as exc:
         detail = error_payload(
             code=exc.code,

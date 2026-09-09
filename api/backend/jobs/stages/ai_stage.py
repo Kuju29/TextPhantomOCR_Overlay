@@ -15,6 +15,8 @@ from backend.render.ai_tree.builder import build_ai_tree
 from backend.render.patch import patch as patch_ai_tree
 from backend.render.html.overlay import render_tree_overlay
 
+from backend.jobs.stage_admission import stage_slot
+
 
 def _canonical_group_units(
     ai_source_tree: dict | None,
@@ -145,6 +147,8 @@ def run_ai_layer(
     use_lens_template: bool = False,
     layout_meta: dict[str, Any] | None = None,
     cancel_check=None,
+    admission_identity: str = "anon",
+    admission_unlimited: bool = False,
 ) -> dict | None:
     """Translate with AI, patch into a tree, and write the ``Ai`` result.
 
@@ -272,11 +276,12 @@ def run_ai_layer(
     # not re-enable a second provider generation.  Attributable empty units are
     # retained as an explicit partial result below.
     ai_cfg.repair_enabled = False
-    result = ai_repair.translate_with_one_repair(
-        src_text, target_lang, ai_cfg, n_src,
-        capture_request=capture_request,
-        cancel_check=cancel_check,
-    )
+    with stage_slot("ai", admission_identity, unlimited=admission_unlimited):
+        result = ai_repair.translate_with_one_repair(
+            src_text, target_lang, ai_cfg, n_src,
+            capture_request=capture_request,
+            cancel_check=cancel_check,
+        )
 
     # OUTPUT clamp — deterministic, always on. A repetition runaway in the
     # model's answer (thousands of repeated chars/clusters) can strike at any

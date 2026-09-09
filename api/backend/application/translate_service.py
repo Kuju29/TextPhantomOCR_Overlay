@@ -49,10 +49,11 @@ async def capability_snapshot(request: Request) -> dict:
     exposes the legacy routes) uses the job queue and says so in its logs, so
     the slow path is never taken silently.
     """
-    from backend.jobs.runtime import CPU_SLOTS
     stats = _gate(request).stats()
     ai_stats = _gate(request, "ai").stats()
-    return {
+    group_stats = request.app.state.grouping_admission_gate.stats()
+    pipeline_stats = request.app.state.pipeline_admission_gate.stats()
+    snapshot = {
         "ok": True,
         "apiVersion": API_VERSION,
         "schemas": SCHEMAS,
@@ -109,7 +110,16 @@ async def capability_snapshot(request: Request) -> dict:
             **ai_stats.as_dict(),
             "executorWorkers": int(getattr(request.app.state, "ai_executor_workers", ai_stats.limit)),
         },
-        "capacityGroups": {"limit": CPU_SLOTS, "source": "shared_cpu_runtime"},
+        "capacityGroups": {
+            **group_stats.as_dict(),
+            "executorWorkers": int(getattr(request.app.state, "grouping_executor_workers", group_stats.limit)),
+            "source": "shared_stage_admission",
+        },
+        "capacityPipeline": {
+            **pipeline_stats.as_dict(),
+            "executorWorkers": int(getattr(request.app.state, "pipeline_executor_workers", pipeline_stats.limit)),
+            "source": "runsapi_dispatch_only",
+        },
         # What each lane is allowed RIGHT NOW and whether it may still move.
         # The extension reads this so both sides agree on how much work fits
         # instead of each guessing behind its own fixed number.
@@ -120,6 +130,17 @@ async def capability_snapshot(request: Request) -> dict:
             "rateGate": rate_gate.enabled() and rate_gate.adaptive_enabled(),
         },
     }
+    headers = getattr(request, "headers", {}) or {}
+    trace.write("api", "api/routes/translate_v1.py", "capabilities", "..", {
+        "trace": snapshot["features"]["trace"],
+        "traceSession": snapshot["features"]["traceSession"],
+        "aiWireTrace": snapshot["features"]["aiWireTrace"],
+        "lensLimit": snapshot["capacity"]["limit"],
+        "groupingLimit": snapshot["capacityGroups"]["limit"],
+        "aiLimit": snapshot["capacityAi"]["limit"],
+        "clientVersion": str(headers.get("x-tp-client-version") or "")[:80],
+    }, trace_id=str(headers.get("x-tp-trace-id") or ""))
+    return snapshot
 
 async def execute(payload: dict[str, Any], request: Request) -> dict:
     """Run one translation and return its result."""
@@ -132,11 +153,11 @@ async def execute(payload: dict[str, Any], request: Request) -> dict:
     mode = prepared.mode
     source = prepared.source
     identity = prepared.identity
-    gate = _gate(request, lane)
-    run_pipeline = translate_request.pipeline_callable(prepared)
-
     # Pace only work that will reach an AI provider.
     unlimited = wants_unlimited(request)
+    run_pipeline = translate_request.pipeline_callable(
+        prepared, admission_unlimited=unlimited
+    )
     ai_cfg = payload.get("ai") if isinstance(payload.get("ai"), dict) else {}
     api_key = str(ai_cfg.get("api_key") or "")
     rate_provider = resolve_provider(str(ai_cfg.get("provider") or "auto"), api_key)
@@ -187,15 +208,19 @@ async def execute(payload: dict[str, Any], request: Request) -> dict:
     try:
         # A local caller is this server's only tenant; the fairness gate has
         # nobody to be fair to. Verified against the peer address, not the header.
-        executor = (request.app.state.pipeline_ai_executor
-                    if lane == "ai" else request.app.state.pipeline_lens_executor)
+        # runs:API dispatch has its own fair transport gate. It is intentionally
+        # NOT Lens or AI capacity: the worker may move through all three stages.
+        # Stage ownership is enforced inside process_payload by the shared API
+        # Lens/Grouping/AI gates used by runs:Extension and legacy as well.
+        executor = request.app.state.pipeline_executor
+        dispatch_gate = request.app.state.pipeline_admission_gate
         loop = asyncio.get_running_loop()
         admission_started = time.perf_counter()
         admission_wait_ms = 0.0
-        if wants_unlimited(request):
+        if unlimited:
             result = await loop.run_in_executor(executor, run_pipeline)
         else:
-            async with gate.slot(identity):
+            async with dispatch_gate.slot(identity):
                 admission_wait_ms = round(
                     (time.perf_counter() - admission_started) * 1000, 1
                 )

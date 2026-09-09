@@ -56,6 +56,7 @@ export async function fetchLensRawViaRest(
           jobId,
           imageId,
           batchId,
+          traceId,
         }),
       ),
       cache: "no-store",

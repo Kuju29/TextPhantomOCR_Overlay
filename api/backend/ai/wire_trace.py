@@ -12,6 +12,7 @@ import json
 import os
 import re
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -37,12 +38,37 @@ def enabled() -> bool:
 def root_dir() -> Path:
     return Path(os.getenv("TP_AI_WIRE_TRACE_DIR") or Path(__file__).resolve().parents[2] / "logs" / "ai-wire")
 
+def start_session() -> dict[str, Any]:
+    """Persist process-level proof that wire tracing reached this API process."""
+    state = {
+        "schema": "tp.ai-wire-trace-session/1",
+        "enabled": enabled(),
+        "pid": os.getpid(),
+        "startedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "root": str(root_dir()),
+    }
+    if not state["enabled"]:
+        return state
+    try:
+        root = root_dir()
+        root.mkdir(parents=True, exist_ok=True)
+        with _lock:
+            (root / f"_session-{os.getpid()}.json").write_text(
+                json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+    except Exception as exc:
+        raise AiWireTraceWriteError(
+            f"AI_WIRE_TRACE_WRITE_FAILED: session: {type(exc).__name__}"
+        ) from exc
+    return state
+
 def safe_path_part(value: Any, *, fallback: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or fallback))[:80] or fallback
 
 def begin(identity: dict[str, Any]) -> contextvars.Token:
     if not enabled():
         return _active.set(None)
+    identity = {**dict(identity or {}), "wireTracePid": os.getpid()}
     trace_id = safe_path_part(identity.get("traceId"), fallback="no-trace")
     operation = safe_path_part(identity.get("operationId"), fallback="no-operation")
     root = root_dir()

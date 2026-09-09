@@ -195,6 +195,15 @@ cloudThinkingState.lastAiResolve.model_capabilities.reasoning = { supported: tru
 cloudThinkingUi.toggle();
 assert.equal(cloudThinkingEls.aiThinkingWrap.style.display, "none",
   "level-only Cloud reasoning must not expose the binary Thinking selector");
+cloudThinkingState.lastAiResolve.model_capabilities.reasoning = {
+  supported: true, mandatory: false, dynamic: true, control: "levels",
+  supported_efforts: ["none", "low"],
+};
+cloudThinkingUi.toggle();
+assert.equal(cloudThinkingEls.aiThinkingWrap.style.display, "",
+  "selected-model levels with verified native none + on effort must expose Thinking");
+assert.equal(cloudThinkingEls.aiThinking.disabled, false);
+assert.match(cloudThinkingEls.aiThinkingHint.textContent, /verified for this selected model/i);
 assert.match(popupHtml, /Thinking off \(recommended for translation\)/,
   "Local translation guidance must default thinking off");
 const thinkingSelectHtml = popupHtml.match(/<select id="ai-thinking"[\s\S]*?<\/select>/i)?.[0] || "";

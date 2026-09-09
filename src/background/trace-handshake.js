@@ -22,7 +22,7 @@ export async function ensureTraceHandshake(rawBase) {
   if (inFlight.has(base)) return inFlight.get(base);
   const epoch = handshakeEpoch;
   const task = (async () => {
-    const caps = await getCapabilities(base);
+    const caps = await getCapabilities(base, { forceRefresh: true });
     if (epoch !== handshakeEpoch || base !== activeBase) {
       return { known: false, trace: false, reason: "stale_capabilities", caps };
     }
@@ -42,7 +42,7 @@ export async function ensureTraceHandshake(rawBase) {
       caps.traceSession,
       async () => {
         forgetCapabilities(base);
-        return getCapabilities(base);
+        return getCapabilities(base, { forceRefresh: true });
       },
     );
     if (caps.trace === true) await flushTrace();

@@ -100,6 +100,21 @@ def remember_model_capabilities(provider: str, base_url: str, api_key: str,
     _MODEL_CAPABILITIES[scope] = {"expires_at": time.monotonic() + _MODEL_CAPABILITIES_TTL_SEC,
                                   "models": dict(capabilities or {})}
 
+def remember_selected_model_capability(provider: str, base_url: str, api_key: str,
+                                      model: str, capability: dict[str, Any]) -> None:
+    scope = (canonical_provider(provider), str(base_url or "").rstrip("/"),
+             hashlib.sha256(str(api_key or "").encode()).hexdigest())
+    now = time.monotonic()
+    cached = _MODEL_CAPABILITIES.get(scope)
+    models = dict(cached.get("models") or {}) if cached and cached.get("expires_at", 0) > now else {}
+    normalized = normalize_model_capabilities(capability)
+    if normalized:
+        models[str(model)] = normalized
+    _MODEL_CAPABILITIES[scope] = {
+        "expires_at": now + _MODEL_CAPABILITIES_TTL_SEC,
+        "models": models,
+    }
+
 def forget_model_capabilities(provider: str, base_url: str, api_key: str) -> None:
     scope = (canonical_provider(provider), str(base_url or "").rstrip("/"),
              hashlib.sha256(str(api_key or "").encode()).hexdigest())

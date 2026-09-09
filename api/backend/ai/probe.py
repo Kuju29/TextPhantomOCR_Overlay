@@ -22,6 +22,8 @@ from backend.ai.provider_resolution import (
     resolve_base_url,
     resolve_model,
     discovered_model_capabilities,
+    normalize_model_capabilities,
+    remember_selected_model_capability,
 )
 from backend.ai.rate_policy import is_local_target
 from backend.config import settings
@@ -48,6 +50,7 @@ class ProbeResult(TypedDict, total=False):
     http_status: int
     cached: bool
     error: str
+    model_capabilities: dict[str, Any]
 
 def _cache_key(provider: str, model: str, base_url: str, api_key: str) -> str:
     raw = f"{provider}|{model}|{base_url}|{hashlib.sha256(api_key.encode()).hexdigest()}"
@@ -181,6 +184,12 @@ def probe(payload: dict[str, Any]) -> ProbeResult:
             error=type(exc).__name__,
         )
     else:
+        verified_capabilities = normalize_model_capabilities(dict(response.capabilities or {}))
+        effective_capabilities = verified_capabilities or normalize_model_capabilities(probe_capabilities)
+        if verified_capabilities:
+            remember_selected_model_capability(
+                provider, base_url, api_key, model, verified_capabilities
+            )
         if response.ok:
             result = ProbeResult(
                 ok=True,
@@ -191,6 +200,7 @@ def probe(payload: dict[str, Any]) -> ProbeResult:
                 status="passed",
                 http_status=response.http_status,
                 cached=False,
+                **({"model_capabilities": effective_capabilities} if effective_capabilities else {}),
             )
         elif response.status:
             result = ProbeResult(

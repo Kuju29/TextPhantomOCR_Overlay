@@ -132,6 +132,23 @@ export function createProviderMetaController({
     setFieldMessage(els.aiModelWrap, type, text);
   };
 
+  const applyProbeCapabilities = async (result, apiKey, providerId, model) => {
+    const capabilities = result?.model_capabilities;
+    if (!capabilities || typeof capabilities !== "object" || Array.isArray(capabilities) ||
+        !Object.keys(capabilities).length) return;
+    if (state.lastAiResolve &&
+        String(state.lastAiResolve.provider || "") === String(providerId || "") &&
+        String(state.lastAiResolve.model || state.lastAiResolve.requested_model || "") === String(model || "")) {
+      state.lastAiResolve = { ...state.lastAiResolve, model_capabilities: capabilities };
+    }
+    if (apiKey) {
+      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(apiKey));
+      const accountHash = Array.from(new Uint8Array(digest).slice(0, 8), (byte) =>
+        byte.toString(16).padStart(2, "0")).join("");
+      await profile.saveModelCapabilities(capabilities, accountHash);
+    }
+  };
+
   const probeSelected = async () => {
     if (!canUse() || provider.isLocal(els.aiProvider?.value)) return;
     const base = normalizeUrl(els.apiUrl.value);
@@ -163,6 +180,7 @@ export function createProviderMetaController({
     const cached = probeCache.get(identity);
     if (cached && Date.now() - cached.ts < PROBE_TTL_MS) {
       state.lastAiProbe = { ...cached.data, provider: id, model, cached: true };
+      await applyProbeCapabilities(state.lastAiProbe, apiKey, id, model);
       setModelBlocked(probeBlocksModel(state.lastAiProbe.status));
       renderStatus();
       toggleUi();
@@ -195,6 +213,7 @@ export function createProviderMetaController({
       const result = await request;
       if (sequence !== state.aiProbeSeq) return;
       state.lastAiProbe = result;
+      await applyProbeCapabilities(result, apiKey, id, model);
       setModelBlocked(probeBlocksModel(result.status));
     } catch {
       if (sequence !== state.aiProbeSeq) return;

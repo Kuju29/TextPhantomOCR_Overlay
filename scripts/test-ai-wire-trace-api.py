@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI
@@ -24,6 +25,35 @@ EXPECTED = {
     "11_terminal.json",
     "06_parsed_records.json", "07_validation.json", "08_apply_result.json", "09_timing.json",
 }
+
+# Import-time contract: TP_AI_WIRE_TRACE alone must make the main trace compact
+# and create process-level evidence. Run in a child process so module globals
+# cannot inherit this test runner's environment/import state.
+with tempfile.TemporaryDirectory(prefix="tp-wire-implies-trace-") as temp:
+    env = dict(os.environ)
+    env.pop("TP_TRACE", None)
+    env["TP_AI_WIRE_TRACE"] = "1"
+    env["TP_TRACE_DIR"] = str(Path(temp) / "trace")
+    env["TP_AI_WIRE_TRACE_DIR"] = str(Path(temp) / "wire")
+    env["PYTHONPATH"] = str(ROOT / "api")
+    code = """
+from pathlib import Path
+import os
+from backend import trace
+from backend.ai import wire_trace
+assert trace.enabled() and trace.mode() == 'compact', (trace.enabled(), trace.mode())
+trace.start_session()
+state = wire_trace.start_session()
+assert state['enabled'] is True
+trace.flush()
+assert list(Path(state['root']).glob('_session-*.json'))
+trace_files = list(Path(os.environ['TP_TRACE_DIR']).glob('trace-*.jsonl'))
+assert trace_files
+text = trace_files[0].read_text('utf-8')
+assert '"fn": "session_start"' in text and '"aiWireTrace": true' in text
+"""
+    child = subprocess.run([sys.executable, "-c", code], env=env, text=True, capture_output=True)
+    assert child.returncode == 0, child.stderr or child.stdout
 
 with tempfile.TemporaryDirectory(prefix="tp-wire-api-") as temp:
     previous = {key: os.environ.get(key) for key in ("TP_AI_WIRE_TRACE", "TP_AI_WIRE_TRACE_DIR")}

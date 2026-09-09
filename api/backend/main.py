@@ -50,8 +50,10 @@ from backend.api.routes import (
     translate_v1,
 )
 from backend import logfile, trace, trace_install
+from backend.ai import wire_trace
 from backend.ai.rategate import rate_gate
 from backend.jobs.admission import AdmissionGate
+from backend.jobs import stage_admission
 from backend.config import settings
 from backend.jobs.pipeline import process_payload
 from backend.jobs.queue import JobQueue
@@ -93,10 +95,26 @@ async def _cookie_refresh_loop() -> None:
 async def lifespan(app: FastAPI):
     """Start the job queue's worker pool when the server boots."""
     configure_uvicorn_access_log()
+    stage_admission.configure(
+        asyncio.get_running_loop(),
+        lens=app.state.admission_gate,
+        grouping=app.state.grouping_admission_gate,
+        ai=app.state.ai_admission_gate,
+    )
     queue = JobQueue(process_payload)
     queue.start()
     app.state.job_queue = queue
-    print(f"[TextPhantom][api] starting workers={settings.max_workers} direct_workers={getattr(queue, '_direct_workers', '?')} ai_workers={getattr(queue, '_ai_workers', '?')} ai_http_threads={settings.ai_thread_workers}", flush=True)
+    print(
+        "[TextPhantom][api] shared stages "
+        f"lens={app.state.admission_gate.stats().limit} "
+        f"grouping={app.state.grouping_admission_gate.stats().limit} "
+        f"ai={app.state.ai_admission_gate.stats().limit} "
+        f"pipeline_threads={getattr(app.state, 'pipeline_executor_workers', '?')} "
+        f"legacy_direct_workers={getattr(queue, '_direct_workers', '?')} "
+        f"legacy_ai_workers={getattr(queue, '_ai_workers', '?')} "
+        f"ai_http_threads={settings.ai_thread_workers}",
+        flush=True,
+    )
     _cpu = cpu_runtime_info()
     print(
         "[TextPhantom][api] CPU runtime "
@@ -168,6 +186,21 @@ async def lifespan(app: FastAPI):
             flush=True,
         )
 
+    try:
+        wire_session = wire_trace.start_session()
+        if wire_session.get("enabled"):
+            print(
+                f"[TextPhantom][api] AI wire trace: on -> {wire_session.get('root')} "
+                f"(pid={wire_session.get('pid')})", flush=True,
+            )
+        else:
+            print("[TextPhantom][api] AI wire trace: off", flush=True)
+    except Exception as exc:
+        print(
+            f"[TextPhantom][api] AI wire trace: FAILED ({type(exc).__name__}: {exc})",
+            flush=True,
+        )
+
     # Security posture, stated at boot. Each of these silently degraded the
     # service or widened its attack surface before, and none of them was
     # visible anywhere at runtime.
@@ -202,11 +235,12 @@ async def lifespan(app: FastAPI):
         if background_tasks:
             await asyncio.gather(*background_tasks, return_exceptions=True)
         await queue.shutdown(timeout=5.0)
+        stage_admission.clear()
         # Thread work already executing cannot be force-killed safely. Cancel
         # only futures that never started and do not hold ASGI shutdown open.
         for name in (
-            "ai_executor", "lens_executor",
-            "pipeline_lens_executor", "pipeline_ai_executor",
+            "ai_executor", "lens_executor", "grouping_executor",
+            "pipeline_executor",
         ):
             executor = getattr(app.state, name, None)
             if executor is not None:
@@ -338,6 +372,21 @@ app.state.admission_gate = AdmissionGate(
 # than computing. Two gates, not one wider gate: a single pool means an image
 # asleep on Gemini's socket is holding a slot that the next image's Lens upload
 # needs, and the two have nothing to do with each other.
+_GROUP_LIMIT = max(1, settings.sync_group_max_concurrency or _LENS_LIMIT)
+app.state.grouping_executor = ThreadPoolExecutor(
+    max_workers=_GROUP_LIMIT,
+    thread_name_prefix="tp-group-http",
+)
+app.state.grouping_executor_workers = _GROUP_LIMIT
+app.state.grouping_admission_gate = AdmissionGate(
+    _GROUP_LIMIT,
+    max_waiters=settings.sync_group_max_waiters,
+    max_wait_sec=settings.sync_group_max_wait_sec,
+    adaptive=False,
+    limit_min=_GROUP_LIMIT,
+    limit_max=_GROUP_LIMIT,
+)
+
 _AI_CONFIGURED = settings.sync_ai_max_concurrency or _AI_THREADS
 _AI_LIMIT = max(1, min(_AI_CONFIGURED, _AI_THREADS))
 app.state.ai_admission_gate = AdmissionGate(
@@ -353,16 +402,25 @@ app.state.ai_admission_gate = AdmissionGate(
     limit_max=_AI_LIMIT,
 )
 app.state.ai_executor_workers = _AI_THREADS
-# The full API-server engine owns a whole image pipeline on one worker. Give
-# each admission lane a matching executor so /v1/translate cannot recreate the
-# hidden shared-default-pool queue that the extension-first route eliminated.
-app.state.pipeline_lens_executor = ThreadPoolExecutor(
-    max_workers=_LENS_LIMIT,
-    thread_name_prefix="tp-pipeline-lens",
+
+# runs:API owns a whole synchronous image pipeline per worker. This transport
+# pool is deliberately wider than any one stage: it must not become a fourth
+# highway that hides free Lens/Grouping/AI slots behind ThreadPoolExecutor FIFO.
+# The sum is a natural upper bound for requests simultaneously resident in the
+# three shared stages. Heavy resources remain protected by their stage gates.
+_PIPELINE_LIMIT = _LENS_LIMIT + _GROUP_LIMIT + _AI_LIMIT
+app.state.pipeline_executor = ThreadPoolExecutor(
+    max_workers=_PIPELINE_LIMIT,
+    thread_name_prefix="tp-pipeline",
 )
-app.state.pipeline_ai_executor = ThreadPoolExecutor(
-    max_workers=_AI_LIMIT,
-    thread_name_prefix="tp-pipeline-ai",
+app.state.pipeline_executor_workers = _PIPELINE_LIMIT
+app.state.pipeline_admission_gate = AdmissionGate(
+    _PIPELINE_LIMIT,
+    max_waiters=settings.sync_max_waiters,
+    max_wait_sec=settings.sync_max_wait_sec,
+    adaptive=False,
+    limit_min=_PIPELINE_LIMIT,
+    limit_max=_PIPELINE_LIMIT,
 )
 
 

@@ -75,15 +75,29 @@ class Settings:
     sync_max_wait_sec: float = field(
         default_factory=lambda: max(0.0, _env_float("TP_SYNC_MAX_WAIT_SEC", 10.0))
     )
-    # The browser owns the AI backlog; server-side waiting is opt-in.
+    # Keep only a small fair cushion on the API. The browser still owns the
+    # large backlog, while runs:API/legacy can wait for a shared AI stage slot
+    # without re-running Lens/Grouping merely because another user is active.
     sync_ai_max_waiters: int = field(
-        default_factory=lambda: max(0, _env_int("TP_SYNC_AI_MAX_WAITERS", 0))
+        default_factory=lambda: max(0, _env_int("TP_SYNC_AI_MAX_WAITERS", 8))
     )
     sync_ai_max_wait_sec: float = field(
         default_factory=lambda: max(0.0, _env_float("TP_SYNC_AI_MAX_WAIT_SEC", 10.0))
     )
+    # Detector-free grouping is a separate API stage. Zero follows Lens
+    # capacity so it never narrows the 15-wide Lens highway by default.
+    sync_group_max_concurrency: int = field(
+        default_factory=lambda: max(0, _env_int("TP_SYNC_GROUP_MAX_CONCURRENCY", 0))
+    )
+    sync_group_max_waiters: int = field(
+        default_factory=lambda: max(0, _env_int("TP_SYNC_GROUP_MAX_WAITERS", 8))
+    )
+    sync_group_max_wait_sec: float = field(
+        default_factory=lambda: max(0.0, _env_float("TP_SYNC_GROUP_MAX_WAIT_SEC", 10.0))
+    )
 
-    # Split-lane concurrency; SERVER_MAX_WORKERS remains the total budget.
+    # Split-lane concurrency for the legacy queued transport only. Stage-level
+    # Lens/Grouping/AI gates remain authoritative across every engine.
     direct_max_concurrency: int = field(default_factory=lambda: max(0, _env_int("TP_DIRECT_MAX_CONCURRENCY", 0)))
     ai_max_concurrency: int = field(default_factory=lambda: max(0, _env_int("TP_AI_MAX_CONCURRENCY", 0)))
 

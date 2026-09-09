@@ -37,7 +37,7 @@ assert.equal(
 const jobsSource = await readFile(new URL("../src/background/jobs.js", import.meta.url), "utf8");
 const traceCreatedAt = jobsSource.indexOf("traceId = newTraceId()");
 const contextStoredAt = jobsSource.indexOf("pendingByImage.set(payload.metadata.image_id, makeContext())");
-const capsAt = jobsSource.indexOf("const caps = await getCapabilities(base)");
+const capsAt = jobsSource.indexOf("const caps = await getFreshCapabilitiesForScope(base");
 const tracingAt = jobsSource.indexOf("setTracingEnabled(", capsAt);
 const issueAt = jobsSource.indexOf("const compatibilityIssue = engineCompatibilityIssue", capsAt);
 const stopOffset = jobsSource.slice(issueAt).search(

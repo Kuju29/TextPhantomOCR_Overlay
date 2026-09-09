@@ -95,9 +95,8 @@ class ProbeRequest:
     """Credential-safe input for one provider-owned connectivity probe.
 
     ``model_capabilities`` comes only from the live provider/account catalogue.
-    A probe may use it to disable optional hidden reasoning or choose another
-    provider-native safe control, but must never infer controls from a model
-    name when the catalogue did not confirm them.
+    A probe may use it directly or feature-detect controls on this exact selected
+    model. Model-name inference alone is never accepted as verified capability.
     """
 
     model: str
@@ -111,15 +110,21 @@ class ProbeRequest:
 
 @dataclass(frozen=True, slots=True)
 class ProbeResponse:
-    """Provider-neutral result after native response validation."""
+    """Provider-neutral result after native response validation.
+
+    ``capabilities`` contains only controls proved by this selected-model probe.
+    It supplements (never replaces) authoritative catalogue metadata.
+    """
 
     ok: bool
     http_status: int = 0
     status: str = ""
     error: str = ""
+    capabilities: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "error", str(self.error or "")[:240])
+        object.__setattr__(self, "capabilities", _frozen_mapping(self.capabilities))
 
 @runtime_checkable
 class ProviderAdapter(Protocol):

@@ -110,14 +110,21 @@ class DisplayPipelineTests(unittest.TestCase):
                 self.assertTrue(result['Ai']['aihtml']);self.assertFalse(a.done())
             finally:release.set()
             self.assertTrue(a.result(timeout=2)['Ai']['aihtml'])
-    def test_capabilities_report_actual_CPU_group_slots(self):
+    def test_capabilities_report_shared_stage_group_slots(self):
         from backend.application.translate_service import capability_snapshot
-        from backend.jobs.runtime import CPU_SLOTS
         stats=SimpleNamespace(limit=8,as_dict=lambda:{"limit":8})
         gate=SimpleNamespace(stats=lambda:stats,adaptive_state=lambda:{"limit":8})
-        request=SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(admission_gate=gate,ai_admission_gate=gate)))
+        state=SimpleNamespace(
+            admission_gate=gate, ai_admission_gate=gate, grouping_admission_gate=gate,
+            pipeline_admission_gate=gate, grouping_executor_workers=8,
+            pipeline_executor_workers=24, ai_executor_workers=8,
+        )
+        request=SimpleNamespace(app=SimpleNamespace(state=state))
         data=asyncio.run(capability_snapshot(request))
-        self.assertEqual(data['capacityGroups'],{'limit':CPU_SLOTS,'source':'shared_cpu_runtime'})
+        self.assertEqual(data['capacityGroups']['limit'],8)
+        self.assertEqual(data['capacityGroups']['source'],'shared_stage_admission')
+        self.assertEqual(data['capacityGroups']['executorWorkers'],8)
+        self.assertEqual(data['capacityPipeline']['source'],'runsapi_dispatch_only')
         self.assertEqual(data['capacityAi']['limit'],8)
 
     def test_short_source_char_batches_over_200_units_reach_validation_but_security_bound_remains(self):

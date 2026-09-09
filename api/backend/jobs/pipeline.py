@@ -12,19 +12,21 @@ from backend.jobs.stages.config import build_ai_config, layout_options
 from backend.jobs.stages.image_flow import process_image
 from backend.jobs.stages.payload_io import extract_image_bytes, temporary_image_file
 from backend.jobs.stages.result import attach_ai_performance, result_worth_caching
+from backend.jobs.admission import identity_of
 from backend.log import event
 from backend.utils.images import sha256_hex
 
 from backend.ai.accounting import api_pipeline_scope
 
 @api_pipeline_scope
-def process_payload(payload: dict) -> dict[str, Any]:
+def process_payload(payload: dict, *, admission_identity: str | None = None, admission_unlimited: bool = False) -> dict[str, Any]:
     """Process one queued job payload end to end (with result caching)."""
     t_start = time.perf_counter()
     mode = payload.get("mode") or "lens_images"
     lang = payload.get("lang") or "en"
     source = str(payload.get("source") or "").strip().lower() or "translated"
     cancel_check = lambda: cancellation.is_cancelled(payload)
+    stage_identity = str(admission_identity or identity_of(payload))
     if cancel_check():
         raise RuntimeError("cancelled")
 
@@ -81,8 +83,12 @@ def process_payload(payload: dict) -> dict[str, Any]:
         t_tmp = time.perf_counter()
         if cancel_check():
             raise RuntimeError("cancelled")
-        out = process_image(tmp_path, lang, mode, ai_cfg, source=source,
-                            layout_opts=layout, cancel_check=cancel_check)
+        out = process_image(
+            tmp_path, lang, mode, ai_cfg, source=source,
+            layout_opts=layout, cancel_check=cancel_check,
+            admission_identity=stage_identity,
+            admission_unlimited=bool(admission_unlimited),
+        )
         stages = out.pop("perfStages", {}) or {}
         out["perf"] = {
             "cache": "miss" if cache_used else "off",

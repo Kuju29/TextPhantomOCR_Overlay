@@ -1,6 +1,7 @@
 """Real ASGI grouping route stays responsive while its CPU task waits/runs."""
 from __future__ import annotations
 import asyncio, base64, io, json, os, sys, threading, time, unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 from PIL import Image
@@ -10,6 +11,7 @@ ROOT=Path(os.environ.get('TP_TEST_ROOT',Path(__file__).resolve().parents[1])).re
 sys.path.insert(0,str(ROOT/'api'))
 from backend.api.routes import lens_groups
 from backend.application import lens_grouping
+from backend.jobs.admission import AdmissionGate
 
 class GroupingEventLoopTests(unittest.IsolatedAsyncioTestCase):
     async def test_probe_completes_before_grouping_released(self):
@@ -22,6 +24,8 @@ class GroupingEventLoopTests(unittest.IsolatedAsyncioTestCase):
                 return original(*args,**kwargs)
             finally:finished.set()
         app=FastAPI();app.include_router(lens_groups.router)
+        app.state.grouping_admission_gate=AdmissionGate(15,max_waiters=8,max_wait_sec=1)
+        app.state.grouping_executor=ThreadPoolExecutor(max_workers=15,thread_name_prefix='test-group')
         @app.get('/diagnostic-probe')
         async def probe():return {'groupingStillActive':started.is_set() and not finished.is_set()}
         image=Image.new('RGB',(400,400),'white');data=io.BytesIO();image.save(data,'PNG')

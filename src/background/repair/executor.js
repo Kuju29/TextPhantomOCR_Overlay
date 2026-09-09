@@ -193,6 +193,7 @@ export async function executeRepairPool({ run, snapshot, executor, signal, getPa
           imageDataUri: ai.send_image ? ai._repairImageDataUri || '' : '',
           batchId: run.batchId, operationId: `repair:${run.id}:${taskId}`,
           jobId: taskId, imageId: '', signal, traceId: run.id, capabilities,
+          tabSession: String(page?.ctx?.sessionId || run?.sessionId || ''),
           repairClaim: page.route === 'server' ? { runId: run.id, taskId, token: run.token } : null,
           trace: (event, data) => onProgress({ phase: 'repair_request', event, taskId,
             unitCount: active.units.length, generationAttempts: data?.generationAttempts }),

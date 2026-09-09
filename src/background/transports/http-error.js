@@ -106,12 +106,14 @@ export function correlationHeaders({
   jobId = "",
   imageId = "",
   batchId = "",
+  traceId = "",
 } = {}) {
   const headers = {
     "X-TP-Request-Id": crypto.randomUUID(),
     "X-TP-Job-Id": String(jobId || ""),
     "X-TP-Image-Id": String(imageId || ""),
     "X-TP-Batch-Id": String(batchId || ""),
+    "X-TP-Trace-Id": String(traceId || ""),
     "X-TP-Client-Version": clientVersion(),
   };
   return Object.fromEntries(

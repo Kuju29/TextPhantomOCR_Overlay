@@ -18,6 +18,7 @@ from backend.grouping.detector_free_service import (
 )
 from backend.grouping.ai_source_tree import build_ai_source_tree
 from backend.jobs.runtime import CPU_GATE
+from backend.jobs.stage_admission import stage_slot
 from backend.jobs.stages.image_prepare import image_to_rgb
 from backend.lens import document as lens_document
 from backend.lens.languages import normalize as normalize_lang
@@ -163,6 +164,8 @@ def process_image(
     capture_ai_request: bool = False,
     layout_opts: dict[str, bool] | None = None,
     cancel_check=None,
+    admission_identity: str = "anon",
+    admission_unlimited: bool = False,
 ) -> dict[str, Any]:
     """Run the full pipeline on a local image file.
 
@@ -196,7 +199,8 @@ def process_image(
     thai_font, latin_font = resolve_font_pair(target_lang)
 
     with _stage(stages, "lens_fetch"):
-        data, stages["lens_ms"] = lens_stage.fetch(image_path, target_lang, lens_data)
+        with stage_slot("lens", admission_identity, unlimited=admission_unlimited):
+            data, stages["lens_ms"] = lens_stage.fetch(image_path, target_lang, lens_data)
 
     image_url = data.get("imageUrl")
     out: dict[str, Any] = {
@@ -302,7 +306,7 @@ def process_image(
                 # Grouping evidence must use the same untouched page pixels as the
                 # Extension route.  The erased render canvas can remove strokes or
                 # create whitespace that changes graph boundaries.
-                with CPU_GATE:
+                with stage_slot("grouping", admission_identity, unlimited=admission_unlimited):
                     grouped = group_vertical_lens(original_tree, W, H, image=img)
                 canonical = grouped["grouping_result"]
                 from backend.geometry_diagnostics import emit_group_diagnostics
@@ -361,6 +365,8 @@ def process_image(
                 capture_request=capture_ai_request,
                 use_lens_template=not ai_requires_relayout,
                 layout_meta=ai_layout_meta,
+                admission_identity=admission_identity,
+                admission_unlimited=admission_unlimited,
             )
 
         _t = time.perf_counter()

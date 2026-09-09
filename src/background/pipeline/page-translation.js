@@ -294,6 +294,7 @@ export async function translateLensPage({
       imageId: correlation.imageId,
       signal,
       traceId,
+      tabSession: String(payload?.context?.tp_tab_session || ""),
       trace: (event, data) =>
         trace("translateUnits", { event, ...data }, traceId),
       onProgress: onStreamProgress,

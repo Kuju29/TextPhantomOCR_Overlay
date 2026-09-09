@@ -6,6 +6,7 @@ import io
 import pathlib
 import sys
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -16,6 +17,7 @@ sys.path.insert(0, str(ROOT / "api"))
 
 from fastapi import HTTPException  # noqa: E402
 from backend.application import lens_grouping  # noqa: E402
+from backend.jobs.admission import AdmissionGate  # noqa: E402
 from backend.grouping.detector_free_service import DetectorFreeGroupingError  # noqa: E402
 from backend.grouping.adapter import raw_tree_fingerprint  # noqa: E402
 
@@ -34,6 +36,10 @@ class FakeRequest:
             "x-tp-client-version": "2026.test",
         }
         self.query_params = {}
+        self.app = SimpleNamespace(state=SimpleNamespace(
+            grouping_admission_gate=AdmissionGate(8, max_waiters=2, max_wait_sec=1),
+            grouping_executor=ThreadPoolExecutor(max_workers=8),
+        ))
 
 
 def source_tree():

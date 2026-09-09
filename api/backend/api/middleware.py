@@ -38,6 +38,18 @@ _FAILURE_MODES = _EVENT_MODES | _ERROR_ONLY_MODES
 _KNOWN_PREFIXES = (
     "/translate", "/ai/", "/v1/", "/v2/", "/health", "/warmup", "/meta", "/version",
 )
+_TRACE_EVIDENCE_PATHS = ("/v1/capabilities",)
+_TRACE_PIPELINE_PREFIXES = (
+    "/v2/engine/", "/v1/lens", "/v1/ai/translate", "/v1/translate", "/v1/repair-runs",
+)
+
+def _trace_request_path(path: str) -> bool:
+    return path == "/translate" or path in _TRACE_EVIDENCE_PATHS or any(
+        path.startswith(prefix) for prefix in _TRACE_PIPELINE_PREFIXES
+    )
+
+def _request_trace_id(request: Request) -> str:
+    return str(request.headers.get("x-tp-trace-id") or "")[:160]
 
 _SCANNER_WINDOW_SEC = 600  # one summary line per 10 minutes at most
 _scanner = {"count": 0, "since": 0.0, "samples": []}
@@ -93,7 +105,19 @@ def configure_uvicorn_access_log() -> None:
     _quiet_logger("websockets.protocol")
 
 async def access_log_middleware(request: Request, call_next):
-    """Log only HTTP failures; success summaries are emitted by route/job code."""
+    """Log failures plus trace-only ingress/egress for diagnostic pipeline paths."""
+    path = request.url.path
+    request_trace_id = _request_trace_id(request)
+    if trace.enabled() and _trace_request_path(path):
+        trace.write("api", "api/middleware.py", "http_request", "->", {
+            "method": request.method,
+            "path": path,
+            "clientVersion": str(request.headers.get("x-tp-client-version") or "")[:80],
+            "requestId": str(request.headers.get("x-tp-request-id") or "")[:120],
+            "jobId": str(request.headers.get("x-tp-job-id") or "")[:120],
+            "batchId": str(request.headers.get("x-tp-batch-id") or "")[:120],
+            "imageId": str(request.headers.get("x-tp-image-id") or "")[:120],
+        }, trace_id=request_trace_id)
     try:
         try:
             response = await call_next(request)
@@ -150,6 +174,10 @@ async def access_log_middleware(request: Request, call_next):
                         )
             except Exception:
                 pass
+        if trace.enabled() and _trace_request_path(path):
+            trace.write("api", "api/middleware.py", "http_request", "<-", {
+                "method": request.method, "path": path, "status": response.status_code,
+            }, trace_id=request_trace_id)
         return response
     finally:
         # Lens upload, Lens graph grouping, AI and browser-ingest routes are

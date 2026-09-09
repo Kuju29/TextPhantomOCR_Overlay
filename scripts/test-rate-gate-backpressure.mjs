@@ -182,8 +182,8 @@ async function occupy(key, n) {
     "AI admission must have its own no-backlog waiter settings");
   assert.match(main, /adaptive=False,[\s\S]*limit_min=_AI_LIMIT,[\s\S]*limit_max=_AI_LIMIT/,
     "AI admission must stay pinned to executor capacity; provider latency must not shrink it");
-  assert.match(config, /TP_SYNC_AI_MAX_WAITERS", 0/,
-    "AI server backlog must default to zero waiters");
+  assert.match(config, /TP_SYNC_AI_MAX_WAITERS", 8/,
+    "AI stage must keep only a small bounded fairness cushion; the browser still owns the large backlog");
   assert.match(config, /TP_SYNC_AI_MAX_WAIT_SEC", 10\.0/,
     "AI waiter timeout is only relevant if an operator explicitly enables waiters");
   assert.match(admission, /if self\._max_waiters <= 0:[\s\S]*no server wait queue/,
@@ -236,17 +236,17 @@ async function occupy(key, n) {
     "Lens must have a dedicated executor");
   assert.doesNotMatch(main, /app\.state\.cpu_(?:executor|admission_gate)/,
     "removed detector infrastructure must not leave a public CPU lane behind");
-  assert.match(main, /app\.state\.pipeline_ai_executor = ThreadPoolExecutor\(/,
-    "the API-server AI pipeline must not fall back to asyncio's shared executor");
-  assert.match(main, /app\.state\.pipeline_lens_executor = ThreadPoolExecutor\(/,
-    "the API-server Lens pipeline must not fall back to asyncio's shared executor");
+  assert.match(main, /app\.state\.pipeline_executor = ThreadPoolExecutor\(/,
+    "runs:API must use a dedicated dispatch executor instead of asyncio's shared executor");
+  assert.match(main, /stage_admission\.configure\([\s\S]*lens=app\.state\.admission_gate,[\s\S]*grouping=app\.state\.grouping_admission_gate,[\s\S]*ai=app\.state\.ai_admission_gate/,
+    "all API engines must share the same stage admission gates");
 
   const lensRoute = await readFile(new URL("../api/backend/application/lens_service.py", import.meta.url), "utf8");
   assert.match(lensRoute, /run_in_executor\(\s*request\.app\.state\.lens_executor/,
     "Lens raw must execute on its dedicated pool");
   const syncRoute = await readFile(new URL("../api/backend/application/translate_service.py", import.meta.url), "utf8");
-  assert.match(syncRoute, /pipeline_ai_executor[\s\S]*pipeline_lens_executor/,
-    "the API-server engine must choose a dedicated executor by lane");
+  assert.match(syncRoute, /executor = request\.app\.state\.pipeline_executor[\s\S]*dispatch_gate = request\.app\.state\.pipeline_admission_gate/,
+    "runs:API dispatch must not reserve Lens or AI capacity before the real stage executes");
 
   assert.match(apiRoute, /if not rate\["enabled"\]/,
     "disabled user pacing must take an explicit no-gate telemetry branch");
