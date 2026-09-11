@@ -9,10 +9,12 @@ from backend import trace
 from backend.application.repair_pool import state
 from backend.application.repair_pool.store import store
 from backend.application.ai_translation.orchestration import execute
+from backend.api.activity_dedupe import TransitionDedupe
 
 router = APIRouter(prefix="/v2/engine/runsextension/repair-runs")
 MAX_BODY_BYTES = 2 * 1024 * 1024
 _running: set[asyncio.Task] = set()
+_activity_transitions = TransitionDedupe(max_entries=1024, ttl_sec=3600)
 
 def token(request: Request) -> str:
     return str(request.headers.get("x-tp-run-token") or "")
@@ -41,10 +43,23 @@ async def call(fn, *args):
 
 async def change(request: Request, run_id: str, action):
     value = await call(store.transact, run_id, token(request), action)
-    trace.write("api", "api/routes/repair_runs.py", "repairPool", "note", {
-        "runId": run_id, "phase": value.get("phase"), "repaired": value.get("repaired"),
-        "pending": len(value.get("pending", [])), "unresolved": value.get("unresolved"),
-    })
+    # Activity mode reports a repair run once at a meaningful transition. Page
+    # enqueue/claim polling is expected success traffic and previously produced
+    # dozens of phase=null lines that looked like separate incidents. Full mode
+    # retains the old per-mutation evidence.
+    phase = str(value.get("phase") or "")
+    unresolved = int(value.get("unresolved") or 0)
+    signature = (phase, len(value.get("pending", [])), int(value.get("repaired") or 0), unresolved)
+    terminal = phase in {"done", "cancelled", "failed"}
+    changed = _activity_transitions.changed(run_id, signature, terminal=terminal)
+    if trace.full_enabled() or (changed and (phase in {"repairing", "done", "cancelled", "failed"} or unresolved)):
+        trace.write("api", "api/routes/repair_runs.py", "repairPool", "note", {
+            "runId": run_id, "phase": phase, "repaired": value.get("repaired"),
+            "pending": len(value.get("pending", [])), "unresolved": unresolved,
+            "outcome": "failed" if phase == "failed" else "partial" if unresolved else "succeeded" if phase == "done" else "progress",
+            "severity": "warning" if unresolved or phase == "failed" else "info",
+            "final": terminal,
+        })
     return value
 
 @router.post("")
@@ -93,7 +108,9 @@ async def cancel(run_id: str, request: Request):
 
 @router.delete("/{run_id}")
 async def remove(run_id: str, request: Request):
-    return await call(store.delete, run_id, token(request))
+    value = await call(store.delete, run_id, token(request))
+    _activity_transitions.discard(run_id)
+    return value
 
 @router.post("/{run_id}/tasks/{task_id}/translate")
 async def translate(run_id: str, task_id: str, request: Request):

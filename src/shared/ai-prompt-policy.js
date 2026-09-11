@@ -6,7 +6,7 @@ export function requireAiPrompt(text) {
   const value = String(text ?? "").trim();
   if (value) return value;
   const error = new Error(
-    "AI Style is empty. Click Reload to load the built-in prompt, then save it before translating.",
+    "[AI option > Set prompt] is empty. Click Reload, then save before translating.",
   );
   error.code = "AI_PROMPT_REQUIRED";
   error.requestDispatched = false;

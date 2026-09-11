@@ -163,6 +163,7 @@ try {
     ai: {
       model: "qwen", base_url: "http://localhost:11434", prompt: "Target language: Thai\nMY COMPLETE STYLE", promptMode: "replace",
       thinking: "on",
+      model_capabilities: { reasoning: { supported: true, control: "boolean" } },
       local_adapter: { version: 1, protocol: "ollama", baseUrl: "http://localhost:11434" },
     },
     canonicalPrompt,
@@ -279,6 +280,7 @@ try {
     ai: {
       model: "any/new-model:latest",
       thinking: "off",
+      model_capabilities: { reasoning: { supported: true, control: "boolean" } },
       base_url: "http://localhost:11434",
       api_key: "OTHER-CLOUD-KEY",
       local_adapter: { version: 1, protocol: "ollama", baseUrl: "http://localhost:11434" },
@@ -295,6 +297,7 @@ try {
   await translateWithLocalOpenAi([{ id: "real-id", text: "test" }], {
     ai: {
       model: "any/new-model:latest", thinking: "on", base_url: "http://localhost:11434",
+      model_capabilities: { reasoning: { supported: true, control: "boolean" } },
       local_adapter: { version: 1, protocol: "ollama", baseUrl: "http://localhost:11434" },
     },
   });
@@ -310,6 +313,7 @@ try {
   await translateWithLocalOpenAi([{ id: "real-id", text: "test" }], {
     ai: {
       model: "local-model", thinking: "on", base_url: "http://localhost:1234/v1",
+      model_capabilities: { reasoning: { supported: true, control: "toggle" } },
       local_adapter: {
         version: 1, protocol: "openai", baseUrl: "http://localhost:1234/v1",
         thinking: { parameter: "reasoning_effort", off: "none", on: "medium" },
@@ -448,8 +452,13 @@ try {
   assert.ok(streamed.meta.streamChunks >= 1);
   assert.equal(batchBodies.length, 1);
   assert.equal(streamed.meta.batchCount, 1);
+  assert.equal(streamed.meta.thinkingSelected, "off",
+    "missing/legacy Direct Local thinking selection must normalize to Off, never Auto");
+  assert.equal(streamed.meta.thinkingApplied, "unverified",
+    "unknown capability omits the provider field without turning user selection into Auto");
   assert.deepEqual(tokenSummary(streamed.meta.usage), { inputTokens: 44, outputTokens: 88, totalTokens: 132, source: "provider" });
-  assert.ok(batchBodies.every((body) => body.think === false));
+  assert.ok(batchBodies.every((body) => !("think" in body)),
+    "unknown Ollama capability must omit think instead of relying on a model name or stale adapter state");
 
   // Initial translation is one provider generation per image regardless of
   // the image's unit count. A later repair is a distinct invocation and can

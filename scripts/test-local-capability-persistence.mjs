@@ -6,6 +6,7 @@ import {
   normalizeLocalConnectionIdentity,
   savedLocalCapabilitySnapshot,
 } from "../src/popup/controllers/local-connection-controller.js";
+import { createLocalCapacityController } from "../src/popup/controllers/local-capacity-controller.js";
 
 const endpoint = "http://localhost:11434";
 const identity = normalizeLocalConnectionIdentity(" Ollama ", `${endpoint}/`);
@@ -56,6 +57,32 @@ assert.deepEqual(modelOptions, ["qwen3.5:9b"]);
 assert.equal(state.lastAiResolve.verification_source, "saved_snapshot");
 assert.match(els.aiLocalStatus.textContent, /was verified/);
 assert.equal(state.aiModelBlocked, false);
+
+let persistedHint = null;
+const capacityState = { localAiCapability: { models: {
+  "qwen3.5:9b": { recommendedMax: 1,
+    reasoning: { supported: true, control: "boolean", source: "ollama-api-show" },
+    structuredOutput: { supported: true, contract: "tp.translation.schema-object/1" },
+    limits: { contextTokens: 8192, source: "ollama-api-ps" } },
+  "other-model": { recommendedMax: 2, reasoning: { supported: false } },
+}}};
+const capacity = createLocalCapacityController({
+  els: { aiProvider: { value: "ollama" }, aiBaseUrl: { value: endpoint },
+    aiModel: { value: "qwen3.5:9b" } },
+  state: capacityState, isLocalProvider: (value) => value === "ollama",
+  persist: async (patch) => { persistedHint = structuredClone(patch.aiLocalCapabilityHint); },
+});
+await capacity.persistSelected();
+assert.deepEqual(persistedHint.modelCapabilities.reasoning,
+  { supported: true, control: "boolean", source: "ollama-api-show" });
+assert.equal(JSON.stringify(persistedHint).includes("other-model"), false,
+  "persisted hint leaked another model's capability");
+const restartedSettings = { aiLocalCapabilityHint: persistedHint };
+assert.equal(restartedSettings.aiLocalCapabilityHint.provider, "ollama");
+assert.equal(restartedSettings.aiLocalCapabilityHint.baseUrl, endpoint);
+assert.equal(restartedSettings.aiLocalCapabilityHint.model, "qwen3.5:9b");
+assert.equal(restartedSettings.aiLocalCapabilityHint.modelCapabilities.reasoning.control, "boolean",
+  "verified boolean capability did not survive restart persistence");
 assert.equal(
   savedLocalCapabilitySnapshot(records, "ollama", "http://localhost:1234"),
   null,

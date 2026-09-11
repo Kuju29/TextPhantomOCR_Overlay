@@ -91,7 +91,10 @@ class LocalOpenAIChatAdapter:
         payload["max_tokens"] = guard_request_budget(request, payload["max_tokens"])
         if self.policy.temperature is not None:
             payload["temperature"] = self.policy.temperature
-        if self.policy.thinking_field and request.thinking in {"on", "off"}:
+        reasoning = request.model_capabilities.get("reasoning", {})
+        control_verified = isinstance(reasoning, dict) and reasoning.get("supported") is True \
+            and reasoning.get("control") in {"toggle", "boolean"}
+        if self.policy.thinking_field and control_verified and request.thinking in {"on", "off"}:
             payload[self.policy.thinking_field] = request.thinking == "on"
         return payload
 
@@ -109,7 +112,7 @@ class LocalOpenAIChatAdapter:
     def generate(self, request: GenerationRequest):
         payload = self.prepare_payload(request)
         reasoning = "local_think" if self.policy.thinking_field in payload else "standard"
-        return execute_chat_completion(
+        result = execute_chat_completion(
             url=self.normalize_base_url(request.base_url) + self.policy.completion_path,
             headers=self._headers(request.api_key), payload=payload,
             model=request.model, provider_id=self.policy.provider_id, timeout=self._timeout(),
@@ -121,6 +124,9 @@ class LocalOpenAIChatAdapter:
                           "reasoningPolicyApplied": reasoning,
                           "reasoningModeRequested": request.thinking},
         )
+        applied = (f"requested_{request.thinking}" if self.policy.thinking_field in payload
+                   else "provider_default" if request.thinking == "auto" else "unverified")
+        return result._replace(thinking_applied=applied)
 
     def list_models(self, *, api_key: str, base_url: str) -> ModelListResult:
         try:

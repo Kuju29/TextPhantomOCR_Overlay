@@ -302,10 +302,17 @@ async function translateSingle(
     automaticRetry: false,
   });
   const thinkingSelected = ["off", "on"].includes(ai?.thinking)
-    ? ai.thinking
-    : "default";
-  const thinkingMode =
-    thinkingSelected === "default" ? adapter.defaultThinking : thinkingSelected;
+    ? ai.thinking : "off";
+  const reasoning = ai?.model_capabilities?.reasoning;
+  const representable = reasoning?.supported === true &&
+    ["toggle", "boolean"].includes(reasoning?.control);
+  const thinkingMode = typeof adapter.resolveThinkingMode === "function"
+    ? adapter.resolveThinkingMode(
+        thinkingSelected,
+        { model, reasoning },
+      )
+    : representable
+      ? thinkingSelected : "default";
   const standardOutputTokens = adapter.outputTokens({
     standard: dynamicOutputTokens(units, effectiveSystemPrompt),
     thinkingMode,
@@ -343,7 +350,7 @@ async function translateSingle(
     const responseSchema = outputContract.kind === "schema_object"
       ? translationObjectSchema(wireUnits.map((unit) => unit.id)) : null;
     exchange = await adapter.generate(
-      { model, messages, outputTokens, thinkingMode, responseSchema },
+      { model, messages, outputTokens, thinkingMode, thinkingCapability: reasoning, responseSchema },
       {
         expectedIds: wireUnits.map((unit) => unit.id),
         signal: controller.signal,
@@ -480,7 +487,9 @@ async function translateSingle(
     usage.reason = adapter.incompleteUsageReason?.(stream) || null;
   }
   const timings = adapter.timing(data, usage.outputTokens),
-    thinkingApplied = adapter.thinkingApplied(thinkingMode, { model });
+    thinkingApplied = thinkingMode === "default"
+      ? "unverified"
+      : `requested_${thinkingSelected}`;
   const attach = (error, extra = 0) => {
     error.generationMeta = {
       provider: String(ai?.provider || adapter.id),

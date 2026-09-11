@@ -1,5 +1,8 @@
 import { repairCoordinator } from "./repair/coordinator.js";
-import { restoreSettingsEpoch } from "./jobs/lifecycle.js";
+import {
+  getSettingsEpoch,
+  restoreSettingsEpoch,
+} from "./jobs/lifecycle.js";
 import { restoreTabSessions } from "./tab-sessions.js";
 import { translationSettingsChanged } from "./translation-settings.js";
 // Service-worker entry point: wires the background modules together and registers every `chrome.*` listener.
@@ -11,6 +14,7 @@ import { getStorage } from "../shared/storage.js";
 import { getTab, queryTabs } from "../shared/browser-api.js";
 import { KEEPALIVE_PORT_NAME } from "../shared/constants.js";
 import { publicTpError } from "../shared/error-contract.js";
+import { resetAdaptiveLearning } from "./scheduler.js";
 
 import { apiHealthSnapshot, getApiBase, healthCache, warmupApi } from "./api.js";
 import { getLastBatchStatus, noteQueueStatus } from "./batches.js";
@@ -41,6 +45,7 @@ import {
 } from "../shared/log-sink.js";
 import {
   flushTrace,
+  getTraceShippingState,
   getTraceDetail,
   isTracing,
   note as traceNote,
@@ -68,6 +73,7 @@ import { ensureThunderbirdMessageScripts } from "./thunderbird.js";
 import { discoverLocalModels } from "../shared/ai/direct-local/generation.js";
 import {
   ensureTraceHandshake,
+  getTraceHandshakeState,
   resetTraceHandshakeIdentity,
 } from "./trace-handshake.js";
 
@@ -182,9 +188,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const provider = String(
         msg?.provider || msg?.adapter?.protocol || "local",
       );
-      const endpointOrigin = (() => {
+      const endpointClass = (() => {
         try {
-          return new URL(String(msg?.adapter?.baseUrl || "")).origin;
+          const host = new URL(String(msg?.adapter?.baseUrl || "")).hostname
+            .toLowerCase().replace(/^\[|\]$/g, "");
+          if (host === "localhost" || host.endsWith(".localhost") ||
+              host === "::1" || host === "0.0.0.0" || host.startsWith("127."))
+            return "loopback";
+          if (host.endsWith(".local") || /^10\./.test(host) ||
+              /^192\.168\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host))
+            return "private";
+          return "public";
         } catch {
           return "invalid";
         }
@@ -196,7 +210,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           event: "start",
           discoveryId,
           provider,
-          endpointOrigin,
+          endpointClass,
         },
         discoveryId,
       );
@@ -241,11 +255,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               event: "result",
               discoveryId,
               provider,
-              endpointOrigin,
+              endpointClass,
               protocol: String(result?.protocol || ""),
               modelCount: Array.isArray(result?.models)
                 ? result.models.length
                 : 0,
+              verificationStatus: String(
+                result?.selectedModelVerification?.status || "not_tested",
+              ),
+              verificationCode: String(
+                result?.selectedModelVerification?.code || "",
+              ),
+              verificationHttpStatus: Number(
+                result?.selectedModelVerification?.httpStatus || 0,
+              ),
             },
             discoveryId,
           );
@@ -260,7 +283,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               event: "error",
               discoveryId,
               provider,
-              endpointOrigin,
+              endpointClass,
               code: String(error?.code || "local_ai_discovery_failed"),
               status: Number(error?.status || 0),
             },
@@ -295,6 +318,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     case "AI_SETTINGS_CHANGED":
       forgetPrompts();
+      sendResponse({ ok: true });
+      return true;
+
+    case "TP_RESET_ADAPTIVE_SCHEDULER":
+      if (sender?.tab) { sendResponse({ ok: false, error: "trusted_ui_only" }); return true; }
+      resetAdaptiveLearning();
       sendResponse({ ok: true });
       return true;
 
@@ -366,6 +395,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         enabled: isTracing(),
         detail: getTraceDetail(),
         consoleLevel: getLogLevel(),
+      });
+      return true;
+
+    case "TP_GET_TRACE_DIAGNOSTIC_STATE":
+      // This exposes service-worker transport state only to extension-owned UI.
+      // Content pages have a sender.tab and must never inspect diagnostics.
+      if (sender?.tab) {
+        sendResponse({ ok: false, error: "trusted_ui_only" });
+        return true;
+      }
+      sendResponse({
+        ok: true,
+        schema: "tp.trace-diagnostic-state/1",
+        shipping: getTraceShippingState(),
+        handshake: getTraceHandshakeState(),
       });
       return true;
 
@@ -531,7 +575,13 @@ function collectMdCacheItems(msg) {
 
   const items = {};
   for (const mdKey of keys) {
-    const cacheKey = mdCacheKey(String(mdKey || ""), lang, mode, source);
+    const cacheKey = mdCacheKey(
+      String(mdKey || ""),
+      lang,
+      mode,
+      source,
+      getSettingsEpoch(),
+    );
     if (!cacheKey) continue;
     const rec = getCachedResult(cacheKey);
     if (!rec) continue;

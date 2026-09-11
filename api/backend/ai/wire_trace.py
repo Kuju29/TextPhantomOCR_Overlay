@@ -95,6 +95,43 @@ def begin(identity: dict[str, Any]) -> contextvars.Token:
             f"AI_WIRE_TRACE_WRITE_FAILED: 00_identity.json: {type(exc).__name__}"
         ) from exc
 
+def update_identity(**details: Any) -> None:
+    """Merge resolved request identity into an already-started operation.
+
+    ``begin`` deliberately runs at HTTP ingress, before request validation.  A
+    valid request can therefore add its resolved provider/model later without
+    losing the provisional evidence needed for rejected requests.
+    """
+    folder = _active.get()
+    if folder is None:
+        return
+    path = folder / "00_identity.json"
+    try:
+        with _lock:
+            current: dict[str, Any] = {}
+            if path.exists():
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(loaded, dict):
+                    current = loaded
+            current.update(details)
+            path.write_text(
+                json.dumps(redact(current), ensure_ascii=False, indent=2, default=str) + "\n",
+                encoding="utf-8",
+            )
+    except Exception as exc:
+        raise AiWireTraceWriteError(
+            f"AI_WIRE_TRACE_WRITE_FAILED: 00_identity.json: {type(exc).__name__}"
+        ) from exc
+
+def active_folder() -> Path | None:
+    """Return the current operation folder for explicit cross-thread handoff."""
+    return _active.get()
+
+def resume(folder: Path | None) -> contextvars.Token:
+    """Attach an existing ingress operation to the current execution context."""
+    _secrets.set(())
+    return _active.set(folder)
+
 def begin_in(folder: Path, identity: dict[str, Any]) -> None:
     """Create relay artifacts without relying on request-local contextvars."""
     try:

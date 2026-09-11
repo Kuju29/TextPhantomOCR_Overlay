@@ -33,8 +33,9 @@ class TranslationRequest:
     source: str
     identity: str
     started: float
+    wire_folder: Any = None
 
-def prepare(payload: dict[str, Any], request: Any) -> TranslationRequest:
+def prepare(payload: dict[str, Any], request: Any, *, trace_id_hint: str = "") -> TranslationRequest:
     requested_route = request.url.path
     canonical_route = "/v2/engine/runsapi/translate"
     route_identity = {
@@ -43,10 +44,10 @@ def prepare(payload: dict[str, Any], request: Any) -> TranslationRequest:
         "compatibilityAlias": requested_route != canonical_route,
     }
     context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+    trace_id = str(context.get("tp_trace") or trace_id_hint or "") or f"srv-{time.time_ns():x}"
     if cancellation.is_cancelled(payload):
         raise HTTPException(status_code=409, detail=cancelled_payload(
-            trace_id=str(context.get("tp_trace") or ""), stage="translate_cancel"))
-    trace_id = str(context.get("tp_trace") or "") or f"srv-{time.time_ns():x}"
+            trace_id=trace_id, stage="translate_cancel"))
     metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
     correlation = merged_request_correlation(request, {
         "batchId": metadata.get("batch_id") or payload.get("batch_id"),
@@ -85,20 +86,10 @@ def pipeline_callable(context: TranslationRequest, *, admission_unlimited: bool 
     def run() -> dict[str, Any]:
         with trace.scope(context.trace_id):
             from backend.jobs.pipeline import process_payload
-            ai = context.payload.get("ai") if isinstance(context.payload.get("ai"), dict) else {}
-            metadata = (context.payload.get("metadata")
-                        if isinstance(context.payload.get("metadata"), dict) else {})
-            token = wire_trace.begin({
-                "schema": "tp.ai-wire-trace/1", "engine": "runsapi",
-                "traceId": context.trace_id,
-                "operationId": str(context.payload.get("idempotency_key") or ""),
-                "batchId": str(metadata.get("batch_id") or context.payload.get("batch_id") or ""),
-                "imageId": str(metadata.get("image_id") or context.payload.get("image_id") or ""),
-                "provider": str(ai.get("provider") or "auto"),
-                "model": str(ai.get("model") or "auto"),
-                "targetLang": str(context.payload.get("target_lang") or context.payload.get("lang") or ""),
-                "providerAttempt": 1, "generationAttempt": 1,
-            })
+            # The operation was created at HTTP ingress before validation.
+            # Resume that exact folder in the pipeline executor thread instead
+            # of starting a second operation and overwriting ingress evidence.
+            token = wire_trace.resume(context.wire_folder)
             started = time.perf_counter()
             try:
                 result = process_payload(
@@ -112,8 +103,10 @@ def pipeline_callable(context: TranslationRequest, *, admission_unlimited: bool 
                 wire_trace.record_error(exc, stage="runsapi_pipeline")
                 raise
             finally:
-                wire_trace.write_json("09_timing.json", {
-                    "pipelineMs": round((time.perf_counter() - started) * 1000, 1)
-                })
-                wire_trace.end(token)
+                try:
+                    wire_trace.write_json("09_timing.json", {
+                        "pipelineMs": round((time.perf_counter() - started) * 1000, 1)
+                    })
+                finally:
+                    wire_trace.end(token)
     return run

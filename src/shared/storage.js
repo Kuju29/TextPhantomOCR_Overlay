@@ -53,3 +53,12 @@ export function getStorage(keys) {
 export function setStorage(patch) {
   return invoke("set", [patch], undefined).then(() => undefined);
 }
+
+/** Remove only explicitly named local-storage keys. */
+export function removeStorage(keys) {
+  const list = Array.isArray(keys)
+    ? [...new Set(keys.map((key) => String(key || "").trim()).filter(Boolean))]
+    : [];
+  if (!list.length) return Promise.resolve();
+  return invoke("remove", [list], undefined).then(() => undefined);
+}

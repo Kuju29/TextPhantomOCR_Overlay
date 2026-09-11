@@ -318,6 +318,12 @@
     for (const [key, rec] of Array.from(htmlOverlaysByKey.entries())) {
       disconnectOverlayResizeObserver(rec);
       TP.overlayBackground.release(rec);
+      if (rec.rasterBlobUrl?.startsWith("blob:")) {
+        try {
+          URL.revokeObjectURL(rec.rasterBlobUrl);
+        } catch {}
+        rec.rasterBlobUrl = "";
+      }
       try {
         rec.cleanImg?.remove();
         rec.host?.remove();

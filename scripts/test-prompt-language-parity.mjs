@@ -112,9 +112,24 @@ for (const [index, { source, target }] of evaluation.directions.entries()) {
   assert.match(localSystem, /Return every supplied ID exactly once/);
 }
 assert.match(BUNDLED_CANONICAL_PROMPT_PLANS.th.pieces.editableStyle, /Omit obvious subjects and person-pronouns/);
-assert.match(BUNDLED_CANONICAL_PROMPT_PLANS.th.pieces.editableStyle, /Silently check meaning/);
-assert.match(BUNDLED_CANONICAL_PROMPT_PLANS.en.pieces.editableStyle, /Supply subjects and articles required by English/);
-assert.match(BUNDLED_CANONICAL_PROMPT_PLANS.ja.pieces.editableStyle, /Omit recoverable subjects/);
+assert.match(BUNDLED_CANONICAL_PROMPT_PLANS.th.pieces.editableStyle, /CHARACTER SHEET and SERIES MEMORY/);
+assert.match(BUNDLED_CANONICAL_PROMPT_PLANS.th.pieces.editableStyle, /Distinguish obligation, ability, permission, desire, resolve and prediction/);
+assert.match(BUNDLED_CANONICAL_PROMPT_PLANS.th.pieces.editableStyle, /คำเรียกที่คั่นด้วยจังหวะหรือเครื่องหมายวรรคตอนยังเป็นคำเรียกขาน/);
+assert.match(BUNDLED_CANONICAL_PROMPT_PLANS.th.pieces.editableStyle, /ใช้บริบทคลี่คลายความกำกวมได้ แต่ห้ามแทนที่ความหมายที่ชัดเจนของต้นฉบับ/);
+assert.match(BUNDLED_CANONICAL_PROMPT_PLANS.th.pieces.editableStyle, /Never move, merge, duplicate or discard meaning across IDs/);
+assert.doesNotMatch(BUNDLED_CANONICAL_PROMPT_PLANS.th.pieces.editableStyle, /Silently check meaning|MICRO-EXAMPLES/);
+assert.match(BUNDLED_CANONICAL_PROMPT_PLANS.en.pieces.editableStyle, /unnecessary “you”/);
+assert.match(BUNDLED_CANONICAL_PROMPT_PLANS.en.pieces.editableStyle, /Distinguish obligation, ability, permission, desire, resolve and prediction/);
+assert.match(BUNDLED_CANONICAL_PROMPT_PLANS.en.pieces.editableStyle, /Keep vocatives as addresses/);
+assert.match(BUNDLED_CANONICAL_PROMPT_PLANS.en.pieces.editableStyle, /Context may resolve ambiguity, but never override clear source meaning/);
+assert.match(BUNDLED_CANONICAL_PROMPT_PLANS.en.pieces.editableStyle, /Never move, merge, duplicate or discard meaning across IDs/);
+assert.doesNotMatch(BUNDLED_CANONICAL_PROMPT_PLANS.en.pieces.editableStyle, /Silently check meaning|MICRO-EXAMPLES/);
+assert.match(BUNDLED_CANONICAL_PROMPT_PLANS.ja.pieces.editableStyle, /省ける主語や代名詞は省き/);
+assert.match(BUNDLED_CANONICAL_PROMPT_PLANS.ja.pieces.editableStyle, /義務・能力・許可・願望・決意・予測を区別し/);
+assert.match(BUNDLED_CANONICAL_PROMPT_PLANS.ja.pieces.editableStyle, /間や句読点で区切られた呼称は呼びかけのまま保ち/);
+assert.match(BUNDLED_CANONICAL_PROMPT_PLANS.ja.pieces.editableStyle, /文脈で曖昧さを解消してよいが、明確な原文の意味を上書きしない/);
+assert.match(BUNDLED_CANONICAL_PROMPT_PLANS.ja.pieces.editableStyle, /意味を別IDへ移動・結合・複製したり、省いたりしない/);
+assert.doesNotMatch(BUNDLED_CANONICAL_PROMPT_PLANS.ja.pieces.editableStyle, /Silently check meaning|MICRO-EXAMPLES/);
 
 // Python is the canonical byte reference for the final provider boundary.
 const boundaryFixture = JSON.parse(execFileSync(process.env.PYTHON || "python", ["-c", `

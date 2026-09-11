@@ -274,9 +274,7 @@ export async function loadPopupSettings(deps) {
     }
   }
   void seriesMemoryController.refresh();
-  // Reading-direction + rate settings. These default ON, so an unset value must
-  // read as true — `Boolean(undefined)` would silently turn them off for every
-  // existing install.
+  // Reading-direction defaults on; the optional manual rate cap defaults off.
   if (els.relayoutTranslated) {
     els.relayoutTranslated.checked =
       typeof stored.relayoutTranslated === "boolean"
@@ -298,7 +296,15 @@ export async function loadPopupSettings(deps) {
       "custom",
     ].includes(stored.rateProfile)
       ? stored.rateProfile
-      : "custom";
+      : stored.rateLimitEnabled === true
+        ? "custom"
+        : "auto";
+  }
+  if (els.rateLimitEnabled &&
+      (els.rateProfile?.value === "auto" || Number(stored.rateRpm) <= 0)) {
+    els.rateLimitEnabled.checked = false;
+    if (stored.rateLimitEnabled === true)
+      await setStorage({ rateLimitEnabled: false });
   }
   if (els.rateRpm)
     els.rateRpm.value = String(

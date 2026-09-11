@@ -15,7 +15,10 @@ globalThis.fetch = async (_url, options) => {
 };
 
 const trace = await import("../src/shared/trace.js");
+assert.equal(trace.getTraceShippingState().clientBuild, "test-build");
+assert.equal(trace.getTraceShippingState().traceSession, "");
 trace.setTracingEnabled(true, () => "http://local", "compact", "session-a");
+assert.equal(trace.getTraceShippingState().traceSession, "session-a");
 trace.traceLine("worker.js", "run", "->", { attempt: 1 }, "t1");
 await trace.flushTrace();
 await trace.flushTrace();
@@ -69,6 +72,46 @@ const counterJson = JSON.stringify(counters);
 assert.doesNotMatch(counterJson, /12345|67890|SENTINEL|222/,
   "only the five allowlisted numeric diagnostic counters may bypass token/key redaction");
 assert.equal(counters.nested.total_tokens, "<redacted>", "string token-like values remain credentials");
+
+const cachedObservation = cold.enrichOperationalTrace("aiModelWorkload", "..", {
+  event: "observation", operationId: "op-cache", usage: { cachedInput: 768 },
+});
+assert.deepEqual(cachedObservation.cache,
+  { kind: "provider_prompt", hit: true, cachedInputTokens: 768 },
+  "provider prompt cache requires positive cached-input evidence");
+const uncachedObservation = cold.enrichOperationalTrace("aiModelWorkload", "..", {
+  event: "observation", operationId: "op-no-cache", usage: { cachedInput: 0 },
+});
+assert.equal(uncachedObservation.cache.hit, false, "zero cached tokens must never claim a cache hit");
+const operationalFlags = cold.shortenValue({ pageImageToAi: true, manualAiRateCap: false,
+  imageDataUri: "data:image/png;base64,SENTINEL_IMAGE" });
+assert.equal(operationalFlags.pageImageToAi, true);
+assert.equal(operationalFlags.manualAiRateCap, false);
+assert.notEqual(operationalFlags.imageDataUri, "data:image/png;base64,SENTINEL_IMAGE",
+  "allowing path booleans must not allow image payloads");
+const terminal = cold.enrichOperationalTrace("aiPageContract", "..", {
+  event: "final", operationId: "shared-op", batchId: "batch-a", imageId: "image-a",
+  userScopeHash: "opaque-user-a",
+});
+const otherUser = cold.enrichOperationalTrace("aiPageContract", "..", {
+  event: "final", operationId: "shared-op", batchId: "batch-a", imageId: "image-a",
+  userScopeHash: "opaque-user-b",
+});
+assert.equal(terminal.final, true);
+assert.equal(terminal.owner, "unknown", "success does not invent provider ownership");
+assert.notEqual(terminal.incidentId, otherUser.incidentId, "opaque user scopes isolate incidents");
+assert.equal(terminal.correlation.imageId, "image-a");
+assert.notEqual(terminal.userScopeHash, "opaque-user-a", "raw client scope claim leaked");
+assert.match(terminal.userScopeHash, /^user:/);
+assert.equal(terminal.userScopeHash, terminal.correlation.userScopeHash,
+  "flat and nested user scopes must share one canonical hash");
+const nestedScopeOnly = cold.enrichOperationalTrace("aiPageContract", "..", {
+  event: "final", operationId: "nested-op", scope: { clientInstanceHash: "raw-client" },
+});
+assert.equal(nestedScopeOnly.clientInstanceHash, nestedScopeOnly.correlation.clientInstanceHash,
+  "nested-only client scope must be normalized once and copied");
+const cacheWrite = cold.shortenValue({ cacheWriteInputTokens: 64 });
+assert.equal(cacheWrite.cacheWriteInputTokens, 64, "numeric cache-write evidence was redacted");
 const nestedPrivate = JSON.stringify(cold.shortenValue({
   nested: { source: "SENTINEL_DIALOGUE", translation: "SENTINEL_TRANSLATION", prompt: "SENTINEL_PROMPT" },
   original: "https://img.example/a.jpg?X-Amz-Signature=SENTINEL_SIGNED_URL",
@@ -110,6 +153,12 @@ assert.equal(requests.length, beforeDisabledFlush, "disabled/base-session transi
 // Exercise the production handshake helper used by TP_LOCAL_AI_DISCOVER.
 const handshake = await import("../src/background/trace-handshake.js");
 handshake.resetTraceHandshakeIdentity();
+const noBase = await handshake.ensureTraceHandshake("");
+assert.equal(noBase.reason, "no_api_base");
+assert.deepEqual(handshake.getTraceHandshakeState(), {
+  schema: "tp.trace-handshake/1", outcome: "no_api_base", status: 0,
+  durationMs: 0, endpointClass: "empty", traceSession: "", traceFile: "",
+});
 const connectRequests = [];
 globalThis.fetch = async (url, options = {}) => {
   const href = String(url);
@@ -132,6 +181,11 @@ trace.traceLine("background/index.js", "localModelDiscovery", "..", { event: "st
 const on = await handshake.ensureTraceHandshake("http://trace-on");
 assert.equal(on.known, true);
 assert.equal(on.trace, true);
+assert.deepEqual(handshake.getTraceHandshakeState(), {
+  schema: "tp.trace-handshake/1", outcome: "active", status: 200,
+  durationMs: handshake.getTraceHandshakeState().durationMs,
+  endpointClass: "public", traceSession: "connect-session", traceFile: "",
+});
 assert.ok(connectRequests.some((batch) => batch.records.some((record) => record.trace === "connect-before-job")),
   "Connect itself negotiates tracing and ships its start before any translation job");
 
@@ -141,6 +195,7 @@ const beforeOff = connectRequests.length;
 const off = await handshake.ensureTraceHandshake("http://trace-off");
 assert.equal(off.known, true);
 assert.equal(off.trace, false);
+assert.equal(handshake.getTraceHandshakeState().outcome, "disabled");
 await trace.flushTrace();
 assert.equal(connectRequests.length, beforeOff, "authoritative trace=false clears the buffered Connect prefix");
 
@@ -164,6 +219,16 @@ resolveA(new Response(JSON.stringify({ apiVersion: "test", features: { trace: fa
 const resultA = await raceA;
 assert.equal(resultB.trace, true);
 assert.equal(resultA.reason, "stale_capabilities");
+assert.equal(handshake.getTraceHandshakeState().outcome, "stale_capabilities");
+
+handshake.resetTraceHandshakeIdentity();
+globalThis.fetch = async () => { throw new Error("https://secret.example/?token=SENTINEL"); };
+const unavailable = await handshake.ensureTraceHandshake("http://192.168.1.8:7860");
+assert.equal(unavailable.reason, "capabilities_unavailable");
+const unavailableState = handshake.getTraceHandshakeState();
+assert.equal(unavailableState.endpointClass, "private");
+assert.equal(unavailableState.outcome, "capabilities_unavailable");
+assert.doesNotMatch(JSON.stringify(unavailableState), /secret|SENTINEL|192\.168/);
 
 for (const instance of [trace, cold, disabled]) instance.setTracingEnabled(false);
 console.log("trace producer identity tests passed");

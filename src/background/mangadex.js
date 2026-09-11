@@ -42,7 +42,7 @@ function mdScopeFromMode(mode) {
 }
 
 // Builds the result-cache key from md key, language, mode and, for text overlays, the text source.
-export function mdCacheKey(mdKey, lang, mode, source = "") {
+export function mdCacheKey(mdKey, lang, mode, source = "", settingsEpoch = 0) {
   const k = String(mdKey || "");
   const l = String(lang || "");
   const s = mdScopeFromMode(mode);
@@ -53,7 +53,13 @@ export function mdCacheKey(mdKey, lang, mode, source = "") {
           .trim()
           .toLowerCase() || "translated"
       : "";
-  return src ? `${k}::${l}::${s}::${src}` : `${k}::${l}::${s}`;
+  // settingsEpoch is an opaque, session-persisted semantic revision. It is
+  // bumped only when translation settings change, so identical profiles hit
+  // while model/prompt/layout changes cannot reuse an old rendered result.
+  // No credential, prompt text, or model name is exposed in the key.
+  const revision = Math.max(0, Number(settingsEpoch) >>> 0);
+  const base = src ? `${k}::${l}::${s}::${src}` : `${k}::${l}::${s}`;
+  return `${base}::r${revision}`;
 }
 
 // Removes every image-bearing field from a result so the cache can store the pixels separately.

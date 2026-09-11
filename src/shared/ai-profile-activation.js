@@ -126,7 +126,7 @@ export function buildEffectiveAiPayload(
       prompt: requireAiPrompt(effective?.prompt),
       prompt_mode: promptMode,
       memory_mode: String(effective?.memoryMode || "off"),
-      send_image: effective?.pageImage === "always" ? "always" : false,
+      send_image: effective?.pageImage === "always",
       thinking: effective?.thinking === "on" ? "on" : "off",
     },
   });

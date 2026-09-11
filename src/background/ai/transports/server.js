@@ -171,7 +171,9 @@ export async function translateViaServer(
     });
     headersAt = performance.now();
     emitTiming("http_headers", {status:res.status, headersMs: headersAt-httpStarted});
-    trace?.("text-only AI server first byte", {
+    // fetch() resolves when response headers are available. The JSON body is
+    // buffered below, so this is not a provider-stream first-token signal.
+    trace?.("text-only AI response headers", {
       status: res.status,
       ms: Math.round(performance.now() - started),
     });

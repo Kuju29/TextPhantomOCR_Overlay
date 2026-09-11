@@ -22,6 +22,120 @@ from backend.ai.clients.provider_error import safe_http_error
 from backend.ai import wire_trace, accounting
 from backend.ai.prompt_cache import apply_chat_cache
 
+class _JsonObjectCompletionDetector:
+    """Validate the complete, flat JSON translation contract.
+
+    ``inspect`` is deliberately called only after the streaming gate observes
+    the root object's closing brace.  Keeping validation here (rather than in
+    the gate) makes the accepted contract identical to ``json.loads``.
+    """
+    def __init__(self, expected_ids: list[str] | None) -> None:
+        self.expected = list(expected_ids or [])
+        self.first_all_ids_ms: float | None = None
+        self.full_inspections = 0
+
+    def inspect(self, content: str, elapsed_ms: float) -> str | None:
+        self.full_inspections += 1
+        if not self.expected:
+            return None
+        source = str(content or "").strip()
+        if not source.startswith("{") or not source.endswith("}"):
+            return None
+        try:
+            pairs = json.loads(source, parse_float=Decimal,
+                               object_pairs_hook=lambda items: items)
+        except (TypeError, ValueError):
+            return None
+        if (not isinstance(pairs, list)
+                or len(pairs) != len(self.expected)
+                or not all(isinstance(pair, tuple) and len(pair) == 2
+                           for pair in pairs)):
+            return None
+        keys = [pair[0] for pair in pairs]
+        values = [pair[1] for pair in pairs]
+        if (len(set(keys)) != len(keys)
+                or set(keys) != set(self.expected)
+                or not all(isinstance(item, str) and item.strip()
+                           for item in values)):
+            return None
+        if self.first_all_ids_ms is None:
+            self.first_all_ids_ms = elapsed_ms
+        return "all_json_fields_closed"
+
+
+class _JsonClosureGate:
+    """Incrementally find a root ``}`` outside JSON strings.
+
+    This is a candidate gate, not a parser.  The strict detector above remains
+    authoritative.  It prevents repeated joins and JSON parses for ordinary
+    token chunks and for braces embedded in string values.
+    """
+    def __init__(self) -> None:
+        self.depth = 0
+        self.started = False
+        self.closed = False
+        self.in_string = False
+        self.escaped = False
+
+    def feed(self, chunk: str) -> bool:
+        if self.closed:
+            return False
+        for char in str(chunk or ""):
+            if self.in_string:
+                if self.escaped:
+                    self.escaped = False
+                elif char == "\\":
+                    self.escaped = True
+                elif char == '"':
+                    self.in_string = False
+                continue
+            if char == '"':
+                self.in_string = True
+            elif char == "{":
+                self.started = True
+                self.depth += 1
+            elif char == "}" and self.started:
+                self.depth -= 1
+                if self.depth == 0:
+                    self.closed = True
+                    return True
+        return False
+
+
+class _WireStreamCapture:
+    """Bound memory and filesystem work for an opt-in SSE wire trace.
+
+    Raw frames are flushed in ordered batches so a long stream does not open
+    and synchronously append the trace file for every provider chunk. The
+    final (or failed/cancelled) batch is flushed by :meth:`finish`, preserving
+    the received prefix. Visible text already lives in the transport's
+    ``pieces`` list, so its diagnostic copy is written once at stream exit.
+    """
+    def __init__(self, *, max_lines: int = 32, max_chars: int = 64 * 1024) -> None:
+        self.max_lines = max(1, max_lines)
+        self.max_chars = max(1024, max_chars)
+        self._raw: list[str] = []
+        self._raw_chars = 0
+
+    def raw(self, value: str) -> None:
+        text = str(value)
+        self._raw.append(text)
+        self._raw_chars += len(text)
+        if len(self._raw) >= self.max_lines or self._raw_chars >= self.max_chars:
+            self.flush_raw()
+
+    def flush_raw(self) -> None:
+        if not self._raw:
+            return
+        value = "".join(self._raw)
+        wire_trace.append_text("05_provider_response.raw", value)
+        self._raw.clear()
+        self._raw_chars = 0
+
+    def finish(self, assembled: str) -> None:
+        self.flush_raw()
+        wire_trace.assembled_response(assembled)
+
 def _merge_usage(target, incoming):
     for key, value in incoming.items():
         if value is None:
@@ -35,9 +149,17 @@ def _merge_usage(target, incoming):
             target[key] = value
 
 def _json_response(response):
-    # Real httpx supports JSON decoder kwargs. Old offline fakes may not.
-    if isinstance(response, httpx.Response):
-        return response.json(parse_float=Decimal)
+    # Decode the raw body ourselves so Decimal handling does not depend on the
+    # concrete response class accepting json.loads kwargs.  This also works for
+    # httpx.Response subclasses whose ``json()`` method has a narrower
+    # signature.  Offline boundary fakes expose only an already-decoded body,
+    # so retain their zero-argument compatibility path.
+    content = getattr(response, "content", None)
+    if isinstance(content, (bytes, bytearray)):
+        return json.loads(content, parse_float=Decimal)
+    response_text = getattr(response, "text", None)
+    if isinstance(response_text, str):
+        return json.loads(response_text, parse_float=Decimal)
     return response.json()
 
 def _text(data: dict[str, Any]) -> str:
@@ -69,6 +191,9 @@ def execute_chat_completion(
     started = time.perf_counter()
     response = None
     detector = LineCompletionDetector(expected_ids)
+    json_detector = _JsonObjectCompletionDetector(expected_ids)
+    json_gate = _JsonClosureGate()
+    content_tail = ""
     early_evidence = None
     early_completion_ms = None
     from backend import trace
@@ -97,7 +222,7 @@ def execute_chat_completion(
                 chunk_count = 0
                 reasoning_chunk_count = 0
                 protocol_done = False
-                raw_wire_lines: list[str] = []
+                wire_capture = _WireStreamCapture()
                 with stream_method("POST", url, json=request_payload, headers=headers) as response:
                     if not response.is_success:
                         response.read()
@@ -125,8 +250,7 @@ def execute_chat_completion(
                             if cancelled_by_owner.is_set() or (cancel_check is not None and cancel_check()):
                                 raise ProviderGenerationCancelled("AI generation was cancelled")
                             line = raw_line.decode() if isinstance(raw_line, bytes) else str(raw_line or "")
-                            raw_wire_lines.append(line)
-                            wire_trace.append_text("05_provider_response.raw", line + "\n")
+                            wire_capture.raw(line + "\n")
                             line = line.strip()
                             if not line or line.startswith(":"): continue
                             if line.startswith("data:"): line = line[5:].strip()
@@ -152,13 +276,31 @@ def execute_chat_completion(
                                 if isinstance(reasoning, str) and reasoning: reasoning_chunk_count += 1
                                 content = delta.get("content") or ""
                                 if isinstance(content, str) and content:
-                                    wire_trace.append_assembled(content)
                                     if first_content_ms is None:
                                         first_content_ms = round((time.perf_counter() - started) * 1000, 1)
                                         trace.note(trace_event + ".first_content", {"stage": "provider_first_content", "elapsedMs": first_content_ms, "reasoningChunksBeforeContent": reasoning_chunk_count}, file=trace_file)
                                     pieces.append(content)
                                     elapsed = round((time.perf_counter() - started) * 1000, 1)
-                                    evidence = detector.inspect("".join(pieces), elapsed)
+                                    # Joining and fully scanning the accumulated
+                                    # output on every token makes this path
+                                    # quadratic. Inspect only when a semantic
+                                    # close can have arrived. Include the prior
+                                    # tail so a marker delimiter split as `>` +
+                                    # `>` is still detected.
+                                    boundary = content_tail + content
+                                    marker_candidate = (early_evidence is None
+                                                        and ">>" in boundary)
+                                    json_candidate = (early_evidence is None
+                                                      and json_gate.feed(content))
+                                    content_tail = boundary[-1:]
+                                    assembled = ("".join(pieces)
+                                                 if marker_candidate or json_candidate
+                                                 else "")
+                                    marker_evidence = (detector.inspect(assembled, elapsed)
+                                                       if marker_candidate else None)
+                                    json_evidence = (json_detector.inspect(assembled, elapsed)
+                                                     if json_candidate else None)
+                                    evidence = marker_evidence or json_evidence
                                     if evidence and early_evidence is None:
                                         # All records being visible is useful latency evidence,
                                         # but it is not the end of the provider protocol.  Usage
@@ -176,6 +318,10 @@ def execute_chat_completion(
                     finally:
                         cancel_stop.set()
                         if watcher: watcher.join(timeout=0.2)
+                        # Flush on success, malformed SSE, cancellation and
+                        # transport interruption. Never influence completion,
+                        # usage collection or provider-drain semantics.
+                        wire_capture.finish("".join(pieces))
                 data = {"choices": [{"finish_reason": finish, "message": {"content": "".join(pieces)}}], "usage": usage_data, "provider": upstream_provider, "model": actual_model, "id": response_id}
                 # Raw SSE was appended before parsing each frame so a broken
                 # or interrupted stream still leaves the received prefix.
@@ -267,7 +413,9 @@ def execute_chat_completion(
             "visibleContentChars": len(content),
             "visibleMarkerCount": len(set(re.findall(r"<<TP_P\d+:", content))),
             "thinkingTokens": reasoning_tokens,
-            "firstAllIdsMs": detector.first_all_ids_ms,
+            "firstAllIdsMs": (detector.first_all_ids_ms
+                              if detector.first_all_ids_ms is not None
+                              else json_detector.first_all_ids_ms),
             "earlyCompletionMs": early_completion_ms,
             "terminalMs": provider_ms if terminal_completed else None,
             "completionEvidence": terminal_evidence,
@@ -278,7 +426,9 @@ def execute_chat_completion(
         return ChatResult(content, str(data.get("model") or model), inp, out, total, finish, provider_ms, parse_ms,
             "provider" if any(v is not None for v in (inp, out, total)) else None,
             reasoning_tokens, terminal_completed, terminal_evidence, None,
-            usage_status, detector.first_all_ids_ms, early_completion_ms,
+            usage_status, (detector.first_all_ids_ms
+                           if detector.first_all_ids_ms is not None
+                           else json_detector.first_all_ids_ms), early_completion_ms,
             provider_ms if terminal_completed else None,
             requested_output_tokens=request_payload.get("max_completion_tokens", request_payload.get("max_tokens")),
             upstream_provider=str(data.get("provider") or "")[:160],

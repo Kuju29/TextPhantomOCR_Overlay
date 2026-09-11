@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { buildLocalAiCapabilityHints, discoverLocalModels } from "../src/shared/ai/direct-local/generation.js";
-import { createOllamaAdapter, ollamaReasoningCapability } from "../src/shared/ai/providers/local-ollama.js";
+import { createOllamaAdapter, ollamaReasoningCapability, resolveOllamaThinkingMode } from "../src/shared/ai/providers/local-ollama.js";
 
 const GiB = 1024 ** 3;
 const hints = buildLocalAiCapabilityHints({
@@ -60,6 +60,14 @@ assert.equal(ollamaReasoningCapability().supported, null);
 assert.equal(ollamaReasoningCapability({ capabilities: "thinking" }).supported, null);
 assert.equal(ollamaReasoningCapability({ capabilities: ["completion"] }).supported, false);
 assert.equal(ollamaReasoningCapability({ capabilities: ["completion", "thinking"] }).control, "boolean");
+assert.equal(resolveOllamaThinkingMode("off", { supported: null, control: "unknown" }), "default");
+assert.equal(resolveOllamaThinkingMode("off", { supported: false, control: "none" }), "default");
+assert.equal(resolveOllamaThinkingMode("off", { supported: true, control: "boolean" }), "off");
+assert.equal(resolveOllamaThinkingMode("on", { supported: true, control: "boolean" }), "on");
+assert.throws(
+  () => resolveOllamaThinkingMode("off", { supported: true, mandatory: true, control: "levels" }),
+  (error) => error.code === "local_ai_thinking_required",
+);
 const levelCapability = ollamaReasoningCapability({ capabilities: ["thinking"], model_info: { "general.architecture": "gptoss" } });
 assert.equal(levelCapability.control, "levels");
 assert.equal(levelCapability.mandatory, true);

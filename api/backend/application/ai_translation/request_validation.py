@@ -46,7 +46,11 @@ def build_config(payload: dict) -> AiConfig:
         api_key="" if is_local_target(provider_id, base_url) else (user_key or settings.ai_api_key),
         user_key=bool(user_key), provider=provider_id,
         model=str(provider.get("model") or "auto").strip() or "auto", base_url=base_url,
-        thinking=str(provider.get("thinking") or "off").strip().lower() or "off",
+        # Off is the only safe default. Auto is a historical input value, not
+        # an effective selection; exact provider capability later decides
+        # whether the native Off field is representable or must be omitted.
+        thinking=(lambda value: "on" if value == "on" else "off")(
+            str(provider.get("thinking") or "off").strip().lower()),
         model_capabilities=normalize_model_capabilities(provider.get("modelCapabilities")),
         workload=normalize_workload(payload.get("workload")),
         output_contract=planned_contract,

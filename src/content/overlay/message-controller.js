@@ -3,6 +3,12 @@
   if (!TP || TP.bail) return;
   const translationReceipts = new WeakMap();
   const targetInserts = new WeakMap();
+  const replacementOwners = new WeakMap();
+
+  function replacementOwnerIsCurrent(owner) {
+    if (!owner || owner.pageInstanceId !== TP.pageInstanceId) return false;
+    return TP.isStillCurrent?.(owner.target, owner.generation)?.ok !== false;
+  }
   function sleepFrame() {
     return TP.nextFrame();
   }
@@ -231,7 +237,7 @@
   // Swaps an image's src for a translated one, returning 1 when applied.
   async function replaceImageInDOM(original, newSrc, generation = null) {
     if (TP.isMangaDexHost?.() && TP.mdKeyFromUrl?.(original)) {
-      return TP.replaceMangaDexImageWithOverlay(original, newSrc);
+      return TP.replaceMangaDexImageWithOverlay(original, newSrc, generation);
     }
 
     const img = TP.findTargetImage(original, generation);
@@ -241,6 +247,121 @@
         original: TP.truncate(original),
       });
       return 0;
+    }
+
+    // X owns its media <img> elements and may restore their src or recycle the
+    // node after any React update. Keep the translated raster in the same
+    // fixed, identity-aware portal used by X text overlays instead of mutating
+    // page-owned image attributes.
+    if (TP.isXHost?.() && TP.imageIdentity?.(original)) {
+      if (TP.isStillCurrent?.(img, generation)?.ok === false) return 0;
+      let nextSrc = newSrc;
+      let ownsNextBlob = false;
+      if (typeof newSrc === "string" && newSrc.startsWith("data:")) {
+        const blobUrl = await TP.dataUriToBlobUrl(newSrc);
+        if (blobUrl) {
+          nextSrc = blobUrl;
+          ownsNextBlob = true;
+        }
+      }
+      if (TP.isStillCurrent?.(img, generation)?.ok === false) {
+        if (ownsNextBlob) {
+          try {
+            URL.revokeObjectURL(nextSrc);
+          } catch {}
+        }
+        return 0;
+      }
+
+      const key = TP.normUrl(original);
+      if (!key || !nextSrc) {
+        if (ownsNextBlob) {
+          try {
+            URL.revokeObjectURL(nextSrc);
+          } catch {}
+        }
+        return 0;
+      }
+      const rec = TP.overlayMount?.upsertHtmlOverlay?.(
+        key,
+        img,
+        Number(img.naturalWidth) || Number(img.width) || 1,
+        Number(img.naturalHeight) || Number(img.height) || 1,
+        "raster",
+      );
+      if (!rec) {
+        if (ownsNextBlob) {
+          try {
+            URL.revokeObjectURL(nextSrc);
+          } catch {}
+        }
+        return 0;
+      }
+
+      if (
+        rec.rasterBlobUrl?.startsWith("blob:") &&
+        rec.rasterBlobUrl !== nextSrc
+      ) {
+        try {
+          URL.revokeObjectURL(rec.rasterBlobUrl);
+        } catch {}
+      }
+      rec.rasterBlobUrl =
+        typeof nextSrc === "string" && nextSrc.startsWith("blob:")
+          ? nextSrc
+          : "";
+      rec.scope?.replaceChildren?.();
+      const raster = TP.overlayBackground?.layer?.(rec);
+      if (!raster) {
+        if (ownsNextBlob) {
+          try {
+            URL.revokeObjectURL(nextSrc);
+          } catch {}
+          rec.rasterBlobUrl = "";
+        }
+        return 0;
+      }
+      if (!raster.dataset.tpReplaceTracked) {
+        raster.dataset.tpReplaceTracked = "1";
+        raster.addEventListener(
+          "load",
+          () => {
+            const owner = replacementOwners.get(raster);
+            if (rec.original && replacementOwnerIsCurrent(owner))
+              TP.setReplaceState(rec.original, "ok");
+          },
+          { passive: true },
+        );
+        raster.addEventListener(
+          "error",
+          () => {
+            const owner = replacementOwners.get(raster);
+            if (!rec.original || !replacementOwnerIsCurrent(owner)) return;
+            TP.setReplaceState(rec.original, "fail");
+            TP.markImageError(rec.original, "Failed to load replaced image", owner.generation);
+          },
+          { passive: true },
+        );
+      }
+      rec.original = key;
+      replacementOwners.set(raster, {
+        target: img,
+        generation,
+        pageInstanceId: TP.pageInstanceId,
+      });
+      if (img.dataset) img.dataset.tpOriginal = key;
+      TP.noteReplaceState(original, "pending");
+      TP.overlayBackground.update(rec, img, nextSrc);
+      TP.overlayMount.scheduleHtmlOverlayUpdate(key);
+      TP.emitViewerEvent("textphantom:image-updated", {
+        original,
+        newSrc: nextSrc,
+        rawNewSrc: newSrc,
+      });
+      TP.log.info("REPLACE_IMAGE overlaid for X", {
+        original: TP.truncate(original),
+      });
+      return 1;
     }
 
     const mdKey = TP.mdKeyFromUrl?.(original);
@@ -253,19 +374,30 @@
       img.dataset.tpReplaceTracked = "1";
       img.addEventListener(
         "load",
-        () => TP.setReplaceState(TP.normUrl(img.dataset.tpOriginal), "ok"),
+        () => {
+          const owner = replacementOwners.get(img);
+          if (replacementOwnerIsCurrent(owner))
+            TP.setReplaceState(owner.original, "ok");
+        },
         { passive: true },
       );
       img.addEventListener(
         "error",
         () => {
-          const k = TP.normUrl(img.dataset.tpOriginal);
-          TP.setReplaceState(k, "fail");
-          TP.markImageError(k, "Failed to load replaced image");
+          const owner = replacementOwners.get(img);
+          if (!replacementOwnerIsCurrent(owner)) return;
+          TP.setReplaceState(owner.original, "fail");
+          TP.markImageError(owner.original, "Failed to load replaced image", owner.generation);
         },
         { passive: true },
       );
     }
+    replacementOwners.set(img, {
+      target: img,
+      original: key,
+      generation,
+      pageInstanceId: TP.pageInstanceId,
+    });
 
     const before = img.currentSrc || img.src;
 

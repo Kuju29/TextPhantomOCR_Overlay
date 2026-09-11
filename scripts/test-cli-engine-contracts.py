@@ -14,6 +14,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "api"))
 
 from backend import cli  # noqa: E402
+from backend.ai.translation.contracts import AiConfig  # noqa: E402
+
+for value in (None, "", "auto", "garbage", False, 7, "off"):
+    assert AiConfig(api_key="", thinking=value).thinking == "off"
+assert AiConfig(api_key="", thinking="on").thinking == "on"
 
 
 with tempfile.TemporaryDirectory(prefix="tp-cli-contract-") as temp_dir:
@@ -46,6 +51,15 @@ assert (
     and thinking.value.id == "args"
     and thinking.attr == "ai_thinking"
 ), "--ai-thinking must be forwarded into AiConfig instead of being silently ignored"
+
+# Parser normalization is exercised before image decoding: historical Auto and
+# malformed CLI values become Off rather than provider-managed behavior.
+for value in ("auto", "garbage"):
+    stderr = io.StringIO()
+    with contextlib.redirect_stderr(stderr):
+        status = cli.main(["missing.jpg", "--source", "ai", "--ai-thinking", value])
+    assert status == 2
+    assert "invalid choice" not in stderr.getvalue()
 
 cli_source = (ROOT / "api" / "backend" / "cli.py").read_text(encoding="utf-8")
 driver_source = (ROOT / "scripts" / "cli-extension-driver.mjs").read_text(encoding="utf-8")

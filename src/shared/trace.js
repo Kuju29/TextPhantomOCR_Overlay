@@ -105,11 +105,17 @@ function newShippingHealth() {
 /** Bounded metadata only; safe to persist with a final repair summary. */
 export function getTraceShippingState() {
   return {
-    schema: "tp.trace-shipping/1", producerId,
+    schema: "tp.trace-shipping/1", producerId, clientBuild,
+    traceSession: activeSession,
     state: enabled === null ? "unnegotiated" : !enabled ? "disabled" :
       retryAt > Date.now() ? "backoff" : "active",
     transport: { ...shippingHealth, consecutiveFailures, retryAt },
-    buffer: { queued: buffer.length, dropped },
+    buffer: {
+      queued: buffer.length,
+      dropped,
+      reason: shippingHealth.lastCode ||
+        (enabled === null ? "unnegotiated" : !enabled ? "disabled" : ""),
+    },
   };
 }
 
@@ -308,9 +314,14 @@ const NUMERIC_AI_DIAGNOSTICS = new Set([
   "outputtokens",
   "totaltokens",
   "thinkingtokens",
+  "cachedinputtokens",
+  "cachewriteinputtokens",
   "sourcechars",
   "targetsourcechars",
   "estimatedresponsechars",
+]);
+const SAFE_OPERATIONAL_BOOLEANS = new Set([
+  "pageimagetoai", "manualairatecap", "manualratecapenabled", "ratecapenabled",
 ]);
 
 export function shortenValue(value, depth = 0) {
@@ -361,6 +372,20 @@ export function shortenValue(value, depth = 0) {
       "outputRotation",
       "outputSign",
       "outputRotationSource",
+      // Operational booleans must remain visible in activity traces.  They
+      // contain no content and answer whether an optional path was active.
+      "pageImageToAi",
+      "manualAiRateCap",
+      "manualRateCapEnabled",
+      "rateCapEnabled",
+      "cache",
+      "scope",
+      "incidentId",
+      "owner",
+      "severity",
+      "outcome",
+      "retryable",
+      "final",
     ]);
     const entries = Object.entries(value).sort(
       ([a], [b]) => Number(priority.has(b)) - Number(priority.has(a)),
@@ -378,6 +403,8 @@ export function shortenValue(value, depth = 0) {
         typeof v === "number" &&
         Number.isFinite(v)
           ? shortenValue(v, depth + 1)
+          : SAFE_OPERATIONAL_BOOLEANS.has(lowKey) && typeof v === "boolean"
+            ? v
           : k.toLowerCase() === "cloudkeysent" && v === false
             ? false
             : isSecret(k)
@@ -388,6 +415,54 @@ export function shortenValue(value, depth = 0) {
     return out;
   }
   return String(value);
+}
+
+const CORRELATION_FIELDS = ["traceId", "operationId", "requestId", "jobId", "batchId",
+  "imageId", "runId", "taskId", "attemptId", "clientInstanceHash", "userScopeHash"];
+function incidentHash(value) {
+  let hash = 2166136261;
+  for (const ch of String(value)) hash = Math.imul(hash ^ ch.charCodeAt(0), 16777619);
+  return `inc:${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+function opaqueScope(value, label) {
+  if (value === undefined || value === null || value === "") return "";
+  if (new RegExp(`^${label}:[0-9a-f]{8,64}$`).test(String(value))) return String(value);
+  return `${label}:${incidentHash(String(value)).slice(4)}`;
+}
+
+/** Additive activity metadata only when evidence supports it. */
+export function enrichOperationalTrace(fn, ev, data, traceId = "") {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return data;
+  const out = { ...data };
+  // A field named *Hash is still an untrusted client claim. Canonicalise it
+  // before it can enter either the flat backwards-compatible fields or scope.
+  if (out.clientInstanceHash) out.clientInstanceHash = opaqueScope(out.clientInstanceHash, "client");
+  if (out.userScopeHash) out.userScopeHash = opaqueScope(out.userScopeHash, "user");
+  const normalizedScopes = {
+    clientInstanceHash: opaqueScope(out.clientInstanceHash || out.scope?.clientInstanceHash, "client"),
+    userScopeHash: opaqueScope(out.userScopeHash || out.scope?.userScopeHash, "user"),
+  };
+  if (normalizedScopes.clientInstanceHash) out.clientInstanceHash = normalizedScopes.clientInstanceHash;
+  if (normalizedScopes.userScopeHash) out.userScopeHash = normalizedScopes.userScopeHash;
+  const cached = Number(out?.usage?.cachedInput ?? out?.usage?.cachedInputTokens ?? 0);
+  if (fn === "aiModelWorkload" && out.event === "observation")
+    out.cache = { kind: "provider_prompt", hit: cached > 0, cachedInputTokens: Math.max(0, cached) };
+  const failed = ev === "!!" || /(?:failed|error|unresolved|rejected)/i.test(String(out.event || out.state || out.phase || "")) ||
+    Number(out.unresolved || out.rejectedCount || 0) > 0;
+  const terminal = out.final === true || out.event === "final" || ["done", "cancelled", "failed"].includes(String(out.phase || out.state || ""));
+  if (!failed && !terminal) return out;
+  const scope = {};
+  for (const key of CORRELATION_FIELDS) {
+    let value = normalizedScopes[key] || out[key] || out.scope?.[key];
+    if (value !== undefined && value !== null && value !== "") scope[key] = String(value).slice(0, 160);
+  }
+  if (traceId && !scope.traceId) scope.traceId = String(traceId).slice(0, 160);
+  const anchor = scope.operationId || scope.imageId || scope.jobId || scope.runId || scope.traceId || scope.batchId;
+  const owner = out.owner || (/config|profile_validation/i.test(String(out.event || out.stage || "")) ? "user_config" : "unknown");
+  const outcome = out.outcome || (failed ? "failed" : "succeeded");
+  return { ...out, owner, outcome, severity: out.severity || (failed ? "warning" : "info"),
+    retryable: out.retryable === true, final: terminal, correlation: { scope: typeof out.scope === "string" ? out.scope : (scope.imageId ? "image" : scope.batchId ? "batch" : "operation"), ...scope },
+    ...(anchor ? { incidentId: out.incidentId || incidentHash(`${scope.userScopeHash || scope.clientInstanceHash || ""}|${anchor}|${out.code || out.stage || fn}`) } : {}) };
 }
 
 /**
@@ -413,7 +488,8 @@ export function traceLine(file, fn, ev, data, traceId = undefined) {
       file: sanitizeTraceString(file),
       fn: sanitizeTraceString(fn),
       ev: sanitizeTraceString(ev),
-      ...(data === undefined ? {} : { d: shortenValue(data) }),
+      ...(data === undefined ? {} : { d: shortenValue(enrichOperationalTrace(fn, ev, data,
+        traceId === undefined ? currentTrace : String(traceId || ""))) }),
     };
     let bounded = record;
     try {

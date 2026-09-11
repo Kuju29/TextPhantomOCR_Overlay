@@ -108,9 +108,9 @@ def main():
     assert default_result.thinking_applied == "provider_default"
     assert default_result.requested_output_tokens > off_result.requested_output_tokens
     assert off_payload["generationConfig"]["thinkingConfig"] == {"thinkingBudget": 0}
-    assert off_result.thinking_applied == "off"
+    assert off_result.thinking_applied == "requested_off"
     assert on_payload["generationConfig"]["thinkingConfig"] == {"thinkingBudget": -1}
-    assert on_result.thinking_applied == "dynamic"
+    assert on_result.thinking_applied == "requested_on"
     assert "thinkingConfig" not in lite_payload["generationConfig"]
     assert lite_result.thinking_applied == "provider_default"
     assert lite_result.requested_output_tokens == off_result.requested_output_tokens

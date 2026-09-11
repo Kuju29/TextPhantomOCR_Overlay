@@ -37,9 +37,9 @@ LANG_STYLE: Final[dict[str, str]] = {
 THAI_STYLE_COMPACT: Final[str] = TH_STYLE
 
 PROMPT_POLICY_VERSION: Final[dict[str, str]] = {
-    "th": "th-natural-7",
-    "en": "en-natural-5",
-    "ja": "ja-natural-5",
+    "th": "th-natural-8",
+    "en": "en-natural-6",
+    "ja": "ja-natural-6",
 }
 
 CANONICAL_PROMPT_CONTRACT_VERSION: Final[str] = "translation-plan-2"

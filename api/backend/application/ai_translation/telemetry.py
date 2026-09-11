@@ -1,12 +1,20 @@
 """Success telemetry for API translation."""
 
+from collections.abc import Mapping
+
 from backend import trace
+from backend.api.errors import activity_fields
 from backend.log import event
 
 def emit_success(*, body: dict, missing: list[str], declined: list[str],
-                 passthrough: list[str], route_identity: dict, rate_entry: dict,
-                 trace_id: str) -> None:
+                 passthrough: list[str], route_identity: dict,
+                 rate_entry: Mapping[str, object] | None,
+                 trace_id: str, correlation: dict | None = None) -> None:
     meta = body["meta"]
+    rate_entry_fields = rate_entry if isinstance(rate_entry, Mapping) else {}
+    activity_correlation = dict(correlation or {})
+    activity_correlation.setdefault("traceId", trace_id)
+    activity_correlation.setdefault("operationId", str(body.get("operationId") or ""))
     event("v1.ai.translate", {
         "units": meta["units"], "translated": len(body["translations"]),
         "missing": len(missing), "missing_ids": missing,
@@ -17,6 +25,20 @@ def emit_success(*, body: dict, missing: list[str], declined: list[str],
         "parse_ms": meta["parseMs"], "usage": meta["usage"],
         "finish_reason": meta["finishReason"], "timeout_policy": meta["timeoutPolicy"],
         **route_identity, "rate_mode": meta["rateMode"],
+        **activity_fields(
+            # Missing markers are observed at our response boundary; without a
+            # wire record we cannot distinguish model omission from decoding.
+            owner="unknown" if missing else "textphantom",
+            outcome="partial" if missing else "succeeded",
+            severity="warning" if missing else "info",
+            stage="response_contract" if missing else "ai_translate",
+            retryable=bool(missing),
+            scope="image" if activity_correlation.get("imageId") else "request",
+            correlation=activity_correlation,
+            code="missing_translation_units" if missing else "",
+            phase="repair" if route_identity.get("compatibilityAlias") and "/repair-runs/" in str(route_identity.get("requestedRoute") or "") else "initial",
+            attempt=int(meta.get("generationAttempts") or 1), final=True,
+        ),
     }, ok=not missing)
     waits = {"rate_gate": float(meta["rateWaitMs"]), "provider": float(meta["providerMs"] or 0),
              "admission": float(meta["admissionWaitMs"]), "parse": float(meta["parseMs"] or 0)}
@@ -27,10 +49,10 @@ def emit_success(*, body: dict, missing: list[str], declined: list[str],
         "effectiveSystemPromptChars", "effectiveSystemPromptFingerprint") if key in meta}
     trace.write("api", "api/routes/ai_v1.py", "ai_translate_v1", "<-", {
         "translated": len(body["translations"]), "missing": len(missing),
-        "dominantWait": dominant, "rateRpmOnEntry": rate_entry.get("rpm", 0),
-        "rateQueueDepthOnEntry": rate_entry.get("waiting", 0),
-        "rateOkStreakOnEntry": rate_entry.get("okStreak", 0),
-        "rateOkStreakTarget": rate_entry.get("okStreakTarget", 0),
+        "dominantWait": dominant, "rateRpmOnEntry": rate_entry_fields.get("rpm", 0),
+        "rateQueueDepthOnEntry": rate_entry_fields.get("waiting", 0),
+        "rateOkStreakOnEntry": rate_entry_fields.get("okStreak", 0),
+        "rateOkStreakTarget": rate_entry_fields.get("okStreakTarget", 0),
         "missingIds": missing, "omittedIds": meta["omittedIds"], "declinedIds": declined,
         "passthroughIds": passthrough, "provider": meta["provider"], "model": meta["model"],
         "dt_ms": meta["dt_ms"], "rateWaitMs": meta["rateWaitMs"],

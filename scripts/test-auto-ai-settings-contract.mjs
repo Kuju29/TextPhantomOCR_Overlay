@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 
 const storage = Object.create(null);
+const tabRequests = [];
 globalThis.chrome = {
   storage: {
     local: {
@@ -16,6 +17,7 @@ globalThis.chrome = {
   contextMenus: { removeAll() {}, create() {} },
   tabs: {
     sendMessage(_tabId, message, _options, callback) {
+      tabRequests.push(message?.type || "");
       // The readiness ping succeeds. A configuration failure must occur before
       // the production handler asks the tab for an image payload.
       callback?.(message?.type === "TP_PING" ? { ok: true } : null);
@@ -170,6 +172,18 @@ assert.equal(autoAiSettingsIssue({ aiProvider: "gemini", aiKey: "" }, { hasServe
   "missing_api_key");
 assert.equal(autoAiSettingsIssue({ aiProvider: "ollama", aiBaseUrl: "", aiKey: "" })?.code,
   "ai_endpoint_missing");
+assert.equal(autoAiSettingsIssue({
+  aiProvider: "openrouter", aiModel: "", aiPrompt: "style", aiKey: "key",
+}, { mainApiBaseUrl: "https://api.example", requireComplete: true })?.path,
+"[AI option > Model]", "strict dispatch readiness must identify the missing Model control");
+assert.equal(autoAiSettingsIssue({
+  aiProvider: "openrouter", aiModel: "model", aiPrompt: "", aiKey: "key",
+}, { mainApiBaseUrl: "https://api.example", requireComplete: true })?.path,
+"[AI option > Set prompt]", "strict dispatch readiness must identify the missing AI Style control");
+assert.equal(autoAiSettingsIssue({
+  aiProvider: "ollama", aiModel: "model", aiPrompt: "style", aiBaseUrl: "",
+}, { mainApiBaseUrl: "https://api.example", requireComplete: true })?.path,
+"[AI option > Local server URL]", "strict dispatch readiness must identify the missing Local URL control");
 assert.equal(autoAiSettingsIssue({ aiProvider: "auto", aiBaseUrl: "http://127.0.0.1:11434", aiKey: "" }), null,
   "a keyless local URL with auto provider is supported");
 assert.deepEqual(
@@ -285,8 +299,10 @@ assert.equal(autoAiSettingsIssue({
 // graph, which expects browser APIs at module evaluation time. The source checks
 // protect the authoritative placement and its conservative server-key policy.
 assert.match(contextMenuSource, /has_env_ai_key/);
-assert.match(contextMenuSource, /if \(mode === "lens_text" && source === "ai"\)/,
+assert.match(contextMenuSource, /const usesAi = mode === "lens_text" && preliminarySource === "ai";/,
   "preflight must cover both manual and Auto text.ai paths");
+assert.match(contextMenuSource, /const profileSnapshot = usesAi[\s\S]*?resolveJobAiProfile/,
+  "AI profile resolution itself must be behind the text.ai boundary");
 assert.match(contextMenuSource, /readFullSettings\(\{ lang: effectiveLang \}\)/);
 assert.match(contextMenuSource, /if \(options\?\.propagateErrors === true\) throw e;/,
   "programmatic callers must receive failures caught by the menu boundary");
@@ -306,6 +322,10 @@ assert.doesNotMatch(contextMenuSource, /apiKey.*message|message.*aiKey/,
 storage.aiProvider = "ollama";
 storage.aiBaseUrl = "";
 storage.aiKey = "do-not-print-this-key";
+storage.aiModel = "local-fixture-model";
+storage.aiPromptByLang = { th: "Thai fixture style" };
+storage.apiUrlDefault = "https://api.example.invalid";
+storage.apiDefaultsFetchedAt = Date.now();
 const { buildRatePayload, onContextMenuClicked } = await import("../src/background/context-menu.js");
 
 delete storage.rateLimitEnabled;
@@ -332,6 +352,20 @@ assert.deepEqual(
 // a later case and accidentally perform a real network request.
 storage.aiProvider = "ollama";
 storage.aiBaseUrl = "";
+
+// A corrupt AI profile is irrelevant to non-AI modes. The content request
+// proves dispatch crossed the settings gate; no Provider request is possible
+// because a non-AI payload never carries an `ai` block.
+storage.aiProfilesV1 = { version: 999 };
+const requestsBeforeNonAi = tabRequests.length;
+await assert.doesNotReject(onContextMenuClicked(
+  { menuItemId: "img_one", srcUrl: "https://example.invalid/non-ai.jpg" },
+  { id: 7, url: "https://example.invalid/page", title: "Page" },
+  { overrides: { mode: "lens_text", lang: "th", source: "original" }, propagateErrors: true },
+));
+assert.ok(tabRequests.slice(requestsBeforeNonAi).includes("GET_CONTEXT_IMAGE_PAYLOAD"),
+  "text.Original must bypass broken AI profile validation and reach normal image collection");
+delete storage.aiProfilesV1;
 
 assert.deepEqual(
   buildRatePayload("lens_text", "ai", {
@@ -360,6 +394,7 @@ assert.deepEqual(
 const savedConsoleError = console.error;
 console.error = () => {};
 try {
+  const requestsBeforeInvalidAi = tabRequests.length;
   await assert.rejects(
     onContextMenuClicked(
       { menuItemId: "img_one" },
@@ -369,10 +404,13 @@ try {
         propagateErrors: true,
       },
     ),
-    (error) => error?.tpError?.code === "ai_endpoint_missing" &&
+    (error) => ["ai_endpoint_missing", "api_url_missing"].includes(error?.tpError?.code) &&
+      error?.requestDispatched !== true &&
       !String(error?.message || "").includes(storage.aiKey),
     "TP_RUN's programmatic path must reject with a safe structured preflight error",
   );
+  assert.ok(!tabRequests.slice(requestsBeforeInvalidAi).includes("GET_CONTEXT_IMAGE_PAYLOAD"),
+    "invalid text.ai settings must stop before image collection/Lens dispatch");
   await assert.doesNotReject(
     onContextMenuClicked(
       { menuItemId: "img_one" },

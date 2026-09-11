@@ -60,8 +60,12 @@ class GenerationRequest:
             raise ValueError("model is required")
         if self.unit_count is not None and self.unit_count < 0:
             raise ValueError("unit_count cannot be negative")
+        thinking = str(self.thinking or "off").strip().lower()
+        if thinking not in {"off", "on"}:
+            thinking = "off"
         object.__setattr__(self, "provider", provider)
         object.__setattr__(self, "model", model)
+        object.__setattr__(self, "thinking", thinking)
         object.__setattr__(self, "workload", _frozen_mapping(self.workload))
         object.__setattr__(self, "user_parts", tuple(self.user_parts))
         object.__setattr__(self, "system_sections", tuple(self.system_sections))
@@ -84,11 +88,15 @@ class ModelListResult:
     http_status: int = 0
     error: str = ""
     capabilities: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
+    # Backward-compatible enrichment. ``models`` remains the stable ID list;
+    # candidates records what the provider actually proved about each ID.
+    candidates: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "models", tuple(self.models))
         object.__setattr__(self, "error", str(self.error or "")[:240])
         object.__setattr__(self, "capabilities", MappingProxyType(dict(self.capabilities)))
+        object.__setattr__(self, "candidates", MappingProxyType(dict(self.candidates)))
 
 @dataclass(frozen=True, slots=True)
 class ProbeRequest:

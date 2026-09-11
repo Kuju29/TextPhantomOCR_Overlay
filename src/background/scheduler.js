@@ -38,6 +38,7 @@ const AI_LEARNING_TTL_MS = 2 * 60 * 60 * 1000;
 const AI_LEARNING_MAX_ENTRIES = 128;
 let learningCache = null;
 let learningLoadPromise = null;
+let learningGeneration = 0;
 
 const lanes = new Map();
 let diagnosticLaneSequence = 0;
@@ -71,6 +72,7 @@ function makeLane(key) {
     window: policy.initialWindow,
     maxWindow: policy.maxWindow,
     running: 0,
+    resetPending: 0,
     waiters: [],
     avgMs: 0,
     samples: 0,
@@ -185,8 +187,10 @@ async function loadLearningCache() {
   if (!storageAvailable()) return {};
   if (learningCache) return learningCache;
   if (!learningLoadPromise) {
+    const generation = learningGeneration;
     learningLoadPromise = getStorage({ [AI_LEARNING_STORAGE_KEY]: {} })
       .then((items) => {
+        if (generation !== learningGeneration) return learningCache || {};
         const raw = items?.[AI_LEARNING_STORAGE_KEY];
         learningCache = raw && typeof raw === "object" ? { ...raw } : {};
         return learningCache;
@@ -297,8 +301,10 @@ function persistLearning(l, { force = false } = {}) {
   l.lastPersistedWindow = safe;
   l.learnedWindow = safe;
   l.learnedUpdatedAt = Date.now();
+  const generation = learningGeneration;
   void loadLearningCache()
     .then((cache) => {
+      if (generation !== learningGeneration) return undefined;
       cache[l.key] = {
         window: safe,
         updatedAt: l.learnedUpdatedAt,
@@ -329,6 +335,7 @@ function lane(key) {
 // Admits waiters while the lane has room and is not paused.
 function pump(l, reason="unchanged", evidence=null) {
   auditCapacity(l,reason,evidence);
+  if (l.resetPending > 0) return;
   if (l.unlimited) {
     while (l.waiters.length) {
       l.running++;
@@ -535,6 +542,7 @@ function localAutoSuccess(l, latency) {
 // not keep widening merely because it eventually answered.
 export function releaseSuccess(key, ms = 0) {
   const l = lane(key);
+  if (consumeResetRelease(l)) return;
   l.running = Math.max(0, l.running - 1);
   l.stats.ok++;
   if (l.unlimited) return;
@@ -568,6 +576,7 @@ export function releaseSuccess(key, ms = 0) {
 // it is neither success evidence nor latency evidence for Auto capacity.
 export function releaseReplay(key) {
   const l = lane(key);
+  if (consumeResetRelease(l)) return;
   l.running = Math.max(0, l.running - 1);
   l.stats.replayed = (l.stats.replayed || 0) + 1;
   pump(l);
@@ -578,6 +587,7 @@ export function releaseReplay(key) {
 // must use releaseDeferred instead: it says nothing about provider capacity.
 export function releaseRejected(key, retryAfterMs = 0) {
   const l = lane(key);
+  if (consumeResetRelease(l)) return;
   l.running = Math.max(0, l.running - 1);
   l.stats.rejected++;
   if (l.unlimited) return;
@@ -607,6 +617,7 @@ export function releaseRejected(key, retryAfterMs = 0) {
 // do not hammer a full HF process with a 503 storm. The backlog stays here.
 export function releaseDeferred(key, retryAfterMs = 0) {
   const l = lane(key);
+  if (consumeResetRelease(l)) return;
   l.running = Math.max(0, l.running - 1);
   l.stats.deferred = (l.stats.deferred || 0) + 1;
   const pause = Number(retryAfterMs) || 0;
@@ -632,6 +643,7 @@ export function releaseDeferred(key, retryAfterMs = 0) {
 // waiting for tokens, with the server otherwise idle 88% of the session.
 export function releaseGated(key, retryAfterMs = 0) {
   const l = lane(key);
+  if (consumeResetRelease(l)) return;
   l.running = Math.max(0, l.running - 1);
   l.stats.gated++;
   if (l.unlimited) return;
@@ -646,6 +658,7 @@ export function releaseGated(key, retryAfterMs = 0) {
 // Returns a slot after a failure that is not backpressure, leaving the window unchanged.
 export function releaseFailed(key) {
   const l = lane(key);
+  if (consumeResetRelease(l)) return;
   l.running = Math.max(0, l.running - 1);
   l.stats.failed++;
   pump(l);
@@ -772,6 +785,48 @@ export function describe(key = "") {
 // Clears every lane.
 export function reset() {
   lanes.clear();
+}
+
+/** Forget adaptive backpressure immediately; storage removal is owned by the UI reset transaction. */
+export function resetAdaptiveLearning() {
+  learningGeneration += 1;
+  learningCache = {};
+  learningLoadPromise = Promise.resolve(learningCache);
+  for (const [key, l] of lanes) {
+    const policy = lanePolicy(key);
+    l.window = policy.initialWindow;
+    l.maxWindow = policy.maxWindow;
+    l.ceiling = 0;
+    l.capacityHint = 0;
+    l.capacityTarget = 0;
+    l.userCeiling = 0;
+    l.unlimited = false;
+    l.localCapacity = null;
+    l.localAuto = { bestWindow: 0, bestLatencyMs: 0, bestScore: 0,
+      probeWindow: 0, probeSamples: 0, probeTotalMs: 0,
+      stable: false, cooldownSuccesses: 0 };
+    l.learnedWindow = 0;
+    l.learnedUpdatedAt = 0;
+    l.lastPersistedWindow = 0;
+    l.backpressured = false;
+    l.slowStart = true;
+    l.recoverySuccesses = 0;
+    l.pausedUntil = 0;
+    l.resetPending = Math.max(0, l.running);
+    if (l.resetPending === 0 && l.waiters.length === 0) lanes.delete(key);
+    else if (l.resetPending === 0) pump(l, "settings_reset");
+  }
+}
+
+function consumeResetRelease(l) {
+  if (!(l.resetPending > 0)) return false;
+  l.running = Math.max(0, l.running - 1);
+  l.resetPending = Math.max(0, l.resetPending - 1);
+  if (l.resetPending === 0) {
+    if (l.waiters.length === 0) lanes.delete(l.key);
+    else pump(l, "settings_reset_complete");
+  }
+  return true;
 }
 
 // Returns a short non-secret label distinguishing one AI key's lane from another's.

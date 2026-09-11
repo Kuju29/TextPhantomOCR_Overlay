@@ -50,8 +50,9 @@ class DeepSeekAdapter(OpenAIProviderAdapter):
     def generate(self, request: GenerationRequest):
         model = resolve_model(request.model)
         payload = build_payload(request, model, POLICY)
-        payload["thinking"] = {"type": "enabled" if request.thinking == "on" else "disabled"}
-        return execute_chat_completion(
+        if request.thinking in {"off", "on"}:
+            payload["thinking"] = {"type": "enabled" if request.thinking == "on" else "disabled"}
+        result = execute_chat_completion(
             url=request.base_url.rstrip("/") + "/chat/completions",
             headers=bearer_headers(request.api_key),
             payload=payload, model=model, provider_id=PROVIDER_ID,
@@ -63,10 +64,14 @@ class DeepSeekAdapter(OpenAIProviderAdapter):
                 "outputBudgetField": POLICY.output_budget_field,
                 "requestedOutputTokens": payload.get("max_tokens"),
                 "reasoningPolicy": "deepseek_thinking_toggle",
-                "reasoningControlSent": True,
+                "reasoningControlSent": "thinking" in payload,
                 "thinkingMode": request.thinking,
             },
         )
+        return result._replace(thinking_applied=(
+            f"requested_{request.thinking}" if request.thinking in {"off", "on"}
+            else "provider_default"
+        ))
 
     def list_models(self, *, api_key: str, base_url: str) -> ModelListResult:
         listed = super().list_models(api_key=api_key, base_url=base_url)

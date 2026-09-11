@@ -32,6 +32,11 @@ class AiConfig:
     prev_context: list = field(default_factory=list)
     context_frozen: bool = False
 
+    def __post_init__(self) -> None:
+        # Auto is retained only as a historical/diagnostic label. Runtime
+        # configuration has a two-state user selection and defaults safely Off.
+        self.thinking = "on" if str(self.thinking or "off").strip().lower() == "on" else "off"
+
 class AiResult(TypedDict):
     aiTextFull: str
     meta: dict[str, Any]

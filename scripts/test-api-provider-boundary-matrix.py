@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import types
 from contextlib import ExitStack
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -31,7 +32,7 @@ except ModuleNotFoundError:
 
 from backend.ai import markers, prompts
 from backend.ai.errors import ModelOutputContractError
-from backend.ai.provider_contract import GenerationRequest
+from backend.ai.provider_contract import GenerationRequest, ProbeRequest
 from backend.ai.provider_registry import ProviderRegistry
 from backend.ai.providers import cloud_anthropic, cloud_gemini, compose_providers
 from backend.ai.transports import openai_chat
@@ -43,9 +44,13 @@ SOURCE = "<<TP_P0:  OCR source  >>\n<<TP_P1:second>>\n<<TP_P2:third>>"
 STYLE, _STYLE_SOURCE = prompts.select_style(
     "th", prompts.lang_style("th"), "replace",
 )
-assert len(STYLE) > 2500 and "Silently check meaning" in STYLE
+assert len(STYLE) > 2500 and "CHARACTER SHEET and SERIES MEMORY" in STYLE
+assert "Never move, merge, duplicate or discard meaning across IDs" in STYLE
+assert "Silently check meaning" not in STYLE and "MICRO-EXAMPLES" not in STYLE
 OCR_OUTPUT_RULE = "Correct missing, extra or misread characters only when the supplied text makes the intended reading unambiguous"
-assert prompts.prompt_metadata("th", prompts.lang_style("th"), "replace")["promptVersion"] == "th-natural-7"
+assert prompts.prompt_metadata("th", prompts.lang_style("th"), "replace")["promptVersion"] == "th-natural-8"
+assert prompts.prompt_metadata("en", prompts.lang_style("en"), "replace")["promptVersion"] == "en-natural-6"
+assert prompts.prompt_metadata("ja", prompts.lang_style("ja"), "replace")["promptVersion"] == "ja-natural-6"
 ANSWER = "<<TP_P0:คำแปล>>"
 USAGE = (23, 7, 30)
 CLOUD_FIELDS = {
@@ -308,7 +313,7 @@ def main() -> None:
             assert "think" not in payload, f"{spec.provider_id}: guessed thinking control sent"
             assert "max_tokens" in payload
         elif spec.provider_id == "ollama":
-            assert payload["think"] is False
+            assert "think" not in payload, "unknown Ollama capability must omit think"
             assert "num_predict" in payload["options"]
             assert "temperature" not in payload["options"]
         elif spec.protocol == "openai_chat_completions":
@@ -332,10 +337,57 @@ def main() -> None:
         print(f"  {provider:14} {protocol:28} {status}")
     print("Custom Local API: N/A (extension-only contract)")
 
+    ollama = next(spec for spec in registry if spec.provider_id == "ollama")
+    base_ollama_request = GenerationRequest(
+        provider="ollama", model=ollama.default_model,
+        base_url=ollama.default_base_url, system_text=system_text,
+        system_sections=sections, user_parts=(SOURCE,), thinking="off",
+        expected_ids=request_ids, unit_count=len(request_ids),
+    )
+    capability_cases = (
+        ({"reasoning": {"supported": None, "control": "unknown"}}, "off", None),
+        ({"reasoning": {"supported": False, "control": "none"}}, "off", None),
+        ({"reasoning": {"supported": True, "control": "levels"}}, "on", None),
+        ({"reasoning": {"supported": True, "control": "boolean"}}, "off", False),
+        ({"reasoning": {"supported": True, "control": "toggle"}}, "on", True),
+    )
+    for capabilities, selected, expected in capability_cases:
+        BoundaryClient.calls = []
+        candidate = replace(base_ollama_request, thinking=selected,
+                            model_capabilities=capabilities)
+        with patch.object(openai_chat.httpx, "Client", BoundaryClient):
+            ollama.adapter.generate(candidate)
+        body = BoundaryClient.calls[0]["json"]
+        if expected is None:
+            assert "think" not in body, (capabilities, body)
+        else:
+            assert body.get("think") is expected, (capabilities, body)
+
+    BoundaryClient.calls = []
+    with patch("backend.ai.providers.local_ollama.httpx.Client", BoundaryClient):
+        probe = ollama.adapter.probe(ProbeRequest(
+            model=ollama.default_model, base_url=ollama.default_base_url,
+        ))
+    assert probe.ok
+    assert "think" not in BoundaryClient.calls[0]["json"], (
+        "unknown Ollama probe capability must omit think", BoundaryClient.calls[0]["json"])
+    mandatory = {"reasoning": {"supported": True, "mandatory": True, "control": "levels"}}
+    try:
+        ollama.adapter.generate(replace(base_ollama_request, model_capabilities=mandatory))
+    except RuntimeError as exc:
+        assert "local_ai_thinking_required" in str(exc)
+    else:
+        raise AssertionError("mandatory-thinking Ollama model accepted Thinking Off")
+    mandatory_probe = ollama.adapter.probe(ProbeRequest(
+        model=ollama.default_model, base_url=ollama.default_base_url,
+        model_capabilities=mandatory,
+    ))
+    assert not mandatory_probe.ok and mandatory_probe.status == "local_ai_thinking_required"
+    print("Ollama thinking boundary: unknown/unsupported/levels omit; verified boolean off/on PASS")
+
     # Regression: marker completion is latency evidence, not permission to
     # freeze the body. A later suffix must reach decode but cannot invalidate
     # independently complete expected records.
-    ollama = next(spec for spec in registry if spec.provider_id == "ollama")
     one_sections = prompts.append_request_output_section(
         prompts.build_system_sections(
             "th", STYLE, prompt_mode="replace", structured_output=False,

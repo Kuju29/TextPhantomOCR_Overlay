@@ -8,11 +8,16 @@ import { readFullSettings } from "../shared/settings.js";
 import { effectiveEngineMode } from "../shared/engine-mode.js";
 import { API_PATHS, isLocalAiProvider } from "../shared/constants.js";
 import { AI_PROMPT_MODE } from "../shared/ai-prompt-policy.js";
-import { attachTpError } from "../shared/error-contract.js";
+import { attachTpError, publicTpError } from "../shared/error-contract.js";
 import {
+  aiConfigurationIssueForError,
   autoAiSettingsIssue,
   classifyAiRuntime,
 } from "../shared/ai-settings-contract.js";
+import {
+  assertPageImageSupported,
+  pageImageEnabled,
+} from "../shared/page-image-policy.js";
 import {
   resolveSeriesKey,
   refineSeriesKeyWithTitle,
@@ -81,22 +86,60 @@ async function assertAutoAiReady(settings) {
   // working keyless route until an executable on-device translator exists.
   const local = classifyAiRuntime(settings).local;
   const needsServerKeyFact = !local && !String(settings?.aiKey || "").trim();
-  const mainApiBaseUrl =
-    local && settings?.engineMode === "api"
-      ? await getApiBase().catch(() => "")
-      : "";
+  const mainApiBaseUrl = await getApiBase().catch(() => "");
   const issue = autoAiSettingsIssue(settings, {
     hasServerKey: needsServerKeyFact ? await serverHasAiKey() : null,
     mainApiBaseUrl,
+    requireComplete: true,
   });
-  if (!issue) return;
-  throw attachTpError(new Error(issue.message), {
+  if (issue) {
+    throw attachTpError(new Error(issue.message), {
+      code: issue.code,
+      category: "configuration",
+      origin: "user",
+      stage: "ai_configuration",
+      retryable: false,
+    });
+  }
+  try {
+    assertPageImageSupported(
+      settings?.aiPageImage,
+      settings?.aiModelCapabilities,
+    );
+  } catch (error) {
+    throw attachTpError(error, {
+      code: error.code,
+      category: "configuration",
+      origin: "user",
+      stage: "ai_configuration",
+      retryable: false,
+    });
+  }
+}
+
+function showAiConfigurationError(menuInfo, tab, error) {
+  const issue = aiConfigurationIssueForError(error) || {
+    code: String(error?.code || error?.tpError?.code || "ai_configuration_invalid"),
+    message: String(error?.message || "การตั้งค่า AI ไม่สมบูรณ์ [AI option > Provider]"),
+  };
+  const safeError = attachTpError(new Error(issue.message), {
     code: issue.code,
     category: "configuration",
     origin: "user",
     stage: "ai_configuration",
     retryable: false,
   });
+  const frameId = Number(menuInfo?.frameId) || 0;
+  sendToastToTab(tab.id, frameId, `TextPhantom: ${issue.message} ยังไม่ได้เริ่มแปล`, 12000);
+  if (menuInfo?.menuItemId === "img_one" && menuInfo?.srcUrl) {
+    void sendToTab(tab.id, {
+      type: "IMAGE_ERROR",
+      original: menuInfo.srcUrl,
+      message: issue.message,
+      error: publicTpError(safeError),
+    }, frameId);
+  }
+  return safeError;
 }
 
 // Reads and discards the lastError left by a contextMenus call.
@@ -169,8 +212,7 @@ export function recreateMenus() {
 export async function buildAiPayload(mode, source, settings, seriesKey) {
   if (mode !== "lens_text" || source !== "ai") return null;
   const memory = selectPromptMemory(await getSeriesMemory(seriesKey));
-  const sendImage =
-    String(settings.aiPageImage || "off") === "always" ? "always" : false;
+  const sendImage = pageImageEnabled(settings.aiPageImage);
   const memMode = ["off", "terms", "full"].includes(settings.aiMemoryMode)
     ? settings.aiMemoryMode
     : "off";
@@ -199,17 +241,17 @@ export async function buildAiPayload(mode, source, settings, seriesKey) {
     char_memory: useChars,
     memory_mode: memMode,
     send_image: sendImage,
-    thinking: String(
-      isLocalAiProvider(settings.aiProvider)
-        ? settings.aiLocalThinking || "off"
-        : settings.aiThinking === "on" ? "on" : "off",
-    ),
+    thinking: (() => {
+      const value = isLocalAiProvider(settings.aiProvider)
+        ? settings.aiLocalThinking : settings.aiThinking;
+      return value === "on" ? "on" : "off";
+    })(),
     model_capabilities: local
       ? sameLocalCapability
-        ? { structuredOutput: storedCapability.structuredOutput || null,
-            reasoning: storedCapability.reasoning || null,
-            limits: storedCapability.limits || { contextTokens: storedCapability.contextLength,
-              source: "ollama-api-ps", scope: "runtime" } }
+        ? (storedCapability.modelCapabilities &&
+            typeof storedCapability.modelCapabilities === "object"
+            ? structuredClone(storedCapability.modelCapabilities)
+            : {})
         : {}
       : settings.aiModelCapabilities && typeof settings.aiModelCapabilities === "object"
         ? settings.aiModelCapabilities
@@ -250,7 +292,8 @@ export function buildRatePayload(mode, source, settings) {
     Number(settings.rateBurst) > 0 ? Number(settings.rateBurst) : 0;
   // Burst is only a concurrency companion to an explicitly enabled RPM cap;
   // a stale Burst value must never activate pacing by itself.
-  const enabled = settings.rateLimitEnabled === true && configuredRpm > 0;
+  const enabled = settings.rateLimitEnabled === true &&
+    settings.rateProfile !== "auto" && configuredRpm > 0;
   // Stored values are preferences, not active limits. If the user turns the
   // switch OFF, do not let yesterday's RPM/Burst silently seed today's
   // scheduler window or server rate gate.
@@ -674,18 +717,24 @@ async function dispatchContextMenuClick(menuInfo, tab, options = {}) {
         : null;
     const mode = overrideMode(overrides?.mode) || flatSettings.mode;
     const lang = String(overrides?.lang || "").trim() || flatSettings.lang;
-    const profileSnapshot = await resolveJobAiProfile(flatSettings, {
-      language: lang,
-    });
+    const preliminarySource =
+      mode === "lens_text"
+        ? overrideSource(overrides?.source) || flatSettings.sources || "translated"
+        : "translated";
+    const usesAi = mode === "lens_text" && preliminarySource === "ai";
+    const profileSnapshot = usesAi
+      ? await resolveJobAiProfile(flatSettings, { language: lang })
+      : null;
+    const resolvedSettings = profileSnapshot?.settings || flatSettings;
     const settings = {
-      ...profileSnapshot.settings,
-      engineMode: effectiveEngineMode(profileSnapshot.settings.engineMode),
+      ...resolvedSettings,
+      engineMode: effectiveEngineMode(resolvedSettings.engineMode),
     };
     const source =
       mode === "lens_text"
         ? overrideSource(overrides?.source) || settings.sources || "translated"
         : "translated";
-    if (mode === "lens_text" && source === "ai") {
+    if (usesAi) {
       await assertAutoAiReady(settings);
     }
     if (overrides) {
@@ -706,15 +755,17 @@ async function dispatchContextMenuClick(menuInfo, tab, options = {}) {
     const limitsPayload = buildLimitsPayload(settings);
     const engineMode = effectiveEngineMode(settings.engineMode);
 
-    traceNote(
-      "background/ai-profile-resolver.js",
-      "jobProfileSnapshot",
-      {
-        ...profileSnapshot.audit,
-        execution: engineMode === "api" ? "runsapi" : "runsextension",
-      },
-      getTrace(),
-    );
+    if (profileSnapshot) {
+      traceNote(
+        "background/ai-profile-resolver.js",
+        "jobProfileSnapshot",
+        {
+          ...profileSnapshot.audit,
+          execution: engineMode === "api" ? "runsapi" : "runsextension",
+        },
+        getTrace(),
+      );
+    }
 
     log.debug("batch concurrency", describeLimits());
 
@@ -775,12 +826,12 @@ async function dispatchContextMenuClick(menuInfo, tab, options = {}) {
     }
   } catch (e) {
     log.error("menu handler error", e);
-    if ([
+    if (aiConfigurationIssueForError(e) || [
       "AI_PROFILE_INVALID",
       "AI_PROFILE_INCOMPLETE",
       "AI_PROFILE_MIGRATION_CONFLICT",
       "AI_PROFILE_MIGRATION_INCOMPLETE",
-    ].includes(e?.code)) {
+    ].includes(e?.code) || e?.tpError?.stage === "ai_configuration") {
       traceNote(
         "background/ai-profile-resolver.js",
         "jobProfileValidationError",
@@ -793,12 +844,7 @@ async function dispatchContextMenuClick(menuInfo, tab, options = {}) {
         },
         getTrace(),
       );
-      sendToastToTab(
-        tab.id,
-        Number(menuInfo?.frameId) || 0,
-        `TextPhantom: AI settings need attention (${e.code}). Open Provider and save the intended Provider and Model. No translation was started.`,
-        12000,
-      );
+      e = showAiConfigurationError(menuInfo, tab, e);
     }
     // Browser context-menu clicks historically report errors through logging,
     // toast/image messages. Programmatic callers need the rejected Promise so

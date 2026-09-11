@@ -57,7 +57,7 @@ function popupFixture(initial = {}) {
   recovery.state.aiProfileBlocked = true;
   recovery.controller.beginRecovery(recovery.storage);
   await recovery.controller.saveProfile({ thinking: "off" });
-  assert.equal(recovery.storage.aiProfileStorageVersion, 2);
+  assert.equal(recovery.storage.aiProfileStorageVersion, 4);
   assert.equal(recovery.storage.aiProfilesV1.version, 1);
   assert.equal(recovery.state.aiProfileBlocked, false);
 }

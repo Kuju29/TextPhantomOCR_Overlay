@@ -117,6 +117,7 @@
 
   // Starts a new page instance and drops parked waiters, so results from the previous route are refused.
   function resetPageInstance(reason = "") {
+    TP.clearAllImageErrors?.();
     TP.clearToasts?.();
     TP.clearImageStatuses?.();
     pageInstanceId = newPageInstanceId();

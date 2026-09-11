@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-import socket, re
+import hashlib, socket, re
 
 from backend.log import event
 
@@ -20,6 +20,130 @@ _RESERVED = {
     "failedStage", "category", "retryable", "httpStatus", "traceId",
     "upstreamStatus",
 }
+
+_CORRELATION_KEYS = (
+    "traceId", "operationId", "requestId", "jobId", "batchId", "imageId",
+    "runId", "taskId", "attemptId", "clientInstanceHash", "userScopeHash",
+    "tabSession", "clientVersion",
+)
+
+def _bounded(value: Any, limit: int = 160) -> str:
+    return str(value or "").strip()[:limit]
+
+def _opaque_tab_session(value: Any) -> str:
+    """Keep a joinable browser-session key without logging the raw identifier."""
+    raw = _bounded(value, 256)
+    return f"tab:{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:20]}" if raw else ""
+
+def _opaque_scope(value: Any, label: str) -> str:
+    """Never trust a client claim to already be privacy-safe."""
+    raw = _bounded(value, 256)
+    return f"{label}:{hashlib.sha256(raw.encode('utf-8')).hexdigest()[:20]}" if raw else ""
+
+def activity_incident_id(*, code: str = "", stage: str = "",
+                         correlation: dict[str, Any] | None = None) -> str:
+    """Stable, privacy-safe grouping key for attempts of the same failure.
+
+    A stable operation/image is deliberately preferred over requestId (which
+    changes on retry) and batchId (which may contain many independent images).
+    If no correlation exists, return an empty value instead of merging unrelated
+    anonymous HTTP failures into one fictional incident.
+    """
+    values = correlation or {}
+    anchor = _bounded(values.get("operationId") or values.get("imageId")
+                      or values.get("jobId") or values.get("traceId")
+                      or values.get("batchId"))
+    if not anchor:
+        return ""
+    namespace = _bounded(values.get("userScopeHash") or values.get("clientInstanceHash"), 80)
+    material = "|".join((namespace, anchor, _bounded(code, 80), _bounded(stage, 80)))
+    return "inc:" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:20]
+
+def activity_fields(*, owner: str, outcome: str, severity: str, stage: str,
+                    retryable: bool, scope: str, correlation: dict[str, Any] | None = None,
+                    code: str = "", phase: str = "", attempt: int | None = None,
+                    final: bool | None = None) -> dict[str, Any]:
+    """Additive, compact classification shared by human and machine readers."""
+    corr = {key: _bounded(value) for key, value in (correlation or {}).items()
+            if key in _CORRELATION_KEYS and _bounded(value)}
+    out: dict[str, Any] = {
+        "owner": owner, "outcome": outcome, "severity": severity,
+        "stage": stage, "retryable": bool(retryable), "scope": scope,
+    }
+    # Keep flat fields for old readers while giving new readers one complete,
+    # unambiguous correlation envelope.
+    out["correlation"] = {"scope": scope, **corr}
+    out.update(corr)
+    incident = activity_incident_id(code=code, stage=stage, correlation=corr)
+    if incident:
+        out["incidentId"] = incident
+    if phase:
+        out["phase"] = phase
+    if attempt is not None:
+        out["attempt"] = max(0, int(attempt))
+    if final is not None:
+        out["final"] = bool(final)
+    return out
+
+def classify_failure(detail: dict[str, Any], *, route: str = "") -> dict[str, Any]:
+    """Classify proven ownership only; provider boundary is not root-cause blame."""
+    origin = _bounded(detail.get("origin"), 80)
+    category = _bounded(detail.get("category"), 80)
+    stage = _bounded(detail.get("stage") or "unknown", 80)
+    code = _bounded(detail.get("code") or "internal_error", 80)
+    if category == "lifecycle" or code == "cancelled":
+        owner, outcome, severity = "cancelled", "cancelled", "info"
+    elif origin == "client" and category in {"configuration", "input"}:
+        owner, outcome, severity = "user_config", "failed", "warning"
+    elif origin == "upstream_image":
+        owner, outcome, severity = "site_input", "failed", "warning"
+    elif origin.startswith("upstream_"):
+        owner, outcome, severity = "provider", "failed", "warning"
+    elif origin == "api":
+        owner, outcome, severity = "textphantom", "failed", "error"
+    else:
+        owner, outcome, severity = "unknown", "failed", "warning"
+    correlation = {key: detail.get(key) for key in _CORRELATION_KEYS}
+    scope = "image" if detail.get("imageId") else "batch" if detail.get("batchId") else "request"
+    phase = "repair" if "/repair-runs/" in route else "initial"
+    raw_attempt = detail.get("generationAttempts", detail.get("providerAttempts"))
+    try:
+        attempt = int(raw_attempt) if raw_attempt is not None else None
+    except (TypeError, ValueError):
+        attempt = None
+    return activity_fields(
+        owner=owner, outcome=outcome, severity=severity, stage=stage,
+        retryable=bool(detail.get("retryable", False)), scope=scope,
+        correlation=correlation, code=code, phase=phase, attempt=attempt,
+        # This line describes one API/provider boundary attempt. The caller may
+        # still run transport or content repair, so it is not a batch verdict.
+        final=False,
+    )
+
+def payload_correlation(payload_data: dict[str, Any] | None, *, job_id: str = "") -> dict[str, str]:
+    """Extract safe queue correlation without retaining payload content."""
+    data = payload_data or {}
+    metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    context = data.get("context") if isinstance(data.get("context"), dict) else {}
+    return {key: value for key, value in {
+        "traceId": _bounded(context.get("tp_trace") or data.get("traceId")),
+        "operationId": _bounded(data.get("operationId") or metadata.get("operation_id")
+                                or data.get("idempotency_key")),
+        "requestId": _bounded(data.get("requestId") or data.get("request_id")),
+        "jobId": _bounded(job_id or data.get("jobId") or data.get("job_id")),
+        "batchId": _bounded(data.get("batchId") or data.get("batch_id")
+                            or metadata.get("batch_id") or context.get("batch_id")),
+        "imageId": _bounded(data.get("imageId") or data.get("image_id")
+                            or metadata.get("image_id") or context.get("image_id")),
+        "tabSession": _opaque_tab_session(data.get("tp_tab_session") or data.get("session")
+                                          or context.get("tp_tab_session")),
+        "clientVersion": _bounded(data.get("clientVersion") or data.get("client_version")
+                                  or metadata.get("client_version")),
+        "runId": _bounded(data.get("runId") or data.get("run_id") or metadata.get("run_id")),
+        "taskId": _bounded(data.get("taskId") or data.get("task_id") or metadata.get("task_id")),
+        "clientInstanceHash": _opaque_scope(data.get("clientInstanceHash") or context.get("client_instance_hash"), "client"),
+        "userScopeHash": _opaque_scope(data.get("userScopeHash") or context.get("user_scope_hash"), "user"),
+    }.items() if value}
 
 def payload(
     *, code: str, message: str, user_message: str, origin: str, stage: str,
@@ -75,6 +199,11 @@ def failure_event(route: str, detail: dict[str, Any], **safe_meta: Any) -> None:
             "batchId": detail.get("batchId"),
             "imageId": detail.get("imageId"),
             "clientVersion": detail.get("clientVersion"),
+            **{key: detail.get(key) for key in (
+                "provider", "model", "providerReason", "providerAttempts",
+                "generationAttempts", "requestDispatched",
+            ) if detail.get(key) not in (None, "")},
+            **classify_failure(detail, route=route),
             **{key: value for key, value in safe_meta.items() if value not in (None, "")},
         },
         ok=False,
@@ -246,10 +375,18 @@ def request_correlation(request: Any) -> dict[str, str]:
     query = getattr(request, "query_params", {})
     pairs = {
         "requestId": headers.get("x-tp-request-id") or headers.get("x-request-id"),
+        "operationId": headers.get("idempotency-key") or headers.get("x-tp-operation-id"),
         "jobId": headers.get("x-tp-job-id"),
         "batchId": headers.get("x-tp-batch-id") or query.get("batch_id"),
         "imageId": headers.get("x-tp-image-id") or query.get("image_id"),
         "clientVersion": headers.get("x-tp-client-version") or headers.get("x-client-version"),
+        "runId": headers.get("x-tp-run-id"),
+        "taskId": headers.get("x-tp-task-id"),
+        # Values are generated as opaque hashes by the client; raw account or
+        # browser identifiers are never accepted into diagnostics.
+        "clientInstanceHash": _opaque_scope(headers.get("x-tp-client-instance-hash"), "client"),
+        "userScopeHash": _opaque_scope(headers.get("x-tp-user-scope-hash"), "user"),
+        "tabSession": _opaque_tab_session(headers.get("x-tp-tab-session")),
     }
     return {key: str(value)[:160] for key, value in pairs.items() if value not in (None, "")}
 

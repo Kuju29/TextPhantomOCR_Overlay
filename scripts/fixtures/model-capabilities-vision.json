@@ -1,0 +1,11 @@
+{
+  "input": {
+    "vision": { "supported": true, "source": "verified-fixture", "ignored": "drop" },
+    "reasoning": { "supported": false },
+    "unknown": { "supported": true }
+  },
+  "normalized": {
+    "reasoning": { "supported": false },
+    "vision": { "supported": true, "source": "verified-fixture" }
+  }
+}

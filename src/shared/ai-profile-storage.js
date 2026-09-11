@@ -9,7 +9,7 @@ import {
 import { classifyAiRuntime } from "./ai-settings-contract.js";
 import { BUNDLED_CANONICAL_PROMPT_PLANS } from "../generated/canonical-prompt-plans.js";
 
-export const AI_PROFILE_STORAGE_VERSION = 3;
+export const AI_PROFILE_STORAGE_VERSION = 4;
 export const AI_PROFILE_STORAGE_VERSION_KEY = "aiProfileStorageVersion";
 export const AI_PROFILE_STORAGE_KEYS = [
   AI_PROFILE_STORAGE_VERSION_KEY,
@@ -231,8 +231,10 @@ export function prepareAiProfileStorageV2(stored, legacy = {}) {
     });
     return { ...result, changed: false, patch: null };
   }
-  if (marker === 2) {
-    const migratedPrompts = migratePromptRecordsToReplace(stored.aiProfilePromptsV1);
+  if (marker === 2 || marker === 3) {
+    const migratedPrompts = marker === 2
+      ? migratePromptRecordsToReplace(stored.aiProfilePromptsV1)
+      : stored.aiProfilePromptsV1;
     const result = migrateAiProfiles({
       stored: stored.aiProfilesV1,
       credentials: stored.aiProfileCredentialsV1,

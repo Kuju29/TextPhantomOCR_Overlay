@@ -4,18 +4,24 @@ import { workloadController } from '../ai/workload-controller.js';
 import { translateUnits } from '../ai/translation-service.js';
 import { diagnoseTargetScripts } from '../ai/script-diagnostics.js';
 import { repairRequest } from './client.js';
+import { pageImageEnabled } from '../../shared/page-image-policy.js';
 
 const cancelled = signal => {
   if (signal?.aborted) throw new DOMException('Repair cancelled', 'AbortError');
 };
-export function acceptedRepairIds(answer, units, targetLang) {
+export function repairValidation(answer, units, targetLang) {
   const expected = new Set(units.map(u => u.id));
   const counts = new Map();
   for (const row of answer?.translations || []) counts.set(row.id, (counts.get(row.id) || 0) + 1);
-  const rejected = new Set(diagnoseTargetScripts(answer?.translations || [], targetLang, units)
-    .filter(x => x.decision === 'reject').map(x => x.id));
-  return (answer?.translations || []).filter(row => expected.has(row.id) && counts.get(row.id) === 1 &&
+  const diagnostics = diagnoseTargetScripts(answer?.translations || [], targetLang, units);
+  const rejectedRows = diagnostics.filter(x => x.decision === 'reject');
+  const rejected = new Set(rejectedRows.map(x => x.id));
+  const accepted = (answer?.translations || []).filter(row => expected.has(row.id) && counts.get(row.id) === 1 &&
     String(row.text || '').trim() && !rejected.has(row.id)).map(row => row.id);
+  return { accepted, wrongLanguageCount: rejectedRows.length, diagnostics };
+}
+export function acceptedRepairIds(answer, units, targetLang) {
+  return repairValidation(answer, units, targetLang).accepted;
 }
 
 // Recovery may bypass translateUnits(): count an already observed server receipt
@@ -40,11 +46,11 @@ export async function executeRepairPool({ run, snapshot, executor, signal, getPa
   async function refresh() { return api(run, '', undefined, { signal }); }
   async function commit(task, answer, page) {
     await accountRecoveredRepair(run, task, answer);
-    const accepted = acceptedRepairIds(answer, task.units, page.targetLang);
+    const validation = repairValidation(answer, task.units, page.targetLang);
+    const accepted = validation.accepted;
     onProgress({ phase: 'repair_validation', taskId: task.id, unitCount: task.units.length,
       acceptedCount: accepted.length, rejectedCount: task.units.length - accepted.length,
-      wrongLanguageCount: diagnoseTargetScripts(answer?.translations || [], page.targetLang, task.units)
-        .filter(row => row.decision === 'reject').length });
+      wrongLanguageCount: validation.wrongLanguageCount });
     // Save the reply before acknowledging it. A lost ACK can be replayed
     // idempotently without a second provider invocation.
     await checkpointTask({ id: task.id, state: 'answered', answer, accepted });
@@ -118,7 +124,7 @@ export async function executeRepairPool({ run, snapshot, executor, signal, getPa
     let workloadSession = profiles.get(groupKey);
     if (!workloadSession) {
       workloadSession = await planner.open({ ai: baseAi, route: page.route, sourceLang: page.sourceLang,
-        targetLang: page.targetLang, image: baseAi.send_image === true });
+        targetLang: page.targetLang, image: pageImageEnabled(baseAi.send_image) });
       profiles.set(groupKey, workloadSession);
     }
     if (workloadSession.ai) baseAi = { ...workloadSession.ai, repair_reason: '' };
@@ -190,7 +196,7 @@ export async function executeRepairPool({ run, snapshot, executor, signal, getPa
         return translate(active.units.map(u => ({ id: u.id, text: u.text })), {
           route: page.route, ai: { ...ai, workload }, rate: page.rate, unlimited: page.unlimited,
           targetLang: page.targetLang, sourceLang: page.sourceLang, base: run.base,
-          imageDataUri: ai.send_image ? ai._repairImageDataUri || '' : '',
+          imageDataUri: pageImageEnabled(ai.send_image) ? ai._repairImageDataUri || '' : '',
           batchId: run.batchId, operationId: `repair:${run.id}:${taskId}`,
           jobId: taskId, imageId: '', signal, traceId: run.id, capabilities,
           tabSession: String(page?.ctx?.sessionId || run?.sessionId || ''),

@@ -21,8 +21,38 @@ const {
   sanitizeAiProfileTrace,
   exportAiProfiles,
 } = await import("../src/shared/ai-profiles.js");
+const { resolveEffectiveAiProfile } = await import("../src/shared/ai-profile-activation.js");
 
 assert.equal(AI_PROFILES_SCHEMA_VERSION, 1);
+
+const thinkingDefaults = {
+  thinking: "off", tokenPolicy: { mode: "dynamic", maxOutputTokens: 0 },
+  temperature: null, pageImage: "off", memoryMode: "off",
+  concurrency: { mode: "auto", max: 0 }, providerOptions: {},
+};
+for (const legacyThinking of [undefined, null, "auto", "garbage", false, "off"]) {
+  const migrated = migrateAiProfiles({ stored: undefined, legacy: {
+    aiProvider: "openrouter", aiBaseUrl: "https://openrouter.ai/api/v1",
+    aiModel: "thinking-fixture", aiThinking: legacyThinking,
+  }});
+  const identity = makeProviderIdentity("openrouter", "https://openrouter.ai/api/v1");
+  assert.equal(migrated.state.providers[identity].models["thinking-fixture"].profile.thinking, "off");
+}
+for (const explicitOn of [true, "on"]) {
+  const migrated = migrateAiProfiles({ stored: undefined, legacy: {
+    aiProvider: "openrouter", aiBaseUrl: "https://openrouter.ai/api/v1",
+    aiModel: "thinking-fixture", aiThinking: explicitOn,
+  }});
+  const identity = makeProviderIdentity("openrouter", "https://openrouter.ai/api/v1");
+  assert.equal(migrated.state.providers[identity].models["thinking-fixture"].profile.thinking, "on");
+}
+for (const selected of [undefined, "auto", "garbage", "off"]) {
+  const effective = resolveEffectiveAiProfile({ prompt: "STYLE", promptMode: "replace",
+    profile: { ...thinkingDefaults, thinking: selected } });
+  assert.equal(effective.thinking, "off");
+}
+assert.equal(resolveEffectiveAiProfile({ prompt: "STYLE", promptMode: "replace",
+  profile: { ...thinkingDefaults, thinking: "on" } }).thinking, "on");
 assert.ok(AI_PROFILE_PROVIDER_OPTIONS instanceof Set,
   "providerOptions must have one auditable allowlist");
 

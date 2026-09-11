@@ -1,6 +1,7 @@
 import { applyTranslations, translationUnits } from '../../shared/lens-document.js';
 import { eraseBoxesForAiPartial } from '../../shared/erase-boxes.js';
 import { sessionSafe } from '../translation-session-store.js';
+import { pageImageEnabled } from '../../shared/page-image-policy.js';
 
 export const stable = value => value == null || typeof value !== 'object' ? JSON.stringify(value)
   : Array.isArray(value) ? `[${value.map(stable).join(',')}]`
@@ -17,7 +18,7 @@ export async function makePageCheckpoint({ payload, result, plan, units, ctx, op
   const groupKey = await digestText(stable({ ai: cleanAi, account: await digestText(plan.ai?.api_key || ''),
     sourceLang, targetLang: payload.lang, route: plan.route, rate: payload.rate,
     // Never mix page-specific visual/series evidence across images.
-    image: plan.ai?.send_image ? imageId : '' }));
+    image: pageImageEnabled(plan.ai?.send_image) ? imageId : '' }));
   const rows = await Promise.all(units.map(async u => ({ id: String(u.id), text: String(u.text),
     paragraphIds: u.paragraphIds, translatable: u.translatable,
     sourceHash: await digestText(u.text) })));

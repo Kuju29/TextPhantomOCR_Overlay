@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+from dataclasses import replace
 from fastapi import HTTPException, Request
 
 import time, asyncio
@@ -144,66 +145,119 @@ async def capability_snapshot(request: Request) -> dict:
 
 async def execute(payload: dict[str, Any], request: Request) -> dict:
     """Run one translation and return its result."""
-    prepared = translate_request.prepare(payload, request)
-    requested_route = prepared.requested_route
-    route_identity = prepared.route_identity
-    trace_id = prepared.trace_id
-    correlation = prepared.correlation
-    lane = prepared.lane
-    mode = prepared.mode
-    source = prepared.source
-    identity = prepared.identity
-    # Pace only work that will reach an AI provider.
-    unlimited = wants_unlimited(request)
-    run_pipeline = translate_request.pipeline_callable(
-        prepared, admission_unlimited=unlimited
+    raw_context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+    raw_metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+    raw_ai = payload.get("ai") if isinstance(payload.get("ai"), dict) else {}
+    provisional_operation = str(
+        payload.get("idempotency_key") or request.headers.get("X-TP-Request-Id")
+        or f"ingress-{time.time_ns():x}"
     )
-    ai_cfg = payload.get("ai") if isinstance(payload.get("ai"), dict) else {}
-    api_key = str(ai_cfg.get("api_key") or "")
-    rate_provider = resolve_provider(str(ai_cfg.get("provider") or "auto"), api_key)
-    rate_model = str(ai_cfg.get("model") or "auto")
-    rate = manual_rate_policy(
-        payload,
-        provider=rate_provider,
-        base_url=str(ai_cfg.get("base_url") or ""),
+    provisional_trace = str(
+        raw_context.get("tp_trace") or request.headers.get("X-TP-Trace-Id")
+        or f"srv-{time.time_ns():x}"
     )
-    paced = lane == "ai" and rate["enabled"] and not unlimited
-    rate_wait_ms = 0.0
-    if paced:
-        rate_started = time.perf_counter()
+    ingress_token = wire_trace.begin({
+        "schema": "tp.ai-wire-trace/1", "engine": "runsapi",
+        "traceId": provisional_trace,
+        "operationId": provisional_operation,
+        "batchId": str(raw_metadata.get("batch_id") or payload.get("batch_id") or ""),
+        "imageId": str(raw_metadata.get("image_id") or payload.get("image_id")
+                       or request.headers.get("X-TP-Image-Id") or ""),
+        "provider": str(raw_ai.get("provider") or "auto"),
+        "model": str(raw_ai.get("model") or "auto"),
+        "targetLang": str(payload.get("target_lang") or payload.get("lang") or ""),
+        "providerAttempt": 0, "generationAttempt": 0, "stage": "request_ingress",
+    })
+    ingress_owned = True
+    failure_stage = "runsapi_pre_handoff"
+    def close_ingress_failure(exc: BaseException, stage: str) -> None:
+        nonlocal ingress_owned
+        if not ingress_owned:
+            return
         try:
-            await rate_gate.acquire(
-                rate_provider, rate_model, api_key,
-                session=str(((payload.get("context") or {}) if isinstance(payload.get("context"), dict) else {})
-                            .get("tp_tab_session") or trace_id),
-                job_id=str(payload.get("idempotency_key") or trace_id or f"v1-{time.time_ns()}"),
-                deadline_sec=settings.rate_max_wait_sec,
-                max_waiters=settings.rate_max_waiters_per_bucket,
-                rpm_override=rate["rpm"] or None,
-                burst_override=rate["burst"] or None,
-                cancel_check=lambda: cancellation.is_cancelled(payload),
-            )
-        except RateGateCancelled as exc:
-            detail = cancelled_payload(
-                trace_id=trace_id, stage="translate_cancel", correlation=correlation)
-            raise HTTPException(status_code=409, detail=detail) from exc
-        except (RateGateTimeout, RateGateRejected) as exc:
-            detail = error_payload(
-                code="rate_gate_busy",
-                message="The explicit manual AI request cap has no capacity yet.",
-                user_message="The AI service is busy. Please try again shortly.",
-                origin="api", stage="ai_rate_gate", category="capacity",
-                retryable=True, http_status=429, trace_id=trace_id,
-                extra={"retryAfterMs": 5000, "generationAttempts": 0},
-                correlation=correlation,
-            )
-            failure_event(requested_route, detail, mode=mode, source=source, **route_identity)
-            raise HTTPException(
-                status_code=429,
-                detail=detail,
-                headers={"Retry-After": "5"},
-            ) from exc
-        rate_wait_ms = round((time.perf_counter() - rate_started) * 1000, 1)
+            wire_trace.record_error(exc, stage=stage)
+        finally:
+            wire_trace.end(ingress_token)
+            ingress_owned = False
+    try:
+        prepared = translate_request.prepare(payload, request, trace_id_hint=provisional_trace)
+        wire_trace.update_identity(
+            traceId=prepared.trace_id, operationId=provisional_operation,
+            provider=str(raw_ai.get("provider") or "auto"), model=str(raw_ai.get("model") or "auto"),
+            targetLang=str(payload.get("target_lang") or payload.get("lang") or ""),
+            providerAttempt=1, generationAttempt=1, stage="prepared",
+        )
+        requested_route = prepared.requested_route
+        route_identity = prepared.route_identity
+        trace_id = prepared.trace_id
+        correlation = prepared.correlation
+        lane = prepared.lane
+        mode = prepared.mode
+        source = prepared.source
+        identity = prepared.identity
+        # Pace only work that will reach an AI provider.
+        unlimited = wants_unlimited(request)
+        ai_cfg = payload.get("ai") if isinstance(payload.get("ai"), dict) else {}
+        api_key = str(ai_cfg.get("api_key") or "")
+        rate_provider = resolve_provider(str(ai_cfg.get("provider") or "auto"), api_key)
+        rate_model = str(ai_cfg.get("model") or "auto")
+        rate = manual_rate_policy(
+            payload,
+            provider=rate_provider,
+            base_url=str(ai_cfg.get("base_url") or ""),
+        )
+        paced = lane == "ai" and rate["enabled"] and not unlimited
+        rate_wait_ms = 0.0
+        if paced:
+            rate_started = time.perf_counter()
+            try:
+                await rate_gate.acquire(
+                    rate_provider, rate_model, api_key,
+                    session=str(((payload.get("context") or {}) if isinstance(payload.get("context"), dict) else {})
+                                .get("tp_tab_session") or trace_id),
+                    job_id=str(payload.get("idempotency_key") or trace_id or f"v1-{time.time_ns()}"),
+                    deadline_sec=settings.rate_max_wait_sec,
+                    max_waiters=settings.rate_max_waiters_per_bucket,
+                    rpm_override=rate["rpm"] or None,
+                    burst_override=rate["burst"] or None,
+                    cancel_check=lambda: cancellation.is_cancelled(payload),
+                )
+            except RateGateCancelled as exc:
+                failure_stage = "ai_rate_gate_cancelled"
+                detail = cancelled_payload(
+                    trace_id=trace_id, stage="translate_cancel", correlation=correlation)
+                raise HTTPException(status_code=409, detail=detail) from exc
+            except (RateGateTimeout, RateGateRejected) as exc:
+                failure_stage = "ai_rate_gate"
+                detail = error_payload(
+                    code="rate_gate_busy",
+                    message="The explicit manual AI request cap has no capacity yet.",
+                    user_message="The AI service is busy. Please try again shortly.",
+                    origin="api", stage="ai_rate_gate", category="capacity",
+                    retryable=True, http_status=429, trace_id=trace_id,
+                    extra={"retryAfterMs": 5000, "generationAttempts": 0},
+                    correlation=correlation,
+                )
+                failure_event(requested_route, detail, mode=mode, source=source, **route_identity)
+                raise HTTPException(
+                    status_code=429,
+                    detail=detail,
+                    headers={"Retry-After": "5"},
+                ) from exc
+            rate_wait_ms = round((time.perf_counter() - rate_started) * 1000, 1)
+
+        wire_folder = wire_trace.active_folder()
+        prepared = replace(prepared, wire_folder=wire_folder)
+        run_pipeline = translate_request.pipeline_callable(
+            prepared, admission_unlimited=unlimited
+        )
+    except BaseException as exc:
+        detail = exc.detail if isinstance(exc, HTTPException) and isinstance(exc.detail, dict) else {}
+        stage = failure_stage
+        if stage == "runsapi_pre_handoff":
+            stage = str(detail.get("stage") or "runsapi_pre_handoff")
+        close_ingress_failure(exc, stage)
+        raise
 
     try:
         # A local caller is this server's only tenant; the fairness gate has
@@ -218,14 +272,21 @@ async def execute(payload: dict[str, Any], request: Request) -> dict:
         admission_started = time.perf_counter()
         admission_wait_ms = 0.0
         if unlimited:
-            result = await loop.run_in_executor(executor, run_pipeline)
+            submitted = loop.run_in_executor(executor, run_pipeline)
+            ingress_owned = False
+            wire_trace.end(ingress_token)
+            result = await submitted
         else:
             async with dispatch_gate.slot(identity):
                 admission_wait_ms = round(
                     (time.perf_counter() - admission_started) * 1000, 1
                 )
-                result = await loop.run_in_executor(executor, run_pipeline)
+                submitted = loop.run_in_executor(executor, run_pipeline)
+                ingress_owned = False
+                wire_trace.end(ingress_token)
+                result = await submitted
     except BaseException as exc:
+        close_ingress_failure(exc, "runsapi_dispatch")
         translate_failures.raise_mapped(
             exc, prepared=prepared, ai_cfg=ai_cfg, paced=paced,
             rate_provider=rate_provider, rate_model=rate_model, api_key=api_key,

@@ -23,7 +23,7 @@ import logging
 from backend import trace
 from backend.config import settings
 from backend.log import event
-from backend.api.errors import safe_cause_class
+from backend.api.errors import activity_fields, request_correlation, safe_cause_class
 
 _UVICORN_MODE = "uvicorn"
 _EVENT_MODES = {"summary", "custom", "tp", "plain"}
@@ -71,6 +71,11 @@ def _note_scanner_probe(method: str, path: str) -> None:
                 "probes": _scanner["count"],
                 "window_min": round((now - _scanner["since"]) / 60, 1),
                 "samples": list(_scanner["samples"]),
+                **activity_fields(
+                    owner="unknown", outcome="neutral", severity="info",
+                    stage="internet_scanner", retryable=False,
+                    scope="server_background", final=True,
+                ),
             },
             # Diagnostic internet background, not a TextPhantom product error.
             ok=True,
@@ -109,6 +114,7 @@ async def access_log_middleware(request: Request, call_next):
     path = request.url.path
     request_trace_id = _request_trace_id(request)
     if trace.enabled() and _trace_request_path(path):
+        request_corr = request_correlation(request)
         trace.write("api", "api/middleware.py", "http_request", "->", {
             "method": request.method,
             "path": path,
@@ -117,6 +123,7 @@ async def access_log_middleware(request: Request, call_next):
             "jobId": str(request.headers.get("x-tp-job-id") or "")[:120],
             "batchId": str(request.headers.get("x-tp-batch-id") or "")[:120],
             "imageId": str(request.headers.get("x-tp-image-id") or "")[:120],
+            "correlation": request_corr,
         }, trace_id=request_trace_id)
     try:
         try:
@@ -134,6 +141,11 @@ async def access_log_middleware(request: Request, call_next):
                         "path": request.url.path,
                         "errorType": type(exc).__name__,
                         "causeClass": safe_cause_class(exc),
+                        **activity_fields(
+                            owner="unknown", outcome="failed", severity="error",
+                            stage="http_exception", retryable=False, scope="request",
+                            correlation=request_correlation(request), final=True,
+                        ),
                     },
                     ok=False,
                 )
@@ -169,6 +181,14 @@ async def access_log_middleware(request: Request, call_next):
                                 "path": path,
                                 "status": response.status_code,
                                 "message": phrase,
+                                # An unclassified HTTP response proves neither a
+                                # TextPhantom bug nor bad user/site input.
+                                **activity_fields(
+                                    owner="unknown", outcome="failed", severity="warning",
+                                    stage="http_response", retryable=response.status_code in (408, 425, 429, 502, 503, 504),
+                                    scope="request", correlation=request_correlation(request),
+                                    code=f"http_{response.status_code}", final=True,
+                                ),
                             },
                             ok=False,
                         )
@@ -177,6 +197,7 @@ async def access_log_middleware(request: Request, call_next):
         if trace.enabled() and _trace_request_path(path):
             trace.write("api", "api/middleware.py", "http_request", "<-", {
                 "method": request.method, "path": path, "status": response.status_code,
+                "correlation": request_correlation(request),
             }, trace_id=request_trace_id)
         return response
     finally:

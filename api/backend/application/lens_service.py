@@ -20,7 +20,7 @@ from backend.log import event
 from backend.api.local_client import wants_unlimited
 from backend.api.errors import (
     payload as error_payload, failure_event, provider_status, cancelled_payload,
-    safe_cause_class, merged_request_correlation,
+    safe_cause_class, merged_request_correlation, activity_fields,
 )
 from backend.render import erase_boxes as erase_boxes_mod
 
@@ -316,6 +316,14 @@ async def lens_raw(
             "lang": target_lang,
             "dt_ms": round((time.perf_counter() - t0) * 1000, 1),
             **route_meta,
+            **activity_fields(
+                owner="unknown" if paragraphs == 0 else "textphantom",
+                # No OCR text is a valid observation: blank/unsupported imagery
+                # is not evidence that Lens or TextPhantom failed.
+                outcome="neutral" if paragraphs == 0 else "succeeded",
+                severity="info", stage="lens_response", retryable=False,
+                scope="image", correlation=correlation, final=True,
+            ),
         },
     )
     result = {

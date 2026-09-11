@@ -122,7 +122,14 @@ try {
   const on = await run({ thinking: "on" });
   assert.equal(off.body.messages[0].content, on.body.messages[0].content);
   assert.equal(off.body.messages[1].content, on.body.messages[1].content);
-  assert.equal(off.body.think, false); assert.equal(on.body.think, true);
+  assert.equal("think" in off.body, false, "unknown capability must omit native think");
+  assert.equal("think" in on.body, false, "unknown capability must omit native think");
+
+  const verifiedReasoning = { reasoning: { supported: true, control: "boolean" } };
+  const verifiedOff = await run({ thinking: "off", model_capabilities: verifiedReasoning });
+  const verifiedOn = await run({ thinking: "on", model_capabilities: verifiedReasoning });
+  assert.equal(verifiedOff.body.think, false);
+  assert.equal(verifiedOn.body.think, true);
 
   const secret = "CLOUD-SECRET-SENTINEL";
   call = await run({ api_key: secret, prompt: "Keep it concise." });

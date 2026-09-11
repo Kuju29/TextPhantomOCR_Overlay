@@ -34,12 +34,19 @@ def normalize_capabilities(item: dict[str, Any]) -> dict[str, Any]:
     if reasoning.get("supports_max_tokens") is True or "reasoning.max_tokens" in supported:
         result["supports_max_tokens"] = True
     output: dict[str, Any] = {"reasoning": result}
+    architecture = item.get("architecture") if isinstance(item.get("architecture"), dict) else {}
+    inputs = architecture.get("input_modalities")
+    if isinstance(inputs, list) and inputs:
+        normalized_inputs = {str(value).strip().lower() for value in inputs}
+        output["vision"] = {
+            "supported": "image" in normalized_inputs,
+            "source": "openrouter-account-model-catalogue",
+        }
     if "response_format" in supported or "structured_outputs" in supported:
         output["structured_output"] = {"supported": True}
     from backend.ai.workload import normalize_limits
     top = item.get("top_provider") if isinstance(item.get("top_provider"), dict) else {}
     per_request = item.get("per_request_limits") if isinstance(item.get("per_request_limits"), dict) else {}
-    architecture = item.get("architecture") if isinstance(item.get("architecture"), dict) else {}
     limits = normalize_limits({"contextTokens": item.get("context_length"),
         "outputHintTokens": top.get("max_completion_tokens"),
         "maxOutputTokens": per_request.get("completion_tokens"),
@@ -51,7 +58,7 @@ def normalize_capabilities(item: dict[str, Any]) -> dict[str, Any]:
     return output
 
 def _policy(request: GenerationRequest) -> tuple[dict[str, Any] | None, bool]:
-    mode = "on" if request.thinking == "on" else "off"
+    mode = request.thinking
     rcaps = request.model_capabilities.get("reasoning", {})
     rcaps = rcaps if isinstance(rcaps, dict) else {}
     # Never infer controllability from a model name. In particular, sending
@@ -61,6 +68,8 @@ def _policy(request: GenerationRequest) -> tuple[dict[str, Any] | None, bool]:
     capable = rcaps.get("supported") is True
     if not capable:
         return None, False
+    if mode == "auto":
+        return None, rcaps.get("default_enabled") is True or rcaps.get("mandatory") is True
     mandatory = rcaps.get("mandatory") is True
     efforts = [str(value).lower() for value in rcaps.get("supported_efforts", [])]
     if mode == "on":
@@ -206,6 +215,8 @@ class OpenRouterAdapter:
         if request.api_key: headers["Authorization"] = f"Bearer {request.api_key}"
         payload = prepare_payload(request)
         reasoning_value = payload.get("reasoning") if isinstance(payload.get("reasoning"), dict) else {}
+        request_reasoning = request.model_capabilities.get("reasoning", {})
+        reasoning_mandatory = isinstance(request_reasoning, dict) and request_reasoning.get("mandatory") is True
         from backend import trace
         trace.note("openrouter.reasoning_policy", {
             "thinkingMode": request.thinking,
@@ -216,7 +227,7 @@ class OpenRouterAdapter:
             "requestedOutputTokens": payload.get("max_completion_tokens", payload.get("max_tokens")),
             "capabilityKnown": bool(request.model_capabilities),
         }, file="ai/providers/cloud_openrouter.py")
-        return execute_chat_completion(
+        result = execute_chat_completion(
             url=base + "/chat/completions", headers=headers, payload=payload,
             model=request.model, provider_id=PROVIDER_ID, timeout=120.0,
             timeout_policy="provider_total_bounded", expected_ids=list(request.expected_ids),
@@ -229,6 +240,14 @@ class OpenRouterAdapter:
                           "reasoningControlSent": bool(reasoning_value),
                           "capabilityKnown": bool(request.model_capabilities)},
         )
+        applied = "provider_default" if request.thinking == "auto" else "unverified"
+        if isinstance(reasoning_value.get("enabled"), bool):
+            applied = "requested_on" if reasoning_value["enabled"] else "requested_off"
+        elif reasoning_value.get("effort"):
+            applied = f"requested_{request.thinking}_effort_{reasoning_value['effort']}"
+        elif reasoning_mandatory:
+            applied = "provider_mandatory"
+        return result._replace(thinking_applied=applied)
 
     def list_models(self, *, api_key: str, base_url: str) -> ModelListResult:
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
@@ -247,7 +266,11 @@ class OpenRouterAdapter:
             accepted = filter_model_items(items)
             models = sorted({str(item["id"]).strip() for item in accepted})
             caps = {str(item["id"]).strip(): normalize_capabilities(item) for item in accepted}
-            return ModelListResult(tuple(models), "valid", capabilities=caps)
+            candidates = {str(item["id"]).strip(): {
+                "eligibility": "usable", "evidence": "openrouter_account_models_user"
+            } for item in accepted}
+            return ModelListResult(tuple(models), "valid", capabilities=caps,
+                                   candidates=candidates)
         except Exception as exc:
             return ModelListResult(status="unreachable", error=str(exc))
 

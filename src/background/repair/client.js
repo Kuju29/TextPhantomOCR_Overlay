@@ -12,7 +12,11 @@ export async function repairRequest(run, action = '', body = undefined, { signal
     const response = await fetch(`${run.base.replace(/\/+$/, '')}${repairRunPath(action === 'register' ? '' : run.id,
       action === 'register' ? '' : action)}`, {
       method: method || (body === undefined ? 'GET' : 'POST'), cache: 'no-store',
-      headers: { 'Content-Type': 'application/json', 'X-TP-Run-Token': run.token },
+      headers: { 'Content-Type': 'application/json', 'X-TP-Run-Token': run.token,
+        'X-TP-Run-Id': String(run.id || ''),
+        ...(run.batchId ? {'X-TP-Batch-Id': String(run.batchId)} : {}),
+        ...(action.match(/tasks\/([^/]+)/)?.[1]
+          ? {'X-TP-Task-Id': decodeURIComponent(action.match(/tasks\/([^/]+)/)[1])} : {}) },
       body: body === undefined ? undefined : JSON.stringify(body), signal: controller.signal,
     });
     const reader = response.body?.getReader();

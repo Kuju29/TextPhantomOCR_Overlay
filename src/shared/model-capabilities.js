@@ -20,6 +20,12 @@ export function normalizeModelCapabilities(value) {
   }
   if (reasoning.mandatory === true) reasoning.supported = true;
   if (Object.keys(reasoning).length) out.reasoning = reasoning;
+  if (source.vision && typeof source.vision === 'object' &&
+      typeof source.vision.supported === 'boolean') {
+    out.vision = { supported: source.vision.supported };
+    if (typeof source.vision.source === 'string')
+      out.vision.source = source.vision.source.slice(0, 200);
+  }
   for (const field of ['structured_output', 'structuredOutput']) {
     const input = source[field];
     if (!input || typeof input !== 'object' || Array.isArray(input)) continue;

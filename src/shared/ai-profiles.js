@@ -425,9 +425,10 @@ function mergedProfile(defaults, stored, patch = null) {
       patch != null && Object.hasOwn(change, "providerOptions"),
     ),
   };
-  // Thinking is user opt-in. Canonical profiles no longer retain the old
-  // adaptive/default state.
-  output.thinking = output.thinking === "on" ? "on" : "off";
+  // Off is the canonical safe default. Historical Auto/missing/malformed
+  // values migrate to Off; only an explicit On survives normalization.
+  output.thinking = output.thinking === true || output.thinking === "on" ? "on"
+    : "off";
   if (
     output.temperature !== null &&
     !(
@@ -591,7 +592,7 @@ export function migrateAiProfiles({
     effective.aiBaseUrl,
   );
   const defaults = {
-    thinking: legacy.aiThinking === "on" ? "on" : "off",
+    thinking: legacy.aiThinking === true || legacy.aiThinking === "on" ? "on" : "off",
     tokenPolicy: { mode: "dynamic", maxOutputTokens: 0 },
     temperature: null,
     pageImage:
@@ -676,7 +677,7 @@ export function buildAiProfileStoragePatch({
   const secret = normalizedCredentials[providerIdentity];
   const local = profileProviderIsLocal(provider.provider, provider.endpoint);
   return {
-    aiProfileStorageVersion: 2,
+    aiProfileStorageVersion: 4,
     aiProfilesV1: normalized,
     aiProfileCredentialsV1: normalizedCredentials,
     aiProfilePromptsV1: normalizeAiProfilePrompts(prompts),

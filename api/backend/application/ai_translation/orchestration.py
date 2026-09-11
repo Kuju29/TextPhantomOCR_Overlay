@@ -91,19 +91,42 @@ def _trace_start(ctx: TranslationContext) -> None:
 async def execute(request: Request, payload: dict[str, Any], idempotency_key: str | None = None) -> dict:
     """Validate, admit, invoke and map exactly one translation request."""
     started = time.perf_counter()
-    ctx = _prepare(request, payload)
-    wire_identity = {
-        "schema": "tp.ai-wire-trace/1", "engine": "runsextension", "traceId": ctx.trace_id,
-        "operationId": str(payload.get("operationId") or ""),
+    raw_context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+    raw_provider = payload.get("provider") if isinstance(payload.get("provider"), dict) else {}
+    provisional_operation = str(
+        payload.get("operationId") or idempotency_key
+        or request.headers.get("X-TP-Request-Id") or f"ingress-{time.time_ns():x}"
+    )
+    wire_token = wire_trace.begin({
+        "schema": "tp.ai-wire-trace/1", "engine": "runsextension",
+        "traceId": str(raw_context.get("tp_trace") or request.headers.get("X-TP-Trace-Id") or ""),
+        "operationId": provisional_operation,
         "batchId": str(payload.get("batchId") or ""),
-        "imageId": str(payload.get("imageId") or ""),
-        "provider": ctx.resolved_provider, "model": ctx.resolved_model,
-        "targetLang": ctx.target_lang, "providerAttempt": 1, "generationAttempt": 1,
-    }
-    # Start before admission, prompt assembly and HTTP.  A configuration,
-    # cancellation or queue failure must leave the same durable evidence as a
-    # provider/validator failure.
-    wire_token = wire_trace.begin(wire_identity)
+        "imageId": str(payload.get("imageId") or request.headers.get("X-TP-Image-Id") or ""),
+        "provider": str(raw_provider.get("id") or ""),
+        "model": str(raw_provider.get("model") or ""),
+        "targetLang": str(payload.get("targetLang") or ""),
+        "providerAttempt": 0, "generationAttempt": 0, "stage": "request_ingress",
+    })
+    try:
+        ctx = _prepare(request, payload)
+    except BaseException as exc:
+        detail = exc.detail if isinstance(exc, HTTPException) and isinstance(exc.detail, dict) else {}
+        stage = str(detail.get("stage") or "request_validation")
+        wire_trace.record_error(exc, stage=stage)
+        wire_trace.end(wire_token)
+        raise
+    try:
+        wire_trace.update_identity(
+            traceId=(ctx.trace_id or str(raw_context.get("tp_trace")
+                                        or request.headers.get("X-TP-Trace-Id") or "")),
+            operationId=str(payload.get("operationId") or provisional_operation),
+            provider=ctx.resolved_provider, model=ctx.resolved_model, targetLang=ctx.target_lang,
+            providerAttempt=1, generationAttempt=1, stage="prepared",
+        )
+    except BaseException:
+        wire_trace.end(wire_token)
+        raise
     if cancellation.is_cancelled(payload):
         exc = RuntimeError("batch was cancelled before AI started")
         trace_failure(ctx, "cancelled", exc, 409)
@@ -179,7 +202,8 @@ async def execute(request: Request, payload: dict[str, Any], idempotency_key: st
         wire_trace.end(wire_token)
     idempotency_session.store(reservation, body)
     telemetry.emit_success(body=body, missing=missing, declined=declined, passthrough=passthrough,
-                           route_identity=dict(ctx.route_identity), rate_entry=rate_entry, trace_id=ctx.trace_id)
+                           route_identity=dict(ctx.route_identity), rate_entry=rate_entry,
+                           trace_id=ctx.trace_id, correlation=dict(ctx.correlation))
     return body
 
 async def ai_schema() -> dict:

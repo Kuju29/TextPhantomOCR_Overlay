@@ -26,6 +26,21 @@ export const OLLAMA_TERMINAL_DRAIN_GRACE_MS = 2000;
 // Discovery metadata only; generation must never load a model to inspect it.
 const reasoningByEndpoint = new Map();
 
+export function resolveOllamaThinkingMode(selected = "off", reasoning = null) {
+  const requested = selected === "on" ? "on" : "off";
+  const capability = reasoning && typeof reasoning === "object" ? reasoning : null;
+  if (capability?.mandatory === true && requested === "off") {
+    throw new LocalAiError(
+      "The selected Ollama model requires thinking; choose a model whose thinking can be turned off or explicitly enable thinking",
+      { code: "local_ai_thinking_required", attempted: false, retryable: false },
+    );
+  }
+  return capability?.supported === true &&
+    ["toggle", "boolean"].includes(String(capability?.control || ""))
+      ? requested
+      : "default";
+}
+
 export function ollamaReasoningCapability(show = null) {
   const capabilities = Array.isArray(show?.capabilities) && show.capabilities.every((value) => typeof value === "string")
     ? show.capabilities : null;
@@ -141,10 +156,17 @@ export function createOllamaAdapter(settings = {}) {
     headers: () => ({ "Content-Type": "application/json" }),
     payload: (request) => {
       const body = buildOllamaGeneration(request);
-      const reasoning = modelReasoning(request.model);
-      if (reasoning?.supported === false || reasoning?.control === "levels") delete body.think;
+      const reasoning = request.thinkingCapability || modelReasoning(request.model);
+      if ("think" in body && !(reasoning?.supported === true &&
+          ["toggle", "boolean"].includes(String(reasoning?.control || ""))))
+        delete body.think;
       return body;
     },
+    resolveThinkingMode: (selected, { model, reasoning = null } = {}) =>
+      resolveOllamaThinkingMode(
+        selected,
+        reasoning || modelReasoning(model),
+      ),
     buildUserContent: (text) => text,
     userImageFields: (dataUri) => dataUri ? { images: [String(dataUri).replace(/^data:image\/[^;]+;base64,/i, "")] } : {},
     defaultThinking: "off",

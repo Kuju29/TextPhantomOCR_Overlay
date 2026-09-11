@@ -31,7 +31,7 @@ export async function readLimitedText(res, limit = 1600) {
 }
 
 // Fetches a remote image from the worker and returns it as a `data:` URI, sending the page URL as the referrer.
-export async function fetchImageDataUriFromUrl(url, pageUrl) {
+export async function fetchImageDataUriFromUrl(url, pageUrl, signal = null) {
   const u = String(url || "").trim();
   if (!u) return "";
 
@@ -40,6 +40,7 @@ export async function fetchImageDataUriFromUrl(url, pageUrl) {
     redirect: "follow",
     cache: "force-cache",
     referrer: pageUrl || "about:client",
+    signal,
   });
   if (!res.ok) throw new Error("HTTP " + res.status);
 
@@ -58,13 +59,31 @@ export async function fetchImageDataUriFromUrl(url, pageUrl) {
 }
 
 // Fetches an image in the page's context via the content script and returns it as a `data:` URI.
-export async function fetchImageDataUriFromTab(tabId, url, frameId = 0) {
+// Abort abandons this worker-side message wait.  It cannot cancel an already
+// executing content-script fetch without a separate request-id/abort protocol.
+export async function fetchImageDataUriFromTab(tabId, url, frameId = 0, signal = null) {
   if (!tabId) throw new Error("no tabId for tab fetch");
-  const resp = await requestFromTabEnsured(
+  if (signal?.aborted)
+    throw new DOMException("The operation was aborted", "AbortError");
+  const request = requestFromTabEnsured(
     tabId,
     { type: "TP_FETCH_IMAGE", url },
     frameId,
   );
+  const resp = signal ? await new Promise((resolve, reject) => {
+    const aborted = () => reject(new DOMException("The operation was aborted", "AbortError"));
+    signal.addEventListener("abort", aborted, { once: true });
+    request.then(
+      (value) => {
+        signal.removeEventListener("abort", aborted);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", aborted);
+        reject(error);
+      },
+    );
+  }) : await request;
   if (!resp?.ok) throw new Error(resp?.error || "tab fetch failed");
   const du = String(resp.dataUri || "");
   if (!du) throw new Error("tab fetch returned empty dataUri");

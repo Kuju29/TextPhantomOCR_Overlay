@@ -12,6 +12,8 @@ LIST_TIMEOUT_SEC = 10.0
 LOCAL_LIST_TIMEOUT_SEC = 3.0
 _MODEL_CAPABILITIES: dict[tuple[str, str, str], dict[str, Any]] = {}
 _MODEL_CAPABILITIES_TTL_SEC = 300.0
+_MODEL_PROMOTIONS: dict[tuple[str, str, str], dict[str, float]] = {}
+_MODEL_PROMOTION_TTL_SEC = 15 * 60.0
 _SECRET_PATTERN = re.compile(r"Bearer\s+[A-Za-z0-9._\-]{8,}|(?:key=|sk-|hf_|gsk_)[A-Za-z0-9._\-]{8,}")
 
 def canonical_provider(provider: str) -> str:
@@ -84,6 +86,12 @@ def normalize_model_capabilities(value: Any) -> dict[str, Any]:
     if normalized.get("mandatory"):
         normalized["supported"] = True
     result: dict[str, Any] = {"reasoning": normalized} if normalized else {}
+    vision = value.get("vision")
+    if isinstance(vision, dict) and isinstance(vision.get("supported"), bool):
+        normalized_vision: dict[str, Any] = {"supported": vision["supported"]}
+        if isinstance(vision.get("source"), str):
+            normalized_vision["source"] = vision["source"][:200]
+        result["vision"] = normalized_vision
     structured = value.get("structured_output")
     if isinstance(structured, dict) and isinstance(structured.get("supported"), bool):
         result["structured_output"] = {"supported": structured["supported"]}
@@ -93,12 +101,51 @@ def normalize_model_capabilities(value: Any) -> dict[str, Any]:
         result["limits"] = limits
     return result
 
+def effective_model_capabilities(*, discovery_fresh: bool,
+                                 server: Any, client: Any) -> dict[str, Any]:
+    """Prefer the current account catalogue; use the verified client snapshot only as fallback."""
+    return normalize_model_capabilities(server if discovery_fresh else client)
+
 def remember_model_capabilities(provider: str, base_url: str, api_key: str,
                                 capabilities: dict[str, dict[str, Any]]) -> None:
     scope = (canonical_provider(provider), str(base_url or "").rstrip("/"),
              hashlib.sha256(str(api_key or "").encode()).hexdigest())
     _MODEL_CAPABILITIES[scope] = {"expires_at": time.monotonic() + _MODEL_CAPABILITIES_TTL_SEC,
                                   "models": dict(capabilities or {})}
+
+def remember_model_promotion(provider: str, base_url: str, api_key: str, model: str) -> None:
+    scope = (canonical_provider(provider), str(base_url or "").rstrip("/"),
+             hashlib.sha256(str(api_key or "").encode()).hexdigest())
+    now = time.monotonic()
+    promoted = {key: expiry for key, expiry in _MODEL_PROMOTIONS.get(scope, {}).items()
+                if expiry > now}
+    promoted[str(model)] = now + _MODEL_PROMOTION_TTL_SEC
+    _MODEL_PROMOTIONS[scope] = promoted
+
+def model_is_promoted(provider: str, base_url: str, api_key: str, model: str) -> bool:
+    scope = (canonical_provider(provider), str(base_url or "").rstrip("/"),
+             hashlib.sha256(str(api_key or "").encode()).hexdigest())
+    now = time.monotonic()
+    promoted = {key: expiry for key, expiry in _MODEL_PROMOTIONS.get(scope, {}).items()
+                if expiry > now}
+    if promoted:
+        _MODEL_PROMOTIONS[scope] = promoted
+    else:
+        _MODEL_PROMOTIONS.pop(scope, None)
+    return promoted.get(str(model), 0) > now
+
+def retain_model_promotions(provider: str, base_url: str, api_key: str,
+                            models: list[str] | tuple[str, ...]) -> None:
+    """Invalidate promotions for models no longer in this account catalogue."""
+    scope = (canonical_provider(provider), str(base_url or "").rstrip("/"),
+             hashlib.sha256(str(api_key or "").encode()).hexdigest())
+    allowed, now = {str(model) for model in models}, time.monotonic()
+    retained = {model: expiry for model, expiry in _MODEL_PROMOTIONS.get(scope, {}).items()
+                if model in allowed and expiry > now}
+    if retained:
+        _MODEL_PROMOTIONS[scope] = retained
+    else:
+        _MODEL_PROMOTIONS.pop(scope, None)
 
 def remember_selected_model_capability(provider: str, base_url: str, api_key: str,
                                       model: str, capability: dict[str, Any]) -> None:
@@ -119,6 +166,7 @@ def forget_model_capabilities(provider: str, base_url: str, api_key: str) -> Non
     scope = (canonical_provider(provider), str(base_url or "").rstrip("/"),
              hashlib.sha256(str(api_key or "").encode()).hexdigest())
     _MODEL_CAPABILITIES.pop(scope, None)
+    _MODEL_PROMOTIONS.pop(scope, None)
 
 def discovered_model_capabilities(provider: str, base_url: str, model: str,
                                   api_key: str = "") -> tuple[bool, dict[str, Any]]:

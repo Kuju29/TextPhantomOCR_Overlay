@@ -4,8 +4,35 @@ import {
   parseLocalAiAdapterJson,
   serializeLocalAiAdapter,
 } from "../../shared/ai/providers/local-registry.js";
+import { note } from "../../shared/trace.js";
 
 export const LOCAL_CAPABILITY_SNAPSHOTS_KEY = "aiLocalCapabilitySnapshotsV1";
+
+export function classifyLocalEndpointForTrace(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "empty";
+  try {
+    const host = new URL(raw).hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    if (host === "localhost" || host.endsWith(".localhost") || host === "::1" ||
+        host === "0.0.0.0" || host.startsWith("127.")) return "loopback";
+    if (host.endsWith(".local") || /^10\./.test(host) || /^192\.168\./.test(host) ||
+        /^172\.(1[6-9]|2\d|3[01])\./.test(host)) return "private";
+    return "public";
+  } catch {
+    return "invalid";
+  }
+}
+
+function localConnectionErrorCode(stage, error) {
+  if (stage === "normalize") return "INVALID_LOCAL_ADAPTER";
+  if (stage === "persist") return "LOCAL_SETTINGS_PERSIST_FAILED";
+  if (error?.name === "AbortError") return "LOCAL_CONNECTION_CANCELLED";
+  if (stage === "model_verify") return "LOCAL_MODEL_VERIFY_FAILED";
+  return "LOCAL_DISCOVERY_FAILED";
+}
+
+const THINKING_REQUIRED_HELP =
+  "✕ This model requires thinking. Open [AI option > AI thinking], enable thinking, then Connect again.";
 
 export function normalizeLocalConnectionIdentity(provider, endpoint) {
   return `${String(provider || "").trim().toLowerCase()}|${String(endpoint || "")
@@ -37,6 +64,10 @@ export function createLocalConnectionController({
   renderCapacity,
   persistCapacity,
   toggleUi,
+  traceLocalConnection = (event) => {
+    console.info("[TextPhantom][popup] ai.local_connection", event);
+    note("popup/local-connection-controller.js", "localConnection", event);
+  },
 }) {
   const identity = (
     provider = els.aiProvider?.value,
@@ -170,7 +201,20 @@ export function createLocalConnectionController({
     clearResolveTimer();
     const sequence = ++state.localConnectSeq;
     let requestIdentity = "";
+    let stage = "normalize";
+    let endpoint = String(els.aiBaseUrl?.value || "").trim();
+    const endpointSource = provider === "customlocal" ? "custom_adapter" : "provider_field";
+    const milestone = (status, extra = {}) => traceLocalConnection({
+      status,
+      provider: provider || "unknown",
+      endpointClass: classifyLocalEndpointForTrace(endpoint),
+      endpointSource,
+      transitionRevision: Number(state.providerTransitionRevision) || 0,
+      stage,
+      ...extra,
+    });
     try {
+      milestone("started");
       const adapter =
         provider === "customlocal"
           ? parseLocalAiAdapterJson(els.aiLocalAdapter?.value)
@@ -181,6 +225,8 @@ export function createLocalConnectionController({
               },
               { provider },
             );
+      endpoint = adapter.baseUrl;
+      milestone("completed");
       if (provider === "customlocal" && els.aiBaseUrl)
         els.aiBaseUrl.value = adapter.baseUrl;
       requestIdentity = identity(provider, adapter.baseUrl);
@@ -188,10 +234,16 @@ export function createLocalConnectionController({
       setBusy(true);
       els.aiLocalStatus.textContent = "Testing the local server…";
       clearCapacity();
+      stage = "persist";
+      milestone("started");
       await persist({
         localAiAdapter: adapter,
         aiBaseUrl: adapter.baseUrl,
       });
+      milestone("completed");
+      stage = "message";
+      milestone("started");
+      stage = "discovery";
       const response = await sendMessage({
         type: "TP_LOCAL_AI_DISCOVER",
         adapter,
@@ -205,16 +257,32 @@ export function createLocalConnectionController({
           "Connection test cancelled because the Local AI provider or URL changed.";
         return;
       }
-      if (!response?.ok)
-        throw new Error(
+      milestone("completed", { ok: Boolean(response?.ok) });
+      if (!response?.ok) {
+        const failure = new Error(
           response?.error ||
             response?.message ||
             "Local server could not be reached",
         );
+        failure.code = String(response?.code || "");
+        throw failure;
+      }
       const models = Array.isArray(response.models) ? response.models : [];
       const verification = response.selectedModelVerification &&
         typeof response.selectedModelVerification === "object"
         ? response.selectedModelVerification : { model: "", status: "not_tested" };
+      stage = "model_verify";
+      const verificationStatus = String(verification.status || "not_tested");
+      milestone(
+        ["passed", "not_tested"].includes(verificationStatus) ? "completed" : "failed",
+        {
+          verificationStatus,
+          modelCount: models.length,
+          ...(!["passed", "not_tested"].includes(verificationStatus)
+            ? { errorCode: "LOCAL_MODEL_VERIFY_FAILED", errorName: "ModelVerificationError" }
+            : {}),
+        },
+      );
       state.localAiCapability =
         response.capability && typeof response.capability === "object"
           ? { ...response.capability, provider, baseUrl: adapter.baseUrl }
@@ -248,14 +316,17 @@ export function createLocalConnectionController({
         rejected: ["error", "✕ Selected model rejected the verification request"],
         invalid_output: ["error", "✕ Selected model returned no usable text"],
         unreachable: ["error", "✕ Selected model could not complete a generation test"],
+        thinking_required: ["error", THINKING_REQUIRED_HELP],
         not_tested: ["warn", "⚠ Select a model and Reconnect to verify it"],
       };
       const modelMessage = verificationMessages[verification.status] ||
         ["error", "✕ Selected model could not be verified"];
       setFieldMessage(els.aiModelWrap, ...modelMessage);
-      els.aiLocalStatus.textContent = verified
-        ? `✓ Connected to ${adapter.baseUrl} · ${selected} verified · ${models.length} installed model(s)`
-        : `⚠ Connected to ${adapter.baseUrl}, but the selected model is not verified`;
+      els.aiLocalStatus.textContent = verification.status === "thinking_required"
+        ? THINKING_REQUIRED_HELP
+        : verified
+          ? `✓ Connected to ${adapter.baseUrl} · ${selected} verified · ${models.length} installed model(s)`
+          : `⚠ Connected to ${adapter.baseUrl}, but the selected model is not verified`;
       renderCapacity();
       toggleUi();
       await persistSnapshot({
@@ -268,9 +339,15 @@ export function createLocalConnectionController({
       await persistCapacity();
     } catch (error) {
       if (sequence !== state.localConnectSeq) return;
+      milestone("failed", {
+        errorCode: localConnectionErrorCode(stage, error),
+        errorName: String(error?.name || "Error"),
+      });
       state.localAiCapability = null;
       await forgetSnapshot(provider, els.aiBaseUrl?.value).catch(() => {});
-      els.aiLocalStatus.textContent = `✕ ${error.message}. Check that the runtime is running and allows extension CORS.`;
+      els.aiLocalStatus.textContent = error?.code === "local_ai_thinking_required"
+        ? THINKING_REQUIRED_HELP
+        : `✕ ${error.message}. Check that the runtime is running and allows extension CORS.`;
       showFallback();
     } finally {
       if (state.localConnectInFlight?.seq === sequence) {

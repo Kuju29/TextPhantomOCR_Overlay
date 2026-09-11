@@ -2,7 +2,12 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { buildEnqueuePolicy } from "../src/background/pipeline/enqueue-policy.js";
-import { createJobPreparation } from "../src/background/pipeline/job-preparation.js";
+import {
+  createJobPreparation,
+  createPrefetchAdmission,
+  releasePreparedDataUri,
+} from "../src/background/pipeline/job-preparation.js";
+import { fetchImageDataUriFromUrl } from "../src/background/images.js";
 
 const {
   addTask,
@@ -253,6 +258,7 @@ function preparationFixture(overrides = {}) {
   assert.deepEqual(fixture.calls.find(([name]) => name === "tabFetch"),
     ["tabFetch", 19, payload.src, 3]);
   assert.equal(payload.metadata.pipeline.at(-1).stage, "prefetch_datauri_tab");
+  releasePreparedDataUri(payload);
 }
 
 // Permanent browser-only failures stop preparation and publish a typed error.
@@ -280,6 +286,104 @@ function preparationFixture(overrides = {}) {
   assert.deepEqual(payload.metadata.pipeline.map(({ stage }) => stage), ["queued", "prefetch_datauri"]);
   assert.ok(!Number.isNaN(Date.parse(payload.metadata.timestamp)));
   assert.equal(fixture.calls.filter(([name]) => name === "updated").length, 1);
+  releasePreparedDataUri(payload);
+}
+
+// Fast fetches followed by a blocked downstream consumer must still bound the
+// number of fetched data URIs retained by job payloads.  Fetch concurrency alone
+// is not the memory invariant.
+{
+  const admission = createPrefetchAdmission(3);
+  let fetched = 0;
+  let retained = 0;
+  let peakRetained = 0;
+  const ready = [];
+  const fixture = preparationFixture({
+    prefetchAdmission: admission,
+    fetchFromUrl: async () => {
+      fetched++;
+      return "data:image/png;base64,BOUNDED";
+    },
+  });
+  const payloads = Array.from({ length: 18 }, (_, index) => ({
+    src: `https://cdn.test/${index}.png`, metadata: {},
+  }));
+  const jobs = payloads.map((payload) => fixture.preparation.prefetchDataUri(payload).then(result => {
+    if (!result.stopped) {
+      retained++;
+      peakRetained = Math.max(peakRetained, retained);
+      ready.push(payload);
+    }
+    return result;
+  }));
+  await waitUntil(() => ready.length === 3 && admission.describe().queued === 15);
+  assert.equal(fetched, 3, "fast fetches must stop when retained payloads fill admission");
+  let released = 0;
+  while (released < payloads.length) {
+    if (!ready.length) await waitUntil(() => ready.length > 0);
+    const payload = ready.shift();
+    releasePreparedDataUri(payload);
+    retained--;
+    released++;
+  }
+  await Promise.all(jobs);
+  assert.ok(peakRetained <= 3, `retained ${peakRetained} exceeded configured limit`);
+  assert.equal(admission.describe().active, 0);
+  assert.equal(admission.describe().queued, 0);
+}
+
+// Navigation abort removes waiting acquisitions before they fetch and releases
+// active acquisitions without reporting an image-read failure.
+{
+  const admission = createPrefetchAdmission(2);
+  const ctrl = new AbortController();
+  let startedFetches = 0;
+  const fixture = preparationFixture({
+    prefetchAdmission: admission,
+    fetchFromUrl: (_src, _pageUrl, signal) => new Promise((_resolve, reject) => {
+      startedFetches++;
+      signal.addEventListener("abort", () =>
+        reject(new DOMException("The operation was aborted", "AbortError")), { once: true });
+    }),
+  });
+  const jobs = Array.from({ length: 12 }, (_, index) =>
+    fixture.preparation.prefetchDataUri(
+      { src: `https://cdn.test/cancel-${index}.png`, metadata: {} },
+      { signal: ctrl.signal },
+    ));
+  await waitUntil(() => admission.describe().active === 2 && admission.describe().queued === 10);
+  ctrl.abort();
+  const outcomes = await Promise.all(jobs);
+  assert.equal(startedFetches, 2, "queued cancelled prefetches must never call fetch");
+  assert.ok(outcomes.every(result => result.stopped && result.cancelled));
+  assert.deepEqual(admission.describe(), { active: 0, queued: 0, limit: 2 });
+  assert.equal(fixture.calls.some(([name]) => name === "updated"), false,
+    "cancelled preparation must not publish stale Lens/AI/DOM payload state");
+  assert.equal(fixture.calls.some(([name]) => name === "permanent"), false,
+    "navigation abort must not become a user-visible image error");
+}
+
+// The worker-side URL fetch receives the same signal, so cancellation stops
+// network transfer rather than merely ignoring the eventual result.
+{
+  const originalFetch = globalThis.fetch;
+  let observedSignal = null;
+  globalThis.fetch = (_url, init) => new Promise((_resolve, reject) => {
+    observedSignal = init.signal;
+    init.signal.addEventListener("abort", () =>
+      reject(new DOMException("The operation was aborted", "AbortError")), { once: true });
+  });
+  try {
+    const ctrl = new AbortController();
+    const fetching = fetchImageDataUriFromUrl(
+      "https://cdn.test/slow.png", "https://reader.test/chapter", ctrl.signal,
+    );
+    ctrl.abort();
+    await assert.rejects(fetching, error => error?.name === "AbortError");
+    assert.equal(observedSignal, ctrl.signal);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 }
 
 // These remaining lifecycle checks stay until cancellation preparation is
@@ -308,6 +412,11 @@ assert.match(jobsSource, /\{ shouldStart: \(\) => pendingByJob\.has\(jobId\) \}/
   "resumed polls removed during cancellation must not start from the queue");
 assert.match(jobsSource, /return scheduleOwnedImageJob\(\{[\s\S]{0,700}?work: \(\) => processJob\(payload/,
   "production enqueue must pass work through atomic image ownership");
+assert.match(jobsSource, /beginInFlight\(prefetchId, tabId, batchId\)/,
+  "navigation cancellation must own the prefetch before network work starts");
+assert.match(jobsSource,
+  /try \{\s*return await processJobInner\(payload, tabId, frameId\);\s*\} finally \{\s*releasePreparedDataUri\(payload\);/,
+  "every processJob exit must release retained data URI admission and its payload copy");
 
 // Exercise the production ownership scheduler itself, not only its map.
 {

@@ -7,7 +7,7 @@ export const TRANSLATOR_IDENTITY_BASE = "You are an expert translator and locali
 export function composeTranslatorIdentitySystem(style) {
   const selectedStyle = String(style || "").trim();
   if (!selectedStyle) {
-    const error = new Error("AI translation style is empty");
+    const error = new Error("[AI option > Set prompt] is empty");
     error.code = "AI_PROMPT_REQUIRED";
     error.requestDispatched = false;
     error.generationAttempts = 0;
@@ -240,7 +240,7 @@ export function composeCanonicalPrompt(
   const pieces = plan?.pieces || {};
   const override = String(ai?.prompt || "").trim();
   if (!override) {
-    const error = new Error("AI Style is empty. Click Reload to load the built-in prompt, then save it before translating.");
+    const error = new Error("[AI option > Set prompt] is empty. Click Reload, then save before translating.");
     error.code = "AI_PROMPT_REQUIRED";
     error.requestDispatched = false;
     error.generationAttempts = 0;
@@ -255,7 +255,7 @@ export function composeCanonicalPrompt(
     ? withoutLeadingTargetLanguageHeader(builtIn)
     : withoutLeadingTargetLanguageHeader(effectiveStyle);
   if (!styleText) {
-    const error = new Error("AI Style must contain instructions beyond the target-language header");
+    const error = new Error("[AI option > Set prompt] needs instructions beyond the target-language header");
     error.code = "AI_PROMPT_REQUIRED";
     error.requestDispatched = false;
     error.generationAttempts = 0;

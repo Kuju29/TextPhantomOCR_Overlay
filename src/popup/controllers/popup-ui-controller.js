@@ -1,4 +1,5 @@
 import { applyProviderKeyLink } from "../provider-key-links.js";
+import { modelVisionSupport } from "../../shared/page-image-policy.js";
 
 export function reasoningCapabilityForSelection({
   local,
@@ -29,6 +30,22 @@ export function reasoningCapabilityForSelection({
   return resolved?.model_capabilities?.reasoning || null;
 }
 
+export function visionCapabilityForSelection({
+  local, provider, model, credential = "", resolved = null,
+  resolvedCredential = "", localCapability = null, baseUrl = "",
+}) {
+  if (local) {
+    const endpoint = (value) => String(value || "").trim().replace(/\/+$/, "");
+    if ((localCapability?.provider && localCapability.provider !== provider) ||
+      (localCapability?.baseUrl && endpoint(localCapability.baseUrl) !== endpoint(baseUrl))) return null;
+    return localCapability?.models?.[model]?.vision || null;
+  }
+  if (String(resolved?.provider || "").trim().toLowerCase() !== provider ||
+      String(resolved?.model || resolved?.requested_model || "").trim() !== model ||
+      (resolvedCredential && resolvedCredential !== credential)) return null;
+  return resolved?.model_capabilities?.vision || null;
+}
+
 export function createPopupUiController({
   els,
   state,
@@ -57,6 +74,15 @@ export function createPopupUiController({
       localCapability: state.localAiCapability,
       baseUrl: els.aiBaseUrl?.value,
     });
+    const vision = visionCapabilityForSelection({
+      local, provider, model,
+      credential: String(els.aiKey?.value || "").trim(),
+      resolved: state.lastAiResolve,
+      resolvedCredential: state.lastResolvedKey,
+      localCapability: state.localAiCapability,
+      baseUrl: els.aiBaseUrl?.value,
+    });
+    const visionSupport = modelVisionSupport({ vision });
     const reasoningSupported =
       reasoning?.supported === true || reasoning?.mandatory === true;
     // The popup exposes Off/On only when both states have a verified native
@@ -69,6 +95,7 @@ export function createPopupUiController({
       efforts.includes("none") && efforts.some((value) => value !== "none");
     const configurableThinking = reasoningSupported &&
       (["toggle", "boolean"].includes(reasoning?.control) || verifiedLevelToggle);
+    const thinkingUnknown = reasoning == null || typeof reasoning?.supported !== "boolean";
     const showAi =
       (els.mode.value || "lens_text") === "lens_text" &&
       (els.sources.value || "") === "ai";
@@ -79,15 +106,18 @@ export function createPopupUiController({
       Boolean(state.metaCache?.has_env_ai_key);
     if (els.aiThinkingWrap) {
       els.aiThinkingWrap.style.display =
-        showAi && canConfigure && configurableThinking ? "" : "none";
+        showAi && canConfigure ? "" : "none";
     }
     if (els.aiThinking) {
       const mandatory = reasoning?.mandatory === true;
-      if (mandatory) els.aiThinking.value = "on";
-      else if (els.aiThinking.value !== "on") els.aiThinking.value = "off";
-      els.aiThinking.disabled = mandatory;
+      // Capability discovery may disable the control, but it must not turn the
+      // user's safe Off selection into provider-managed Auto. Provider
+      // boundaries omit the native field when this capability is unverified.
+      if (!["off", "on"].includes(els.aiThinking.value))
+        els.aiThinking.value = "off";
+      els.aiThinking.disabled = !configurableThinking;
       for (const option of els.aiThinking.options)
-        option.disabled = mandatory && option.value === "off";
+        option.disabled = !configurableThinking || (mandatory && option.value === "off");
     }
     if (els.aiThinkingHint) {
       els.aiThinkingHint.textContent = configurableThinking
@@ -96,8 +126,17 @@ export function createPopupUiController({
             : verifiedLevelToggle
               ? "Off and On use reasoning levels verified for this selected model."
               : "Thinking is Off by default. Turn it On only when you want reasoning.")
-        : "";
+        : thinkingUnknown
+          ? "Thinking support is not verified; no native thinking field will be sent."
+          : "Thinking is unavailable for this model; no native thinking field will be sent.";
     }
+    if (els.aiPageImage) els.aiPageImage.disabled = visionSupport !== true;
+    const imageHint = els.aiPageImageWrap?.querySelector?.(".hint");
+    if (imageHint) imageHint.textContent = visionSupport === true
+      ? "The verified model will receive each page image."
+      : visionSupport === false
+        ? "The selected model does not support page images."
+        : "Page images require verified image support for this selected model.";
     updatePromptWarning();
     validateAiKey();
     validateLangSource();

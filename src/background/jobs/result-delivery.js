@@ -6,6 +6,150 @@ const URL_ONLY_DATA_URI_RETRY_CODES = new Set([
   "IMAGE_DATA_UNAVAILABLE",
 ]);
 
+// Usage persistence is an accounting side effect, not a rendering prerequisite.
+// Keep immutable receipts in an ordered retry queue so a slow/full browser
+// storage area cannot suppress an otherwise valid translation result.
+export function createResultAccountingQueue({
+  persist = persistProviderGeneration,
+  retryDelayMs = 250,
+  maxRetryDelayMs = 2000,
+  maxAttempts = 3,
+  maxPending = 64,
+  maxAgeMs = 30_000,
+  attemptTimeoutMs = 3000,
+  clock = Date.now,
+  schedule = (fn, delay) => setTimeout(fn, delay),
+  attemptSchedule = (fn, delay) => setTimeout(fn, delay),
+  cancelAttemptSchedule = handle => clearTimeout(handle),
+  onError = () => {},
+  onTerminal = () => {},
+} = {}) {
+  const attemptLimit = Number.isFinite(maxAttempts) ? Math.max(1, Math.floor(maxAttempts)) : 3;
+  const pendingLimit = Number.isFinite(maxPending) ? Math.max(1, Math.floor(maxPending)) : 64;
+  const ageLimitMs = Number.isFinite(maxAgeMs) ? Math.max(1, maxAgeMs) : 30_000;
+  const timeoutLimitMs = Number.isFinite(attemptTimeoutMs) ? Math.max(1, attemptTimeoutMs) : 3000;
+  const retryBaseMs = Number.isFinite(retryDelayMs) ? Math.max(0, retryDelayMs) : 250;
+  const retryCapMs = Number.isFinite(maxRetryDelayMs) ? Math.max(retryBaseMs, maxRetryDelayMs) : 2000;
+  const pending = [];
+  let running = false;
+  let retryScheduled = false;
+  let idleWaiters = [];
+  const freezeTree = (value, seen = new WeakSet()) => {
+    if (!value || typeof value !== "object" || seen.has(value)) return value;
+    seen.add(value);
+    for (const child of Object.values(value)) freezeTree(child, seen);
+    return Object.freeze(value);
+  };
+
+  const settleIdle = () => {
+    if (running || pending.length || retryScheduled) return;
+    const waiters = idleWaiters;
+    idleWaiters = [];
+    for (const resolve of waiters) resolve();
+  };
+  const requestDrain = () => {
+    if (running || retryScheduled || !pending.length) return;
+    queueMicrotask(() => void drain());
+  };
+  async function drain() {
+    if (running || retryScheduled) return;
+    running = true;
+    try {
+      while (pending.length) {
+        const current = pending[0];
+        if (current.attempts && clock() - current.queuedAt >= ageLimitMs) {
+          pending.shift();
+          const outcome = { confirmed: false, code: "accounting_unconfirmed",
+            reason: "max_age", attempts: current.attempts,
+            operationId: current.event.operationId || "" };
+          onTerminal(current.lastError || new Error("Usage accounting receipt expired"), outcome);
+          current.resolve(outcome);
+          continue;
+        }
+        try {
+          let timeout;
+          try {
+            await Promise.race([
+              Promise.resolve().then(() => persist(current.event)),
+              new Promise((_, reject) => { timeout = attemptSchedule(() =>
+                reject(Object.assign(new Error("Usage accounting timed out"), {
+                  code: "accounting_timeout",
+                })), timeoutLimitMs); }),
+            ]);
+          } finally {
+            cancelAttemptSchedule(timeout);
+          }
+          pending.shift();
+          current.resolve({ confirmed: true, attempts: current.attempts + 1 });
+        } catch (error) {
+          current.attempts += 1;
+          current.lastError = error;
+          onError(error, { attempts: current.attempts, operationId: current.event.operationId || "" });
+          if (current.attempts >= attemptLimit || clock() - current.queuedAt >= ageLimitMs) {
+            pending.shift();
+            const outcome = {
+              confirmed: false,
+              code: "accounting_unconfirmed",
+              reason: current.attempts >= attemptLimit ? "max_attempts" : "max_age",
+              attempts: current.attempts,
+              operationId: current.event.operationId || "",
+            };
+            onTerminal(error, outcome);
+            current.resolve(outcome);
+            continue;
+          }
+          retryScheduled = true;
+          const remainingAge = Math.max(0, ageLimitMs - (clock() - current.queuedAt));
+          const delay = Math.min(retryCapMs,
+            retryBaseMs * (2 ** Math.max(0, current.attempts - 1)), remainingAge);
+          schedule(() => {
+            retryScheduled = false;
+            requestDrain();
+          }, delay);
+          break;
+        }
+      }
+    } finally {
+      running = false;
+      if (pending.length && !retryScheduled) requestDrain();
+      settleIdle();
+    }
+  }
+  return {
+    enqueue(event) {
+      let resolve;
+      const done = new Promise(doneResolve => { resolve = doneResolve; });
+      if (pending.length >= pendingLimit) {
+        const outcome = { confirmed: false, code: "accounting_unconfirmed",
+          reason: "queue_full", attempts: 0, operationId: event?.operationId || "" };
+        onTerminal(Object.assign(new Error("Usage accounting queue is full"), {
+          code: "accounting_queue_full",
+        }), outcome);
+        resolve(outcome);
+        return done;
+      }
+      let immutableEvent;
+      try {
+        immutableEvent = freezeTree(structuredClone(event));
+      } catch (error) {
+        const outcome = { confirmed: false, code: "accounting_unconfirmed",
+          reason: "invalid_receipt", attempts: 0, operationId: event?.operationId || "" };
+        onTerminal(error, outcome);
+        resolve(outcome);
+        return done;
+      }
+      pending.push({ event: immutableEvent, attempts: 0, resolve, queuedAt: clock() });
+      requestDrain();
+      return done;
+    },
+    describe: () => ({ pending: pending.length, running, retryScheduled }),
+    flush() {
+      if (!running && !pending.length && !retryScheduled) return Promise.resolve();
+      return new Promise(resolve => idleWaiters.push(resolve));
+    },
+  };
+}
+
 // A URL-only retry exists solely to recover image acquisition by attaching the
 // bytes to pass 2. It must never convert a semantic API rejection (grouping
 // contract, decode, render, AI, etc.) from permanent to transient.
@@ -68,21 +212,38 @@ export function createResultDelivery(deps) {
     workflow,
     log,
   } = deps;
+  const accounting = deps.accountingQueue || createResultAccountingQueue({
+    persist: deps.persistUsage || persistProviderGeneration,
+    onError: (error, details) => log.warn("queued usage persistence failed", {
+      ...details, message: error?.message || String(error), recoverable: true,
+    }),
+    onTerminal: (error, details) => {
+      log.warn("usage accounting remains unconfirmed", {
+        ...details, code: "accounting_unconfirmed",
+        message: error?.message || String(error), recoverable: true,
+      });
+      traceNote("background/jobs/result-delivery.js", "usageAccounting", {
+        code: "accounting_unconfirmed", reason: details.reason || "unknown",
+        attempts: details.attempts, operationId: details.operationId || "",
+        recoverable: true,
+      });
+    },
+  });
+  const deliveringJobs = new Set();
 
-  async function accountQueued(ctx, value, success) {
-    if (!ctx?.serverQueued) return;
+  function accountQueued(ctx, value, success) {
+    if (!ctx?.serverQueued) return Promise.resolve();
     if (success && value?.perf?.cache === "hit") {
-      await persistProviderGeneration({ operationId: String(ctx.idempotencyKey || ""), engine: "runsapi", resolvePending: true });
-      return;
+      return accounting.enqueue({ operationId: String(ctx.idempotencyKey || ""), engine: "runsapi", resolvePending: true });
     }
     const meta = success ? value?.Ai?.meta : null;
     const charged = success ? { ...meta, usage: meta?.usage } : failureUsageDetails(value);
     if (!charged?.provider || !charged?.model) {
       if (success || value?.generationAttempts === 0 || value?.requestDispatched === false)
-        await persistProviderGeneration({ operationId: String(ctx.idempotencyKey || ""), engine: "runsapi", resolvePending: true });
-      return;
+        return accounting.enqueue({ operationId: String(ctx.idempotencyKey || ""), engine: "runsapi", resolvePending: true });
+      return Promise.resolve();
     }
-    await persistProviderGeneration({
+    return accounting.enqueue({
       runtime: isLocalAiTarget(charged.provider, charged.baseUrl) ? "local" : "cloud",
       provider: charged.provider, model: charged.model, engine: "runsapi",
       operationId: String(ctx.idempotencyKey || ctx.metadata?.operation_id || ""),
@@ -141,8 +302,7 @@ export function createResultDelivery(deps) {
     const ctx = pendingByJob.get(jobId);
     // Ledger updates are serialized and independent of DOM delivery. Durable
     // cloud receipts remain on the API even if this worker disappears.
-    void accountQueued(ctx, error?.tpError || error, false).catch(error =>
-      log.warn("queued usage persistence failed", { message: error?.message || String(error) }));
+    void accountQueued(ctx, error?.tpError || error, false);
     const errMsg = error?.message || String(error || "PROCESSING_FAILED");
     const aiGenerationAttempted = Boolean(ctx?.aiGenerationAttempted);
     let cls = classifyJobError(error, { aiGenerationAttempted });
@@ -194,7 +354,13 @@ export function createResultDelivery(deps) {
       log.warn("result for unknown job", { id: jobId });
       return;
     }
-    await accountQueued(ctx, result, true);
+    // A slow accounting commit lengthens ownership after DOM delivery. Claim
+    // this result synchronously so duplicate poll/message delivery cannot draw
+    // or enqueue the same receipt twice during that window.
+    if (deliveringJobs.has(jobId)) return;
+    deliveringJobs.add(jobId);
+    try {
+    const accountingDone = accountQueued(ctx, result, true);
     const { imgUrl, tabId } = ctx;
     const frameId = ctx.frameId || 0;
     const mode = ctx.mode || ctx.metadata?.mode || null;
@@ -228,6 +394,7 @@ export function createResultDelivery(deps) {
         String(ctx.traceId || ""),
       );
       removeJob(jobId, result?.metadata?.image_id);
+      deliveringJobs.delete(jobId);
       if (batch && imageKey)
         markImagePhase(batchId, imageKey, "cancelled", {
           lastError: "stale result",
@@ -251,6 +418,7 @@ export function createResultDelivery(deps) {
       ctx.lang || ctx.metadata?.lang,
       mode,
       ctx.source || ctx.metadata?.source,
+      ctx.settingsEpoch,
     );
     if (cacheKey && (newImg || hasHtml)) {
       const sourceImageKey = result?.sourceImageDataUri
@@ -301,6 +469,7 @@ export function createResultDelivery(deps) {
     };
     const stop = () => {
       removeJob(jobId, result?.metadata?.image_id);
+      deliveringJobs.delete(jobId);
       if (batch && imageKey)
         markImagePhase(batchId, imageKey, "cancelled", {
           lastError: "stale draw prevented",
@@ -317,6 +486,7 @@ export function createResultDelivery(deps) {
           type: "REPLACE_IMAGE",
           original: imgUrl,
           newSrc: newImg,
+          generation: ctx.generation || null,
           tpTrace: ctx.traceId || "",
         },
         frameId,
@@ -392,7 +562,12 @@ export function createResultDelivery(deps) {
       },
       String(ctx.traceId || ""),
     );
+    // The overlay is already visible. Keep this job/keepalive owned until its
+    // immutable usage receipt reaches durable storage, including a transient
+    // retry, without putting storage latency on the visible render path.
+    await accountingDone;
     removeJob(jobId, result?.metadata?.image_id);
+    deliveringJobs.delete(jobId);
     if (batch && imageKey) {
       if (ok) {
         const skipped = errMsg === "No text detected";
@@ -414,7 +589,14 @@ export function createResultDelivery(deps) {
       }
       finalizeBatch(batch);
     }
+    } finally {
+      deliveringJobs.delete(jobId);
+    }
   }
 
-  return { failJobImmediately, handleStaleJob, handleJobError, handleResult };
+  return {
+    failJobImmediately, handleStaleJob, handleJobError, handleResult,
+    flushAccounting: () => accounting.flush(),
+    accountingState: () => accounting.describe(),
+  };
 }

@@ -22,7 +22,7 @@ def _part(v, depth=0):
         elif k in ('persistence','decisionStatus'): out[k]=x if isinstance(x,str) and x in _TABLE['states'] else 'unknown'
         elif k in ('sourceKind','engine','route','thinking','direction','effectiveFrom'):
             allowed={'sourceKind':('original','translated','ai'),'engine':('extension','api'),
-                'route':('direct-local','server','api','extension'),'thinking':('on','off','default','unknown'),
+                'route':('direct-local','server','api','extension'),'thinking':('on','off','auto','default','unknown'),
                 'direction':('h','v','tilted','unknown'),'effectiveFrom':('next_request','current_request','current_image','next_job','unknown')}
             out[k]=x if isinstance(x,str) and x in allowed[k] else 'unknown'
         elif k in ('changed','complete','pageImage','memoryEnabled','traceEnabled','rotated','eraseEnabled','unlimited'): out[k]=x if type(x) is bool else None

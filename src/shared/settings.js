@@ -276,12 +276,15 @@ export async function readFullSettings(options = {}) {
     // Text overlays are extension-first. Ignore the hidden legacy false value;
     // it caused an entire batch to fall back to server erase/render/PNG.
     clientBackground: true,
-    // Reasoning is opt-in. Legacy/default values migrate to Off; models that
-    // require reasoning are surfaced explicitly by capability metadata.
-    aiThinking: it.aiThinking === "on" ? "on" : "off",
+    // Missing or malformed legacy values default to the user's safe selection:
+    // Off. Provider boundaries still omit native controls unless capability is
+    // verified for the exact selected model.
+    aiThinking: it.aiThinking === true || it.aiThinking === "on" ? "on"
+      : "off",
     // Kept separate from cloud thinking so enabling/disabling a local model
     // never silently changes Gemini. New Local AI installs default to off.
-    aiLocalThinking: it.aiLocalThinking === "on" ? "on" : "off",
+    aiLocalThinking: it.aiLocalThinking === true || it.aiLocalThinking === "on" ? "on"
+      : "off",
     aiPrompt,
     // Orientation relayout for the Translated overlay. Default ON.
     relayoutTranslated: readBool(

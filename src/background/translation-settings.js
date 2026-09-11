@@ -17,8 +17,13 @@ export function translationProfileIdentity(state) {
 
 export function translationSettingsChanged(changes, area = 'local') {
   if (area !== 'local' || !changes) return false;
+  // These legacy/top-level values can change either translated text or the
+  // cached HTML/image artifact. Scheduling, usage and fontScale are excluded:
+  // fontScale is a live CSS variable applied again when a cached overlay is
+  // mounted, while pacing/concurrency cannot change the semantic result.
   for (const key of ['mode', 'lang', 'sources', 'aiProvider', 'aiModel', 'aiRuntime',
-    'customApiUrl', 'aiProfilePromptsV1', 'aiProfileCredentialsV1']) {
+    'customApiUrl', 'aiProfilePromptsV1', 'aiProfileCredentialsV1',
+    'aiOnDevice', 'localRender', 'engineMode', 'relayoutTranslated']) {
     const change = changes[key];
     if (change && stable(change.oldValue) !== stable(change.newValue)) return true;
   }

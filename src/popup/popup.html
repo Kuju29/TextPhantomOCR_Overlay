@@ -11,6 +11,9 @@
 
 <body>
   <div class="app">
+    <a id="update-banner" class="update-banner" href="#" target="_blank" rel="noopener noreferrer" hidden>
+      A new version is available. Please update TextPhantom.
+    </a>
     <!-- ============ HEADER ============ -->
     <header class="app-head">
       <div class="brand">
@@ -210,7 +213,7 @@
           <div class="field" id="ai-thinking-wrap" style="display: none">
             <label for="ai-thinking">AI thinking</label>
             <select id="ai-thinking" aria-label="AI thinking mode">
-              <option value="off" selected>Thinking off (recommended for translation)</option>
+              <option value="off" selected>Thinking off</option>
               <option value="on">Thinking on</option>
             </select>
             <div class="hint" id="ai-thinking-hint"></div>
@@ -218,7 +221,7 @@
 
           <div class="field" id="ai-prompt-wrap" style="display: none">
             <label for="ai-prompt" class="label-row">
-              <span>AI Style</span>
+              <span>Set prompt</span>
               <span class="label-actions">
                 <button type="button" id="ai-prompt-back" class="icon-btn" title="Back to the previous prompt version"
                   aria-label="Back to the previous prompt version">↶</button>
@@ -227,13 +230,13 @@
                 <button type="button" id="ai-prompt-studio" class="icon-btn"
                   title="Open full-page editor (Prompt Studio)" aria-label="Open full-page prompt editor">🗗</button>
                 <button type="button" id="ai-prompt-expand" class="icon-btn" title="Expand editor"
-                  aria-label="Expand the style editor" aria-pressed="false">⤢</button>
-                <button type="button" id="ai-prompt-reset" class="icon-btn" title="Reload built-in style"
-                  aria-label="Reload built-in style">⟲</button>
+                  aria-label="Expand the prompt editor" aria-pressed="false">⤢</button>
+                <button type="button" id="ai-prompt-reset" class="icon-btn" title="Reload built-in prompt"
+                  aria-label="Reload built-in prompt">⟲</button>
               </span>
             </label>
             <textarea id="ai-prompt" rows="8"
-              placeholder="Full AI translation style. Click Reload to restore the built-in prompt."></textarea>
+              placeholder="Set translation instructions. Click Reload to restore the built-in prompt."></textarea>
             <div id="ai-prompt-count" class="prompt-count" aria-live="polite"></div>
           </div>
 
@@ -303,13 +306,8 @@
             <button type="button" id="open-local-images" class="action-btn primary">Select a image</button>
             <button type="button" id="open-local-folder" class="action-btn secondary">Select folder</button>
           </div>
-          <div class="hint">
-            <strong>Select a image</strong> takes any number of image files. <strong>Select folder</strong> uses the
-            native File System Access picker and opens only image files directly in the folder — subfolders are not
-            entered. In Brave, enable <code>brave://flags/#file-system-access-api</code> once and Relaunch Brave.<br />
-            Both open your pages in a reader tab. Right-click a page to translate, then download the image (text baked
-            in) or HTML.
-          </div>
+          <div class="hint">Open images in the local reader. For folders in Brave, enable
+            <code>brave://flags/#file-system-access-api</code>.</div>
           <div id="local-picker-msg" class="hint local-picker-msg" role="status" aria-live="polite"></div>
           <input id="local-images-input" type="file" accept="image/*" multiple hidden />
         </div>
@@ -320,23 +318,11 @@
           <div class="file-actions">
             <button type="button" id="open-auto-translate" class="action-btn primary">Auto translate</button>
           </div>
-          <div class="hint">
-            Opens a full-page tab where you drop, paste (Ctrl+V) or upload one image and it translates immediately.
-            Dropping another image replaces it and translates again.<br />
-            That tab keeps its <strong>own</strong> mode / language / source, so experimenting there never changes the
-            settings this popup uses for web pages.
-          </div>
+          <div class="hint">Drop, paste or upload one image for immediate translation.</div>
         </div>
 
         <div class="divider" role="separator"></div>
         <div class="section-title">Advanced</div>
-        <div class="field" id="translation-session-panel" hidden>
-          <label>Translation session / Repair</label>
-          <div class="hint" id="translation-session-status" role="status" aria-live="polite"></div>
-          <button id="translation-session-resume" type="button" hidden>Resume saved repair</button>
-          <div class="hint">Resumes saved receipts and unsent repair work. Interrupted generations are not sent again automatically.</div>
-        </div>
-
         <div class="field">
           <label for="api-url">Custom API URL <span id="api-status-emoji-2" class="api-dot-inline" aria-live="polite"
               title="Loading…">⏳</span></label>
@@ -351,12 +337,7 @@
               <span>Remove server pacing for this local API</span>
               <input type="checkbox" id="api-local-unlimited" />
             </label>
-            <div class="hint">
-              On by default and only applied when this URL is on your machine or private network. It removes server
-              time/RPM admission delays; browser concurrency and the server's CPU/GPU safety bounds remain active.<br />
-              Two things stay paced on purpose: <strong>Google Lens</strong> is still a remote service, so the extension
-              keeps spacing uploads to it. Canonical Lens graph grouping remains bounded by server safety limits.
-            </div>
+            <div class="hint">Removes API pacing on your local network. Safety limits stay active.</div>
           </div>
         </div>
 
@@ -366,22 +347,16 @@
             <option value="extension">Extension (default)</option>
             <option value="api" disabled aria-disabled="true">API server (temporarily unavailable)</option>
           </select>
-          <div class="hint engine-mode-availability" id="engine-mode-availability" role="status">
-            API server execution is temporarily unavailable. Work will run in the extension.
-          </div>
-          <div class="hint" id="engine-mode-hint">
-            <strong>Extension</strong> decodes Lens, builds the layout, samples colours and draws the overlay in your
-            browser. The API only does three things: the Lens upload, Lens graph grouping, and the AI translation
-            call.<br />
-            <strong>API server</strong> is the older split: the server runs Lens, Lens graph grouping, the AI call, the erase, the
-            fonts and the HTML, and sends back a finished overlay or image. Slower per page and it uploads the whole
-            picture, but it needs almost nothing from the browser — useful when a site fights the overlay, when a page
-            is too large for the local renderer, or to compare the two.<br />
-            Both engines use the same AI contract, the same Lens client and the same per-key pacing, so switching does
-            not change the translation you get.
-            <br /><strong>Custom Local Adapter</strong> is Extension-only. Built-in Local AI providers, including
-            llama.cpp, also work with a self-hosted API when the runtime is on that API machine.
-          </div>
+          <div class="hint engine-mode-availability" id="engine-mode-availability" role="status">API server mode is temporarily unavailable; work will run in the extension.</div>
+          <div class="hint" id="engine-mode-hint">Extension runs the page workflow; API handles remote services.</div>
+        </div>
+
+        <div class="divider" role="separator"></div>
+        <div class="section-title">Reset</div>
+        <div class="field">
+          <button type="button" id="reset-defaults" class="action-btn secondary">Reset defaults</button>
+          <div class="hint">Clears settings and reloads current defaults.</div>
+          <div id="reset-defaults-status" class="hint" role="status" aria-live="polite"></div>
         </div>
 
       </section>

@@ -49,9 +49,20 @@ export function createRateSettingsController({
 
   const bind = () => {
     els.rateLimitEnabled?.addEventListener("change", async () => {
-      await persist({
-        rateLimitEnabled: Boolean(els.rateLimitEnabled.checked),
-      });
+      const checked = Boolean(els.rateLimitEnabled.checked);
+      if (checked && els.rateProfile?.value === "auto") {
+        const preset = providerPreset() || fallback;
+        const rateRpm = Math.max(1, Math.round(preset.rpm));
+        const rateBurst = Math.max(1, Math.min(rateRpm, Math.round(preset.burst)));
+        els.rateProfile.value = "balanced";
+        if (els.rateRpm) els.rateRpm.value = String(rateRpm);
+        if (els.rateBurst) els.rateBurst.value = String(rateBurst);
+        await persist({ rateLimitEnabled: true, rateProfile: "balanced",
+          rateRpm, rateBurst });
+      } else {
+        await persist({ rateLimitEnabled: checked });
+      }
+      renderHint();
       toggleUi();
     });
     els.rateProfile?.addEventListener("change", async () => {
@@ -66,7 +77,11 @@ export function createRateSettingsController({
         if (els.rateRpm) els.rateRpm.value = "";
         if (els.rateBurst) els.rateBurst.value = "";
       }
-      await persist({ rateProfile: profile, rateRpm, rateBurst });
+      const providerManaged = profile === "auto";
+      if (providerManaged && els.rateLimitEnabled)
+        els.rateLimitEnabled.checked = false;
+      await persist({ rateProfile: profile, rateRpm, rateBurst,
+        ...(providerManaged ? { rateLimitEnabled: false } : {}) });
       renderHint();
       toggleUi();
     });

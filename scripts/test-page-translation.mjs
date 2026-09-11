@@ -63,6 +63,7 @@ const ok = (translations) => ({ translations, missing: [], meta: { generationAtt
   const f = make([ok([{ id: "P0", text: "แปลหนึ่ง" }, { id: "P1", text: "แปลสอง" }])], {
     trace: (name, data) => events.push({ name, data }),
   });
+  f.args.dependencies.traceEnabled = () => true;
   f.args.dependencies.applyTranslations = (doc, translations) => ({
     document: {
       ...doc,
@@ -84,6 +85,11 @@ const ok = (translations) => ({ translations, missing: [], meta: { generationAtt
     "unchanged provider records must retain their session-safe fingerprints after document insertion");
   assert.equal(JSON.stringify(events).includes("แปลหนึ่ง"), false,
     "stage traces must not include translated text");
+  const timing = events.find((event) => event.name === "aiPreProviderTiming")?.data;
+  assert.equal(timing?.event, "pre_provider_timing");
+  for (const value of Object.values(timing.timing))
+    assert.equal(Number.isFinite(value) && value >= 0, true,
+      "pre-provider milestones must be finite non-negative numbers");
 }
 {
   const f = make([

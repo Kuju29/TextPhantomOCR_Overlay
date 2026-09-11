@@ -27,9 +27,65 @@ import { classifyAiOutcomeIds } from "./ai-outcome-classification.js";
 import { workloadController as defaultWorkloadController } from "../ai/workload-controller.js";
 
 import { workloadOperationId } from "../ai/workload-identity.js";
+import { pageImageEnabled } from "../../shared/page-image-policy.js";
+import { isTracing as defaultIsTracing } from "../../shared/trace.js";
 
 const noop = () => {};
 const quietLog = Object.freeze({ info: noop, warn: noop });
+const FINGERPRINT_CONCURRENCY = 16;
+const defaultFingerprintDigest = (_algorithm, keyed) =>
+  crypto.subtle.digest("SHA-256", keyed);
+
+async function mapBounded(values, limit, mapper) {
+  const output = new Array(values.length);
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < values.length) {
+      const index = cursor++;
+      output[index] = await mapper(values[index], index);
+    }
+  };
+  await Promise.all(
+    Array.from(
+      { length: Math.min(Math.max(1, limit), values.length) },
+      worker,
+    ),
+  );
+  return output;
+}
+
+/** Privacy-safe diagnostics. No key or digest work occurs while trace is off. */
+export async function diagnosticFingerprints(
+  units,
+  { enabled = defaultIsTracing(), digest = defaultFingerprintDigest } = {},
+) {
+  if (!enabled) return null;
+  if (!globalThis.__tpTraceFingerprintKey)
+    globalThis.__tpTraceFingerprintKey = crypto.getRandomValues(new Uint8Array(32));
+  const key = globalThis.__tpTraceFingerprintKey;
+  const fingerprint = async (value) => {
+    const source = new TextEncoder().encode(String(value || ""));
+    const keyed = new Uint8Array(key.length + source.length);
+    keyed.set(key);
+    keyed.set(source, key.length);
+    const valueDigest = await digest("SHA-256", keyed);
+    return Array.from(new Uint8Array(valueDigest), (byte) =>
+      byte.toString(16).padStart(2, "0"),
+    ).join("");
+  };
+  const source = await mapBounded(
+    units,
+    FINGERPRINT_CONCURRENCY,
+    (unit) => fingerprint(unit?.text),
+  );
+  const partition = JSON.stringify(
+    units.map((unit) => [
+      String(unit.id),
+      (unit.paragraphIds || []).map(String),
+    ]),
+  );
+  return { source, partition: await fingerprint(partition), fingerprint };
+}
 
 /**
  * Translate one already-decoded Lens page.
@@ -84,6 +140,10 @@ export async function translateLensPage({
   const getSeriesMemory = dependencies.getSeriesMemory || defaultGetMemory;
   const selectPromptMemory =
     dependencies.selectPromptMemory || defaultSelectMemory;
+  const clock = dependencies.clock || (() => performance.now());
+  const traceEnabled = dependencies.traceEnabled || defaultIsTracing;
+  const digest = dependencies.fingerprintDigest;
+  const pageTranslationStartedAt = clock();
 
   const doc = requireDocument(result);
   const units = readUnits(doc);
@@ -137,55 +197,26 @@ export async function translateLensPage({
     paragraphIds: (unit.paragraphIds || []).map(String) })));
   // Privacy-safe, session-keyed fingerprints make per-page input ordering
   // observable without placing OCR dialogue in TP_TRACE.
-  const sourceFingerprints = [];
+  let sourceFingerprints = [];
   let unitPartitionFingerprint = "";
   let fingerprintText = null;
+  const fingerprintStartedAt = clock();
   try {
-    if (!globalThis.__tpTraceFingerprintKey) {
-      globalThis.__tpTraceFingerprintKey = crypto.getRandomValues(
-        new Uint8Array(32),
-      );
+    const fingerprints = await diagnosticFingerprints(sendable, {
+      enabled: traceEnabled(),
+      ...(digest ? { digest } : {}),
+    });
+    if (fingerprints) {
+      sourceFingerprints = fingerprints.source;
+      unitPartitionFingerprint = fingerprints.partition;
+      fingerprintText = fingerprints.fingerprint;
     }
-    fingerprintText = async (value) => {
-      const source = new TextEncoder().encode(String(value || ""));
-      const keyed = new Uint8Array(
-        globalThis.__tpTraceFingerprintKey.length + source.length,
-      );
-      keyed.set(globalThis.__tpTraceFingerprintKey);
-      keyed.set(source, globalThis.__tpTraceFingerprintKey.length);
-      const digest = await crypto.subtle.digest("SHA-256", keyed);
-      return Array.from(new Uint8Array(digest), (byte) =>
-        byte.toString(16).padStart(2, "0"),
-      ).join("");
-    };
-    for (const unit of sendable) {
-      sourceFingerprints.push(await fingerprintText(unit.text));
-    }
-    const partition = new TextEncoder().encode(
-      JSON.stringify(
-        sendable.map((unit) => [
-          String(unit.id),
-          (unit.paragraphIds || []).map(String),
-        ]),
-      ),
-    );
-    const keyedPartition = new Uint8Array(
-      globalThis.__tpTraceFingerprintKey.length + partition.length,
-    );
-    keyedPartition.set(globalThis.__tpTraceFingerprintKey);
-    keyedPartition.set(partition, globalThis.__tpTraceFingerprintKey.length);
-    const partitionDigest = await crypto.subtle.digest(
-      "SHA-256",
-      keyedPartition,
-    );
-    unitPartitionFingerprint = Array.from(
-      new Uint8Array(partitionDigest),
-      (byte) => byte.toString(16).padStart(2, "0"),
-    ).join("");
   } catch {
-    sourceFingerprints.length = 0; // Never fall back to an unsalted hash.
+    sourceFingerprints = []; // Never fall back to an unsalted hash.
     unitPartitionFingerprint = "";
+    fingerprintText = null;
   }
+  const fingerprintMs = Math.max(0, clock() - fingerprintStartedAt);
   trace(
     "aiPageContract",
     {
@@ -261,20 +292,24 @@ export async function translateLensPage({
     else status(common);
   };
   const workloadController = dependencies.workloadController || defaultWorkloadController;
+  const workloadStartedAt = clock();
   const workloadSession = await workloadController.open({ ai: plan.ai, route: plan.route,
     sourceLang: String(doc?.languages?.source || ""), targetLang: String(payload.lang || ""),
-    image: plan.ai?.send_image === true });
+    image: pageImageEnabled(plan.ai?.send_image) });
+  const workloadOpenMs = Math.max(0, clock() - workloadStartedAt);
   // Capture the same snapshot that selected the workload before any async
   // metadata refresh can change what the transport or repair sees.
   if (workloadSession.ai) plan = { ...plan, ai: workloadSession.ai };
   trace("effectiveSettings", {schema:"tp.audit/1",event:"settings_effective",reason:"initial",
     scope:{profileId:workloadSession.key.slice(0,16),imageId:correlation.imageId,batchId:cancelBatchId},
     engine:payload.engine === 'api' ? 'api' : 'extension',route:plan.route,
-    planned:{thinking:plan.ai.thinking === 'on' ? 'on' : 'off',pageImage:plan.ai.send_image===true,
+    planned:{thinking:plan.ai.thinking === 'on' ? 'on' : 'off',pageImage:pageImageEnabled(plan.ai.send_image),
       memoryEnabled:plan.ai.char_memory===true,temperature:plan.ai.temperature ?? null,
       maxOutput:plan.ai.max_output_tokens ?? null,glossaryItems:plan.ai.glossary?.length || 0,
       characterItems:plan.ai.characters?.length || 0,previousItems:plan.ai.prev_context?.length || 0}},traceId);
+  const preparedCheckpointStartedAt = clock();
   await checkpoint("prepared");
+  const checkpointPreparedMs = Math.max(0, clock() - preparedCheckpointStartedAt);
 
   const translateOne = (selectedUnits, operationId, workload, recorder = wireTrace) =>
     translateUnits(selectedUnits, {
@@ -282,7 +317,7 @@ export async function translateLensPage({
       ai: { ...plan.ai, workload },
       rate: payload?.rate || null,
       unlimited: payload?.limits?.aiUnlimited === true,
-      imageDataUri: plan.ai?.send_image
+      imageDataUri: pageImageEnabled(plan.ai?.send_image)
         ? String(result?.sourceImageDataUri || payload?.imageDataUri || "")
         : "",
       targetLang: String(payload.lang || ""),
@@ -338,8 +373,27 @@ export async function translateLensPage({
         }, traceId);
         let answer;
         try {
+          const dispatchCheckpointStartedAt = clock();
           await checkpoint("dispatch", { ids: chunk.units.map(u => String(u.id)), operationId: subOperationId, workload:chunk.estimate });
+          const checkpointDispatchMs = Math.max(0, clock() - dispatchCheckpointStartedAt);
           if (isCancelled()) throw signal?.reason || new DOMException("Aborted", "AbortError");
+          trace("aiPreProviderTiming", {
+            schema: "tp.audit/1",
+            event: "pre_provider_timing",
+            operationId: subOperationId,
+            parentOperationId: operationId,
+            batchIndex: index,
+            timing: {
+              fingerprintMs,
+              workloadOpenMs,
+              checkpointPreparedMs,
+              checkpointDispatchMs,
+              // This is the exact handoff to the transport. The server
+              // transport's requestTiming/http_started event owns the later
+              // network-dispatch boundary after its durable usage intent.
+              pageTranslationToTransportHandoffMs: Math.max(0, clock() - pageTranslationStartedAt),
+            },
+          }, traceId);
           answer = await translateOne(chunk.units, subOperationId, workload, recorder);
         } catch (error) {
           if (!isCancelled()) trace("aiModelWorkload", { event: "observation", operationId: subOperationId,

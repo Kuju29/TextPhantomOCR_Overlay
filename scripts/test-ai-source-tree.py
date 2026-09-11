@@ -66,8 +66,9 @@ class AiSourceTreeTests(unittest.TestCase):
         paragraph = matches[0]
         self.assertEqual(
             paragraph["text"],
-            "こうこうせい高校生で五町ほどのモノを持ってる子はなかなか中々いないよ",
+            "高校生で五町ほどのモノを持ってる子はなかなか中々いないよ",
         )
+        self.assertEqual(paragraph["source"]["rubyItemsDropped"], 1)
         self.assertEqual(
             [item["text"] for item in paragraph["items"]],
             ["こうこうせい", "高校生で", "五町ほどのモノを", "持ってる子は", "なかなか", "中々いないよ"],

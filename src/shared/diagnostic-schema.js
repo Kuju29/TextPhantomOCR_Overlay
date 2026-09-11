@@ -41,7 +41,7 @@
       else if(k==='sourceKind')out[k]=['original','translated','ai'].includes(x)?x:'unknown';
       else if(k==='engine')out[k]=['extension','api'].includes(x)?x:'unknown';
       else if(k==='route')out[k]=['direct-local','server','api','extension'].includes(x)?x:'unknown';
-      else if(k==='thinking')out[k]=['on','off','default','unknown'].includes(x)?x:'unknown';
+      else if(k==='thinking')out[k]=['on','off','auto','default','unknown'].includes(x)?x:'unknown';
       else if(k==='direction')out[k]=['h','v','tilted','unknown'].includes(x)?x:'unknown';
       else if(k==='effectiveFrom')out[k]=['next_request','current_request','current_image','next_job','unknown'].includes(x)?x:'unknown';
       else if(['changed','complete','pageImage','memoryEnabled','traceEnabled','rotated','eraseEnabled','unlimited'].includes(k))out[k]=typeof x==='boolean'?x:null;

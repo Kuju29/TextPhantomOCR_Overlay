@@ -10,6 +10,9 @@ import {
   localAiPreset,
   normalizeLocalAiAdapter,
 } from "../../shared/ai/providers/local-registry.js";
+import { classifyLocalEndpointForTrace } from "./local-connection-controller.js";
+import { note } from "../../shared/trace.js";
+import { isLocalHostUrl } from "../../shared/ai/providers/local-spec.js";
 import { createTab, queryTabs } from "../../shared/browser-api.js";
 import { broadcast, sendRuntimeMessage } from "../../shared/messaging.js";
 import { isLocalAiProvider } from "../../shared/constants.js";
@@ -72,7 +75,7 @@ export function bindPopupEvents(deps) {
     resetPromptForLang(els.lang.value),
   );
 
-  // Expand / collapse the style editor for comfortable long-prompt editing.
+  // Expand / collapse the prompt editor for comfortable long-prompt editing.
   els.aiPromptStudio?.addEventListener("click", () => {
     const lang = encodeURIComponent(els.lang.value || "en");
     const model = encodeURIComponent(
@@ -212,11 +215,17 @@ export function bindPopupEvents(deps) {
     // Pre-fill the local endpoint when a local provider is picked and the field
     // is empty (or still holds another provider's default).
     const def = defaultEndpointFor(provider);
+    const preset = localAiPreset(provider);
     if (els.aiBaseUrl) {
       const cur = (els.aiBaseUrl.value || "").trim();
       const isAnyDefault = isKnownLocalEndpoint(cur);
       if (def) {
-        if (!cur || isAnyDefault) els.aiBaseUrl.value = def;
+        // Named Local providers must not inherit a hidden Cloud endpoint from
+        // the previously-selected provider. Keep explicit localhost/private
+        // LAN endpoints, including non-default ports, unchanged.
+        const staleForNamedLocal = Boolean(preset) && !isLocalHostUrl(cur);
+        if (!cur || isAnyDefault || staleForNamedLocal)
+          els.aiBaseUrl.value = def;
       } else if (isAnyDefault && provider) {
         // Switching to a CLOUD provider: a local default left in the (now
         // hidden) endpoint field is still sent to /ai/resolve, where it reads as
@@ -226,7 +235,6 @@ export function bindPopupEvents(deps) {
         els.aiBaseUrl.value = "";
       }
     }
-    const preset = localAiPreset(provider);
     if (els.aiLocalAdapter && preset)
       els.aiLocalAdapter.value = JSON.stringify(preset, null, 2);
     // Render the selected Provider + Model profile before any persistence or
@@ -247,6 +255,18 @@ export function bindPopupEvents(deps) {
         (els.aiBaseUrl?.value || "").trim(),
       );
       const selectedProfile = transition.selected;
+      const selectedEndpoint = String(selectedProfile.endpoint || "");
+      const selectionEvidence = {
+        provider: provider || "unknown",
+        runtime: local ? "local" : "cloud",
+        revision,
+        endpointClass: classifyLocalEndpointForTrace(selectedEndpoint),
+        endpointSource: selectedEndpoint === String(def || "")
+          ? "provider_default"
+          : "saved_profile_or_explicit",
+      };
+      console.info("[TextPhantom][popup] ai.provider_transition_selection", selectionEvidence);
+      note("popup/popup-event-controller.js", "providerTransitionSelection", selectionEvidence);
       if (els.aiBaseUrl) els.aiBaseUrl.value = selectedProfile.endpoint;
       state.desiredAiModel = selectedProfile.model;
       setModelOptions([], {

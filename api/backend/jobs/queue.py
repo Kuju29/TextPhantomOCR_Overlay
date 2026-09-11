@@ -20,6 +20,7 @@ from backend.ai.provider_resolution import resolve_provider
 from backend.ai.rate_policy import is_local_target
 from backend import cancellation, trace
 from backend.jobs.admission import identity_of, ANONYMOUS
+from backend.api.errors import activity_fields, payload_correlation
 
 Job = dict[str, Any]
 
@@ -831,6 +832,7 @@ class JobQueue:
                 "source": str(payload.get("source") or ""),
                 "queue_wait_ms": queue_wait_ms,
                 "ai_gate_wait_ms": gate_wait_ms,
+                **payload_correlation(payload, job_id=job_id),
             }
             try:
                 prev = dict(self._jobs.get(job_id) or {})
@@ -841,8 +843,16 @@ class JobQueue:
                     await self._set_job(job_id, {**prev, "status": "aborted", "result": _queue_error(RuntimeError("cancelled"), payload, cancelled=True,
                                                      generation_meta=(result.get("Ai") or {}).get("meta") if isinstance(result, dict) else None),
                                                  "ts": time.time(), "queue_kind": kind})
-                    event("translate.cancelled", {**summary, "providerAbortObservedAt": time.time(),
-                                                   "staleDrawPrevented": True})
+                    event("translate.cancelled", {
+                        **summary, "providerAbortObservedAt": time.time(),
+                        "staleDrawPrevented": True,
+                        **activity_fields(
+                            owner="cancelled", outcome="cancelled", severity="info",
+                            stage="job_processing", retryable=False,
+                            scope="image" if summary.get("imageId") else "job",
+                            correlation=summary, code="cancelled", final=True,
+                        ),
+                    })
                     if kind == self.AI:
                         _trace_ai_terminal(
                             payload, job_id, "aborted", exc=RuntimeError("cancelled"), attempts=_result_generation_attempts(result),
@@ -857,7 +867,15 @@ class JobQueue:
                     result["perf"]["queue_wait_ms"] = queue_wait_ms
                     result["perf"]["ai_gate_wait_ms"] = gate_wait_ms
                 await self._set_job(job_id, {**prev, "status": "done", "result": result, "ts": time.time(), "queue_kind": kind})
-                event("translate.done", {**summary, "dt_ms": round((time.perf_counter() - t0) * 1000, 1)})
+                event("translate.done", {
+                    **summary, "dt_ms": round((time.perf_counter() - t0) * 1000, 1),
+                    **activity_fields(
+                        owner="textphantom", outcome="succeeded", severity="info",
+                        stage="job_processing", retryable=False,
+                        scope="image" if summary.get("imageId") else "job",
+                        correlation=summary, final=True,
+                    ),
+                })
                 if kind == self.AI:
                     # Same adaptive feedback the v1 route gives: a clean provider
                     # call raises this key's sustained rate, nothing else does.
@@ -875,7 +893,16 @@ class JobQueue:
                 )
                 event(
                     "translate.error",
-                    {**summary, "dt_ms": round((time.perf_counter() - t0) * 1000, 1), "error": "job timed out"},
+                    {
+                        **summary, "dt_ms": round((time.perf_counter() - t0) * 1000, 1),
+                        "error": "job timed out",
+                        **activity_fields(
+                            owner="unknown", outcome="failed", severity="error",
+                            stage="job_timeout", retryable=True,
+                            scope="image" if summary.get("imageId") else "job",
+                            correlation=summary, code="job_timeout", final=True,
+                        ),
+                    },
                     ok=False,
                 )
                 if kind == self.AI:
@@ -889,10 +916,23 @@ class JobQueue:
                 tb = traceback.format_exc()
                 cancelled = cancellation.is_cancelled(payload) or str(e).lower() == "cancelled"
                 dbg("jobs.error", {"job_id": job_id, "error": str(e), "traceback": tb})
+                raw_error = "cancelled" if cancelled else str(e)[:240]
+                prompt_contract = "prompt_mode must be exactly" in raw_error.lower()
                 event("translate.cancelled" if cancelled else "translate.error", {
                     **summary, "dt_ms": round((time.perf_counter() - t0) * 1000, 1),
-                    "error": "cancelled" if cancelled else str(e)[:240],
+                    "error": raw_error,
                     **({"providerAbortObservedAt": time.time()} if cancelled else {}),
+                    **activity_fields(
+                        owner="cancelled" if cancelled else "user_config" if prompt_contract else "unknown",
+                        outcome="cancelled" if cancelled else "failed",
+                        severity="info" if cancelled else "warning" if prompt_contract else "error",
+                        stage="job_processing" if cancelled else "request_contract" if prompt_contract else "job_processing",
+                        retryable=False,
+                        scope="image" if summary.get("imageId") else "job",
+                        correlation=summary,
+                        code="cancelled" if cancelled else "invalid_prompt_mode" if prompt_contract else "job_processing_error",
+                        final=True,
+                    ),
                 }, ok=cancelled)
                 prev = dict(self._jobs.get(job_id) or {})
                 await self._set_job(job_id, {

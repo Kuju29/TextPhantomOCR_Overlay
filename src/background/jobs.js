@@ -58,6 +58,7 @@ import {
   forgetCapabilities,
   getCapabilities,
   getFreshCapabilitiesForScope,
+  traceCapabilitySnapshot,
 } from "./capabilities.js";
 import {
   getTrace,
@@ -94,7 +95,10 @@ import {
   payloadForFullServer as buildFullServerPayload,
 } from "./pipeline/engine-routing.js";
 import { buildEnqueuePolicy } from "./pipeline/enqueue-policy.js";
-import { createJobPreparation } from "./pipeline/job-preparation.js";
+import {
+  createJobPreparation,
+  releasePreparedDataUri,
+} from "./pipeline/job-preparation.js";
 import { createLensDirectPath } from "./pipeline/lens-direct.js";
 import { createAiExecution } from "./pipeline/ai-execution.js";
 import {
@@ -391,7 +395,11 @@ function shouldPrefetchDataUri(payload) {
 // Processes one image payload end to end, from data-URI prefetch to the translate call.
 export async function processJob(payload, tabId, frameId = 0) {
   if (!payload || typeof payload !== "object") return;
-  return processJobInner(payload, tabId, frameId);
+  try {
+    return await processJobInner(payload, tabId, frameId);
+  } finally {
+    releasePreparedDataUri(payload);
+  }
 }
 
 async function processJobInner(payload, tabId, frameId = 0) {
@@ -507,12 +515,19 @@ async function processJobInner(payload, tabId, frameId = 0) {
   if (await stopIfBatchWasCancelled()) return;
 
   if (shouldPrefetchDataUri(payload)) {
-    const outcome = await preparation.prefetchDataUri(payload, {
-      tabId,
-      frameId,
-      pageUrl,
-    });
-    if (outcome.stopped) return;
+    const prefetchId = `prefetch:${crypto.randomUUID()}`;
+    const prefetchCtrl = beginInFlight(prefetchId, tabId, batchId);
+    try {
+      const outcome = await preparation.prefetchDataUri(payload, {
+        tabId,
+        frameId,
+        pageUrl,
+        signal: prefetchCtrl.signal,
+      });
+      if (outcome.stopped) return;
+    } finally {
+      endInFlight(prefetchId);
+    }
   }
 
   await wf.mediaReady(workflowId);
@@ -559,18 +574,7 @@ async function processJobInner(payload, tabId, frameId = 0) {
     ? `translation:${batchId}:pass:${Number(batch?.pass) || 1}`
     : `translation:${workflowId || traceId}`;
   const caps = await getFreshCapabilitiesForScope(base, capabilityScope);
-  traceNote(
-    "background/capabilities.js",
-    "capabilityProbe",
-    {
-      origin: caps?.probe?.origin || "",
-      durationMs: Number(caps?.probe?.durationMs) || 0,
-      outcome: caps?.probe?.outcome || (caps?.reason ? "unavailable" : "ok"),
-      status: Number(caps?.probe?.status) || 0,
-      errorName: caps?.probe?.errorName || "",
-    },
-    traceId,
-  );
+  traceCapabilitySnapshot(capabilityScope, caps, traceId);
   // Configure tracing from this API response before emitting a first-job
   // compatibility stop. Otherwise that event is lost until the second job.
   setLogLevel(caps.consoleLevel || "warn");
@@ -668,7 +672,8 @@ async function processJobInner(payload, tabId, frameId = 0) {
       seriesMemoryMode: String(payload?.ai?.memory_mode || "off"),
       removeServerPacing: payload?.limits?.apiUnlimited === true,
       localAiCapacity: Number(payload?.limits?.manualConcurrency) || 1,
-      aiThinking: String(payload?.ai?.thinking || "off") === "on",
+      aiThinking: ["off", "on"].includes(payload?.ai?.thinking)
+        ? payload.ai.thinking : "off",
       aiStyle: String(payload?.ai?.prompt || "").trim() ? "custom" : "empty",
     },
     traceId,

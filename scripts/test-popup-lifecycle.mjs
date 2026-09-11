@@ -208,9 +208,11 @@ const { activateAiProfileSafely } = await import(
   });
   ui.toggle();
   for (const control of [els.aiProvider, els.aiKey, els.aiModel, els.aiBaseUrl,
-    els.aiLocalTest, els.aiLocalModelId, els.aiThinking, els.aiPrompt,
+    els.aiLocalTest, els.aiLocalModelId, els.aiPrompt,
     els.aiPromptMode, els.aiPromptReset, els.aiPromptStudio])
     assert.equal(control.disabled, false, "profile recovery control must remain enabled");
+  assert.equal(els.aiThinking.disabled, true,
+    "unknown Thinking capability is status-only until exact verification");
   assert.equal(els.translatePageBtn.disabled, true);
   els.sources.value = "translated";
   ui.toggle();

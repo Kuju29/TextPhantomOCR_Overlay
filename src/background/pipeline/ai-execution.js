@@ -23,7 +23,6 @@ import {
   releaseLocalFailure,
   laneKeyFor,
   describe as describeLane,
-  setLaneSlotCeiling,
   setLaneUnlimited,
   configureLocalCapacityForPayload,
 } from "../scheduler.js";
@@ -213,7 +212,12 @@ export function createAiExecution({ log, markJobPhase, traceUnitLayout, onCheckp
     const localCapacity = configureLocalCapacityForPayload(payload);
     if (!localCapacity) {
       setLaneUnlimited(key, false);
-      setLaneSlotCeiling(key, 0);
+      // Cloud lanes were already pinned to the API's advertised executable
+      // capacity by applyRuntimeCapacityHints(). Clearing that ceiling here
+      // made every successful request widen the browser lane back toward 64,
+      // overfilling the server's 24 active + bounded-waiter admission gate.
+      // Local lanes have their own key and policy, so cloud setup must leave
+      // the server-owned ceiling intact.
     }
     const unlimited = false;
     const traceId = String(payload?.context?.tp_trace || getTrace() || "");

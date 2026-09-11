@@ -160,16 +160,21 @@ assert.equal(thinkingEls.aiThinking.disabled, false);
 assert.equal(thinkingEls.aiThinkingWrap.style.display, "");
 selectedCapability.models.selected.reasoning = { supported: false, control: "none" };
 thinkingUi.toggle();
-assert.equal(thinkingEls.aiThinkingWrap.style.display, "none",
-  "models without thinking support must not show a fake binary control");
+assert.equal(thinkingEls.aiThinkingWrap.style.display, "");
+assert.equal(thinkingEls.aiThinking.disabled, true);
+assert.equal(thinkingEls.aiThinking.value, "off",
+  "unsupported models must preserve the safe Off selection while omitting native controls");
 selectedCapability.models.selected.reasoning = { supported: true, mandatory: true, control: "levels" };
 thinkingUi.toggle();
-assert.equal(thinkingEls.aiThinkingWrap.style.display, "none",
-  "level-only reasoning must not be misrepresented as On/Off");
+assert.equal(thinkingEls.aiThinkingWrap.style.display, "");
+assert.equal(thinkingEls.aiThinking.disabled, true,
+  "unrepresentable level controls must remain unavailable");
 thinkingEls.aiModel.value = "other";
 thinkingUi.toggle();
-assert.equal(thinkingEls.aiThinkingWrap.style.display, "none",
-  "unknown model capability stays hidden until exact verification");
+assert.equal(thinkingEls.aiThinkingWrap.style.display, "",
+  "unknown thinking capability must be distinguishable from unsupported");
+assert.equal(thinkingEls.aiThinking.disabled, true);
+assert.match(thinkingEls.aiThinkingHint.textContent, /not verified/i);
 
 const geminiReasoning = { supported: true, mandatory: false, default_enabled: true, dynamic: true, control: "toggle" };
 const cloudThinkingEls = {
@@ -193,8 +198,9 @@ assert.equal(cloudThinkingEls.aiThinking.options.find((option) => option.value =
   "a mandatory-thinking model must not present Off as a usable choice");
 cloudThinkingState.lastAiResolve.model_capabilities.reasoning = { supported: true, mandatory: true, default_enabled: true, dynamic: true, control: "levels" };
 cloudThinkingUi.toggle();
-assert.equal(cloudThinkingEls.aiThinkingWrap.style.display, "none",
-  "level-only Cloud reasoning must not expose the binary Thinking selector");
+assert.equal(cloudThinkingEls.aiThinkingWrap.style.display, "");
+assert.equal(cloudThinkingEls.aiThinking.disabled, true,
+  "level-only Cloud reasoning must remain unavailable");
 cloudThinkingState.lastAiResolve.model_capabilities.reasoning = {
   supported: true, mandatory: false, dynamic: true, control: "levels",
   supported_efforts: ["none", "low"],
@@ -204,11 +210,11 @@ assert.equal(cloudThinkingEls.aiThinkingWrap.style.display, "",
   "selected-model levels with verified native none + on effort must expose Thinking");
 assert.equal(cloudThinkingEls.aiThinking.disabled, false);
 assert.match(cloudThinkingEls.aiThinkingHint.textContent, /verified for this selected model/i);
-assert.match(popupHtml, /Thinking off \(recommended for translation\)/,
-  "Local translation guidance must default thinking off");
+assert.match(popupHtml, /option value="off" selected/i,
+  "Thinking must default to Off");
 const thinkingSelectHtml = popupHtml.match(/<select id="ai-thinking"[\s\S]*?<\/select>/i)?.[0] || "";
-assert.doesNotMatch(thinkingSelectHtml, /option value="(?:default|auto)"/i,
-  "Thinking Auto/Default must not be present in the Thinking selector");
+assert.doesNotMatch(thinkingSelectHtml, /option value="auto"/i,
+  "Thinking Auto must not be present in the selector");
 assert.match(popupHtml, /For vision models\. Uses more time and memory/,
   "page-image guidance stays short and capability-focused");
 assert.match(popupHtml, /Reconnect after changing models\. Use a model your PC can handle, or translation may fail or hang\./,

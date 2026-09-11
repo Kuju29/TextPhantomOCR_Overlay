@@ -107,15 +107,109 @@ try{
     handleResult:()=>{},handleJobError:(_id,e)=>{throw e},releaseJob:()=>{},waitForRetry:()=>{throw new Error('unexpected retry')},
     log:{info:()=>{},warn:()=>{},debug:()=>{}}});
  assert.equal(view(stored.aiUsageV1).requests,26);assert.equal(stored.aiUsageV1.models[usageKey('cloud','openrouter','m')].sessions.at(-1).engines.runsapi,1);checks++;console.log('PASS runs:API sync actual transport -> ledger');
- const {createResultDelivery}=await import('../src/background/jobs/result-delivery.js');
+ const {createResultDelivery,createResultAccountingQueue}=await import('../src/background/jobs/result-delivery.js');
+ const waitUntil=async predicate=>{for(let i=0;i<100;i++){if(predicate())return;await new Promise(r=>setTimeout(r,2));}throw new Error('condition timeout')};
+ let terminal=[];
+ const rejectedQueue=createResultAccountingQueue({persist:async()=>{throw new Error('permanent disk rejection')},retryDelayMs:1,maxRetryDelayMs:1,
+   maxAttempts:2,attemptTimeoutMs:20,onTerminal:(_error,outcome)=>terminal.push(outcome)});
+ const rejectedOutcome=await rejectedQueue.enqueue({operationId:'reject-op',usage:{receiptId:'reject-receipt'}});
+ await rejectedQueue.flush();assert.equal(rejectedOutcome.confirmed,false);assert.equal(rejectedOutcome.reason,'max_attempts');
+ assert.equal(rejectedOutcome.attempts,2);assert.equal(terminal.length,1);assert.deepEqual(rejectedQueue.describe(),{pending:0,running:false,retryScheduled:false});
+ checks++;console.log('PASS permanent accounting rejection terminates and cleans queue');
+
+ let fakeNow=0,ageRetry;
+ terminal=[];
+ const agedQueue=createResultAccountingQueue({persist:async()=>{throw new Error('offline')},clock:()=>fakeNow,maxAgeMs:10,maxAttempts:9,
+   retryDelayMs:100,schedule:fn=>{ageRetry=fn},onTerminal:(_error,outcome)=>terminal.push(outcome)});
+ const agedDone=agedQueue.enqueue({operationId:'aged-op'});await waitUntil(()=>Boolean(ageRetry));fakeNow=10;ageRetry();
+ const agedOutcome=await agedDone;await agedQueue.flush();assert.equal(agedOutcome.reason,'max_age');assert.equal(agedOutcome.attempts,1);
+ assert.equal(terminal.length,1);assert.deepEqual(agedQueue.describe(),{pending:0,running:false,retryScheduled:false});
+ checks++;console.log('PASS accounting age cap stops before another persistence attempt');
+
+ terminal=[];
+ const hungQueue=createResultAccountingQueue({persist:()=>new Promise(()=>{}),retryDelayMs:1,maxAttempts:2,attemptTimeoutMs:5,
+   onTerminal:(_error,outcome)=>terminal.push(outcome)});
+ const hungOutcome=await hungQueue.enqueue({operationId:'hung-op'});await hungQueue.flush();
+ assert.equal(hungOutcome.reason,'max_attempts');assert.equal(hungOutcome.attempts,2);assert.equal(terminal.length,1);
+ assert.deepEqual(hungQueue.describe(),{pending:0,running:false,retryScheduled:false});checks++;console.log('PASS never-resolving persistence is bounded by attempt timeout');
+
+ let releaseFull;
+ terminal=[];
+ const fullQueue=createResultAccountingQueue({maxPending:1,persist:()=>new Promise(resolve=>{releaseFull=resolve}),onTerminal:(_error,outcome)=>terminal.push(outcome)});
+ const firstFull=fullQueue.enqueue({operationId:'full-first'});await waitUntil(()=>fullQueue.describe().running);
+ const fullOutcome=await fullQueue.enqueue({operationId:'full-second'});assert.equal(fullOutcome.reason,'queue_full');assert.equal(terminal.length,1);
+ releaseFull();await firstFull;await fullQueue.flush();assert.deepEqual(fullQueue.describe(),{pending:0,running:false,retryScheduled:false});
+ checks++;console.log('PASS full accounting queue rejects receipt explicitly without leaking ownership');
+
+ let releaseImmutable,capturedReceipt;
+ const originalReceipt={operationId:'immutable-op',usage:{receiptId:'before'}};
+ const immutableQueue=createResultAccountingQueue({persist:event=>new Promise(resolve=>{capturedReceipt=event;releaseImmutable=resolve})});
+ const immutableDone=immutableQueue.enqueue(originalReceipt);originalReceipt.operationId='mutated';originalReceipt.usage.receiptId='after';
+ await waitUntil(()=>Boolean(releaseImmutable));assert.equal(capturedReceipt.operationId,'immutable-op');assert.equal(capturedReceipt.usage.receiptId,'before');
+ assert.equal(Object.isFrozen(capturedReceipt),true);assert.equal(Object.isFrozen(capturedReceipt.usage),true);releaseImmutable();await immutableDone;
+ checks++;console.log('PASS queued accounting event is an immutable snapshot');
  const ctx={serverQueued:true,idempotencyKey:'queued-api',settingsEpoch:0,tabId:1,imgUrl:'https://image.test/1.jpg'};
  let discarded=false;
  const delivery=createResultDelivery({pendingByJob:new Map([['q',ctx]]),findContext:()=>ctx,getTabSessionId:()=>'',getSettingsEpoch:()=>1,
    removeJob:()=>{discarded=true},finalizeBatch:()=>{},traceNote:()=>{},log:{warn:()=>{}}});
  await delivery.handleResult('q',{Ai:{meta:{provider:'openrouter',model:'m',usage:{...complete,receiptId:'queued'}}}});
+ await delivery.flushAccounting();
  assert.equal(view(stored.aiUsageV1).requests,27);assert.equal(discarded,true);checks++;console.log('PASS runs:API queued receipt accounted BEFORE stale-image discard');
  await delivery.handleResult('q',{perf:{cache:'hit'},Ai:{meta:{provider:'openrouter',model:'m',usage:{...complete,receiptId:'old-cache-never-seen'}}}});
+ await delivery.flushAccounting();
  assert.equal(view(stored.aiUsageV1).requests,27);checks++;console.log('PASS rendered result-cache hit is not a new provider generation');
+
+ // A slow or temporarily rejected usage write is never on the render critical
+ // path. The immutable receipt remains queued and retries without AI dispatch.
+ const deliveryFixture=(accountingQueue,{stale=false}={})=>{
+   const current={serverQueued:true,idempotencyKey:'delivery-op',settingsEpoch:0,tabId:9,frameId:0,
+     imgUrl:'https://image.test/delivery.jpg',mode:'lens_text',source:'ai',sessionId:'session-a',
+     metadata:{image_id:'delivery-image'}};
+   let inserts=0,removed=0;
+   const instance=createResultDelivery({accountingQueue,pendingByJob:new Map([['delivery',current]]),findContext:()=>current,
+     getTabSessionId:()=>stale?'session-b':'session-a',getSettingsEpoch:()=>0,getBatch:()=>null,ensureBatch:()=>null,
+     removeJob:()=>{removed++},finalizeBatch:()=>{},traceNote:()=>{},log:{warn:()=>{}},
+     summarizeResultPresentation:()=>({newImg:null,hasHtml:true,skipReason:'',shouldShowSkipBadge:false}),
+     enqueueDomInsert:async()=>{inserts++;return {ok:true,applied:true}},resolveSeriesKey:async()=>'',
+     accumulateSeriesMemory:async()=>{},mdCacheKey:()=>'',mdKeyFromUrl:x=>x,normImgSrc:x=>x,
+     setCachedDataUri:()=>{},setCachedResult:()=>{},stripImageFields:x=>x,markImagePhase:()=>{},batchUpdateToast:()=>{},
+     classifyJobError:()=>({permanent:false}),evaluateTextNoOverlaySkippable:()=>false,imageErrorMessage:()=>({}),
+     markDomainNeedsDataUri:()=>{},workflow:{renderReady:async()=>{},applyRequested:async()=>{},applied:async()=>{},failed:async()=>{}}});
+   return {instance,counts:()=>({inserts,removed})};
+ };
+ let finishSlow;
+ const slowQueue=createResultAccountingQueue({persist:()=>new Promise(resolve=>{finishSlow=resolve})});
+ const slow=deliveryFixture(slowQueue);
+ const slowHandling=slow.instance.handleResult('delivery',{Ai:{meta:{provider:'openrouter',model:'m',usage:{...complete,receiptId:'delivery-slow'}}}});
+ await new Promise(resolve=>setTimeout(resolve,0));
+ assert.deepEqual(slow.counts(),{inserts:1,removed:0});assert.equal(slowQueue.describe().pending,1);
+ await slow.instance.handleResult('delivery',{Ai:{meta:{provider:'openrouter',model:'m',usage:{...complete,receiptId:'delivery-slow'}}}});
+ assert.deepEqual(slow.counts(),{inserts:1,removed:0});assert.equal(slowQueue.describe().pending,1);
+ finishSlow();await slowHandling;await slowQueue.flush();assert.deepEqual(slow.counts(),{inserts:1,removed:1});
+ assert.equal(slowQueue.describe().pending,0);checks++;console.log('PASS slow usage commit does not delay one-time rendering');
+
+ let retries=[],persistAttempts=0,savedReceipts=0;
+ const retryQueue=createResultAccountingQueue({retryDelayMs:1,schedule:fn=>{retries.push(fn)},persist:async event=>{
+   persistAttempts++;if(persistAttempts===1)throw new Error('storage unavailable');
+   assert.equal(event.usage.receiptId,'delivery-retry');savedReceipts++;
+ }});
+ const retrying=deliveryFixture(retryQueue);
+ const retryHandling=retrying.instance.handleResult('delivery',{Ai:{meta:{provider:'openrouter',model:'m',usage:{...complete,receiptId:'delivery-retry'}}}});
+ await new Promise(resolve=>setTimeout(resolve,0));
+ assert.deepEqual(retrying.counts(),{inserts:1,removed:0});assert.equal(retryQueue.describe().pending,1);
+ assert.equal(retries.length,1);retries.shift()();await retryHandling;await retryQueue.flush();
+ assert.equal(persistAttempts,2);assert.equal(savedReceipts,1);assert.equal(retrying.counts().inserts,1);checks++;console.log('PASS rejected usage commit remains recoverable without provider/render retry');
+
+ const staleQueue=createResultAccountingQueue({persist:async()=>{}}),staleDelivery=deliveryFixture(staleQueue,{stale:true});
+ await staleDelivery.instance.handleResult('delivery',{Ai:{meta:{provider:'openrouter',model:'m',usage:{...complete,receiptId:'delivery-stale'}}}});
+ await staleQueue.flush();assert.deepEqual(staleDelivery.counts(),{inserts:0,removed:1});checks++;console.log('PASS stale result is accounted but never rendered');
+ terminal=[];
+ const boundedQueue=createResultAccountingQueue({persist:()=>new Promise(()=>{}),maxAttempts:1,attemptTimeoutMs:5,
+   onTerminal:(_error,outcome)=>terminal.push(outcome)}),boundedDelivery=deliveryFixture(boundedQueue);
+ await boundedDelivery.instance.handleResult('delivery',{Ai:{meta:{provider:'openrouter',model:'m',usage:{...complete,receiptId:'delivery-timeout'}}}});
+ await boundedQueue.flush();assert.deepEqual(boundedDelivery.counts(),{inserts:1,removed:1});assert.equal(terminal[0].reason,'max_attempts');
+ assert.deepEqual(boundedDelivery.instance.accountingState(),{pending:0,running:false,retryScheduled:false});
+ checks++;console.log('PASS terminal accounting timeout never suppresses overlay and releases job ownership');
  const {pollFailure}=await import('../src/background/transports/polling-result.js');
  const cancelled=pollFailure({result:{generationAttempts:1,structuralDetails:{generationMeta:{usage:{...complete,receiptId:'cancelled-receipt'}}}}},'aborted');
  assert.equal(cancelled.code,'cancelled');assert.equal(cancelled.structuralDetails.generationMeta.usage.receiptId,'cancelled-receipt');checks++;console.log('PASS aborted queue polling preserves provider receipt');

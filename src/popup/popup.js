@@ -1,6 +1,6 @@
-import { mountTranslationSessionStatus } from './controllers/translation-session-controller.js';
 import { normalizeUrl } from "../shared/url.js";
-import { getStorage, setStorage } from "../shared/storage.js";
+import { getStorage, removeStorage, setStorage } from "../shared/storage.js";
+import { ensureApiDefaults } from "../shared/api-defaults.js";
 import {
   AI_USAGE_STORAGE_KEY,
   currentUsage,
@@ -63,6 +63,8 @@ import { createSettingsPersistenceController } from "./controllers/settings-pers
 import { createLocalCapacityController } from "./controllers/local-capacity-controller.js";
 import { createPopupUiController } from "./controllers/popup-ui-controller.js";
 import { createApiAvailabilityGate } from "./controllers/api-availability-gate.js";
+import { createResetDefaultsController } from "./controllers/reset-defaults-controller.js";
+import { createUpdateBannerController } from "./controllers/update-banner-controller.js";
 import {
   protocolLabel,
   providerFromKey,
@@ -96,9 +98,6 @@ const state = {
   apiDefaults: { defaultApiUrl: "", resetApiUrl: "", fetchedAt: 0 },
   healthSeq: 0,
   localAiCapability: null,
-  // Explicit Local-AI connection tests have a separate generation from
-  // background metadata refreshes.  A health/meta refresh must never make a
-  // user click disappear without a terminal status.
   localConnectSeq: 0,
   localConnectInFlight: null,
   activeAiProvider: "",
@@ -143,10 +142,11 @@ const seriesMemoryController = createSeriesMemoryController({
   setStorage,
   queryTabs,
 });
-
-const renderAiUsage = usageViewController.refresh;
-const openAiUsageHistory = usageViewController.openHistory;
-const closeAiUsageHistory = usageViewController.closeHistory;
+const resetDefaultsController = createResetDefaultsController({ els, remove: removeStorage,
+  resetLive: () => sendRuntimeMessage({ type: "TP_RESET_ADAPTIVE_SCHEDULER" }) });
+const updateBannerController = createUpdateBannerController({ els, getDefaults: ensureApiDefaults,
+  getCurrentVersion: () => chrome.runtime.getManifest().version });
+const openAiUsageHistory = usageViewController.openHistory, closeAiUsageHistory = usageViewController.closeHistory;
 
 function isRemoteDefaultApiUrl(url) {
   const normalized = normalizeUrl(url);
@@ -324,11 +324,11 @@ const settingsPersistenceController = createSettingsPersistenceController({
   isRemoteDefaultApiUrl,
   refreshPromptHistoryButtons,
 });
-
 fontScaleController.bind();
 localPickerController.bind();
 seriesMemoryController.bind();
 rateSettingsController.bind();
+resetDefaultsController.bind();
 localConnectionController.bind();
 bindPopupEvents({
   els,
@@ -364,7 +364,7 @@ bindPopupEvents({
   persistSelectedLocalCapacityHint,
   clearLocalCapacitySnapshot,
   rateSettingsController,
-  renderAiUsage,
+  renderAiUsage: usageViewController.refresh,
   refreshSeriesMemory: seriesMemoryController.refresh,
   openAiUsageHistory,
   closeAiUsageHistory,
@@ -395,4 +395,4 @@ void loadPopupSettings({
   setEmojiStatus("error", "Settings could not be loaded. Reopen the popup.");
 });
 
-mountTranslationSessionStatus();
+void updateBannerController.refresh();

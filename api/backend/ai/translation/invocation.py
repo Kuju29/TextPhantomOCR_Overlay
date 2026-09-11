@@ -26,6 +26,21 @@ from backend.ai.translation.result_decode import decode_result
 # outside the API process composition root.
 ensure_provider_registry()
 
+def resolve_thinking_selection(requested: object, reasoning_caps: object) -> str:
+    """Resolve the user selection without silently enabling model reasoning."""
+    selected = str(requested or "off").strip().lower()
+    if selected not in {"off", "on"}:
+        selected = "off"
+    caps = reasoning_caps if isinstance(reasoning_caps, dict) else {}
+    if caps.get("mandatory") is True and selected == "off":
+        error = ValueError(
+            "The selected model requires Thinking. Change [AI option > AI thinking] "
+            "or choose a model that supports Thinking off."
+        )
+        error.code = "AI_THINKING_REQUIRED"
+        raise error
+    return "on" if caps.get("mandatory") is True else selected
+
 def _translate_once(
     original_text_full: str,
     target_lang: str,
@@ -61,7 +76,9 @@ def _translate_once(
         provider = default_local_provider()
     model = resolve_generation_model(provider, ai.model)
     base_url = resolve_base_url(provider, ai.base_url)
-    thinking_requested = "on" if str(getattr(ai, "thinking", "") or "off").strip().lower() == "on" else "off"
+    thinking_requested = str(getattr(ai, "thinking", "") or "off").strip().lower()
+    if thinking_requested not in {"off", "on"}:
+        thinking_requested = "off"
     thinking_selected = thinking_requested
 
     assert_ai_base_url_allowed(
@@ -95,18 +112,27 @@ def _translate_once(
         raise ValueError("AI input requires attributable P0..Pn source units")
 
     from backend.ai.provider_resolution import (
-        discovered_model_capabilities, normalize_model_capabilities,
+        discovered_model_capabilities, effective_model_capabilities,
     )
     discovery_fresh, server_capabilities = discovered_model_capabilities(
         provider, base_url, model, api_key
     )
-    discovered_capabilities = server_capabilities if discovery_fresh else normalize_model_capabilities(
-        getattr(ai, "model_capabilities", {})
+    discovered_capabilities = effective_model_capabilities(
+        discovery_fresh=discovery_fresh, server=server_capabilities,
+        client=getattr(ai, "model_capabilities", {}),
     )
+    if image_b64 and discovered_capabilities.get("vision", {}).get("supported") is not True:
+        status = discovered_capabilities.get("vision", {}).get("supported")
+        if status is False:
+            raise ValueError(
+                "[AI option > Page image to AI] is unavailable for the selected model"
+            )
+        raise ValueError(
+            "[AI option > Page image to AI] requires verified image support for the selected model"
+        )
     reasoning_caps = discovered_capabilities.get("reasoning", {})
     reasoning_caps = reasoning_caps if isinstance(reasoning_caps, dict) else {}
-    if reasoning_caps.get("mandatory") is True:
-        thinking_selected = "on"
+    thinking_selected = resolve_thinking_selection(thinking_requested, reasoning_caps)
 
     capability = select_planned_output_capability(
         provider, model, base_url, model_capabilities=discovered_capabilities,

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createProviderMetaController } from "../src/popup/controllers/provider-meta-controller.js";
 
 const val = (value = "") => ({ value });
-function fixture({ provider = "huggingface", model = "stale-model", resolveModels = ["good-model"], probeStatus = "passed", probeCapabilities = null } = {}) {
+function fixture({ provider = "huggingface", model = "stale-model", resolveModels = ["good-model"], modelCandidates = null, probeStatus = "passed", probeCapabilities = null } = {}) {
   const els = {
     mode: val("lens_text"), sources: val("ai"), lang: val("th"), apiUrl: val("http://api.local"),
     aiProvider: val(provider), aiBaseUrl: val(provider === "huggingface" ? "https://router.huggingface.co/v1" : ""),
@@ -19,13 +19,14 @@ function fixture({ provider = "huggingface", model = "stale-model", resolveModel
       requested_model:String(els.aiModel.value || model), provider, backend_supported:true,
       provider_protocol:"openai_chat_completions", key_status:"valid", models_verified:true,
       models_source:"live", models:[...resolveModels], model:String(els.aiModel.value || model), model_status:resolveModels.includes(String(els.aiModel.value || model))?"available":"unavailable",
+      ...(modelCandidates ? { model_candidates: structuredClone(modelCandidates) } : {}),
       model_capabilities:{},
     };
     if (url.endsWith("/probe")) return { ok:probeStatus === "passed", provider, model:String(els.aiModel.value), status:probeStatus, cached:false, ...(probeCapabilities ? { model_capabilities: structuredClone(probeCapabilities) } : {}) };
     throw new Error("unexpected URL");
   }};
   const setModelOptions=(models,{keepValue="",placeholder="",selectFirst=true}={})=>{
-    const list=models.map(String); const current=String(keepValue||"");
+    const list=models.map(value=>String(value?.id ?? value)); const current=String(keepValue||"");
     els.aiModel.options=list.map(value=>({value}));
     els.aiModel.placeholder=placeholder;
     els.aiModel.value=list.includes(current)?current:(selectFirst&&list.length?list[0]:"");
@@ -38,6 +39,21 @@ function fixture({ provider = "huggingface", model = "stale-model", resolveModel
     setFieldMessage:(wrap,type,text)=>messages.push({wrap,type,text}), setStatus:()=>{}, toggleUi:()=>{},
   });
   return {controller,els,state,requests,messages};
+}
+
+// Candidate metadata survives the backward-compatible IDs contract. Unknown
+// entries are explicitly verified only after selection; no catalogue-wide
+// generation probes are issued.
+{
+  const candidates = [
+    {id:"good-model",eligibility:"unknown",evidence:"catalogue_only"},
+    {id:"blocked-model",eligibility:"blocked",evidence:"account_policy"},
+  ];
+  const t=fixture({model:"good-model",resolveModels:["good-model","blocked-model"],modelCandidates:candidates});
+  await t.controller.refresh();
+  assert.equal(t.requests.filter(x=>x.url.endsWith("/probe")).length,1);
+  assert.equal(t.state.lastAiResolve.model_candidates[0].eligibility,"usable");
+  assert.equal(t.state.lastAiResolve.model_candidates[0].evidence,"selected_generation_probe");
 }
 
 // A stored model missing from this provider/account's authoritative catalogue

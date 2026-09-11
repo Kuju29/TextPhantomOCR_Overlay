@@ -80,7 +80,7 @@ export function createPromptController(deps) {
       setFieldMessage(
         els.aiPromptWrap,
         "warn",
-        "⚠ AI Style is required — click Reload, then save before translating",
+        "⚠ [AI option > Set prompt] is empty — click Reload, then save",
       );
     } else if (fieldMessageType(els.aiPromptWrap) === "warn") {
       setFieldMessage(els.aiPromptWrap, "", "");

@@ -92,7 +92,12 @@ export function createProviderMetaController({
       ];
     else if (data.models_source === "live" && data.models_verified) {
       const count = Array.isArray(data.models) ? data.models.length : 0;
-      text = `✓ ${count} compatible model${count === 1 ? "" : "s"} reported by ${name} • Backend: ${protocol}`;
+      const candidates = Array.isArray(data.model_candidates) ? data.model_candidates : [];
+      const usable = candidates.filter((item) => item?.eligibility === "usable").length;
+      const unknown = candidates.filter((item) => item?.eligibility === "unknown").length;
+      text = candidates.length
+        ? `✓ ${usable} usable${unknown ? ` • ${unknown} require verification` : ""} • Backend: ${protocol}`
+        : `✓ ${count} live model${count === 1 ? "" : "s"} reported by ${name} • Backend: ${protocol}`;
       if (data.model_status === "unavailable")
         [type, text] = [
           "error",
@@ -134,14 +139,24 @@ export function createProviderMetaController({
 
   const applyProbeCapabilities = async (result, apiKey, providerId, model) => {
     const capabilities = result?.model_capabilities;
-    if (!capabilities || typeof capabilities !== "object" || Array.isArray(capabilities) ||
-        !Object.keys(capabilities).length) return;
-    if (state.lastAiResolve &&
+    const hasCapabilities = capabilities && typeof capabilities === "object" &&
+      !Array.isArray(capabilities) && Object.keys(capabilities).length > 0;
+    if (hasCapabilities && state.lastAiResolve &&
         String(state.lastAiResolve.provider || "") === String(providerId || "") &&
         String(state.lastAiResolve.model || state.lastAiResolve.requested_model || "") === String(model || "")) {
       state.lastAiResolve = { ...state.lastAiResolve, model_capabilities: capabilities };
     }
-    if (apiKey) {
+    if (result?.status === "passed" && Array.isArray(state.lastAiResolve?.model_candidates)) {
+      state.lastAiResolve = {
+        ...state.lastAiResolve,
+        model_candidates: state.lastAiResolve.model_candidates.map((candidate) =>
+          candidate?.id === model
+            ? { ...candidate, eligibility: "usable", evidence: "selected_generation_probe",
+                ...(capabilities ? { capabilities } : {}) }
+            : candidate),
+      };
+    }
+    if (hasCapabilities && apiKey) {
       const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(apiKey));
       const accountHash = Array.from(new Uint8Array(digest).slice(0, 8), (byte) =>
         byte.toString(16).padStart(2, "0")).join("");
@@ -303,15 +318,21 @@ export function createProviderMetaController({
         models_verified: true,
         models,
       };
+      const thinkingRequired = verification.status === "thinking_required" ||
+        verification.code === "local_ai_thinking_required";
       setFieldMessage(
         els.aiModelWrap,
-        verified ? "info" : "warn",
-        verified
+        verified ? "info" : thinkingRequired ? "error" : "warn",
+        thinkingRequired
+          ? "✕ This model requires thinking. Open [AI option > AI thinking], enable thinking, then Connect again."
+          : verified
           ? `✓ ${selected} verified · ${models.length} installed model(s)`
           : `⚠ ${models.length} installed model(s) found; Reconnect to verify the selected model`,
       );
       if (els.aiLocalStatus)
-        els.aiLocalStatus.textContent = `✓ Connected directly to ${adapter.baseUrl}`;
+        els.aiLocalStatus.textContent = thinkingRequired
+          ? "✕ This model requires thinking. Open [AI option > AI thinking], enable thinking, then Connect again."
+          : `✓ Connected directly to ${adapter.baseUrl}`;
       local.renderCapacity();
       await local.persistCapacity();
       toggleUi();
@@ -423,6 +444,8 @@ export function createProviderMetaController({
       state.lastAiResolve = data || null;
       const models =
         data?.models_verified && Array.isArray(data.models) ? data.models : [];
+      const candidates = data?.models_verified && Array.isArray(data.model_candidates)
+        ? data.model_candidates : models;
       const selectedCapability =
         data?.model_capabilities && typeof data.model_capabilities === "object"
           ? data.model_capabilities
@@ -438,7 +461,7 @@ export function createProviderMetaController({
         preferred && !models.includes(preferred) && !requestedWasAuto;
       // The picker is provider-authoritative. Never append a stored/typed model
       // that the current provider/account did not return as compatible.
-      setModelOptions(models, {
+      setModelOptions(candidates, {
         keepValue: explicitUnavailable ? "" : preferred || String(data?.model || "").trim(),
         placeholder:
           data?.key_status === "missing"

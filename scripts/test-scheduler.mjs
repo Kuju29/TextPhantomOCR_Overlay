@@ -23,6 +23,10 @@ const {
 } = await import("../src/background/scheduler.js");
 
 const jobsSource = await readFile(new URL("../src/background/pipeline/server-translation.js", import.meta.url), "utf8");
+const extensionAiSource = await readFile(new URL("../src/background/pipeline/ai-execution.js", import.meta.url), "utf8");
+assert.doesNotMatch(extensionAiSource,
+  /if\s*\(!localCapacity\)[\s\S]{0,180}setLaneSlotCeiling\(key,\s*0\)/,
+  "Cloud AI setup must not erase the server-advertised capacity ceiling");
 assert.match(jobsSource,
   /const requestLane = laneKeyFor\(outbound\);[\s\S]{0,400}configureLocalCapacityForPayload\(outbound\);[\s\S]{0,900}await acquire\(requestLane/,
   "API-engine path must configure local capacity before its first acquire");
@@ -78,6 +82,26 @@ const { localCapacityConfig, isLocalCapacityFailure } = await import(
     "lens:direct",
     "non-AI work belongs to the lens lane",
   );
+}
+
+// --- server-advertised Cloud capacity remains authoritative ---------------
+reset();
+{
+  const cloud = {
+    mode: "lens_text", source: "ai",
+    ai: { provider: "openrouter", model: "fixture", api_key: "secret" },
+  };
+  const key = laneKeyFor(cloud);
+  setLaneCapacityHint(key, 24);
+  assert.equal(configureLocalCapacityForPayload(cloud), null,
+    "Cloud payload must not acquire a Local capacity policy");
+  setLaneUnlimited(key, false);
+  assert.equal(describe(key).effectiveMax, 24,
+    "Cloud setup must preserve the API's advertised 24-slot ceiling");
+  for (let i = 0; i < 40; i++) releaseSuccess(key, 10);
+  assert.equal(describe(key).effectiveMax, 24);
+  assert.ok(describe(key).window <= 24,
+    "Provider successes must never widen past executable server capacity");
 }
 
 // --- local capacity is per runtime endpoint + model and provider-managed ----

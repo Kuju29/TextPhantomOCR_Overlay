@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from backend.ai.rate_policy import is_local_target
+from backend.ai.provider_resolution import normalize_model_capabilities
 from backend.ai.translation.contracts import AiConfig
 from backend.config import settings
 
@@ -56,7 +57,9 @@ def build_ai_config(payload: dict, mode: str, source: str) -> AiConfig | None:
         characters=ai.get("characters") if isinstance(ai.get("characters"), list) else [],
         char_memory=bool(ai.get("char_memory", True)),
         send_image=(ai.get("send_image").strip().lower() if isinstance(ai.get("send_image"), str) else bool(ai.get("send_image"))),
-        thinking=str(ai.get("thinking") or "off").strip().lower() or "off",
+        thinking=(lambda value: "on" if value == "on" else "off")(
+            str(ai.get("thinking") or "off").strip().lower()),
+        model_capabilities=normalize_model_capabilities(ai.get("model_capabilities")),
         # One image is one billable provider generation.  Do not let a client
         # payload re-enable the legacy second content-repair request.
         repair_enabled=False,

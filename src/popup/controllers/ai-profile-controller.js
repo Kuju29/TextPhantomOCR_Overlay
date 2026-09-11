@@ -12,6 +12,8 @@ import {
 import { ensureAiProfileStorageV2 } from "../../shared/ai-profile-storage.js";
 import { isLocalAiProvider } from "../../shared/constants.js";
 import { cloudProviderSpec } from "../../shared/ai/providers/cloud-registry.js";
+import { localProviderSpec } from "../../shared/ai/providers/local-registry.js";
+import { isLocalHostUrl } from "../../shared/ai/providers/local-spec.js";
 
 
 function safeEndpointForProvider(provider, endpoint) {
@@ -19,6 +21,23 @@ function safeEndpointForProvider(provider, endpoint) {
     .trim()
     .toLowerCase();
   const normalizedEndpoint = String(endpoint || "").trim();
+  const localSpec = localProviderSpec(normalizedProvider);
+  if (localSpec) {
+    // Older popup builds could persist the previously-selected Cloud endpoint
+    // under a named Local Provider identity. Repair only registered presets;
+    // Custom Local remains fail-closed so an invalid user adapter is visible.
+    if (!normalizedEndpoint) return localSpec.baseUrl;
+    if (isLocalHostUrl(normalizedEndpoint)) return normalizedEndpoint;
+    // Only a syntactically-valid public HTTP(S) endpoint matches the stale
+    // Cloud-profile bug. Other malformed input remains visible to validation.
+    try {
+      const parsed = new URL(normalizedEndpoint);
+      if (["http:", "https:"].includes(parsed.protocol)) return localSpec.baseUrl;
+    } catch {
+      /* rejected by the canonical endpoint validator below */
+    }
+    return normalizedEndpoint;
+  }
   if (isLocalAiProvider(normalizedProvider)) return normalizedEndpoint;
   const cloudSpec = cloudProviderSpec(normalizedProvider);
   // A registered Cloud provider owns its transport endpoint. Carrying a base
@@ -225,8 +244,7 @@ export function createAiProfileController({
 
   function render(profile) {
     if (els.aiThinking)
-      els.aiThinking.value =
-        (["off", "on"].includes(profile.thinking) ? profile.thinking : "off");
+      els.aiThinking.value = profile.thinking === "on" ? "on" : "off";
     if (els.aiPageImage)
       els.aiPageImage.checked = profile.pageImage === "always";
     if (els.aiMemoryMode) els.aiMemoryMode.value = profile.memoryMode || "off";
@@ -268,7 +286,7 @@ export function createAiProfileController({
     const local = isLocalAiProvider(providerValue());
     const max = Number(profile.concurrency?.max) || 1;
     return {
-      ...(local ? { aiLocalThinking: profile.thinking || "off" } : {}),
+      ...(local ? { aiLocalThinking: profile.thinking === "on" ? "on" : "off" } : {}),
       aiCharMemory: profile.memoryMode === "full",
       aiLocalCapacityMode: profile.concurrency?.mode || "auto",
       aiLocalManualConcurrency: Math.min(4, Math.max(1, max)),

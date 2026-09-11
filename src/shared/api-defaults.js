@@ -18,6 +18,10 @@ const FETCH_TIMEOUT_MS = 8000;
 const TTL_MS = 12 * 60 * 60 * 1000;
 
 const coerceUrl = (v) => (typeof v === "string" ? normalizeUrl(v) : "");
+const coerceVersion = (v) => {
+  const value = typeof v === "string" ? v.trim() : "";
+  return /^\d+(?:\.\d+){1,3}$/.test(value) ? value : "";
+};
 
 /**
  * Parse JSON that may be slightly malformed (unquoted keys / single quotes).
@@ -68,10 +72,21 @@ async function fetchRemoteDefaults() {
       coerceUrl(data.apiUrlReset) ||
       coerceUrl(data.reset_api_url);
 
-    if (!defaultApiUrl && !resetApiUrl) return null;
+    // Optional release metadata shares the already trusted defaults document.
+    // Older documents remain valid and simply leave the banner hidden.
+    const latestVersion =
+      coerceVersion(data.latestVersion) ||
+      coerceVersion(data.latest_version);
+    const updateUrl =
+      coerceUrl(data.updateUrl) ||
+      coerceUrl(data.update_url);
+
+    if (!defaultApiUrl && !resetApiUrl && !latestVersion && !updateUrl) return null;
     return {
       defaultApiUrl: defaultApiUrl || "",
       resetApiUrl: resetApiUrl || "",
+      latestVersion,
+      updateUrl,
     };
   } catch {
     return null;
@@ -84,19 +99,23 @@ async function fetchRemoteDefaults() {
  * Return the cached/fresh API defaults, refreshing from the network when the
  * cache is stale (or `force` is set).
  * @param {{force?: boolean}} [opts]
- * @returns {Promise<{defaultApiUrl:string, resetApiUrl:string, fetchedAt:number}>}
+ * @returns {Promise<{defaultApiUrl:string, resetApiUrl:string, latestVersion:string, updateUrl:string, fetchedAt:number}>}
  */
 export async function ensureApiDefaults({ force = false } = {}) {
   const stored = await getStorage({
     apiUrlDefault: "",
     apiUrlReset: "",
     apiDefaultsFetchedAt: 0,
+    latestVersion: "",
+    updateUrl: "",
   });
 
   const current = {
     defaultApiUrl: coerceUrl(stored.apiUrlDefault),
     resetApiUrl: coerceUrl(stored.apiUrlReset),
     fetchedAt: Number(stored.apiDefaultsFetchedAt) || 0,
+    latestVersion: coerceVersion(stored.latestVersion),
+    updateUrl: coerceUrl(stored.updateUrl),
   };
 
   const fresh = current.fetchedAt && Date.now() - current.fetchedAt <= TTL_MS;
@@ -109,11 +128,15 @@ export async function ensureApiDefaults({ force = false } = {}) {
     defaultApiUrl: remote.defaultApiUrl || current.defaultApiUrl,
     resetApiUrl: remote.resetApiUrl || current.resetApiUrl,
     fetchedAt: Date.now(),
+    latestVersion: remote.latestVersion || current.latestVersion,
+    updateUrl: remote.updateUrl || current.updateUrl,
   };
   await setStorage({
     apiUrlDefault: next.defaultApiUrl,
     apiUrlReset: next.resetApiUrl,
     apiDefaultsFetchedAt: next.fetchedAt,
+    latestVersion: next.latestVersion,
+    updateUrl: next.updateUrl,
   });
   return next;
 }

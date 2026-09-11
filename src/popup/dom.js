@@ -16,6 +16,7 @@ import {
 
 /** All the elements the popup interacts with, looked up once. */
 export const els = {
+  updateBanner: document.getElementById("update-banner"),
   mode: document.getElementById("mode"),
   lang: document.getElementById("lang"),
   sources: document.getElementById("sources"),
@@ -110,6 +111,8 @@ export const els = {
   localFolderInput: document.getElementById("local-folder-input"),
   openAutoTranslate: document.getElementById("open-auto-translate"),
   localPickerMsg: document.getElementById("local-picker-msg"),
+  resetDefaults: document.getElementById("reset-defaults"),
+  resetDefaultsStatus: document.getElementById("reset-defaults-status"),
 };
 
 export function renderProviderOptions() {
@@ -194,7 +197,7 @@ export function orderLanguages(list, pinnedCodes = []) {
  * Populate the AI-model `<select>` from a VERIFIED live list.
  * No `auto` or static fallback is offered: if the provider/key cannot enumerate
  * a model, the user sees a disabled placeholder instead of a model that may fail.
- * @param {string[]} models
+ * @param {(string|{id:string,eligibility?:string,evidence?:string})[]} models
  * @param {{keepValue?:string, placeholder?:string, selectFirst?:boolean}} opts
  */
 export function setModelOptions(
@@ -204,13 +207,16 @@ export function setModelOptions(
   const prev = String(keepValue || els.aiModel.value || "").trim();
   els.aiModel.innerHTML = "";
 
-  const ids = [
-    ...new Set(
-      (Array.isArray(models) ? models : [])
-        .map((m) => String(m || "").trim())
-        .filter(Boolean),
-    ),
-  ].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+  const candidates = new Map();
+  for (const value of Array.isArray(models) ? models : []) {
+    const item = value && typeof value === "object" ? value : { id: value };
+    const id = String(item.id || "").trim();
+    const eligibility = ["usable", "unknown", "blocked"].includes(item.eligibility)
+      ? item.eligibility : "unknown";
+    if (id && eligibility !== "blocked") candidates.set(id, { ...item, id, eligibility });
+  }
+  const ids = [...candidates.keys()].sort((a, b) =>
+    a.localeCompare(b, undefined, { sensitivity: "base" }));
 
   const ph = document.createElement("option");
   ph.value = "";
@@ -221,7 +227,10 @@ export function setModelOptions(
   for (const id of ids) {
     const opt = document.createElement("option");
     opt.value = id;
-    opt.textContent = id;
+    const candidate = candidates.get(id);
+    opt.textContent = candidate.eligibility === "unknown" ? `${id} — verify before use` : id;
+    opt.dataset.eligibility = candidate.eligibility;
+    if (candidate.evidence) opt.dataset.evidence = String(candidate.evidence).slice(0, 120);
     els.aiModel.appendChild(opt);
   }
 

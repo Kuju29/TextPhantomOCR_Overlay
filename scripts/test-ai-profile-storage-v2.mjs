@@ -51,7 +51,7 @@ oldV2.aiProfileStorageVersion = 2;
 for (const record of Object.values(oldV2.aiProfilePromptsV1)) record.mode = "append";
 const upgradedV3 = prepareAiProfileStorageV2(oldV2, {});
 assert.equal(upgradedV3.changed, true);
-assert.equal(upgradedV3.patch.aiProfileStorageVersion, 3);
+assert.equal(upgradedV3.patch.aiProfileStorageVersion, 4);
 assert.equal(Object.values(upgradedV3.prompts)[0].mode, "replace");
 const forbiddenAppend = structuredClone(v2);
 Object.values(forbiddenAppend.aiProfilePromptsV1)[0].mode = "append";

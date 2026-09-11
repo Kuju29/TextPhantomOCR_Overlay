@@ -638,6 +638,22 @@ textarea {
   cursor: default;
 }
 
+.update-banner {
+  display: block;
+  padding: 5px 10px;
+  color: #2b2100;
+  background: #f5c84b;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.3;
+  text-align: center;
+  text-decoration: none;
+}
+
+.update-banner[hidden] {
+  display: none;
+}
+
 .api-offline-gate {
   margin-bottom: 12px;
   padding: 10px;

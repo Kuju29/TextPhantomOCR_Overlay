@@ -193,6 +193,7 @@
   }
 
   const imageErrorBadges = new WeakMap();
+  const imageErrorTargets = new Set();
 
   // Converts technical terminal errors into short text a normal reader can
   // report from a screenshot. The full diagnostic remains in the title.
@@ -262,12 +263,28 @@
       } catch {}
       imageErrorBadges.delete(img);
     }
+    imageErrorTargets.delete(img);
     if (img.dataset?.lensError) delete img.dataset.lensError;
     if (img.style) {
       img.style.outline = String(img.dataset?.tpLensPrevOutline || "");
     }
     if (img.dataset?.tpLensPrevOutline !== undefined)
       delete img.dataset.tpLensPrevOutline;
+  }
+
+  // Clears terminal image errors owned by the previous page generation.
+  // The explicit target set lets navigation restore an outline even when an
+  // SPA detached the image before its route-change callback ran.  The DOM
+  // sweep is defensive cleanup for badges left by an older extension build.
+  function clearAllImageErrors() {
+    for (const img of Array.from(imageErrorTargets)) clearImageError(img);
+    for (const badge of Array.from(
+      document.querySelectorAll?.('[data-tp-image-error="1"]') || [],
+    )) {
+      try {
+        badge.remove();
+      } catch {}
+    }
   }
 
   function positionImageErrorBadge(img, badge) {
@@ -302,6 +319,7 @@
       badge.setAttribute("role", "alert");
       badge.dataset.tpImageError = "1";
       imageErrorBadges.set(img, badge);
+      imageErrorTargets.add(img);
       document.body.appendChild(badge);
       badge.addEventListener("click", () => clearImageError(img));
     }
@@ -362,6 +380,7 @@
     findTargetImage,
     markImageError,
     clearImageError,
+    clearAllImageErrors,
     shortImageError,
     positionImageErrorBadge,
     repositionImageError: img => positionImageErrorBadge(img, imageErrorBadges.get(img)),

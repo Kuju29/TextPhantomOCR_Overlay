@@ -200,6 +200,10 @@ async def lifespan(app: FastAPI):
             f"[TextPhantom][api] AI wire trace: FAILED ({type(exc).__name__}: {exc})",
             flush=True,
         )
+        # Opting into content-bearing wire evidence is a fail-visible contract.
+        # Starting without its requested evidence would make a healthy API look
+        # traced while silently discarding the operator's diagnostic record.
+        raise
 
     # Security posture, stated at boot. Each of these silently degraded the
     # service or widened its attack surface before, and none of them was

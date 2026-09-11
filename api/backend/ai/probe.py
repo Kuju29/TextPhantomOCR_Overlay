@@ -24,6 +24,7 @@ from backend.ai.provider_resolution import (
     discovered_model_capabilities,
     normalize_model_capabilities,
     remember_selected_model_capability,
+    remember_model_promotion,
 )
 from backend.ai.rate_policy import is_local_target
 from backend.config import settings
@@ -191,6 +192,7 @@ def probe(payload: dict[str, Any]) -> ProbeResult:
                 provider, base_url, api_key, model, verified_capabilities
             )
         if response.ok:
+            remember_model_promotion(provider, base_url, api_key, model)
             result = ProbeResult(
                 ok=True,
                 provider=provider,
@@ -231,4 +233,11 @@ def probe(payload: dict[str, Any]) -> ProbeResult:
 
     ttl = PROBE_CACHE_TTL_SEC if result["ok"] else PROBE_FAILURE_CACHE_TTL_SEC
     _PROBE_CACHE[cache_key] = (now, dict(result), ttl)
+    from backend import trace
+    trace.note("model_probe_completed", {
+        "provider": provider, "status": result.get("status", "unknown"),
+        "httpStatus": result.get("http_status", 0), "promoted": result.get("ok") is True,
+        "capabilityReported": bool(result.get("model_capabilities")),
+        "accountScope": hashlib.sha256(api_key.encode()).hexdigest()[:12],
+    }, file="ai/probe.py")
     return result

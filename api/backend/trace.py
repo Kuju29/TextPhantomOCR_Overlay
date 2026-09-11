@@ -122,6 +122,7 @@ _SECRET_HINTS = ("api_key", "apikey", "key", "token",
                  "secret", "password", "cookie", "auth")
 _NUMERIC_TOKEN_COUNTERS = {
     "requestedoutputtokens", "inputtokens", "outputtokens", "totaltokens", "thinkingtokens",
+    "cachedinputtokens", "cachewriteinputtokens",
     "sourcechars", "targetsourcechars", "estimatedresponsechars",
 }
 _PRIVATE_CONTENT_NAMES = {
@@ -471,6 +472,8 @@ def _short(value: Any, depth: int = 0) -> Any:
         priority = {
             "wrongLanguageIds", "missingIds", "languageDiagnostics", "detectedScripts", "unitLayout", "units", "readingOrder", "members",
             "inputRotations", "inputSigns", "outputRotation", "outputSign", "outputRotationSource",
+            "pageImageToAi", "manualAiRateCap", "manualRateCapEnabled", "rateCapEnabled",
+            "cache", "scope", "incidentId", "owner", "severity", "outcome", "retryable", "final",
         }
         entries = sorted(value.items(), key=lambda item: str(
             item[0]) not in priority)
@@ -665,7 +668,10 @@ def write(side: str, file: str, fn: str, ev: str, data: Any = None, trace_id: st
         with _LOCK:
             _seq += 1
             line["seq"] = _seq
-            line["at"] = datetime.now(_TZ).isoformat(timespec="milliseconds")
+            occurred_at = datetime.now(_TZ).isoformat(timespec="milliseconds")
+            line["at"] = occurred_at
+            line["occurredAt"] = occurred_at
+            line["ingestedAt"] = occurred_at
             _emit_locked(json.dumps(line, ensure_ascii=False,
                          default=str) + "\n", target)
     except Exception:  # noqa: BLE001 - a trace that can fail a request is worse than none
@@ -807,6 +813,9 @@ def client(records: list[dict[str, Any]]) -> int:
             }
             if event_at is not None:
                 line["eventAt"] = event_at
+                # Canonical event chronology. ``at`` remains the durable file
+                # ingestion order for backwards compatibility.
+                line["occurredAt"] = event_at
             if record.get("d") is not None:
                 line["d"] = _short(record.get("d"))
             with _LOCK:
@@ -816,6 +825,7 @@ def client(records: list[dict[str, Any]]) -> int:
                 line["seq"] = _seq
                 line["at"] = ingested_at
                 line["ingestedAt"] = ingested_at
+                line.setdefault("occurredAt", ingested_at)
                 _emit_locked(json.dumps(line, ensure_ascii=False,
                              default=str) + "\n", target)
             written += 1

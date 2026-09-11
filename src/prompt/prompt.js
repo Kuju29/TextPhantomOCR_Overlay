@@ -1,6 +1,6 @@
 /**
  *
- * Prompt Studio — full-page editor for Provider + Model + Language AI Style.
+ * Prompt Studio — full-page editor for Provider + Model + language prompt.
  */
 
 import { getStorage, setStorage } from "../shared/storage.js";

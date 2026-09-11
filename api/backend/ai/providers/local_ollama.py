@@ -21,13 +21,29 @@ ALIASES = ("local", "llama")
 KEY_PREFIXES: tuple[str, ...] = ()
 MODEL_ALIASES: dict[str, str] = {}
 
+def _thinking_mode(selected: str, capabilities: Any) -> str:
+    reasoning = capabilities.get("reasoning", {}) if isinstance(capabilities, dict) else {}
+    requested = "on" if selected == "on" else "off"
+    if isinstance(reasoning, dict) and reasoning.get("mandatory") is True and requested == "off":
+        return "required"
+    if isinstance(reasoning, dict) and reasoning.get("supported") is True \
+            and reasoning.get("control") in {"toggle", "boolean"}:
+        return requested
+    return "omit"
+
 class OllamaAdapter:
     """Provider-owned native Ollama generation and tag discovery."""
 
     def probe(self, request: ProbeRequest) -> ProbeResponse:
         payload = {"model": request.model,
                    "messages": [{"role": "user", "content": "Reply only OK."}],
-                   "stream": False, "think": False, "options": {"num_predict": 8}}
+                   "stream": False, "options": {"num_predict": 8}}
+        thinking = _thinking_mode("off", dict(request.model_capabilities))
+        if thinking == "required":
+            return ProbeResponse(False, 0, "local_ai_thinking_required",
+                                 "The selected Ollama model requires thinking")
+        if thinking == "off":
+            payload["think"] = False
         with httpx.Client(timeout=request.timeout_sec) as client:
             response = client.post(normalize_base_url(request.base_url) + "/api/chat",
                                    headers={"Content-Type": "application/json"}, json=payload)
@@ -42,7 +58,11 @@ class OllamaAdapter:
         return ProbeResponse(True, response.status_code)
 
     def generate(self, request: GenerationRequest) -> ChatResult:
-        thinking = "off" if request.thinking == "default" else request.thinking
+        thinking = _thinking_mode(request.thinking, dict(request.model_capabilities))
+        if thinking == "required":
+            raise RuntimeError("local_ai_thinking_required: the selected Ollama model requires thinking")
+        if thinking == "omit":
+            thinking = "auto"
         result = generate(
             request.base_url or DEFAULT_BASE_URL, request.model, request.system_text,
             list(request.user_parts), image_b64=request.image_b64,
@@ -54,7 +74,9 @@ class OllamaAdapter:
                if request.workload else {}),
         )
         # Boolean think is a request, not acknowledgement (GPT-OSS ignores it).
-        return (result._replace(thinking_applied=f"requested_{thinking}_unverified")
+        applied = f"requested_{thinking}" if thinking in {"off", "on"} else (
+            "provider_default" if request.thinking == "auto" else "unverified")
+        return (result._replace(thinking_applied=applied)
                 if hasattr(result, "_replace") else result)
 
     def list_models(self, *, api_key: str, base_url: str) -> ModelListResult:
@@ -193,7 +215,7 @@ def generate(
     image_b64: str = "",
     image_mime: str = "image/jpeg",
     response_schema: dict | None = None,
-    thinking: str = "off",
+    thinking: str = "auto",
     unit_count: int | None = None,
     cancel_check=None,
     expected_ids: list[str] | None = None,

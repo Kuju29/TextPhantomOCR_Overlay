@@ -811,7 +811,9 @@ limits:
     parser.add_argument("--ai-model", default="auto")
     parser.add_argument("--ai-provider", default="auto")
     parser.add_argument("--ai-base-url", default="auto")
-    parser.add_argument("--ai-thinking", default="off")
+    parser.add_argument("--ai-thinking", default="off", type=lambda value:
+                        "on" if str(value).strip().lower() == "on" else "off",
+                        choices=["off", "on"])
     parser.add_argument(
         "--ai-prompt", default="",
         help="style prompt required by --source ai; no built-in fallback is used",

@@ -62,29 +62,33 @@ class CapabilityForwardingAPI(unittest.TestCase):
         @asynccontextmanager
         async def slot(_):
             yield
+        def broken_stats():
+            raise RuntimeError('optional telemetry unavailable')
         async def reserve(*_):
             return SimpleNamespace(replay=None)
         async def acquire(**_):
             return None,0
-        app=FastAPI();app.include_router(ai_router)
-        app.state.ai_admission_gate=SimpleNamespace(slot=slot)
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            app.state.ai_executor=executor
-            async def request():
-                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://fixture.invalid') as client:
-                    return await client.post('/v1/ai/translate',json=body)
-            # Only unrelated admission/idempotency persistence is isolated. The
-            # real router/config/provider executor/invocation/error mapper run.
-            with patch.object(idempotency_session,'reserve',side_effect=reserve), patch.object(rate_admission,'acquire',side_effect=acquire), patch.object(provider_registry.require('openrouter').adapter,'generate') as generate:
-                reply=asyncio.run(request())
-                self.assertEqual(reply.status_code,409,reply.text)
-                detail=reply.json()['detail']
-                self.assertEqual(detail['code'],'ai_output_capability_changed')
-                self.assertFalse(detail['requestDispatched'])
-                self.assertEqual(detail['providerAttempts'],0)
-                self.assertEqual(detail['generationAttempts'],0)
-                self.assertFalse(detail['retryable'])
-                generate.assert_not_called()
+        for gate in (SimpleNamespace(slot=slot), SimpleNamespace(slot=slot,stats=broken_stats)):
+            with self.subTest(stats='missing' if not hasattr(gate,'stats') else 'throws'):
+                app=FastAPI();app.include_router(ai_router)
+                app.state.ai_admission_gate=gate
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    app.state.ai_executor=executor
+                    async def request():
+                        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://fixture.invalid') as client:
+                            return await client.post('/v1/ai/translate',json=body)
+                    # Only unrelated admission/idempotency persistence is isolated. The
+                    # real router/config/provider executor/invocation/error mapper run.
+                    with patch.object(idempotency_session,'reserve',side_effect=reserve), patch.object(rate_admission,'acquire',side_effect=acquire), patch.object(provider_registry.require('openrouter').adapter,'generate') as generate:
+                        reply=asyncio.run(request())
+                        self.assertEqual(reply.status_code,409,reply.text)
+                        detail=reply.json()['detail']
+                        self.assertEqual(detail['code'],'ai_output_capability_changed')
+                        self.assertFalse(detail['requestDispatched'])
+                        self.assertEqual(detail['providerAttempts'],0)
+                        self.assertEqual(detail['generationAttempts'],0)
+                        self.assertFalse(detail['retryable'])
+                        generate.assert_not_called()
 
     def test_true_false_unknown_before_and_after_cache_expiry(self):
         for row in self.rows:

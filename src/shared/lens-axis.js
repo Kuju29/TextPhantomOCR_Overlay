@@ -228,6 +228,61 @@ export function paragraphAxes(tree, tiltTol = DEFAULT_TILT_TOL) {
   );
 }
 
+function paragraphEnvelope(para) {
+  let left = Infinity;
+  let top = Infinity;
+  let right = -Infinity;
+  let bottom = -Infinity;
+  for (const item of Array.isArray(para?.items) ? para.items : []) {
+    if (!String(item?.text || "").trim()) continue;
+    const box = item?.box || {};
+    const x = Number(box.left);
+    const y = Number(box.top);
+    const width = Number(box.width);
+    const height = Number(box.height);
+    if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0)
+      return null;
+    left = Math.min(left, x);
+    top = Math.min(top, y);
+    right = Math.max(right, x + width);
+    bottom = Math.max(bottom, y + height);
+  }
+  return Number.isFinite(left) ? { left, top, right, bottom } : null;
+}
+
+/**
+ * Detect a local run of adjacent vertical columns on an otherwise mixed page.
+ *
+ * Page-majority is insufficient for manga: status panels and other horizontal
+ * copy can outvote a real two/three-column speech balloon.  This is only an
+ * admission check.  The server remains authoritative for grouping and may
+ * conservatively return these paragraphs as singletons.
+ */
+function hasLocalVerticalRun(tree, axes) {
+  const vertical = [];
+  for (const [index, para] of (tree?.paragraphs || []).entries()) {
+    if (axes[index] !== "v") continue;
+    const bounds = paragraphEnvelope(para);
+    if (bounds) vertical.push({ index, bounds });
+  }
+  for (let i = 0; i < vertical.length; i += 1) {
+    for (let j = i + 1; j < vertical.length; j += 1) {
+      const a = vertical[i].bounds;
+      const b = vertical[j].bounds;
+      const aw = a.right - a.left;
+      const bw = b.right - b.left;
+      const scale = Math.max(aw, bw);
+      const horizontalGap = Math.max(0, Math.max(a.left, b.left) - Math.min(a.right, b.right));
+      const verticalOverlap = Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top));
+      const overlapRatio = verticalOverlap / Math.max(1e-9, Math.min(a.bottom - a.top, b.bottom - b.top));
+      const headDelta = Math.abs(a.top - b.top);
+      if (horizontalGap <= 2.5 * scale && headDelta <= scale && overlapRatio >= 0.5)
+        return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Does this page need canonical Lens graph grouping?
  *
@@ -273,10 +328,11 @@ export function pageNeedsGroups(tree, tiltTol = DEFAULT_TILT_TOL) {
     classifiableParagraphs > 0 ? votes.h / classifiableParagraphs : 0;
   const verticalRatio =
     classifiableParagraphs > 0 ? votes.v / classifiableParagraphs : 0;
-  // A tie is intentionally horizontal/conservative: grouping changes
-  // paragraph membership, so mixed evidence must not trigger it without a
-  // page-wide vertical majority.
-  const needed = votes.v > votes.h;
+  // A page-wide majority catches ordinary vertical manga pages. A local
+  // aligned run catches vertical speech inside status panels/mixed layouts.
+  // The latter merely admits the request; the server still proves membership.
+  const localVerticalRun = hasLocalVerticalRun(tree, axes);
+  const needed = votes.v > votes.h || localVerticalRun;
   return {
     needed,
     axes,
@@ -291,6 +347,8 @@ export function pageNeedsGroups(tree, tiltTol = DEFAULT_TILT_TOL) {
         ? axes.length === 0
           ? "the page has no paragraphs"
           : "the page has no classifiable text paragraphs (tilted/empty only)"
+        : localVerticalRun && votes.v <= votes.h
+          ? `mixed page has a local aligned vertical-column run (${votes.v} vertical, ${votes.h} horizontal paragraph(s))`
         : needed
           ? `page is vertical-majority: ${votes.v}/${classifiableParagraphs} ` +
             `classifiable paragraph(s) (${(verticalRatio * 100).toFixed(1)}%)`

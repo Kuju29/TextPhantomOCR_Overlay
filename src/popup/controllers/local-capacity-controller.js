@@ -49,6 +49,20 @@ export function createLocalCapacityController({
               hint?.structuredOutput && typeof hint.structuredOutput === "object"
                 ? { ...hint.structuredOutput }
                 : null,
+            // Persist only the exact selected model's verified wire controls.
+            // The provider/endpoint/model identity above prevents capability
+            // metadata from leaking across a switch or browser restart.
+            modelCapabilities: {
+              ...(hint?.reasoning && typeof hint.reasoning === "object"
+                ? { reasoning: { ...hint.reasoning } }
+                : {}),
+              ...(hint?.structuredOutput && typeof hint.structuredOutput === "object"
+                ? { structuredOutput: { ...hint.structuredOutput } }
+                : {}),
+              ...(hint?.limits && typeof hint.limits === "object"
+                ? { limits: { ...hint.limits } }
+                : {}),
+            },
           }
         : null;
     await persist({ aiLocalCapabilityHint: value });

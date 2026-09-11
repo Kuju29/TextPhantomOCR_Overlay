@@ -118,6 +118,7 @@ def models_status(api_key: str, *, timeout_sec: float = 10.0) -> ModelListResult
         return model_status(status="error", http_status=status, error="invalid_json")
     models = []
     capabilities = {}
+    candidates = {}
     for item in data.get("models") or []:
         if not isinstance(item, dict):
             continue
@@ -126,6 +127,8 @@ def models_status(api_key: str, *, timeout_sec: float = 10.0) -> ModelListResult
                 and name.startswith("models/") and model_usable(name.split("/", 1)[1])):
             model_id = name.split("/", 1)[1]
             models.append(model_id)
+            candidates[model_id] = {"eligibility": "usable",
+                                    "evidence": "gemini_generateContent_method"}
             from backend.ai.workload import normalize_limits
             limits = normalize_limits({"maxInputTokens": item.get("inputTokenLimit"),
                 "maxOutputTokens": item.get("outputTokenLimit"), "modelRevision": str(item.get("version") or ""),
@@ -143,7 +146,8 @@ def models_status(api_key: str, *, timeout_sec: float = 10.0) -> ModelListResult
                 capability["reasoning"] = reasoning
             if capability:
                 capabilities[model_id] = capability
-    return {**model_status(models=models, status="valid", http_status=status), "capabilities": capabilities}
+    return {**model_status(models=models, status="valid", http_status=status),
+            "capabilities": capabilities, "candidates": candidates}
 
 class GeminiAdapter:
     """Provider-owned bridge from the stable request contract to Gemini wire data."""
@@ -215,9 +219,9 @@ def _thinking_state(model: str, mode: str = "") -> tuple[bool, dict | None, str]
     if mode in _THINKING_OFF_MODES:
         if mandatory:
             return True, None, "provider_default_mandatory"
-        return False, {"thinkingBudget": 0}, "off"
+        return False, {"thinkingBudget": 0}, "requested_off"
     if mode in ("on", "true", "yes", "1"):
-        return True, {"thinkingBudget": -1}, "dynamic"
+        return True, {"thinkingBudget": -1}, "requested_on"
     # Gemini 2.5 Flash defaults to dynamic thinking, while Flash-Lite defaults
     # to no thinking. The capability tells budgeting which behavior applies.
     return cap.get("default_enabled") is not False, None, "provider_default"

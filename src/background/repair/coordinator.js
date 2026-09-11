@@ -300,7 +300,8 @@ export function createRepairCoordinator({
     for (const plan of deliveries) {
       const applied = committed.has(plan.pageId) && live(prepared);
       if (applied) {
-        const key = mdCacheKey(mdKeyFromUrl(plan.page.ctx.imgUrl), plan.page.targetLang, plan.page.ctx.mode, plan.page.ctx.source);
+        const key = mdCacheKey(mdKeyFromUrl(plan.page.ctx.imgUrl), plan.page.targetLang,
+          plan.page.ctx.mode, plan.page.ctx.source, prepared.settingsEpoch);
         if (key) setCachedResult(key, {newImg:null, result:stripImageFields(plan.patch.result),
           sourceImageKey:plan.image ? normImgSrc(plan.page.ctx.imgUrl) : ''});
       }

@@ -20,6 +20,26 @@ const FAILED_CACHE_TTL_MS = 15 * 1000;
 
 const cache = new Map();
 const freshScopes = new Map();
+const tracedScopes = new Set();
+
+/** Emit one activity snapshot per resolution scope; failures are never hidden. */
+export function traceCapabilitySnapshot(scope, caps, traceId = "") {
+  const key = String(scope || "");
+  const failed = Boolean(caps?.reason) || caps?.probe?.outcome !== "ok";
+  if (!failed && tracedScopes.has(key)) return false;
+  tracedScopes.add(key);
+  if (tracedScopes.size > 256) tracedScopes.delete(tracedScopes.values().next().value);
+  note("background/capabilities.js", "capabilityProbe", {
+    origin: caps?.probe?.origin || "",
+    durationMs: Number(caps?.probe?.durationMs) || 0,
+    outcome: caps?.probe?.outcome || (caps?.reason ? "unavailable" : "ok"),
+    status: Number(caps?.probe?.status) || 0,
+    errorName: caps?.probe?.errorName || "",
+    scope: key,
+    cache: { kind: "capability", hit: Number(caps?.probe?.durationMs) === 0 },
+  }, traceId);
+  return true;
+}
 
 // Returns the capability set assumed for a server that never answered /v1/capabilities.
 function legacyCapabilities(reason, probe = {}) {

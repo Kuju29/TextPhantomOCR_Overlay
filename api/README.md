@@ -1,5 +1,5 @@
 ---
-title: TextPhantom v4.0.0
+title: TextPhantom API
 emoji: 👻
 colorFrom: blue
 colorTo: purple
@@ -118,6 +118,38 @@ Direct Local AI is the deliberate exception: in `runs:Extension` the browser
 owns the local model socket, so that provider generation does not traverse the
 API AI admission gate. Lens and API grouping still use their normal API routes.
 
+### Reading `TP_DIAGNOSTICS=activity`
+
+Activity output is a multi-user event stream, not one user's sequential trace.
+Group related lines by `incidentId` for failures, then by `batchId`,
+`operationId`, `imageId`, `jobId`, or `traceId`. `requestId` identifies one HTTP
+attempt and therefore normally changes on retry. `tabSession`, when present, is
+an irreversible short hash; the raw browser session is never logged.
+
+The additive classification fields do not remove existing event keys:
+
+| Field | Meaning |
+|---|---|
+| `owner` | Proven boundary: `textphantom`, `site_input`, `provider`, `user_config`, `cancelled`, or `unknown` |
+| `outcome` | `succeeded`, `partial`, `failed`, `cancelled`, or `neutral` |
+| `severity` | Operational importance: `info`, `warning`, or `error` |
+| `stage` / `scope` | Where it ended and whether it affects one request, job, image, batch, or server background |
+| `retryable` | Whether retrying the same operation may succeed; it is not permission for an unbounded retry loop |
+| `phase` / `attempt` / `final` | Initial versus repair work, known attempt count, and whether the line is a terminal verdict at that boundary |
+
+`owner=provider` proves that TextPhantom received failure at an upstream
+provider boundary; it does not by itself prove the provider is defective. For
+example, upstream HTTP 400 can also mean an unsupported model option or request
+shape. Use `provider`, `model`, `providerReason`, stage and a wire trace to find
+the underlying cause. A generic HTTP 400 without canonical detail remains
+`owner=unknown` instead of being blamed on TextPhantom or the user.
+
+`v1.lens.raw` with zero paragraphs is `outcome=neutral`: the image may simply
+contain no readable text or be unsuitable for OCR. `http.scanner` is also
+neutral internet background. Repeated lines sharing one `incidentId` are
+attempts of one incident, not independent outages; count terminal lines where
+`final=true` when measuring completed operations.
+
 The current browser build also keeps `RUNS_API_AVAILABLE=false` in
 `src/shared/engine-mode.js`. That existing switch means normal extension
 surfaces currently execute `runs:Extension` even if an older saved preference
@@ -182,17 +214,23 @@ verified values.
   `runsextension` routes; Local AI may stream directly from the browser.
 - **runs: API server:** `/v2/engine/runsapi/translate` runs the complete Python
   pipeline and returns server-rendered output.
+- **Google Lens (image) mode:** this is the deliberate exception to the browser
+  engine selector. Even while the effective browser setting is
+  `runs:Extension`, image mode sends the whole image to
+  `/v2/engine/runsapi/translate` because the API owns its complete Lens-image
+  pipeline. The engine selector controls the split/full pipeline choice for
+  text mode; it does not create an Extension-owned image pipeline.
 - **Legacy queue:** `/translate` remains compatible. Local generation is no
   longer cut off by the old fixed job timeout and participates in current
   telemetry/cancellation behavior. Cloud and non-AI work remain bounded for
   worker safety.
 
-### AI wire contract (.41; unchanged from .40)
+### AI wire contract
 
-The existing System contains translator identity + the selected user Style.
+The System contains translator identity + the selected user Style.
 The User message contains the task, target language, context, exact output
-contract and source records. This release does not rewrite, summarize or
-repeat the Style elsewhere.
+contract and source records. The current implementation does not rewrite,
+summarize or repeat the Style elsewhere.
 
 - Confirmed native schema support selects `tp.translation.schema-object/1`.
 - Otherwise new generations use `tp.translation.compact-records/1`, for example
@@ -210,12 +248,12 @@ repeat the Style elsewhere.
   Gemini thought parts are not translation text. `length` is recorded separately
   from a normally ended response containing invalid/missing/wrong-language text.
 
-The Extension workload planner from .39/.40 remains unchanged. The standalone
-Python API engine remains its own full-image pipeline; this release does not
+The Extension workload planner remains separate from the standalone Python API
+engine's full-image pipeline. The current implementation does not
 silently enable the browser's cross-image workload/repair coordinator there.
 Both engines invoke the same server provider adapters for server-executed AI.
 
-### Prompt caching (.41)
+### Prompt caching
 
 Cache hints are applied at the actual provider adapter, so **both engine routes**
 benefit without changing prompts or batching. The policy checks the configured
@@ -522,10 +560,11 @@ Wrong-language failures include bounded, privacy-safe per-unit diagnostics in
 `TP_TRACE`: target script, detected script character counts, target/foreign
 character totals, and the validator decision/reason. Dialogue text and
 reversible text hashes are never recorded. Both engines use the same fields.
+
 ## Translation repair and cancellation lifecycle
 
-The **browser runs:Extension** path inherits the .40 session checkpoints and
-server-owned pooled repair registry. It waits for the registered initial images,
+The **browser runs:Extension** path uses session checkpoints and the server-owned
+pooled repair registry. It waits for the registered initial images,
 collects only failed units, packs compatible tasks with the existing workload
 planner and performs one logical repair round. Good units are not overwritten.
 Cloud execution runs through the API; Direct Local execution stays in the
@@ -545,7 +584,7 @@ Cancellation remains cooperative. Result/image delivery can be discarded after
 navigation, but already-observed Provider usage must be retained. No missing
 receipt is automatically interpreted as a refund or a free request.
 
-## Usage accounting and payment boundary (.41)
+## Usage accounting and payment boundary
 
 ### Actual data paths
 

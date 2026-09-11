@@ -120,6 +120,20 @@ class CanonicalAiGroupingTests(unittest.TestCase):
         self.assertIsNotNone(ai_config)
         self.assertFalse(ai_config.repair_enabled)
 
+    def test_runsapi_thinking_defaults_and_normalizes_to_off(self):
+        base = {"provider": "ollama", "base_url": "http://localhost:11434",
+                "model": "mock", "prompt_mode": "replace", "prompt": "style"}
+        for value in (None, "", "auto", "garbage", False, 7):
+            ai = dict(base)
+            if value is not None:
+                ai["thinking"] = value
+            self.assertEqual(config.build_ai_config({"ai": ai}, "lens_text", "ai").thinking, "off")
+        for value in ("off", "OFF"):
+            self.assertEqual(config.build_ai_config({"ai": {**base, "thinking": value}},
+                                                    "lens_text", "ai").thinking, "off")
+        self.assertEqual(config.build_ai_config({"ai": {**base, "thinking": "on"}},
+                                                "lens_text", "ai").thinking, "on")
+
 
 if __name__ == "__main__":
     unittest.main()

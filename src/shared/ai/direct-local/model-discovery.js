@@ -21,6 +21,9 @@ export async function verifyLocalModelGeneration(adapter, model, {
   );
   const started = performance.now();
   try {
+    const thinkingMode = typeof adapter.resolveThinkingMode === "function"
+      ? adapter.resolveThinkingMode("off", { model: selected })
+      : "off";
     const result = await adapter.generate({
       model: selected,
       messages: [
@@ -28,7 +31,7 @@ export async function verifyLocalModelGeneration(adapter, model, {
         { role: "user", content: "Reply only OK." },
       ],
       outputTokens: 64,
-      thinkingMode: "off",
+      thinkingMode,
       responseSchema: null,
     }, {
       signal: controller.signal,
@@ -60,7 +63,10 @@ export async function verifyLocalModelGeneration(adapter, model, {
   } catch (error) {
     if (signal?.aborted) throw error;
     const timedOut = controller.signal.aborted || /timed out|timeout/i.test(String(error?.message || ""));
-    return verificationResult(selected, timedOut ? "timeout" : "unreachable", {
+    const status = error?.code === "local_ai_thinking_required"
+      ? "thinking_required"
+      : timedOut ? "timeout" : "unreachable";
+    return verificationResult(selected, status, {
       code: String(error?.code || ""),
       httpStatus: Number(error?.status || 0),
       elapsedMs: Math.round(performance.now() - started),

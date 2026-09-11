@@ -50,6 +50,35 @@ await test('completion metadata changes batch size independently of unit count',
   const b=partition(units(20),p,{...ctx,limits:{maxOutputTokens:2048}});
   assert.ok(a.length>b.length);
 });
+await test('confirmed 8192 completion capacity packs an ordinary page once without becoming unbounded',()=>{
+  const rows=units(21,'This ordinary dialogue is about forty source characters.');
+  const context={...ctx,limits:{contextTokens:16384,maxOutputTokens:8192}};
+  const packed=partition(rows,initialProfile(),context);
+  assert.equal(packed.length,1);
+  assert.equal(packed[0].estimate.target,2048);
+  assert.equal(packed[0].estimate.recordTarget,50);
+  const oversized=partition(units(80,'長い文章です'.repeat(20)),initialProfile(),context);
+  assert.ok(oversized.length>1);
+  assert.ok(oversized.every(batch=>batch.estimate.fitsHard));
+});
+await test('large-window output split reports the effective target instead of the cold record cap',()=>{
+  const context={...ctx,limits:{contextTokens:32768,maxOutputTokens:8192}};
+  const first=takeWorkloadBatch(units(60,'a'.repeat(315)),0,initialProfile(),context);
+  assert.equal(first.splitReason,'learned_output_target');
+  assert.ok(first.units.length<=first.estimate.recordTarget);
+  assert.equal(first.estimate.recordTarget,50);
+});
+await test('a real capacity failure disables the large-window bootstrap for that learned profile',()=>{
+  const rows=units(21,'This ordinary dialogue is about forty source characters.');
+  const context={...ctx,limits:{contextTokens:16384,maxOutputTokens:8192}};
+  const p=initialProfile(),plan=estimateRequest(rows,p,context),answer=result(rows,{finishReason:'length'});
+  answer.translations.pop();
+  const learned=learnWorkload(p,observeWorkload({units:rows,answer,plan,ai:{model:'fixture'}}));
+  const next=partition(rows,learned,context);
+  assert.equal(learned.target,128);
+  assert.equal(next[0].estimate.target,128);
+  assert.ok(next.length>1);
+});
 await test('unknown metadata does not invent hardware context',()=>{
   assert.equal(estimateRequest(units(1),initialProfile(),ctx).completionAvailable,8192);
   assert.deepEqual(estimateRequest(units(1),initialProfile(),ctx).limits,{});

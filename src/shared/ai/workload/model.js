@@ -3,6 +3,13 @@ export const WORKLOAD_VERSION = 6;
 export const WORKLOAD_POLICY = Object.freeze({
   initialOutputTarget: 160, minimumOutputTarget: 48, maximumOutputTarget: 4096,
   initialRecords: 10, maximumRecords: 200, growthSamples: 8,
+  // A confirmed large completion window can safely avoid paying provider
+  // latency several times for an ordinary page. Keep the bootstrap target at
+  // one quarter of the advertised window and abandon it after the first real
+  // length/structure failure; unknown and smaller-capability models retain the
+  // conservative learned profile above.
+  largeCompletionThreshold: 8192, largeCompletionFraction: .25,
+  largeCompletionRecords: 50,
   window: 64, safety: 1.25, contextReserve: 128, applicationCompletionCeiling: 8192,
 });
 export const positive = (value) => Number.isSafeInteger(value) && value > 0 ? value : null;
@@ -79,13 +86,20 @@ export function estimateRequest(units, profile, context) {
     ? limits.contextTokens - estimatedInput - WORKLOAD_POLICY.contextReserve : Infinity;
   const completionAvailable = Math.min(WORKLOAD_POLICY.applicationCompletionCeiling, limits.maxOutputTokens || Infinity,
     limits.outputHintTokens || Infinity, context.userMaxOutput || Infinity, contextAvailable);
+  const capacityFailureSeen = profile.outcomes.some(outcome => outcome === 'length' || outcome === 'structure');
+  const confirmedLargeCompletion = positive(limits.maxOutputTokens) >= WORKLOAD_POLICY.largeCompletionThreshold;
+  const bootstrapTarget = confirmedLargeCompletion && !capacityFailureSeen
+    ? Math.floor(completionAvailable * WORKLOAD_POLICY.largeCompletionFraction) : 0;
+  const effectiveTarget = Math.max(profile.target, bootstrapTarget);
+  const effectiveRecords = bootstrapTarget > profile.target
+    ? Math.max(profile.records, WORKLOAD_POLICY.largeCompletionRecords) : profile.records;
   const fitsHard = estimatedInput <= (limits.maxInputTokens || Infinity) &&
     predictedOutput + reasoningReserve <= completionAvailable;
   return { ...features, predictedOutput, reasoningReserve, estimatedInput,
     totalReserve: predictedOutput + reasoningReserve,
     completionAvailable: Number.isFinite(completionAvailable) ? Math.max(0, completionAvailable) : null,
-    fitsHard, fitsTarget: predictedOutput <= profile.target && units.length <= profile.records,
-    target: profile.target, recordTarget: profile.records, samples: profile.samples, revision: profile.revision,
+    fitsHard, fitsTarget: predictedOutput <= effectiveTarget && units.length <= effectiveRecords,
+    target: effectiveTarget, recordTarget: effectiveRecords, samples: profile.samples, revision: profile.revision,
     limits, epoch: profile.epoch, estimateKind: 'script_weight_calibrated_from_valid_provider_usage' };
 }
 export function takeWorkloadBatch(rows, offset, profile, context) {
@@ -94,7 +108,7 @@ export function takeWorkloadBatch(rows, offset, profile, context) {
     const candidate = estimateRequest([...units, rows[i]], profile, context);
     if (units.length && (!candidate.fitsHard || !candidate.fitsTarget)) {
       splitReason = !candidate.fitsHard ? 'context_or_completion_reserve' :
-        candidate.units > profile.records ? 'learned_record_target' : 'learned_output_target';
+        candidate.units > candidate.recordTarget ? 'learned_record_target' : 'learned_output_target';
       break;
     }
     units.push(rows[i]); estimate = candidate;

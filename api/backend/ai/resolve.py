@@ -60,6 +60,7 @@ class ResolveResult(TypedDict, total=False):
     models_error: str
     model_status: str
     model_capabilities: dict[str, Any]
+    model_candidates: list[dict[str, Any]]
 
 class EnumerationResult(TypedDict):
     models: list[str]
@@ -69,6 +70,7 @@ class EnumerationResult(TypedDict):
     http_status: int
     error: str
     capabilities: dict[str, dict[str, Any]]
+    candidates: dict[str, dict[str, Any]]
 
 def _dedupe_sorted(models: list[str]) -> list[str]:
     """Case-insensitively dedupe and sort a model list."""
@@ -86,13 +88,32 @@ def _enumerate_models_detailed(provider: str, api_key: str, base_url: str) -> En
 
     spec = provider_registry.require(provider)
     listed = spec.adapter.list_models(api_key="" if local else api_key, base_url=base_url)
-    from backend.ai.provider_resolution import remember_model_capabilities
-    remember_model_capabilities(provider, base_url, api_key, dict(listed.capabilities))
+    from backend.ai.provider_resolution import (
+        forget_model_capabilities, remember_model_capabilities, retain_model_promotions,
+    )
+    if listed.status == "valid":
+        remember_model_capabilities(provider, base_url, api_key, dict(listed.capabilities))
+        retain_model_promotions(provider, base_url, api_key, list(listed.models))
+    else:
+        forget_model_capabilities(provider, base_url, api_key)
     live = {"models": list(listed.models), "status": listed.status,
             "http_status": listed.http_status, "error": listed.error,
-            "capabilities": dict(listed.capabilities)}
+            "capabilities": dict(listed.capabilities),
+            "candidates": dict(getattr(listed, "candidates", {}) or {})}
 
     usable_live = _dedupe_sorted(live["models"])
+    from backend import trace
+    candidate_values = list(live["candidates"].values())
+    counts = {state: sum(1 for item in candidate_values
+                         if isinstance(item, dict) and item.get("eligibility") == state)
+              for state in ("usable", "unknown", "blocked")}
+    unspecified = max(0, len(usable_live) - sum(counts.values()))
+    trace.note("model_catalogue_completed", {
+        "provider": provider, "status": live["status"],
+        "httpStatus": live["http_status"], "modelCount": len(usable_live),
+        "usableCount": counts["usable"], "unknownCount": counts["unknown"] + unspecified,
+        "blockedCount": counts["blocked"], "accountScope": hashlib.sha256(api_key.encode()).hexdigest()[:12],
+    }, file="ai/resolve.py")
     if live["status"] == "valid":
         # A successful provider catalogue is authoritative even when filtering
         # leaves zero translation-compatible models. Do not turn an empty valid
@@ -105,6 +126,7 @@ def _enumerate_models_detailed(provider: str, api_key: str, base_url: str) -> En
             http_status=live["http_status"],
             error=live["error"],
             capabilities=dict(live.get("capabilities") or {}),
+            candidates=dict(live.get("candidates") or {}),
         )
 
     # Do not put guessed/static models in the picker. A cloud model appears only
@@ -117,6 +139,7 @@ def _enumerate_models_detailed(provider: str, api_key: str, base_url: str) -> En
         http_status=live["http_status"],
         error=live["error"],
         capabilities={},
+        candidates={},
     )
 
 def resolve(payload: dict[str, Any]) -> ResolveResult:
@@ -257,6 +280,19 @@ def resolve(payload: dict[str, Any]) -> ResolveResult:
     enumeration = _enumerate_models_detailed(provider, api_key, base_url)
     models = enumeration["models"]
     live_verified = enumeration["verified"]
+    from backend.ai.provider_resolution import model_is_promoted
+    model_candidates = []
+    for candidate_model in models:
+        native = dict(enumeration.get("candidates", {}).get(candidate_model) or {})
+        eligibility = str(native.get("eligibility") or "unknown")
+        evidence = str(native.get("evidence") or "provider_catalogue_only")[:120]
+        if model_is_promoted(provider, base_url, api_key, candidate_model):
+            eligibility, evidence = "usable", "selected_generation_probe"
+        if eligibility not in {"usable", "unknown", "blocked"}:
+            eligibility = "unknown"
+        model_candidates.append({"id": candidate_model, "eligibility": eligibility,
+                                 "evidence": evidence,
+                                 "capabilities": dict(enumeration["capabilities"].get(candidate_model) or {})})
 
     list_status = enumeration["status"]
     if local:
@@ -325,6 +361,7 @@ def resolve(payload: dict[str, Any]) -> ResolveResult:
         models_error=enumeration["error"],
         model_status=model_status,
         model_capabilities=dict(enumeration["capabilities"].get(resolved_model) or {}),
+        model_candidates=model_candidates,
     )
 
 def prompt_default(lang: str, *, want_memo: bool = True) -> dict[str, Any]:

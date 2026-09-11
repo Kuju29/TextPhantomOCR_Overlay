@@ -127,15 +127,17 @@ export async function resolveJobAiProfile(settings, { language = "en" } = {}) {
     aiPageImage: profile.pageImage || "off",
     aiMemoryMode: profile.memoryMode || "off",
     aiThinking: profile.thinking === "on" ? "on" : "off",
-    aiLocalThinking: profile.thinking || "off",
+    aiLocalThinking: profile.thinking === "on" ? "on" : "off",
     aiLocalCapacityMode:
       profile.concurrency?.mode || "auto",
     aiLocalManualConcurrency:
       Number(profile.concurrency?.max) || 0,
     aiModelCapabilities:
-      !local && profile.providerOptions?.capabilityAccountHash === await shortHash(activated.credential)
-        ? profile.providerOptions?.modelCapabilities || {}
-        : {},
+      local
+        ? selectedSettings.aiLocalCapabilityHint?.modelCapabilities || {}
+        : profile.providerOptions?.capabilityAccountHash === await shortHash(activated.credential)
+          ? profile.providerOptions?.modelCapabilities || {}
+          : {},
   };
   const unsupported = activated.unsupported;
   const audit = {

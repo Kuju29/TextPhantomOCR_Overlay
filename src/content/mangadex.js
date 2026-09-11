@@ -442,6 +442,7 @@
   // Removes every MangaDex overlay and releases the blob URLs they hold.
   function mdDestroyAllOverlays() {
     for (const rec of mdOverlaysByKey.values()) {
+      rec.active = false;
       try {
         if (rec?.blobUrl?.startsWith("blob:")) URL.revokeObjectURL(rec.blobUrl);
       } catch {}
@@ -724,11 +725,12 @@
   }
 
   // Replaces a MangaDex image by overlaying the translated image on top of it.
-  async function replaceMangaDexImageWithOverlay(original, newSrc) {
+  async function replaceMangaDexImageWithOverlay(original, newSrc, generation = null) {
     const mdKey = mdKeyFromUrl(original);
     if (!mdKey) return 0;
 
-    const img = findMangaDexImgByKey(mdKey) || TP.findTargetImage(original);
+    const img = findMangaDexImgByKey(mdKey) || TP.findTargetImage(original, generation);
+    if (img && TP.isStillCurrent?.(img, generation)?.ok === false) return 0;
     if (!img) {
       TP.log.warn("REPLACE_IMAGE target not found", {
         original: TP.truncate(original),
@@ -757,20 +759,26 @@
         display: "none",
       });
       document.documentElement.appendChild(el);
-      rec = { el, img: null, blobUrl: "", original: "" };
+      rec = { el, img: null, blobUrl: "", original: "", generation: null,
+        pageInstanceId: TP.pageInstanceId, active: true };
       mdOverlaysByKey.set(mdKey, rec);
       ensureMangaDexOverlayListeners();
       el.addEventListener(
         "load",
-        () => rec.original && TP.setReplaceState(rec.original, "ok"),
+        () => {
+          if (!rec.active || rec.pageInstanceId !== TP.pageInstanceId ||
+              TP.isStillCurrent?.(rec.img, rec.generation)?.ok === false) return;
+          if (rec.original) TP.setReplaceState(rec.original, "ok");
+        },
         { passive: true },
       );
       el.addEventListener(
         "error",
         () => {
-          if (rec.original) {
+          if (rec.active && rec.pageInstanceId === TP.pageInstanceId && rec.original &&
+              TP.isStillCurrent?.(rec.img, rec.generation)?.ok !== false) {
             TP.setReplaceState(rec.original, "fail");
-            TP.markImageError(rec.original, "Failed to load replaced image");
+            TP.markImageError(rec.original, "Failed to load replaced image", rec.generation);
           }
         },
         { passive: true },
@@ -779,6 +787,9 @@
 
     rec.img = img;
     rec.original = TP.normUrl(original);
+    rec.generation = generation;
+    rec.pageInstanceId = TP.pageInstanceId;
+    rec.active = true;
 
     let nextSrc = newSrc;
     if (typeof newSrc === "string" && newSrc.startsWith("data:")) {

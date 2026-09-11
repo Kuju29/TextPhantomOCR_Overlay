@@ -186,7 +186,7 @@ class OpenAIAdapter:
         if request.api_key:
             headers["Authorization"] = f"Bearer {request.api_key}"
         payload = prepare_payload(request)
-        return execute_chat_completion(
+        result = execute_chat_completion(
             url=base + "/chat/completions", headers=headers, payload=payload,
             model=model, provider_id=PROVIDER_ID, timeout=120.0,
             timeout_policy="provider_total_bounded",
@@ -198,6 +198,9 @@ class OpenAIAdapter:
                           "thinkingMode": request.thinking,
                           "capabilityKnown": bool(request.model_capabilities)},
         )
+        applied = (f"requested_{request.thinking}" if "reasoning_effort" in payload
+                   else "provider_default" if request.thinking == "auto" else "unverified")
+        return result._replace(thinking_applied=applied)
 
     def list_models(self, *, api_key: str, base_url: str) -> ModelListResult:
         if not api_key:

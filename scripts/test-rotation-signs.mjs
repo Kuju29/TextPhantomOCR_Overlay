@@ -80,6 +80,39 @@ assert.equal(classifyItemAxis(lensItem("章", 0.9, 0.1, 0.02, 0.2)), "h",
   "one tall CJK glyph is a local label, not enough evidence to request grouping");
 assert.equal(pageNeedsGroups({ paragraphs: [{ items: [lensItem("章", 0.9, 0.1, 0.02, 0.2)] }] }).needed, false,
   "a one-glyph page must not request grouping");
+
+// Regression from a real mixed status/manga page: horizontal UI text must not
+// outvote the aligned speech columns at y=.33 and y=.78.
+{
+  const horizontal = Array.from({ length: 12 }, (_, index) => ({
+    items: [lensItem(`LEVEL ${index}`, 0.2, 0.02 + index * 0.02, 0.18, 0.02)],
+  }));
+  const speech = [
+    lensItem("なんだこの", .306, .331, .032, .127),
+    lensItem("疑似シンカ", .255, .334, .031, .116),
+    lensItem("という恩恵は", .206, .333, .031, .167),
+    lensItem("レベルが", .212, .784, .031, .091),
+    lensItem("どんどん", .173, .783, .031, .092),
+    lensItem("上がっている", .124, .786, .033, .161),
+  ].map((column) => ({ items: [column] }));
+  const verdict = pageNeedsGroups({ paragraphs: [...horizontal, ...speech] });
+  assert.equal(verdict.needed, true);
+  assert.deepEqual(verdict.votes, { h: 12, v: 6 });
+  assert.match(verdict.reason, /local aligned vertical-column run/);
+}
+
+// Multiple isolated vertical labels far apart are not a local column run.
+{
+  const paragraphs = [
+    { items: [lensItem("縦書き", .85, .1, .02, .2)] },
+    { items: [lensItem("別表示", .10, .65, .02, .2)] },
+    ...Array.from({ length: 3 }, (_, index) => ({
+      items: [lensItem(`LEVEL ${index}`, .3, .3 + index * .08, .2, .03)],
+    })),
+  ];
+  assert.equal(pageNeedsGroups({ paragraphs }).needed, false,
+    "far-apart vertical labels must not open the grouping route");
+}
 assert.equal(classifyItemAxis(lensItem("横書きです", 0.1, 0.1, 0.3, 0.04)), "h");
 assert.equal(classifyItemAxis(lensItem("装飾", 0.1, 0.1, 0.02, 0.2, 30)), "tilted");
 

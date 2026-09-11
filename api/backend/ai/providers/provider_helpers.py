@@ -12,7 +12,8 @@ def model_status(*, models=None, status: str, http_status: int = 0,
 def contract_model_status(result: dict) -> ModelListResult:
     return ModelListResult(models=tuple(result["models"]), status=result["status"],
                            http_status=result["http_status"], error=result["error"],
-                           capabilities=result.get("capabilities") or {})
+                           capabilities=result.get("capabilities") or {},
+                           candidates=result.get("candidates") or {})
 
 def invoke_leaf_generate(request: GenerationRequest, generate: Callable):
     return generate(
