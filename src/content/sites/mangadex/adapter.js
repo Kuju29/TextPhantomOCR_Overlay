@@ -128,7 +128,8 @@
   }
 
   const pageImages = () =>
-    Array.from(document.querySelectorAll(".md--page img"));
+    Array.from(document.querySelectorAll(".md--page img"))
+      .filter(image => !TP.isTranslationOutputImage?.(image));
 
   async function mapMangaDexDom() {
     const current = await getMangaDexManifest();

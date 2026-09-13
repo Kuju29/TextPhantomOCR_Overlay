@@ -1,4 +1,5 @@
 import { formatLocalBytes } from "./provider-model-display.js";
+import { buildLocalCapabilityHint } from "../../shared/ai/direct-local/verification-snapshot.js";
 
 export function createLocalCapacityController({
   els,
@@ -35,36 +36,14 @@ export function createLocalCapacityController({
       .trim()
       .replace(/\/+$/, "");
     const model = String(els.aiModel?.value || state.desiredAiModel || "").trim();
-    const hint = state.localAiCapability?.models?.[model];
-    const recommendedMax = Number(hint?.recommendedMax);
-    const value =
-      isLocalProvider(provider) && model && Number.isFinite(recommendedMax)
-        ? {
-            provider,
-            baseUrl,
-            model,
-            recommendedMax: Math.min(2, Math.max(1, Math.floor(recommendedMax))),
-            reason: String(hint?.reason || ""),
-            structuredOutput:
-              hint?.structuredOutput && typeof hint.structuredOutput === "object"
-                ? { ...hint.structuredOutput }
-                : null,
-            // Persist only the exact selected model's verified wire controls.
-            // The provider/endpoint/model identity above prevents capability
-            // metadata from leaking across a switch or browser restart.
-            modelCapabilities: {
-              ...(hint?.reasoning && typeof hint.reasoning === "object"
-                ? { reasoning: { ...hint.reasoning } }
-                : {}),
-              ...(hint?.structuredOutput && typeof hint.structuredOutput === "object"
-                ? { structuredOutput: { ...hint.structuredOutput } }
-                : {}),
-              ...(hint?.limits && typeof hint.limits === "object"
-                ? { limits: { ...hint.limits } }
-                : {}),
-            },
-          }
-        : null;
+    const value = isLocalProvider(provider) && model
+      ? buildLocalCapabilityHint({
+          provider,
+          endpoint: baseUrl,
+          model,
+          capability: state.localAiCapability,
+        })
+      : null;
     await persist({ aiLocalCapabilityHint: value });
   };
 

@@ -1,3 +1,4 @@
+import { TRANSLATOR_IDENTITY_BASE } from "../src/generated/localization-content.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -15,7 +16,7 @@ assert.equal(plan.pieces.systemPolicy.includes(ocrOutputRule), true,
   "the shared fixed system policy must distinguish mixed OCR input from target-language output");
 const style = "Avoid pronouns unless the source makes them indispensable.";
 const source = "  OCR source  ";
-const expectedSystem = "You are an expert translator and localization editor. The following defines how you translate. Treat it as your own translation style and apply it naturally and consistently.\n\nTRANSLATION STYLE\n" + style;
+const expectedSystem = TRANSLATOR_IDENTITY_BASE + "\n\nTRANSLATION STYLE\n" + plan.pieces.targetLanguageInstruction + "\n" + style;
 // Capture the live API invocation boundary, not the legacy build_system_text helper.
 const api = JSON.parse(execFileSync(process.env.PYTHON || "python", ["-c", `
 import json
@@ -40,8 +41,8 @@ print(json.dumps({"system": calls[0].system_text, "user": calls[0].user_parts[0]
 `], { cwd: fileURLToPath(new URL("../api", import.meta.url)), encoding: "utf8",
   env: { ...process.env, PYTHONIOENCODING: "utf-8" } }));
 const apiHeader = plan.pieces.targetLanguageInstruction + "\n";
-assert.equal(api.system, expectedSystem.replace("TRANSLATION STYLE\n", "TRANSLATION STYLE\n" + apiHeader),
-  "API retains its target header inside Style; Local removes that redundant header, but neither loses the style");
+assert.equal(api.system, expectedSystem,
+  "API and Local preserve identical identity, target header and selected style");
 assert.equal(api.schema, null, "unknown model uses markers, not an invented schema capability");
 const expectedUser = api.user;
 assert.match(expectedUser, /^TRANSLATION TASK\nTranslate every source unit into Thai \(ภาษาไทย\)\./);

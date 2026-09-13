@@ -5,7 +5,10 @@ import {
   makeProfilePromptKey,
   resolveAiProfile,
 } from "./ai-profiles.js";
-import { AI_PROMPT_MODE, requireAiPrompt } from "./ai-prompt-policy.js";
+import {
+  normalizeAiPrompt,
+  normalizeAiPromptMode,
+} from "./ai-prompt-policy.js";
 
 const clone = (value) => structuredClone(value);
 
@@ -21,10 +24,7 @@ function frozenCopy(value) {
 }
 
 function requirePromptMode(value) {
-  if (value === AI_PROMPT_MODE) return value;
-  const error = new TypeError("Canonical AI prompt mode is missing or invalid");
-  error.code = "AI_PROFILE_INVALID";
-  throw error;
+  return normalizeAiPromptMode(value);
 }
 
 /** Creates a synchronous selector over a fixed storage snapshot. */
@@ -94,7 +94,7 @@ export function resolveEffectiveAiProfile(snapshot) {
     target: snapshot?.target || {},
     providerIdentity: String(snapshot?.providerIdentity || ""),
     credential: String(snapshot?.credential || ""),
-    prompt: requireAiPrompt(snapshot?.prompt),
+    prompt: normalizeAiPrompt(snapshot?.prompt),
     promptMode,
     thinking: profile.thinking === "on" ? "on" : "off",
     pageImage: profile.pageImage || "off",
@@ -123,7 +123,7 @@ export function buildEffectiveAiPayload(
       model: String(target.model || "auto"),
       provider: String(target.provider || ""),
       base_url: String(target.endpoint || "auto") || "auto",
-      prompt: requireAiPrompt(effective?.prompt),
+      prompt: normalizeAiPrompt(effective?.prompt),
       prompt_mode: promptMode,
       memory_mode: String(effective?.memoryMode || "off"),
       send_image: effective?.pageImage === "always",

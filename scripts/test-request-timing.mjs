@@ -29,3 +29,25 @@ const phases=events.filter(e=>e.name==='requestTiming').map(e=>e.data.reason);
 assert(phases.includes('http_headers')&&phases.includes('response_complete'));assert(progress.includes('validating'));checks++;
 console.log('PASS ready / persistence / HTTP / headers / response separated with monotonic durations');
 console.log(`${checks}/${checks} actual Cloud transport timing checks passed.`);
+// A controlled monotonic clock distinguishes post-response usage latency from
+// HTTP duration without sleeping or contacting any provider.
+const savedPerformance=globalThis.performance;
+let fixtureNow=10000;
+globalThis.performance={now:()=>fixtureNow};
+const originalFetch=globalThis.fetch;
+globalThis.fetch=async()=>{fixtureNow+=20;return {ok:true,status:200,
+  headers:new Headers(),text:async()=>{fixtureNow+=30;return JSON.stringify({schema:'tp.ai.result/1',
+    translations:[{id:'g0',text:'ทดสอบ'}],missing:[],meta:{generationAttempts:1,providerMs:7}});}};};
+try {
+  const delayedOpts=opts('post-response-delay');
+  delayedOpts.onProgress=p=>{if(p.state==='validating')holdRead=true;};
+  const pending=translateViaServer(input,delayedOpts);
+  await tick();
+  const response=events.find(e=>e.name==='requestTiming'&&e.data.scope.operationId==='post-response-delay'&&e.data.reason==='response_complete');
+  assert.equal(response.data.timing.httpMs,50);assert.equal(response.data.timing.headersMs,20);assert.equal(response.data.timing.bodyMs,30);
+  fixtureNow+=500;holdRead=false;release();await pending;
+  const usage=events.find(e=>e.name==='requestTiming'&&e.data.scope.operationId==='post-response-delay'&&e.data.event==='usage_commit_timing');
+  assert.equal(usage.data.timing.usageCallbackMs,500);
+  assert.equal(response.data.timing.httpMs,50,'post-response persistence cannot inflate HTTP');
+  console.log('PASS isolated post-response usage callback can be slow while HTTP stays 50 ms');
+} finally {globalThis.performance=savedPerformance;globalThis.fetch=originalFetch;holdRead=false;}

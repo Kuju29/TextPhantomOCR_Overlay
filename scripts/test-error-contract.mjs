@@ -44,6 +44,8 @@ for (const code of [
   "local_model_not_found", "local_ai_endpoint_incompatible", "local_ai_http_error",
   "invalid_local_response", "invalid_model_output", "custom_local_extension_only",
   "local_models_http_error", "local_models_empty", "local_ai_server_error",
+  "LOCAL_MODEL_VERIFY_TIMEOUT", "LOCAL_MODEL_VERIFY_FAILED",
+  "LOCAL_MODEL_THINKING_REQUIRED", "LOCAL_ADAPTER_MISSING",
   "local_ai_unreachable_from_remote_api", "local_prompt_unavailable",
   // Codes the live API emits. These all used to read "unknown cause" to the
   // reader while the real reason sat in the code field beside it.

@@ -217,8 +217,12 @@ assert.doesNotMatch(thinkingSelectHtml, /option value="auto"/i,
   "Thinking Auto must not be present in the selector");
 assert.match(popupHtml, /For vision models\. Uses more time and memory/,
   "page-image guidance stays short and capability-focused");
-assert.match(popupHtml, /Reconnect after changing models\. Use a model your PC can handle, or translation may fail or hang\./,
-  "Local UI must warn that a model change needs reconnect and hardware-fit matters");
+assert.match(popupHtml, /Models load automatically when Local AI is selected/,
+  "Local UI must explain that discovery no longer requires repeated Connect clicks");
+assert.match(popupHtml, /Choosing a model verifies it automatically/,
+  "changing the selected Local model must trigger verification automatically");
+assert.doesNotMatch(popupHtml, /ai-local-model-id/,
+  "the redundant exact Local model ID field must be removed");
 const popupSource = await readFile(new URL("../src/popup/popup.js", import.meta.url), "utf8");
 const popupEvents = await readFile(new URL("../src/popup/controllers/popup-event-controller.js", import.meta.url), "utf8");
 const localConnection = await readFile(new URL("../src/popup/controllers/local-connection-controller.js", import.meta.url), "utf8");
@@ -228,8 +232,8 @@ assert.match(popupEvents, /try\s*\{[\s\S]*await pendingEdits[\s\S]*transition = 
 assert.match(popupEvents, /setProviderTransitionPending\(true\)[\s\S]*finally\s*\{[\s\S]*setProviderTransitionPending\(false\)/,
   "translation/provider controls must remain disabled until transition settlement");
 const settingsSource = await readFile(new URL("../src/shared/settings.js", import.meta.url), "utf8");
-assert.match(localConnection, /const saved = savedModel\(\)[\s\S]*aiLocalModelId\.value = saved/,
-  "saved exact Local model ID must be restored when the popup reopens");
+assert.match(localConnection, /const saved = savedModel\(\)[\s\S]*setModelOptions\(models/,
+  "a saved Local model must be restored directly into the installed-model picker");
 assert.match(localConnection, /selectedModelVerification[\s\S]*?verification\.status === "passed"/,
   "a successful explicit connection must require a verified selected model");
 assert.match(localConnection, /state\.localAiCapability\s*=\s*[\s\S]*?response\.capability/,
@@ -248,14 +252,16 @@ assert.match(localConnection, /sequence !== state\.localConnectSeq[\s\S]*identit
   "Connect must reject a response from an obsolete provider or endpoint");
 const connectHandler = localConnection.slice(localConnection.indexOf("const connect = async"), localConnection.indexOf("const saveCustomAdapter"));
 assert.match(connectHandler, /state\.localAiCapability\s*=\s*[\s\S]*?response\.capability/,
-  "the explicit Connect path must retain returned runtime capability");
+  "the shared Local refresh path must retain returned runtime capability");
 assert.match(connectHandler, /await persistCapacity\(\)/,
-  "the explicit Connect path must persist the selected model hint");
-const exactModelHandler = localConnection.slice(localConnection.indexOf("const selectExactModel"), localConnection.indexOf("const bind ="));
-assert.match(exactModelHandler, /renderCapacity\(\)/,
-  "typing an exact Local model must update its visible capacity hint");
-assert.match(exactModelHandler, /persistCapacity\(\)/,
-  "typing an exact Local model must persist its matching capacity hint");
+  "the shared Local refresh path must persist the selected model hint");
+const modelChangeHandler = localConnection.slice(
+  localConnection.indexOf("const markModelChanged"), localConnection.indexOf("const bind ="),
+);
+assert.match(modelChangeHandler, /invalidate\("Selected model changed — restarting verification\."\)/,
+  "changing a Local model must invalidate the prior model verification");
+assert.match(modelChangeHandler, /if \(selected\) await connect\(\)/,
+  "changing a Local model must verify it without another manual Connect step");
 assert.match(popupEvents, /provider !== previousProvider[\s\S]*?state\.desiredAiModel = "auto"/,
   "changing providers must not reuse a model ID from the previous runtime");
 const providerChange = popupEvents.slice(

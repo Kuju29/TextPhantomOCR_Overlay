@@ -7,6 +7,7 @@ import {
   savedLocalCapabilitySnapshot,
 } from "../src/popup/controllers/local-connection-controller.js";
 import { createLocalCapacityController } from "../src/popup/controllers/local-capacity-controller.js";
+import { LOCAL_MODEL_VERIFICATION_VERSION } from "../src/shared/ai/direct-local/verification-snapshot.js";
 
 const endpoint = "http://localhost:11434";
 const identity = normalizeLocalConnectionIdentity(" Ollama ", `${endpoint}/`);
@@ -26,8 +27,10 @@ const records = {
     models: ["qwen3.5:9b"],
     capability,
     verifiedModel: "qwen3.5:9b",
+    verifiedThinking: "off",
     verificationStatus: "passed",
-    checkedAt: 1234,
+    verificationVersion: LOCAL_MODEL_VERIFICATION_VERSION,
+    checkedAt: Date.now(),
   },
 };
 assert.equal(
@@ -39,7 +42,8 @@ assert.equal(
 const modelOptions = [];
 const els = {
   aiProvider: { value: "ollama" }, aiBaseUrl: { value: endpoint },
-  aiModel: { value: "qwen3.5:9b" }, aiLocalModelId: { value: "" },
+  aiModel: { value: "qwen3.5:9b" },
+  aiThinking: { value: "off" },
   aiLocalStatus: { textContent: "" }, aiLocalTest: null,
 };
 const state = { desiredAiModel: "qwen3.5:9b", localAiCapability: null, lastAiResolve: null, aiModelBlocked: true };
@@ -57,6 +61,11 @@ assert.deepEqual(modelOptions, ["qwen3.5:9b"]);
 assert.equal(state.lastAiResolve.verification_source, "saved_snapshot");
 assert.match(els.aiLocalStatus.textContent, /was verified/);
 assert.equal(state.aiModelBlocked, false);
+const legacy = structuredClone(records);
+delete legacy[identity].verificationVersion;
+assert.equal(controller.restoreSnapshot(legacy), true, "legacy metadata remains available");
+assert.equal(state.aiModelBlocked, true, "older weaker verification must not authorize translation");
+assert.match(els.aiLocalStatus.textContent, /Verifying the selected model automatically/);
 
 let persistedHint = null;
 const capacityState = { localAiCapability: { models: {
@@ -106,9 +115,11 @@ assert.match(hydration, new RegExp(LOCAL_CAPABILITY_SNAPSHOTS_KEY));
 assert.match(hydration, /restoreSnapshot\(stored\.aiLocalCapabilitySnapshotsV1\)/);
 assert.match(connection, /verification_source:\s*"saved_snapshot"/,
   "a restored snapshot must not masquerade as a live health result");
-assert.match(connection, /Reconnect to verify/);
+assert.match(connection, /Verifying the selected model automatically/);
+assert.doesNotMatch(connection, /aiLocalModelId/,
+  "the removed exact-model text box must not remain in the connection flow");
 assert.match(connection, /verifiedModel/);
 assert.match(connection, /forgetSnapshot\(provider,[\s\S]*?\.catch\(\(\) => \{\}\)/,
   "an evidenced discovery failure invalidates that identity's saved snapshot");
 
-console.log("Local capability persistence passed: exact saved identity survives popup reopen without claiming live connectivity.");
+console.log("Local capability persistence passed: exact saved identity restores immediately and refreshes automatically.");

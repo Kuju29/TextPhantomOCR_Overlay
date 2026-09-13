@@ -46,7 +46,7 @@ await check('checkpoint preserves erasure/rendering contract and accepted transl
 });
 async function runPool(abortAfterSecond = false, abortOnDispatch = false, wrongLanguage = false, options = {}) {
   const b = bridge(), ctrl = new AbortController();
-  const calls = [], applications = [];
+  const calls = [], applications = [], progressEvents = [], observations = [], checkpoints = [];
   let capacityRunning = 0, translateRunning = 0, maxTranslateRunning = 0;
   const capacityWaiters = [];
   const capacityLimit = Math.max(1, Number(options.capacityLimit) || Number.MAX_SAFE_INTEGER);
@@ -76,20 +76,43 @@ async function runPool(abortAfterSecond = false, abortOnDispatch = false, wrongL
     let caught;
     try {
       await executeRepairPool({ run, snapshot: await b.api(run, 'seal', {}), executor: 'w', signal: ctrl.signal, api: b.api,
-        getPage: async id => pages.get(id), resolveAi: async p => p.ai, checkpointTask: async task => { if (abortOnDispatch && task.state === 'dispatched') ctrl.abort(); },
-        onProgress: () => {}, applyResults: async rows => applications.push({ calls: calls.length, ids: rows.map(r => r.id) }),
-        withCapacity, planner: { open: async () => ({ next: rows => ({ units: rows.slice(0,2), estimate: {} }) }) },
+        getPage: async id => pages.get(id), resolveAi: async p => p.ai, checkpointTask: async task => { checkpoints.push(task); if (abortOnDispatch && task.state === 'dispatched') ctrl.abort(); },
+        onProgress: event => progressEvents.push(event),
+        applyResults: async rows => applications.push({ calls: calls.length, ids: rows.map(r => r.id) }),
+        withCapacity, planner: { open: async () => ({
+          next: rows => ({ units: rows.slice(0, Number(options.planSize) || 2),
+            estimate: { predictedOutput: 128, reasoningReserve: 0, estimatedInput: 128, completionAvailable: 1024 } }),
+          observe: ({ error, defects = {} }) => {
+            const outcome = error
+              ? (/output_budget_exhausted|invalid_model_output|output_contract|invalid_result_schema/i.test(String(error.code || '')) ? 'length' : 'ignored')
+              : defects.missing?.length ? 'structure'
+                : defects.wrongLanguage?.length ? 'language' : 'ok';
+            observations.push(outcome);
+            return { outcome };
+          },
+        }) },
         translate: async units => {
           calls.push(units); translateRunning++; maxTranslateRunning = Math.max(maxTranslateRunning, translateRunning);
           try {
             if (abortAfterSecond && calls.length === 2) ctrl.abort();
             if (options.delayMs) await new Promise(resolve => setTimeout(resolve, options.delayMs));
+            if (calls.length <= Number(options.capacityFailures || 0)) {
+              const error = Object.assign(new Error('fixture output budget exhausted'), {
+                code: 'output_budget_exhausted', requestDispatched: true, providerResponded: true,
+                generationAttempts: 1, providerAttempts: 1,
+                generationMeta: { model: 'fixture', selectedContract: 'tp.translation.schema-object/1',
+                  finishReason: 'length', usage: { source: 'provider', outputTokens: 4096, thinkingTokens: 3900 } },
+              });
+              throw error;
+            }
+            if (typeof options.translateImpl === 'function')
+              return await options.translateImpl(units, calls.length);
             return { translations: units.map(u => ({ id: u.id, text: wrongLanguage ? '日本語のままです' : 'คำแปลไทย' })) };
           } finally { translateRunning--; }
         }
       });
     } catch (error) { caught = error; }
-    return { calls, applications, caught, maxTranslateRunning };
+    return { calls, applications, caught, maxTranslateRunning, progressEvents, observations, checkpoints };
   } finally { b.close(); }
 }
 await check('pool batches 6 failed units in 3 requests and delivers one final snapshot', async () => {
@@ -107,6 +130,24 @@ await check('repair tasks overlap only up to the scheduler capacity and still ap
   assert.equal(r.applications.length, 1, 'parallel repair must keep one final DOM patch wave');
   assert.equal(r.applications[0].calls, 3);
 });
+await check('repair planner admits at most two requests per group before re-planning', async () => {
+  const r = await runPool(false, false, false, { capacityLimit: 8, delayMs: 20 });
+  if (r.caught) throw r.caught;
+  const waves = r.progressEvents.filter(event => event.phase === 'repair_wave');
+  assert.deepEqual(waves.map(event => event.taskCount), [2, 1],
+    'six units with two-unit plans must be measured as a two-request wave before the final request');
+  assert.deepEqual(r.observations, ['ok', 'ok', 'ok']);
+});
+await check('two generated capacity failures open the repair circuit without a third provider call', async () => {
+  const r = await runPool(false, false, false, { capacityLimit: 8, capacityFailures: 2 });
+  if (r.caught) throw r.caught;
+  assert.equal(r.calls.length, 2, 'remaining repair units must be terminalized without provider dispatch');
+  assert.deepEqual(r.observations, ['length', 'length']);
+  assert.ok(r.progressEvents.some(event => event.phase === 'repair_circuit_open' && event.unitCount === 2),
+    'the two not-yet-dispatched units must be explicitly closed by the circuit');
+  assert.equal(r.applications.length, 1, 'the terminal partial result still reaches one final apply pass');
+  assert.deepEqual(r.applications[0].ids, []);
+});
 await check('cancellation during pooled generation cannot deliver an intermediate repair', async () => {
   const r = await runPool(true);
   assert.equal(r.caught?.name, 'AbortError');
@@ -120,16 +161,42 @@ await check('repair cancellation during checkpoint does not start a provider req
 await check('wrong-language repair keeps all failed units unresolved despite complete JSON IDs', async () => {
   const r=await runPool(false,false,true);if(r.caught)throw r.caught;
   assert.equal(r.calls.length,3);assert.equal(r.applications.length,1);assert.deepEqual(r.applications[0].ids,[]);
+  const rejected=r.checkpoints.filter(t=>t.state==='answered').flatMap(t=>t.wrongLanguageIds);
+  assert.equal(rejected.length,6);assert.equal(new Set(rejected).size,6,'persisted validation uses exact pool IDs once');
 });
-async function runCoordinator({ acknowledge = true, race = false, testProgress = false } = {}) {
+await check('running cloud receipt pauses quickly and remains durable instead of being failed or re-dispatched', async () => {
+  const task = { id:'cloud-running', state:'running', route:'server',
+    units:[{ id:'R0', pageId:'p0', text:'source' }] };
+  const snapshot = { phase:'repairing', pending:[], tasks:[task], repaired:0, unresolved:0, failedUnits:1 };
+  const actions = [];
+  const api = async (_run, action='') => { actions.push(action); return structuredClone(snapshot); };
+  const started = Date.now();
+  await assert.rejects(executeRepairPool({
+    run:{ id:'receipt-run', token:'a'.repeat(64) }, snapshot:structuredClone(snapshot), executor:'new-worker',
+    signal:new AbortController().signal, api, getPage:async()=>null, resolveAi:async()=>({}),
+    checkpointTask:async()=>{}, onProgress:()=>{}, applyResults:async()=>{ throw new Error('must not apply'); },
+    withCapacity:async()=>{ throw new Error('must not dispatch'); }, translate:async()=>{ throw new Error('must not translate'); },
+    receiptPollBudgetMs:25, receiptPollIntervalMs:10,
+  }), error => error?.code === 'repair_receipt_pending' && error?.retryable === true);
+  assert.ok(Date.now() - started < 500, 'foreground recovery must not wait for the old 12-minute deadline');
+  assert.ok(!actions.some(action => action.includes('/fail')), 'running paid receipt must remain resumable');
+});
+async function runCoordinator({ acknowledge = true, race = false, testProgress = false, partial = false, noSource = false, raceAtFinal = false } = {}) {
   let value = {}, writes = 0, epoch = 7, transientWrites = 0, firstAckSaw = 0;
-  const area = { async get(k) { return { [k]: structuredClone(value[k]) }; }, async set(v) { writes++; Object.assign(value, structuredClone(v)); } };
+  const area = { async get(k) { return { [k]: structuredClone(value[k]) }; }, async set(v) {
+    writes++; Object.assign(value, structuredClone(v));
+    if (raceAtFinal && Object.values(v).some(saved=>Object.values(saved?.runs || {}).some(run=>run.phase==='done'))) epoch=8;
+  } };
   const sessions = createTranslationSessionStore({ area: () => area });
   const tabId = 77000 + Math.floor(Math.random() * 100000), batch = ensureBatch(crypto.randomUUID(), tabId, 0);
   const ctxs = new Map(), queue = [], rendered = [], events = [];
-  const payloads = [0,1,2].map(i => ({ engine:'extension', mode:'lens_text', source:'ai', lang:'th', src:`https://fixture.invalid/${i}`, metadata:{ image_id:`p${i}` } }));
+  const payloads = (noSource ? [0,1,2,3] : [0,1,2]).map(i => ({ engine:'extension', mode:'lens_text', source:'ai', lang:'th', src:`https://fixture.invalid/${i}`, metadata:{ image_id:`p${i}` } }));
   for (const p of payloads) batch.items.set(p.metadata.image_id, { attempt:1, status:'queued', phase:'waiting', payload:p });
-  const api = async (_r, action) => action === 'seal' ? { phase:'repairing', pending:[] } : {};
+  const reports = [];
+  const api = async (_r, action, body) => {
+    if(action === 'pages') reports.push(body);
+    return action === 'seal' ? { phase:'repairing', pending:[] } : {};
+  };
   const co = createRepairCoordinator({ sessions, api, currentEpoch: () => epoch, currentSession: () => 'session', getBase: async () => 'http://fixture.invalid', getContext: id => ctxs.get(id), getCapabilitiesFor: async () => ({}), emit: (ev,d) => events.push({ ev,d }),
     insert: async (_tab, msg) => {
       if (msg.type !== 'OVERLAY_HTML') return { ok:true, applied:true };
@@ -139,7 +206,7 @@ async function runCoordinator({ acknowledge = true, race = false, testProgress =
       return new Promise((resolve,reject) => {
         const timer = setTimeout(() => reject(new Error('repair delivery serialized before the other pages were enqueued')), 120);
         queue.push({ resolve, timer });
-        if (queue.length === 3) {
+        if (queue.length === (partial ? 2 : 3)) {
           firstAckSaw = rendered.length;
           for (const entry of queue) { clearTimeout(entry.timer); entry.resolve({ ok:true, applied:true }); }
         }
@@ -149,6 +216,7 @@ async function runCoordinator({ acknowledge = true, race = false, testProgress =
       const rows = [];
       for (const p of payloads) {
         const saved = await options.getPage(p.metadata.image_id);
+        if (!saved) continue;
         rows.push({ id:`R${rows.length}`, pageId:saved.pageId, unitId:'g1', generationId:saved.generationId, sourceHash:saved.units[1].sourceHash, translation:'ซ่อมแล้ว' });
       }
       if (testProgress) {
@@ -159,21 +227,29 @@ async function runCoordinator({ acknowledge = true, race = false, testProgress =
         }
         await sessions.flush(); transientWrites = writes - before;
       }
+      if (partial) {
+        rows.pop();
+        await options.checkpointTask({id:'language-task',state:'done',wrongLanguageIds:['R2']});
+      }
       await options.applyResults(rows);
-      return { phase:'done', repaired:3, failedUnits:3, initialAccepted:3, unresolved:0, unverified:0, results:rows };
+      return { phase:'done', repaired:rows.length, failedUnits:3, initialAccepted:3,
+        unresolved:partial ? 1 : 0, unverified:0,
+        unavailablePages:reports.filter(r=>r.status === 'no_source').length, results:rows };
     }
   });
   const run = await co.registerBatch(batch,payloads);
   for (const p of payloads) {
+    if (noSource && p.metadata.image_id === 'p3') continue;
     const id = `gen:${p.metadata.image_id}`;
     const ctx = { jobId:id, imageKey:p.metadata.image_id, tabId, frameId:0, imgUrl:p.src, mode:'lens_text', source:'ai', lang:'th', sessionId:'session', settingsEpoch:7, generation:{ pageInstanceId:'instance' } };
     ctxs.set(id,ctx); const r = result();
     await co.capture(batch.id,{ stage:'prepared', payload:p, result:r, plan:{ route:'direct-local', ai:{ provider:'ollama',model:'fixture',thinking:'off' } }, units:translationUnits(r.lensDocument), jobId:id, operationId:`op:${id}` });
-    await co.capture(batch.id,{ stage:'finished', payload:p, jobId:id, accepted:[{ id:'g0',text:'ของดีเดิม' }], failures:[{ id:'g1',reason:'missing' }] });
+    await co.capture(batch.id,{ stage:'finished', payload:p, jobId:id, accepted:[{ id:'g0',text:'ของดีเดิม' }], failures:[{ id:'g1',reason:'wrong_language' }] });
     await co.markDelivered(ctx,true);
   }
+  const initialPresentations=[...batch.items.values()].map(item=>({...item.presentation}));
   await co.finishInitial(batch); await sessions.flush();
-  return { final:await sessions.get(run.id), rendered, firstAckSaw, transientWrites, events };
+  return { final:await sessions.get(run.id), rendered, firstAckSaw, transientWrites, events, batch, reports, initialPresentations };
 }
 await check('all repaired pages enter the bulk queue before waiting for the first DOM ACK', async () => {
   const r = await runCoordinator();
@@ -186,9 +262,31 @@ await check('provider delta telemetry never rewrites the whole session checkpoin
   const r = await runCoordinator({ acknowledge:false, testProgress:true });
   assert.equal(r.transientWrites, 0, 'request/validation telemetry must not produce checkpoint writes');
   const validation=r.events.filter(e=>e.d.phase==='repair_validation');assert.equal(validation.length,100);
-  assert.equal(validation[0].d.acceptedCount,1);assert.equal(validation[0].d.rejectedCount,2);
-  assert.equal(validation[0].d.wrongLanguageCount,2);
+  assert.equal(validation[0].d.counts.acceptedCount,1);assert.equal(validation[0].d.counts.rejectedCount,2);
+  assert.equal(validation[0].d.counts.wrongLanguageCount,2);
   assert.ok(r.final.summary.phase!=='repair_validation','validation must never replace the current UI phase');
+});
+await check('repair reports retain partial, missing-source and exact language counts after placement', async () => {
+  const r=await runCoordinator({partial:true,noSource:true});
+  assert.equal(r.final.phase,'done');assert.equal(r.rendered.length,2);
+  assert.equal(r.final.summary.repaired,2);assert.equal(r.final.summary.unresolved,1);
+  assert.equal(r.final.summary.wrongLanguageCount,1);assert.equal(r.final.summary.unavailablePages,1);
+  assert.match(r.batch.repair.label,/2\/3 fixed; 1 unresolved; 1 wrong target language/);
+  assert.match(r.batch.repair.label,/1 image\(s\) lack source/);
+  assert.equal(r.reports.find(p=>p.pageId === 'p3').status,'no_source');
+  assert(r.initialPresentations.slice(0,3).every(p=>p.wrongLanguageCount===1));
+  for(const id of ['p0','p1']) {
+    const p=r.batch.items.get(id).presentation;
+    assert.equal(p.accepted,2);assert.equal(p.applied,2);assert.equal(p.pending,0);
+    assert.equal(p.wrongLanguageCount,0);assert.equal(p.repairPhase,'done');
+  }
+  assert.equal(r.batch.items.get('p2').presentation.wrongLanguageCount,1);
+  const event=r.events.findLast(e=>e.ev==='repairProgress'&&e.d.phase==='done');
+  const {enrichOperationalTrace,shortenValue}=await from('src/shared/trace.js');
+  const compact=shortenValue(enrichOperationalTrace('repairProgress','..',event.d,'trace-fixture'));
+  assert.equal(compact.outcome,'partial');assert.equal(compact.owner,'extension');
+  assert.equal(compact.counts.unresolved,1);assert.equal(compact.counts.wrongLanguageCount,1);
+  assert.equal(compact.counts.unavailablePages,1);assert.equal(compact.placement.appliedRepairedUnits,2);
 });
 await check('an ambiguous ACK remains apply_pending instead of deleting the checkpoint', async () => {
   const r = await runCoordinator({ acknowledge:false });
@@ -201,6 +299,11 @@ await check('settings change during delivery invalidates the run before terminal
   assert.equal(r.final.phase, 'cancelled');
   assert.deepEqual(r.final.pages, {});
   assert.ok(!r.events.some(e => e.ev === 'repairPatch' && e.d.applied === true));
+});
+await check('settings change during final repair commit cannot emit stale done', async () => {
+  const r=await runCoordinator({raceAtFinal:true});
+  assert.equal(r.final.phase,'cancelled');
+  assert(!r.events.some(e=>e.ev==='repairProgress'&&e.d.phase==='done'));
 });
 await check('partial and grouping diagnostics are trace-only; render refusal retains warnings', async () => {
   let code = await readFile(new URL('src/content/overlay/local-render.js',root),'utf8');

@@ -166,7 +166,7 @@ class OpenAIAdapter:
                     "reasoning": {
                         "supported": True,
                         "mandatory": False,
-                        "control": "provider",
+                        "control": "levels",
                         "supported_efforts": ["none"],
                     }
                 },
@@ -221,7 +221,12 @@ class OpenAIAdapter:
         except ValueError:
             return ModelListResult(status="error", http_status=response.status_code, error="invalid_json")
         models = sorted(set(filter_model_items(items)), key=str.lower)
-        return ModelListResult(tuple(models), "valid", http_status=response.status_code)
+        candidates = {model: {
+            "eligibility": "usable",
+            "evidence": "openai_account_gpt_o_chat_filter",
+        } for model in models}
+        return ModelListResult(tuple(models), "valid", http_status=response.status_code,
+                               candidates=candidates)
 
 ADAPTER = OpenAIAdapter()
 SPEC = ProviderSpec(PROVIDER_ID, "openai_chat_completions", DEFAULT_MODEL,

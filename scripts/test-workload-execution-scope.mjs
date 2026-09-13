@@ -32,10 +32,27 @@ await check('missing or wrong model provenance does not survive under a confirme
   const s=await createWorkloadController(await seedProfile(opts(),{actualIdentity})).open(opts());assert.equal(s.next(rows,0).estimate.samples,0);
  }
 });
-await check('unknown capability cannot borrow past cache-selected structure targets',async()=>{
+await check('unknown capability explicitly plans markers and retains matching profile',async()=>{
  const o=opts();o.ai.model_capabilities={};
  const s=await createWorkloadController(await seedProfile(o,{actualIdentity:'model-a|compact_markers_v1'})).open(o);
- assert.equal(s.next(rows,0).estimate.recordTarget,10);assert.equal(s.next(rows,0).estimate.planningContract,'unconfirmed');
+ assert.equal(s.next(rows,0).estimate.recordTarget,2);assert.equal(s.next(rows,0).estimate.planningContract,'compact_markers_v1');
+ assert.equal(s.snapshot().samples,132);
+});
+await check('unknown HF capability carries observed learning into the next image',async()=>{
+ const o=opts();o.ai.provider='huggingface';o.ai.model_capabilities={};
+ const io=store(),c=createWorkloadController(io),a=await c.open(o),batch=a.next(rows,0);
+ a.observe({units:batch.units,answer:answer(batch.units,{selectedContract:'compact_markers_v1'}),plan:batch.estimate});
+ assert.equal(a.snapshot().samples,1);
+ const b=await c.open(o);assert.equal(b.snapshot().samples,1);
+ await c.flush();
+ const reopened=await createWorkloadController(io).open(o);assert.equal(reopened.snapshot().samples,1);
+});
+await check('auto model remains isolated despite a concrete marker contract',async()=>{
+ const o=opts();o.ai.model='auto';o.ai.model_capabilities={};
+ const c=createWorkloadController(store()),a=await c.open(o),batch=a.next(rows,0);
+ a.observe({units:batch.units,answer:answer(batch.units,{selectedContract:'compact_markers_v1'}),plan:batch.estimate});
+ const b=await c.open(o);assert.equal(b.snapshot().samples,0);
+ assert.equal(b.next(rows,0).estimate.planningContract,'compact_markers_v1');
 });
 await check('explicit supported=false has its own concrete marker scope',async()=>{
  const c=createWorkloadController(store()),json=await c.open(opts()),o=opts();o.ai.model_capabilities.structured_output.supported=false;

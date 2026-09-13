@@ -22,6 +22,7 @@ function metaController({ provider = "openrouter", model = "saved-model", fetch 
   let profileWrites = 0;
   let storageWrites = 0;
   let fallbackCalls = 0;
+  let connectCalls = 0;
   const controller = createProviderMetaController({
     els, state,
     api: {
@@ -34,28 +35,34 @@ function metaController({ provider = "openrouter", model = "saved-model", fetch 
     provider: { isLocal: (id) => id === "ollama", label: (id) => id, protocolLabel: () => "test" },
     profile: { selectModel: () => profileWrites++, persist: async () => profileWrites++, saveCredential: async () => profileWrites++ },
     prompt: { render: async () => {}, scheduleSave: () => {} },
-    local: { savedModel: () => model, showFallback: () => fallbackCalls++, renderCapacity: () => {}, persistCapacity: async () => {} },
+    local: { savedModel: () => model, showFallback: () => fallbackCalls++,
+      connect: async () => { connectCalls++; }, renderCapacity: () => {}, persistCapacity: async () => {} },
     usage: {}, persist: async () => storageWrites++, normalizeUrl: (x) => x,
     setModelOptions: (models, { keepValue } = {}) => {
-      const values = models.map(String);
+      const values = models.map((item) => typeof item === "object" ? String(item.id || "") : String(item));
       els.aiModel.value = values.includes(keepValue) ? keepValue : (values[0] || "");
     },
     setFieldMessage: () => {}, setStatus: () => {}, toggleUi: () => {},
   });
-  return { controller, els, state, writes: () => ({ profileWrites, storageWrites, fallbackCalls }) };
+  return { controller, els, state,
+    writes: () => ({ profileWrites, storageWrites, fallbackCalls, connectCalls }) };
 }
 
-// Local startup refresh is display-only and must never contact the runtime.
+// Local startup performs one automatic discovery/verification. A verified live
+// snapshot suppresses duplicate refreshes.
 {
   let calls = 0;
   const t = metaController({ provider: "ollama", model: "qwen", fetch: async () => { calls++; } });
   await t.controller.refresh();
   assert.equal(calls, 0);
   assert.equal(t.els.aiModel.value, "qwen");
-  t.state.lastAiResolve = { provider: "ollama", models_verified: true, models: ["qwen", "llama"] };
+  assert.equal(t.writes().connectCalls, 1);
+  t.state.lastAiResolve = { provider: "ollama", models_verified: true,
+    models: ["qwen", "llama"], verified_model: "qwen" };
+  t.state.aiModelBlocked = false;
   await t.controller.refresh();
-  assert.equal(t.writes().fallbackCalls, 1,
-    "model-only refresh erased a successful Local Connect snapshot");
+  assert.equal(t.writes().connectCalls, 1,
+    "a verified Local snapshot started a duplicate model verification");
 }
 
 // Concurrent/repeated Cloud refreshes share one live catalogue request and
@@ -76,6 +83,10 @@ function metaController({ provider = "openrouter", model = "saved-model", fetch 
     return {
       provider: "openrouter", backend_supported: true, key_status: "valid",
       models_verified: true, models_source: "live", models: ["saved-model", "other-model"],
+      model_candidates: [
+        { id: "saved-model", eligibility: "usable" },
+        { id: "other-model", eligibility: "usable" },
+      ],
     };
   } });
   const first = t.controller.refresh();
@@ -86,7 +97,7 @@ function metaController({ provider = "openrouter", model = "saved-model", fetch 
   assert.equal(probeCalls, 1);
   assert.equal(t.els.aiModel.value, "saved-model");
   assert.equal(t.state.lastAiProbe?.status, "passed");
-  assert.deepEqual(t.writes(), { profileWrites: 0, storageWrites: 0, fallbackCalls: 0 });
+  assert.deepEqual(t.writes(), { profileWrites: 0, storageWrites: 0, fallbackCalls: 0, connectCalls: 0 });
   await t.controller.refresh();
   assert.equal(resolveCalls, 1, "TTL cache did not suppress an unchanged resolve");
   assert.equal(probeCalls, 1, "TTL cache did not suppress an unchanged selected-model probe");
@@ -197,7 +208,7 @@ const { activateAiProfileSafely } = await import(
   const els = {
     mode: option("lens_text"), sources: option("ai"), aiProvider: { ...option("openrouter"), disabled: false },
     aiKey: { ...option("key"), disabled: false }, aiModel: control(), aiBaseUrl: control(),
-    aiLocalTest: control(), aiLocalModelId: control(), aiThinking: { ...control(), value: "off", options: [] },
+    aiLocalTest: control(), aiThinking: { ...control(), value: "off", options: [] },
     aiPrompt: control(), aiPromptMode: control(), aiPromptReset: control(),
     aiPromptStudio: control(), translatePageBtn: control(),
   };
@@ -208,7 +219,7 @@ const { activateAiProfileSafely } = await import(
   });
   ui.toggle();
   for (const control of [els.aiProvider, els.aiKey, els.aiModel, els.aiBaseUrl,
-    els.aiLocalTest, els.aiLocalModelId, els.aiPrompt,
+    els.aiLocalTest, els.aiPrompt,
     els.aiPromptMode, els.aiPromptReset, els.aiPromptStudio])
     assert.equal(control.disabled, false, "profile recovery control must remain enabled");
   assert.equal(els.aiThinking.disabled, true,
@@ -220,4 +231,4 @@ const { activateAiProfileSafely } = await import(
     "corrupt AI profile disabled non-AI translation");
 }
 
-console.log("Popup lifecycle passed: cache-first rendering, strict fail-closed AI, deduped health, explicit Local discovery.");
+console.log("Popup lifecycle passed: cache-first rendering, strict fail-closed AI, deduped health, automatic Local discovery.");

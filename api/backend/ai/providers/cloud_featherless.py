@@ -44,6 +44,7 @@ POLICY = OpenAIProviderPolicy(
     output_budget_field="max_tokens",
     reasoning_policy="requires_verified_capability",
     model_filter=filter_model_items,
+    catalogue_evidence="featherless_current_plan_conversational",
     list_params=LIST_PARAMS,
 )
 ADAPTER = OpenAIProviderAdapter(POLICY)

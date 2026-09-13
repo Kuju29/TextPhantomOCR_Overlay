@@ -247,8 +247,10 @@ assert.equal(emptyPromptSnapshot.settings.aiModel, "strict-model");
 assert.equal(emptyPromptSnapshot.settings.aiPrompt, "strict full style",
   "the canonical full style must win over stale flat prompt data");
 storage.aiProfilePromptsV1 = {};
-await assert.rejects(() => resolveJobAiProfile(settings, { language: "th" }),
-  (error) => error.code === "AI_PROMPT_REQUIRED" && error.requestDispatched === false);
+const builtInPromptSnapshot = await resolveJobAiProfile(settings, { language: "th" });
+assert.equal(builtInPromptSnapshot.settings.aiPrompt, "");
+assert.equal(builtInPromptSnapshot.settings.aiPromptMode, "replace",
+  "a missing editable prompt must select the built-in style without blocking dispatch");
 storage.aiProfilePromptsV1 = { [canonicalPromptKey]: { text: "strict full style", mode: "replace" } };
 const flatMutatedSnapshot = await resolveJobAiProfile({
   ...settings,
@@ -301,7 +303,7 @@ assert.equal(autoAiSettingsIssue({
 assert.match(contextMenuSource, /has_env_ai_key/);
 assert.match(contextMenuSource, /const usesAi = mode === "lens_text" && preliminarySource === "ai";/,
   "preflight must cover both manual and Auto text.ai paths");
-assert.match(contextMenuSource, /const profileSnapshot = usesAi[\s\S]*?resolveJobAiProfile/,
+assert.match(contextMenuSource, /(?:const|let) profileSnapshot = usesAi[\s\S]*?resolveJobAiProfile/,
   "AI profile resolution itself must be behind the text.ai boundary");
 assert.match(contextMenuSource, /readFullSettings\(\{ lang: effectiveLang \}\)/);
 assert.match(contextMenuSource, /if \(options\?\.propagateErrors === true\) throw e;/,
@@ -343,7 +345,8 @@ assert.deepEqual(
 );
 assert.deepEqual(
   buildRatePayload("lens_text", "ai", {
-    ...freshRateSettings, rateLimitEnabled: true, rateRpm: 30, rateBurst: 4,
+    ...freshRateSettings, rateLimitEnabled: true, rateProfile: "balanced",
+    rateRpm: 30, rateBurst: 4,
   }),
   { enabled: true, rpm: 30, burst: 4 },
   "manual pacing activates only after explicit opt-in with rpm > 0",

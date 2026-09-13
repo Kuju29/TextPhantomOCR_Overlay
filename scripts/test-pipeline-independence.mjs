@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {createLensDirectPath,rawTreeFingerprint} from '../src/background/pipeline/lens-direct.js';
 import * as scheduler from '../src/background/scheduler.js';
+import { fetchImageDataUriFromUrl } from '../src/background/images.js';
+import { imageErrorMessage } from '../src/background/error-message.js';
 const recorded=JSON.parse(await readFile(new URL('./fixtures/lens-display-recorded.json',import.meta.url),'utf8'));
 const deferred=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};};
 const tick=()=>new Promise(r=>setTimeout(r,0));
@@ -55,5 +57,53 @@ for(const source of ['original','translated']) {
  scheduler.releaseRejected(key,0);const lower=scheduler.describe(key).window;
  scheduler.setLaneCapacityHint(key,4);assert(scheduler.describe(key).window<=lower,'Repeated hint cannot erase backpressure');
  console.log('PASS repeated grouping capacity hints do not erase learned backpressure');checks++;
+}
+// Exercise the actual URL fetch -> direct Lens decline -> public image error
+// boundary. The live 12.5 failure lost HTTP404 when it became a plain string.
+{
+ const originalFetch=globalThis.fetch;
+ let lensCalls=0,fetchCalls=0;
+ const pipeline=createLensDirectPath({fetchFromUrl:fetchImageDataUriFromUrl,
+  fetchFromTab:async()=>{throw Error('404 must not trigger a speculative tab/canvas recovery');},
+  fetchLensRaw:async()=>{lensCalls++;throw Error('no image must reach Lens');},
+  runStage:async(_key,fn)=>fn(),markPhase(){},trace(){},traceLayout(){},getTrace(){return '';},log:{warn(){}}});
+ const payload={mode:'lens_text',source:'ai',render:{lensDocument:true},naturalSize:{width:629,height:900},
+  src:'https://fixture.invalid/page.jpg?private=secret',context:{tp_trace:'image-read-trace'},metadata:{image_id:'image-read-id',batch_id:'batch-read-id'}};
+ try {
+  globalThis.fetch=async()=>{fetchCalls++;return new Response('private source error body',{status:404});};
+  const decline={};
+  assert.equal(await pipeline('http://fixture',payload,{tabId:1,jobId:'job-read-id',decline}),null);
+  assert.match(decline.reason,/could not read the image bytes: HTTP 404/);
+  assert.equal(decline.error.code,'IMG_SOURCE_UNREACHABLE');
+  assert.equal(decline.error.status,404);
+  const message=imageErrorMessage({traceId:'image-read-trace'},decline.error);
+  assert.equal(message.error.code,'IMG_SOURCE_UNREACHABLE');
+  assert.equal(message.error.stage,'image_read');
+  assert.equal(message.error.httpStatus,404);
+  assert.equal(message.error.imageId,'image-read-id');
+  assert.equal(message.error.jobId,'job-read-id');
+  assert.equal(message.error.batchId,'batch-read-id');
+  assert.equal(message.error.traceId,'image-read-trace');
+  assert.equal(message.error.retryable,false);
+  assert.doesNotMatch(JSON.stringify(message),/PROCESSING_FAILED|private|secret/);
+  assert.equal(fetchCalls,1);assert.equal(lensCalls,0);
+
+  globalThis.fetch=async()=>{throw new TypeError('Failed to fetch private source');};
+  const network={};await pipeline('http://fixture',payload,{tabId:1,decline:network});
+  assert.equal(network.error.code,'IMG_READ_FAILED');
+  assert.equal(imageErrorMessage({},network.error).error.stage,'image_read');
+  assert.equal(lensCalls,0);
+
+  globalThis.fetch=async()=>new Response('not an image body',{status:200,headers:{'content-type':'text/html'}});
+  const malformed={};await pipeline('http://fixture',payload,{tabId:1,decline:malformed});
+  assert.equal(malformed.error.code,'IMG_READ_FAILED');
+  assert.equal(malformed.error.retryable,false,'invalid image content must retain its permanent classification');
+  assert.equal(lensCalls,0);
+
+  const controller=new AbortController();controller.abort();
+  await assert.rejects(pipeline('http://fixture',payload,{tabId:1,signal:controller.signal}),{name:'AbortError'});
+  assert.equal(lensCalls,0,'cancellation must not become a retryable read failure');
+ } finally {globalThis.fetch=originalFetch;}
+ console.log('PASS image acquisition errors retain stage, HTTP status and identity; cancellation remains cancellation');checks++;
 }
 console.log(`Pipeline independence: ${checks}/${checks} PASS; real scheduler and pipeline, mocked external I/O.`);

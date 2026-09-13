@@ -127,7 +127,7 @@ _NUMERIC_TOKEN_COUNTERS = {
 }
 _PRIVATE_CONTENT_NAMES = {
     "ai_text", "body", "character_sheet", "content", "input", "memo",
-    "messages", "original_text_full", "paragraphs", "prev_context", "prompt",
+    "messages", "original_text_full", "paragraphs", "prev_context", "page_context", "pagecontext", "prompt",
     "prompt_editable", "prompt_override", "raw", "series_state", "source_text",
     "speakers", "system_dynamic", "system_static", "system_text", "text",
     "translated_text", "user_parts", "source_chars", "target_source_chars", "estimated_response_chars",

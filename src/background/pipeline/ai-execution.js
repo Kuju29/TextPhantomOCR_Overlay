@@ -1,3 +1,4 @@
+import { providerLearningSample } from "../../shared/ai/execution-timing.js";
 import { updateImagePresentation } from "../batches.js";
 import { attachTpError } from "../../shared/error-contract.js";
 import { classifyAiRuntime } from "../../shared/ai-settings-contract.js";
@@ -271,8 +272,9 @@ export function createAiExecution({ log, markJobPhase, traceUnitLayout, onCheckp
         traceId,
       );
   
-      const started = Date.now();
-      let laneStarted = started;
+      const started = performance.now();
+      let repaired = false;
+      let sampleSlot = slot;
       const telemetry = {};
       let slotHeld = true;
       try {
@@ -280,7 +282,8 @@ export function createAiExecution({ log, markJobPhase, traceUnitLayout, onCheckp
           // A repair must not occupy scarce provider capacity while sibling
           // images are still making their first attempt. Release, join the
           // current batch-pass barrier, then reacquire for the single repair.
-          releaseSuccess(key, Math.max(1, Date.now() - laneStarted));
+          releaseSuccess(key, 0, { sampleWindow: sampleSlot?.window });
+          repaired = true;
           slotHeld = false;
           const barrierRequired = Boolean(String(batchId || "").trim());
           const barrierBatch = getBatch(batchId);
@@ -311,7 +314,7 @@ export function createAiExecution({ log, markJobPhase, traceUnitLayout, onCheckp
           const repairSlot = await acquire(key, signal);
           const repairQueueWaitMs = Number(repairSlot?.waitMs) || 0;
           accumulatedQueueWaitMs += repairQueueWaitMs;
-          laneStarted = Date.now();
+          sampleSlot = repairSlot;
           slotHeld = true;
         };
         const done = await runLocalAi(
@@ -330,40 +333,21 @@ export function createAiExecution({ log, markJobPhase, traceUnitLayout, onCheckp
         // Clean/partial-complete images never enter beforeRepair, so publish
         // their initial terminal boundary before the caller starts rendering.
         markBatchInitialAi(batchId, barrierImageKey);
-        const roundTripMs = Date.now() - started;
-        const serverWaitMs =
-          (Number.isFinite(telemetry.rateWaitMs) ? telemetry.rateWaitMs : 0) +
-          (Number.isFinite(telemetry.admissionWaitMs)
-            ? telemetry.admissionWaitMs
-            : 0);
+        const roundTripMs = Math.max(0, performance.now() - started);
+        const serverWaitMs = Number.isFinite(telemetry.rateWaitMs) && Number.isFinite(telemetry.admissionWaitMs)
+          ? telemetry.rateWaitMs + telemetry.admissionWaitMs : null;
         const replayed = telemetry.replayed === true;
-        const reportedProviderMs =
-          Number.isFinite(telemetry.providerMs) && telemetry.providerMs > 0
-            ? telemetry.providerMs
-            : 0;
-        const providerMs = replayed
-          ? 0
-          : reportedProviderMs > 0
-            ? reportedProviderMs
-            : Math.max(1, Date.now() - laneStarted - serverWaitMs);
-        const serverTotalMs =
-          Number.isFinite(telemetry.serverTotalMs) && telemetry.serverTotalMs > 0
-            ? telemetry.serverTotalMs
-            : 0;
-        const transportProxyMs =
-          replayed || serverTotalMs <= 0
-            ? 0
-            : Math.max(0, roundTripMs - serverTotalMs);
-        const latencySource = replayed
-          ? "idempotent-replay"
-          : reportedProviderMs > 0
-            ? "server.providerMs"
-            : "roundTrip-minus-serverWait";
+        const providerMs = Number.isFinite(telemetry.providerMs) ? telemetry.providerMs : null;
+        const reportedProviderMs = providerMs;
+        const serverTotalMs = Number.isFinite(telemetry.serverTotalMs) ? telemetry.serverTotalMs : null;
+        const learningMs = providerLearningSample(telemetry, { repaired });
+        const latencySource = replayed ? "idempotent-replay" : providerMs === null
+          ? "unknown" : plan.route === "direct-local" ? "local.fetch-to-terminal" : "server.providerMs";
         // A ledger replay did not call the provider now. Do not pollute the
         // scheduler's latency telemetry with the original generation's duration.
         if (slotHeld) {
           if (replayed) releaseReplay(key);
-          else releaseSuccess(key, providerMs);
+          else releaseSuccess(key, learningMs, { sampleWindow: sampleSlot?.window, sampleWorkload: telemetry.sampleWorkload || {} });
           slotHeld = false;
         }
         const rpmNow = Number(telemetry.rate?.rpm) || 0;
@@ -383,7 +367,9 @@ export function createAiExecution({ log, markJobPhase, traceUnitLayout, onCheckp
             roundTripMs,
             serverWaitMs,
             serverTotalMs,
-            transportProxyMs,
+            providerSamples: telemetry.providerSamples ?? 0,
+            providerTimingComplete: telemetry.providerTimingComplete === true,
+            learningSampleMs: learningMs || null,
             replayed,
             latencySource,
             rpmNow,
@@ -446,7 +432,8 @@ export function createAiExecution({ log, markJobPhase, traceUnitLayout, onCheckp
             imageId,
             queueWaitMs,
             accumulatedQueueWaitMs,
-            providerMs: Date.now() - started,
+            providerMs: Number.isFinite(telemetry.providerMs) ? telemetry.providerMs : null,
+            roundTripMs: Math.max(0, performance.now() - started),
             status,
             backpressure,
             gated,

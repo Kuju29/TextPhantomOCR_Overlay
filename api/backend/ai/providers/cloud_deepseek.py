@@ -37,6 +37,7 @@ POLICY = OpenAIProviderPolicy(
     reasoning_policy="requires_verified_capability",
     model_filter=filter_model_items,
     model_resolver=resolve_model,
+    catalogue_evidence="deepseek_account_model_catalogue",
 )
 class DeepSeekAdapter(OpenAIProviderAdapter):
     """DeepSeek owns a documented thinking toggle; default it to Off."""
@@ -88,7 +89,7 @@ class DeepSeekAdapter(OpenAIProviderAdapter):
         }
         return ModelListResult(
             models=listed.models, status=listed.status, http_status=listed.http_status,
-            error=listed.error, capabilities=capabilities,
+            error=listed.error, capabilities=capabilities, candidates=listed.candidates,
         )
 
 ADAPTER = DeepSeekAdapter(POLICY)

@@ -1,3 +1,5 @@
+import { selectPageContext } from "../../shared/ai/page-context.js";
+import { summarizeExecutionTiming } from "../../shared/ai/execution-timing.js";
 import { reportTranslationFailure } from "../../shared/diagnostic-policy.js";
 // Per-image AI translation orchestration. Queueing, batch barriers and provider
 // capacity remain owned by jobs.js; this module owns one page-level translation
@@ -25,6 +27,7 @@ import {
 import { aiWireTraceEnabled, createAiWireRecorder } from "../ai/wire-trace.js";
 import { classifyAiOutcomeIds } from "./ai-outcome-classification.js";
 import { workloadController as defaultWorkloadController } from "../ai/workload-controller.js";
+import { WORKLOAD_POLICY } from "../../shared/ai/workload/model.js";
 
 import { workloadOperationId } from "../ai/workload-identity.js";
 import { pageImageEnabled } from "../../shared/page-image-policy.js";
@@ -63,8 +66,12 @@ export async function diagnosticFingerprints(
   if (!globalThis.__tpTraceFingerprintKey)
     globalThis.__tpTraceFingerprintKey = crypto.getRandomValues(new Uint8Array(32));
   const key = globalThis.__tpTraceFingerprintKey;
-  const fingerprint = async (value) => {
-    const source = new TextEncoder().encode(String(value || ""));
+  const fingerprints = new Map();
+  const fingerprint = (value) => {
+    const text = String(value || "");
+    if (fingerprints.has(text)) return fingerprints.get(text);
+    const pending = (async () => {
+    const source = new TextEncoder().encode(text);
     const keyed = new Uint8Array(key.length + source.length);
     keyed.set(key);
     keyed.set(source, key.length);
@@ -72,6 +79,10 @@ export async function diagnosticFingerprints(
     return Array.from(new Uint8Array(valueDigest), (byte) =>
       byte.toString(16).padStart(2, "0"),
     ).join("");
+    })();
+    // Scope reuse to this page and trace key; keep no cross-page text cache.
+    fingerprints.set(text, pending);
+    return pending;
   };
   const source = await mapBounded(
     units,
@@ -281,21 +292,37 @@ export async function translateLensPage({
   let statusBatch = 0;
   const status = patch => { try { onStatus(patch); } catch {} };
   const checkpoint = async (stage, data = {}) => {
-    await onCheckpoint({stage, payload, result, plan, units, jobId,
-      operationId:operationBase, imageId:correlation.imageId, ...data});
+    const checkpointStartedAt = clock();
+    let checkpointFailed = true;
+    try {
+      await onCheckpoint({stage, payload, result, plan, units, jobId,
+        operationId:operationBase, imageId:correlation.imageId, ...data});
+      checkpointFailed = false;
+    } finally {
+      // Diagnostics must never change checkpoint success/failure semantics.
+      try { trace("aiCheckpointTiming", {schema:"tp.audit/1", event:"checkpoint_timing",
+        reason:stage, scope:{operationId:data.operationId || operationBase,
+          imageId:correlation.imageId, batchId:cancelBatchId, jobId},
+        timing:{checkpointMs:Math.max(0, clock() - checkpointStartedAt)},
+        counts:{failed:Number(checkpointFailed)}}, traceId); } catch {}
+    }
     for (const u of data.accepted || []) if (expectedRequestIds.includes(String(u.id))) acceptedStatusIds.add(String(u.id));
     const common = {total:sendable.length, accepted:acceptedStatusIds.size,
       pending:sendable.length-acceptedStatusIds.size};
     if(stage === 'prepared') status({...common,applied:0,provider:plan.ai.provider,model:plan.ai.model,
       fallbackCount:Number(result?.diagnosticSummary?.orientationFallbackCount || 0)});
     else if(stage === 'dispatch') status({...common,phase:'usage_pending',unitCount:data.ids?.length || 0,batchIndex:++statusBatch,contract:data.workload?.planningContract || 'unconfirmed'});
-    else status(common);
+    else {
+      status(common);
+      if (data.nextDispatch) status({...common,phase:'usage_pending',unitCount:data.nextDispatch.ids.length,
+        batchIndex:++statusBatch,contract:data.nextDispatch.workload?.planningContract || 'unconfirmed'});
+    }
   };
   const workloadController = dependencies.workloadController || defaultWorkloadController;
   const workloadStartedAt = clock();
-  const workloadSession = await workloadController.open({ ai: plan.ai, route: plan.route,
+  const workloadSession = await workloadController.open({ ai: plan.ai, route: plan.route, pageUnits: sendable,
     sourceLang: String(doc?.languages?.source || ""), targetLang: String(payload.lang || ""),
-    image: pageImageEnabled(plan.ai?.send_image) });
+    image: pageImageEnabled(plan.ai?.send_image), singleRequest: false });
   const workloadOpenMs = Math.max(0, clock() - workloadStartedAt);
   // Capture the same snapshot that selected the workload before any async
   // metadata refresh can change what the transport or repair sees.
@@ -311,10 +338,16 @@ export async function translateLensPage({
   await checkpoint("prepared");
   const checkpointPreparedMs = Math.max(0, clock() - preparedCheckpointStartedAt);
 
-  const translateOne = (selectedUnits, operationId, workload, recorder = wireTrace) =>
-    translateUnits(selectedUnits, {
+  const executionTimings = [];
+  const recordExecutionTiming = result => {
+    executionTimings.push(result);
+    if (telemetry) Object.assign(telemetry, summarizeExecutionTiming(executionTimings));
+  };
+  const translateOne = async (selectedUnits, operationId, workload, recorder = wireTrace) => {
+    try {
+      const answer = await translateUnits(selectedUnits, {
       route: plan.route,
-      ai: { ...plan.ai, workload },
+      ai: { ...plan.ai, workload, page_context: selectPageContext(sendable, selectedUnits) },
       rate: payload?.rate || null,
       unlimited: payload?.limits?.aiUnlimited === true,
       imageDataUri: pageImageEnabled(plan.ai?.send_image)
@@ -336,21 +369,57 @@ export async function translateLensPage({
       capabilities,
       wireTrace: recorder,
     });
+      recordExecutionTiming(answer);
+      if (telemetry) telemetry.sampleWorkload = executionTimings.length === 1
+        ? {unitCount:selectedUnits.length, sourceChars:selectedUnits.reduce((sum,unit)=>sum+Array.from(String(unit?.text || "")).length,0)}
+        : null;
+      return answer;
+    } catch (error) {
+      // Even an unconfirmed dispatch invalidates a complete timing sample.
+      recordExecutionTiming({ failed: true, replayed: error?.replayed === true,
+        meta: error?.providerResponded === false ? {} :
+          error?.generationMeta || error?.structuralDetails?.generationMeta ||
+          (error?.diagnostics?.providerTerminalComplete === true ? error.diagnostics : {}) });
+      throw error;
+    }
+  };
 
   // Re-plan only the unsent units after each measured generation. Never resend
   // successful units, change their IDs, or turn one attempt into a hidden retry.
   const translate = async (selectedUnits, operationId) => {
     const translations = [], missing = [], memoryCharacters = [], memoryGlossary = [], subBatches = [];
+    const unsentIds = [];
     let offset = 0;
+    let preparedDispatch = null;
+    let consecutiveCapacityFailures = 0;
+    let circuitOpened = false;
+    let circuitReason = '';
+    const markRemainingUnsent = async (reason) => {
+      const remaining = selectedUnits.slice(offset);
+      if (!remaining.length) return;
+      const ids = remaining.map(unit => String(unit.id));
+      unsentIds.push(...ids);
+      missing.push(...ids);
+      circuitOpened = true;
+      circuitReason = reason;
+      await checkpoint("progress", {
+        failures: ids.map(id => ({ id, reason: "not_sent" })),
+        circuit: { open: true, reason, consecutiveCapacityFailures },
+      });
+      offset = selectedUnits.length;
+    };
     try {
       while (offset < selectedUnits.length) {
         if (isCancelled()) throw signal?.reason || new DOMException("Aborted", "AbortError");
-        const chunk = workloadSession.next(selectedUnits, offset);
+        const priorDispatch = preparedDispatch;
+        preparedDispatch = null;
+        const chunk = priorDispatch?.chunk || workloadSession.next(selectedUnits, offset);
         const index = subBatches.length;
         const single = offset === 0 && chunk.units.length === selectedUnits.length;
-        const subOperationId = await workloadOperationId(operationId, index, chunk.units, workloadSession.key);
+        const subOperationId = priorDispatch?.operationId || await workloadOperationId(operationId, index, chunk.units, workloadSession.key);
         let recorder = wireTrace;
-        if (subOperationId !== operationId) {
+        const childTrace = subOperationId !== operationId;
+        if (childTrace) {
           recorder = createAiWireRecorder({ enabled: aiWireTraceEnabled(capabilities, plan.route),
             operationId: subOperationId, traceId, identity: { ...correlation, operationId: subOperationId },
             apiBase: base, relay: plan.route === "direct-local" ? capabilities?.aiWireTraceRelay : null });
@@ -374,7 +443,7 @@ export async function translateLensPage({
         let answer;
         try {
           const dispatchCheckpointStartedAt = clock();
-          await checkpoint("dispatch", { ids: chunk.units.map(u => String(u.id)), operationId: subOperationId, workload:chunk.estimate });
+          if (!priorDispatch) await checkpoint("dispatch", { ids: chunk.units.map(u => String(u.id)), operationId: subOperationId, workload:chunk.estimate });
           const checkpointDispatchMs = Math.max(0, clock() - dispatchCheckpointStartedAt);
           if (isCancelled()) throw signal?.reason || new DOMException("Aborted", "AbortError");
           trace("aiPreProviderTiming", {
@@ -396,46 +465,133 @@ export async function translateLensPage({
           }, traceId);
           answer = await translateOne(chunk.units, subOperationId, workload, recorder);
         } catch (error) {
-          if (!isCancelled()) trace("aiModelWorkload", { event: "observation", operationId: subOperationId,
-            ...workloadSession.observe({ units: chunk.units, error, plan: estimate }) }, traceId);
-          const known = /invalid_model_output|output_budget_exhausted|wrong_language|output_contract|invalid_result_schema/.test(String(error?.code || ""));
-          if (!isCancelled()) await checkpoint("progress", {
-            failures: known ? chunk.units.map(u => ({ id: String(u.id), reason: error.code === "output_budget_exhausted" ? "length" : "malformed" })) : [],
-            blocked: known ? [] : chunk.units.map(u => String(u.id)),
+          if (isCancelled()) {
+            if (childTrace) await recorder?.("terminal", { state: "cancelled", stage: "provider_generation",
+              code: String(error?.code || "cancelled"), terminal: true });
+            throw error;
+          }
+          const observed = workloadSession.observe({ units: chunk.units, error, plan: estimate });
+          trace("aiModelWorkload", { event: "observation", operationId: subOperationId, ...observed }, traceId);
+          const code = String(error?.code || "");
+          const generated = error?.providerResponded === true || error?.requestDispatched === true ||
+            Number(error?.generationAttempts || 0) > 0 || Number(error?.providerAttempts || 0) > 0 ||
+            observed.outcome === "length" || observed.outcome === "structure";
+          const recoverableGeneratedFailure = generated &&
+            /invalid_model_output|output_budget_exhausted|wrong_language|output_contract|invalid_result_schema/.test(code);
+          // A typed upstream HTTP failure returned by the API ends this API
+          // invocation. It does not establish provider billing or downstream
+          // generation termination. Pool it once at the batch barrier; do not
+          // retry this initial call or infer finality from an outer 502/504.
+          const terminalGatewayFailure = plan.route === "server" &&
+            code === "provider_timeout" && error?.upstreamStatus === 504 &&
+            error?.providerFailureKind === "http_status" && error?.requestDispatched === true;
+          await checkpoint("progress", {
+            failures: terminalGatewayFailure ? chunk.units.map(u => ({ id: String(u.id), reason: "provider_http_error" }))
+              : recoverableGeneratedFailure ? chunk.units.map(u => ({ id: String(u.id),
+              reason: code === "output_budget_exhausted" ? "length" : code === "wrong_language_output" ? "wrong_language" : "malformed" })) : [],
+            blocked: recoverableGeneratedFailure || terminalGatewayFailure ? [] : chunk.units.map(u => String(u.id)),
           });
-          throw error;
+          if (childTrace) await recorder?.("terminal", { state: "failed", stage: "provider_generation",
+            code: code || "provider_generation_failed", providerResponded: generated,
+            providerAttempts: Number(error?.providerAttempts || 0),
+            generationAttempts: Number(error?.generationAttempts || 0), terminal: true });
+          if (!recoverableGeneratedFailure) throw error;
+          const ids = chunk.units.map(unit => String(unit.id));
+          missing.push(...ids);
+          subBatches.push({ index, operationId: subOperationId, unitCount: chunk.units.length,
+            outputTarget: estimate.target, sourceChars: estimate.sourceChars,
+            recordTarget: estimate.recordTarget, predictedOutput: estimate.predictedOutput,
+            splitReason: chunk.splitReason, failed: true, errorCode: code || "generated_output_invalid",
+            outcome: observed.outcome, meta: error?.generationMeta || error?.structuralDetails?.generationMeta || {} });
+          offset += chunk.units.length;
+          consecutiveCapacityFailures = ["length", "structure"].includes(observed.outcome)
+            ? consecutiveCapacityFailures + 1 : 0;
+          if (consecutiveCapacityFailures >= WORKLOAD_POLICY.circuitFailureThreshold)
+            await markRemainingUnsent("repeated_generated_capacity_failure");
+          continue;
         }
         if (isCancelled()) throw signal?.reason || new DOMException("Aborted", "AbortError");
-        trace("aiModelWorkload", { event: "observation", operationId: subOperationId,
-          ...workloadSession.observe({ units: chunk.units, answer,
-            defects: contentDefects(answer, chunk.units), plan: estimate }) }, traceId);
         const chunkDefects = contentDefects(answer, chunk.units);
+        const observed = workloadSession.observe({ units: chunk.units, answer,
+          defects: chunkDefects, plan: estimate });
+        trace("aiModelWorkload", { event: "observation", operationId: subOperationId,
+          ...observed }, traceId);
+        consecutiveCapacityFailures = ["length", "structure"].includes(observed.outcome)
+          ? consecutiveCapacityFailures + 1 : 0;
         const rejected = new Set([...chunkDefects.missing, ...chunkDefects.wrongLanguage]);
+        if (childTrace) await recorder?.("terminal", {
+          state: rejected.size ? "partial" : "succeeded",
+          translated: Math.max(0, chunk.units.length - rejected.size),
+          missingIds: chunkDefects.missing.map(String),
+          wrongLanguageIds: chunkDefects.wrongLanguage.map(String),
+          complete: rejected.size === 0, terminal: true,
+        });
+        // Commit this answer and the next dispatch in one awaited checkpoint,
+        // avoiding two whole-run writes per successful sub-batch boundary.
+        // The coordinator retains its existing explicit unavailable/degraded
+        // behavior if session storage fails; no checkpoint is fire-and-forgotten.
+        let planningError;
+        if (!isCancelled() && offset + chunk.units.length < selectedUnits.length &&
+            consecutiveCapacityFailures < WORKLOAD_POLICY.circuitFailureThreshold) {
+          try {
+            const next = workloadSession.next(selectedUnits, offset + chunk.units.length);
+            preparedDispatch = { chunk: next, operationId: await workloadOperationId(
+              operationId, index + 1, next.units, workloadSession.key) };
+          } catch (error) { planningError = error; }
+        }
         await checkpoint("progress", {
+          ...(preparedDispatch ? {nextDispatch: {
+            ids: preparedDispatch.chunk.units.map(u => String(u.id)),
+            operationId: preparedDispatch.operationId,
+            workload: preparedDispatch.chunk.estimate,
+          }} : {}),
           accepted: (answer?.translations || []).filter(x => !rejected.has(String(x.id))),
           failures: [...rejected].map(id => ({ id, reason: chunkDefects.wrongLanguage.includes(id) ? "wrong_language"
             : answer?.meta?.declinedIds?.includes(id) ? "empty"
             : answer?.meta?.omittedIds?.includes(id) ? "omitted" : "missing" })),
         });
+        if (planningError) throw planningError;
         translations.push(...(answer?.translations || []));
         missing.push(...(answer?.missing || []));
         memoryCharacters.push(...(answer?.memoryDelta?.characters || []));
         memoryGlossary.push(...(answer?.memoryDelta?.glossary || []));
         subBatches.push({ index, operationId: subOperationId, unitCount: chunk.units.length,
           outputTarget: estimate.target, sourceChars: estimate.sourceChars, recordTarget: estimate.recordTarget,
-          predictedOutput: estimate.predictedOutput, meta: answer?.meta || {} });
+          predictedOutput: estimate.predictedOutput, splitReason: chunk.splitReason,
+          outcome: observed.outcome, meta: answer?.meta || {} });
         offset += chunk.units.length;
-        if (single) return answer;
+        if (consecutiveCapacityFailures >= WORKLOAD_POLICY.circuitFailureThreshold)
+          await markRemainingUnsent("repeated_incomplete_model_output");
+        if (single && !circuitOpened) return {
+          ...answer,
+          meta: {
+            ...(answer?.meta || {}),
+            route: plan.route,
+            adaptiveBatching: true,
+            workloadPolicy: "adaptive_sequential_sub_batches_v3",
+            hardBudgetSplit: chunk.splitReason === "context_or_completion_reserve",
+            circuitOpened: false,
+            batchCount: 1,
+            subBatches,
+          },
+        };
       }
       return { schema: "tp.ai.result/1", translations, missing: [...new Set(missing.map(String))],
         memoryDelta: { characters: memoryCharacters, glossary: memoryGlossary },
-        meta: { route: plan.route, adaptiveBatching: true, workloadPolicy: "model_aware_output_weight_v1",
+        meta: { route: plan.route, adaptiveBatching: true, workloadPolicy: "adaptive_sequential_sub_batches_v3",
+          hardBudgetSplit: subBatches.some(batch => batch.splitReason === "context_or_completion_reserve"),
+          circuitOpened, circuitReason, unsentIds: [...new Set(unsentIds)],
           batchCount: subBatches.length, subBatches,
-          generationAttempts: subBatches.reduce((n,b) => n + (b.meta.generationAttempts || 1), 0),
-          providerAttempts: subBatches.reduce((n,b) => n + (b.meta.providerAttempts || 1), 0),
+          generationAttempts: subBatches.reduce((n, batch) =>
+            n + Math.max(1, Number(batch.meta?.generationAttempts || batch.meta?.generation_attempts || 1)), 0),
+          providerAttempts: subBatches.reduce((n, batch) =>
+            n + Math.max(1, Number(batch.meta?.providerAttempts || batch.meta?.provider_attempts || 1)), 0),
           omittedIds: subBatches.flatMap(b => b.meta.omittedIds || []),
           declinedIds: subBatches.flatMap(b => b.meta.declinedIds || []) } };
-    } finally { await workloadController.flush(); }
+    } finally {
+      if (workloadSession.flush) await workloadSession.flush();
+      else await workloadController.flush();
+    }
   };
 
   const memoryCharacters = [];
@@ -509,16 +665,18 @@ export async function translateLensPage({
     );
   const traceStageFingerprints = async (items, stage) => {
     if (!fingerprintText) return;
-    const rows = [];
-    for (const item of items || []) {
-      const id = String(item?.id || "");
-      if (!id) continue;
-      rows.push({
-        id,
-        contentFingerprint: await fingerprintText(item?.text),
-        scripts: summarizeScripts([{ id, text: String(item?.text || "") }])[0],
-      });
-    }
+    const rows = await mapBounded(
+      (items || []).filter(item => String(item?.id || "")),
+      FINGERPRINT_CONCURRENCY,
+      async item => {
+        const id = String(item.id);
+        return {
+          id,
+          contentFingerprint: await fingerprintText(item?.text),
+          scripts: summarizeScripts([{ id, text: String(item?.text || "") }])[0],
+        };
+      },
+    );
     for (let offset = 0; offset < rows.length; offset += 10) {
       trace(
         "aiUnitStageFingerprints",
@@ -607,10 +765,16 @@ export async function translateLensPage({
     for (const id of firstDefects.wrongLanguage)
       if (unresolvedIds.has(String(id))) unresolvedWrongLanguageIds.add(String(id));
   }
+  const wrongLanguageCount = unresolvedWrongLanguageIds.size;
+  const overwhelminglyWrongLanguage =
+    wrongLanguageCount > 0 &&
+    wrongLanguageCount >= Math.ceil(sendable.length * 0.8);
   trace(
     "aiPageContract",
     {
       event: "final",
+      outcome: overwhelminglyWrongLanguage || unresolvedIds.size >= sendable.length
+        ? "failed" : unresolvedIds.size ? "partial" : "succeeded",
       ...correlation,
       repairAttempted,
       repairReason,
@@ -626,10 +790,6 @@ export async function translateLensPage({
     failures: [...unresolvedIds].map(id => ({ id, reason: unresolvedWrongLanguageIds.has(id) ? "wrong_language" :
       emptyIds.includes(id) ? "empty" : "missing" })),
   });
-  const wrongLanguageCount = unresolvedWrongLanguageIds.size;
-  const overwhelminglyWrongLanguage =
-    wrongLanguageCount > 0 &&
-    wrongLanguageCount >= Math.ceil(sendable.length * 0.8);
   if (overwhelminglyWrongLanguage) {
     const error = new Error(
       `AI returned ${wrongLanguageCount} of ${sendable.length} translation units outside the selected target language`,
@@ -675,11 +835,7 @@ export async function translateLensPage({
     remainingWrongLanguageIds: remainingDefects.wrongLanguage,
   };
   if (telemetry) {
-    telemetry.providerMs = Number(outcome.meta.providerMs);
-    telemetry.serverTotalMs = Number(outcome.meta.dt_ms);
-    telemetry.replayed = outcome.replayed === true;
-    telemetry.rateWaitMs = Number(outcome.meta.rateWaitMs);
-    telemetry.admissionWaitMs = Number(outcome.meta.admissionWaitMs);
+    Object.assign(telemetry, summarizeExecutionTiming(executionTimings));
     telemetry.rate =
       outcome.meta.rate && typeof outcome.meta.rate === "object"
         ? outcome.meta.rate

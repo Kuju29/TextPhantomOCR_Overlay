@@ -37,9 +37,9 @@ LANG_STYLE: Final[dict[str, str]] = {
 THAI_STYLE_COMPACT: Final[str] = TH_STYLE
 
 PROMPT_POLICY_VERSION: Final[dict[str, str]] = {
-    "th": "th-natural-8",
-    "en": "en-natural-6",
-    "ja": "ja-natural-6",
+    "th": "th-contextual-localization-10",
+    "en": "en-contextual-localization-8",
+    "ja": "ja-contextual-localization-8",
 }
 
 CANONICAL_PROMPT_CONTRACT_VERSION: Final[str] = "translation-plan-2"
@@ -102,11 +102,10 @@ def _with_canonical_target_header(lang: str, value: str) -> str:
     return f"{_target_language_header(lang)}\n{body}"
 
 
-def normalize_prompt_mode(prompt_mode: str | None) -> str:
-    mode = str(prompt_mode or "").strip().lower()
-    if mode != "replace":
-        raise ValueError("prompt_mode must be exactly 'replace'")
-    return mode
+def normalize_prompt_mode(_prompt_mode: str | None) -> str:
+    # Replace is the sole wire composition mode. Legacy or missing values are
+    # normalized instead of blocking a translation request.
+    return "replace"
 
 
 def select_style(

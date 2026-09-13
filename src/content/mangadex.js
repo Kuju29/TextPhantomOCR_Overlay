@@ -193,6 +193,7 @@
   // Returns true when an image looks like a reader page rather than site furniture.
   function isProbableMangaDexPageImage(img) {
     if (!img || !img.getBoundingClientRect) return false;
+    if (TP.isTranslationOutputImage?.(img)) return false;
     const u = String(TP.getBestImgUrl(img) || "");
     if (!u) return false;
     const rect = img.getBoundingClientRect();

@@ -23,6 +23,7 @@ from starlette.concurrency import run_in_threadpool
 from backend.trace_shipping import shipping_metadata
 
 import json
+import time
 
 from backend import logfile, trace
 # from backend.config import settings
@@ -44,6 +45,11 @@ _trace_dedupe = TraceIngestDedupe(TRACE_DEDUPE_TTL_SEC, TRACE_DEDUPE_MAX)
 
 @router.post("/v1/logs")
 async def ingest(payload: dict[str, Any]) -> dict:
+    # Decision-log file I/O must not block unrelated API requests either.
+    return await run_in_threadpool(_ingest, payload)
+
+
+def _ingest(payload: dict[str, Any]) -> dict:
     """Append a batch of client log records."""
     if not logfile.is_enabled():
         # Says so rather than pretending to accept them: a client that believes
@@ -71,16 +77,19 @@ async def ingest(payload: dict[str, Any]) -> dict:
 @router.post("/v1/trace")
 async def ingest_trace(payload: dict[str, Any]) -> dict:
     # File/lock waits and privacy formatting must not occupy the API event loop.
-    return await run_in_threadpool(_ingest_trace, payload)
+    handler_started = time.perf_counter()
+    return await run_in_threadpool(_ingest_trace, payload, handler_started)
 
 
-def _ingest_trace(payload: dict[str, Any]) -> dict:
+def _ingest_trace(payload: dict[str, Any], handler_started: float | None = None) -> dict:
     """Append a batch of browser-side TRACE lines to the shared trace file.
 
     Separate from ``/v1/logs`` because the two are different things with
     different switches: a user may want the decision log without a
     function-by-function trace, and almost always does.
     """
+    ingest_started = time.perf_counter()
+    queue_ms = max(0, round((ingest_started - (handler_started or ingest_started)) * 1000))
     if not trace.enabled():
         # Told, not silently dropped — the extension stops shipping on this
         # answer instead of retrying a doomed request on every batch.
@@ -157,7 +166,9 @@ def _ingest_trace(payload: dict[str, Any]) -> dict:
             {"browserRecordsDropped": dropped},
         )
 
+    write_started = time.perf_counter()
     written = trace.client(records)
+    write_ms = max(0, round((time.perf_counter() - write_started) * 1000))
     health = shipping_metadata(payload.get("shipping"))
     transport = health.get("transport", {})
     if transport.get("totalFailures", 0) > 0:
@@ -171,6 +182,10 @@ def _ingest_trace(payload: dict[str, Any]) -> dict:
         "ok": True,
         "written": written,
         "duplicates": duplicates + gap_duplicate,
+        # Measured from handler entry, not socket arrival or JSON body parsing.
+        # Returned in the existing ACK, never recursively shipped as new lines.
+        "timing": {"queueMs": queue_ms, "writeMs": write_ms,
+                   "ingestMs": max(0, round((time.perf_counter() - ingest_started) * 1000))},
         "dropped": dropped,
         "session": current_session,
         # Basename only. A browser needs the file identity, not the host's

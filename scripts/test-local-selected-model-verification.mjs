@@ -3,6 +3,8 @@ import {
   discoverLocalModels,
   verifyLocalModelGeneration,
 } from "../src/shared/ai/direct-local/model-discovery.js";
+import { createOllamaAdapter } from "../src/shared/ai/providers/local-ollama.js";
+import { createOpenAiCompatibleAdapter } from "../src/shared/ai/providers/local-openai-compatible.js";
 
 const originalFetch = globalThis.fetch;
 try {
@@ -92,6 +94,51 @@ try {
   }, "mandatory-model", { timeoutMs: 1000 });
   assert.equal(mandatory.status, "thinking_required");
   assert.equal(mandatory.code, "local_ai_thinking_required");
+
+  let requestedThinking = "";
+  const mandatoryCapable = await verifyLocalModelGeneration({
+    resolveThinkingMode(selected) {
+      requestedThinking = selected;
+      if (selected !== "on") throw Object.assign(new Error("thinking required"), {
+        code: "local_ai_thinking_required",
+      });
+      return "on";
+    },
+    async generate() {
+      return { response: { ok: true }, stream: { data: { text: "OK" } } };
+    },
+    responseText(data) { return data?.text || ""; },
+  }, "mandatory-model", { timeoutMs: 1000, thinking: "on" });
+  assert.equal(requestedThinking, "on",
+    "selected-model verification must use the user's current thinking setting");
+  assert.equal(mandatoryCapable.status, "passed");
+
+  // Mock only HTTP: the actual adapters assemble content and report terminal
+  // evidence, exactly as they do for real translation requests.
+  const ollama = createOllamaAdapter({ baseUrl: "http://localhost:11434" });
+  const openai = createOpenAiCompatibleAdapter({ baseUrl: "http://localhost:1234/v1" });
+  const ollamaContent = JSON.stringify({ message: { content: "OK" }, done: false }) + "\n";
+  const ollamaDone = JSON.stringify({ done: true, done_reason: "stop" }) + "\n";
+  const openaiContent = 'data: {"choices":[{"delta":{"content":"OK"}}]}\n\n';
+  const fixtures = [
+    ["Ollama clean EOF without terminal", ollama, "application/x-ndjson", ollamaContent, "invalid_output"],
+    ["Ollama completed stream", ollama, "application/x-ndjson", ollamaContent + ollamaDone, "passed"],
+    ["Ollama malformed frame before terminal", ollama, "application/x-ndjson", ollamaContent + '{bad}\n' + ollamaDone, "invalid_output"],
+    ["Ollama error frame before terminal", ollama, "application/x-ndjson", ollamaContent + '{"error":"load failed"}\n' + ollamaDone, "invalid_output"],
+    ["OpenAI clean EOF without terminal", openai, "text/event-stream", openaiContent, "invalid_output"],
+    ["OpenAI completed SSE", openai, "text/event-stream", openaiContent + 'data: [DONE]\n\n', "passed"],
+    ["OpenAI finish-reason terminal", openai, "text/event-stream", openaiContent + 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n', "passed"],
+    ["OpenAI nonstream body", openai, "application/json", '{"choices":[{"message":{"content":"OK"}}]}', "passed"],
+    ["Ollama nonstream body", ollama, "application/json", '{"message":{"content":"OK"},"done":true,"done_reason":"stop"}', "passed"],
+  ];
+  for (const [name, adapter, contentType, body, expected] of fixtures) {
+    globalThis.fetch = async () => new Response(body, {
+      status: 200, headers: { "content-type": contentType },
+    });
+    const result = await verifyLocalModelGeneration(adapter, "fixture-model", { timeoutMs: 1000 });
+    assert.equal(result.status, expected, name);
+    if (expected === "invalid_output") assert.equal(result.code, "provider_protocol_error", name);
+  }
 } finally {
   globalThis.fetch = originalFetch;
 }

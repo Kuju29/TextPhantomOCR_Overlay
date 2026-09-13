@@ -72,12 +72,12 @@ try {
   assert.equal(schemaBody.format.additionalProperties, false);
   const schemaSystem = schemaBody.messages[0].content;
   const schemaUser = schemaBody.messages[1].content;
-  assert.match(schemaSystem, /expert translator/);
-  assert.match(schemaSystem, /TRANSLATION STYLE\nSTYLE SENTINEL/);
+  assert.match(schemaSystem, /professional manga and manhwa translator and localization editor/);
+  assert.match(schemaSystem, /TRANSLATION STYLE\nTarget language: Thai \(ภาษาไทย\)\.\nSTYLE SENTINEL/);
   assert.doesNotMatch(schemaSystem, /OUTPUT —|P0/);
   assert.match(schemaUser, /TRANSLATION TASK/);
   assert.match(schemaUser, /Translate every source unit into Thai \(ภาษาไทย\)\./);
-  assert.doesNotMatch(schemaUser, /TRANSLATION STYLE\nSTYLE SENTINEL/);
+  assert.doesNotMatch(schemaUser, /TRANSLATION STYLE\nTarget language: Thai \(ภาษาไทย\)\.\nSTYLE SENTINEL/);
   assert.match(schemaUser, /Return only the JSON object required by the supplied schema/);
   assert.doesNotMatch(schemaUser, /MARKER OUTPUT SENTINEL|compact record|<<TP_Pn:/,
     "schema user content must contain no marker-output grammar");
@@ -117,7 +117,7 @@ try {
     assert.equal("response_format" in body, false);
     const system = body.messages[0].content;
     const user = body.messages[1].content;
-    assert.match(system, /TRANSLATION STYLE\nSTYLE SENTINEL/);
+    assert.match(system, /TRANSLATION STYLE\nTarget language: Thai \(ภาษาไทย\)\.\nSTYLE SENTINEL/);
     assert.doesNotMatch(system, /<<TP_Pn:|OUTPUT —/);
     assert.match(user, /<<TP_Pn:translated text>>/);
     assert.doesNotMatch(user, /SCHEMA OUTPUT SENTINEL|Return only one JSON object/,

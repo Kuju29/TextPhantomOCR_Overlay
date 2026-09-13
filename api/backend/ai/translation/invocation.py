@@ -188,6 +188,7 @@ def _translate_once(
         series_state=str(getattr(ai, "series_state", "") or ""),
         speakers=getattr(ai, "speakers", None),
         prev_context=getattr(ai, "prev_context", None),
+        page_context=getattr(ai, "page_context", None),
         repair_reason=getattr(ai, "repair_reason", ""),
     )
     user_parts = [user_message]

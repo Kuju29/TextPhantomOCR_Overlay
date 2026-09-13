@@ -243,6 +243,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           return discoverLocalModels(msg?.adapter || {}, {
             provider: msg?.provider,
             model: msg?.model,
+            thinking: msg?.thinking === "on" ? "on" : "off",
             verifySelected: true,
             probeTimeoutMs: 60_000,
           });

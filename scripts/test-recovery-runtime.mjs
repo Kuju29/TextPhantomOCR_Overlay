@@ -130,10 +130,24 @@ await test('expected diagnostics never call console at debug/warn levels; real r
   assert.doesNotMatch(message,/ยังไม่มีคำอธิบาย|UNCLASSIFIED/);assert.match(message,/ทิศทาง|กรอบ|ตำแหน่ง/);
  }finally{console.warn=warn;console.error=error;setLogLevel('warn');}
 });
-await test('page catch uses trace-only classification while returning the actual failure',async()=>{
- const warnings=[],events=[];const fail=Object.assign(new Error('malformed provider result'),{code:'invalid_model_output',generationAttempts:1});
- await assert.rejects(translateLensPage({base:'http://test',payload:{lang:'th',metadata:{image_id:'page-error'},context:{}},result:{lensDocument:structuredClone(fixture.doc),eraseBoxes:[]},plan:{route:'direct-local',ai},log:{info(){},warn:(...a)=>warnings.push(a)},trace:(...a)=>events.push(a),dependencies:{workloadController:createWorkloadController({read:async()=>({}),write:async()=>{}}),translateUnits:async()=>{throw fail;}}}),e=>e.code==='invalid_model_output');
- assert.equal(warnings.length,0);assert(events.some(e=>e[0]==='translationFailure'));
+await test('generated malformed output becomes a repairable terminal page instead of aborting the whole image',async()=>{
+ const warnings=[],events=[],checkpoints=[];const fail=Object.assign(new Error('malformed provider result'),{
+  code:'invalid_model_output',generationAttempts:1,providerAttempts:1,requestDispatched:true,providerResponded:true,
+  generationMeta:{finishReason:'length',usage:{source:'provider',outputTokens:256,thinkingTokens:250}}
+ });
+ const out=await translateLensPage({base:'http://test',payload:{lang:'th',metadata:{image_id:'page-error'},context:{}},
+  result:{lensDocument:structuredClone(fixture.doc),eraseBoxes:[]},plan:{route:'direct-local',ai},
+  log:{info(){},warn:(...a)=>warnings.push(a)},trace:(...a)=>events.push(a),onCheckpoint:async row=>checkpoints.push(row),
+  dependencies:{workloadController:createWorkloadController({read:async()=>({}),write:async()=>{}}),translateUnits:async()=>{throw fail;}}});
+ assert.equal(out.usable,false);assert.equal(out.translated,0);assert.equal(warnings.length,0);
+ assert(checkpoints.some(row=>row.stage==='progress'&&row.failures?.length));
+ assert(checkpoints.some(row=>row.stage==='finished'&&row.failures?.length),
+  'full-image content failure must remain available to the batch repair pool');
+});
+await test('non-generated runtime failure keeps trace-only classification and is rethrown',async()=>{
+ const warnings=[],events=[];const fail=Object.assign(new Error('offline before provider ownership'),{code:'NET_OFFLINE'});
+ await assert.rejects(translateLensPage({base:'http://test',payload:{lang:'th',metadata:{image_id:'page-error-network'},context:{}},result:{lensDocument:structuredClone(fixture.doc),eraseBoxes:[]},plan:{route:'direct-local',ai},log:{info(){},warn:(...a)=>warnings.push(a)},trace:(...a)=>events.push(a),dependencies:{workloadController:createWorkloadController({read:async()=>({}),write:async()=>{}}),translateUnits:async()=>{throw fail;}}}),e=>e.code==='NET_OFFLINE');
+ assert.equal(warnings.length,1);assert(events.some(e=>e[0]==='translationFailure'));
  const jobs=readFileSync('src/background/jobs.js','utf8');assert.match(jobs,/reportFailure\("the extension route threw before it could draw", e/);
 });
 console.log(`Recovery runtime: ${checks}/${checks} PASS; real modules+durable ledger, mocked provider HTTP.`);

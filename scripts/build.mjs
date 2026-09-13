@@ -424,6 +424,7 @@ for (const filename of [
   "STORE-CHECKLIST-TH.md",
   "PROJECT_CONTEXT.md",
   "RELEASE_NOTES.md",
+  "docs/diagnostics-12.5.md",
   "ENGINE_MODES.md",
   "CONCURRENCY.md",
   "DIAGNOSIS.md",

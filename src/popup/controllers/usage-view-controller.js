@@ -53,7 +53,9 @@ export function createUsageViewController({
     els.aiUsageCounts.title = "Translation usage only. Cache reads/writes are included in Input; reasoning is included in Output. Browser totals are not a customer billing balance.";
   };
 
-  const refresh = async () => {
+  let refreshSequence = 0;
+  const refresh = async (...snapshots) => {
+    const sequence = ++refreshSequence;
     if (
       !els.aiUsageWrap ||
       !els.aiUsageKind ||
@@ -66,7 +68,12 @@ export function createUsageViewController({
       els.aiUsageWrap.style.display = "none";
       return;
     }
-    const ledger = (await getStorage({ [storageKey]: null }))[storageKey];
+    // Storage change events already carry the complete committed ledger.
+    const ledger = snapshots.length ? snapshots[0]
+      : (await getStorage({ [storageKey]: null }))[storageKey];
+    const current = target();
+    if (sequence !== refreshSequence || current.runtime !== selected.runtime ||
+        current.provider !== selected.provider || current.model !== selected.model) return;
     render(currentUsage(ledger, selected));
   };
 

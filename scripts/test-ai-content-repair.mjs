@@ -34,6 +34,37 @@ assert.deepEqual(
   assert.equal(diag.decision, "accept");
   assert.equal(diag.reason, "proper_name_or_sfx_exemption");
 }
+{
+  const [diag] = diagnoseTargetScripts(
+    [{ id: "g0", text: "ฉันเกิดใหม่เป็นผู้หญิงบน пороге แห่งความตายแล้ว!!!" }],
+    "th",
+    [{ id: "g0", text: "I WAS REINCARNATED AS A GIRL ON THE VERGE OF DEATH...!" }],
+  );
+  assert.equal(diag.decision, "reject",
+    "invented Cyrillic absent from an English source must be repaired");
+  assert.equal(diag.reason, "invented_third_script");
+  assert.equal(diag.detectedScripts.cyrillic, 6);
+  assert.ok(!JSON.stringify(diag).includes("пороге"),
+    "script diagnostics must remain privacy-safe and content-free");
+}
+assert.deepEqual(
+  dominantWrongTargetIds(
+    [{ id: "g0", text: "เมื่อวานฉันพบ Александр ที่สถานี" }],
+    "th",
+    [{ id: "g0", text: "I met Александр at the station yesterday." }],
+  ),
+  [],
+  "a bounded foreign name copied exactly from the source must remain valid",
+);
+assert.deepEqual(
+  dominantWrongTargetIds(
+    [{ id: "g0", text: "นี่คือคำแปล Я ที่ผิด" }],
+    "th",
+    [{ id: "g0", text: "This is a translation" }],
+  ),
+  ["g0"],
+  "even a short invented third-script fragment must not get the old small-fragment exemption",
+);
 
 {
   const units = [{ id: "g0", text: "日本語の長い文章です" }];

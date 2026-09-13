@@ -27,7 +27,6 @@ export const els = {
   aiKeyGet: document.getElementById("ai-key-get"),
   aiModelWrap: document.getElementById("ai-model-wrap"),
   aiModel: document.getElementById("ai-model"),
-  aiLocalModelId: document.getElementById("ai-local-model-id"),
   aiLocalModelHint: document.getElementById("ai-local-model-hint"),
   aiThinkingWrap: document.getElementById("ai-thinking-wrap"),
   aiThinking: document.getElementById("ai-thinking"),
@@ -388,8 +387,6 @@ export function toggleUi({ hasEnvKey }) {
   const canConfigureAi =
     local || (els.aiKey.value || "").trim().length > 0 || hasEnvKey;
   els.aiModelWrap.style.display = showAi ? "" : "none";
-  if (els.aiLocalModelId)
-    els.aiLocalModelId.style.display = showAi && local ? "" : "none";
   if (els.aiLocalModelHint)
     els.aiLocalModelHint.style.display = showAi && local ? "" : "none";
   if (els.aiLocalCapacityWrap)

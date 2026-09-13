@@ -1,4 +1,6 @@
 import { isTracing } from "../../shared/trace.js";
+import { attachTpError } from "../../shared/error-contract.js";
+import { classifyJobError } from "../images.js";
 import { geometryDiagnostics, groupDiagnostics } from "../../shared/geometry-diagnostics.js";
 import {
   attachCanonicalOriginalTree,
@@ -29,24 +31,29 @@ export function createLensDirectPath({
   getTrace,
   log,
 }) {
-  async function imageBytesFor(payload, tabId, frameId) {
+  async function imageBytesFor(payload, tabId, frameId, signal) {
+    signal?.throwIfAborted();
     const inline = String(payload?.imageDataUri || "").trim();
     let dataUri = inline;
     if (!dataUri.startsWith("data:")) {
       const src = String(payload?.src || "").trim();
       if (!src) return null;
-      dataUri = await fetchFromUrl(src, payload?.context?.page_url || "").catch(
+      dataUri = await fetchFromUrl(src, payload?.context?.page_url || "", signal).catch(
         async (error) => {
+          signal?.throwIfAborted();
           if (/\bHTTP 403\b/i.test(error?.message || "") && tabId)
-            return fetchFromTab(tabId, src, frameId || 0);
+            return fetchFromTab(tabId, src, frameId || 0, signal);
           throw error;
         },
       );
     }
+    signal?.throwIfAborted();
     if (!dataUri) return null;
-    const response = await fetch(dataUri);
+    const response = await fetch(dataUri, { signal });
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    signal?.throwIfAborted();
     return {
-      bytes: new Uint8Array(await response.arrayBuffer()),
+      bytes,
       mime: response.headers.get("content-type") || "image/jpeg",
       dataUri,
     };
@@ -80,13 +87,32 @@ export function createLensDirectPath({
 
     let image;
     try {
-      image = await imageBytesFor(payload, tabId, frameId);
+      image = await imageBytesFor(payload, tabId, frameId, signal);
     } catch (error) {
-      return stop(
+      if (signal?.aborted || error?.name === "AbortError") throw error;
+      const status = Number(error?.tpError?.httpStatus || error?.status) || 0;
+      return stop(attachTpError(new Error(
         `could not read the image bytes: ${error?.message || String(error)}`,
-      );
+        { cause: error },
+      ), {
+        code: status ? "IMG_SOURCE_UNREACHABLE" : "IMG_READ_FAILED",
+        origin: "browser",
+        stage: "image_read",
+        httpStatus: status,
+        retryable: !classifyJobError(error).permanent,
+        ...error?.tpError,
+        traceId: String(payload?.context?.tp_trace || ""),
+        imageId: String(payload?.metadata?.image_id || ""),
+        batchId: String(payload?.metadata?.batch_id || ""),
+        jobId,
+      }));
     }
-    if (!image) return stop("the image reader returned nothing to upload");
+    if (!image) return stop(attachTpError(new Error("the image reader returned nothing to upload"), {
+      code: "IMG_READ_FAILED", origin: "browser", stage: "image_read", retryable: true,
+      traceId: String(payload?.context?.tp_trace || ""), jobId,
+      imageId: String(payload?.metadata?.image_id || ""),
+      batchId: String(payload?.metadata?.batch_id || ""),
+    }));
 
     const traceId = String(payload?.context?.tp_trace || "");
     const imageId = String(payload?.metadata?.image_id || "");

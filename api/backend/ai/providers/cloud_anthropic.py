@@ -66,7 +66,11 @@ def models_status(api_key: str, *, timeout_sec: float = 10.0) -> dict:
         return model_status(status="error", http_status=status, error="invalid_json")
     models = [str(item.get("id") or "").strip() for item in (data.get("data") or [])
               if isinstance(item, dict) and str(item.get("id") or "").strip()]
-    return model_status(models=models, status="valid", http_status=status)
+    result = model_status(models=models, status="valid", http_status=status)
+    result["candidates"] = {model: {
+        "eligibility": "usable", "evidence": "anthropic_account_models_api"
+    } for model in models}
+    return result
 
 class AnthropicAdapter:
     """Provider-owned bridge from the stable request contract to Messages API."""

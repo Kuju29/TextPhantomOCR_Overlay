@@ -311,14 +311,28 @@ assert.deepEqual(migratedAgain.state, migrated.state, "migration must be idempot
 assert.deepEqual(migratedAgain.credentials, migrated.credentials);
 assert.deepEqual(migratedAgain.prompts, migrated.prompts);
 assert.equal(migratedAgain.changed, false);
-for (const corruptPrompt of ["old string", { text: "missing mode" }, { text: "bad mode", mode: "auto" }]) {
-  assert.throws(() => migrateAiProfiles({
+assert.throws(() => migrateAiProfiles({
+  stored: migrated.state,
+  credentials: migrated.credentials,
+  prompts: { [makeProfilePromptKey(openRouter, "deepseek/example", "th")]: "old string" },
+  legacy,
+}), (error) => error.code === "AI_PROFILE_INVALID",
+"a canonical prompt record still requires an object with explicit text storage");
+for (const legacyPrompt of [
+  { text: "missing mode" },
+  { text: "bad mode", mode: "auto" },
+]) {
+  const normalized = migrateAiProfiles({
     stored: migrated.state,
     credentials: migrated.credentials,
-    prompts: { [makeProfilePromptKey(openRouter, "deepseek/example", "th")]: corruptPrompt },
+    prompts: { [makeProfilePromptKey(openRouter, "deepseek/example", "th")]: legacyPrompt },
     legacy,
-  }), (error) => error.code === "AI_PROFILE_INVALID",
-  "a present canonical prompt record must remain fixed replace");
+  });
+  assert.deepEqual(
+    normalized.prompts[makeProfilePromptKey(openRouter, "deepseek/example", "th")],
+    { text: legacyPrompt.text, mode: "replace" },
+    "missing or legacy prompt modes must migrate without blocking translation",
+  );
 }
 
 // A valid canonical schema is authoritative after migration. Reopening with

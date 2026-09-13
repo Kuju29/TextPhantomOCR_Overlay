@@ -30,6 +30,7 @@ class AiConfig:
     series_state: str = ""
     speakers: dict = field(default_factory=dict)
     prev_context: list = field(default_factory=list)
+    page_context: list = field(default_factory=list)
     context_frozen: bool = False
 
     def __post_init__(self) -> None:

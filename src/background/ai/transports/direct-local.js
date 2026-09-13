@@ -44,6 +44,11 @@ export async function translateDirectLocal(
 
   const started = performance.now();
   const usageStartedAt = Date.now();
+  const usageTiming = timing => {
+    try { trace?.("aiLocalUsageTiming", {schema:"tp.audit/1", event:"usage_commit_timing",
+      reason:timing.failed ? "failed" : "success",
+      scope:{operationId, batchId, imageId, jobId, traceId}, timing}); } catch {}
+  };
   trace?.("direct Local AI intent", {
     units: units.length,
     provider: String(ai?.provider || "local"),
@@ -158,7 +163,8 @@ export async function translateDirectLocal(
     });
     if (generationAttempts === 0 && error?.requestDispatched === true)
       await persistProviderGeneration({ pending: true, pendingReason: "local_transport_unconfirmed", operationId,
-        runtime: "local", engine: "runsextension", provider: ai?.provider, model: ai?.model });
+        runtime: "local", engine: "runsextension", provider: ai?.provider, model: ai?.model },
+        { onTiming: usageTiming });
     if (generationAttempts > 0)
       await persistProviderGeneration(
         {
@@ -189,7 +195,7 @@ export async function translateDirectLocal(
             ? charged.totalMs
             : Math.round(performance.now() - started),
         },
-        { emitTrace: trace },
+        { emitTrace: trace, onTiming: usageTiming },
       );
     throw error;
   }
@@ -258,7 +264,7 @@ export async function translateDirectLocal(
       providerMs: result?.meta?.providerMs,
       totalMs: result?.meta?.totalMs,
     },
-    { emitTrace: trace },
+    { emitTrace: trace, onTiming: usageTiming },
   );
   return result;
 }

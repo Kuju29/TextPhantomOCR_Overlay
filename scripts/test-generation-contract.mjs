@@ -49,7 +49,7 @@ else {
   for(const row of captures){
     const actual=row.body.provider.modelCapabilities.structured_output?.supported;
     assert.equal(actual,row.supported===null?undefined:row.supported,`${row.name} repair=${row.repair}: tri-state capability lost`);
-    assert.equal(row.body.provider.outputContract,row.supported===true?'json_schema_object_v1':row.supported===false?'compact_markers_v1':undefined);
+    assert.equal(row.body.provider.outputContract,row.supported===true?'json_schema_object_v1':'compact_markers_v1');
     assert.equal(row.body.prompt,'STYLE SENTINEL');assert.equal(row.body.provider.thinking,'off');
     assert.equal(row.body.repair.enabled,false,'no nested repair introduced');
   }

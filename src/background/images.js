@@ -1,6 +1,7 @@
 // Fetches and encodes images for the service worker and classifies job errors as permanent or transient.
 
 import { requestFromTabEnsured } from "./tabs-messaging.js";
+import { attachTpError } from "../shared/error-contract.js";
 
 // Base64-encodes a Uint8Array in 32 KB chunks.
 export function bytesToBase64(bytes) {
@@ -42,7 +43,13 @@ export async function fetchImageDataUriFromUrl(url, pageUrl, signal = null) {
     referrer: pageUrl || "about:client",
     signal,
   });
-  if (!res.ok) throw new Error("HTTP " + res.status);
+  if (!res.ok) throw attachTpError(new Error("HTTP " + res.status), {
+    code: "IMG_SOURCE_UNREACHABLE",
+    origin: "image_host",
+    stage: "image_read",
+    httpStatus: res.status,
+    retryable: res.status === 429 || res.status >= 500,
+  });
 
   const mime = String(res.headers.get("content-type") || "")
     .split(";")[0]

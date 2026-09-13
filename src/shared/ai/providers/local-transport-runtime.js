@@ -165,15 +165,18 @@ export async function readProviderResponse(response, adapter, {
 }
 
 export async function dispatchProviderRequest(adapter, request, context) {
-  const started = performance.now();
+  const setupStarted = performance.now();
   context.onProgress?.({ state: "connecting" });
   const url = adapter.requestUrl(request), headers = adapter.headers(request), payload = adapter.payload(request);
   emitWire(context.wireTrace, "providerRequest", { url, method: "POST", headers, body: payload });
+  const requestBody = JSON.stringify(payload);
+  const started = performance.now();
+  const requestSetupMs = started - setupStarted;
   let response;
   try {
     response = await fetch(url, {
       method: "POST", headers, cache: "no-store", credentials: "omit",
-      redirect: "error", signal: context.signal, body: JSON.stringify(payload),
+      redirect: "error", signal: context.signal, body: requestBody,
     });
   } catch (error) {
     error.requestDispatched = true;
@@ -201,6 +204,19 @@ export async function dispatchProviderRequest(adapter, request, context) {
   const providerMs = Number.isFinite(stream.terminalMs)
     ? stream.terminalMs
     : Math.max(0, performance.now() - started);
+  // These are client-observed intervals on one monotonic clock. In particular,
+  // dispatch-to-headers includes server work and is never labeled network time.
+  stream.requestSetupMs = requestSetupMs;
+  stream.headersToFirstByteMs = Number.isFinite(stream.firstByteMs)
+    ? Math.max(0, stream.firstByteMs - stream.dispatchToHeadersMs) : null;
+  stream.headersToFirstContentMs = Number.isFinite(stream.firstContentMs)
+    ? Math.max(0, stream.firstContentMs - stream.dispatchToHeadersMs) : null;
+  stream.contentToTerminalMs = Number.isFinite(stream.lastContentMs) && Number.isFinite(stream.terminalMs)
+    ? Math.max(0, stream.terminalMs - stream.lastContentMs) : null;
+  try { context.trace?.("requestTiming", {schema:"tp.audit/1", event:"request_timing", reason:"response_complete",
+    route:"direct-local", timing:{requestSetupMs, httpMs:providerMs,
+      headersMs:stream.dispatchToHeadersMs, headersToFirstByteMs:stream.headersToFirstByteMs,
+      headersToFirstContentMs:stream.headersToFirstContentMs, contentToTerminalMs:stream.contentToTerminalMs}}); } catch {}
   return { response, stream, providerMs };
 }
 

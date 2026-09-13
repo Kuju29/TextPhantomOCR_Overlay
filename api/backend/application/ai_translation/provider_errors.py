@@ -5,11 +5,12 @@ from __future__ import annotations
 from typing import Any, NoReturn
 from fastapi import HTTPException
 
-import re, math
+import math
 
 from backend import trace
 from backend.ai.clients.base import OutputBudgetExhausted, ProviderGenerationCancelled
-from backend.ai.clients.provider_error import ProviderAdapterContractError
+from backend.ai.clients.provider_error import (ProviderAdapterContractError,
+                                               structured_upstream_http_status)
 from backend.ai.errors import ModelOutputContractError
 from backend.ai.workload import WorkloadBudgetError
 from backend.ai.capabilities import OutputCapabilityChanged
@@ -68,7 +69,7 @@ def invalid_detail(ctx: TranslationContext, message: str,
 
 def trace_failure(ctx: TranslationContext, stage: str, exc: BaseException,
                   status: int, **details: Any) -> None:
-    status_match = re.search(r"\bHTTP\s+(\d{3})\b", str(exc), re.IGNORECASE)
+    upstream = provider_status(exc)
     provider_attempts = int(details.pop("providerAttempts", 0) or 0)
     generation_attempts = int(details.pop("generationAttempts", provider_attempts) or 0)
     trace.write("api", "api/routes/ai_v1.py", "ai_translate_v1", "!!", {
@@ -76,7 +77,8 @@ def trace_failure(ctx: TranslationContext, stage: str, exc: BaseException,
         "error": str(exc), "httpStatus": status, "automaticContentRetry": False,
         "automaticTransportRetry": False, "providerAttempts": provider_attempts,
         "generationAttempts": generation_attempts,
-        "providerHttpStatuses": [int(status_match.group(1))] if status_match else [],
+        "providerHttpStatuses": [upstream] if upstream is not None else [],
+        "upstreamStatus": upstream,
         "modelFallback": False, "schemaFallback": False, **ctx.route_identity, **details,
     }, trace_id=ctx.trace_id)
 
@@ -203,6 +205,8 @@ def _raise_provider_failure(ctx: TranslationContext, exc: BaseException,
                   outputContractRequested="id_markers", providerAttempts=providers,
                   generationAttempts=generations)
     internal = code in {"provider_client_contract_error", "internal_error"}
+    http_evidence = ({"providerFailureKind": "http_status", "requestDispatched": True}
+                     if structured_upstream_http_status(exc) is not None else {})
     detail = error_payload(
         code=code, message=semantics.message,
         user_message=PUBLIC_MESSAGES.get(code, PUBLIC_MESSAGES["provider_failed"]),
@@ -216,7 +220,7 @@ def _raise_provider_failure(ctx: TranslationContext, exc: BaseException,
                "model": str(ctx.resolved_model or "")[:160],
                "providerCode": str(getattr(exc, "provider_code", "") or "")[:80],
                "providerType": str(getattr(exc, "provider_type", "") or "")[:80],
-               "providerReason": semantics.message, "failureKind": code},
+               "providerReason": semantics.message, "failureKind": code, **http_evidence},
         correlation=dict(ctx.correlation),
     )
     headers = None

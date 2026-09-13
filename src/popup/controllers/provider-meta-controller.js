@@ -91,13 +91,9 @@ export function createProviderMetaController({
         `✕ Account/model access denied • Backend: ${protocol}`,
       ];
     else if (data.models_source === "live" && data.models_verified) {
-      const count = Array.isArray(data.models) ? data.models.length : 0;
       const candidates = Array.isArray(data.model_candidates) ? data.model_candidates : [];
       const usable = candidates.filter((item) => item?.eligibility === "usable").length;
-      const unknown = candidates.filter((item) => item?.eligibility === "unknown").length;
-      text = candidates.length
-        ? `✓ ${usable} usable${unknown ? ` • ${unknown} require verification` : ""} • Backend: ${protocol}`
-        : `✓ ${count} live model${count === 1 ? "" : "s"} reported by ${name} • Backend: ${protocol}`;
+      text = `✓ ${usable} compatible model${usable === 1 ? "" : "s"} • Backend: ${protocol}`;
       if (data.model_status === "unavailable")
         [type, text] = [
           "error",
@@ -242,114 +238,6 @@ export function createProviderMetaController({
     return state.lastAiProbe;
   };
 
-  const discoverLocal = async (selectedProvider, selectedBaseUrl, sequence) => {
-    if (state.localConnectInFlight) return;
-    const explicitAtStart = state.localConnectSeq;
-    try {
-      const stored = await api.getStorage(["localAiAdapter"]);
-      const source =
-        selectedProvider === "customlocal"
-          ? stored.localAiAdapter
-          : {
-              ...(api.localPreset(selectedProvider) || {}),
-              baseUrl: selectedBaseUrl,
-            };
-      const adapter = api.normalizeLocalAdapter(source, {
-        provider: selectedProvider,
-      });
-      const discoveryId = crypto.randomUUID();
-      const response = await api.sendMessage({
-        type: "TP_LOCAL_AI_DISCOVER",
-        adapter,
-        provider: selectedProvider,
-        model: String(els.aiModel?.value || state.desiredAiModel || "").trim(),
-        discoveryId,
-        apiBase: normalizeUrl(els.apiUrl.value),
-      });
-      if (
-        sequence !== state.aiMetaSeq ||
-        explicitAtStart !== state.localConnectSeq
-      ) {
-        void api.sendMessage({
-          type: "TP_LOCAL_AI_DISCOVERY_STALE",
-          discoveryId,
-          provider: selectedProvider,
-        });
-        return;
-      }
-      if (!response?.ok)
-        throw new Error(
-          response?.error ||
-            response?.message ||
-            "Local server could not be reached",
-        );
-      const models = Array.isArray(response.models) ? response.models : [];
-      const verification = response.selectedModelVerification &&
-        typeof response.selectedModelVerification === "object"
-        ? response.selectedModelVerification : { model: "", status: "not_tested" };
-      state.localAiCapability =
-        response.capability && typeof response.capability === "object"
-          ? { ...response.capability, provider: selectedProvider, baseUrl: adapter.baseUrl }
-          : null;
-      const saved = local.savedModel();
-      const savedMissing = Boolean(saved && !models.includes(saved));
-      setModelOptions(models, {
-        keepValue: savedMissing ? "" : (els.aiModel.value || state.desiredAiModel),
-        placeholder: savedMissing
-          ? "Saved model is not installed — choose a model"
-          : "Select a model",
-        selectFirst: !savedMissing,
-      });
-      const selected = String(els.aiModel?.value || "").trim();
-      const verified = verification.status === "passed" &&
-        String(verification.model || "").trim() === selected;
-      setModelBlocked(savedMissing || models.length === 0 || !verified);
-      if (selected && selected !== state.desiredAiModel) {
-        state.desiredAiModel = selected;
-        profile.selectModel(selected);
-        await prompt.render(state.desiredLang);
-        state.modelDirty = true;
-        prompt.scheduleSave();
-      }
-      state.lastAiResolve = {
-        provider: selectedProvider,
-        backend_supported: true,
-        key_status: "not_required",
-        models_verified: true,
-        models,
-      };
-      const thinkingRequired = verification.status === "thinking_required" ||
-        verification.code === "local_ai_thinking_required";
-      setFieldMessage(
-        els.aiModelWrap,
-        verified ? "info" : thinkingRequired ? "error" : "warn",
-        thinkingRequired
-          ? "✕ This model requires thinking. Open [AI option > AI thinking], enable thinking, then Connect again."
-          : verified
-          ? `✓ ${selected} verified · ${models.length} installed model(s)`
-          : `⚠ ${models.length} installed model(s) found; Reconnect to verify the selected model`,
-      );
-      if (els.aiLocalStatus)
-        els.aiLocalStatus.textContent = thinkingRequired
-          ? "✕ This model requires thinking. Open [AI option > AI thinking], enable thinking, then Connect again."
-          : `✓ Connected directly to ${adapter.baseUrl}`;
-      local.renderCapacity();
-      await local.persistCapacity();
-      toggleUi();
-    } catch (error) {
-      if (
-        sequence === state.aiMetaSeq &&
-        explicitAtStart === state.localConnectSeq
-      ) {
-        state.lastAiResolve = null;
-        setModelBlocked(true);
-        if (els.aiLocalStatus)
-          els.aiLocalStatus.textContent = `✕ ${error.message}. Start the runtime and connect again.`;
-        local.showFallback();
-        toggleUi();
-      }
-    }
-  };
 
   const refresh = async () => {
     if (!canUse()) {
@@ -372,13 +260,18 @@ export function createProviderMetaController({
     setFieldMessage(els.aiProviderWrap, "", "");
     if (provider.isLocal(selectedProvider)) {
       const snapshot = state.lastAiResolve;
+      const selectedModel = String(els.aiModel?.value || state.desiredAiModel || "").trim();
       if (
         snapshot?.models_verified === true &&
-        String(snapshot.provider || "") === selectedProvider
+        String(snapshot.provider || "") === selectedProvider &&
+        state.aiModelBlocked !== true &&
+        String(snapshot.verified_model || selectedModel) === selectedModel
       ) return;
-      // Opening/changing ordinary UI must not contact a local runtime. The
-      // explicit Connect action owns discovery and its terminal status.
-      local.showFallback();
+      // Local discovery is part of selecting the provider. A verified saved
+      // snapshot avoids needless probes; otherwise one automatic refresh both
+      // loads the installed model list and verifies the selected/first model.
+      if (state.localConnectInFlight) return;
+      await local.connect();
       return;
     }
     const base = normalizeUrl(els.apiUrl.value);
@@ -445,7 +338,12 @@ export function createProviderMetaController({
       const models =
         data?.models_verified && Array.isArray(data.models) ? data.models : [];
       const candidates = data?.models_verified && Array.isArray(data.model_candidates)
-        ? data.model_candidates : models;
+        ? data.model_candidates : [];
+      const usableCandidates = candidates.filter((candidate) =>
+        candidate && typeof candidate === "object" &&
+        candidate.eligibility === "usable" && String(candidate.id || "").trim(),
+      );
+      const usableModels = usableCandidates.map((candidate) => String(candidate.id).trim());
       const selectedCapability =
         data?.model_capabilities && typeof data.model_capabilities === "object"
           ? data.model_capabilities
@@ -458,10 +356,10 @@ export function createProviderMetaController({
       if (requestedWasAuto && data?.model) preferred = String(data.model).trim();
       const explicitUnavailable =
         data?.models_verified === true &&
-        preferred && !models.includes(preferred) && !requestedWasAuto;
+        preferred && !usableModels.includes(preferred) && !requestedWasAuto;
       // The picker is provider-authoritative. Never append a stored/typed model
       // that the current provider/account did not return as compatible.
-      setModelOptions(candidates, {
+      setModelOptions(usableCandidates, {
         keepValue: explicitUnavailable ? "" : preferred || String(data?.model || "").trim(),
         placeholder:
           data?.key_status === "missing"
@@ -476,7 +374,7 @@ export function createProviderMetaController({
         "model_unavailable", "unsupported_provider",
       ].includes(String(data?.error || ""));
       setModelBlocked(resolveBlocked || explicitUnavailable ||
-        (data?.models_verified === true && models.length === 0));
+        (data?.models_verified === true && usableModels.length === 0));
       state.lastResolvedProvider =
         String(data?.provider || "").trim() || state.lastResolvedProvider;
       state.lastResolvedKey = key;
@@ -490,7 +388,7 @@ export function createProviderMetaController({
       toggleUi();
       renderStatus();
       const selectedNow = String(els.aiModel?.value || "").trim();
-      if (selectedNow && models.includes(selectedNow)) await probeSelected();
+      if (selectedNow && usableModels.includes(selectedNow)) await probeSelected();
     } catch {
       if (sequence === state.aiMetaSeq) {
         state.lastAiResolve = null;

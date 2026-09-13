@@ -48,9 +48,9 @@ assert len(STYLE) > 2500 and "CHARACTER SHEET and SERIES MEMORY" in STYLE
 assert "Never move, merge, duplicate or discard meaning across IDs" in STYLE
 assert "Silently check meaning" not in STYLE and "MICRO-EXAMPLES" not in STYLE
 OCR_OUTPUT_RULE = "Correct missing, extra or misread characters only when the supplied text makes the intended reading unambiguous"
-assert prompts.prompt_metadata("th", prompts.lang_style("th"), "replace")["promptVersion"] == "th-natural-8"
-assert prompts.prompt_metadata("en", prompts.lang_style("en"), "replace")["promptVersion"] == "en-natural-6"
-assert prompts.prompt_metadata("ja", prompts.lang_style("ja"), "replace")["promptVersion"] == "ja-natural-6"
+assert prompts.prompt_metadata("th", prompts.lang_style("th"), "replace")["promptVersion"] == "th-contextual-localization-10"
+assert prompts.prompt_metadata("en", prompts.lang_style("en"), "replace")["promptVersion"] == "en-contextual-localization-8"
+assert prompts.prompt_metadata("ja", prompts.lang_style("ja"), "replace")["promptVersion"] == "ja-contextual-localization-8"
 ANSWER = "<<TP_P0:คำแปล>>"
 USAGE = (23, 7, 30)
 CLOUD_FIELDS = {

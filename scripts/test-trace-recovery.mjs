@@ -138,5 +138,28 @@ await test('reset to another API base clears old queued/sensitive evidence and c
   h.enable();h.setSend(async()=>({ok:true,status:200,json:async()=>({ok:true,session:'s'})}));await h.api.flushTrace();
   assert.deepEqual(h.sent.at(-1).body.records.map(r=>r.fn),['new-prefix']);
 });
+await test('deadline timings distinguish HTTP headers from ACK parsing without recursive records',async()=>{
+  for (const phase of ['http','ack']) {
+    const h=harness();h.enable();
+    h.setSend(phase==='http'?()=>new Promise(()=>{}):async()=>({ok:true,status:200,json:()=>new Promise(()=>{})}));
+    h.api.note('fixture','timed');const pending=h.api.flushTrace();await microtasks();await h.advance(10_000);await pending;
+    const state=h.state();assert.equal(state.transport.lastStage,phase);
+    assert.equal(state.timing.totalMs,10_000);assert.equal(state.timing[`${phase}Ms`],10_000);
+    assert.equal(state.timing.httpStartedAt,100_000);
+    assert.equal(state.timing.headersAt,phase==='ack'?100_000:undefined);
+    h.setSend(async()=>({ok:true,status:200,json:async()=>({ok:true,session:'s',timing:{queueMs:2,writeMs:3,ingestMs:6,secret:'SENTINEL',url:'SENTINEL'}})}));
+    await h.api.flushTrace();
+    assert.equal(h.sent.at(-1).body.shipping.timing.totalMs,10_000,'retry carries completed failure timing');
+    assert.equal(h.sent.at(-1).body.records.length,1,'diagnostics never generate trace records');
+    assert.equal(h.state().timing.serverQueueMs,2);assert.equal(h.state().timing.serverWriteMs,3);
+    assert.equal(h.state().timing.serverIngestMs,6);assert.doesNotMatch(JSON.stringify(h.state()),/SENTINEL/);
+  }
+});
+await test('untrusted server durations cannot enter shipping diagnostics',async()=>{
+  const h=harness();h.enable();h.api.note('fixture','timed');
+  h.setSend(async()=>({ok:true,status:200,json:async()=>({ok:true,session:'s',timing:{queueMs:-1,writeMs:'SECRET',ingestMs:Infinity}})}));
+  await h.api.flushTrace();const timing=h.state().timing;
+  assert.equal(timing.serverQueueMs,undefined);assert.equal(timing.serverWriteMs,undefined);assert.equal(timing.serverIngestMs,undefined);
+});
 console.log(JSON.stringify({passed:results.filter(r=>r.pass).length,failed:results.filter(r=>!r.pass).length,results},null,2));
 process.exitCode=results.some(r=>!r.pass)?1:0;

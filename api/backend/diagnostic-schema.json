@@ -1,5 +1,8 @@
 {
   "events": [
+    "pre_provider_timing",
+    "checkpoint_timing",
+    "usage_commit_timing",
     "workload_observed",
     "workload_profile",
     "workload_persisted",
@@ -18,6 +21,10 @@
     "route_capability"
   ],
   "reasons": [
+    "prepared",
+    "dispatch",
+    "progress",
+    "finished",
     "unchanged",
     "changed",
     "initial",
@@ -85,7 +92,8 @@
     "no_translatable_text",
     "sync_supported",
     "legacy_supported",
-    "capability_unavailable"
+    "capability_unavailable",
+    "body_failed"
   ],
   "states": [
     "planned",
@@ -133,6 +141,12 @@
     "compact_markers_v1"
   ],
   "numeric": [
+    "fingerprintMs",
+    "workloadOpenMs",
+    "checkpointPreparedMs",
+    "checkpointDispatchMs",
+    "checkpointMs",
+    "pageTranslationToTransportHandoffMs",
     "outputTarget",
     "recordTarget",
     "revision",
@@ -189,7 +203,13 @@
     "h",
     "rotation",
     "wrongLanguageCount",
-    "structuralCount"
+    "structuralCount",
+    "usageCallbackMs",
+    "requestSetupMs",
+    "headersToFirstByteMs",
+    "headersToFirstContentMs",
+    "contentToTerminalMs",
+    "callbackMs"
   ],
   "ids": [
     "batchId",

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+from .localization import TRANSLATOR_IDENTITY_BASE, TASK_GUIDANCE, build_style_examples
 
 from backend.lens.languages import normalize as _normalize_lang
 from backend.ai.provider_contract import SystemPromptSection
-from .context import build_character_block, build_glossary_block, build_prev_context_block, build_series_block, build_speaker_block
+from .context import build_page_context_block, build_character_block, build_glossary_block, build_prev_context_block, build_series_block, build_speaker_block
 from .languages import target_language_priority
 from .styles import CANONICAL_PROMPT_CONTRACT_VERSION, CHARACTER_MEMO_INSTRUCTION, IMAGE_HINT, OCR_SEMANTIC_GUIDANCE, SERIES_NOTES_HEADING, SYSTEM_BASE, lang_style, select_style
 
@@ -24,10 +25,6 @@ SCHEMA_SOURCE_INPUT_CONTRACT = (
 # Browser contract metadata retains this legacy label until its independent
 # direct-local contract is revised. API provider messages do not use it.
 
-TRANSLATOR_IDENTITY_BASE = (
-    "You are an expert translator and localization editor. The following defines how you translate. "
-    "Treat it as your own translation style and apply it naturally and consistently."
-)
 
 def build_translator_identity_system(style: str) -> str:
     selected = str(style or "").strip()
@@ -286,13 +283,13 @@ def build_translation_user_message(
     series_state: str = "",
     speakers: dict | None = None,
     prev_context: list | None = None,
+    page_context: list | None = None,
     repair_reason: str = "",
 ) -> str:
     """Compose the provider-visible user message for translation.
 
-    The system role is intentionally tiny. All task-specific material lives
-    here: target language, editable style, optional runtime context, source
-    contract, exact output contract, and the OCR records.
+    System owns identity and selected style. User owns task, examples,
+    optional context, the active output contract and finally source records.
     """
     style, _source = select_style(lang, prompt_override, prompt_mode)
     runtime = "\n\n".join(filter(None, (
@@ -302,14 +299,19 @@ def build_translation_user_message(
         build_glossary_block(glossary),
         build_speaker_block(speakers),
         build_prev_context_block(prev_context),
+        build_page_context_block(page_context),
     )))
     source_contract = SCHEMA_SOURCE_INPUT_CONTRACT if structured_output else SOURCE_INPUT_CONTRACT
     blocks = [
         "TRANSLATION TASK\n" + target_language_priority(lang) +
-        "\nUse the translation style defined in your translator identity.",
+        "\nUse the translation style defined in your translator identity.\n" + TASK_GUIDANCE,
     ]
+    if _source != "saved_custom_replace":
+        examples = build_style_examples(lang, expected_ids, structured_output=structured_output)
+        if examples:
+            blocks.append(examples)
     if runtime:
-        blocks.append("CONTEXT\n" + runtime)
+        blocks.append("CONTEXT — READ ONLY, DO NOT TRANSLATE\n" + runtime)
     blocks.extend((source_contract,
         exact_request_output_contract(expected_ids, structured_output=structured_output)))
     from .repair import wrong_language_repair_instruction
@@ -392,9 +394,10 @@ def canonical_prompt_contract(lang: str, *, want_memo: bool = True) -> dict:
             "markerOutputContract",
         ],
         "editableStylePolicy": {
-            "control": "fixed_replace",
+            "control": "optional_replace",
             "supportedModes": ["replace"],
             "migrationDefault": "replace",
+            "emptyBehavior": "built_in",
         },
         "pieces": pieces,
         "hashes": hashes,

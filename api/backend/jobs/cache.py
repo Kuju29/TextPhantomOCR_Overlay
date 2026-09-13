@@ -70,6 +70,7 @@ def _ai_context_signature(ai_cfg: AiConfig) -> str:
             "state": str(getattr(ai_cfg, "series_state", "") or ""),
             "speakers": getattr(ai_cfg, "speakers", None) or {},
             "prev": getattr(ai_cfg, "prev_context", None) or [],
+            "page": getattr(ai_cfg, "page_context", None) or [],
         },
         ensure_ascii=False,
         sort_keys=True,

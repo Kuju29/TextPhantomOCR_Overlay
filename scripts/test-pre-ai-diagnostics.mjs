@@ -31,6 +31,9 @@ const actual = await diagnosticFingerprints(units, { enabled: true, digest });
 assert.equal(calls, units.length + 1);
 assert(peak > 1 && peak <= 16, `digest concurrency must be bounded at 16; saw ${peak}`);
 
+const originalCalls = calls;
+await Promise.all([actual.fingerprint(units[0].text), actual.fingerprint(units[0].text)]);
+assert.equal(calls, originalCalls, "same page text reuses its already computed fingerprint");
 const encoder = new TextEncoder();
 const oldFingerprint = async (value) => {
   const source = encoder.encode(String(value || ""));

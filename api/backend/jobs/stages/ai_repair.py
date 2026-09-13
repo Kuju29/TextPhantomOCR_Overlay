@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-import time, re
+import time, re, unicodedata
 
 from backend.ai import markers, wire_trace
 from backend.ai.errors import ModelOutputContractError, WrongLanguageOutput
@@ -60,6 +60,75 @@ from backend.log import dbg, event
 #     dbg("ai.partial.restored", {"paragraphs": indices})
 #     return len(indices)
 
+def _script_name(ch: str) -> str:
+    """Return a stable, privacy-safe script label for one Unicode letter."""
+    if not ch or not ch.isalpha():
+        return ""
+    code = ord(ch)
+    if 0x0E00 <= code <= 0x0E7F:
+        return "thai"
+    if 0x0E80 <= code <= 0x0EFF:
+        return "lao"
+    if 0x3040 <= code <= 0x30FF or 0x31F0 <= code <= 0x31FF:
+        return "kana"
+    if (0x3400 <= code <= 0x9FFF or 0xF900 <= code <= 0xFAFF
+            or 0x20000 <= code <= 0x323AF):
+        return "han"
+    if (0x1100 <= code <= 0x11FF or 0x3130 <= code <= 0x318F
+            or 0xA960 <= code <= 0xA97F or 0xAC00 <= code <= 0xD7AF
+            or 0xD7B0 <= code <= 0xD7FF):
+        return "hangul"
+    name = unicodedata.name(ch, "")
+    prefixes = (
+        ("LATIN", "latin"), ("CYRILLIC", "cyrillic"),
+        ("GREEK", "greek"), ("ARABIC", "arabic"),
+        ("HEBREW", "hebrew"), ("DEVANAGARI", "devanagari"),
+        ("BENGALI", "bengali"), ("GURMUKHI", "gurmukhi"),
+        ("GUJARATI", "gujarati"), ("ORIYA", "oriya"),
+        ("TAMIL", "tamil"), ("TELUGU", "telugu"),
+        ("KANNADA", "kannada"), ("MALAYALAM", "malayalam"),
+        ("SINHALA", "sinhala"), ("KHMER", "khmer"),
+        ("MYANMAR", "myanmar"), ("ARMENIAN", "armenian"),
+        ("GEORGIAN", "georgian"), ("ETHIOPIC", "ethiopic"),
+        ("SYRIAC", "syriac"), ("THAANA", "thaana"),
+        ("TIBETAN", "tibetan"), ("MONGOLIAN", "mongolian"),
+    )
+    for prefix, label in prefixes:
+        if name.startswith(prefix):
+            return label
+    return "other"
+
+
+def _script_counts(value: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for ch in str(value or ""):
+        name = _script_name(ch)
+        if name:
+            counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def _script_runs(value: str, target_script: str) -> list[dict[str, Any]]:
+    runs: list[dict[str, Any]] = []
+    current: dict[str, Any] | None = None
+    for ch in str(value or ""):
+        name = _script_name(ch)
+        if not name or name in {target_script, "latin"}:
+            current = None
+            continue
+        if current is not None and current["script"] == name:
+            current["text"] += ch
+        else:
+            current = {"script": name, "text": ch}
+            runs.append(current)
+    return runs
+
+
+def _source_contains_run(source: str, value: str) -> bool:
+    normalized = unicodedata.normalize("NFKC", str(value or ""))
+    return bool(normalized) and normalized in unicodedata.normalize("NFKC", str(source or ""))
+
+
 def _target_script_diagnostic(text: str, target_lang: str, source_text: str = "", unit_id: str = "") -> dict[str, Any]:
     """Mirror the extension's source-aware per-unit Thai/Korean verdict."""
     raw_target = str(target_lang or "").strip().lower()
@@ -91,75 +160,76 @@ def _target_script_diagnostic(text: str, target_lang: str, source_text: str = ""
         and all(0x21 <= ord(ch) <= 0x7E for ch in trimmed)
         and is_preserved_identifier
     )
+    target_script = "thai" if target == "th" else "hangul"
     if preserved_identifier:
-        return {"id": unit_id, "targetScript": "thai" if target == "th" else "hangul",
+        return {"id": unit_id, "targetScript": target_script,
                 "detectedScripts": {}, "targetChars": 0, "foreignChars": 0,
                 "decision": "accept", "reason": "preserved_identifier"}
-    script_letters = [ch for ch in value if ch.isalpha()]
-    def wanted_script(ch: str) -> bool:
-        if target == "th":
-            return "\u0e00" <= ch <= "\u0e7f"
-        code = ord(ch)
-        return (0x1100 <= code <= 0x11FF or 0x3130 <= code <= 0x318F
-                or 0xA960 <= code <= 0xA97F or 0xAC00 <= code <= 0xD7AF
-                or 0xD7B0 <= code <= 0xD7FF)
-    wanted = sum(1 for ch in script_letters if wanted_script(ch))
-    def foreign_script(ch: str) -> str:
-        code = ord(ch)
-        if 0x0E80 <= code <= 0x0EFF:
-            return "lao"
-        if 0x3040 <= code <= 0x30FF:
-            return "kana"
-        if 0x3400 <= code <= 0x9FFF:
-            return "han"
-        if (0x1100 <= code <= 0x11FF or 0x3130 <= code <= 0x318F
-                or 0xA960 <= code <= 0xA97F or 0xAC00 <= code <= 0xD7AF
-                or 0xD7B0 <= code <= 0xD7FF):
-            return "hangul"
-        return ""
-    foreign_names = ("lao", "kana", "han", "hangul") if target == "th" else ("lao", "kana", "han", "thai")
-    def classified_script(ch: str) -> str:
-        if "\u0e00" <= ch <= "\u0e7f":
-            return "thai"
-        return foreign_script(ch)
-    output_scripts = {name: sum(1 for ch in value if classified_script(ch) == name)
-                      for name in foreign_names}
-    source_scripts = {name: sum(1 for ch in source_value if classified_script(ch) == name)
-                      for name in output_scripts}
-    hard = sum(output_scripts.values())
-    invented = sum(count for name, count in output_scripts.items() if source_scripts[name] == 0)
-    # Permit only one source-native glyph beside substantial Thai (for a
-    # compact name/SFX such as `王`).  Source Japanese/Han must not exempt a
-    # longer untranslated fragment or a model language switch.
-    lao_count = output_scripts["lao"]
+
+    counts = _script_counts(value)
+    wanted = counts.get(target_script, 0)
+    latin_chars = counts.get("latin", 0)
+    letters = sum(counts.values())
+    other_letters = max(0, letters - wanted)
+    hard_counts = {name: count for name, count in counts.items()
+                   if count > 0 and name not in {target_script, "latin"}}
+    hard = sum(hard_counts.values())
+    runs = _script_runs(value, target_script)
+    attributed = [{**run, "chars": len(run["text"]),
+                   "inSource": _source_contains_run(source_value, run["text"])}
+                  for run in runs]
+    invented = sum(run["chars"] for run in attributed if not run["inSource"])
+    strict_scripts = {"lao", "han", "kana", "hangul", "thai"}
+    strict_foreign = sum(run["chars"] for run in attributed if run["script"] in strict_scripts)
+    preservable_scripts = {
+        "cyrillic", "greek", "arabic", "hebrew", "devanagari", "bengali",
+        "gurmukhi", "gujarati", "oriya", "tamil", "telugu", "kannada",
+        "malayalam", "sinhala", "khmer", "myanmar", "armenian", "georgian",
+        "ethiopic", "syriac", "thaana", "tibetan", "mongolian",
+    }
+    preservable = [run for run in attributed if run["script"] in preservable_scripts]
+    all_preservable_attributed = (
+        bool(preservable) and len(preservable) == len(attributed)
+        and all(run["inSource"] and run["chars"] <= 24 for run in preservable)
+    )
+    lao_count = hard_counts.get("lao", 0)
     bounded_lao_confusable = target == "th" and lao_count == hard and lao_count <= 2 and wanted >= 3
-    standalone_source_glyph = len(trimmed) == 1 and trimmed in source_value
+    normalized_source = unicodedata.normalize("NFKC", source_value)
+    normalized_trimmed = unicodedata.normalize("NFKC", trimmed)
+    standalone_source_glyph = len(trimmed) == 1 and normalized_trimmed in normalized_source
     bounded_source_glyph = hard == 1 and invented == 0 and (wanted >= 3 or standalone_source_glyph)
-    bounded_foreign_fragment = bounded_lao_confusable or bounded_source_glyph
+    bounded_source_alphabetic = (
+        strict_foreign == 0 and invented == 0 and all_preservable_attributed
+        and wanted >= 3 and hard <= max(8, min(24, wanted))
+    )
+    bounded_foreign_fragment = (
+        bounded_lao_confusable or bounded_source_glyph or bounded_source_alphabetic
+    )
     foreign_leak = hard > 0 and not bounded_foreign_fragment and (
         wanted == 0 or invented > 0 or hard >= 2
     )
-    other_letters = max(0, len(script_letters) - wanted)
-    latin_chars = sum(1 for ch in value if ch.isascii() and ch.isalpha())
     single_hyphen_prose = trimmed == source_trimmed and re.match(r"^[A-Z]{3,}-\d+$", trimmed) is not None
-    untranslated_long = len(script_letters) >= 8 and wanted == 0 and other_letters / len(script_letters) >= 0.75
+    untranslated_long = letters >= 8 and wanted == 0 and other_letters / letters >= 0.75
     rejected = foreign_leak or single_hyphen_prose or untranslated_long
+    invented_third_script = invented > 0 and any(
+        not run["inSource"] and run["script"] not in strict_scripts for run in attributed
+    )
     reason = (
-        "foreign_script_leak" if foreign_leak else
+        ("invented_third_script" if invented_third_script else "foreign_script_leak") if foreign_leak else
         "untranslated_identifier_like_prose" if single_hyphen_prose else
         "untranslated_long_prose" if untranslated_long else
+        "source_preserved_foreign_name" if bounded_source_alphabetic else
         "proper_name_or_sfx_exemption" if bounded_foreign_fragment and standalone_source_glyph else
         "small_foreign_fragment_exemption" if bounded_foreign_fragment else
         "target_script_present" if wanted > 0 else "insufficient_evidence"
     )
-    detected = {"thai" if target == "th" else "hangul": wanted}
-    detected.update({name: count for name, count in output_scripts.items() if count > 0})
+    detected = {target_script: wanted}
+    detected.update(hard_counts)
     if latin_chars > 0:
         detected["latin"] = latin_chars
-    if other_letters > hard + latin_chars:
-        detected["otherLetters"] = other_letters - hard - latin_chars
-    return {"id": unit_id, "targetScript": "thai" if target == "th" else "hangul",
-            "detectedScripts": detected, "targetChars": wanted, "foreignChars": hard + latin_chars,
+    return {"id": unit_id, "targetScript": target_script,
+            "detectedScripts": detected, "targetChars": wanted,
+            "foreignChars": hard + latin_chars,
             "decision": "reject" if rejected else "accept", "reason": reason}
 
 def _high_confidence_wrong_target_script(text: str, target_lang: str, source_text: str = "") -> bool:

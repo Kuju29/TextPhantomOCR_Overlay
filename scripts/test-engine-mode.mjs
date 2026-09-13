@@ -149,13 +149,13 @@ const {
     "both the single-image and whole-page payloads must carry the engine",
   );
   assert.ok(
-    menu.includes("const resolvedSettings = profileSnapshot?.settings || flatSettings") &&
+    menu.includes("let resolvedSettings = profileSnapshot?.settings || flatSettings") &&
       menu.includes("engineMode: effectiveEngineMode(resolvedSettings.engineMode)"),
     "context-menu.js must gate either the AI snapshot or non-AI flat settings before preflight and payload creation",
   );
   assert.match(
     menu,
-    /const profileSnapshot = usesAi[\s\S]{0,180}?resolveJobAiProfile[\s\S]{0,180}?: null;/,
+    /(?:const|let) profileSnapshot = usesAi[\s\S]{0,180}?resolveJobAiProfile[\s\S]{0,180}?: null;/,
     "only AI jobs may substitute a profile snapshot; non-AI jobs retain their stored engine identity",
   );
   assert.ok(

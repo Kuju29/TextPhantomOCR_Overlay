@@ -23,6 +23,7 @@ POLICY = OpenAIProviderPolicy(
     output_budget_field="max_tokens",
     reasoning_policy="requires_verified_capability",
     model_filter=filter_model_items,
+    catalogue_evidence="together_account_chat_type",
     catalogue_items=array_or_data_items,
 )
 ADAPTER = OpenAIProviderAdapter(POLICY)

@@ -8,6 +8,7 @@ function verificationResult(model, status, extra = {}) {
 export async function verifyLocalModelGeneration(adapter, model, {
   signal = null,
   timeoutMs = 60_000,
+  thinking = "off",
 } = {}) {
   const selected = String(model || "").trim();
   if (!selected) return verificationResult("", "not_selected");
@@ -21,9 +22,10 @@ export async function verifyLocalModelGeneration(adapter, model, {
   );
   const started = performance.now();
   try {
+    const requestedThinking = thinking === "on" ? "on" : "off";
     const thinkingMode = typeof adapter.resolveThinkingMode === "function"
-      ? adapter.resolveThinkingMode("off", { model: selected })
-      : "off";
+      ? adapter.resolveThinkingMode(requestedThinking, { model: selected })
+      : requestedThinking;
     const result = await adapter.generate({
       model: selected,
       messages: [
@@ -43,6 +45,17 @@ export async function verifyLocalModelGeneration(adapter, model, {
     if (!result?.response?.ok) {
       return verificationResult(selected, "rejected", {
         httpStatus: Number(result?.response?.status || 0),
+        elapsedMs: Math.round(performance.now() - started),
+      });
+    }
+    // Text received before EOF is not proof that the provider completed a
+    // generation. Apply the same transport integrity gate as translation.
+    const stream = result?.stream;
+    if (stream?.providerStreamErrorCode || stream?.malformedFrameCount > 0 ||
+        stream?.drainStatus === "timeout" ||
+        (stream?.streaming && stream.terminalCompleted !== true)) {
+      return verificationResult(selected, "invalid_output", {
+        code: "provider_protocol_error",
         elapsedMs: Math.round(performance.now() - started),
       });
     }
@@ -108,6 +121,7 @@ export async function discoverLocalModels(settings = {}, options = {}) {
         : await verifyLocalModelGeneration(adapter, selected, {
             signal: options.signal,
             timeoutMs: options.probeTimeoutMs,
+            thinking: options.thinking,
           });
     }
     return {

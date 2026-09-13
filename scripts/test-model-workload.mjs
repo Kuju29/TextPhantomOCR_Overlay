@@ -5,7 +5,7 @@ import { guardOutputBudget } from '../src/shared/ai/workload/budget.js';
 import { createWorkloadController, WORKLOAD_STORAGE_KEY } from '../src/background/ai/workload-controller.js';
 let cases = 0;
 const test = async (name, fn) => { await fn(); cases++; console.log(`PASS ${name}`); };
-const ctx = { contract: 'schema_object', fixedInput: 300, limits: {}, reasoningActive: false };
+const ctx = { contract: 'schema_object', fixedInput: 300, limits: {}, reasoningActive: false, reasoningSupported: false };
 const units = (n, text = 'hello') => Array.from({length:n}, (_, i) => ({id:`P${i}`,text,translatable:true}));
 function partition(rows, profile, context = ctx) {
   const batches=[]; let offset=0;
@@ -22,6 +22,20 @@ function observation(profile, overrides={}) {
 await test('multilingual estimates are not whitespace word counts',()=>{
   assert.equal(textWeight('夏休み'),3); assert.equal(textWeight('abcdefghijklmnopqrst'),5);
   assert.ok(textWeight('ภาษาไทย')>1);
+});
+await test('one-image mode ignores learned soft targets and splits only at a real hard provider budget',()=>{
+  const rows=units(43,'A longer dialogue about the place where we met yesterday.');
+  const soft={...initialProfile(),target:48,records:1};
+  const one=takeWorkloadBatch(rows,0,soft,{...ctx,singleRequest:true,limits:{contextTokens:8192,maxOutputTokens:4096}});
+  assert.equal(one.units.length,rows.length);
+  assert.equal(one.splitReason,'one_image_one_generation');
+  const hard=partition(rows,soft,{...ctx,singleRequest:true,limits:{contextTokens:1536,maxOutputTokens:512}});
+  assert.ok(hard.length>1,'an actually small provider window must use the minimum hard-safe chunks');
+  assert.ok(hard.every(batch=>batch.estimate.fitsHard));
+  assert.ok(hard.slice(0,-1).every(batch=>batch.splitReason==='hard_provider_budget'));
+  assert.deepEqual(hard.flatMap(batch=>batch.units),rows,'hard splitting must conserve exact unit identity and order');
+  assert.throws(()=>takeWorkloadBatch(rows,0,soft,{...ctx,singleRequest:true,fixedInput:9000,limits:{contextTokens:4096,maxOutputTokens:4096}}),
+    e=>e.code==='ai_workload_budget_insufficient'&&e.requestDispatched===false);
 });
 await test('longer text causes smaller groups; identities and text are conserved',()=>{
   const p=initialProfile();
@@ -60,6 +74,16 @@ await test('confirmed 8192 completion capacity packs an ordinary page once witho
   const oversized=partition(units(80,'長い文章です'.repeat(20)),initialProfile(),context);
   assert.ok(oversized.length>1);
   assert.ok(oversized.every(batch=>batch.estimate.fitsHard));
+});
+
+await test('cold reasoning-capable large windows stay adaptive until measured',()=>{
+  const rows=units(21,'This ordinary dialogue is about forty source characters.');
+  const context={...ctx,reasoningSupported:true,limits:{contextTokens:16384,maxOutputTokens:8192}};
+  const cold=partition(rows,initialProfile(),context);
+  assert.ok(cold.length>1,'unknown hidden reasoning must not receive a cold whole-page bootstrap');
+  const trusted={...initialProfile(),successes:2};
+  const measured=partition(rows,trusted,context);
+  assert.equal(measured.length,1,'two valid measured generations may use the large-window bootstrap');
 });
 await test('large-window output split reports the effective target instead of the cold record cap',()=>{
   const context={...ctx,limits:{contextTokens:32768,maxOutputTokens:8192}};
@@ -131,6 +155,25 @@ await test('network errors, cancellation, and unknown terminal do not poison pro
     const p=initialProfile();const o=observation(p,{answer:undefined,error});assert.equal(o.outcome,'ignored');assert.equal(learnWorkload(p,o),p);
   }
   assert.equal(observation(initialProfile(),{answer:result(units(10),{finishReason:'unknown'})}).outcome,'ignored');
+});
+
+await test('truncated provider reasoning is reserved on the next sub-batch',()=>{
+  const p=initialProfile();
+  const rows=units(8,'A moderately long sentence for the model.');
+  const plan=estimateRequest(rows,p,{...ctx,reasoningSupported:true,limits:{contextTokens:16384,maxOutputTokens:8192}});
+  const error=Object.assign(new Error('budget exhausted'),{
+    code:'output_budget_exhausted',requestDispatched:true,providerResponded:true,
+    generationAttempts:1,providerAttempts:1,
+    generationMeta:{model:'fixture',selectedContract:'schema_object',finishReason:'length',
+      usage:{source:'provider',outputTokens:4096,thinkingTokens:3900}},
+  });
+  const observed=observeWorkload({units:rows,error,plan,ai:{model:'fixture'}});
+  assert.equal(observed.outcome,'length');
+  const learned=learnWorkload(p,observed);
+  assert.equal(learned.reasoning.at(-1),3900);
+  const next=estimateRequest(units(1),learned,{...ctx,reasoningSupported:true,limits:{contextTokens:16384,maxOutputTokens:8192}});
+  assert.ok(next.reasoningReserve>=3900,'measured hidden reasoning must survive a failed visible answer');
+  assert.equal(next.observedReasoning,true);
 });
 await test('unreported reasoning is unknown, not zero',()=>{
   const p=initialProfile(),o=observation(p,{answer:result(units(10),{thinkingApplied:'requested_off_unverified',usage:{source:'provider',outputTokens:80}})});

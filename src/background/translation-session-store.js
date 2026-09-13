@@ -16,7 +16,15 @@ export function createTranslationSessionStore({
   now = Date.now, maxBytes = 6 * 1024 * 1024, maxRuns = 24,
   ttlMs = 6 * 60 * 60 * 1000,
 } = {}) {
-  let data = {}, loaded = null, chain = Promise.resolve();
+  let data = {}, loaded = null, running = false;
+  const pending = [], tails = new Map(), outstanding = new Set();
+  // Stored rows are immutable internally; callers and reducers receive clones.
+  // Cache only their exact UTF-8 JSON sizes, never a guessed byte estimate.
+  const rowSizes = new WeakMap();
+  function entrySize(key, row) {
+    if (!rowSizes.has(row)) rowSizes.set(row, size(row));
+    return size(key) + 1 + rowSizes.get(row);
+  }
   async function load() {
     if (!loaded) loaded = (async () => {
       const storage = area();
@@ -29,12 +37,8 @@ export function createTranslationSessionStore({
     })();
     return loaded;
   }
-  function update(id, change) {
-    const work = chain.then(async () => {
-      await load();
-      const previous = structuredClone(data[id] || null);
-      const next = await change(previous);
-      const candidate = { ...data };
+  function candidateFor(current, id, next) {
+      const candidate = { ...current };
       if (next == null) delete candidate[id];
       else candidate[id] = sessionSafe({ ...next, id, updatedAt: now() });
       for (const [key, row] of Object.entries(candidate)) {
@@ -42,25 +46,70 @@ export function createTranslationSessionStore({
       }
       const oldTerminal = Object.values(candidate).filter(row => row.id !== id &&
         ['done','apply_failed','cancelled','unavailable'].includes(row.phase)).sort((a,b) => a.updatedAt - b.updatedAt);
-      while ((Object.keys(candidate).length > maxRuns || size(candidate) > maxBytes) && oldTerminal.length)
-        delete candidate[oldTerminal.shift().id];
-      if (Object.keys(candidate).length > maxRuns || size(candidate) > maxBytes)
+      let count = Object.keys(candidate).length;
+      let bytes = 2 + Math.max(0, count - 1);
+      for (const [key, row] of Object.entries(candidate)) bytes += entrySize(key, row);
+      while ((count > maxRuns || bytes > maxBytes) && oldTerminal.length) {
+        const key = String(oldTerminal.shift().id);
+        bytes -= entrySize(key, candidate[key]) + (count > 1 ? 1 : 0);
+        count--;
+        delete candidate[key];
+      }
+      if (count > maxRuns || bytes > maxBytes)
         throw Object.assign(new Error('Active translation checkpoints reached their session storage limit'), { code: 'session_checkpoint_limit' });
-      // Publish memory only after the persistent write succeeds. Failed writes
-      // cannot make a later caller believe a missing checkpoint was saved.
-      await area().set({ [TRANSLATION_SESSION_KEY]: { version: 1, runs: candidate } });
-      data = candidate;
-      return structuredClone(data[id] || null);
+      return candidate;
+  }
+  async function drain() {
+    try {
+      await load();
+      while (pending.length) {
+        // Preserve every transition in invocation order, but commit an ordered
+        // burst once. No timer, dropped progress, or fire-and-forget checkpoint.
+        const batch = pending.splice(0, 32), results = [];
+        let candidate = data;
+        for (const task of batch) {
+          try {
+            const next = await task.change(structuredClone(candidate[task.id] || null));
+            const updated = candidateFor(candidate, task.id, next);
+            const result = structuredClone(updated[task.id] || null);
+            candidate = updated;
+            results.push({ task, result });
+          } catch (error) { task.reject(error); }
+        }
+        if (!results.length) continue;
+        try {
+          await area().set({ [TRANSLATION_SESSION_KEY]: { version: 1, runs: candidate } });
+          // No reader can see a snapshot which failed to reach session storage.
+          data = candidate;
+          for (const { task, result } of results) task.resolve(result);
+        } catch (error) {
+          for (const { task } of results) task.reject(error);
+        }
+      }
+    } catch (error) {
+      for (const task of pending.splice(0)) task.reject(error);
+    } finally { running = false; }
+  }
+  function update(id, change) {
+    const work = new Promise((resolve, reject) => {
+      pending.push({ id, change, resolve, reject });
     });
-    chain = work.catch(() => {});
+    const settled = work.then(() => {}, () => {});
+    tails.set(id, settled);
+    outstanding.add(settled);
+    void settled.then(() => {
+      outstanding.delete(settled);
+      if (tails.get(id) === settled) tails.delete(id);
+    });
+    if (!running) { running = true; queueMicrotask(() => { void drain(); }); }
     return work;
   }
   return {
     update,
-    async get(id) { await load(); await chain; return structuredClone(data[id] || null); },
-    async list() { await load(); await chain; return structuredClone(Object.values(data)); },
+    async get(id) { const tail = tails.get(id); await load(); await tail; return structuredClone(data[id] || null); },
+    async list() { const writes = [...outstanding]; await load(); await Promise.all(writes); return structuredClone(Object.values(data)); },
     remove(id) { return update(id, () => null); },
-    flush() { return chain; },
+    flush() { return Promise.all([...outstanding]); },
   };
 }
 export const translationSessions = createTranslationSessionStore();

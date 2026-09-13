@@ -19,7 +19,9 @@ function fixture({ provider = "huggingface", model = "stale-model", resolveModel
       requested_model:String(els.aiModel.value || model), provider, backend_supported:true,
       provider_protocol:"openai_chat_completions", key_status:"valid", models_verified:true,
       models_source:"live", models:[...resolveModels], model:String(els.aiModel.value || model), model_status:resolveModels.includes(String(els.aiModel.value || model))?"available":"unavailable",
-      ...(modelCandidates ? { model_candidates: structuredClone(modelCandidates) } : {}),
+      model_candidates: structuredClone(modelCandidates || resolveModels.map((id) => ({
+        id, eligibility: "usable", evidence: "account_catalogue_translation_filter",
+      }))),
       model_capabilities:{},
     };
     if (url.endsWith("/probe")) return { ok:probeStatus === "passed", provider, model:String(els.aiModel.value), status:probeStatus, cached:false, ...(probeCapabilities ? { model_capabilities: structuredClone(probeCapabilities) } : {}) };
@@ -41,9 +43,8 @@ function fixture({ provider = "huggingface", model = "stale-model", resolveModel
   return {controller,els,state,requests,messages};
 }
 
-// Candidate metadata survives the backward-compatible IDs contract. Unknown
-// entries are explicitly verified only after selection; no catalogue-wide
-// generation probes are issued.
+// Only positively eligible models enter the picker. Unknown and blocked
+// catalogue entries are not exposed and therefore cannot trigger paid probes.
 {
   const candidates = [
     {id:"good-model",eligibility:"unknown",evidence:"catalogue_only"},
@@ -51,9 +52,10 @@ function fixture({ provider = "huggingface", model = "stale-model", resolveModel
   ];
   const t=fixture({model:"good-model",resolveModels:["good-model","blocked-model"],modelCandidates:candidates});
   await t.controller.refresh();
-  assert.equal(t.requests.filter(x=>x.url.endsWith("/probe")).length,1);
-  assert.equal(t.state.lastAiResolve.model_candidates[0].eligibility,"usable");
-  assert.equal(t.state.lastAiResolve.model_candidates[0].evidence,"selected_generation_probe");
+  assert.equal(t.requests.filter(x=>x.url.endsWith("/probe")).length,0);
+  assert.deepEqual(t.els.aiModel.options.map(x=>x.value),[]);
+  assert.equal(t.state.aiModelBlocked,true);
+  assert.equal(t.state.lastAiResolve.model_candidates[0].eligibility,"unknown");
 }
 
 // A stored model missing from this provider/account's authoritative catalogue
@@ -116,7 +118,8 @@ function fixture({ provider = "huggingface", model = "stale-model", resolveModel
     profile:{saveModelCapabilities:async()=>{},selectModel:()=>{}}, prompt:{render:async()=>{},scheduleSave:()=>{}}, local:{}, usage:{},
     persist:async()=>{}, normalizeUrl:x=>x,
     setModelOptions:(models,{keepValue="",selectFirst=true}={})=>{
-      const list=models.map(String); els.aiModel.options=list.map(value=>({value}));
+      const list=models.map((item)=>typeof item === "object" ? String(item.id || "") : String(item));
+      els.aiModel.options=list.map(value=>({value}));
       els.aiModel.value=list.includes(String(keepValue||""))?String(keepValue):(selectFirst&&list.length?list[0]:"");
     },
     setFieldMessage:()=>{}, setStatus:()=>{}, toggleUi:()=>{},
@@ -128,7 +131,8 @@ function fixture({ provider = "huggingface", model = "stale-model", resolveModel
   releaseResolve({
     ok:true,requested_model:"good-model",provider:"huggingface",backend_supported:true,
     provider_protocol:"openai_chat_completions",key_status:"valid",models_verified:true,models_source:"live",
-    models:["good-model"],model:"good-model",model_status:"available",model_capabilities:{},
+    models:["good-model"], model_candidates:[{id:"good-model",eligibility:"usable",evidence:"fixture"}],
+    model:"good-model",model_status:"available",model_capabilities:{},
   });
   await refreshPromise;
   assert.equal(state.lastAiProbe?.status,"passed");

@@ -32,20 +32,23 @@ export { targetLanguagePriority } from "./prompt.js";
 export { assertNoDuplicateJsonKeys } from "./decode.js";
 export { completedLineContract } from "../contracts/marker-completion.js";
 
-function dynamicOutputTokens(units, systemText = "") {
-  const chars = (units || []).reduce(
+function dynamicOutputTokens(units, _systemText = "", workload = null) {
+  const list = Array.isArray(units) ? units : [];
+  const chars = list.reduce(
     (n, unit) => n + String(unit?.text || "").length,
     0,
   );
-  return Math.max(
-    1024,
-    Math.min(
-      8192,
-      Math.ceil(chars * 3 + String(systemText).length * 0.1) +
-        Math.max(1, units?.length || 0) * 96 +
-        512,
-    ),
-  );
+  const count = Math.max(1, list.length);
+  const predicted = Number(workload?.predictedOutput);
+  // Output allowance must follow the requested translation, not the size of
+  // the system/style prompt. Counting prompt characters here previously gave
+  // a four-record Local request 2k+ completion tokens, which invited small
+  // models to ramble or spend the entire allowance on hidden reasoning.
+  const sourceAllowance = Math.ceil(chars * 1.75 + count * 36 + 96);
+  const learnedAllowance = Number.isFinite(predicted) && predicted > 0
+    ? Math.ceil(predicted * 1.75 + 96)
+    : 0;
+  return Math.max(384, Math.min(8192, Math.max(sourceAllowance, learnedAllowance)));
 }
 export const localAiOutputBudgetForTest = dynamicOutputTokens;
 
@@ -131,6 +134,10 @@ function rejectedResponse(response, raw) {
 function terminalDiagnostics(stream, providerMs, parseMs, finishReason) {
   return {
     providerMs: Math.round(providerMs),
+    requestSetupMs: Number.isFinite(stream.requestSetupMs) ? Math.round(stream.requestSetupMs) : null,
+    headersToFirstByteMs: stream.headersToFirstByteMs == null ? null : Math.round(stream.headersToFirstByteMs),
+    headersToFirstContentMs: stream.headersToFirstContentMs == null ? null : Math.round(stream.headersToFirstContentMs),
+    contentToTerminalMs: stream.contentToTerminalMs == null ? null : Math.round(stream.contentToTerminalMs),
     parseMs: Math.round(parseMs),
     finishReason,
     terminalCompleted: stream.terminalCompleted === true,
@@ -199,12 +206,6 @@ async function translateSingle(
     model,
     modelCapabilities: ai?.model_capabilities,
   });
-  if (!canonicalPrompt || canonicalPrompt.version !== "translation-plan-2")
-    throw new LocalAiError("Local AI requires canonical prompt contract translation-plan-2", {
-      code: "canonical_prompt_contract_invalid",
-      attempted: false,
-      retryable: false,
-    });
   const composed = composeCanonicalPrompt(
     canonicalPrompt,
     ai,
@@ -220,7 +221,8 @@ async function translateSingle(
   const builtInStyle = String(
     canonicalPrompt?.pieces?.editableStyle || "",
   ).trim();
-  const savedDefault =
+  const userPromptPresent = Boolean(userPrompt);
+  const savedDefault = userPromptPresent &&
     withoutLeadingTargetLanguageHeader(userPrompt) ===
     withoutLeadingTargetLanguageHeader(builtInStyle);
   const wireUnits = units.map((unit, index) => ({
@@ -230,16 +232,18 @@ async function translateSingle(
   const requestOutputContract = exactOutputInstruction(
     wireUnits.map((unit) => unit.id), outputContract, targetLang,
   );
-  const effectiveSystemPrompt = composeTranslatorIdentitySystem(composed.sections.style);
+  const effectiveSystemPrompt = composeTranslatorIdentitySystem(`${composed.sections.language}\n${composed.sections.style}`);
   const audit = {
     promptPolicyVersion: String(promptAudit?.promptVersion || ""),
     canonicalPromptVersion: String(
       promptAudit?.canonicalPromptVersion || canonicalPrompt?.version || "",
     ),
     canonicalPromptHash: String(promptAudit?.canonicalPromptHash || ""),
-    promptSource: savedDefault ? "saved_default" : "saved_custom_replace",
+    promptSource: !userPromptPresent
+      ? "built_in_default"
+      : savedDefault ? "saved_default" : "saved_custom_replace",
     promptMode: "replace",
-    userPromptPresent: Boolean(userPrompt),
+    userPromptPresent,
     userPromptChars: userPrompt.length,
     effectiveStyleChars: composed.sections.style.length,
     effectiveStyleFingerprint: await sessionPromptFingerprint(
@@ -271,6 +275,8 @@ async function translateSingle(
     requestOutputContract,
     sourceRecords,
     targetLang, repairReason: ai?.repair_reason,
+    expectedIds: wireUnits.map(unit => unit.id),
+    structuredOutput: outputContract.kind === "schema_object",
   });
   const userTextFingerprint = await sessionPromptFingerprint(userText);
   diagnosticTrace?.("AI local request contract", {
@@ -314,7 +320,7 @@ async function translateSingle(
     : representable
       ? thinkingSelected : "default";
   const standardOutputTokens = adapter.outputTokens({
-    standard: dynamicOutputTokens(units, effectiveSystemPrompt),
+    standard: dynamicOutputTokens(units, effectiveSystemPrompt, ai?.workload),
     thinkingMode,
   });
   const outputTokens = guardOutputBudget({ standard: standardOutputTokens,

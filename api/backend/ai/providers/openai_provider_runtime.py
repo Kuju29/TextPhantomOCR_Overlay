@@ -49,6 +49,9 @@ class OpenAIProviderPolicy:
     list_path: str = "/models"
     list_params: Mapping[str, object] = field(default_factory=dict)
     model_resolver: ModelResolver | None = None
+    # Non-empty only when this provider's account-scoped catalogue and leaf
+    # filter prove that a returned ID is eligible for this translation adapter.
+    catalogue_evidence: str = ""
 
     def __post_init__(self) -> None:
         if self.output_budget_field not in {None, "max_tokens", "max_completion_tokens"}:
@@ -56,6 +59,7 @@ class OpenAIProviderPolicy:
         if self.reasoning_policy not in {"unsupported", "requires_verified_capability"}:
             raise ValueError("unsupported reasoning policy")
         object.__setattr__(self, "list_params", MappingProxyType(dict(self.list_params)))
+        object.__setattr__(self, "catalogue_evidence", str(self.catalogue_evidence or "")[:120])
 
 def build_messages(request: GenerationRequest) -> list[dict[str, Any]]:
     parts = [part for part in request.user_parts if part.strip()]
@@ -144,6 +148,11 @@ class OpenAIProviderAdapter:
         except ValueError:
             return ModelListResult(status="error", http_status=response.status_code, error="invalid_json")
         models = self.policy.model_filter(self.policy.catalogue_items(body))
-        return ModelListResult(models=models, status="valid", http_status=response.status_code)
+        candidates = ({model: {
+            "eligibility": "usable",
+            "evidence": self.policy.catalogue_evidence,
+        } for model in models} if self.policy.catalogue_evidence else {})
+        return ModelListResult(models=models, status="valid",
+                               http_status=response.status_code, candidates=candidates)
 
 __all__ = ["OpenAIProviderAdapter", "OpenAIProviderPolicy", "all_model_ids", "array_or_data_items", "data_items"]

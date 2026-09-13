@@ -231,6 +231,7 @@
   // Returns why an image is not a translation candidate, or "" when it is one.
   function imageSkipReason(img, mode = "") {
     if (!img || !img.isConnected) return "detached";
+    if (TP.isTranslationOutputImage?.(img)) return "translation_output";
     const srcRaw = TP.getBestImgUrl(img) || img.currentSrc || img.src || "";
     const src = TP.normUrl(srcRaw);
     const classText = [

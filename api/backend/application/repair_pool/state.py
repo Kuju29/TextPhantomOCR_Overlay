@@ -82,7 +82,7 @@ def record_page(run: dict, body: dict) -> dict:
         if item.get("sourceHash") != checksum:
             raise PoolError("repair_source_hash_mismatch")
         reason = item.get("reason", "missing")
-        if reason not in ("missing", "omitted", "empty", "wrong_language", "malformed", "length", "not_sent"):
+        if reason not in ("missing", "omitted", "empty", "wrong_language", "malformed", "length", "not_sent", "provider_http_error"):
             raise PoolError("invalid_repair_reason", 400)
         rows.append({"unitId": unit_id, "text": text, "sourceHash": checksum,
                      "reason": reason, "pageId": page, "generationId": generation,

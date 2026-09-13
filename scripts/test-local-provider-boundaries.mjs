@@ -59,6 +59,10 @@ try {
   assert.ok(one.stream.firstByteMs <= one.stream.firstContentMs);
   assert.ok(one.stream.firstContentMs <= one.stream.lastContentMs);
   assert.ok(one.stream.lastContentMs <= one.stream.terminalMs);
+  assert.equal(one.stream.headersToFirstByteMs,one.stream.firstByteMs-one.stream.dispatchToHeadersMs);
+  assert.equal(one.stream.headersToFirstContentMs,one.stream.firstContentMs-one.stream.dispatchToHeadersMs);
+  assert.equal(one.stream.contentToTerminalMs,one.stream.terminalMs-one.stream.lastContentMs);
+  assert.ok(one.stream.requestSetupMs>=0);
 
   globalThis.fetch = async (url, init) => { request = { url: String(url), body: JSON.parse(init.body) };
     return streamed(['data: {"choices":[{"delta":{"content":"<<TP_P0:ไทย>>"}}]}\n\n', 'data: [DONE]\n\n'], "text/event-stream"); };

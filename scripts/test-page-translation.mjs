@@ -64,6 +64,11 @@ const ok = (translations) => ({ translations, missing: [], meta: { generationAtt
     trace: (name, data) => events.push({ name, data }),
   });
   f.args.dependencies.traceEnabled = () => true;
+  let digestCalls = 0;
+  f.args.dependencies.fingerprintDigest = async (...args) => {
+    digestCalls++;
+    return crypto.subtle.digest(...args);
+  };
   f.args.dependencies.applyTranslations = (doc, translations) => ({
     document: {
       ...doc,
@@ -74,6 +79,7 @@ const ok = (translations) => ({ translations, missing: [], meta: { generationAtt
     report: { translated: 2, missing: [], complete: true },
   });
   await translateLensPage(f.args);
+  assert.equal(digestCalls, 5, 'two sources, partition, two outputs; applied stage reuses page fingerprints');
   const stages = events
     .filter((event) => event.name === "aiUnitStageFingerprints")
     .map((event) => event.data.stage);
@@ -104,13 +110,49 @@ const ok = (translations) => ({ translations, missing: [], meta: { generationAtt
   assert.equal(f.result.aiRoute.contentRepairAttempts, 0);
 }
 {
-  const malformed = Object.assign(new Error("bad shape"), { code: "invalid_model_output", generationAttempts: 1 });
-  const f = make([malformed, ok([{ id: "P0", text: "A" }, { id: "P1", text: "B" }])]);
-  await assert.rejects(translateLensPage(f.args), (error) =>
-    error.code === "invalid_model_output" && error.contentRepairSkipped === true,
-  );
+  const malformed = Object.assign(new Error("bad shape"), {
+    code: "invalid_model_output", generationAttempts: 1, providerAttempts: 1,
+    requestDispatched: true, providerResponded: true,
+  });
+  const checkpoints = [];
+  const f = make([malformed, ok([{ id: "P0", text: "A" }, { id: "P1", text: "B" }])], {
+    onCheckpoint: async row => checkpoints.push(row),
+  });
+  const out = await translateLensPage(f.args);
+  assert.equal(out.usable, false);
+  assert.deepEqual(out.missing, ["P0", "P1"]);
+  assert(checkpoints.some(row => row.stage === "finished" && row.failures?.length === 2),
+    "whole-image structural failure must enter the later batch repair pool");
   assert.deepEqual(f.calls.map((call) => call.ids), [["P0", "P1"]]);
-  assert.equal(f.calls.length, 1, "structural failure must not dispatch a second provider request");
+  assert.equal(f.calls.length, 1, "structural failure must not dispatch a hidden provider retry");
+}
+{
+  const confirmed = {code: "provider_timeout", status: 502, upstreamStatus: 504,
+    providerFailureKind: "http_status", requestDispatched: true, generationAttempts: 1};
+  for (const [label, fields, eligible] of [
+    ["confirmed upstream 504", confirmed, true],
+    ["lost transport", {code: "network_error", requestDispatched: true}, false],
+    ["outer gateway only", {code: "provider_timeout", status: 504}, false],
+    ["legacy status text", {...confirmed, providerFailureKind: undefined}, false],
+    ["local timeout", {...confirmed, upstreamStatus: undefined}, false],
+    ["running receipt", {code: "repair_receipt_pending", requestDispatched: true}, false],
+  ]) {
+    const error = Object.assign(new Error(label), fields);
+    const checkpoints = [];
+    const f = make([error], {onCheckpoint: async row => checkpoints.push(row)});
+    await assert.rejects(translateLensPage(f.args), e => e === error);
+    assert.equal(f.calls.length, 1, `${label}: never retry initial translation`);
+    const progress = checkpoints.find(row => row.stage === "progress");
+    assert.deepEqual(progress.failures, eligible ? units.map(u => ({id:u.id,reason:"provider_http_error"})) : []);
+    assert.deepEqual(progress.blocked, eligible ? [] : units.map(u => u.id));
+    assert.equal(checkpoints.some(row => row.stage === "finished"), false);
+  }
+  let cancelled = false;
+  const checkpoints = [];
+  const f = make([], {isCancelled: () => cancelled, onCheckpoint: async row => checkpoints.push(row)});
+  f.args.dependencies.translateUnits = async () => { cancelled = true; throw Object.assign(new Error("cancelled"), confirmed); };
+  await assert.rejects(translateLensPage(f.args));
+  assert.equal(checkpoints.some(row => row.stage === "progress"), false, "cancellation never adds repair candidates");
 }
 {
   let repairBarrierEntered = false;
@@ -124,7 +166,8 @@ const ok = (translations) => ({ translations, missing: [], meta: { generationAtt
 }
 {
   const wrong = ok([{ id: "P0", text: "原文" }, { id: "P1", text: "原文" }]);
-  const f = make([wrong]);
+  const events = [];
+  const f = make([wrong], { trace: (name, data) => events.push({ name, data }) });
   f.args.dependencies.diagnoseTargetScripts = (translations) => translations.map((item) => ({
     id: item.id,
     decision: /[\u3040-\u30ff\u3400-\u9fff]/u.test(item.text) ? "reject" : "accept",
@@ -135,12 +178,14 @@ const ok = (translations) => ({ translations, missing: [], meta: { generationAtt
     error.diagnostics.repairAttempted === false,
   );
   assert.equal(f.calls.length, 1);
+  assert.equal(events.find(e => e.name === "aiPageContract" && e.data.event === "final").data.outcome, "failed");
   assert.equal(f.result.lensDocument.applied, undefined,
     "an overwhelmingly wrong-language page must fail before a sparse overlay is inserted");
 }
 {
   const initial = ok([{ id: "P0", text: "แปลแล้ว" }, { id: "P1", text: "原文" }]);
-  const f = make([initial]);
+  const events = [];
+  const f = make([initial], { trace: (name, data) => events.push({ name, data }) });
   f.args.dependencies.diagnoseTargetScripts = (translations) => translations.map((item) => ({
     id: item.id,
     decision: /[\u3040-\u30ff\u3400-\u9fff]/u.test(item.text) ? "reject" : "accept",
@@ -148,6 +193,7 @@ const ok = (translations) => ({ translations, missing: [], meta: { generationAtt
   const out = await translateLensPage(f.args);
   assert.equal(out.usable, true);
   assert.equal(out.complete, false);
+  assert.equal(events.find(e => e.name === "aiPageContract" && e.data.event === "final").data.outcome, "partial");
   assert.equal(f.calls.length, 1);
   assert.equal(f.result.lensDocument.applied.some((item) => item.id === "P0"), true,
     "a legitimate partial translation remains usable below the page-failure threshold");
@@ -256,6 +302,13 @@ const ok = (translations) => ({ translations, missing: [], meta: { generationAtt
     assert.deepEqual(f.result.aiPartial.wrongLanguage, ["P3"]);
     assert.deepEqual(f.result.aiPartial.preserved, ["P4"]);
     assert.match(f.result.warnings[0], /omitted: P1; empty: P2; wrong target language: P3/);
+    const childTerminalEvents = relayed.filter((event) => event.stage === "terminal" &&
+      String(event.identity?.operationId || "").includes(":w0:"));
+    assert.equal(childTerminalEvents.length, 1,
+      "every Direct Local workload child trace must finish instead of remaining in started state");
+    assert.equal(childTerminalEvents[0].value.state, "partial");
+    assert.deepEqual(childTerminalEvents[0].value.missingIds, ["P1", "P2"]);
+    assert.deepEqual(childTerminalEvents[0].value.wrongLanguageIds, ["P3"]);
     const terminal = relayed.findLast((event) => event.stage === "terminal")?.value;
     assert.deepEqual(terminal.omittedIds, ["P1"]);
     assert.deepEqual(terminal.emptyIds, ["P2"]);

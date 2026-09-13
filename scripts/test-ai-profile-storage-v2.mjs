@@ -55,8 +55,11 @@ assert.equal(upgradedV3.patch.aiProfileStorageVersion, 4);
 assert.equal(Object.values(upgradedV3.prompts)[0].mode, "replace");
 const forbiddenAppend = structuredClone(v2);
 Object.values(forbiddenAppend.aiProfilePromptsV1)[0].mode = "append";
-assert.throws(() => prepareAiProfileStorageV2(forbiddenAppend, {}),
-  (error) => error.code === "AI_PROFILE_INVALID");
+const normalizedAppend = prepareAiProfileStorageV2(forbiddenAppend, {});
+assert.equal(Object.values(normalizedAppend.prompts)[0].mode, "replace",
+  "legacy prompt modes normalize at activation instead of blocking a valid profile");
+assert.equal(normalizedAppend.changed, false,
+  "read-time compatibility normalization must not force a storage write");
 assert.throws(() => prepareAiProfileStorageV2({ ...v2, aiProfilesV1: { ...v2.aiProfilesV1, version: 99 } }), (error) => error.code === "AI_PROFILE_INVALID");
 let invalidMigrationCalls = 0;
 let invalidWrites = 0;
@@ -75,11 +78,13 @@ assert.equal(invalidMigrationCalls, 0,
   "known-default migration must not inspect prompts before profile validation");
 assert.equal(invalidWrites, 0,
   "an invalid profile must remain unchanged");
-for (const badPrompts of [
-  { safe: { text: "missing mode" } },
-  { constructor: { text: "bad key", mode: "replace" } },
-]) assert.throws(() => prepareAiProfileStorageV2({ ...v2, aiProfilePromptsV1: badPrompts }),
-  (error) => error.code === "AI_PROFILE_INVALID");
+const missingMode = prepareAiProfileStorageV2({
+  ...v2, aiProfilePromptsV1: { safe: { text: "missing mode" } },
+});
+assert.deepEqual(missingMode.prompts.safe, { text: "missing mode", mode: "replace" });
+assert.throws(() => prepareAiProfileStorageV2({
+  ...v2, aiProfilePromptsV1: { constructor: { text: "bad key", mode: "replace" } },
+}), (error) => error.code === "AI_PROFILE_INVALID");
 
 const broken = structuredClone(markerless);
 broken.aiProfilesV1.active.model = "missing";

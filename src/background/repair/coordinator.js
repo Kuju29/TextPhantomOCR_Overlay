@@ -1,7 +1,7 @@
 import { translationSessions } from '../translation-session-store.js';
 import { repairRequest } from './client.js';
 import { makePageCheckpoint, digestText, buildPatchedResult, pageInitialReport } from './page-checkpoint.js';
-import { executeRepairPool } from './executor.js';
+import { executeRepairPool, repairUsageDiagnostic } from './executor.js';
 import { findContext } from '../job-registry.js';
 import { getBatch, ensureBatch, batchUpdateToast, batchStopKeepAlive, updateImagePresentation } from '../batches.js';
 import { getTabSessionId } from '../tab-sessions.js';
@@ -11,7 +11,7 @@ import { getStorage } from '../../shared/storage.js';
 import { makeProviderIdentity } from '../../shared/ai-profiles.js';
 import { getCapabilities } from '../capabilities.js';
 import { getApiBase } from '../api.js';
-import { acquire, releaseSuccess, releaseFailed, laneKeyFor } from '../scheduler.js';
+import { acquire, releaseSuccess, releaseReplay, releaseFailed, laneKeyFor } from '../scheduler.js';
 import { getCachedDataUri, setCachedResult, mdCacheKey, mdKeyFromUrl, stripImageFields } from '../mangadex.js';
 import { fetchImageDataUriFromTab } from '../images.js';
 import { normImgSrc } from '../job-keys.js';
@@ -47,15 +47,40 @@ export function createRepairCoordinator({
     const remaining=page.failures.filter(f=>ids.has(f.id)&&!acceptedIds.has(f.id));
     updateImagePresentation(run.batchId,page.pageId,{total:ids.size,accepted,
       applied:page.delivered?accepted:0,pending:Math.max(0,ids.size-accepted),repairPhase,
-      wrongLanguageCount:remaining.filter(f=>f.reason==='wrong_target_script').length,
+      wrongLanguageCount:remaining.filter(f=>['wrong_language','wrong_target_script'].includes(f.reason)).length,
       structuralCount:remaining.filter(f=>['missing','omitted','malformed','empty','duplicate'].includes(f.reason)).length});
+  }
+  function diagnosticProgress(run, data) {
+    const validation = data.phase === 'repair_validation';
+    const unresolved = validation ? Number(data.rejectedCount || 0)
+      : Number(data.unresolved || 0) + Number(data.unavailablePages || 0) + Number(data.unverified || 0);
+    const successful = validation ? Number(data.acceptedCount || 0)
+      : Number(data.repaired || 0) + Number(data.initialAccepted || 0);
+    const outcome = ['blocked','unavailable','apply_failed'].includes(data.phase) ? 'failed'
+      : unresolved ? (successful ? 'partial' : 'failed')
+      : data.phase === 'done' || validation ? 'succeeded' : 'progress';
+    const summary = publicProgress(data);
+    const placement = Object.fromEntries(['applyFailedPages','applyPendingPages',
+      'appliedRepairedUnits','unappliedRepairedUnits'].filter(k => summary[k] !== undefined).map(k => [k,summary[k]]));
+    const counts = Object.fromEntries(Object.entries(summary)
+      .filter(([key,value]) => typeof value === 'number' && !Object.hasOwn(placement,key)));
+    // Keep counters grouped so compact trace enrichment cannot hide unresolved
+    // language failures or images that never produced a source checkpoint.
+    return { owner:validation ? 'model' : 'extension', outcome,
+      severity:outcome === 'failed' || outcome === 'partial' ? 'warning' : 'info',
+      runId:run.id, batchId:run.batchId, phase:data.phase, counts,
+      ...(data.taskId ? {taskId:data.taskId} : {}),
+      ...(data.code ? {code:data.code} : {}),
+      ...(Object.keys(placement).length ? {placement} : {}) };
   }
   function progress(run, data) {
     // Stream telemetry is not a durable state transition. Task receipts below
     // already checkpoint each answer; do not serialize every token to storage.
     if (data.phase === 'repair_request' || data.phase === 'repair_validation') {
-      emit('repairProgress', { runId:run.id, batchId:run.batchId,
-        ...publicProgress(data), event:data.event });
+      emit('repairProgress', data.phase === 'repair_validation'
+        ? diagnosticProgress(run, data)
+        : { runId:run.id, batchId:run.batchId, ...publicProgress(data), event:data.event,
+          ...repairUsageDiagnostic(data) });
       return;
     }
     for(const page of Object.values(run.pages || {})) presentPage(run,page,data.phase);
@@ -64,7 +89,7 @@ export function createRepairCoordinator({
     if (b) {
       b.repair = summary;
       const label = data.phase === 'done'
-        ? `Repair: ${data.repaired || 0}/${data.failedUnits || 0} fixed; ${data.unresolved || 0} unresolved${data.unverified ? `; ${data.unverified} interrupted` : ''}${data.unavailablePages ? `; ${data.unavailablePages} image(s) lack source` : ''}`
+        ? `Repair: ${data.repaired || 0}/${data.failedUnits || 0} fixed; ${data.unresolved || 0} unresolved${data.wrongLanguageCount ? `; ${data.wrongLanguageCount} wrong target language` : ''}${data.unverified ? `; ${data.unverified} interrupted` : ''}${data.unavailablePages ? `; ${data.unavailablePages} image(s) lack source` : ''}`
         : data.phase === 'apply_failed'
           ? `Repair finished: ${data.appliedRepairedUnits || 0}/${data.failedUnits || 0} fixed and placed; ${data.unresolved || 0} unresolved; ${data.applyFailedPages || 0} image(s) could not be placed safely (saved results)`
         : data.phase === 'unavailable' ? `Repair unavailable: ${data.code || 'API/session error'}`
@@ -82,13 +107,7 @@ export function createRepairCoordinator({
       current.events = [...(current.events || []), {at:now(), ...summary}].slice(-96);
       return current;
     }).catch(() => {});
-    // Keep placement counters together so the compact trace field limit does
-    // not drop the distinction between translated answers and delivered ones.
-    const {applyFailedPages, applyPendingPages, appliedRepairedUnits, unappliedRepairedUnits, ...eventSummary} = summary;
-    const placement = Object.fromEntries(Object.entries({applyFailedPages, applyPendingPages,
-      appliedRepairedUnits, unappliedRepairedUnits}).filter(([,v]) => v !== undefined));
-    emit('repairProgress', { runId: run.id, batchId: run.batchId, ...eventSummary,
-      ...(Object.keys(placement).length ? {placement} : {}) });
+    emit('repairProgress', diagnosticProgress(run, data));
   }
   async function registerBatch(batch, payloads) {
     if (!payloads.length || payloads.some(p => p.engine === 'api' || p.mode !== 'lens_text' || p.source !== 'ai')) return null;
@@ -125,11 +144,11 @@ export function createRepairCoordinator({
   async function capture(batchId, data) {
     const runId = batchRuns.get(batchId);
     if (!runId || cancelledRuns.has(runId)) return;
-    const run = await sessions.get(runId);
-    if (!run || !live(run) || run.phase === 'unavailable') return;
     const pageId = String(data.payload?.metadata?.image_id || data.imageId || getContext(data.jobId)?.imageKey || '');
     let captured;
     if (data.stage === 'prepared') {
+      const run = await sessions.get(runId);
+      if (!run || !live(run) || run.phase === 'unavailable') return;
       const ctx = getContext(data.jobId, pageId) || {};
       ctx.translationRun = { runId, pageId, generationId: data.jobId, phase: 'initial', revision: '' };
       const page = await makePageCheckpoint({ ...data, ctx: { ...ctx, jobId: data.jobId } });
@@ -138,13 +157,13 @@ export function createRepairCoordinator({
       runtimePages.set(`${runId}:${pageId}`, { ai: data.plan.ai,
         sourceImageDataUri: data.result.sourceImageDataUri || data.payload.imageDataUri || '' });
       captured = await sessions.update(runId, current => {
-        if (!current || current.phase !== 'collecting') return current;
+        if (!current || !live(current) || current.phase !== 'collecting') return current;
         current.pages[pageId] = page; return current;
       });
     } else {
       captured = await sessions.update(runId, current => {
         const page = current?.pages?.[pageId];
-        if (!page || current.phase !== 'collecting') return current;
+        if (!page || !live(current) || current.phase !== 'collecting') return current;
         if (data.stage === 'dispatch') {
           page.phase = 'translating';
           page.inFlight = (data.ids || []).map(String);
@@ -162,6 +181,11 @@ export function createRepairCoordinator({
           page.blocked = [...new Set([...page.blocked, ...(data.blocked || [])])];
           page.inFlight = [];
           if (data.stage === 'finished') page.phase = 'finished';
+          else if (data.nextDispatch) {
+            page.phase = 'translating';
+            page.inFlight = (data.nextDispatch.ids || []).map(String);
+            page.currentOperation = data.nextDispatch.operationId;
+          }
         }
         return current;
       });
@@ -340,11 +364,14 @@ export function createRepairCoordinator({
         withCapacity: async (page, ai, signal, work) => {
           if (!live(run)) throw new DOMException('Stale repair','AbortError');
           const payload = { mode:'lens_text', source:'ai', ai, rate:page.rate, engine:'extension' };
-          const lane = laneKeyFor(payload); const start = Date.now();
+          const lane = laneKeyFor(payload);
           await acquire(lane, signal);
           try {
             const answer = await work();
-            releaseSuccess(lane, Math.max(1, Number(answer?.meta?.providerMs) || Date.now() - start));
+            // A repair task has different work from the initial page sample.
+            // Release capacity without teaching Auto from repair or wait time.
+            if (answer?.replayed === true) releaseReplay(lane);
+            else releaseSuccess(lane, 0);
             return answer;
           } catch (error) { releaseFailed(lane); throw error; }
         },
@@ -352,13 +379,17 @@ export function createRepairCoordinator({
       if (!live(run)) { await cancelBatch(run.batchId, 'stale_after_repair'); return null; }
       if (snapshot.phase !== 'done') throw Object.assign(new Error('Repair pool is not terminal'), {code:'repair_tasks_pending'});
       const summary = publicProgress(snapshot);
+      let finalPages = [];
       const value = await sessions.update(run.id, current => {
         if (!current || current.phase === 'cancelled') return current;
         const pages = Object.values(current.pages);
+        finalPages = pages;
+        const wrongLanguageCount = Object.values(current.tasks).reduce((n,task) =>
+          n + (task.state === 'done' ? (task.wrongLanguageIds || []).length : 0), 0);
         const applyPendingPages = pages.filter(p => p.patchPending).length;
         const applyFailedPages = pages.filter(p => p.patchError).length;
         const appliedRepairedUnits = pages.reduce((n,p) => n + p.repaired.length, 0);
-        const finalSummary = {...summary, applyPendingPages, applyFailedPages,
+        const finalSummary = {...summary, wrongLanguageCount, applyPendingPages, applyFailedPages,
           appliedRepairedUnits,
           unappliedRepairedUnits: Math.max(0, (summary.repaired || 0) - appliedRepairedUnits)};
         const retain = applyPendingPages || applyFailedPages;
@@ -369,6 +400,8 @@ export function createRepairCoordinator({
           // is terminal, not a blocked network job to retry on worker wake-up.
           pages:retain ? current.pages : {}, tasks:retain ? current.tasks : {} };
       });
+      if (!value || !live(value)) { await cancelBatch(run.batchId, 'stale_after_repair_commit'); return null; }
+      for (const page of finalPages) presentPage(value, page, value.phase);
       progress(value || run, {...(value?.summary || summary), phase:value?.phase || summary.phase});
       if (['done','apply_failed'].includes(value?.phase)) {
         for (const key of runtimePages.keys()) if (key.startsWith(`${run.id}:`)) runtimePages.delete(key);

@@ -146,10 +146,7 @@ export async function runServerTranslation(input, deps) {
       }
       const requestMs = Date.now() - requestStartedAt;
       const serverProcessingMs = Number(result?.perf?.total_ms) || 0;
-      const transportProxyMs =
-        serverProcessingMs > 0
-          ? Math.max(0, requestMs - serverProcessingMs)
-          : 0;
+
       const replayed =
         result?.replayed === true ||
         result?.perf?.replayed === true ||
@@ -200,8 +197,15 @@ export async function runServerTranslation(input, deps) {
         );
       if (replayed) releaseReplay(requestLane);
       else {
-        const localProviderMs = Math.max(0, Number(aiMeta.provider_ms ?? result?.perf?.ai_ms) || 0);
-        releaseSuccess(requestLane, localRequest && localProviderMs > 0 ? localProviderMs : requestMs);
+        const localProviderMs = aiMeta.provider_ms;
+        const localSingleGeneration = Number(aiMeta.generation_attempts) === 1;
+        const localSampleMs = localSingleGeneration && Number.isFinite(localProviderMs) && localProviderMs > 0
+          ? localProviderMs : 0;
+        releaseSuccess(requestLane, localRequest ? localSampleMs : requestMs, {
+          sampleWindow: slot?.window,
+          sampleWorkload: localRequest ? {unitCount:aiMeta.units,
+            sourceChars:Array.from(String(result?.originalTextFull || "")).length} : null,
+        });
       }
       slotHeld = false;
       traceNote(
@@ -215,7 +219,6 @@ export async function runServerTranslation(input, deps) {
           queueWaitMs,
           requestMs,
           serverProcessingMs,
-          transportProxyMs,
           totalElapsedMs: Date.now() - t0,
           laneCeiling: Number(describeLane(requestLane)?.effectiveMax) || 0,
         },

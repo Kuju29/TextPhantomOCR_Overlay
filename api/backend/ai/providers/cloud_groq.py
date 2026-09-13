@@ -27,6 +27,7 @@ POLICY = OpenAIProviderPolicy(
     output_budget_field="max_completion_tokens",
     reasoning_policy="requires_verified_capability",
     model_filter=filter_model_items,
+    catalogue_evidence="groq_active_translation_filter",
 )
 ADAPTER = OpenAIProviderAdapter(POLICY)
 SPEC = ProviderSpec(

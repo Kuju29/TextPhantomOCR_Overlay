@@ -34,5 +34,12 @@ def shipping_metadata(value: Any) -> dict:
         if section == "transport" and source.get("lastStage") in {"", "base", "signature", "http", "ack", "session"}:
             clean["lastStage"] = source["lastStage"]
         out[section] = clean
+    timing = value.get("timing")
+    if isinstance(timing, dict):
+        out["timing"] = {key: timing[key] for key in (
+            "startedAt", "httpStartedAt", "headersAt", "completedAt",
+            "baseMs", "prepareMs", "httpMs", "ackMs", "totalMs",
+            "serverQueueMs", "serverWriteMs", "serverIngestMs",
+        ) if counter(timing.get(key)) is not None}
     return out
 

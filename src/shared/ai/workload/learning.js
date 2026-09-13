@@ -22,6 +22,10 @@ export function observeWorkload({ units, answer, error, defects = {}, plan, ai =
   if (answer?.replayed === true || meta.replayed === true || error?.name === 'AbortError' || /cancel|abort|timeout|network|http|transport/i.test(code)) outcome = 'ignored';
   else if (/^(length|max_tokens|max_output_tokens)$/i.test(finish) || code === 'output_budget_exhausted')
     outcome = !error && !structural && !missing.size ? 'complete_at_limit' : 'length';
+  else if (error && /contract|model_output|invalid_result_schema/i.test(code) &&
+      (error?.providerResponded === true || error?.requestDispatched === true ||
+       Number(error?.providerAttempts || 0) > 0 || Number(error?.generationAttempts || 0) > 0 ||
+       Object.keys(meta).length > 0)) outcome = 'structure';
   else if (normalFinish.test(finish) && (!error || /contract|model_output/i.test(code))) {
     outcome = structural || missing.size || error ? 'structure' :
       array(defects.wrongLanguage).length ? 'language' : 'ok';
@@ -39,15 +43,21 @@ export function observeWorkload({ units, answer, error, defects = {}, plan, ai =
   // requests. Treat the resolved model + wire contract as workload identity;
   // changing only the transient upstream must not reset learning back to a cold
   // workload target on every routed request.
-  const identity = answer ? [String(meta.model || meta.resolvedModel || ai.model || ''),
-    String(meta.selectedContract || meta.outputContract || '')].join('|') : '';
+  const identityModel = String(meta.model || meta.resolvedModel || '');
+  const identityContract = String(meta.selectedContract || meta.outputContract || '');
+  const identity = identityModel && identityContract
+    ? [identityModel, identityContract].join('|')
+    : answer ? [String(ai.model || ''), identityContract].join('|') : '';
+  const executionObserved = Boolean(answer || error?.providerResponded === true ||
+    error?.requestDispatched === true || Number(error?.providerAttempts || 0) > 0 ||
+    Number(error?.generationAttempts || 0) > 0 || identityModel);
   return { outcome, visibleTokens: visible, calibrationTokens: calibration, reasoningTokens: reasoning, actualIdentity: identity,
     providerInputTokens: count(usage.inputTokens), providerOutputTokens: output,
     cachedInputTokens: count(usage.cachedInputTokens),
     requestedOutputTokens: positive(meta.requestedOutputTokens), finishReason: finish,
     missingCount: missing.size, wrongLanguageCount: array(defects.wrongLanguage).length,
     providerMs: Number.isFinite(meta.providerMs) ? meta.providerMs : null,
-    limits: normalizeLimits(meta.modelLimits), plan };
+    executionObserved, limits: normalizeLimits(meta.modelLimits), plan };
 }
 export function learnWorkload(profile, observation, now = Date.now()) {
   const o = observation; if (o.outcome === 'ignored' || !o.plan) return profile;
@@ -61,6 +71,11 @@ export function learnWorkload(profile, observation, now = Date.now()) {
   p.updatedAt = now; p.samples += 1;
   p.limits = { ...p.limits, ...o.limits };
   p.outcomes = [...p.outcomes, o.outcome].slice(-WORKLOAD_POLICY.window);
+  // Hidden-reasoning telemetry is useful even when the visible answer is
+  // truncated or structurally incomplete. It is not response-size calibration,
+  // but it must reserve completion capacity for the next unsent sub-batch.
+  if (count(o.reasoningTokens) != null && o.reasoningTokens > 0)
+    p.reasoning = [...p.reasoning, o.reasoningTokens].slice(-64);
   const currentPlan = o.plan.revision == null || o.plan.revision === p.revision;
   const oldTarget = p.target, oldRecords = p.records;
   if (o.outcome === 'ok') {
@@ -69,7 +84,6 @@ export function learnWorkload(profile, observation, now = Date.now()) {
       const ratio = o.calibrationTokens / o.plan.baseOutput;
       if (ratio >= .05 && ratio <= 32) p.ratios = [...p.ratios, ratio].slice(-64);
     }
-    if (count(o.reasoningTokens) != null) p.reasoning = [...p.reasoning, o.reasoningTokens].slice(-64);
     // Only full/near-full batches demonstrate that a larger limit is worth trying.
     if (currentPlan && o.plan.predictedOutput >= p.target * .75) p.fillSuccesses += 1;
     if (currentPlan && o.plan.units >= p.records) p.recordSuccesses += 1;

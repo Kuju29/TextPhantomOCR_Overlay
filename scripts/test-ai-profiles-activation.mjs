@@ -225,17 +225,25 @@ assert.deepEqual(Object.keys(extensionPayload.ai.providerOptions || {}).sort(),
 assert.equal(effective.promptMode, "replace");
 assert.equal(extensionPayload.ai.prompt_mode, "replace");
 for (const invalidMode of [undefined, "", "fallback", null]) {
-  assert.throws(
-    () => activation.resolveEffectiveAiProfile({ ...selectedSnapshot, promptMode: invalidMode }),
-    (error) => error.code === "AI_PROFILE_INVALID",
-    "activation must not coerce an invalid canonical prompt mode",
+  assert.equal(
+    activation.resolveEffectiveAiProfile({ ...selectedSnapshot, promptMode: invalidMode }).promptMode,
+    "replace",
+    "legacy or missing prompt modes must migrate to replace",
   );
-  assert.throws(
-    () => activation.buildEffectiveAiPayload({ ...effective, promptMode: invalidMode }),
-    (error) => error.code === "AI_PROFILE_INVALID",
-    "wire payload must not coerce an invalid canonical prompt mode",
+  assert.equal(
+    activation.buildEffectiveAiPayload({ ...effective, promptMode: invalidMode }).ai.prompt_mode,
+    "replace",
+    "the wire contract must always use replace",
   );
 }
+
+const emptyPromptEffective = activation.resolveEffectiveAiProfile({
+  ...selectedSnapshot, prompt: "", promptMode: "append",
+});
+assert.equal(emptyPromptEffective.prompt, "");
+assert.equal(emptyPromptEffective.promptMode, "replace");
+assert.equal(activation.buildEffectiveAiPayload(emptyPromptEffective).ai.prompt, "",
+  "empty editable prompt must remain empty so the runtime can use its built-in style");
 
 const replacePromptKey = makeProfilePromptKey(
   makeProviderIdentity(targets[0].provider, targets[0].endpoint),

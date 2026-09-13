@@ -55,4 +55,35 @@ assert.match(mangadexRuntime,
   /md chapter changed[\s\S]*?forgetImageState\?\.\(\)[\s\S]*?resetPageInstance\?\.\("chapter_change"\)[\s\S]*?TP_MD_CHAPTER_CHANGED/,
   "MangaDex chapter navigation must invalidate page UI before asynchronous background cancellation");
 
+// Reader DOM queries also contain full-size extension layers after translation.
+// Exercise the shared ownership predicate with all three MangaDex collectors.
+vm.runInNewContext(await readFile(new URL("../src/content/dom-utils.js", import.meta.url), "utf8"), context);
+const candidate = (generated = false) => ({
+  dataset: {}, currentSrc: generated ? "blob:erased-result" : "blob:publisher-original",
+  naturalWidth: 600, naturalHeight: 900,
+  getAttribute: name => name === "alt" ? "1.png" : null,
+  getBoundingClientRect: () => ({width:600,height:900}),
+  matches: () => generated,
+  closest: () => null,
+});
+const original = candidate(), generated = candidate(true);
+context.document.querySelectorAll = () => [generated, original];
+assert.equal(await TP.mapMangaDexDom(), 1);
+assert.equal(original.dataset.tpOriginalKey, "md:data/hash/1.png");
+assert.equal(generated.dataset.tpOriginalKey, undefined);
+// A previously mapped generated node still must not win an identical key.
+generated.dataset.tpOriginalKey = original.dataset.tpOriginalKey;
+const inlineTargets = [];
+TP.getImageDataUriFromElement = async image => {inlineTargets.push(image);return "data:image/png;base64,c291cmNl";};
+TP.buildPositionFromElement = () => ({});
+TP.buildPayload = fields => fields;
+vm.runInNewContext(await readFile(new URL("../src/content/sites/mangadex/collector.js", import.meta.url), "utf8"), context);
+await TP.collectMangaDexPages("lens_text", "th");
+assert.deepEqual(inlineTargets, [original]);
+vm.runInNewContext(mangadexRuntime, context);
+assert.deepEqual([...TP.getMangaDexPageImagesInDOM()], [original]);
+context.document.querySelectorAll = () => [];
+context.document.images = [generated, original];
+assert.deepEqual([...TP.getMangaDexPageImagesInDOM()], [original], "fallback document.images must exclude generated display pixels");
+
 console.log("MangaDex adapter passed: canonical key, manifest cache, immediate chapter-generation/toast invalidation.");

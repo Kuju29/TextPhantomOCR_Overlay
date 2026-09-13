@@ -79,10 +79,10 @@ export function createPromptController(deps) {
     if (canUseAiUi() && empty) {
       setFieldMessage(
         els.aiPromptWrap,
-        "warn",
-        "⚠ [AI option > Set prompt] is empty — click Reload, then save",
+        "info",
+        "Built-in translation style will be used. Reload only when you want to edit the default.",
       );
-    } else if (fieldMessageType(els.aiPromptWrap) === "warn") {
+    } else if (["warn", "info"].includes(fieldMessageType(els.aiPromptWrap))) {
       setFieldMessage(els.aiPromptWrap, "", "");
     }
   }

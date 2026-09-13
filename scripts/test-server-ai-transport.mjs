@@ -55,12 +55,24 @@ try {
   assert.equal(captured.body.image.dataUri, "data:image/png;base64,AQ==");
 
   let emptyPromptDispatches = 0;
-  globalThis.fetch = async () => { emptyPromptDispatches += 1; throw new Error("must not dispatch"); };
-  await assert.rejects(translateViaServer([{ id: "P0", text: "source" }], {
+  let emptyPromptBody = null;
+  globalThis.fetch = async (_url, init) => {
+    emptyPromptDispatches += 1;
+    emptyPromptBody = JSON.parse(init.body);
+    return new Response(JSON.stringify({
+      schema: "tp.ai.result/1", translations: [{ id: "P0", text: "ค่าเริ่มต้น" }], missing: [],
+      meta: { resolvedProvider: "openrouter", resolvedModel: "model-a", generationAttempts: 1,
+        providerAttempts: 1, usage: { inputTokens: 5, outputTokens: 2, totalTokens: 7 } },
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const emptyPromptResult = await translateViaServer([{ id: "P0", text: "source" }], {
     base: "https://api.test", targetLang: "th",
-    ai: { provider: "openrouter", model: "model-a", prompt: "" },
-  }), (error) => error?.code === "AI_PROMPT_REQUIRED" && error?.requestDispatched === false);
-  assert.equal(emptyPromptDispatches, 0, "empty prompt must fail before HTTP dispatch");
+    ai: { provider: "openrouter", model: "model-a", prompt: "", promptMode: "fallback" },
+  });
+  assert.equal(emptyPromptResult.translations[0].text, "ค่าเริ่มต้น");
+  assert.equal(emptyPromptDispatches, 1, "empty prompt must dispatch once using the built-in style");
+  assert.equal(emptyPromptBody.prompt, "");
+  assert.equal(emptyPromptBody.prompt_mode, "replace");
 
   globalThis.fetch = async () => new Response(JSON.stringify({
     schema: "unexpected", translations: null,
@@ -70,6 +82,37 @@ try {
     base: "https://api.test", targetLang: "th", sourceLang: "en",
     ai: { provider: "openrouter", model: "model-a", prompt: "style" },
   }), (error) => error?.code === "invalid_result_schema" && error?.status === 200 && error?.generationAttempts === 1);
+
+  const {currentUsage, recordProviderGeneration} = await import("../src/shared/ai-usage.js");
+  const target = {runtime:"cloud",provider:"openrouter",model:"model-a"};
+  const beforeFailure = currentUsage(stored.aiUsageV1, target);
+  let failureCalls = 0;
+  globalThis.fetch = async () => {
+    failureCalls++;
+    return new Response(JSON.stringify({detail: {code:"provider_timeout", upstreamStatus:504,
+      providerFailureKind:"http_status", requestDispatched:true, generationAttempts:1,
+      structuralDetails:{generationMeta:{usage:{receiptId:"gateway-failure-receipt",
+        usageStatus:"unconfirmed_transport", accountingOrigin:"server_provider_boundary",
+        receiptStatus:"interrupted_usage_pending", inputTokens:null,outputTokens:null,totalTokens:null}}}}}),
+      {status:502,headers:{"content-type":"application/json"}});
+  };
+  await assert.rejects(translateViaServer([{id:"P0",text:"source"}], {
+    base:"https://api.test",targetLang:"th",operationId:"gateway-failure",
+    ai:{provider:"openrouter",model:"model-a"},
+  }), error => error.code === "provider_timeout" && error.upstreamStatus === 504 &&
+    error.providerFailureKind === "http_status" && error.requestDispatched === true);
+  assert.equal(failureCalls, 1, "a confirmed HTTP failure never triggers transport retry");
+  assert.match(JSON.stringify(stored.aiUsageV1), /gateway-failure-receipt/,
+    "original unknown usage receipt survives repair eligibility classification");
+
+  const afterFailure = currentUsage(stored.aiUsageV1, target);
+  assert.equal(afterFailure.requests, beforeFailure.requests + 1);
+  assert.equal(afterFailure.totalTokens, beforeFailure.totalTokens, "unknown gateway usage must not invent tokens");
+  assert.equal(afterFailure.incompleteRequests, beforeFailure.incompleteRequests + 1);
+  const replay = recordProviderGeneration(stored.aiUsageV1, {...target,engine:"runsextension",
+    operationId:"gateway-failure",replayed:true,requests:1,usage:{receiptId:"gateway-failure-receipt",
+      usageStatus:"unconfirmed_transport",accountingOrigin:"server_provider_boundary"}});
+  assert.equal(currentUsage(replay,target).requests, afterFailure.requests, "receipt recovery cannot double count the original call");
 
   console.log("Server AI transport contract passed: request ownership, correlation, identity, usage and typed schema failure.");
 } finally {

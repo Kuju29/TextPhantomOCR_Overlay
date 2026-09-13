@@ -21,7 +21,7 @@ try {
   const after=await translateWithLocalOpenAi(units,{...opts,ai:{...ai,workload}});
   assert.equal(bodies.length,2);assert.deepEqual(bodies[0],bodies[1],'Within original budget, exact wire bytes/parameters remain unchanged');
   assert.equal(after.translations[0].id,'global_42');assert.equal(after.translations[0].text,'อรุณสวัสดิ์');
-  assert.equal(after.meta.usage.cachedInputTokens,512);assert.equal(after.meta.requestedOutputTokens,1024);
+  assert.equal(after.meta.usage.cachedInputTokens,512);assert.equal(after.meta.requestedOutputTokens,bodies[1].options.num_predict);assert.ok(after.meta.requestedOutputTokens<1024);
   await assert.rejects(translateWithLocalOpenAi(units,{...opts,ai:{...ai,workload:{...workload,predictedOutput:3000}}}),
    e=>e.code==='ai_workload_budget_insufficient');
   assert.equal(bodies.length,2,'No probe/retry/dispatch after rejected budget');

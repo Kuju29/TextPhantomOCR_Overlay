@@ -76,7 +76,7 @@ assert schema_request.response_schema is not None
 assert list(schema_request.response_schema["required"]) == ["P0", "P1"]
 assert schema_request.response_schema["additionalProperties"] is False
 assert "<<TP_" not in schema_request.system_text
-assert "expert translator" in schema_request.system_text
+assert "professional manga and manhwa translator and localization editor" in schema_request.system_text
 assert "Return only the JSON object required by the supplied schema" not in schema_request.system_text
 assert len(schema_request.user_parts) == 1
 schema_user = schema_request.user_parts[0]

@@ -23,3 +23,21 @@ await Promise.resolve();release();await pending.flush();assert(events.some(e=>e.
 const damaged=createWorkloadController({read:async()=>({[WORKLOAD_STORAGE_KEY]:{version:WORKLOAD_VERSION,profiles:{[key]:null}}}),write:async()=>{},emit(){}});
 assert.equal((await damaged.open(opts)).snapshot().samples,0);await damaged.flush();count++;
 console.log(`${count}/${count} workload decisions: actual transition vs historical label, persisted/pending/memory-only, corrupt storage, privacy.`);
+
+// An already-persisted session must not join unrelated later profile writes.
+{
+ const releases=[],entered=[];
+ const controller=createWorkloadController({read:async()=>io(),emit(){},write:()=>new Promise(resolve=>{releases.push(resolve);entered.splice(0).forEach(r=>r());})});
+ const first=await controller.open(opts);
+ first.observe({units,answer:answer(units),plan:first.next(units,0).estimate});
+ await Promise.resolve();
+ const second=await controller.open({...opts,ai:{...opts.ai,model:'other-model'}});
+ let finished=false;const own=first.flush().then(()=>{finished=true;});
+ await Promise.resolve();assert.equal(finished,false,'own outstanding observation must still await storage');
+ releases.shift()();
+ await own;
+ assert.equal(releases.length,1,'unrelated second profile snapshot is still pending');
+ assert.equal(finished,true,'first session releases after its version was written');
+ releases.shift()();await second.flush();await controller.flush();
+}
+console.log('PASS session workload flush excludes unrelated later snapshot writes');

@@ -1,19 +1,14 @@
+import { pageContextText } from "../page-context.js";
 import { wrongLanguageRepairInstruction } from "../repair-instruction.js";
 import { normalizeLanguageCode } from "../../../generated/language-code-aliases.js";
 import { FALLBACK_LANGS } from "../../constants.js";
 
-export const TRANSLATOR_IDENTITY_BASE = "You are an expert translator and localization editor. The following defines how you translate. Treat it as your own translation style and apply it naturally and consistently.";
+import { TRANSLATOR_IDENTITY_BASE, TASK_GUIDANCE, STYLE_EXAMPLES } from "../../../generated/localization-content.js";
+export { TRANSLATOR_IDENTITY_BASE };
 
 export function composeTranslatorIdentitySystem(style) {
-  const selectedStyle = String(style || "").trim();
-  if (!selectedStyle) {
-    const error = new Error("[AI option > Set prompt] is empty");
-    error.code = "AI_PROMPT_REQUIRED";
-    error.requestDispatched = false;
-    error.generationAttempts = 0;
-    error.providerAttempts = 0;
-    throw error;
-  }
+  const selectedStyle = String(style || "").trim() ||
+    "Write natural, faithful, in-character dialogue in the selected target language.";
   return `${TRANSLATOR_IDENTITY_BASE}\n\nTRANSLATION STYLE\n${selectedStyle}`;
 }
 
@@ -125,6 +120,7 @@ function memoryText(ai) {
   blocks.push(characterText(ai?.characters));
   blocks.push(glossaryText(ai?.glossary));
   blocks.push(previousContextText(ai?.prev_context));
+  blocks.push(pageContextText(ai?.page_context));
   return blocks.filter(Boolean).join("\n\n");
 }
 
@@ -182,21 +178,15 @@ export function targetLanguagePriority(targetLang) {
 
 export function withoutLeadingTargetLanguageHeader(text) {
   return String(text || "")
+    .replace(/^\s*Style prompt\s*:\s*(?:\r?\n)?/i, "")
     .replace(/^\s*Target language:\s*[^\r\n]*(?:\r?\n)?/i, "")
     .trim();
 }
 
-export function normalizePromptMode(value) {
-  const mode = String(value ?? "").trim().toLowerCase();
-  if (mode !== "replace") {
-    const error = new Error("AI prompt policy must be fixed replace");
-    error.code = "ai_prompt_mode_invalid";
-    error.generationAttempts = 0;
-    error.providerAttempts = 0;
-    error.requestDispatched = false;
-    throw error;
-  }
-  return mode;
+export function normalizePromptMode(_value) {
+  // Legacy/missing modes are normalized during activation. The editable prompt
+  // is always composed as one replace-style block on the provider wire.
+  return "replace";
 }
 
 const REQUIRED_CANONICAL_PIECES = Object.freeze([
@@ -207,14 +197,6 @@ const REQUIRED_CANONICAL_PIECES = Object.freeze([
 ]);
 
 export function assertCanonicalPromptPlan(plan) {
-  if (plan?.version !== "translation-plan-2") {
-    const error = new Error("AI requires canonical prompt contract translation-plan-2");
-    error.code = "canonical_prompt_contract_invalid";
-    error.requestDispatched = false;
-    error.generationAttempts = 0;
-    error.providerAttempts = 0;
-    throw error;
-  }
   const missing = REQUIRED_CANONICAL_PIECES.filter(
     (key) => typeof plan?.pieces?.[key] !== "string" || !plan.pieces[key].trim(),
   );
@@ -239,45 +221,23 @@ export function composeCanonicalPrompt(
   assertCanonicalPromptPlan(plan);
   const pieces = plan?.pieces || {};
   const override = String(ai?.prompt || "").trim();
-  if (!override) {
-    const error = new Error("[AI option > Set prompt] is empty. Click Reload, then save before translating.");
-    error.code = "AI_PROMPT_REQUIRED";
-    error.requestDispatched = false;
-    error.generationAttempts = 0;
-    error.providerAttempts = 0;
-    throw error;
-  }
   normalizePromptMode(ai?.promptMode ?? ai?.prompt_mode);
-  const effectiveStyle = override;
-  const canonical = plan?.version === "translation-plan-2";
   const builtIn = String(pieces.editableStyle || "").trim();
-  const styleText = effectiveStyle === builtIn
-    ? withoutLeadingTargetLanguageHeader(builtIn)
-    : withoutLeadingTargetLanguageHeader(effectiveStyle);
-  if (!styleText) {
-    const error = new Error("[AI option > Set prompt] needs instructions beyond the target-language header");
-    error.code = "AI_PROMPT_REQUIRED";
-    error.requestDispatched = false;
-    error.generationAttempts = 0;
-    error.providerAttempts = 0;
-    throw error;
-  }
+  const effectiveStyle = override || builtIn;
+  const styleText = withoutLeadingTargetLanguageHeader(effectiveStyle) ||
+    withoutLeadingTargetLanguageHeader(builtIn) ||
+    "Write natural, faithful, in-character dialogue in the selected target language.";
+  // The current UI selection is authoritative. A stale server/bundled target
+  // header must never reject a valid custom style or translate to another language.
   const selectedLanguage = targetLanguagePriority(targetLang)
     .replace(/^Translate every source unit into\s+/i, "Target language: ");
-  const expectedLanguage = String(pieces.targetLanguageInstruction || "").trim();
-  if (selectedLanguage !== expectedLanguage) {
-    const error = new Error("AI canonical prompt target language does not match the selected language");
-    error.code = "canonical_prompt_contract_invalid";
-    error.requestDispatched = false;
-    error.generationAttempts = 0;
-    error.providerAttempts = 0;
-    throw error;
-  }
+  const canonical = true;
   const runtime = [];
   if (hasImage) runtime.push(String(pieces.imageHint || "").trim());
   runtime.push(memoryText(ai));
   const sections = {
     style: styleText,
+    useStyleExamples: !override || withoutLeadingTargetLanguageHeader(override) === withoutLeadingTargetLanguageHeader(builtIn),
     policy: String(pieces.systemPolicy || "").trim(),
     language: selectedLanguage,
     source: String(pieces.sourceInputContract || "").trim(),
@@ -296,12 +256,16 @@ export function composeCanonicalPrompt(
   };
 }
 
-export function composeTranslationUserMessage({ sections, requestOutputContract, sourceRecords, targetLang, repairReason = "" }) {
+export function composeTranslationUserMessage({ sections, requestOutputContract, sourceRecords, targetLang, repairReason = "", expectedIds = [], structuredOutput = false }) {
   const blocks = [
-    `TRANSLATION TASK\n${targetLanguagePriority(targetLang)}\nUse the translation style defined in your translator identity.`,
+    `TRANSLATION TASK\n${targetLanguagePriority(targetLang)}\nUse the translation style defined in your translator identity.\n${TASK_GUIDANCE}`,
   ];
+  if (sections?.useStyleExamples) {
+    const examples = buildStyleExamples(targetLang, expectedIds, structuredOutput);
+    if (examples) blocks.push(examples);
+  }
   const runtime = String(sections?.runtime || "").trim();
-  if (runtime) blocks.push(`CONTEXT\n${runtime}`);
+  if (runtime) blocks.push(`CONTEXT — READ ONLY, DO NOT TRANSLATE\n${runtime}`);
   const source = String(sections?.source || "").trim();
   if (source) blocks.push(source);
   const output = String(requestOutputContract || "").trim();
@@ -328,4 +292,19 @@ const promptAuditSessionKey = (() => {
 
 export async function sessionPromptFingerprint(value) {
   return sha256Text(`${promptAuditSessionKey}\0${String(value || "")}`);
+}
+
+function buildStyleExamples(lang, expectedIds, structuredOutput) {
+  const groups = STYLE_EXAMPLES[normalizeLanguageCode(lang)];
+  if (!groups) return "";
+  let nextId = Math.max(-1, ...expectedIds.map(id => Number(id.slice(1)))) + 1;
+  const blocks = ["STYLE EXAMPLES — separate from the current scene; do not return these IDs. Edited illustrations of translation choices. Do not import their people, gender, setting or mood into SOURCE."];
+  for (const group of groups) {
+    const ids = group.source.map((_, i) => `P${nextId+i}`);
+    nextId += ids.length;
+    const source = group.source.map((value,i) => structuredOutput ? `${ids[i]}:${value}` : `<<TP_${ids[i]}:${value}>>`).join("\n");
+    const output = structuredOutput ? JSON.stringify(Object.fromEntries(ids.map((key,i) => [key,group.target[i]]))) : ids.map((key,i) => `<<TP_${key}:${group.target[i]}>>`).join("\n");
+    blocks.push(`Example ${group.label} context: ${group.context}\nExample ${group.label} source:\n${source}\nExample ${group.label} output:\n${output}`);
+  }
+  return blocks.join("\n\n");
 }

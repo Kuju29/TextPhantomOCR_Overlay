@@ -430,12 +430,25 @@ with tempfile.TemporaryDirectory(prefix="tp-wire-route-") as temp:
         assert "route-secret" not in (folder / "04_provider_request.json").read_text("utf-8")
         assert json.loads((folder / "11_terminal.json").read_text("utf-8"))["state"] == "succeeded"
 
-        # Configuration rejection occurs before provider dispatch but must still
-        # leave a typed, terminal operation instead of only a process session.
+        # Empty editable style is valid: the API must use its built-in default
+        # rather than rejecting the request or requiring a saved prompt.
+        with TestClient(app) as client:
+            default_prompt = client.post("/v2/engine/runsextension/ai/translate", json={
+                "operationId": "route-default-prompt",
+                "context": {"tp_trace": "trace-default-prompt"},
+                "units": [{"id": "g0", "text": "原文"}], "targetLang": "Thai",
+                "prompt_mode": "replace", "prompt": "",
+                "provider": {"id": "openrouter", "model": "test-model", "apiKey": "route-secret"},
+            })
+            assert default_prompt.status_code == 200, default_prompt.text
+            assert default_prompt.json()["meta"]["promptSource"] == "built_in_default_endpoint"
+
+        # A real configuration rejection still occurs before provider dispatch
+        # and must leave a typed, terminal operation instead of only a process session.
         with TestClient(app) as client:
             rejected = client.post("/v2/engine/runsextension/ai/translate", json={
                 "operationId": "route-invalid", "context": {"tp_trace": "trace-invalid"},
-                "units": [{"id": "g0", "text": "原文"}], "targetLang": "Thai",
+                "units": [{"id": "g0", "text": "原文"}], "targetLang": "",
                 "prompt_mode": "replace", "prompt": "",
                 "provider": {"id": "openrouter", "model": "test-model", "apiKey": "route-secret"},
             })
@@ -444,7 +457,7 @@ with tempfile.TemporaryDirectory(prefix="tp-wire-route-") as temp:
         rejected_terminal = json.loads((rejected_folder / "11_terminal.json").read_text("utf-8"))
         rejected_error = json.loads((rejected_folder / "10_error.json").read_text("utf-8"))
         assert rejected_terminal["terminal"] is True and rejected_terminal["state"] == "failed"
-        assert rejected_error["stage"] == "configuration"
+        assert rejected_error["stage"] == "request_validation"
         assert json.loads((rejected_folder / "04_provider_request.json").read_text("utf-8")) == {
             "status": "not_reached"
         }

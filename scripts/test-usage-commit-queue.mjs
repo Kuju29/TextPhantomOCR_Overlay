@@ -43,9 +43,46 @@ await test('large bursts are bounded to 32 and no task lost across batch boundar
  const h=harness();await Promise.all(Array.from({length:70},(_,i)=>h.commit(v=>({events:[...v.events,i]}))));
  assert.equal(h.counts().reads,3);assert.equal(h.counts().writes,3);assert.equal(new Set(h.read().events).size,70);
 });
-await test('request arriving during storage wait uses fresh next transaction, not a stale cached ledger',async()=>{
+await test('request arriving during authoritative read joins ordered transaction before reducers',async()=>{
  const h=harness({hold:true}),a=h.commit(v=>({events:[...v.events,'A']}));await tick();
  const b=h.commit(v=>({events:[...v.events,'B']}));h.release();await Promise.all([a,b]);
- assert.equal(h.counts().reads,2);assert.deepEqual(h.read().events,['A','B']);
+ assert.equal(h.counts().reads,1);assert.deepEqual(h.read().events,['A','B']);
+});
+await test('write-phase arrivals require another authoritative read',async()=>{
+ let data={events:[]},reads=0,release,entered;
+ const gate=new Promise(r=>release=r),start=new Promise(r=>entered=r);
+ const commit=createUsageCommitQueue({read:async()=>{reads++;return structuredClone(data);},
+  write:async v=>{entered();await gate;data=structuredClone(v);},normalize:v=>v,lock:fn=>fn()});
+ const first=commit(v=>({events:[...v.events,'A']}));await start;
+ const second=commit(v=>({events:[...v.events,'B']}));release();await Promise.all([first,second]);
+ assert.equal(reads,2);assert.deepEqual(data.events,['A','B']);
+});
+await test('exact adjacent equality, trace-off encoding budget, and callback timing',async()=>{
+ let time=0,writes=0;const results=[],timings=[];
+ const commit=createUsageCommitQueue({read:async()=>({n:0}),write:async()=>{writes++;},normalize:v=>v,lock:fn=>fn(),clock:()=>time});
+ const stringify=JSON.stringify;let encodes=0;
+ JSON.stringify=(...args)=>{encodes++;return stringify(...args);};
+ try {
+  await Promise.all(Array.from({length:24},()=>commit(v=>({n:v.n+1}))));
+  assert.equal(encodes,2,'unobserved batch encodes only original and final ledger');
+  encodes=0;
+  const onCommit=result=>{results.push(result.unchanged);time+=7;};
+  await Promise.all([commit(v=>({n:v.n+1}),{onCommit,onTiming:t=>timings.push(t)}),
+    commit(v=>({...v}),{onCommit,onTiming:t=>timings.push(t)}),
+    commit(()=>({n:0}),{onCommit,onTiming:t=>timings.push(t)})]);
+  assert.equal(encodes,4,'three observed events share adjacent encodings');
+ } finally {JSON.stringify=stringify;}
+ assert.deepEqual(results,[false,true,false]);
+ assert(timings.every(t=>t.callbackMs===7&&t.persistMs>=t.callbackMs));
+ assert.equal(writes,1,'net unchanged observed batch needs no write');
+});
+await test('late read-phase task timings exclude time before its arrival',async()=>{
+ let time=0,release,entered;const gate=new Promise(r=>release=r),start=new Promise(r=>entered=r),timings=[];
+ const commit=createUsageCommitQueue({clock:()=>time,read:async()=>{time=10;entered();await gate;time=30;return {n:0};},
+  write:async()=>{time=40;},normalize:v=>v,lock:fn=>fn()});
+ const first=commit(v=>({n:v.n+1}));await start;time=20;
+ const second=commit(v=>({n:v.n+1}),{onTiming:t=>timings.push(t)});release();await Promise.all([first,second]);
+ assert.equal(timings[0].readMs,10);assert.equal(timings[0].persistMs,20);
+ assert.equal(timings[0].lockMs,0);assert.equal(timings[0].batchSize,2);
 });
 console.log(`${checks}/${checks} durable burst queue checks passed; no provider I/O.`);

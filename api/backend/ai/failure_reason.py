@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from backend.ai.errors import ModelOutputContractError
 from backend.ai.clients.provider_error import (
     ProviderAdapterContractError, ProviderHttpError, ProviderTransportError,
+    upstream_http_status,
 )
 
 def classify(exc: BaseException) -> str:
@@ -25,10 +26,9 @@ def classify(exc: BaseException) -> str:
         return "provider_client_contract_error"
     if isinstance(exc, ProviderTransportError):
         return "provider_transport"
-    if isinstance(exc, ProviderHttpError):
-        message = str(exc).lower()
-        # Continue through the provider-code/message classifiers below before
-        # falling back to provider_http.
+    upstream_status = upstream_http_status(exc)
+    if upstream_status == 504:
+        return "provider_timeout"
     message = str(exc).lower()
     if any(marker in message for marker in (
         "billing required", "billing_required", "billing is past due",
@@ -69,7 +69,7 @@ def classify(exc: BaseException) -> str:
         return "provider_timeout"
     if "transport error" in message:
         return "provider_transport"
-    if isinstance(exc, ProviderHttpError) or "http " in message:
+    if upstream_status is not None or isinstance(exc, ProviderHttpError) or "http " in message:
         return "provider_http"
     if "json" in message or "schema" in message or "structured" in message:
         return "invalid_output_contract"
@@ -123,12 +123,12 @@ def provider_http_failure(exc: BaseException) -> ProviderHttpFailure:
         )
     # A permanent upstream 4xx must not invite an identical retry.  Keep the
     # existing outer 502 behaviour; upstreamStatus carries the real response.
-    import re
-    typed_status = getattr(exc, "status", None)
-    match = re.search(r"\bHTTP\s+(\d{3})\b", str(exc), re.IGNORECASE)
-    upstream_status = int(typed_status) if isinstance(typed_status, int) else (
-        int(match.group(1)) if match else None
-    )
+    upstream_status = upstream_http_status(exc)
+    if upstream_status == 504:
+        return ProviderHttpFailure(
+            502, "provider_timeout",
+            "The AI provider returned HTTP 504 (gateway timeout).", True,
+        )
     if upstream_status == 413:
         return ProviderHttpFailure(
             502, "provider_payload_too_large",

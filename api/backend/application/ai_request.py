@@ -19,6 +19,7 @@ def request_fingerprint(payload: dict[str, Any]) -> str:
             if key in provider
         },
         "memory": payload.get("memory"),
+        "pageContext": payload.get("pageContext"),
         "image": payload.get("image"),
         # Repair ownership changes billable generation semantics and therefore
         # must not replay an idempotent result produced under another owner.

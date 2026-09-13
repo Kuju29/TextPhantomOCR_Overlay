@@ -215,9 +215,23 @@ assert.deepEqual(
   for (const event of ['event: "start"', 'event: "result"', 'event: "error"', 'event: "stale_discard"']) {
     assert.ok(background.includes(event), `missing Local AI discovery ${event}`);
   }
-  assert.ok(popupMeta.includes("TP_LOCAL_AI_DISCOVERY_STALE"));
-  assert.match(popupLocal, /TP_LOCAL_AI_DISCOVER[\s\S]{0,180}apiBase:\s*normalizeUrl\(els\.apiUrl\.value\)/,
-    "explicit Connect must send the API base used for the trace handshake");
+  assert.doesNotMatch(
+    popupMeta,
+    /TP_LOCAL_AI_DISCOVERY_STALE/,
+    "provider metadata must not own a second Local AI discovery path",
+  );
+  assert.match(
+    popupLocal,
+    /if \(state\.localConnectInFlight\) return;/,
+    "Local AI discovery must coalesce concurrent automatic refreshes",
+  );
+  assert.match(
+    popupLocal,
+    /sequence !== state\.localConnectSeq[\s\S]{0,220}identity\(\) !== requestIdentity/,
+    "late Local AI discovery results must be discarded by the single connection owner",
+  );
+  assert.match(popupLocal, /TP_LOCAL_AI_DISCOVER[\s\S]{0,220}apiBase:\s*normalizeUrl\(els\.apiUrl\.value\)/,
+    "automatic Local AI discovery must send the API base used for the trace handshake");
   const handshake = await readFile(path.join(projectRoot, "src/background/trace-handshake.js"), "utf8");
   assert.match(handshake, /epoch !== handshakeEpoch \|\| base !== activeBase/,
     "late capability results from an old API base must be ignored");

@@ -43,7 +43,6 @@ const els = {
   aiModel: el("deepseek/deepseek-v4-flash-0731"), aiModelWrap: el(),
   aiPrompt: el("saved prompt"), aiPromptWrap: el(), aiPromptReset: el(),
   aiLocalTest: el(), aiLocalStatus: el(), aiLocalAdapter: el(),
-  aiLocalModelId: el(),
 };
 const state = {
   activeAiProvider: "openrouter", desiredAiModel: els.aiModel.value,

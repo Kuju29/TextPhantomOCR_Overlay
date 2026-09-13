@@ -55,6 +55,7 @@ let configurationRevision = 0;
 let consecutiveFailures = 0;
 let retryAt = 0;
 let shippingHealth = newShippingHealth();
+let shipmentTiming = {};
 let lineNo = 0;
 let activeSession = "";
 let refreshCapabilitiesProvider = null;
@@ -110,6 +111,7 @@ export function getTraceShippingState() {
     state: enabled === null ? "unnegotiated" : !enabled ? "disabled" :
       retryAt > Date.now() ? "backoff" : "active",
     transport: { ...shippingHealth, consecutiveFailures, retryAt },
+    timing: { ...shipmentTiming },
     buffer: {
       queued: buffer.length,
       dropped,
@@ -176,6 +178,7 @@ export function setTracingEnabled(
     consecutiveFailures = 0;
     retryAt = 0;
     shippingHealth = newShippingHealth();
+    shipmentTiming = {};
   }
   enabled = nextEnabled;
   detail =
@@ -226,6 +229,7 @@ export function resetTracingForBaseChange() {
   consecutiveFailures = 0;
   retryAt = 0;
   shippingHealth = newShippingHealth();
+  shipmentTiming = {};
   activeSession = "";
   if (timer) {
     clearTimeout(timer);
@@ -601,6 +605,15 @@ export async function flushTrace() {
   // no authority to delete current records or turn the new sink off.
   shipping = true;
   const revision = configurationRevision;
+  const now = () => globalThis.performance?.now?.() ?? Date.now();
+  const started = now();
+  let phaseStarted = started, phase = "baseMs";
+  const timing = { startedAt: Date.now() };
+  const phaseDone = next => {
+    timing[phase] = Math.max(0, Math.round(now() - phaseStarted));
+    phaseStarted = now();
+    phase = next;
+  };
   const controller = new AbortController();
   const deadline = setTimeout(() => controller.abort(), SHIP_DEADLINE_MS);
   const wait = value => beforeDeadline(value, controller.signal);
@@ -609,12 +622,13 @@ export async function flushTrace() {
     const base = String((await wait(baseUrlProvider?.())) || "").replace(/\/+$/, "");
     if (enabled !== true || revision !== configurationRevision) return;
     if (!base) { failureCode = "no_api_base"; throw new Error(failureCode); }
+    phaseDone("prepareMs");
     const expectedSession = activeSession;
     const batch = [], oversized = new Set();
-    let bytes = 2048; // Reserve for identity and bounded shipping-health metadata.
+    let bytes = 3072; // Reserve for identity and bounded shipping-health/timing metadata.
     for (const record of buffer.slice(0, MAX_BATCH)) {
       const recordBytes = new TextEncoder().encode(JSON.stringify(record)).length + 1;
-      if (recordBytes > MAX_RECORD_BYTES || recordBytes + 2048 > MAX_REQUEST_BYTES) {
+      if (recordBytes > MAX_RECORD_BYTES || recordBytes + 3072 > MAX_REQUEST_BYTES) {
         oversized.add(record); continue;
       }
       if (batch.length && bytes + recordBytes > MAX_REQUEST_BYTES) break;
@@ -633,6 +647,8 @@ export async function flushTrace() {
     if (revision !== configurationRevision || enabled !== true) return;
     failureStage = "http";
     shippingHealth.attempts++;
+    phaseDone("httpMs");
+    timing.httpStartedAt = Date.now();
     const response = await wait(fetch(`${base}/v1/trace`, {
       signal: controller.signal, method: "POST",
       headers: { "Content-Type": "application/json" }, cache: "no-store", keepalive: false,
@@ -641,6 +657,8 @@ export async function flushTrace() {
         shipmentId, shipping: getTraceShippingState() }),
     }));
     if (revision !== configurationRevision) return;
+    phaseDone("ackMs");
+    timing.headersAt = Date.now();
     status = Number(response.status) || 0;
     let reply = null;
     if (response.ok || status === 503 || status === 409) {
@@ -674,6 +692,13 @@ export async function flushTrace() {
       failureCode = "invalid_ack";
       throw new Error(failureCode);
     }
+    // Accept numeric durations only; an upstream error/body must never enter
+    // this bounded diagnostic state. Missing timing means unknown, not zero.
+    for (const key of ["queueMs", "writeMs", "ingestMs"]) {
+      const value = reply?.timing?.[key];
+      if (Number.isSafeInteger(value) && value >= 0 && value <= 3_600_000)
+        timing[`server${key[0].toUpperCase()}${key.slice(1)}`] = value;
+    }
     const sent = new Set(batch);
     buffer = buffer.filter(record => !sent.has(record));
     if (activeSession === expectedSession) dropped = Math.max(0, dropped - droppedAtSend);
@@ -697,6 +722,14 @@ export async function flushTrace() {
     // Keep the bounded buffer (with overflow accounting). These are diagnostic
     // retries only; no provider request, renderer or repair state is repeated.
   } finally {
+    if (revision === configurationRevision) {
+      phaseDone(phase);
+      timing.totalMs = Math.max(0, Math.round(now() - started));
+      timing.completedAt = Date.now();
+      // Keep the last completed attempt so the next successful shipment can
+      // carry prior deadline evidence, rather than only its own request start.
+      shipmentTiming = timing;
+    }
     clearTimeout(deadline);
     shipping = false;
     scheduleTraceFlush();

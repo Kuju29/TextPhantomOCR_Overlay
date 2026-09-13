@@ -1,7 +1,7 @@
 const comparisonSummary = u => Object.fromEntries(["runtime","provider","model","requests","inputTokens","outputTokens","totalTokens","tokensReported","tokenStatus"].map(k => [k,u[k]]));
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { applyUsageSelectionBoundary, currentUsage, failureUsageDetails, normalizeUsageLedger, persistUsageSelectionBoundary, recordProviderGeneration, recordUsage, resetActiveUsage, usageHistoryRows, usageKey, usageRows, AI_USAGE_SESSION_LIMIT, AI_USAGE_DELTA_LIMIT } from "../src/shared/ai-usage.js";
+import { applyUsageSelectionBoundary, currentUsage, failureUsageDetails, normalizeUsageLedger, persistProviderGeneration, persistUsageSelectionBoundary, recordProviderGeneration, recordUsage, resetActiveUsage, usageHistoryRows, usageKey, usageRows, AI_USAGE_SESSION_LIMIT, AI_USAGE_DELTA_LIMIT } from "../src/shared/ai-usage.js";
 
 let sequence = 0;
 const opts = (now) => ({ now, id: () => `s${++sequence}` });
@@ -250,6 +250,14 @@ for (let i = 0; i < AI_USAGE_DELTA_LIMIT + 3; i++) cappedDeltas = recordProvider
   runtime: "cloud", provider: "p", model: "delta-cap", operationId: `delta-${i}`, totalTokens: 1,
 }, opts(1100 + i));
 assert.equal(cappedDeltas.models[usageKey("cloud", "p", "delta-cap")].sessions[0].deltas.length, AI_USAGE_DELTA_LIMIT);
+const retainedDedupe = new Set(cappedDeltas.models[usageKey("cloud", "p", "delta-cap")].sessions[0].deltas.map((delta) => delta.dedupeKey));
+assert.equal(Object.keys(cappedDeltas.seen).length, 3,
+  "only dedupe identities evicted from visible delta history belong in the overflow index");
+assert.ok(Object.keys(cappedDeltas.seen).every((key) => !retainedDedupe.has(key)));
+const duplicateSeen = normalizeUsageLedger({ ...cappedDeltas,
+  seen: { ...cappedDeltas.seen, [cappedDeltas.models[usageKey("cloud", "p", "delta-cap")].sessions[0].deltas.at(-1).dedupeKey]: 9999 } });
+assert.equal(Object.keys(duplicateSeen.seen).length, 3,
+  "normalization removes legacy duplicate seen entries still retained as deltas");
 const localOrchestration = fs.readFileSync(new URL("../src/shared/ai/direct-local/generation.js", import.meta.url), "utf8");
 const ollamaProvider = fs.readFileSync(new URL("../src/shared/ai/providers/local-ollama.js", import.meta.url), "utf8");
 const compatibleProvider = fs.readFileSync(new URL("../src/shared/ai/providers/local-openai-compatible.js", import.meta.url), "utf8");
@@ -356,6 +364,13 @@ await Promise.all([
   persistUsageSelectionBoundary({ runtime: "cloud", provider: "gemini", model: "A", reason: "model_switch" }),
 ]);
 assert.equal(stored.aiUsageV1.selection.model, "A", "rapid A→B→A persistence preserves the latest boundary");
+const deltas=[];
+const receipt={runtime:"cloud",provider:"fixture",model:"trace",engine:"runsextension",
+  operationId:"same-op",receiptId:"same-receipt",inputTokens:10,outputTokens:2,totalTokens:12};
+await Promise.all([persistProviderGeneration(receipt,{emitTrace:(_name,row)=>deltas.push(row)}),
+  persistProviderGeneration(receipt,{emitTrace:(_name,row)=>deltas.push(row)})]);
+assert.deepEqual(deltas.map(row=>row.deduplicated),[false,true],"duplicate receipt trace retains exact unchanged semantics");
+assert.equal(stored.aiUsageV1.models[usageKey("cloud","fixture","trace")].sessions[0].requests,1);
 const { translateUnits } = await import("../src/background/ai/translation-service.js");
 try {
   globalThis.fetch = async () => new Response(JSON.stringify({

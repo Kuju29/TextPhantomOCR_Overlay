@@ -32,6 +32,14 @@ export function aiConfigurationIssueForError(error) {
   }
   if (["AI_PROFILE_INVALID", "AI_PROFILE_MIGRATION_CONFLICT", "AI_PROFILE_MIGRATION_INCOMPLETE"].includes(code))
     return configurationIssue(code, "การตั้งค่า AI เดิมไม่สมบูรณ์ กรุณาเลือก Provider และ Model ใหม่ที่", AI_SETTINGS_UI_PATHS.provider);
+  if (["LOCAL_MODEL_UNAVAILABLE", "LOCAL_MODELS_EMPTY"].includes(code))
+    return configurationIssue(code, "ไม่พบโมเดล Local AI ที่เลือก ระบบหยุดก่อนเริ่มงาน กรุณาตรวจหรือเลือกโมเดลที่", AI_SETTINGS_UI_PATHS.model);
+  if (["LOCAL_MODEL_VERIFY_TIMEOUT", "LOCAL_MODEL_VERIFY_FAILED"].includes(code))
+    return configurationIssue(code, "โมเดล Local AI ไม่ผ่านการตรวจสอบอัตโนมัติก่อนเริ่มงาน กรุณาตรวจที่", AI_SETTINGS_UI_PATHS.model);
+  if (code === "LOCAL_MODEL_THINKING_REQUIRED")
+    return configurationIssue(code, "โมเดล Local AI นี้ต้องเปิด AI thinking กรุณาปรับที่", AI_SETTINGS_UI_PATHS.model);
+  if (["LOCAL_AI_UNREACHABLE", "LOCAL_ADAPTER_MISSING"].includes(code))
+    return configurationIssue(code, "เชื่อมต่อ Local AI ไม่ได้ ระบบหยุดก่อนเริ่มงาน กรุณาตรวจ URL ที่", AI_SETTINGS_UI_PATHS.localUrl);
   return null;
 }
 

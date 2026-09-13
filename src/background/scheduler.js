@@ -540,14 +540,38 @@ function localAutoSuccess(l, latency) {
 // lanes remain provider-backpressure driven. Local Auto additionally learns
 // machine+endpoint+model throughput so a successful-but-saturated model does
 // not keep widening merely because it eventually answered.
-export function releaseSuccess(key, ms = 0) {
+export function releaseSuccess(key, ms = 0, { sampleWindow = null, sampleWorkload = null } = {}) {
   const l = lane(key);
   if (consumeResetRelease(l)) return;
   l.running = Math.max(0, l.running - 1);
   l.stats.ok++;
   if (l.unlimited) return;
 
-  const latency = Number(ms) || 0;
+  // A completion admitted under an earlier window cannot describe the current
+  // concurrency probe. Release it normally, but do not teach Auto from it.
+  const comparableWindow = l.localCapacity?.mode !== "auto" || sampleWindow == null ||
+    sampleWindow === Math.floor(l.window);
+  let comparableWorkload = true;
+  if (l.localCapacity?.mode === "auto" && sampleWorkload !== null) {
+    const units = sampleWorkload.unitCount, chars = sampleWorkload.sourceChars;
+    comparableWorkload = Number.isFinite(units) && units > 0 && Number.isFinite(chars) && chars > 0;
+    if (comparableWorkload && comparableWindow && Number.isFinite(ms) && ms > 0) {
+      const baseline = l.localAuto.sampleWorkload;
+      if (!baseline) {
+        // Stored latency has no workload identity. Establish fresh comparable
+        // evidence at the current capacity before making another probe.
+        l.localAuto.bestWindow = 0;
+        resetLocalProbe(l);
+        l.localAuto.sampleWorkload = {unitCount:units, sourceChars:chars};
+      } else {
+        // Compare like-sized work only; this is a conservative eligibility
+        // guard, not a claim that text size normalizes model throughput.
+        comparableWorkload = units === baseline.unitCount &&
+          chars >= baseline.sourceChars * 0.8 && chars <= baseline.sourceChars * 1.2;
+      }
+    }
+  }
+  const latency = comparableWindow && comparableWorkload && Number.isFinite(ms) && ms > 0 ? ms : 0;
   if (latency > 0) {
     l.avgMs = l.avgMs > 0 ? l.avgMs * 0.8 + latency * 0.2 : latency;
     l.samples++;

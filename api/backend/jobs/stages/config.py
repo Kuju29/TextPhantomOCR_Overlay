@@ -39,12 +39,8 @@ def build_ai_config(payload: dict, mode: str, source: str) -> AiConfig | None:
     base_url = str(ai.get("base_url") or "auto").strip() or "auto"
     user_key = str(ai.get("api_key") or "").strip()
     api_key = user_key or ("" if is_local_target(provider, base_url) else settings.ai_api_key)
-    prompt_mode = str(ai.get("prompt_mode") or "").strip().lower()
-    if prompt_mode != "replace":
-        raise ValueError("ai.prompt_mode must be exactly 'replace'")
+    prompt_mode = "replace"
     prompt = str(ai.get("prompt") or "").strip()
-    if not prompt:
-        raise ValueError("AI_PROMPT_REQUIRED: AI Style is empty; Reload the built-in prompt and save it")
     return AiConfig(
         api_key=api_key,
         user_key=bool(user_key),
@@ -66,5 +62,6 @@ def build_ai_config(payload: dict, mode: str, source: str) -> AiConfig | None:
         series_state=str(ai.get("series_state") or "").strip(),
         speakers=ai.get("speakers") if isinstance(ai.get("speakers"), dict) else {},
         prev_context=ai.get("prev_context") if isinstance(ai.get("prev_context"), list) else [],
+        page_context=ai.get("page_context") if isinstance(ai.get("page_context"), list) else [],
         context_frozen=bool(ai.get("context_frozen", False)),
     )

@@ -164,8 +164,8 @@
             <label for="ai-base-url">Local server URL</label>
             <input type="text" id="ai-base-url" placeholder="http://localhost:11434" />
             <div class="hint">Local server address. No API key.</div>
-            <button type="button" id="ai-local-test" class="secondary-btn">Connect &amp; load models</button>
-            <div class="hint" id="ai-local-status">Start Local AI, then connect.</div>
+            <button type="button" id="ai-local-test" class="secondary-btn">Refresh models</button>
+            <div class="hint" id="ai-local-status">Models load automatically when Local AI is selected.</div>
             <div id="ai-local-adapter-wrap" style="display: none; margin-top: 10px">
               <label for="ai-local-adapter">Custom adapter JSON</label>
               <textarea id="ai-local-adapter" rows="9" spellcheck="false"
@@ -187,9 +187,7 @@
           <div class="field" id="ai-model-wrap" style="display: none">
             <label for="ai-model">Model <span aria-hidden="true">(required)</span></label>
             <select id="ai-model" aria-label="AI Model"></select>
-            <input id="ai-local-model-id" type="text" aria-label="Exact Local AI model ID"
-              placeholder="Model not listed? Type its exact ID" style="display: none; margin-top: 6px" />
-            <div class="hint" id="ai-local-model-hint" style="display: none">Reconnect after changing models. Use a model your PC can handle, or translation may fail or hang.</div>
+            <div class="hint" id="ai-local-model-hint" style="display: none">Installed models are loaded from the selected Local AI runtime. Choosing a model verifies it automatically.</div>
             <div id="ai-local-capacity-wrap" style="display: none; margin-top: 10px">
               <label for="ai-local-capacity-mode">Local AI capacity</label>
               <select id="ai-local-capacity-mode" aria-label="Local AI capacity mode">
@@ -236,7 +234,7 @@
               </span>
             </label>
             <textarea id="ai-prompt" rows="8"
-              placeholder="Set translation instructions. Click Reload to restore the built-in prompt."></textarea>
+              placeholder="Optional custom translation style. Leave empty to use the built-in style."></textarea>
             <div id="ai-prompt-count" class="prompt-count" aria-live="polite"></div>
           </div>
 

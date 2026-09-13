@@ -40,6 +40,30 @@ class ProviderTransportError(ProviderFailure):
 class ProviderAdapterContractError(RuntimeError):
     """TextPhantom's provider adapter interface is internally inconsistent."""
 
+def structured_upstream_http_status(exc: BaseException) -> int | None:
+    """Only HTTP status metadata, never exception wording."""
+    response = getattr(exc, "response", None)
+    for value in (getattr(response, "status_code", None),
+                  getattr(exc, "status_code", None), getattr(exc, "status", None)):
+        if isinstance(value, int) and not isinstance(value, bool) and 100 <= value <= 599:
+            return value
+    return None
+
+def upstream_http_status(exc: BaseException) -> int | None:
+    """Read status metadata first; legacy clients may only carry safe text.
+
+    Do not inspect response bodies, request URLs or headers. A transport
+    timeout without a response has no upstream HTTP status.
+    """
+    status = structured_upstream_http_status(exc)
+    if status is not None:
+        return status
+    if isinstance(exc, (ProviderTransportError, httpx.RequestError)):
+        return None
+    match = re.search(r"\bHTTP\s+(\d{3})\b", str(exc), re.IGNORECASE)
+    value = int(match.group(1)) if match else None
+    return value if value is not None and 100 <= value <= 599 else None
+
 def _scrub(value: Any) -> str:
     text = " ".join(str(value or "").split())
     for pattern in _SECRET_PATTERNS:

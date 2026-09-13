@@ -1,3 +1,4 @@
+from backend.ai.prompts.context import normalize_page_context
 from backend.ai.workload import normalize_workload
 from backend.ai.capabilities import SCHEMA_OBJECT, COMPACT_MARKERS
 """Validate and normalize API translation requests."""
@@ -33,12 +34,8 @@ def build_config(payload: dict) -> AiConfig:
     user_key = str(provider.get("apiKey") or "").strip()
     provider_id = str(provider.get("id") or "auto").strip() or "auto"
     base_url = str(provider.get("baseUrl") or "auto").strip() or "auto"
-    prompt_mode = str(payload.get("prompt_mode") or "").strip().lower()
-    if prompt_mode != "replace":
-        raise ValueError("prompt_mode must be exactly 'replace'")
+    prompt_mode = "replace"
     prompt = str(payload.get("prompt") or "").strip()
-    if not prompt:
-        raise ValueError("AI_PROMPT_REQUIRED: AI Style is empty; Reload the built-in prompt and save it")
     planned_contract = provider.get("outputContract", "")
     if not isinstance(planned_contract, str) or planned_contract not in ("", SCHEMA_OBJECT, COMPACT_MARKERS):
         raise ValueError("Invalid planned translation output contract")
@@ -62,6 +59,7 @@ def build_config(payload: dict) -> AiConfig:
         series_state=str(memory.get("seriesState") or "").strip(),
         prev_context=(memory.get("previousContext")
                       if isinstance(memory.get("previousContext"), list) else []),
+        page_context=normalize_page_context(payload.get("pageContext"), payload.get("units")),
         repair_reason=("wrong_target_script" if isinstance(payload.get("repair"), dict)
                        and payload["repair"].get("reason") == "wrong_target_script" else ""),
         repair_enabled=not ai_request.extension_owns_repair(payload),

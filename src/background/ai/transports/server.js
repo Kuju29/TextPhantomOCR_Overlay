@@ -9,7 +9,7 @@ import {
   failureUsageDetails,
   persistProviderGeneration,
 } from "../../../shared/ai-usage.js";
-import { AI_PROMPT_MODE, requireAiPrompt } from "../../../shared/ai-prompt-policy.js";
+import { AI_PROMPT_MODE, normalizeAiPrompt } from "../../../shared/ai-prompt-policy.js";
 import { beginApiRequest, noteApiActivity, noteApiSuccess } from "../../api.js";
 
 function sourceChars(units) {
@@ -51,7 +51,7 @@ export async function translateViaServer(
   } = {},
 ) {
   const promptMode = AI_PROMPT_MODE;
-  const prompt = requireAiPrompt(ai?.prompt);
+  const prompt = normalizeAiPrompt(ai?.prompt);
   const usageStartedAt = Date.now();
   const apiBase = String(base || "").replace(/\/+$/, "");
   if (!apiBase) throw new Error("server AI route has no API base URL");
@@ -66,6 +66,7 @@ export async function translateViaServer(
       ...(tabSession ? { tp_tab_session: String(tabSession) } : {}),
     },
     units: units.map(({ id, text }) => ({ id, text })),
+    pageContext: Array.isArray(ai?.page_context) ? ai.page_context : [],
     targetLang,
     sourceLang,
     repair: { owner: "extension", enabled: false },
@@ -140,6 +141,36 @@ export async function translateViaServer(
       ...(usageTiming || {}), ...extra },
   });
   const progress = state => { try { onProgress?.({state}); } catch {} };
+  const persistResponseUsage = async (details, options = {}) => {
+    const usageCallbackStarted = performance.now();
+    let commitTiming = null, failed = true;
+    try {
+      const value = await persistProviderGeneration(details, { ...options,
+        onTiming: timing => { commitTiming = timing; options.onTiming?.(timing); } });
+      failed = false;
+      return value;
+    } finally {
+      // Isolate the post-response callback from pre-dispatch durable intent and
+      // HTTP. This includes queueing, persistence and its trace callback only.
+      try { trace?.("requestTiming", {
+        schema:"tp.audit/1", event:"usage_commit_timing", reason:failed ? "failed" : "success",
+        scope:{operationId,requestId,imageId,batchId,jobId,traceId},
+        timing:{...(commitTiming || {}), usageCallbackMs:Math.max(0,performance.now()-usageCallbackStarted)},
+      }); } catch {}
+    }
+  };
+  const readResponseBody = async () => {
+    try {
+      const raw = String(await res.text());
+      const bodyCompleteAt = performance.now();
+      emitTiming("response_complete", {httpMs:bodyCompleteAt-httpStarted,
+        headersMs:headersAt-httpStarted, bodyMs:bodyCompleteAt-headersAt});
+      return raw;
+    } catch (error) {
+      emitTiming("body_failed", {httpMs:performance.now()-httpStarted, bodyMs:performance.now()-headersAt});
+      throw error;
+    }
+  };
   const finishApiRequest = beginApiRequest(apiBase);
   try {
     noteApiActivity(apiBase);
@@ -160,15 +191,18 @@ export async function translateViaServer(
       await persistProviderGeneration({operationId, engine:"runsextension", resolvePending:true});
       throw signal.reason || new DOMException("Aborted", "AbortError");
     }
+    const requestBody = JSON.stringify(body);
+    progress("http_wait");
     httpStarted = performance.now(); httpAttempts = 1;
-    progress("http_wait"); emitTiming("http_started");
-    res = await fetch(`${apiBase}${path}`, {
+    const pendingResponse = fetch(`${apiBase}${path}`, {
       method: "POST",
       headers,
       cache: "no-store",
       signal,
-      body: JSON.stringify(body),
+      body: requestBody,
     });
+    emitTiming("http_started");
+    res = await pendingResponse;
     headersAt = performance.now();
     emitTiming("http_headers", {status:res.status, headersMs: headersAt-httpStarted});
     // fetch() resolves when response headers are available. The JSON body is
@@ -208,7 +242,7 @@ export async function translateViaServer(
   finishApiRequest();
 
   if (!res.ok) {
-    const rawText = String(await res.text());
+    const rawText = await readResponseBody();
     await wireTrace?.("providerResponse", { mode: "body", status: res.status, raw: rawText });
     await wireTrace?.("providerAssembled", { text: rawText, complete: true,
       source: "extension_api_http_body" });
@@ -285,11 +319,19 @@ export async function translateViaServer(
     error.retryAfterMs = retryAfterMs;
     error.providerAttempts = providerAttempts;
     error.generationAttempts = generationAttempts;
+    // Preserve only typed, additive API provenance for later bounded repair.
+    // Never derive upstream status/finality from response text or outer status.
+    if (detailObject?.providerFailureKind === "http_status")
+      error.providerFailureKind = "http_status";
+    if (Number.isInteger(detailObject?.upstreamStatus))
+      error.upstreamStatus = detailObject.upstreamStatus;
+    if (typeof detailObject?.requestDispatched === "boolean")
+      error.requestDispatched = detailObject.requestDispatched;
     if (generationAttempts === 0 && (detailObject?.requestDispatched === false ||
         detailObject?.generationAttempts === 0 || (res.status >= 400 && res.status < 500)))
-      await persistProviderGeneration({ operationId, engine: "runsextension", resolvePending: true });
+      await persistResponseUsage({ operationId, engine: "runsextension", resolvePending: true });
     if (generationAttempts > 0)
-      await persistProviderGeneration(
+      await persistResponseUsage(
         {
           runtime: runtimeFor(
             charged.provider || ai?.provider,
@@ -327,8 +369,7 @@ export async function translateViaServer(
   }
 
   noteApiSuccess(apiBase);
-  const rawResponse = String(await res.text());
-  emitTiming("response_complete", {httpMs: performance.now()-httpStarted, bodyMs:performance.now()-headersAt});
+  const rawResponse = await readResponseBody();
   progress("validating");
   await wireTrace?.("providerResponse", { mode: "body", status: res.status, raw: rawResponse });
   await wireTrace?.("providerAssembled", { text: rawResponse, complete: true,
@@ -356,7 +397,7 @@ export async function translateViaServer(
       modelFallback: false,
       schemaFallback: false,
     });
-    if (generationAttempts > 0) await persistProviderGeneration(
+    if (generationAttempts > 0) await persistResponseUsage(
       {
         runtime: runtimeFor(
           charged.provider || result?.meta?.provider || ai?.provider,
@@ -460,13 +501,14 @@ export async function translateViaServer(
     omittedIds: Array.isArray(result?.meta?.omittedIds) ? result.meta.omittedIds.map(String) : [],
     declinedIds: Array.isArray(result?.meta?.declinedIds) ? result.meta.declinedIds.map(String) : [] });
   await wireTrace?.("timing", { totalMs: Math.round(performance.now() - started), status: res.status,
-    providerMs: Number(result?.meta?.providerMs || 0), parseMs: Number(result?.meta?.parseMs || 0) });
+    providerMs: Number.isFinite(result?.meta?.providerMs) ? result.meta.providerMs : null,
+    parseMs: Number.isFinite(result?.meta?.parseMs) ? result.meta.parseMs : null });
 
   const generationAttempts = Math.max(
     1,
     Number(result?.meta?.generationAttempts) || 1,
   );
-  await persistProviderGeneration(
+  await persistResponseUsage(
     {
       runtime: runtimeFor(
         result?.meta?.resolvedProvider ||

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { getCanonicalPrompt, getSystemPrompt, validateCanonicalPrompt, forgetPrompts } from "../src/background/ai/prompt-cache.js";
 import { targetLanguagePriority, translateWithLocalOpenAi } from "../src/shared/ai/direct-local/generation.js";
-import { composeCanonicalPrompt } from "../src/shared/ai/direct-local/prompt.js";
+import { composeCanonicalPrompt, TRANSLATOR_IDENTITY_BASE } from "../src/shared/ai/direct-local/prompt.js";
 import { decodeTranslations } from "../src/shared/ai/direct-local/decode.js";
 
 const plan = { version: "translation-plan-2", localContractVersion: "v1", pieces: {
@@ -41,14 +41,14 @@ async function run(ai = {}, options = {}) {
 try {
   let call = await run({ prompt: "Target language: Thai\nFULL USER STYLE SENTINEL", promptMode: "replace" });
   let system = call.body.messages[0].content;
-  assert.equal(system, "You are an expert translator and localization editor. The following defines how you translate. Treat it as your own translation style and apply it naturally and consistently.\n\nTRANSLATION STYLE\nFULL USER STYLE SENTINEL");
+  assert.equal(system, TRANSLATOR_IDENTITY_BASE + "\n\nTRANSLATION STYLE\nTarget language: Thai (ภาษาไทย).\nFULL USER STYLE SENTINEL");
   assert.equal(system.split("FULL USER STYLE SENTINEL").length - 1, 1);
   assert.doesNotMatch(system, /SOURCE INPUT CONTRACT SENTINEL|SYSTEM POLICY SENTINEL|OUTPUT —/);
   assert.match(call.body.messages[1].content, /^TRANSLATION TASK\nTranslate every source unit into Thai \(ภาษาไทย\)\./);
   assert.match(call.body.messages[1].content, /SOURCE INPUT CONTRACT SENTINEL[\s\S]*OUTPUT — tp\.translation\.compact-records\/1/);
   assert.doesNotMatch(call.body.messages[1].content, /FULL USER STYLE SENTINEL/);
   const composed = composeCanonicalPrompt(plan, { prompt: "Target language: Thai\nFULL USER STYLE SENTINEL", promptMode: "replace" }, false, false, "th");
-  assert.deepEqual(Object.keys(composed.sections), ["style", "policy", "language", "source", "output", "runtime"]);
+  assert.deepEqual(Object.keys(composed.sections), ["style", "useStyleExamples", "policy", "language", "source", "output", "runtime"]);
   assert.equal(composed.sections.runtime, "", "empty runtime remains an internal empty boundary");
   assert.doesNotMatch(system, /BUILT-IN STYLE SENTINEL|STRUCTURED JSON SENTINEL/);
   assert.doesNotMatch(system, /STRUCTURED JSON SENTINEL/);
@@ -79,14 +79,14 @@ try {
     characters: [{ name: "Rey", gender: "unknown" }], glossary: [{ src: "Captain", tgt: "กัปตัน" }],
     prev_context: [{ src: "Where?", who: "Rey" }] });
   system = call.body.messages[0].content;
-  assert.match(system, /\nTRANSLATION STYLE\nKeep Captain as กัปตัน\.$/);
+  assert.match(system, /\nTRANSLATION STYLE\nTarget language: Thai \(ภาษาไทย\)\.\nKeep Captain as กัปตัน\.$/);
   assert.match(call.body.messages[1].content, /CONTEXT[\s\S]*STORY SO FAR[\s\S]*CHARACTER SHEET[\s\S]*TRANSLATION MEMORY[\s\S]*PREVIOUS PAGE[\s\S]*SOURCE INPUT CONTRACT SENTINEL[\s\S]*OUTPUT —/);
   assert.doesNotMatch(system, /STORY SO FAR|CHARACTER SHEET|PREVIOUS PAGE/);
   assert.doesNotMatch(system, /BUILT-IN STYLE SENTINEL|SERIES NOTES SENTINEL/);
 
   call = await run({ prompt: "HEADERLESS COMPLETE STYLE", promptMode: "replace" });
   system = call.body.messages[0].content;
-  assert.match(system, /^You are an expert translator[\s\S]*TRANSLATION STYLE\nHEADERLESS COMPLETE STYLE$/,
+  assert.match(system, /^You are a professional manga and manhwa translator and localization editor[\s\S]*TRANSLATION STYLE\nTarget language: Thai \(ภาษาไทย\)\.\nHEADERLESS COMPLETE STYLE$/,
     "replace mode works without a magic Target language header");
   assert.doesNotMatch(system, /BUILT-IN STYLE SENTINEL|SERIES NOTES SENTINEL/);
 
@@ -147,31 +147,44 @@ try {
   forgetPrompts();
   const retiredV1 = { ...validSignedPlan, version: "translation-plan-1" };
   globalThis.fetch = async () => new Response(JSON.stringify({ canonicalPrompt: retiredV1 }), { status: 200 });
-  await assert.rejects(
-    getSystemPrompt("https://textphantom.example", "th"),
-    (error) => error?.code === "canonical_prompt_contract_invalid" &&
-      /Unsupported AI prompt contract version/.test(error.message) &&
-      error?.requestDispatched === false,
-    "a cached/server plan-v1 shape must fail closed instead of entering translation",
-  );
+  const normalizedV1 = await getSystemPrompt("https://textphantom.example", "th");
+  assert.equal(normalizedV1.version, "translation-plan-2");
+  assert.equal(normalizedV1.sourceVersion, "translation-plan-1");
+  assert.equal(normalizedV1.compatibility.normalized, true,
+    "a legacy plan version must be migrated instead of blocking translation");
+
+
+  forgetPrompts();
+  const forwardV3 = { ...validSignedPlan, version: "translation-plan-3" };
+  globalThis.fetch = async () => new Response(JSON.stringify({ canonicalPrompt: forwardV3 }), { status: 200 });
+  const normalizedV3 = await getSystemPrompt("https://textphantom.example", "th");
+  assert.equal(normalizedV3.version, "translation-plan-2");
+  assert.equal(normalizedV3.sourceVersion, "translation-plan-3");
+  assert.equal(normalizedV3.compatibility.normalized, true,
+    "a newer version label with the required structural pieces must not block provider dispatch");
+  assert.equal(normalizedV3.pieces.editableStyle, forwardV3.pieces.editableStyle,
+    "forward-version normalization must preserve the editable style");
 
   forgetPrompts();
   const tampered = structuredClone(validSignedPlan);
-  tampered.pieces.editableStyle += " TAMPERED";
+  tampered.pieces.markerOutputContract += " TAMPERED";
   globalThis.fetch = async () => new Response(JSON.stringify({ canonicalPrompt: tampered }), { status: 200 });
-  await assert.rejects(
-    getSystemPrompt("https://textphantom.example", "th"),
-    (error) => error?.code === "canonical_prompt_contract_invalid" && /hash mismatch/.test(error.message),
-  );
+  const protectedContract = await getSystemPrompt("https://textphantom.example", "th");
+  assert.match(protectedContract.pieces.markerOutputContract,
+    /^OUTPUT — tp\.translation\.compact-records\/1/,
+    "remote hash drift must not replace the extension-owned output contract");
+  assert.doesNotMatch(protectedContract.pieces.markerOutputContract, /TAMPERED/);
+  assert.ok(protectedContract.compatibility.protectedPieces.includes("markerOutputContract"));
+  assert.equal(protectedContract.compatibility.protectedPieces.includes("editableStyle"), false,
+    "the editable default style remains the only remotely replaceable prompt piece");
 
   forgetPrompts();
   const tamperedAggregate = structuredClone(validSignedPlan);
   tamperedAggregate.hash = "0".repeat(64);
   globalThis.fetch = async () => new Response(JSON.stringify({ canonicalPrompt: tamperedAggregate }), { status: 200 });
-  await assert.rejects(
-    getSystemPrompt("https://textphantom.example", "th"),
-    (error) => error?.code === "canonical_prompt_contract_invalid" && /aggregate hash mismatch/.test(error.message),
-  );
+  const diagnosticHashOnly = await getSystemPrompt("https://textphantom.example", "th");
+  assert.equal(diagnosticHashOnly.hash, tamperedAggregate.hash,
+    "legacy hashes remain audit metadata and do not block a complete safe plan");
 
   forgetPrompts();
   const extraPiece = await signedPlan({
@@ -179,20 +192,26 @@ try {
     pieces: { ...plan.pieces, injectedInstruction: "unadvertised instruction" },
   });
   globalThis.fetch = async () => new Response(JSON.stringify({ canonicalPrompt: extraPiece }), { status: 200 });
-  await assert.rejects(
-    getSystemPrompt("https://textphantom.example", "th"),
-    (error) => error?.code === "canonical_prompt_contract_invalid" && /unexpected prompt pieces/.test(error.message),
-  );
+  const ignoredExtra = await getSystemPrompt("https://textphantom.example", "th");
+  assert.deepEqual(ignoredExtra.compatibility.ignoredUnexpectedPieces,
+    ["injectedInstruction"]);
+  assert.equal("injectedInstruction" in ignoredExtra.pieces, false);
 
   forgetPrompts(); calls.length = 0;
   globalThis.fetch = async (url, init = {}) => {
     calls.push({ url: String(url), init });
     return new Response(JSON.stringify({ ok: true, system_base: "LEGACY SYSTEM BASE", lang_style: "Target language: Thai\nLEGACY STYLE", system_text: "MUST NOT REUSE", promptVersion: "legacy", promptHash: "hash" }), { status: 200 });
   };
-  await assert.rejects(
-    getSystemPrompt("https://textphantom.example", "th", { wantMemo: false }),
-    (error) => error?.code === "canonical_prompt_contract_invalid" && error?.requestDispatched === false,
+  const legacyEnvelope = await getSystemPrompt(
+    "https://textphantom.example", "th", { wantMemo: false },
   );
+  assert.equal(legacyEnvelope.version, "translation-plan-2");
+  assert.match(legacyEnvelope.pieces.markerOutputContract,
+    /^OUTPUT — tp\.translation\.compact-records\/1/,
+    "a legacy endpoint envelope must fall back to the bundled safe contract");
+  assert.equal(legacyEnvelope.compatibility.remoteFallback, true,
+    "bundled fallback must be explicit in compatibility metadata");
+  assert.equal(legacyEnvelope.compatibility.remoteFallbackReason, "remote_contract_missing");
 
   globalThis.fetch = async () => { throw new Error("API must stay offline"); };
   const offlineBundled = await getCanonicalPrompt("http://127.0.0.1:7860", "th");
@@ -201,9 +220,10 @@ try {
     /Return every supplied ID exactly once as <<TP_Pn:translated text>>/);
   assert.match(offlineBundled.pieces.markerOutputContract,
     /results are matched by ID/);
-  assert.throws(() => composeCanonicalPrompt(offlineBundled,
-    { prompt: "Target language: Thai\n  ", promptMode: "replace" }, false, false, "th"),
-    (error) => error.code === "AI_PROMPT_REQUIRED" && error.requestDispatched === false && error.generationAttempts === 0);
+  const emptyComposed = composeCanonicalPrompt(offlineBundled,
+    { prompt: "Target language: Thai\n  ", promptMode: "replace" }, false, false, "th");
+  assert.match(emptyComposed.sections.style, /professional|natural|manga|dialogue|สร้างประโยค/i,
+    "an empty editable style must use the bundled style rather than fail");
   const realStyle = "Avoid pronouns unless the source makes them indispensable.";
   const realComposed = composeCanonicalPrompt(
     offlineBundled,
@@ -248,20 +268,25 @@ try {
   }
   const tamperedBundled = structuredClone(offlineBundled);
   tamperedBundled.pieces.markerOutputContract += " tampered";
-  await assert.rejects(
-    validateCanonicalPrompt({ canonicalPrompt: tamperedBundled }),
-    (error) => error?.code === "canonical_prompt_contract_invalid" && /hash mismatch/.test(error.message),
-  );
+  const completeLegacyPlan = await validateCanonicalPrompt({ canonicalPrompt: tamperedBundled });
+  assert.equal(completeLegacyPlan.pieces.markerOutputContract,
+    tamperedBundled.pieces.markerOutputContract,
+    "without a bundled fallback, a complete caller-owned plan is normalized structurally");
 
   let providerDispatches = 0;
-  globalThis.fetch = async () => { providerDispatches += 1; throw new Error("must not dispatch"); };
-  await assert.rejects(
-    translateWithLocalOpenAi([{ id: "P0", text: "原文" }], {
-      ai: { model: "qwen", prompt: "FULL STYLE", promptMode: "replace", local_adapter: { protocol: "ollama", baseUrl: "http://localhost:11434" } },
-      canonicalPrompt: { ...plan, version: "translation-plan-0" }, targetLang: "th",
-    }),
-    (error) => error?.code === "canonical_prompt_contract_invalid" && error?.requestDispatched !== true,
-  );
+  globalThis.fetch = async () => {
+    providerDispatches += 1;
+    return new Response(JSON.stringify({
+      message: { content: "<<TP_P0:แปลแล้ว>>" }, done: true, done_reason: "stop",
+    }), { status: 200 });
+  };
+  const legacyDirect = await translateWithLocalOpenAi([{ id: "P0", text: "原文" }], {
+    ai: { model: "qwen", prompt: "FULL STYLE", promptMode: "replace", local_adapter: { protocol: "ollama", baseUrl: "http://localhost:11434" } },
+    canonicalPrompt: { ...plan, version: "translation-plan-0" }, targetLang: "th",
+  });
+  assert.equal(legacyDirect.translations[0].text, "แปลแล้ว");
+  assert.equal(providerDispatches, 1,
+    "a legacy version label must not block an otherwise complete Local plan");
   const missingPiece = structuredClone(plan); delete missingPiece.pieces.systemPolicy;
   await assert.rejects(
     translateWithLocalOpenAi([{ id: "P0", text: "原文" }], {
@@ -270,15 +295,16 @@ try {
     }),
     (error) => error?.code === "canonical_prompt_contract_invalid" && /systemPolicy/.test(error.message),
   );
-  assert.equal(providerDispatches, 0, "invalid prompt contracts must fail before provider dispatch");
+  assert.equal(providerDispatches, 1, "an incomplete prompt contract must fail before provider dispatch");
 
-  await assert.rejects(
-    translateWithLocalOpenAi([{ id: "P0", text: "原文" }], {
-      ai: { model: "qwen", prompt: "", promptMode: "replace", local_adapter: { protocol: "ollama", baseUrl: "http://localhost:11434" } },
-      canonicalPrompt: plan, targetLang: "th",
-    }),
-    (error) => error?.code === "AI_PROMPT_REQUIRED" && error?.requestDispatched === false,
-  );
+  const builtInDefault = await translateWithLocalOpenAi([{ id: "P0", text: "原文" }], {
+    ai: { model: "qwen", prompt: "", promptMode: "fallback", local_adapter: { protocol: "ollama", baseUrl: "http://localhost:11434" } },
+    canonicalPrompt: plan, targetLang: "th",
+  });
+  assert.equal(builtInDefault.meta.promptAudit.promptSource, "built_in_default");
+  assert.equal(builtInDefault.meta.promptAudit.promptMode, "replace");
+  assert.equal(providerDispatches, 2,
+    "an empty editable prompt must dispatch once with the built-in style");
 } finally { globalThis.fetch = originalFetch; forgetPrompts(); }
 
 console.log("Prompt parity passed: style/context/thinking preserved; Local wire is marker-only without JSON schema.");

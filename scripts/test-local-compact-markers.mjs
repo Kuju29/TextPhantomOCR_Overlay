@@ -18,8 +18,8 @@ assert.equal("response_format" in request, false);
 assert.doesNotMatch(request.messages.at(-1).content, /^\s*[{[]/);
 assert.match(request.messages.at(-1).content, /TRANSLATION TASK/);
 assert.match(request.messages.at(-1).content, /Translate every source unit into Thai \(ภาษาไทย\)\./);
-assert.match(request.messages[0].content, /TRANSLATION STYLE\nfull style/);
-assert.doesNotMatch(request.messages.at(-1).content, /TRANSLATION STYLE\nfull style/);
+assert.match(request.messages[0].content, /TRANSLATION STYLE\nTarget language: Thai \(ภาษาไทย\)\.\nfull style/);
+assert.doesNotMatch(request.messages.at(-1).content, /TRANSLATION STYLE\nTarget language: Thai \(ภาษาไทย\)\.\nfull style/);
 assert.match(request.messages.at(-1).content, /SOURCE TEXT\n<<TP_P0:同じ >> OCR-like source>>\n<<TP_P1:同じ ກ mixed Unicode \{"x"\}>>$/);
 for (const badSource of ["line one\nline two", "tab\ttext", "literal <<TP_P9:source>>"]) {
   await assert.rejects(
@@ -155,13 +155,13 @@ await translateWithLocalOpenAi(units, {
   canonicalPrompt: prompt,
 });
 const exactSystem = exactContractBody.messages.find((message) => message.role === "system").content;
-assert.doesNotMatch(exactSystem, /Expected IDs:|Thai/);
-assert.match(exactSystem, /TRANSLATION STYLE\nfull style/);
-assert.match(exactSystem, /expert translator/);
+assert.doesNotMatch(exactSystem, /Expected IDs:/);
+assert.match(exactSystem, /TRANSLATION STYLE\nTarget language: Thai \(ภาษาไทย\)\.\nfull style/);
+assert.match(exactSystem, /professional manga and manhwa translator and localization editor/);
 const exactUser = exactContractBody.messages.find((message) => message.role === "user").content;
 assert.match(exactUser, /Expected IDs: P0, P1/);
 assert.equal(exactUser.split("Expected IDs:").length - 1, 1);
-assert.doesNotMatch(exactUser, /TRANSLATION STYLE\nfull style/);
+assert.doesNotMatch(exactUser, /TRANSLATION STYLE\nTarget language: Thai \(ภาษาไทย\)\.\nfull style/);
 
 const eightUnits = Array.from({ length: 8 }, (_, index) => ({ id: `group-${index}`, text: `source-${index}` }));
 let eightDispatches = 0;

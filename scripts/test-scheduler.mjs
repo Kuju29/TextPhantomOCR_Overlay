@@ -45,9 +45,8 @@ assert.match(safeDeferredCatch,
 assert.match(jobsSource,
   /if \(slotHeld\) \{\s*if \(localRequest\) releaseLocalFailure\(requestLane, error, retryAfterMs\);\s*else if \(isBusy\) releaseRejected/,
   "API-local terminal catch must not reject from HTTP status alone");
-assert.match(jobsSource,
-  /localProviderMs[\s\S]{0,220}releaseSuccess\(requestLane, localRequest && localProviderMs > 0 \? localProviderMs : requestMs\)/,
-  "Local Auto must learn provider execution latency when the API reports it, not browser HTTP overhead");
+assert.match(jobsSource, /releaseSuccess\(requestLane, localRequest \? localSampleMs : requestMs/,
+  "Missing Local provider duration must release without learning browser HTTP overhead");
 
 const { localCapacityConfig, isLocalCapacityFailure } = await import(
   "../src/background/local-capacity.js"
@@ -471,3 +470,26 @@ reset();
 
 reset();
 console.log("Scheduler test passed: fast provider-driven AI widens, provider backpressure narrows, server deferral does not, and user ceilings hold.");
+
+reset();
+{
+  const payload={engine:'extension',mode:'lens_text',source:'ai',ai:{provider:'ollama',model:'timing-fixture',base_url:'http://localhost:11434'},limits:{aiLocalCapacityMode:'auto'}};
+  const key=laneKeyFor(payload);configureLocalCapacityForPayload(payload);
+  const workload={unitCount:2,sourceChars:100};
+  await acquire(key);releaseSuccess(key,9000); // Legacy baseline has no workload identity.
+  const initial=await acquire(key);releaseSuccess(key,1000,{sampleWindow:initial.window,sampleWorkload:workload});
+  const before=describe(key);
+  assert.equal(before.localBestLatencyMs,1000,'unidentified prior latency must not contaminate the fresh workload baseline');
+  const one=await acquire(key);
+  releaseSuccess(key,100,{sampleWindow:one.window,sampleWorkload:{unitCount:12,sourceChars:800}});
+  assert.equal(describe(key).avgMs,before.avgMs,'different-size pages cannot teach Local capacity');
+  const two=await acquire(key);
+  releaseSuccess(key,100,{sampleWindow:initial.window,sampleWorkload:workload});
+  assert.equal(describe(key).avgMs,before.avgMs,'completion from older admission window is not current probe evidence');
+  const three=await acquire(key);releaseSuccess(key,100,{sampleWindow:three.window,sampleWorkload:{}});
+  assert.equal(describe(key).avgMs,before.avgMs,'unknown workload cannot train');
+  const four=await acquire(key);releaseSuccess(key,0,{sampleWindow:four.window,sampleWorkload:workload});
+  assert.equal(describe(key).avgMs,before.avgMs,'unknown provider timing cannot train');
+  assert.equal(describe(key).running,0,'all excluded samples still release capacity');
+  console.log('PASS Local learning excludes mismatched window/workload and unknown duration');
+}

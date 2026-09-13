@@ -2,7 +2,7 @@ import { normalizeModelCapabilities } from "./model-capabilities.js";
 /** Pure, opt-in Provider + Model profile core. Runtime activation is external. */
 import { normalizePrompt, makeProfilePromptKey } from "./prompt.js";
 import { isLocalAiProvider, isLocalAiTarget } from "./constants.js";
-import { AI_PROMPT_MODE } from "./ai-prompt-policy.js";
+import { AI_PROMPT_MODE, normalizeAiPromptMode } from "./ai-prompt-policy.js";
 
 export { makeProfilePromptKey };
 export const AI_PROFILES_SCHEMA_VERSION = 1;
@@ -101,15 +101,14 @@ function promptRecord(value, { allowLegacyString = false } = {}) {
     return { text: normalizePrompt(value), mode: AI_PROMPT_MODE };
   }
   if (!value || typeof value !== "object" || Array.isArray(value) ||
-      typeof value.text !== "string" || value.mode !== AI_PROMPT_MODE) {
+      typeof value.text !== "string") {
     const error = new TypeError("Canonical AI prompt record is invalid");
     error.code = "AI_PROFILE_INVALID";
     throw error;
   }
-  const source = value;
   return {
-    text: normalizePrompt(source.text),
-    mode: source.mode,
+    text: normalizePrompt(value.text),
+    mode: normalizeAiPromptMode(value.mode),
   };
 }
 
@@ -138,8 +137,7 @@ export function getAiProfilePrompt(prompts, key) {
 
 export function setAiProfilePrompt(prompts, key, { text = "", mode = AI_PROMPT_MODE } = {}) {
   safeKey(key, "prompt");
-  if (mode !== AI_PROMPT_MODE)
-    throw new TypeError("Unsupported AI prompt mode");
+  mode = normalizeAiPromptMode(mode);
   return {
     ...normalizeAiProfilePrompts(prompts),
     [key]: { text: normalizePrompt(text), mode },

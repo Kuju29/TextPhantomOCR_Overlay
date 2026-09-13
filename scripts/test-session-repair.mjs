@@ -77,15 +77,18 @@ function erase(count=3){return {schema:'tp.erase-boxes/1',boxes:Array.from({leng
    await b.api(run,'pages',{pageId:p.pageId,generationId:p.generationId,groupKey:p.groupKey,status:'finished',initialAccepted:i<16?3:2,
     failed:i<20?[{id:'g0',text:p.units[0].text,sourceHash:p.units[0].sourceHash,reason:'wrong_language'}]:[]});
   }
-  const snapshot=await b.api(run,'seal',{});const calls=[],checkpoints={};
+  const snapshot=await b.api(run,'seal',{});const calls=[],checkpoints={},usageProgress=[];
   const end=await executeRepairPool({run,snapshot,executor:'w',signal:new AbortController().signal,api:b.api,
    getPage:async id=>pages.get(id),resolveAi:async p=>p.ai,checkpointTask:async t=>checkpoints[t.id]={...checkpoints[t.id],...t},
-   onProgress:()=>{},applyResults:async()=>{},withCapacity:async(_p,_a,_s,f)=>f(),
+   onProgress:data=>usageProgress.push(data),applyResults:async()=>{},withCapacity:async(_p,_a,_s,f)=>f(),
    planner:createWorkloadController({read:async()=>({}),write:async()=>{}}),
-   translate:async (units,options)=>{calls.push(units);assert.equal(options.ai.prompt,'KEEP STYLE');return {translations:units.map(u=>({id:u.id,text:'สวัสดี'})),meta:{generationAttempts:1}}}});
+   translate:async (units,options)=>{calls.push(units);assert.equal(options.ai.prompt,'KEEP STYLE');options.trace('AI usage ledger delta',{inputTokens:100,outputTokens:20,totalTokens:120,beforeRequests:0,afterRequests:1,beforeTotalTokens:null,afterTotalTokens:120,deduplicated:false,prompt:'SECRET',api_key:'SECRET'});return {translations:units.map(u=>({id:u.id,text:'สวัสดี'})),meta:{generationAttempts:1}}}});
   assert.equal(end.phase,'done');assert.equal(end.repaired,20);assert.equal(end.initialAccepted,80);
   assert.ok(calls.length>1);assert.equal(calls.flat().length,20);assert.equal(new Set(calls.flat().map(u=>u.id)).size,20);
-  console.log('Real planner repair batches:',calls.map(x=>x.length));checks+=6;
+  const usageRows=usageProgress.filter(row=>row.event==='AI usage ledger delta');
+  assert.equal(usageRows.length,calls.length);
+  for(const row of usageRows){assert.equal(row.inputTokens,100);assert.equal(row.outputTokens,20);assert.equal(row.totalTokens,120);assert.equal(row.beforeTotalTokens,null);assert.equal(row.deduplicated,false);assert.equal(row.prompt,undefined);assert.equal(row.api_key,undefined);}
+  console.log('Real planner repair batches:',calls.map(x=>x.length));checks+=8;
  }finally{b.close()}
 }
 {
@@ -144,6 +147,47 @@ function erase(count=3){return {schema:'tp.erase-boxes/1',boxes:Array.from({leng
   assert.equal(rendered.length,4);
   for(const msg of rendered){assert.equal(msg.result.lensDocument.paragraphs[0].aiText,'ของดีเดิม');assert.equal(msg.result.lensDocument.paragraphs[1].aiText,'คำแปลที่ซ่อม');}
   assert.deepEqual(complete.pages,{});assert.deepEqual(complete.tasks,{});checks+=14;
+ }finally{b.close()}
+}
+{
+ const b=bridge();try{
+  const sessions=createTranslationSessionStore({area:()=>area}),area=memory(),contexts=new Map(),calls=[],rendered=[];
+  const batch=ensureBatch('gateway-coordinator',778,0);
+  const payload={engine:'extension',mode:'lens_text',source:'ai',lang:'th',src:'http://fixture/gateway.png',metadata:{image_id:'gateway-page'},context:{},ai:{}};
+  batch.items.set('gateway-page',{attempt:1,status:'queued',phase:'waiting',payload});
+  let run;
+  const coordinator=createRepairCoordinator({sessions,api:b.api,getBase:async()=> 'http://fixture',
+   currentEpoch:()=>7,currentSession:()=> 'tab-session',getContext:id=>contexts.get(id),getCapabilitiesFor:async()=>({}),
+   insert:async(_tab,msg)=>{if(msg.type==='OVERLAY_HTML')rendered.push(msg);return {ok:true,applied:true}},
+   execute:options=>executeRepairPool({...options,withCapacity:async(_p,_a,_s,fn)=>fn(),
+    planner:createWorkloadController({read:async()=>({}),write:async()=>{}}),
+    translate:async(units,opts)=>{
+      calls.push({units,operationId:opts.operationId});assert.equal(opts.ai.prompt,'KEEP STYLE');
+      const task=(await b.api(run)).tasks.find(t=>t.id===opts.jobId);
+      await b.api(run,`tasks/${task.id}/start`,{executor:task.executor});
+      const answer={translations:units.map(u=>({id:u.id,text:'คำแปลที่ซ่อม'})),meta:{generationAttempts:1}};
+      await b.api(run,`tasks/${task.id}/answer`,answer);return answer;
+    }})});
+  run=await coordinator.registerBatch(batch,[payload]);
+  contexts.set('gateway-job',{jobId:'gateway-job',imageKey:'gateway-page',tabId:778,frameId:0,imgUrl:payload.src,mode:'lens_text',source:'ai',lang:'th',sessionId:'tab-session',settingsEpoch:7});
+  let initial=0;
+  const initialOps=[];
+  await assert.rejects(translateLensPage({base:'http://fixture',payload,result:{lensDocument:doc(3),eraseBoxes:erase(3)},jobId:'gateway-job',cancelBatchId:batch.id,
+   plan:{route:'server',ai:{provider:'openrouter',model:'fixture',prompt:'KEEP STYLE'}},
+   onCheckpoint:data=>coordinator.capture(batch.id,data),dependencies:{
+    workloadController:{open:async()=>({key:'fixed',next:(units,offset)=>({units:units.slice(offset,offset+1),estimate:{limits:{}}}),observe:()=>({outcome:'failed'}),flush:async()=>{}})},
+    translateUnits:async(units,opts)=>{initial++;initialOps.push(opts.operationId);if(initial===1)return {translations:[{id:units[0].id,text:'ของดีเดิม'}],meta:{generationAttempts:1}};
+      throw Object.assign(new Error('upstream gateway'),{code:'provider_timeout',upstreamStatus:504,providerFailureKind:'http_status',requestDispatched:true,generationAttempts:1});}
+   }}),e=>e.code==='provider_timeout');
+  assert.equal(initial,2,'one accepted initial call, then one failure; remaining source stays unsent');
+  assert.equal(calls.length,0,'repair waits for batch barrier');
+  await Promise.all([coordinator.finishInitial(batch),coordinator.finishInitial(batch)]);
+  const complete=await sessions.get(run.id);
+  assert.equal(complete.summary.initialAccepted,1);assert.equal(complete.summary.unverified,0);
+  assert.equal(complete.summary.repaired,2);assert.equal(calls.flatMap(c=>c.units).length,2);
+  assert(calls.every(c=>c.operationId.startsWith(`repair:${run.id}:`)&&!initialOps.includes(c.operationId)));
+  assert.equal(rendered[0].result.lensDocument.paragraphs[0].aiText,'ของดีเดิม');
+  assert.equal(complete.phase,'done');checks+=9;
  }finally{b.close()}
 }
 console.log(`Session/UI/repair checks: ${checks} passed (no live providers).`);

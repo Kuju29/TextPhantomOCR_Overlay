@@ -55,6 +55,13 @@
     typeof u === "string" &&
     /^(?:data:|blob:|file:|chrome-extension:|moz-extension:)/i.test(u);
 
+  // Generated display pixels are never source pages for a later translation.
+  // The publisher image remains outside these hosts, even when tpOriginal is set.
+  function isTranslationOutputImage(img) {
+    return Boolean(img?.matches?.(".tp-ol-clean-img, .tp-md-image-overlay") ||
+      img?.closest?.(".tp-ol-root"));
+  }
+
   // Returns the best source URL for an image element, preferring a remembered original.
   function getBestImgUrl(img) {
     const tp =
@@ -344,6 +351,7 @@
     isXHost,
     isHttpish,
     isInlineableImageUrl,
+    isTranslationOutputImage,
     getBestImgUrl,
     blobToDataUri,
     removeLazyScriptsAndForceSrc,

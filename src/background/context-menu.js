@@ -31,6 +31,7 @@ import { imageKeyFromPayload } from "./job-keys.js";
 import { enqueue, setCurrentBatchId } from "./jobs.js";
 import { getSettingsEpoch } from "./jobs/lifecycle.js";
 import { resolveJobAiProfile } from "./ai-profile-resolver.js";
+import { ensureLocalAiBatchReady } from "./local-ai-preflight.js";
 import { getTrace, note as traceNote } from "../shared/trace.js";
 import { chooseCanonicalImageSource } from "./right-click-target.js";
 import { ensureTabSession } from "./tab-sessions.js";
@@ -76,31 +77,33 @@ async function serverHasAiKey() {
   }
 }
 
-async function assertAutoAiReady(settings) {
-  const provider = String(settings?.aiProvider || "")
-    .trim()
-    .toLowerCase();
-  const baseUrl = String(settings?.aiBaseUrl || "").trim();
-  // The current text.ai plan is server-owned even when the legacy
-  // `aiOnDevice` preference is present. Do not treat that preference as a
-  // working keyless route until an executable on-device translator exists.
-  const local = classifyAiRuntime(settings).local;
-  const needsServerKeyFact = !local && !String(settings?.aiKey || "").trim();
-  const mainApiBaseUrl = await getApiBase().catch(() => "");
-  const issue = autoAiSettingsIssue(settings, {
-    hasServerKey: needsServerKeyFact ? await serverHasAiKey() : null,
-    mainApiBaseUrl,
-    requireComplete: true,
-  });
-  if (issue) {
-    throw attachTpError(new Error(issue.message), {
-      code: issue.code,
-      category: "configuration",
-      origin: "user",
-      stage: "ai_configuration",
-      retryable: false,
+async function assertAutoAiReady(settings, {
+  checkConfiguration = true,
+  checkPageImage = true,
+} = {}) {
+  if (checkConfiguration) {
+    // The current text.ai plan is server-owned even when the legacy
+    // `aiOnDevice` preference is present. Do not treat that preference as a
+    // working keyless route until an executable on-device translator exists.
+    const local = classifyAiRuntime(settings).local;
+    const needsServerKeyFact = !local && !String(settings?.aiKey || "").trim();
+    const mainApiBaseUrl = await getApiBase().catch(() => "");
+    const issue = autoAiSettingsIssue(settings, {
+      hasServerKey: needsServerKeyFact ? await serverHasAiKey() : null,
+      mainApiBaseUrl,
+      requireComplete: true,
     });
+    if (issue) {
+      throw attachTpError(new Error(issue.message), {
+        code: issue.code,
+        category: "configuration",
+        origin: "user",
+        stage: "ai_configuration",
+        retryable: false,
+      });
+    }
   }
+  if (!checkPageImage) return;
   try {
     assertPageImageSupported(
       settings?.aiPageImage,
@@ -722,20 +725,57 @@ async function dispatchContextMenuClick(menuInfo, tab, options = {}) {
         ? overrideSource(overrides?.source) || flatSettings.sources || "translated"
         : "translated";
     const usesAi = mode === "lens_text" && preliminarySource === "ai";
-    const profileSnapshot = usesAi
+    let profileSnapshot = usesAi
       ? await resolveJobAiProfile(flatSettings, { language: lang })
       : null;
-    const resolvedSettings = profileSnapshot?.settings || flatSettings;
-    const settings = {
+    let resolvedSettings = profileSnapshot?.settings || flatSettings;
+    let settings = {
       ...resolvedSettings,
       engineMode: effectiveEngineMode(resolvedSettings.engineMode),
     };
+    // Validate static configuration before touching a Local runtime. This keeps
+    // missing URL/model/prompt failures immediate and avoids a misleading
+    // connection error when the setup itself is incomplete.
+    if (usesAi) {
+      await assertAutoAiReady(settings, { checkPageImage: false });
+    }
+    let localPreflightAudit = null;
+    if (usesAi && classifyAiRuntime(settings).local) {
+      sendToastToTab(
+        tab.id,
+        menuInfo.menuItemId === "img_all" ? 0 : Number(menuInfo.frameId) || 0,
+        "TextPhantom: checking the selected Local AI model…",
+        60000,
+      );
+      const preflight = await ensureLocalAiBatchReady(settings, {
+        traceId: getTrace(),
+      });
+      resolvedSettings = preflight.settings;
+      settings = {
+        ...resolvedSettings,
+        engineMode: effectiveEngineMode(resolvedSettings.engineMode),
+      };
+      localPreflightAudit = preflight.audit;
+      if (profileSnapshot) {
+        profileSnapshot = {
+          ...profileSnapshot,
+          settings,
+          audit: {
+            ...profileSnapshot.audit,
+            localPreflight: localPreflightAudit,
+          },
+        };
+      }
+    }
     const source =
       mode === "lens_text"
         ? overrideSource(overrides?.source) || settings.sources || "translated"
         : "translated";
     if (usesAi) {
-      await assertAutoAiReady(settings);
+      await assertAutoAiReady(settings, {
+        checkConfiguration: false,
+        checkPageImage: true,
+      });
     }
     if (overrides) {
       log.info("running this request on caller-supplied settings", {

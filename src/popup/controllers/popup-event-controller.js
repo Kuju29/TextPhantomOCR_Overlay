@@ -199,7 +199,7 @@ export function bindPopupEvents(deps) {
     state.lastAiProbe = null;
     if (els.aiLocalStatus)
       els.aiLocalStatus.textContent = local
-        ? "Not connected for this provider yet. Click Connect & load models."
+        ? "Loading installed Local AI models automatically…"
         : "Local AI is not selected.";
     if (provider !== previousProvider) {
       // A model ID belongs to its runtime/provider. Never carry a Gemini model
@@ -207,9 +207,8 @@ export function bindPopupEvents(deps) {
       // selector changed.
       state.desiredAiModel = "auto";
       state.modelDirty = false;
-      if (els.aiLocalModelId) els.aiLocalModelId.value = "";
       setModelOptions([], {
-        placeholder: local ? "Connect to load models" : "Loading models…",
+        placeholder: "Loading models…",
       });
     }
     // Pre-fill the local endpoint when a local provider is picked and the field
@@ -271,7 +270,7 @@ export function bindPopupEvents(deps) {
       state.desiredAiModel = selectedProfile.model;
       setModelOptions([], {
         keepValue: selectedProfile.model,
-        placeholder: local ? "Connect to load models" : "Loading models…",
+        placeholder: "Loading models…",
       });
       els.aiKey.value = profileController.credentialForCurrent();
       updatePromptCount(AI_PROMPT_MAX_CHARS, els.aiPrompt.value);
@@ -310,9 +309,7 @@ export function bindPopupEvents(deps) {
       profileController.selectProvider(previous.provider, previous.endpoint);
       setModelOptions([], {
         keepValue: previous.model,
-        placeholder: isLocalAiProvider(previous.provider)
-          ? "Connect to load models"
-          : "Loading models…",
+        placeholder: "Loading models…",
       });
       els.aiKey.value = profileController.credentialForCurrent();
       toggleUi();
@@ -343,7 +340,7 @@ export function bindPopupEvents(deps) {
     state.lastAiProbe = null;
     if (els.aiLocalStatus)
       els.aiLocalStatus.textContent =
-        "URL changed — connection status cleared. Click Connect & load models.";
+        "URL changed — model discovery will refresh automatically.";
     clearTimeout(endpointTimer);
     endpointTimer = setTimeout(async () => {
       const baseUrl = (els.aiBaseUrl.value || "").trim();
@@ -465,7 +462,20 @@ export function bindPopupEvents(deps) {
 
   els.aiThinking?.addEventListener("change", async () => {
     const value = els.aiThinking.value === "on" ? "on" : "off";
+    const provider = els.aiProvider?.value;
+    const transitionRevision = state.providerTransitionRevision;
+    const local = isLocalAiProvider(provider);
+    if (local) {
+      localConnectionController.invalidate("AI thinking changed — restarting verification.");
+      state.aiModelBlocked = true;
+      toggleUi();
+    }
     await profileController.saveProfile({ thinking: value });
+    if (local && els.aiProvider?.value === provider &&
+        state.providerTransitionRevision === transitionRevision &&
+        (els.aiThinking.value === "on" ? "on" : "off") === value) {
+      await providerMetaController.refresh();
+    }
   });
 
   els.aiMemoryMode?.addEventListener("change", async () => {
@@ -507,9 +517,9 @@ export function bindPopupEvents(deps) {
     await applyPromptForLang(state.desiredLang);
     scheduleSaveAi();
     if (isLocalAiProvider(els.aiProvider?.value))
-      localConnectionController.markModelChanged(nextModel);
+      await localConnectionController.markModelChanged(nextModel);
     else
-      providerMetaController.refresh();
+      await providerMetaController.refresh();
     toggleUi();
   });
 
@@ -705,7 +715,7 @@ export function bindPopupEvents(deps) {
     if (changes.aiSeriesMemory) {
       void refreshSeriesMemory();
     }
-    if (changes[AI_USAGE_STORAGE_KEY]) void renderAiUsage();
+    if (changes[AI_USAGE_STORAGE_KEY]) void renderAiUsage(changes[AI_USAGE_STORAGE_KEY].newValue);
     // Prompt Studio edits the canonical Provider+Model prompt map.
     if (changes.aiProfilePromptsV1) {
       const next = changes.aiProfilePromptsV1.newValue;

@@ -162,8 +162,6 @@ export async function loadPopupSettings(deps) {
     typeof stored.aiModel === "string" && stored.aiModel
       ? stored.aiModel
       : "auto";
-  if (els.aiLocalModelId)
-    els.aiLocalModelId.value = localConnectionController.savedModel();
 
   setSelectOptions(
     els.lang,
@@ -400,9 +398,9 @@ export async function loadPopupSettings(deps) {
 
   if (aiProfileReady && canUseAiUi()) {
     applyPromptForLang(state.desiredLang);
-    // Local discovery is explicit (Connect button). Cloud metadata is a
-    // read-only, cached verification and has one startup owner here.
-    if (!localConnectionController.isCurrentProviderLocal())
-      providerMetaController.refresh();
+    // Restore any verified Local snapshot first, then refresh only when the
+    // current provider/model still needs live discovery. Cloud keeps the same
+    // provider-authoritative refresh path.
+    providerMetaController.refresh();
   }
 }

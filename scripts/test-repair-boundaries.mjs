@@ -21,9 +21,10 @@ try {
  const sent=[],elements=Object.fromEntries(['translation-session-panel','translation-session-status','translation-session-resume'].map(id=>[id,{hidden:true,addEventListener(_event,fn){this.click=fn;}}]));
  const callbacks={};
  mountTranslationSessionStatus({document:{getElementById:id=>elements[id]},events:{addListener:f=>callbacks.change=f,removeListener(){}},page:{addEventListener(){}},
-  send:async m=>{sent.push(m.type);return {ok:true,runs:[{phase:'blocked',repaired:2,failedUnits:3,unresolved:1}]}}});
+  send:async m=>{sent.push(m.type);return {ok:true,runs:[{phase:'blocked',repaired:2,failedUnits:3,unresolved:1,wrongLanguageCount:1}]}}});
  await new Promise(r=>setTimeout(r,0));assert.deepEqual(sent,['TP_GET_TRANSLATION_SESSIONS']);
  assert.equal(elements['translation-session-resume'].hidden,false);
+ assert.match(elements['translation-session-status'].textContent,/unresolved 1 \(1 wrong target language\)/);
  await elements['translation-session-resume'].click();assert.ok(sent.includes('TP_RESUME_REPAIRS'));
 }
 for(const text of ['@official_scan','++ KUMO TRANSLATION']) {

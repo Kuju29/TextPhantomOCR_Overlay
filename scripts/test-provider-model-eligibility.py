@@ -12,7 +12,8 @@ from backend.ai.provider_bootstrap import ensure_provider_registry
 from backend.ai.provider_registry import provider_registry
 ensure_provider_registry()
 from backend.ai.provider_resolution import resolve_base_url
-from backend.ai.provider_contract import ProbeRequest, ProbeResponse
+from backend.ai.provider_contract import GenerationRequest, ProbeRequest, ProbeResponse
+from backend.ai.clients.base import ChatResult
 from backend.ai import resolve as resolve_service
 from backend.ai.providers import (
     cloud_deepseek, cloud_featherless, cloud_gemini, cloud_groq,
@@ -126,6 +127,97 @@ hf = cloud_huggingface.filter_model_items([
     {"id":"no-routing-metadata", "architecture":{"input_modalities":["text"],"output_modalities":["text"]}},
 ])
 assert hf == ["live-chat"], hf
+
+# Hugging Face reasoning controls are selected-model/account capabilities. Probe
+# the exact live route before exposing Thinking Off/On; accepting the request is
+# only wire support, so runtime usage remains authoritative about compliance.
+_hf_probe_payloads = []
+def _hf_reasoning_probe(request, **kwargs):
+    extra = dict(kwargs.get("payload_extra") or {})
+    _hf_probe_payloads.append(extra)
+    return ProbeResponse(True, 200)
+with patch.object(cloud_huggingface, "openai_chat_probe", _hf_reasoning_probe):
+    hf_reasoning = cloud_huggingface.ADAPTER.probe(ProbeRequest(
+        model="deepseek-ai/DeepSeek-V4-Flash-0731", api_key="hf_fixture",
+        base_url=cloud_huggingface.DEFAULT_BASE_URL, model_capabilities={},
+    ))
+assert hf_reasoning.ok is True
+assert [row.get("reasoning_effort") for row in _hf_probe_payloads] == ["none", "low"], _hf_probe_payloads
+assert hf_reasoning.capabilities["reasoning"]["control"] == "levels"
+assert hf_reasoning.capabilities["reasoning"]["supported_efforts"] == ["none", "low"]
+
+# A route that proves only native Off keeps the `none` mapping active while the
+# popup correctly withholds an On toggle.
+_hf_probe_payloads.clear()
+def _hf_off_only_probe(request, **kwargs):
+    extra = dict(kwargs.get("payload_extra") or {})
+    _hf_probe_payloads.append(extra)
+    if extra.get("reasoning_effort") == "low":
+        return ProbeResponse(False, 400, error="unsupported effort")
+    return ProbeResponse(True, 200)
+with patch.object(cloud_huggingface, "openai_chat_probe", _hf_off_only_probe):
+    hf_off_only = cloud_huggingface.ADAPTER.probe(ProbeRequest(
+        model="off-only", api_key="hf_fixture", base_url=cloud_huggingface.DEFAULT_BASE_URL,
+    ))
+assert hf_off_only.ok is True
+assert hf_off_only.capabilities["reasoning"]["control"] == "levels"
+assert hf_off_only.capabilities["reasoning"]["supported_efforts"] == ["none"]
+
+# Unsupported reasoning_effort must fall back to an ordinary tiny health probe,
+# not hide an otherwise usable selected model.
+_hf_probe_payloads.clear()
+def _hf_plain_probe(request, **kwargs):
+    extra = dict(kwargs.get("payload_extra") or {})
+    _hf_probe_payloads.append(extra)
+    if extra.get("reasoning_effort") == "none":
+        return ProbeResponse(False, 400, error="unsupported parameter")
+    return ProbeResponse(True, 200)
+with patch.object(cloud_huggingface, "openai_chat_probe", _hf_plain_probe):
+    hf_plain = cloud_huggingface.ADAPTER.probe(ProbeRequest(
+        model="google/gemma-2-2b-it", api_key="hf_fixture",
+        base_url=cloud_huggingface.DEFAULT_BASE_URL, model_capabilities={},
+    ))
+assert hf_plain.ok is True and not hf_plain.capabilities
+assert _hf_probe_payloads == [
+    {"max_tokens": 256, "reasoning_effort": "none"},
+    {"max_tokens": 256},
+], _hf_probe_payloads
+
+_hf_generated_payloads = []
+def _hf_execute(**kwargs):
+    _hf_generated_payloads.append(dict(kwargs["payload"]))
+    # Simulate an upstream that accepts `none` but still reports hidden tokens.
+    return ChatResult("OK", kwargs["model"], thinking_tokens=64)
+_hf_caps = {"reasoning": {"supported": True, "mandatory": False,
+                           "control": "levels", "supported_efforts": ["none", "low"]}}
+_hf_request = GenerationRequest(
+    provider="huggingface", model="deepseek-ai/DeepSeek-V4-Flash-0731",
+    system_text="system", user_parts=("hello",), api_key="hf_fixture",
+    base_url=cloud_huggingface.DEFAULT_BASE_URL, thinking="off",
+    expected_ids=("P0",), unit_count=1, model_capabilities=_hf_caps,
+)
+with patch.object(cloud_huggingface, "execute_chat_completion", _hf_execute):
+    hf_off_result = cloud_huggingface.ADAPTER.generate(_hf_request)
+assert _hf_generated_payloads[-1]["reasoning_effort"] == "none"
+assert "temperature" not in _hf_generated_payloads[-1]
+assert hf_off_result.thinking_applied == "provider_ignored_off"
+
+from dataclasses import replace
+with patch.object(cloud_huggingface, "execute_chat_completion", _hf_execute):
+    hf_on_result = cloud_huggingface.ADAPTER.generate(replace(_hf_request, thinking="on"))
+assert _hf_generated_payloads[-1]["reasoning_effort"] == "low"
+assert "temperature" not in _hf_generated_payloads[-1]
+assert hf_on_result.thinking_applied == "requested_on_effort_low"
+
+# A route without verified selected-model capability must not receive a guessed
+# reasoning field. Its normal sampling policy remains unchanged.
+with patch.object(cloud_huggingface, "execute_chat_completion", _hf_execute):
+    hf_unknown_result = cloud_huggingface.ADAPTER.generate(
+        replace(_hf_request, model_capabilities={})
+    )
+assert "reasoning_effort" not in _hf_generated_payloads[-1]
+assert _hf_generated_payloads[-1]["temperature"] == 0.7
+assert hf_unknown_result.thinking_applied == "unverified"
 
 # Featherless: query is plan-aware and the returned item must remain active/conversational/text.
 assert dict(cloud_featherless.LIST_PARAMS)["available_on_current_plan"] == "true"

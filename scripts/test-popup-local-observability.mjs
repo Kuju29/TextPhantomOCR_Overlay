@@ -18,7 +18,7 @@ const events = [];
 const els = {
   aiProvider: element("ollama"), aiBaseUrl: element("https://example.invalid/secret/path"),
   aiLocalStatus: element(), aiLocalTest: element(), aiModel: element("model-secret"),
-  aiLocalModelId: element(), apiUrl: element("http://localhost:7860"), aiModelWrap: {},
+apiUrl: element("http://localhost:7860"), aiModelWrap: {},
 };
 const state = {
   localConnectSeq: 0, localConnectInFlight: null, providerTransitionRevision: 7,
@@ -50,7 +50,7 @@ const successEvents = [];
 const successEls = {
   aiProvider: element("ollama"), aiBaseUrl: element("http://localhost:11434"),
   aiLocalStatus: element(), aiLocalTest: element(), aiModel: element("qwen"),
-  aiLocalModelId: element(), apiUrl: element("http://localhost:7860"), aiModelWrap: {},
+apiUrl: element("http://localhost:7860"), aiModelWrap: {},
 };
 const successState = {
   localConnectSeq: 0, localConnectInFlight: null, providerTransitionRevision: 8,
@@ -85,7 +85,7 @@ const mandatoryMessages = [];
 const mandatoryEls = {
   aiProvider: element("ollama"), aiBaseUrl: element("http://localhost:11434"),
   aiLocalStatus: element(), aiLocalTest: element(), aiModel: element("gpt-oss"),
-  aiLocalModelId: element(), apiUrl: element("http://localhost:7860"), aiModelWrap: {},
+apiUrl: element("http://localhost:7860"), aiModelWrap: {},
 };
 const mandatoryState = {
   localConnectSeq: 0, localConnectInFlight: null, providerTransitionRevision: 10,
@@ -123,7 +123,7 @@ const staleEvents = [];
 const staleEls = {
   aiProvider: element("ollama"), aiBaseUrl: element("http://localhost:11434"),
   aiLocalStatus: element(), aiLocalTest: element(), aiModel: element("qwen"),
-  aiLocalModelId: element(), apiUrl: element("http://localhost:7860"), aiModelWrap: {},
+apiUrl: element("http://localhost:7860"), aiModelWrap: {},
 };
 const staleState = {
   localConnectSeq: 0, localConnectInFlight: null, providerTransitionRevision: 9,

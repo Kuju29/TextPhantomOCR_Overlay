@@ -1,5 +1,5 @@
 /** Estimates, not tokenizer counts. Billing always uses provider telemetry. */
-export const WORKLOAD_VERSION = 6;
+export const WORKLOAD_VERSION = 7;
 export const WORKLOAD_POLICY = Object.freeze({
   initialOutputTarget: 160, minimumOutputTarget: 48, maximumOutputTarget: 4096,
   initialRecords: 10, maximumRecords: 200, growthSamples: 8,
@@ -9,7 +9,8 @@ export const WORKLOAD_POLICY = Object.freeze({
   // length/structure failure; unknown and smaller-capability models retain the
   // conservative learned profile above.
   largeCompletionThreshold: 8192, largeCompletionFraction: .25,
-  largeCompletionRecords: 50,
+  largeCompletionRecords: 50, bootstrapSuccessSamples: 2,
+  circuitFailureThreshold: 2,
   window: 64, safety: 1.25, contextReserve: 128, applicationCompletionCeiling: 8192,
 });
 export const positive = (value) => Number.isSafeInteger(value) && value > 0 ? value : null;
@@ -76,11 +77,18 @@ export function estimateRequest(units, profile, context) {
   const features = outputFeatures(units, context.contract);
   const ratio = quantile(profile.ratios, .9, 1.5);
   const predictedOutput = Math.ceil(features.baseOutput * ratio * WORKLOAD_POLICY.safety);
-  const reasoningReserve = context.reasoningActive
+  // A provider may continue producing hidden reasoning even when the UI asks
+  // for Thinking Off. Once provider telemetry proves that happened, reserve it
+  // on every later sub-batch in this session/profile instead of trusting the
+  // requested toggle. Unknown is not treated as zero.
+  const observedReasoning = profile.reasoning.some(value => value > 0);
+  const reasoningRisk = context.reasoningActive || observedReasoning;
+  const reasoningReserve = reasoningRisk
     ? Math.max(256, Math.ceil(quantile(profile.reasoning, .95, 768) * 1.2)) : 0;
   // Includes style, context, task, input keys, output schema, and role overhead.
   // Exact provider prompt count is retained separately, never reported as this estimate.
-  const estimatedInput = Math.ceil((context.fixedInput + features.sourceWeight + units.length * 30) * 1.25);
+  const fixedInput = context.estimateFixedInput ? context.estimateFixedInput(units) : context.fixedInput;
+  const estimatedInput = Math.ceil((fixedInput + features.sourceWeight + units.length * 30) * 1.25);
   const limits = { ...normalizeLimits(context.limits), ...profile.limits };
   const contextAvailable = positive(limits.contextTokens)
     ? limits.contextTokens - estimatedInput - WORKLOAD_POLICY.contextReserve : Infinity;
@@ -88,7 +96,12 @@ export function estimateRequest(units, profile, context) {
     limits.outputHintTokens || Infinity, context.userMaxOutput || Infinity, contextAvailable);
   const capacityFailureSeen = profile.outcomes.some(outcome => outcome === 'length' || outcome === 'structure');
   const confirmedLargeCompletion = positive(limits.maxOutputTokens) >= WORKLOAD_POLICY.largeCompletionThreshold;
-  const bootstrapTarget = confirmedLargeCompletion && !capacityFailureSeen
+  // Do not turn an advertised 8K completion window into one huge cold request
+  // for a reasoning-capable/unknown model. A non-reasoning provider may use the
+  // window immediately; otherwise require two valid measured generations first.
+  const bootstrapTrusted = context.reasoningSupported === false ||
+    (profile.successes >= WORKLOAD_POLICY.bootstrapSuccessSamples && !observedReasoning);
+  const bootstrapTarget = confirmedLargeCompletion && !capacityFailureSeen && bootstrapTrusted
     ? Math.floor(completionAvailable * WORKLOAD_POLICY.largeCompletionFraction) : 0;
   const effectiveTarget = Math.max(profile.target, bootstrapTarget);
   const effectiveRecords = bootstrapTarget > profile.target
@@ -100,9 +113,43 @@ export function estimateRequest(units, profile, context) {
     completionAvailable: Number.isFinite(completionAvailable) ? Math.max(0, completionAvailable) : null,
     fitsHard, fitsTarget: predictedOutput <= effectiveTarget && units.length <= effectiveRecords,
     target: effectiveTarget, recordTarget: effectiveRecords, samples: profile.samples, revision: profile.revision,
-    limits, epoch: profile.epoch, estimateKind: 'script_weight_calibrated_from_valid_provider_usage' };
+    limits, epoch: profile.epoch, observedReasoning, reasoningRisk, estimateKind: 'script_weight_calibrated_from_valid_provider_usage' };
 }
+function budgetError(estimate, message = 'This image plus the fixed prompt exceeds the available token budget; the image was not split or dispatched.') {
+  return Object.assign(new Error(message),
+    { code: 'ai_workload_budget_insufficient', providerAttempts: 0, generationAttempts: 0,
+      requestDispatched: false, diagnostics: { estimatedInput: estimate?.estimatedInput,
+        estimatedOutput: estimate?.predictedOutput, reasoningReserve: estimate?.reasoningReserve,
+        completionAvailable: estimate?.completionAvailable } });
+}
+
 export function takeWorkloadBatch(rows, offset, profile, context) {
+  // Page translation prefers one image/one generation. Learned soft targets
+  // remain telemetry only and must never fragment an ordinary image. When the
+  // complete remainder genuinely exceeds a provider/context ceiling, keep the
+  // minimum contiguous hard-safe prefix instead of failing the whole image.
+  // A single semantic unit is never cut; if that unit alone cannot fit, stop
+  // before provider dispatch with an explicit budget error.
+  if (context?.singleRequest === true) {
+    const units = [];
+    let estimate = null;
+    for (let i = offset; i < rows.length; i++) {
+      const candidate = estimateRequest([...units, rows[i]], profile, context);
+      if (units.length && !candidate.fitsHard) {
+        return { units, estimate, splitReason: 'hard_provider_budget', oversizeSingleUnit: false };
+      }
+      if (!candidate.fitsHard) {
+        throw budgetError(candidate,
+          'One translation unit plus the prompt exceeds the available token budget; the unit was not cut or dispatched.');
+      }
+      units.push(rows[i]);
+      estimate = candidate;
+    }
+    if (!units.length)
+      return { units, estimate, splitReason: 'empty_image', oversizeSingleUnit: false };
+    return { units, estimate, splitReason: 'one_image_one_generation', oversizeSingleUnit: false };
+  }
+
   const units = []; let estimate; let splitReason = 'end_of_page';
   for (let i = offset; i < rows.length; i++) {
     const candidate = estimateRequest([...units, rows[i]], profile, context);
@@ -113,11 +160,7 @@ export function takeWorkloadBatch(rows, offset, profile, context) {
     }
     units.push(rows[i]); estimate = candidate;
     if (!candidate.fitsHard) {
-      throw Object.assign(new Error('One translation unit plus the prompt exceeds the available token budget; the unit was not cut.'),
-        { code: 'ai_workload_budget_insufficient', providerAttempts: 0, generationAttempts: 0,
-          requestDispatched: false, diagnostics: { estimatedInput: candidate.estimatedInput,
-            estimatedOutput: candidate.predictedOutput, reasoningReserve: candidate.reasoningReserve,
-            completionAvailable: candidate.completionAvailable } });
+      throw budgetError(candidate, 'One translation unit plus the prompt exceeds the available token budget; the unit was not cut.');
     }
     if (!candidate.fitsTarget) { splitReason = 'oversize_single_unit'; break; }
   }

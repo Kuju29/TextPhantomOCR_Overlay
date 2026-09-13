@@ -2,7 +2,7 @@
 // Only system-defined enums, generated IDs and finite numbers survive this path.
 (function (root) {
   const events = new Set(['workload_observed','workload_profile','workload_persisted','capacity_changed','capacity_selected','route_capability','barrier_recovery',
-    'unknown','request_timing','settings_effective','image_status','geometry_snapshot','group_membership','geometry_overlap','ruby_filter','orientation_fallback']);
+    'unknown','pre_provider_timing','checkpoint_timing','usage_commit_timing','request_timing','settings_effective','image_status','geometry_snapshot','group_membership','geometry_overlap','ruby_filter','orientation_fallback']);
   const reasons = new Set(['unchanged','changed','initial','success','failed','cancelled','unknown','not_applicable','deadline',
     'sync_supported','legacy_supported','capability_unavailable','loaded','cold_start','version_mismatch','invalid_profile','expired_profile','storage_unavailable','snapshot_written',
     'profile_matches_execution','unconfirmed_contract_cold_start','execution_identity_reset_before_dispatch',
@@ -10,7 +10,7 @@
     'grow_output_after_valid_near_full_batches','grow_records_after_valid_full_batches','shrink_after_output_length',
     'shrink_records_after_structural_failure','resolved_provider_model_or_contract_changed','stale_observation_no_resize',
     'user_policy','runtime_capacity_hint','provider_backpressure','provider_success','restored_batch','rate_gate_defer','server_admission_defer','stored_capacity','main_columns','overlap_detected',
-    'request_ready','usage_pending','http_started','http_headers','response_complete','http_failed','persistence_failed',
+    'prepared','dispatch','progress','finished','request_ready','usage_pending','http_started','http_headers','response_complete','http_failed','persistence_failed','body_failed',
     'complete_at_limit_no_reduction','grow_output_after_valid_near_full_batches','grow_records_after_valid_full_batches','language_failure_observed_no_budget_claim','reduce_next_workload_after_truncation','reduce_records_after_incomplete_structure','stale_target_observation_no_reduction','source_geometry','clean_geometry','group_geometry','render_geometry','detected_ruby','ambiguous_kept','standalone_bounds',
     'acknowledged','unconfirmed_ack','source_unavailable','wrong_language','malformed','no_text','no_translatable_text']);
   const states = new Set(['planned','applied','rejected','unchanged','pending','persisted','memory_only','failed','unknown','not_applicable']);
@@ -20,6 +20,7 @@
   const numeric = new Set(['outputTarget','recordTarget','revision','epoch','samples','count','eligibleSamples','window','ceiling','running','queued',
     'unitCount','batchIndex','total','accepted','applied','failed','pending','fallbackCount','wrongLanguageCount','structuralCount','removedCount','retainedCount','totalRows','chunk','chunks','capturedRows',
     'pauseMs','parentIndex','itemIndex','spanIndex','rawIndex','queueMs','lockMs','readMs','computeMs','writeMs','persistMs','httpMs','headersMs','bodyMs','elapsedMs','status','httpAttempts','batchSize','sequence',
+    'callbackMs','usageCallbackMs','requestSetupMs','headersToFirstByteMs','headersToFirstContentMs','contentToTerminalMs','fingerprintMs','workloadOpenMs','checkpointPreparedMs','checkpointDispatchMs','checkpointMs','pageTranslationToTransportHandoffMs',
     'fontScale','temperature','maxOutput','glossaryItems','characterItems','previousItems','x','y','w','h','rotation']);
   const ids = new Set(['batchId','runId','imageId','jobId','requestId','operationId','profileId','traceId','parentId','id','ref']);
   const idPattern = /^(?:[a-f0-9]{16,64}|[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}|t[a-z0-9]{8,40}|(?:p|g|P|R|c|i)\d+(?:[-:]\w{1,12})?|tr:\d+|(?:ai|repair):[a-f0-9-]{16,64}(?::[a-zA-Z0-9-]{1,64}){0,5})$/;

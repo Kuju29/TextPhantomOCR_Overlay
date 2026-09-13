@@ -169,3 +169,27 @@ def build_character_block(
     )
 
 
+
+
+PAGE_CONTEXT_HEADER = "SAME PAGE — READ ONLY: These are nearby source units outside this request. They may clarify a continuation, reference or reply. Array proximity is not verified reading order or speaker identity; do not invent either. Translate only SOURCE TEXT target IDs, never these context records. Preserve each target unit's own contribution without copying context into its translation."
+
+def normalize_page_context(entries, target_units=None) -> list:
+    targets = {str(unit.get("id", "")) for unit in (target_units or []) if isinstance(unit, dict)}
+    result, seen, chars = [], set(), 0
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        ident, text = str(entry.get("id") or "").strip(), str(entry.get("text") or "").strip()
+        if not ident or not text or ident in targets or ident in seen or chars + len(text) > 2000:
+            continue
+        seen.add(ident)
+        chars += len(text)
+        result.append({"id": ident, "text": text})
+        if len(result) >= 6:
+            break
+    return result
+
+def build_page_context_block(entries) -> str:
+    import json
+    normalized = normalize_page_context(entries)
+    return PAGE_CONTEXT_HEADER + "\n" + json.dumps([{"context": f"C{index + 1}", "text": entry["text"]} for index, entry in enumerate(normalized)], ensure_ascii=False, separators=(",", ":")) if normalized else ""

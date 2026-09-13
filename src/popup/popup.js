@@ -295,8 +295,8 @@ const providerMetaController = createProviderMetaController({
     scheduleSave: () => settingsPersistenceController.scheduleSaveAi(),
   },
   local: {
-    savedModel: localConnectionController.savedModel,
-    showFallback: localConnectionController.showFallback,
+    savedModel: localConnectionController.savedModel, showFallback: localConnectionController.showFallback,
+    connect: localConnectionController.connect,
     renderCapacity: renderLocalCapacityHint,
     persistCapacity: persistSelectedLocalCapacityHint,
   },

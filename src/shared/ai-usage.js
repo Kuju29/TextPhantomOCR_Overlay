@@ -17,6 +17,9 @@ const blankLedger = () => ({
 });
 const nullableToken = (value) =>
   Number.isSafeInteger(value) && value >= 0 ? value : null;
+const compactStoredRecord = (value) => Object.fromEntries(
+  Object.entries(value || {}).filter(([, item]) => item !== null && item !== ""),
+);
 
 // Provider failures do not all carry telemetry at the same nesting level.
 // Normalize only the documented envelopes; never estimate missing token counts.
@@ -209,7 +212,7 @@ export function normalizeUsageLedger(raw) {
         deltas: Array.isArray(s.deltas)
           ? s.deltas
               .filter((d) => d && typeof d === "object")
-              .slice(-AI_USAGE_DELTA_LIMIT).map((d) => ({ ...d }))
+              .slice(-AI_USAGE_DELTA_LIMIT).map((d) => compactStoredRecord(d))
           : [],
       }));
     if (sessions.length) models[key] = { ...value, sessions };
@@ -253,7 +256,19 @@ export function normalizeUsageLedger(raw) {
               : null,
         }
       : null;
-  return { version: AI_USAGE_VERSION, active, selection, models, pending: { ...(raw.pending || {}) }, pendingOverflow: Number(raw.pendingOverflow) || 0, seen: raw.seen && typeof raw.seen === "object" ? { ...raw.seen } : {} };
+  const seen = raw.seen && typeof raw.seen === "object" ? { ...raw.seen } : {};
+  // Retained deltas already provide exact replay/enrichment evidence. Keeping
+  // the same long dedupe identity in `seen` duplicated every active receipt
+  // and made each chrome.storage write grow much faster than the visible
+  // history. `seen` is only the overflow index for deltas/sessions no longer
+  // retained in the ledger.
+  for (const model of Object.values(models))
+    for (const session of model.sessions)
+      for (const delta of session.deltas || [])
+        if (delta?.dedupeKey) delete seen[delta.dedupeKey];
+  return { version: AI_USAGE_VERSION, active, selection, models,
+    pending: { ...(raw.pending || {}) }, pendingOverflow: Number(raw.pendingOverflow) || 0,
+    seen };
 }
 
 const newSession = (now, id) => ({
@@ -350,6 +365,26 @@ const generationDedupeKey = (event, runtime, provider, model) => {
     .join("|");
 };
 
+const rememberEvictedDedupe = (ledger, key, now) => {
+  // This is an already constructed key, not a raw identity. Its provider/model
+  // prefix may make it longer than cleanId's limit. Preserve exactly what the
+  // retained delta used so replay lookup still works after history rolls over.
+  const value = String(key || "").trim();
+  if (value) ledger.seen[value] = now;
+};
+const capSeenDedupe = (ledger) => {
+  const entries = Object.entries(ledger.seen);
+  if (entries.length > 8192)
+    ledger.seen = Object.fromEntries(
+      entries.sort((a, b) => Number(b[1]) - Number(a[1])).slice(0, 8192),
+    );
+};
+const rememberEvictedSessions = (ledger, sessions, now) => {
+  for (const session of sessions || [])
+    for (const delta of session?.deltas || [])
+      rememberEvictedDedupe(ledger, delta?.dedupeKey, now);
+};
+
 export function recordProviderGeneration(
   raw,
   event,
@@ -380,11 +415,18 @@ export function recordProviderGeneration(
   }
   const generationUsages = event?.usage?.generations || event?.generationUsage;
   if (Array.isArray(generationUsages) && generationUsages.length) {
+    const hasAggregateFailures = Number.isInteger(event.failures) || event.success === false;
+    const failedGenerations = Math.max(0, Math.min(generationUsages.length,
+      Number.isInteger(event.failures) ? event.failures : event.success === false ? generationUsages.length : 0));
     return generationUsages.reduce((value, usage, generationOrdinal) => recordProviderGeneration(value,
       { ...event, ...usage, ...Object.fromEntries(TOKEN_FIELDS.map(k => [k, token(usage?.[k])])),
         providerCostUsd: decimal(usage?.providerCostUsd), usageStatus: usage?.usageStatus || (usageIsComplete(usage) ? "reported" : "incomplete"),
         usage, generationUsage: null, requests: 1, generationOrdinal,
-        generationAttempts: 1, failures: event.success === false ? 1 : undefined }, { now, id }), ledger);
+        // Preserve the aggregate failure count when splitting a charged event.
+        // Prior completed batches precede the failed tail in accumulated usage.
+        generationAttempts: 1, failures: hasAggregateFailures
+          ? (generationOrdinal >= generationUsages.length - failedGenerations ? 1 : 0)
+          : undefined }, { now, id }), ledger);
   }
   event = { ...(event?.usage || {}), ...event };
   const runtime = event?.runtime === "local" ? "local" : "cloud";
@@ -499,7 +541,14 @@ export function recordProviderGeneration(
     if (staleCompletion)
       Object.assign(session, { endedAt: now, resetReason: "model_switch" });
     model.sessions.push(session);
-    model.sessions = model.sessions.slice(-AI_USAGE_SESSION_LIMIT);
+    if (model.sessions.length > AI_USAGE_SESSION_LIMIT) {
+      const evicted = model.sessions.splice(
+        0,
+        model.sessions.length - AI_USAGE_SESSION_LIMIT,
+      );
+      rememberEvictedSessions(ledger, evicted, now);
+      capSeenDedupe(ledger);
+    }
     if (!staleCompletion)
       ledger.active = { selectionKey: key, sessionId: session.id };
   }
@@ -561,7 +610,7 @@ export function recordProviderGeneration(
     : failures > 0
       ? "provider_charged_failure"
       : "translation_success";
-  session.deltas.push({
+  session.deltas.push(compactStoredRecord({
     id: cleanId(event?.deltaId) || id(),
     dedupeKey,
     sessionId: session.id,
@@ -591,11 +640,19 @@ export function recordProviderGeneration(
     idempotent: Boolean(dedupeKey),
     idempotencyKey: cleanId(event?.idempotencyKey),
     timestamp: now,
-  });
-  session.deltas = session.deltas.slice(-AI_USAGE_DELTA_LIMIT);
-  if (dedupeKey) ledger.seen[dedupeKey] = now;
-  const entries = Object.entries(ledger.seen);
-  if (entries.length > 8192) ledger.seen = Object.fromEntries(entries.sort((a,b) => b[1]-a[1]).slice(0,8192));
+  }));
+  if (session.deltas.length > AI_USAGE_DELTA_LIMIT) {
+    const evicted = session.deltas.splice(
+      0,
+      session.deltas.length - AI_USAGE_DELTA_LIMIT,
+    );
+    for (const delta of evicted)
+      rememberEvictedDedupe(ledger, delta?.dedupeKey, now);
+  }
+  // The retained delta is the canonical lookup/enrichment record. `seen` only
+  // tracks identities that have fallen out of retained history.
+  if (dedupeKey) delete ledger.seen[dedupeKey];
+  capSeenDedupe(ledger);
   return ledger;
 }
 
@@ -622,7 +679,9 @@ export function resetActiveUsage(
   closeActive(ledger, now, "manual");
   const session = newSession(now, id());
   model.sessions.push(session);
-  model.sessions = model.sessions.slice(-AI_USAGE_SESSION_LIMIT);
+  const evicted = model.sessions.splice(0, Math.max(0, model.sessions.length - AI_USAGE_SESSION_LIMIT));
+  rememberEvictedSessions(ledger, evicted, now);
+  capSeenDedupe(ledger);
   ledger.active = { selectionKey: key, sessionId: session.id };
   if (ledger.selection)
     ledger.selection = { ...ledger.selection, pendingReset: null };
@@ -761,9 +820,7 @@ export function persistProviderGeneration(event, { emitTrace = null, onTiming = 
   event = structuredClone(event);
   return commitUsage(before => recordProviderGeneration(before, event), {
     onTiming,
-    onCommit: ({before, next}) => {
-    if (typeof emitTrace === "function") {
-      const unchanged = JSON.stringify(before) === JSON.stringify(next);
+    onCommit: typeof emitTrace === "function" ? ({before, next, unchanged}) => {
       const eventKey = usageKey(
         event?.runtime === "local" ? "local" : "cloud",
         event?.provider,
@@ -802,8 +859,7 @@ export function persistProviderGeneration(event, { emitTrace = null, onTiming = 
         beforeTotalTokens: beforeSession?.totalTokens ?? null,
         afterTotalTokens: afterSession?.totalTokens ?? null,
       });
-    }
-    },
+    } : undefined,
   });
 }
 export const persistUsageEvent = persistProviderGeneration;

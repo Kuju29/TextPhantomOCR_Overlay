@@ -210,14 +210,10 @@ def failure_event(route: str, detail: dict[str, Any], **safe_meta: Any) -> None:
     )
 
 def provider_status(exc: BaseException) -> int | None:
-    """Extract an upstream HTTP status from the clients' sanitised messages."""
-    typed = getattr(exc, "status", None)
-    if isinstance(typed, int) and 100 <= typed <= 599:
-        return typed
-    import re
+    """Extract structured upstream status, with a legacy safe-text fallback."""
+    from backend.ai.clients.provider_error import upstream_http_status
 
-    match = re.search(r"\bHTTP\s+(\d{3})\b", str(exc), re.IGNORECASE)
-    return int(match.group(1)) if match else None
+    return upstream_http_status(exc)
 
 def provider_http_semantics(status: int | None) -> tuple[str, bool]:
     """Stable code/retry decision for an upstream HTTP response.

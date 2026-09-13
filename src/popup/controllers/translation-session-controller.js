@@ -19,7 +19,7 @@ export function mountTranslationSessionStatus({ document: doc = globalThis.docum
       const run = runs.filter(x => !['done','cancelled','unavailable'].includes(x.phase)).at(-1) || runs.at(-1);
       panel.hidden = !run;
       if (run) {
-        label.textContent = `${run.phase}: initial accepted ${run.initialAccepted || 0} · repair ${run.repaired || 0}/${run.failedUnits || 0} · unresolved ${run.unresolved || 0} · interrupted ${run.unverified || 0} · no-source images ${run.unavailablePages || 0}${run.code ? ` · ${run.code}` : ''}`;
+        label.textContent = `${run.phase}: initial accepted ${run.initialAccepted || 0} · repair ${run.repaired || 0}/${run.failedUnits || 0} · unresolved ${run.unresolved || 0}${run.wrongLanguageCount ? ` (${run.wrongLanguageCount} wrong target language)` : ''} · interrupted ${run.unverified || 0} · no-source images ${run.unavailablePages || 0}${run.code ? ` · ${run.code}` : ''}`;
         button.hidden = !['blocked','apply_pending'].includes(run.phase);
       }
     } finally { busy = false; }

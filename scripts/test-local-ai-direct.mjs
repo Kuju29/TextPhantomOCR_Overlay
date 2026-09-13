@@ -10,7 +10,14 @@ const translateWithLocalOpenAi = (units, options = {}) => translateRaw(units, {
   ai: { prompt: "full style", promptMode: "replace", ...(options.ai || {}) },
 });
 
-assert.ok(localAiOutputBudgetForTest([{ text: "สั้น" }]) >= 1024);
+const shortLocalBudget = localAiOutputBudgetForTest([{ text: "สั้น" }]);
+assert.ok(shortLocalBudget >= 384 && shortLocalBudget < 1024,
+  "a short compact-marker request must not receive a 1k+ completion allowance");
+assert.equal(
+  localAiOutputBudgetForTest([{ text: "สั้น" }], "SYSTEM ".repeat(2000)),
+  shortLocalBudget,
+  "system/style prompt length must not inflate Local AI completion budget",
+);
 assert.equal(localAiOutputBudgetForTest([{ text: "漢".repeat(10000) }]), 8192);
 
 assert.equal(shouldUseDirectLocalAi("extension", "ollama", "http://localhost:11434"), true);
@@ -81,7 +88,9 @@ try {
   assert.equal(answer.meta.timeoutMs, 0, "direct-local generation must have no default wall-clock deadline");
   assert.ok(answer.meta.providerMs >= 0, "provider timing must be observable");
   assert.ok(answer.meta.parseMs >= 0, "parse timing must be observable");
-  assert.ok(answer.meta.requestedOutputTokens >= 1024, "requested output budget must be observable");
+  assert.ok(answer.meta.requestedOutputTokens >= 384, "requested output budget must be observable");
+  assert.equal(answer.meta.requestedOutputTokens, calls[0].body.options.num_predict,
+    "diagnostics must report the exact reduced Local completion allowance");
   assert.equal(answer.meta.finishReason, "unknown", "missing provider finish reason must stay explicitly unknown");
   assert.deepEqual(tokenSummary(answer.meta.usage), { inputTokens: 21, outputTokens: 9, totalTokens: 30, source: "provider" });
 
@@ -169,7 +178,7 @@ try {
     canonicalPrompt,
   });
   assert.match(calls[0].body.messages[0].content,
-    /^You are an expert translator[\s\S]*\nTRANSLATION STYLE\nMY COMPLETE STYLE$/);
+    /^You are a professional manga and manhwa translator and localization editor[\s\S]*\nTRANSLATION STYLE\nTarget language: Thai \(ภาษาไทย\)\.\nMY COMPLETE STYLE$/);
   assert.doesNotMatch(calls[0].body.messages[0].content, /BUILT-IN STYLE|USER TRANSLATION NOTES/,
     "a full editable style replaces the built-in style exactly as on Cloud");
   assert.match(calls[0].body.messages[1].content, /<<TP_Pn:translated text>>/);
@@ -191,7 +200,7 @@ try {
     canonicalPrompt,
   });
   assert.match(calls[0].body.messages[0].content,
-    /^You are an expert translator[\s\S]*\nTRANSLATION STYLE\nTarget languages: Thai edge policy$/);
+    /^You are a professional manga and manhwa translator and localization editor[\s\S]*\nTRANSLATION STYLE\nTarget language: Thai \(ภาษาไทย\)\.\nTarget languages: Thai edge policy$/);
   assert.doesNotMatch(calls[0].body.messages[0].content, /BUILT-IN STYLE|SERIES NOTES HEADING/,
     "explicit replace mode does not depend on a magic prompt heading");
 
