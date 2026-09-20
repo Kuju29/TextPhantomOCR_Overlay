@@ -1,13 +1,11 @@
 [![Website](https://img.shields.io/badge/Website-kuju29.github.io-blue?style=flat-square&logo=github&logoColor=white)](https://kuju29.github.io/)
-
+# ✨ [TextPhantomOCR Overlay ](https://chromewebstore.google.com/detail/cjbaepobgmickhgebgagklfcfacbbpem?utm_source=item-share-cb)
+ [![Installation](https://img.shields.io/badge/-Guide-red.svg?logo=youtube&labelColor=555555&style=for-the-badge)](https://youtu.be/5GuW_qyg1GU "Installation Guide")
 ### Note: 
 - text.Ai โมเดลที่ผมใช้ทดสอบ HuggingFace/(deepseek-ai/DeepSeek-V4-Pro)"ฟรี" | OpenRouter/(deepseek/deepseek-v4-flash-0731)"เสียเงิน" | Google Gemini/gemini-2.5-flash"ใช้เยอะเสียเงิน" | Ollama(qwen3.5:9b)"ฟรี" 
 - text.Ai ปัญหาที่ยังพบคือช้า, Ai ไม่รองรับการส่งแบบหลาย id+unit ที่ต้องการความแม่นยำ ยังไม่มีไอเดียตอนนี้ทำได้แค่แบ่งส่ง unitย่อยๆพร้อมกัน เลยทำให้เปลืองโทเค็นกว่าส่งแปลครั้งเดียวทั้งภาพ
 
 ![Desktop2026 02 06-08 11 52 01-ezgif com-video-to-gif-converter](https://github.com/user-attachments/assets/43cc9a1e-eb79-46f0-b4a1-08ca9bcd49f5)
-
-# ✨ TextPhantomOCR Overlay 
-[![Installation](https://img.shields.io/badge/-Installation-red.svg?logo=youtube&labelColor=555555&style=for-the-badge)](https://www.youtube.com/watch?v=WQ7p7zsz_kc "Installation Guide") [![Run API Online](https://img.shields.io/badge/-Run_API_Online-blue.svg?logo=youtube&labelColor=555555&style=for-the-badge)](https://www.youtube.com/watch?v=NMHwaI8mn4c "Run API Online")
 
 ## 📥 Download & Install Options
 
