@@ -1,5 +1,5 @@
-[![Website](https://img.shields.io/badge/Website-kuju29.github.io-blue?style=flat-square&logo=github&logoColor=white)](https://kuju29.github.io/)
-# ✨ [TextPhantomOCR Overlay ](https://chromewebstore.google.com/detail/cjbaepobgmickhgebgagklfcfacbbpem?utm_source=item-share-cb)
+
+# ✨ TextPhantomOCR Overlay | [![Website](https://img.shields.io/badge/Website-kuju29.github.io-blue?style=flat-square&logo=github&logoColor=white)](https://kuju29.github.io/)
  [![Installation](https://img.shields.io/badge/-Guide-red.svg?logo=youtube&labelColor=555555&style=for-the-badge)](https://youtu.be/5GuW_qyg1GU "Installation Guide")
 ### Note: 
 - text.Ai โมเดลที่ผมใช้ทดสอบ HuggingFace/(deepseek-ai/DeepSeek-V4-Pro)"ฟรี" | OpenRouter/(deepseek/deepseek-v4-flash-0731)"เสียเงิน" | Google Gemini/gemini-2.5-flash"ใช้เยอะเสียเงิน" | Ollama(qwen3.5:9b)"ฟรี" 
