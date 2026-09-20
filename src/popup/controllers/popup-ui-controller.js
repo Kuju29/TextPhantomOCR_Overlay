@@ -1,5 +1,29 @@
 import { applyProviderKeyLink } from "../provider-key-links.js";
 import { modelVisionSupport } from "../../shared/page-image-policy.js";
+import {
+  normalizeUserReasoningPreference,
+  reasoningOptionsForCapability,
+} from "../../shared/reasoning-preference.js";
+
+
+function replaceReasoningOptions(select, options) {
+  const doc = select?.ownerDocument || globalThis.document;
+  if (typeof select?.replaceChildren === "function" && typeof doc?.createElement === "function") {
+    select.replaceChildren(...options.map(({ value, label }) => {
+      const option = doc.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      return option;
+    }));
+    return;
+  }
+  // Dependency-light test/runtime shims may expose a mutable options array
+  // without a browser Document. Real browser selects always take the path above.
+  if (Array.isArray(select?.options)) {
+    select.options.splice(0, select.options.length,
+      ...options.map(({ value, label }) => ({ value, textContent: label })));
+  }
+}
 
 export function reasoningCapabilityForSelection({
   local,
@@ -57,7 +81,7 @@ export function createPopupUiController({
   applyApiAvailabilityGate = null,
 }) {
   const toggle = () => {
-    toggleDom({ hasEnvKey: Boolean(state.metaCache?.has_env_ai_key) });
+    toggleDom({ hasEnvKey: false });
     const provider = String(els.aiProvider?.value || "")
       .trim()
       .toLowerCase();
@@ -85,16 +109,6 @@ export function createPopupUiController({
     const visionSupport = modelVisionSupport({ vision });
     const reasoningSupported =
       reasoning?.supported === true || reasoning?.mandatory === true;
-    // The popup exposes Off/On only when both states have a verified native
-    // representation. Level-based providers may opt in after the selected-model
-    // probe proves `none` plus at least one non-none effort.
-    const efforts = Array.isArray(reasoning?.supported_efforts)
-      ? reasoning.supported_efforts.map((value) => String(value).toLowerCase())
-      : [];
-    const verifiedLevelToggle = reasoning?.control === "levels" &&
-      efforts.includes("none") && efforts.some((value) => value !== "none");
-    const configurableThinking = reasoningSupported &&
-      (["toggle", "boolean"].includes(reasoning?.control) || verifiedLevelToggle);
     const thinkingUnknown = reasoning == null || typeof reasoning?.supported !== "boolean";
     const showAi =
       (els.mode.value || "lens_text") === "lens_text" &&
@@ -102,33 +116,53 @@ export function createPopupUiController({
     const profileBlocked = Boolean(state.aiProfileBlocked || state.aiModelBlocked);
     const canConfigure =
       local ||
-      Boolean((els.aiKey?.value || "").trim()) ||
-      Boolean(state.metaCache?.has_env_ai_key);
+      Boolean((els.aiKey?.value || "").trim());
     if (els.aiThinkingWrap) {
       els.aiThinkingWrap.style.display =
         showAi && canConfigure ? "" : "none";
     }
     if (els.aiThinking) {
-      const mandatory = reasoning?.mandatory === true;
-      // Capability discovery may disable the control, but it must not turn the
-      // user's safe Off selection into provider-managed Auto. Provider
-      // boundaries omit the native field when this capability is unverified.
-      if (!["off", "on"].includes(els.aiThinking.value))
-        els.aiThinking.value = "off";
-      els.aiThinking.disabled = !configurableThinking;
-      for (const option of els.aiThinking.options)
-        option.disabled = !configurableThinking || (mandatory && option.value === "off");
+      // The profile owns the user's reasoning intent. Capability discovery is
+      // allowed to describe what the selected model can execute, but it must
+      // never rewrite Off/Low/etc. in the control while the popup is open.
+      // The leaf adapter resolves unsupported intent at dispatch time.
+      const requested = normalizeUserReasoningPreference(els.aiThinking.value);
+      const options = reasoningOptionsForCapability(reasoning);
+      const labels = {
+        minimum: "Lowest available", off: "Thinking off", on: "Thinking on",
+        minimal: "Thinking minimal", low: "Thinking low", medium: "Thinking medium",
+        high: "Thinking high", xhigh: "Thinking xhigh", max: "Thinking max", ultra: "Thinking ultra",
+      };
+      const requestedVisible = options.some(option => option.value === requested);
+      const visibleOptions = options.length ? [...options] : [];
+      if (!requestedVisible) visibleOptions.push({
+        value: requested,
+        label: `${labels[requested] || `Thinking ${requested}`} (saved)`,
+      });
+      replaceReasoningOptions(els.aiThinking, visibleOptions);
+      els.aiThinking.value = requested;
+      // Capability discovery describes execution, never ownership of the user's
+      // saved intent. Keep the control editable even when the selected model has
+      // no reasoning support; in that case Off is simply the effective state.
+      els.aiThinking.disabled = false;
     }
     if (els.aiThinkingHint) {
-      els.aiThinkingHint.textContent = configurableThinking
-        ? (reasoning?.mandatory === true
-            ? "This model requires thinking; it cannot be turned off."
-            : verifiedLevelToggle
-              ? "Off and On use reasoning levels verified for this selected model."
-              : "Thinking is Off by default. Turn it On only when you want reasoning.")
+      const control = String(reasoning?.control || "provider");
+      const efforts = Array.isArray(reasoning?.supported_efforts)
+        ? reasoning.supported_efforts.join(", ") : "";
+      const requested = normalizeUserReasoningPreference(els.aiThinking?.value);
+      const executable = reasoningOptionsForCapability(reasoning).some(option => option.value === requested);
+      els.aiThinkingHint.textContent = reasoning?.supported === true && !executable && requested !== "minimum"
+        ? `Saved ${requested === "off" ? "Thinking off" : `Thinking ${requested}`}; this model cannot execute that exact mode, so dispatch uses its lowest verified mode without changing your saved choice.`
+        : reasoning?.supported === false
+        ? "This model has no reasoning support. Execution is Off; your saved selection is kept."
         : thinkingUnknown
-          ? "Thinking support is not verified; no native thinking field will be sent."
-          : "Thinking is unavailable for this model; no native thinking field will be sent.";
+          ? "Reasoning control is not verified yet. Your selected thinking mode is kept; the provider adapter resolves it only when capability is known."
+          : control === "levels"
+            ? `Lowest available is TextPhantom's default; the saved policy is kept. Verified levels${efforts ? `: ${efforts}` : ""}.`
+            : ["toggle", "boolean"].includes(control)
+              ? "Lowest available is TextPhantom's default; the saved policy is kept."
+              : "This model exposes no verified lower reasoning control. Your saved choice is kept; dispatch uses the model's required/default behavior when necessary.";
     }
     if (els.aiPageImage) els.aiPageImage.disabled = visionSupport !== true;
     const imageHint = els.aiPageImageWrap?.querySelector?.(".hint");

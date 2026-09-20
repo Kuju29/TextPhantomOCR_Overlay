@@ -62,6 +62,13 @@ class Settings:
     sync_max_concurrency: int = field(
         default_factory=lambda: max(0, _env_int("TP_SYNC_MAX_CONCURRENCY", 0))
     )
+    # Google Lens is a remote two-request upstream. Large cold bursts showed a
+    # latency cliff above ~8 simultaneous uploads even though local CPU was idle.
+    # Keep the upstream fan-out bounded separately from generic server workers;
+    # operators can raise it explicitly after measuring their own deployment.
+    lens_upstream_max_concurrency: int = field(
+        default_factory=lambda: max(1, _env_int("TP_LENS_UPSTREAM_MAX_CONCURRENCY", 8))
+    )
     # Provider SDKs use a dedicated executor; admission must not exceed it.
     ai_thread_workers: int = field(
         default_factory=lambda: max(1, _env_int("TP_AI_THREAD_WORKERS", 24))
@@ -84,8 +91,8 @@ class Settings:
     sync_ai_max_wait_sec: float = field(
         default_factory=lambda: max(0.0, _env_float("TP_SYNC_AI_MAX_WAIT_SEC", 10.0))
     )
-    # Detector-free grouping is a separate API stage. Zero follows Lens
-    # capacity so it never narrows the 15-wide Lens highway by default.
+    # Detector-free grouping is a separate API stage. Zero follows effective
+    # Lens capacity so it never narrows the active Lens lane by default.
     sync_group_max_concurrency: int = field(
         default_factory=lambda: max(0, _env_int("TP_SYNC_GROUP_MAX_CONCURRENCY", 0))
     )
@@ -122,10 +129,13 @@ class Settings:
     rate_default_rpm: float = field(default_factory=lambda: max(0.0, _env_float("TP_RATE_RPM_DEFAULT", 30.0)))
     rate_default_burst: int = field(default_factory=lambda: max(1, _env_int("TP_RATE_BURST_DEFAULT", 4)))
 
-    # Server keys may be sent only to approved provider hosts.
-    ai_api_key: str = field(default_factory=lambda: _env_str("AI_API_KEY"))
-    # Comma-separated extra hostnames the SERVER key may be sent to, on top of
-    # the built-in PROVIDER_DEFAULTS hosts (e.g. a company AI gateway).
+    # Compatibility field only. Requests/CLI must supply their own cloud key.
+    # AI_API_KEY is intentionally not read or used as a fallback.
+    ai_api_key: str = ""
+    # AI network authority is independent from ownership of the API key.
+    # Shared defaults trust provider endpoints + explicit operator allowlist only.
+    # Personal mode additionally permits server-owned Local AI on loopback.
+    ai_endpoint_policy: str = field(default_factory=lambda: _env_str("TP_AI_ENDPOINT_POLICY", "shared"))
     ai_extra_hosts: str = field(default_factory=lambda: _env_str("TP_AI_EXTRA_HOSTS"))
 
     # SSRF guard: private, loopback and link-local image hosts are opt-in.
@@ -207,6 +217,11 @@ class Settings:
     access_log_mode: str = field(
         default_factory=_access_log_default
     )
+
+def lens_concurrency_limit(value: "Settings") -> int:
+    """Bound local Lens workers by the remote-upstream fan-out ceiling."""
+    configured = max(1, int(value.sync_max_concurrency or value.max_workers))
+    return max(1, min(configured, int(value.lens_upstream_max_concurrency)))
 
 # Module-level singleton.  Import this from anywhere as ``from backend.config import settings``.
 # (rate-gate settings added above: rate_gate_enabled / rate_max_wait_sec / ...)

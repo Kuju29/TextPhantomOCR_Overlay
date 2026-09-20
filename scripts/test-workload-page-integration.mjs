@@ -53,7 +53,7 @@ for(const route of ['direct-local','server']) {
   const observations=f.events.filter(e=>e.name==='aiModelWorkload'&&e.data.event==='observation');
   assert.equal(observations.length,1); assert(observations.every(e=>e.data.outcome==='ok'));
   const dispatches=f.events.filter(e=>e.name==='aiModelWorkload'&&e.data.event==='dispatch');
-  assert.equal(dispatches.length,1); assert.equal(dispatches[0].data.splitReason,'end_of_page');
+  assert.equal(dispatches.length,1); assert.equal(dispatches[0].data.splitReason,'whole_page_fits');
   assert(Object.keys(f.storage()[WORKLOAD_STORAGE_KEY].profiles).length===1);
   console.log(`PASS ${route}: measured non-reasoning capacity keeps one generation with exact ID/prompt/settings conservation`);
 }
@@ -166,4 +166,65 @@ for (const route of ['direct-local', 'server']) {
     assert.ok(context.every(unit=>all.some(source=>source.id===unit.id && source.text===unit.text)));
   }
   console.log(`PASS ${route}: split page gets bounded source context without extra target IDs or retries`);
+}
+// Actual page owner + child recorder -> real HTTP ingest -> scoped disk evidence.
+{
+  const oldFetch=globalThis.fetch, packets=[];
+  try {
+    globalThis.fetch=async(_url,init)=>{packets.push(JSON.parse(init.body));return new Response('{}',{status:202});};
+    const f=fixture(rows(4));f.args.capabilities={aiWireTrace:true,aiWireTraceRelay:{path:'/relay',token:'fixture-capability'}};
+    f.args.payload.context.tp_trace='tabcdefgh123';f.args.payload.idempotency_key='b'.repeat(32);
+    const translate=f.args.dependencies.translateUnits;
+    f.args.dependencies.translateUnits=async(units,request)=>{
+      assert.equal(request.wireTrace.identity.recordKind,'provider_request');
+      assert.equal(request.wireTrace.identity.parentOperationId,'ai:'+'b'.repeat(32));
+      await request.wireTrace('providerRequest',{body:{model:'fixture',messages:[{role:'user',content:'SAFE_FIXTURE_SOURCE'}]}});
+      const answer=await translate(units,request);
+      await request.wireTrace('providerResponse',{raw:JSON.stringify({done:true,prompt_eval_count:40,eval_count:8,message:{content:'SAFE_FIXTURE_REPLY'}})});
+      return answer;
+    };
+    assert.equal((await translateLensPage(f.args)).complete,true);
+    assert.equal(f.calls.length,1,'recording must not invoke another provider');
+    const starts=packets.filter(p=>p.stage==='trace_started');
+    assert.equal(starts.length,2);assert.equal(starts.filter(p=>p.identity.recordKind==='page_summary').length,1);
+    const parent=packets.find(p=>p.stage==='terminal'&&p.identity.recordKind==='page_summary');
+    assert.equal(parent.value.children.length,1);
+    assert.equal(parent.value.children[0].operationId,f.calls[0].request.operationId);
+    const {spawnSync}=await import('node:child_process');
+    const py=spawnSync('python',['-c',String.raw`
+import os,sys,tempfile,json,asyncio
+from pathlib import Path
+sys.path.insert(0,'api')
+with tempfile.TemporaryDirectory() as temp:
+ os.environ.update(TP_AI_WIRE_TRACE='1',TP_AI_WIRE_TRACE_DIR=temp)
+ from backend.ai import local_wire_relay
+ from backend.api.routes.local_wire_trace import router
+ from fastapi import FastAPI
+ import httpx
+ app=FastAPI();app.include_router(router)
+ packets=json.load(sys.stdin)
+ async def send():
+  async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://fixture') as c:
+   for p in packets:
+    reply=await c.post('/v2/engine/runsextension/ai/local-wire-trace',json=p,headers={'X-TP-AI-Wire-Capability':local_wire_relay.CAPABILITY_TOKEN, **{h:str(p['identity'].get(k) or '') for h,k in [('X-TP-Trace-Id','traceId'),('X-TP-Request-Id','operationId'),('X-TP-Job-Id','jobId'),('X-TP-Batch-Id','batchId'),('X-TP-Image-Id','imageId')]}})
+    assert reply.status_code==202,reply.text
+ asyncio.run(send())
+ owners=[];children=[]
+ for p in Path(temp).rglob('00_identity.json'):
+  ident=json.loads(p.read_text()); req=json.loads(p.with_name('04_provider_request.json').read_text())
+  if ident['recordKind']=='page_summary':
+   assert req['status']=='not_applicable',req
+   terminal=json.loads(p.with_name('11_terminal.json').read_text())
+   assert len(terminal['children'])==1,terminal
+   owners.append(ident)
+  else:
+   assert req['body']['model']=='fixture',req
+   assert p.with_name('05_provider_response.raw').read_text()
+   children.append(ident)
+ assert len(owners)==1 and len(children)==1,(owners,children)
+ assert children[0]['parentOperationId']==owners[0]['operationId']
+ print('PASS page summary is not a provider attempt; child linked through actual HTTP relay to disk')
+`],{cwd:new URL('..',import.meta.url),input:JSON.stringify(packets),encoding:'utf8'});
+    assert.equal(py.status,0,py.stderr||py.stdout);console.log(py.stdout.trim());
+  } finally {globalThis.fetch=oldFetch;}
 }

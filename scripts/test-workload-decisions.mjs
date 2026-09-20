@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import {createWorkloadController,WORKLOAD_STORAGE_KEY} from '../src/background/ai/workload-controller.js';
 import {initialProfile,WORKLOAD_VERSION} from '../src/shared/ai/workload/model.js';
+import {learnWorkload} from '../src/shared/ai/workload/learning.js';
 const opts={route:'server',sourceLang:'ja',targetLang:'th',ai:{provider:'openrouter',model:'model-a',base_url:'http://fixture',api_key:'SECRET_TEST',prompt:'STYLE_SECRET',thinking:'off',model_capabilities:{structured_output:{supported:true},reasoning:{supported:false}}}};
 let saved={};const bootstrap=createWorkloadController({read:async()=>({}),write:async v=>{saved=v;},emit(){}});const base=await bootstrap.open(opts);await bootstrap.flush();
 const key=base.key;let count=0;
@@ -41,3 +42,12 @@ console.log(`${count}/${count} workload decisions: actual transition vs historic
  releases.shift()();await second.flush();await controller.flush();
 }
 console.log('PASS session workload flush excludes unrelated later snapshot writes');
+
+{
+ const profile={...initialProfile(),records:10,structureStreak:1};
+ const learned=learnWorkload(profile,{outcome:'structure',structureEligible:true,isolatedShortIncomplete:false,
+   plan:{epoch:profile.epoch,revision:profile.revision,units:47,phase:'initial'},limits:{},actualIdentity:''});
+ assert.equal(learned.records,10,'a 47-unit failure cannot claim it reduced an already-lower 10-record target');
+ assert.equal(learned.lastDecision,'structure_observed_no_capacity_claim');
+}
+console.log('PASS unchanged structural target never reports a false reduce_records decision');

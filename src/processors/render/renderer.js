@@ -29,7 +29,7 @@ import {
 } from "./geometry.js";
 import { targetTextDirection } from "./typography.js";
 import { buildAiLineLayout, itemsReadVertically } from "./line-layout.js";
-import { reportAiBlockCollisions } from "./ai-layout.js";
+import { partitionIndependentHorizontalBlocks, reportAiBlockCollisions } from "./ai-layout.js";
 import { OVERLAY_CLASSES } from "./markup.js";
 import { OVERLAY_CSS } from "./css.js";
 import { makeLine } from "./line-renderer.js";
@@ -54,12 +54,11 @@ export { OVERLAY_CSS };
  * Count AI bubbles whose drawn canvases land on top of one another.
  *
  * Two translations stacked in the same spot is the loudest way this layer can
- * fail, and it is invisible in every other signal: the report says two
- * paragraphs and two lines, exactly as it would for a good page. It is not a
- * renderer fault and the renderer must not "fix" it by moving a bubble
- * somewhere the source text is not — when two groups' SOURCE columns overlap,
- * grouping spliced a region and there is no honest second place to draw. So
- * this names the pairs and leaves the drawing alone.
+ * fail. Independent single-paragraph horizontal Lens envelopes are allowed to
+ * share a noisy AABB edge; those are partitioned at the midpoint before text
+ * fitting, without relocating either paragraph. Remaining collisions are kept
+ * diagnostic-only because grouped SOURCE regions can genuinely be spliced and
+ * there is no honest second place to move them.
  */
 /**
  * One box covering a whole paragraph, for text that has no per-item split.
@@ -222,10 +221,11 @@ export function renderOverlay(
         ),
       });
     }
-    for (const entry of entries) {
+    const layoutEntries = partitionIndependentHorizontalBlocks(entries, report);
+    for (const entry of layoutEntries) {
       const lines = buildAiLineLayout(
         entry,
-        entries,
+        layoutEntries,
         imgW,
         imgH,
         targetLanguage,

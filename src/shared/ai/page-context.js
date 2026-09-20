@@ -1,3 +1,4 @@
+import { instructionPack } from "./prompt-language.js";
 // Bounded source evidence from the current page; never additional translation targets.
 export const PAGE_CONTEXT_MAX_UNITS = 6;
 export const PAGE_CONTEXT_MAX_CHARS = 2000;
@@ -36,7 +37,7 @@ export function selectPageContext(allUnits, targetUnits) {
     .filter((unit, index, list) => list.indexOf(unit) === index);
 }
 
-export function pageContextText(entries) {
+export function pageContextText(entries, lang = "en") {
   const normalized = normalizePageContext(entries);
-  return normalized.length ? PAGE_CONTEXT_HEADER + "\n" + JSON.stringify(normalized.map((entry, index) => ({ context: `C${index + 1}`, text: entry.text }))) : "";
+  return normalized.length ? instructionPack(lang).page + "\n" + JSON.stringify(normalized.map((entry, index) => ({ context: `C${index + 1}`, text: entry.text }))) : "";
 }

@@ -28,19 +28,20 @@ def safe_source_identity(value: Any) -> dict[str, Any] | None:
         "fingerprint": digest,
     }
 
-def lane_for(payload: dict[str, Any], *, fallback_api_key: str, is_local_target: Any) -> str:
+def lane_for(payload: dict[str, Any], *, fallback_api_key: str = "", is_local_target: Any) -> str:
     if str(payload.get("mode") or "") != "lens_text":
         return "lens"
     if str(payload.get("source") or "").strip().lower() != "ai":
         return "lens"
     ai = payload.get("ai") if isinstance(payload.get("ai"), dict) else {}
-    has_key = bool(str(ai.get("api_key") or fallback_api_key or "").strip())
+    # Legacy keyword is accepted but never authorizes a server-owned key.
+    has_key = bool(str(ai.get("api_key") or "").strip())
     provider = str(ai.get("provider") or "auto").strip().lower()
     base_url = str(ai.get("base_url") or "")
     return "ai" if (has_key or is_local_target(provider, base_url)) else "lens"
 
 def ai_server_execution_configured(
-    payload: dict[str, Any], *, fallback_api_key: str, is_local_target: Any
+    payload: dict[str, Any], *, fallback_api_key: str = "", is_local_target: Any
 ) -> bool:
     if str(payload.get("mode") or "") != "lens_text":
         return True

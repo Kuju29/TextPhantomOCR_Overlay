@@ -56,15 +56,7 @@ export function createSettingsPersistenceController(deps) {
     }
     const key = (els.aiKey.value || "").trim();
     if (!key) {
-      if (state.metaCache?.has_env_ai_key) {
-        setFieldMessage(els.aiKeyWrap, "", "");
-      } else {
-        setFieldMessage(
-          els.aiKeyWrap,
-          "warn",
-          "⚠ No API key set — AI won’t run",
-        );
-      }
+      setFieldMessage(els.aiKeyWrap, "warn", "API key required for Cloud AI");
       return;
     }
     if (/\s/.test(key)) {

@@ -212,8 +212,10 @@ assert.deepEqual(
     assert.ok(adapter.includes(required), `missing unit-contract diagnostic ${required}`);
   }
   assert.ok(aiLocal.includes('"direct Local AI failed"'));
-  for (const event of ['event: "start"', 'event: "result"', 'event: "error"', 'event: "stale_discard"']) {
-    assert.ok(background.includes(event), `missing Local AI discovery ${event}`);
+  const discovery = await readFile(path.join(projectRoot, "src/background/ai/local-discovery-controller.js"), "utf8");
+  assert.match(background, /localDiscovery\.run\(msg\)/, "worker delegates to the single discovery owner");
+  for (const reason of ["'initial'", "'finished'", "'failed'", "'stale_discard'", "'ui_applied'"]) {
+    assert.ok(discovery.includes(reason), `missing worker-owned Local discovery ${reason}`);
   }
   assert.doesNotMatch(
     popupMeta,
@@ -227,7 +229,7 @@ assert.deepEqual(
   );
   assert.match(
     popupLocal,
-    /sequence !== state\.localConnectSeq[\s\S]{0,220}identity\(\) !== requestIdentity/,
+    /const current = \(\) => sequence === state\.localConnectSeq &&[\s\S]{0,220}identity\(\) === requestIdentity/,
     "late Local AI discovery results must be discarded by the single connection owner",
   );
   assert.match(popupLocal, /TP_LOCAL_AI_DISCOVER[\s\S]{0,220}apiBase:\s*normalizeUrl\(els\.apiUrl\.value\)/,

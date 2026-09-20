@@ -56,7 +56,16 @@ def apply_chat_cache(payload: dict, *, provider: str, model: str, url: str,
     account = headers.get('Authorization', headers.get('authorization', ''))
     key = 'tp-' + hashlib.sha256((account+'\0'+model+'\0'+str(text)).encode()).hexdigest()[:48]
     if provider == 'openrouter':
-        result.setdefault('session_id', key)
+        # Do not inject an application-global session_id here.  OpenRouter uses
+        # session_id as the provider-sticky routing key, and this helper's key is
+        # intentionally stable for account/model/System-prefix cache reuse.  That
+        # scope is broader than a real TextPhantom document Conversation, so it
+        # can pin unrelated manga/documents to the same upstream endpoint.  Let
+        # OpenRouter derive its normal conversation fingerprint from the opening
+        # messages instead; a real cache hit can then enable stickiness at the
+        # provider's own conversation scope.
+        policy['stickyRouting'] = ('explicit_conversation_session' if result.get('session_id')
+                                   else 'openrouter_conversation_fingerprint')
     elif provider == 'openai':
         result.setdefault('prompt_cache_key', key)
     if policy['strategy'] == 'explicit_prefix' and isinstance(system['content'], str):

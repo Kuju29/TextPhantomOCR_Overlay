@@ -1,3 +1,4 @@
+import { reservedConversation } from '../ai/translation-paths/order.js';
 import { applyTranslations, translationUnits } from '../../shared/lens-document.js';
 import { eraseBoxesForAiPartial } from '../../shared/erase-boxes.js';
 import { sessionSafe } from '../translation-session-store.js';
@@ -12,10 +13,16 @@ export async function digestText(text) {
 }
 
 export async function makePageCheckpoint({ payload, result, plan, units, ctx, operationId }) {
-  const cleanAi = sessionSafe(plan.ai || {});
+  const reserved = reservedConversation(payload);
+  const cleanAi = sessionSafe({...plan.ai, ...(reserved ? {conversation:reserved} : {})});
   const sourceLang = String(result?.lensDocument?.languages?.source || '');
   const imageId = String(payload.metadata?.image_id || ctx.imageKey || '');
-  const groupKey = await digestText(stable({ ai: cleanAi, account: await digestText(plan.ai?.api_key || ''),
+  const groupingAi = {...cleanAi};
+  if (groupingAi.conversation) {
+    const {pageId,pageIndex,pageOrder,pageQueueWaitMs, ...scope} = groupingAi.conversation;
+    groupingAi.conversation = scope;
+  }
+  const groupKey = await digestText(stable({ ai: groupingAi, account: await digestText(plan.ai?.api_key || ''),
     sourceLang, targetLang: payload.lang, route: plan.route, rate: payload.rate,
     // Never mix page-specific visual/series evidence across images.
     image: pageImageEnabled(plan.ai?.send_image) ? imageId : '' }));
@@ -33,7 +40,7 @@ export async function makePageCheckpoint({ payload, result, plan, units, ctx, op
     rate: payload.rate || null, unlimited: payload.limits?.aiUnlimited === true,
     operationId, ctx: sessionSafe(ctx), result: cleanResult, originalEraseBoxes: result.eraseBoxes,
     units: rows, accepted: [], failures: [], blocked: [], inFlight: [], phase: 'prepared', delivered: false,
-    repaired: [] };
+    repaired: [], sourceEvidence: [] };
 }
 
 export function buildPatchedResult(page, accepted) {

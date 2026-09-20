@@ -21,13 +21,13 @@ const write=async patch=>{
  writes.push({keys:Object.keys(changed),epoch:getSettingsEpoch()});
 };
 const els={mode:val('lens_text'),sources:val('ai'),lang:val('th'),apiUrl:val('http://localhost:7860'),aiProvider:val(provider),aiBaseUrl:val(endpoint),aiKey:val('fixture-key-not-real'),aiModel:val(model),aiModelWrap:{},aiProviderWrap:{},aiKeyWrap:{style:{display:''}}};
-const state={desiredLang:'th',desiredAiModel:model,aiMetaSeq:0,localConnectSeq:0,localConnectInFlight:null};
+const state={desiredLang:'th',desiredAiModel:model,aiMetaSeq:0,aiProbeSeq:0,localConnectSeq:0,localConnectInFlight:null};
 const profile=createAiProfileController({els,state,setStorage:write,now:()=>++tick});
 await profile.initialize(storage);
 const epochAtJobStart=getSettingsEpoch();
 const capabilities={reasoning:{supported:true},structured_output:{supported:true},limits:{contextTokens:1310720,outputHintTokens:943718,source:'fixture'}};
-const apiResult={provider,backend_supported:true,key_status:'valid',models_verified:true,models_source:'live',models:[model],model_capabilities:capabilities};
-const createPopupMetadata=()=>createProviderMetaController({els,state,api:{fetchJson:async()=>structuredClone(apiResult)},constants:{paths:{AI_RESOLVE:'/resolve',AI_PROBE:'/probe'},metaTimeout:100},provider:{isLocal:()=>false,label:x=>x,protocolLabel:()=>''},profile,prompt:{},local:{},usage:{},persist:write,normalizeUrl:x=>x,setModelOptions:(_m,{keepValue})=>{els.aiModel.value=keepValue},setFieldMessage:()=>{},setStatus:()=>{},toggleUi:()=>{}});
+const apiResult={provider,model,model_candidates:[{id:model,eligibility:"usable"}],backend_supported:true,key_status:'valid',models_verified:true,models_source:'live',models:[model],model_capabilities:capabilities};
+const createPopupMetadata=()=>createProviderMetaController({els,state,api:{fetchJson:async(url)=>url.endsWith("/probe")?{ok:true,provider,model,status:"passed",model_capabilities:structuredClone(capabilities)}:structuredClone(apiResult)},constants:{paths:{AI_RESOLVE:'/resolve',AI_PROBE:'/probe'},metaTimeout:100},provider:{isLocal:()=>false,label:x=>x,protocolLabel:()=>''},profile,prompt:{},local:{},usage:{},persist:write,normalizeUrl:x=>x,setModelOptions:(_m,{keepValue})=>{els.aiModel.value=keepValue},setFieldMessage:()=>{},setStatus:()=>{},toggleUi:()=>{}});
 await createPopupMetadata().refresh();
 const epochAfterOpen=getSettingsEpoch();
 const storedCaps=storage.aiProfilesV1.providers[id].models[model].profile.providerOptions.modelCapabilities;

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+from .source_context import build_source_context_block
+from .instruction_packs import instruction_pack
 from .localization import TRANSLATOR_IDENTITY_BASE, TASK_GUIDANCE, build_style_examples
 
 from backend.lens.languages import normalize as _normalize_lang
@@ -26,14 +28,16 @@ SCHEMA_SOURCE_INPUT_CONTRACT = (
 # direct-local contract is revised. API provider messages do not use it.
 
 
-def build_translator_identity_system(style: str) -> str:
+def build_translator_identity_system(style: str, lang: str = "en") -> str:
     selected = str(style or "").strip()
     if not selected:
         raise ValueError("AI translation style is empty")
-    return TRANSLATOR_IDENTITY_BASE + "\n\nTRANSLATION STYLE\n" + selected
+    pack = instruction_pack(lang)
+    # The selected style has one owner: this stable System block.
+    return pack["identity"] + "\n\n" + pack["styleHeading"] + "\n" + selected
 MARKER_OUTPUT_CONTRACT = "\n".join((
     "OUTPUT — tp.translation.compact-records/1",
-    "Return every supplied ID exactly once as <<TP_Pn:translated text>>. Record order is irrelevant because results are matched by ID.",
+    "Return every supplied ID exactly once as <<TP_Pn:translated text>>. Keep both << and >> delimiters; the payload after ':' must be a non-empty translation. Record order is irrelevant because results are matched by ID.",
     "Do not add, omit, merge, split or rename records. Do not insert manual line breaks inside a payload.",
     "Return only the records, with no JSON, markdown, commentary or explanations.",
 ))
@@ -167,24 +171,11 @@ def build_user_parts(original_text_full: str) -> list[str]:
     return [str(original_text_full or "")]
 
 def exact_request_output_contract(expected_ids: list[str] | tuple[str, ...], *,
-                                  structured_output: bool = False) -> str:
-    """Bind one provider request to its parsed, ordered output ID set."""
+                                  structured_output: bool = False, lang: str = "en") -> str:
     ids = tuple(str(value or "") for value in expected_ids)
-    if (not ids or any(value != f"P{index}" for index, value in enumerate(ids))):
+    if not ids or any(value != f"P{index}" for index, value in enumerate(ids)):
         raise ValueError("AI request has invalid output IDs")
-    if structured_output:
-        return (
-            "OUTPUT — tp.translation.schema-object/1\n"
-            "Return only the JSON object required by the supplied schema. "
-            f"Its keys must be exactly {', '.join(ids)}; each value is that unit's complete non-empty translation. "
-            "Do not add, omit, merge, split or rename records. Do not insert manual line breaks for visual layout."
-        )
-    return (
-        "OUTPUT — tp.translation.compact-records/1\n"
-        f"Return every supplied ID exactly once as <<TP_Pn:translated text>>. Expected IDs: {', '.join(ids)}. "
-        "Record order is irrelevant because results are matched by ID. Do not add, omit, merge, split or rename records. "
-        "Do not insert manual line breaks inside a payload. Return only the records, with no JSON, markdown, commentary or explanations."
-    )
+    return instruction_pack(lang)["schemaOutput" if structured_output else "markerOutput"].format(ids=", ".join(ids))
 
 def append_request_output_section(
     sections: tuple[SystemPromptSection, ...], expected_ids: list[str] | tuple[str, ...],
@@ -269,57 +260,112 @@ def join_system_sections(sections: tuple[SystemPromptSection, ...]) -> str:
     request_contract = values.get("request_output_contract", "")
     return "\n\n".join(filter(None, (static, dynamic, request_contract)))
 
-def build_translation_user_message(
-    lang: str,
-    prompt_override: str,
-    original_text_full: str,
-    expected_ids: list[str] | tuple[str, ...],
-    *,
-    structured_output: bool = False,
-    prompt_mode: str = "replace",
-    glossary: list[dict] | None = None,
-    characters: list[dict] | None = None,
-    has_image: bool = False,
-    series_state: str = "",
-    speakers: dict | None = None,
-    prev_context: list | None = None,
-    page_context: list | None = None,
-    repair_reason: str = "",
-) -> str:
-    """Compose the provider-visible user message for translation.
+def conversation_record_contract(lang: str, *, structured_output: bool = False) -> str:
+    code = _normalize_lang(lang)
+    if structured_output:
+        if code == "th":
+            return ("INPUT/OUTPUT — tp.translation.image-records/1\n"
+                    "ข้อความล่าสุดใช้ ID รูป I<ภาพ>_P<หน่วย> ซึ่งระบุตำแหน่ง ไม่ใช่ผู้พูด "
+                    "ตอบเฉพาะ ID ในข้อความผู้ใช้ล่าสุดให้ครบครั้งเดียวด้วยคีย์เดิมใน JSON schema ที่กำหนด "
+                    "ค่าของแต่ละคีย์ต้องเป็นคำแปลเท่านั้น ห้ามคงข้อความต้นฉบับเป็นค่า และห้ามมีข้อความนอก JSON "
+                    "ประวัติก่อนหน้าเป็นบริบท ห้ามตอบ ID เก่าซ้ำ")
+        if code == "ja":
+            return ("INPUT/OUTPUT — tp.translation.image-records/1\n"
+                    "最新入力のIDは I<画像>_P<単位> で、位置を示し話者を示さない。"
+                    "最新ユーザーメッセージのIDだけを指定JSON schemaの同じキーで一度ずつ返す。"
+                    "各キーの値には訳文だけを入れ、原文を値として残したりJSONの外に訳文や説明を書いたりしない。過去IDを再回答しない。")
+        return ("INPUT/OUTPUT — tp.translation.image-records/1\n"
+                "Latest source IDs are I<image>_P<unit>. IDs identify source locations, not speakers. "
+                "Return only IDs from the latest user message exactly once using the same JSON keys. "
+                "Each value must contain the translation only: never keep the source text as the value or place the translation/commentary outside the JSON. "
+                "Previous turns are context only; do not repeat old IDs.")
+    if code == "th":
+        return ("INPUT/OUTPUT — tp.translation.image-records/1\n"
+                "รายการงานจริงใช้ <<I<ภาพ>_P<หน่วย>:ข้อความต้นฉบับ>> โดย I ระบุภาพและ P ระบุหน่วยในภาพ ไม่ใช่ผู้พูด "
+                "ตอบเฉพาะ ID รูปแบบ I<เลข>_P<เลข> ที่อยู่ในข้อความผู้ใช้ล่าสุดให้ครบครั้งเดียวในรูป <<I<ภาพ>_P<หน่วย>:คำแปล>> ด้วย ID เดิม "
+                "ข้อความหลังเครื่องหมาย : ภายใน marker ต้องเป็นคำแปลที่ไม่ว่าง และต้องคงเครื่องหมาย << กับ >> ให้ครบ ต้องแทนที่ข้อความต้นฉบับด้วยคำแปล "
+                "ห้ามคงข้อความต้นฉบับไว้ใน marker แล้ววางคำแปลไว้นอก marker และห้ามมีข้อความใดนอก marker นอกจากช่องว่าง "
+                "ประวัติก่อนหน้าเป็นบริบท ห้ามตอบ ID เก่าซ้ำ ห้ามเพิ่ม JSON, markdown หรือคำอธิบาย")
+    if code == "ja":
+        return ("INPUT/OUTPUT — tp.translation.image-records/1\n"
+                "最新の各項目は <<I<画像>_P<単位>:原文>>。Iは画像、Pは画像内単位を示し、話者IDではない。"
+                "最新ユーザーメッセージのIDだけを同じIDの <<I<画像>_P<単位>:訳文>> で一度ずつ返す。"
+                "コロンの後には空でない訳文だけを入れ、<< と >> を必ず保持する。原文をmarker内に残して訳文をmarker外へ書かない。marker外は空白以外を出力しない。過去IDを再回答しない。")
+    return ("INPUT/OUTPUT — tp.translation.image-records/1\n"
+            "Each latest source record is <<I<image>_P<unit>:source text>>. I identifies a stable image and P a unit inside it; IDs are locations, not speakers. "
+            "Return only IDs from the latest user message exactly once as <<I<image>_P<unit>:translated text>> using the same IDs. "
+            "The text after ':' inside each marker must be a non-empty translation. Keep both << and >> delimiters and replace the source text with the translation. "
+            "Never keep source text inside a marker and put its translation outside; output no non-whitespace text outside markers. "
+            "Previous turns are context only. Do not repeat old IDs or add JSON, markdown, commentary or explanations.")
 
-    System owns identity and selected style. User owns task, examples,
-    optional context, the active output contract and finally source records.
-    """
-    style, _source = select_style(lang, prompt_override, prompt_mode)
-    runtime = "\n\n".join(filter(None, (
-        IMAGE_HINT if has_image else "",
-        build_series_block(series_state),
-        build_character_block(characters, has_image=has_image),
-        build_glossary_block(glossary),
-        build_speaker_block(speakers),
-        build_prev_context_block(prev_context),
-        build_page_context_block(page_context),
-    )))
-    source_contract = SCHEMA_SOURCE_INPUT_CONTRACT if structured_output else SOURCE_INPUT_CONTRACT
-    blocks = [
-        "TRANSLATION TASK\n" + target_language_priority(lang) +
-        "\nUse the translation style defined in your translator identity.\n" + TASK_GUIDANCE,
-    ]
-    if _source != "saved_custom_replace":
-        examples = build_style_examples(lang, expected_ids, structured_output=structured_output)
+def build_static_user_prefix(lang: str, *, structured_output: bool = False,
+                             source_lang: str = "", style_examples: bool = True,
+                             selected_style: str | None = None, conversation_records: bool = False) -> str:
+    """Task/protocol/examples only; the selected style is owned by System."""
+    pack = instruction_pack(lang)
+    style = select_style(lang)[0] if selected_style is None else str(selected_style).strip()
+    if not style:
+        raise ValueError("AI translation style is empty")
+    blocks = [pack["taskHeading"] + "\n" + target_language_priority(lang),
+              pack["dataHeading"] + "\n" + pack["task"]]
+    if not conversation_records:
+        blocks.append(pack["schemaInput" if structured_output else "markerInput"])
+    if style_examples is not False:
+        examples = build_style_examples(lang, [], structured_output=structured_output, source_lang=source_lang)
         if examples:
             blocks.append(examples)
+    # Conversation keeps the I#_P# contract final immediately before SOURCE.
+    # Independent retains its established marker-before-examples layout.
+    if conversation_records:
+        blocks.append(conversation_record_contract(lang, structured_output=structured_output))
+    return "\n\n".join(blocks)
+
+
+def build_translation_user_message(
+    lang: str, prompt_override: str, original_text_full: str,
+    expected_ids: list[str] | tuple[str, ...], *,
+    structured_output: bool = False, prompt_mode: str = "replace",
+    glossary=None, characters=None, has_image=False, series_state="", speakers=None,
+    prev_context=None, page_context=None, source_lang="", source_context=None,
+    repair_reason="", style_examples: bool = True, memory_mode: str | None = None,
+    conversation_records: bool = False,
+) -> str:
+    """Static prefix first; dynamic source evidence last. IDs are output locations.
+
+    Explicit memory modes strictly control story data, independently of examples.
+    None preserves legacy callers that passed their own already-filtered context.
+    """
+    pack = instruction_pack(lang)
+    if memory_mode is not None:
+        glossary = glossary if memory_mode in ("terms", "full") else []
+        if memory_mode != "full":
+            characters, series_state, speakers, prev_context = [], "", {}, []
+    runtime = "\n\n".join(filter(None, (
+        pack["image"] if has_image else "",
+        build_series_block(series_state, lang=lang),
+        build_character_block(characters, has_image=has_image, lang=lang),
+        build_glossary_block(glossary, lang=lang),
+        build_speaker_block(speakers, lang=lang),
+        build_prev_context_block(prev_context, lang=lang),
+        build_page_context_block(page_context, lang=lang),
+        build_source_context_block(source_context, lang=lang),
+    )))
+    selected_style, _ = select_style(lang, prompt_override, prompt_mode)
+    blocks = [build_static_user_prefix(lang, structured_output=structured_output,
+                                       source_lang=source_lang, style_examples=style_examples,
+                                       selected_style=selected_style, conversation_records=conversation_records)]
+    # No dynamic ID list, context, image or repair reason before this point.
     if runtime:
-        blocks.append("CONTEXT — READ ONLY, DO NOT TRANSLATE\n" + runtime)
-    blocks.extend((source_contract,
-        exact_request_output_contract(expected_ids, structured_output=structured_output)))
+        blocks.append(pack["contextHeading"] + "\n" + runtime)
+    if not conversation_records:
+        blocks.append(exact_request_output_contract(expected_ids, structured_output=structured_output, lang=lang))
     from .repair import wrong_language_repair_instruction
-    repair = wrong_language_repair_instruction(target_language_priority(lang), repair_reason)
+    repair = wrong_language_repair_instruction(target_language_priority(lang), repair_reason, lang=lang)
     if repair:
         blocks.append(repair)
-    blocks.append("SOURCE TEXT\n" + str(original_text_full or ""))
+    blocks.append(pack["sourceHeading"] + "\n" + str(original_text_full or ""))
     return "\n\n".join(blocks)
+
 
 def canonical_boundary_fixture(
     lang: str,
@@ -348,18 +394,16 @@ def canonical_boundary_fixture(
 def canonical_prompt_contract(lang: str, *, want_memo: bool = True) -> dict:
     """Return provider-neutral prompt pieces for a direct/local adapter.
 
-    This endpoint contract intentionally contains no page text, translation,
-    credentials, character memory or series memory.  Those remain on the
-    caller's machine.  Joining ``staticSystemText`` with the appropriate output
-    contract (and caller-built runtime context between them) reproduces the
-    same semantic ordering used by :func:`build_system_split` for Cloud.
-
-    The legacy fields returned by ``/ai/prompt/default`` remain untouched;
-    this is an additive, versioned description for newer callers.
+    The plan contains no page content, credentials or runtime memory. Its
+    systemPolicy describes only the identity/data boundary; editableStyle is
+    rendered once in System by the live builders. Field names remain
+    compatible with existing callers, while compositionOrder and styleRole
+    describe the current role ownership. Legacy system-section helpers are
+    transport fixtures, not the live translation layout.
     """
     code = _normalize_lang(lang)
     style = lang_style(code)
-    system_policy = "\n".join((STYLE_PRIORITY, SYSTEM_BASE.strip()))
+    system_policy = instruction_pack(code)["identity"]
     target_instruction = lang_style(code).splitlines()[0].strip()
     structured_contract = (
         "OUTPUT — tp.translation.schema-object/1\n"
@@ -385,14 +429,11 @@ def canonical_prompt_contract(lang: str, *, want_memo: bool = True) -> dict:
     return {
         "version": CANONICAL_PROMPT_CONTRACT_VERSION,
         "compositionOrder": [
-            "editableStyle",
-            "systemPolicy",
-            "targetLanguageInstruction",
-            "sourceInputContract",
-            "imageHintIfAttached",
-            "runtimeContext",
-            "markerOutputContract",
+            "system.identity", "system.editableStyle", "user.task", "user.dataScope",
+            "user.sourceInputContract", "user.examplesIfEnabled", "user.runtimeContext",
+            "user.outputContract", "user.repairIfNeeded", "user.source",
         ],
+        "styleRole": "system",
         "editableStylePolicy": {
             "control": "optional_replace",
             "supportedModes": ["replace"],

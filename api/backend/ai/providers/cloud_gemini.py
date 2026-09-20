@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import TypedDict
 
 import os, re, time, httpx
-from backend.ai import wire_trace, accounting
+from backend.ai import wire_trace, accounting, content_stream
 from backend.ai.workload import guard_output_budget
 
 from backend.ai.generation_defaults import DEFAULT_GENERATION, output_token_budget
@@ -14,7 +14,7 @@ from backend.ai.clients.base import (
 from backend.ai.clients.provider_error import ProviderTransportError, safe_http_error
 from backend.ai.transports.cancellable_http import post_json
 from backend.ai.provider_contract import GenerationRequest, ModelListResult as ContractModelListResult, ProbeRequest, ProbeResponse, ProviderSpec, SystemPromptSection
-from backend.ai.providers.probe_support import response_error
+from backend.ai.providers.probe_support import response_error, response_error_details
 from backend.ai.providers.provider_helpers import (
     contract_model_status, model_status,
 )
@@ -71,29 +71,39 @@ def model_usable(model_id: str) -> bool:
                 and model not in MODEL_ALIASES)
 
 def _reasoning_capability(model_id: str) -> dict:
-    """Verified Gemini reasoning controls for an exact model family.
-
-    The Models API does not publish thinkingBudget/thinkingLevel metadata, so
-    TextPhantom adds only controls documented by Gemini for model families it
-    can identify exactly. Unknown families remain unknown rather than inheriting
-    a provider-wide switch.
-    """
+    """Verified Gemini reasoning controls for exact documented model families."""
     model = (model_id or "").strip().lower()
     if re.match(r"^gemini-2\.5-pro(?:-|$)", model):
         return {"supported": True, "mandatory": True, "default_enabled": True,
-                "control": "toggle", "dynamic": True}
+                "control": "levels", "dynamic": True,
+                "supported_efforts": ["low", "medium", "high"]}
     if re.match(r"^gemini-2\.5-flash-lite(?:-|$)", model):
         return {"supported": True, "mandatory": False, "default_enabled": False,
-                "control": "toggle", "dynamic": True}
+                "control": "levels", "dynamic": True,
+                "supported_efforts": ["none", "low", "medium", "high"],
+                "default_effort": "none"}
     if re.match(r"^gemini-2\.5-flash(?:-|$)", model):
         return {"supported": True, "mandatory": False, "default_enabled": True,
-                "control": "toggle", "dynamic": True}
+                "control": "levels", "dynamic": True,
+                "supported_efforts": ["none", "low", "medium", "high"]}
+
+    # Gemini 3+ uses model-specific thinking levels and cannot be represented
+    # as a universal boolean Off/On switch. Keep the exact documented levels.
+    level_sets = (
+        (r"^gemini-3\.(?:8|7)-flash(?:-|$)", ["low", "medium", "high"], "medium"),
+        (r"^gemini-3\.(?:6|5)-flash(?:-|$)", ["minimal", "low", "medium", "high"], "medium"),
+        (r"^gemini-3\.1-pro(?:-|$)", ["low", "medium", "high"], "high"),
+        (r"^gemini-3\.(?:5|1)-flash-lite(?:-|$)", ["minimal", "low", "medium", "high"], "minimal"),
+        (r"^gemini-3-flash(?:-|$)", ["minimal", "low", "medium", "high"], "high"),
+    )
+    for pattern, efforts, default_effort in level_sets:
+        if re.match(pattern, model):
+            return {"supported": True, "mandatory": True, "default_enabled": True,
+                    "control": "levels", "dynamic": True,
+                    "supported_efforts": efforts, "default_effort": default_effort}
     if model.startswith("gemini-3"):
-        # Gemini 3 uses levels rather than the 2.5 on/off budget contract. Keep
-        # the current popup's boolean control disabled instead of pretending an
-        # Off value maps to a provider-supported full thinking disable.
-        return {"supported": True, "mandatory": "pro" in model,
-                "default_enabled": True, "control": "levels", "dynamic": True}
+        return {"supported": True, "mandatory": True, "default_enabled": True,
+                "control": "levels", "dynamic": True}
     return {}
 
 def models_status(api_key: str, *, timeout_sec: float = 10.0) -> ModelListResult:
@@ -158,12 +168,17 @@ class GeminiAdapter:
         generation_config: dict = {"maxOutputTokens": 256 if cap.get("mandatory") or cap.get("control") == "levels" else 32}
         if cap.get("control") == "toggle" and cap.get("mandatory") is not True:
             generation_config["thinkingConfig"] = {"thinkingBudget": 0}
+        elif (cap.get("control") == "levels" and cap.get("mandatory") is not True
+              and "none" in (cap.get("supported_efforts") or [])):
+            generation_config["thinkingConfig"] = {"thinkingBudget": 0}
         payload = {"contents": [{"role": "user", "parts": [{"text": "Reply only OK."}]}],
                    "generationConfig": generation_config}
         with httpx.Client(timeout=request.timeout_sec) as client:
             response = client.post(url, json=payload)
         if not response.is_success:
-            return ProbeResponse(False, response.status_code, error=response_error(response))
+            return ProbeResponse(False, response.status_code,
+                error=response_error(response, api_key=request.api_key),
+                error_details=response_error_details(response, api_key=request.api_key))
         try:
             data = response.json()
             candidates = data.get("candidates") if isinstance(data, dict) else None
@@ -181,6 +196,7 @@ class GeminiAdapter:
             system_sections=request.system_sections, image_b64=request.image_b64,
             image_mime=request.image_mime, response_schema=dict(request.response_schema or {}) or None,
             thinking=request.thinking, cancel_check=request.cancel_check,
+            **({"history_messages": request.history_messages} if request.history_messages else {}),
             workload=dict(request.workload), model_capabilities=dict(request.model_capabilities),
             unit_count=request.unit_count,
         )
@@ -205,33 +221,58 @@ _THINKING_DEFAULT = (os.environ.get("TP_GEMINI_THINKING", "off") or "off").strip
 
 _THINKING_OFF_MODES = ("off", "fast", "none", "0", "false", "no")
 
-def _thinking_state(model: str, mode: str = "") -> tuple[bool, dict | None, str]:
-    mode = (mode or "").strip().lower() or _THINKING_DEFAULT
+def _thinking_state(model: str, mode: str = "", model_capabilities=None) -> tuple[bool, dict | None, str]:
+    mode = (mode or "").strip().lower() or "default"
     m = (model or "").strip().lower()
-    cap = _reasoning_capability(m)
+    native = _reasoning_capability(m)
+    external = (model_capabilities or {}).get("reasoning", {}) if isinstance(model_capabilities, dict) else {}
+    external = external if isinstance(external, dict) else {}
+    cap = native or external
     if not cap:
         return False, None, "unverified"
+    if not native:
+        active = cap.get("mandatory") is True or cap.get("default_enabled") is True
+        return bool(active), None, "provider_default_capability"
     if cap.get("control") == "levels":
-        # The popup does not expose level selection yet. Preserve Gemini's
-        # provider default rather than mapping boolean Off/On onto a false level.
-        return True, None, "provider_default_levels"
+        efforts = {str(value).strip().lower() for value in cap.get("supported_efforts", [])
+                   if isinstance(value, str)}
+        if re.match(r"^gemini-2\.5-(?:pro|flash|flash-lite)(?:-|$)", m):
+            # Gemini 2.5 exposes effort-like choices through a numeric
+            # thinkingBudget. Gemini 3 uses thinkingLevel instead. Keep this
+            # mapping in the Gemini provider leaf so shared reasoning policy
+            # remains provider-neutral.
+            if mode == "off" and cap.get("mandatory") is not True and "none" in efforts:
+                return False, {"thinkingBudget": 0}, "requested_off"
+            effort_budgets = {"low": 1024, "medium": 8192, "high": 24576}
+            if mode in efforts and mode in effort_budgets:
+                return True, {"thinkingBudget": effort_budgets[mode]}, f"requested_effort_{mode}"
+            active = cap.get("mandatory") is True or cap.get("default_enabled") is True
+            return bool(active), None, "provider_default_levels"
+        if mode in efforts:
+            return True, {"thinkingLevel": mode}, f"requested_effort_{mode}"
+        # Stale Off/On profiles and Provider default all preserve the model's
+        # native behavior. The UI exposes exact levels for level-based models.
+        active = cap.get("mandatory") is True or cap.get("default_enabled") is True
+        return bool(active), None, "provider_default_levels"
     mandatory = cap.get("mandatory") is True
-    if mode in _THINKING_OFF_MODES:
-        if mandatory:
-            return True, None, "provider_default_mandatory"
+    if mode == "off" and not mandatory:
         return False, {"thinkingBudget": 0}, "requested_off"
-    if mode in ("on", "true", "yes", "1"):
+    if mode == "on":
         return True, {"thinkingBudget": -1}, "requested_on"
-    # Gemini 2.5 Flash defaults to dynamic thinking, while Flash-Lite defaults
-    # to no thinking. The capability tells budgeting which behavior applies.
     return cap.get("default_enabled") is not False, None, "provider_default"
 
-def _thinking_config_for(model: str, mode: str = "") -> dict | None:
-    return _thinking_state(model, mode)[1]
+def _thinking_config_for(model: str, mode: str = "", model_capabilities=None) -> dict | None:
+    return _thinking_state(model, mode, model_capabilities)[1]
 
 def _post_once(api_key: str, model: str, payload: dict, cancel_check=None) -> "httpx.Response":
     url = _ENDPOINT.format(model=model, key=api_key)
-    return post_json(
+    if content_stream.active():
+        from backend.ai.transports.native_stream import post_native_stream
+        url = url.replace(":generateContent?", ":streamGenerateContent?alt=sse&")
+        post = post_native_stream
+    else:
+        post = post_json
+    return post(
         url, json=payload, headers=None, timeout=DEFAULT_GENERATION.timeout_sec,
         cancel_check=cancel_check, provider="gemini", model=model,
         trace_file="ai/providers/cloud_gemini.py",
@@ -330,6 +371,7 @@ def generate(
     workload=None,
     model_capabilities=None,
     unit_count: int | None = None,
+    history_messages=(),
 ) -> ChatResult:
     """Call generateContent once without model or option fallback."""
     source_text = "\n\n".join(p for p in user_parts if p != "")
@@ -341,15 +383,16 @@ def generate(
     instruction_parts = [
         {"text": section.text} for section in system_sections if section.text
     ] or [{"text": system_text}]
-    reasoning_active, thinking_cfg, thinking_applied = _thinking_state(model, thinking)
+    reasoning_active, thinking_cfg, thinking_applied = _thinking_state(model, thinking, model_capabilities)
+    from backend.ai.translation_paths.messages import native_history
     payload = {
         "systemInstruction": {"parts": instruction_parts},
-        "contents": [{"role": "user", "parts": parts}],
+        "contents": native_history(history_messages, "gemini") + [{"role": "user", "parts": parts}],
         "generationConfig": {
             "maxOutputTokens": guard_output_budget(
                 output_token_budget(user_parts, system_text, reasoning=reasoning_active, unit_count=unit_count),
                 workload=workload, limits=(model_capabilities or {}).get("limits"),
-                system=system_text, parts=user_parts, schema=response_schema, image=bool(image_b64)),
+                system=system_text, parts=user_parts, schema=response_schema, image=bool(image_b64), history=history_messages),
             "responseMimeType": "text/plain",
         },
     }
@@ -371,7 +414,8 @@ def generate(
         payload["generationConfig"]["thinkingConfig"] = thinking_cfg
 
     wire_trace.provider_request(
-        url=_ENDPOINT.format(model=model, key=api_key), headers={}, payload=payload,
+        url=(_ENDPOINT.format(model=model, key=api_key).replace(":generateContent?", ":streamGenerateContent?alt=sse&")
+             if content_stream.active() else _ENDPOINT.format(model=model, key=api_key)), headers={}, payload=payload,
     )
 
     if cancel_check is not None and cancel_check():
@@ -445,7 +489,8 @@ def generate(
         finish_reason=finish or None, provider_ms=provider_ms, parse_ms=parse_ms,
         usage_source="provider" if any(v is not None for v in (inp, out, total)) else None,
         thinking_tokens=usage_details.get("thinkingTokens"), terminal_completed=True,
-        terminal_evidence="non_stream_body_read", thinking_applied=thinking_applied,
+        terminal_evidence="native_sse_terminal" if content_stream.active() else "non_stream_body_read", thinking_applied=thinking_applied,
         requested_output_tokens=payload["generationConfig"]["maxOutputTokens"],
         cached_input_tokens=usage_details.get("cachedInputTokens"), usage_details=usage_details,
+        first_content_ms=getattr(r, "extensions", {}).get("first_content_ms"),
     )

@@ -98,4 +98,17 @@ for token in ("<<TP_P1abc>>", "<<TP_P1_x>>", "<<TP_P broken>>"):
     assert isolated.ai_text_full == "<<TP_P0>>\nหนึ่ง\n\n<<TP_P1>>\n\n\n<<TP_P2>>\nสาม"
     assert isolated.missing_ids == ("P1",)
 
+
+# A provider may close one physical-line record with a single `>` and then
+# continue with valid sibling records. Salvage those valid siblings instead of
+# turning the entire remaining response into one malformed island.
+image_ids = ["I2_P0", "I2_P1", "I2_P2", "I2_P3"]
+line_malformed = decode_translation_response(
+    "<<I2_P0:เสียตัวแรก>\n<<I2_P1:เสียตัวที่สอง>\n<<I2_P2:ดีสาม>>\n<<I2_P3:ดีสี่>>",
+    image_ids,
+)
+assert line_malformed.missing_ids == ("I2_P0", "I2_P1")
+assert values(line_malformed) == ["", "", "ดีสาม", "ดีสี่"]
+assert line_malformed.malformed_line_count == 2
+
 print("Python tolerant marker output parity passed")

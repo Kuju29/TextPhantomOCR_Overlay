@@ -16,6 +16,7 @@ import { isLocalHostUrl } from "../../shared/ai/providers/local-spec.js";
 import { createTab, queryTabs } from "../../shared/browser-api.js";
 import { broadcast, sendRuntimeMessage } from "../../shared/messaging.js";
 import { isLocalAiProvider } from "../../shared/constants.js";
+import { normalizeReasoningPreference } from "../../shared/reasoning-preference.js";
 import {
   AI_PROMPT_MAX_CHARS,
   normalizeAiModel,
@@ -71,6 +72,14 @@ export function bindPopupEvents(deps) {
     setProviderTransitionPending,
   } = deps;
   let endpointTimer = null;
+  const invalidateProviderRequests = () => {
+    state.aiMetaSeq = (state.aiMetaSeq || 0) + 1;
+    state.aiProbeSeq = (state.aiProbeSeq || 0) + 1;
+    state.lastAiProbe = null;
+    state.aiModelBlocked = true;
+    providerMetaController.cancelSchedule();
+    toggleUi();
+  };
   els.aiPromptReset?.addEventListener("click", () =>
     resetPromptForLang(els.lang.value),
   );
@@ -105,6 +114,7 @@ export function bindPopupEvents(deps) {
   });
 
   els.mode.addEventListener("change", async () => {
+    invalidateProviderRequests();
     await setStorage({ mode: els.mode.value });
     state.modelDirty = false;
     toggleUi();
@@ -113,6 +123,7 @@ export function bindPopupEvents(deps) {
   });
 
   els.lang.addEventListener("change", async () => {
+    invalidateProviderRequests();
     const prevLang = state.desiredLang;
     state.desiredLang = els.lang.value || state.desiredLang;
     if (canUseAiUi()) await flushPromptForLang(prevLang, state.desiredAiModel);
@@ -124,6 +135,7 @@ export function bindPopupEvents(deps) {
   });
 
   els.sources.addEventListener("change", async () => {
+    invalidateProviderRequests();
     if (canUseAiUi())
       await flushPromptForLang(state.desiredLang, state.desiredAiModel);
     state.modelDirty = false;
@@ -137,6 +149,7 @@ export function bindPopupEvents(deps) {
   });
 
   els.apiUrl.addEventListener("input", (e) => {
+    invalidateProviderRequests();
     state.lastApiOk = false;
     state.healthSeq += 1;
     setEmojiStatus("loading", "Not checked for this URL yet");
@@ -147,6 +160,7 @@ export function bindPopupEvents(deps) {
   els.apiUrl.addEventListener("blur", (e) => scheduleSaveApi(e.target.value));
 
   els.aiKey.addEventListener("input", () => {
+    invalidateProviderRequests();
     state.pendingCredentialSave = true;
     state.modelDirty = false;
     state.lastAiResolve = null;
@@ -184,7 +198,7 @@ export function bindPopupEvents(deps) {
     // Invalidate old-provider discovery and debounced writes before the first
     // await. A slow Ollama reply must never repopulate the Model UI after the
     // user has already switched to LM Studio (or another provider).
-    state.aiMetaSeq += 1;
+    invalidateProviderRequests();
     localConnectionController.invalidate(
       "Connection test cancelled because the Local AI provider changed.",
     );
@@ -331,7 +345,7 @@ export function bindPopupEvents(deps) {
   });
 
   els.aiBaseUrl?.addEventListener("input", () => {
-    state.aiMetaSeq += 1;
+    invalidateProviderRequests();
     localConnectionController.invalidate(
       "Connection test cancelled because the Local AI URL changed.",
     );
@@ -370,7 +384,7 @@ export function bindPopupEvents(deps) {
     }, 400);
   });
   els.aiBaseUrl?.addEventListener("blur", async () => {
-    state.aiMetaSeq += 1;
+    invalidateProviderRequests();
     clearLocalCapacitySnapshot();
     const baseUrl = (els.aiBaseUrl.value || "").trim();
     const provider = String(els.aiProvider?.value || "").trim();
@@ -461,21 +475,19 @@ export function bindPopupEvents(deps) {
   });
 
   els.aiThinking?.addEventListener("change", async () => {
-    const value = els.aiThinking.value === "on" ? "on" : "off";
-    const provider = els.aiProvider?.value;
-    const transitionRevision = state.providerTransitionRevision;
-    const local = isLocalAiProvider(provider);
-    if (local) {
-      localConnectionController.invalidate("AI thinking changed — restarting verification.");
-      state.aiModelBlocked = true;
-      toggleUi();
-    }
+    const value = normalizeReasoningPreference(els.aiThinking.value, "minimum");
+    // Reasoning preference is a generation setting, not model availability.
+    // Local discovery is metadata-only, so changing Lowest/Off/On/effort must
+    // never reload the runtime, re-list installed models, or invalidate a fresh
+    // availability snapshot. The exact leaf adapter maps the saved preference
+    // when the first real translation is dispatched.
     await profileController.saveProfile({ thinking: value });
-    if (local && els.aiProvider?.value === provider &&
-        state.providerTransitionRevision === transitionRevision &&
-        (els.aiThinking.value === "on" ? "on" : "off") === value) {
-      await providerMetaController.refresh();
-    }
+    toggleUi();
+  });
+
+
+  els.aiStyleExamples?.addEventListener("change", async () => {
+    await profileController.saveProfile({ styleExamples: els.aiStyleExamples.checked === true });
   });
 
   els.aiMemoryMode?.addEventListener("change", async () => {
@@ -487,6 +499,7 @@ export function bindPopupEvents(deps) {
   });
 
   els.aiModel.addEventListener("change", async () => {
+    invalidateProviderRequests();
     const prevModel = state.desiredAiModel;
     const nextModel = normalizeAiModel(els.aiModel.value || prevModel);
     const flushed = await flushPendingAiEditsForSwitch(

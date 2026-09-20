@@ -1,4 +1,4 @@
-"""Durable server repair transitions; no provider/network calls."""
+"""Temporary server repair transitions; no provider/network calls."""
 import concurrent.futures
 import json
 import sys
@@ -49,7 +49,7 @@ class PoolTest(unittest.TestCase):
   self.make(1,1)
   def claim(i):
    try:
-    RepairStore(self.path).transact('run',TOKEN,lambda r:s.claim(r,dict(taskId=f't{i}',executor=f'w{i}',route='server',ids=['R0'])))
+    self.db.transact('run',TOKEN,lambda r:s.claim(r,dict(taskId=f't{i}',executor=f'w{i}',route='server',ids=['R0'])))
     return True
    except s.PoolError:return False
   with concurrent.futures.ThreadPoolExecutor(8) as pool: results=list(pool.map(claim,range(16)))
@@ -60,7 +60,6 @@ class PoolTest(unittest.TestCase):
   self.db.transact('run',TOKEN,lambda r:s.claim(r,task))
   self.db.transact('run',TOKEN,lambda r:s.begin(r,'t','w'))
   self.db.transact('run',TOKEN,lambda r:s.answer_task(r,'t',dict(translations=[dict(id='R0',text='ไทย')],apiKey='secret')))
-  self.db=RepairStore(self.path)
   snapshot=self.db.read('run',TOKEN);self.assertEqual(snapshot['tasks'][0]['state'],'answered')
   self.assertNotIn('secret',json.dumps(snapshot))
   with self.assertRaisesRegex(s.PoolError,'invalid_repair_acceptance'):
@@ -103,5 +102,13 @@ class PoolTest(unittest.TestCase):
   self.assertEqual(out['phase'],'done');self.assertEqual(out['pending'],[]);self.assertEqual(out['unresolved'],1)
   self.db.now=lambda:10**15
   with self.assertRaisesRegex(s.PoolError,'not_found'):self.db.read('run',TOKEN)
+ def test_existing_disk_state_is_untouched_and_not_restored(self):
+  self.path.write_bytes(b'old-state-must-remain-untouched')
+  self.db=RepairStore(self.path)
+  self.assertEqual(self.db.register('fresh',TOKEN,['p0'],'caller')['id'],'fresh')
+  self.assertEqual(self.path.read_bytes(),b'old-state-must-remain-untouched')
+  self.assertEqual(list(self.path.parent.iterdir()),[self.path])
+  with self.assertRaisesRegex(s.PoolError,'not_found'):
+   RepairStore(self.path).read('fresh',TOKEN)
 
 if __name__=='__main__':unittest.main()

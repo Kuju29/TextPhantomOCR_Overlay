@@ -1,3 +1,11 @@
+import { isProviderBillingFailure } from "../../shared/error-contract.js";
+import { uncertainRepairIds } from "../../shared/ai/repair-alignment.js";
+import { createAiWireRecorder, aiWireTraceEnabled } from "../ai/wire-trace.js";
+import { budgetDiagnostic, rejectedBudgetDiagnostic, resultDiagnostic } from "../../shared/ai/request-diagnostics.js";
+import { rememberDiagnostic } from "../ai/recent-diagnostics.js";
+import { note as diagnosticNote } from "../../shared/trace.js";
+import { repairSourceContext } from "./source-evidence.js";
+import { orderRepairUnits, prepareConversationRepairWire } from "./conversation-repair-wire.js";
 import { persistProviderGeneration, failureUsageDetails } from "../../shared/ai-usage.js";
 import { isLocalAiTarget } from "../../shared/constants.js";
 import { workloadController } from '../ai/workload-controller.js';
@@ -9,16 +17,24 @@ import { pageImageEnabled } from '../../shared/page-image-policy.js';
 const cancelled = signal => {
   if (signal?.aborted) throw new DOMException('Repair cancelled', 'AbortError');
 };
-export function repairValidation(answer, units, targetLang) {
+export function repairValidation(answer, units, targetLang, wireToAlias = new Map()) {
   const expected = new Set(units.map(u => u.id));
+  const unknown = answer?.meta?.contractDiagnostics?.ignoredUnknownIds || [];
+  const wireIds = wireToAlias.size ? [...wireToAlias.keys()] : [...expected];
+  const uncertain = new Set(Array.isArray(answer?.meta?.alignmentUncertainIds)
+    ? answer.meta.alignmentUncertainIds
+    : uncertainRepairIds(wireIds, unknown).map(id => wireToAlias.get(id) || id));
+
   const counts = new Map();
   for (const row of answer?.translations || []) counts.set(row.id, (counts.get(row.id) || 0) + 1);
   const diagnostics = diagnoseTargetScripts(answer?.translations || [], targetLang, units);
   const rejectedRows = diagnostics.filter(x => x.decision === 'reject');
   const rejected = new Set(rejectedRows.map(x => x.id));
   const accepted = (answer?.translations || []).filter(row => expected.has(row.id) && counts.get(row.id) === 1 &&
-    String(row.text || '').trim() && !rejected.has(row.id)).map(row => row.id);
-  return { accepted, wrongLanguageCount: rejectedRows.length, diagnostics };
+    String(row.text || '').trim() && !rejected.has(row.id) && !uncertain.has(row.id)).map(row => row.id);
+  return { accepted, wrongLanguageCount: rejectedRows.length, diagnostics,
+    alignmentUncertainIds:[...uncertain].filter(id => expected.has(id)),
+    alignmentStatus:uncertain.size ? "uncertain" : "not_semantically_verified" };
 }
 export function acceptedRepairIds(answer, units, targetLang) {
   return repairValidation(answer, units, targetLang).accepted;
@@ -26,6 +42,11 @@ export function acceptedRepairIds(answer, units, targetLang) {
 
 // Only bounded numeric usage evidence may cross repair progress sanitizers.
 export function repairUsageDiagnostic(data = {}) {
+  if(data.schema === "tp.conversation/1") return globalThis.TPAuditSchema.sanitizeConversation(data);
+  if (data.schema === 'tp.audit/1' && data.event === 'usage_ledger') {
+    // Preserve the typed record through both compact trace sanitizers.
+    return globalThis.TPAuditSchema.sanitize(data);
+  }
   return {
     ...Object.fromEntries(['inputTokens','outputTokens','totalTokens','generationAttempts',
       'beforeRequests','afterRequests','beforeTotalTokens','afterTotalTokens']
@@ -34,6 +55,13 @@ export function repairUsageDiagnostic(data = {}) {
     ...Object.fromEntries(['replayed','deduplicated']
       .filter(key => typeof data[key] === 'boolean').map(key => [key, data[key]])),
   };
+}
+
+// Provider telemetry has its own phase vocabulary; never let it own repair lifecycle.
+export function repairRequestProgress(event, data, taskId, unitCount) {
+  const diagnostic = repairUsageDiagnostic(data);
+  return { phase:'repair_request', event, taskId, unitCount,
+    ...(diagnostic.schema ? {diagnostic} : diagnostic) };
 }
 
 // Recovery may bypass translateUnits(): count an already observed server receipt
@@ -56,14 +84,31 @@ export async function executeRepairPool({ run, snapshot, executor, signal, getPa
   receiptPollBudgetMs = 60_000, receiptPollIntervalMs = 1_500,
 }) {
   const profiles = new Map();
+  const repairRecorders = [];
+  const flushRepairEvidence = () => Promise.all(repairRecorders.map(recorder =>
+    recorder?.flush?.(Number(capabilities?.aiWireTraceRelay?.timeoutMs) || 1500)));
   async function refresh() { return api(run, '', undefined, { signal }); }
   async function commit(task, answer, page) {
     await accountRecoveredRepair(run, task, answer);
-    const validation = repairValidation(answer, task.units, page.targetLang);
+    // Recovery uses source checkpoints, not guesses from the order of aliases.
+    let wireToAlias = new Map();
+    if (page.ai?.translation_mode === "conversation" &&
+        (answer?.meta?.contractDiagnostics?.ignoredUnknownIds || []).length &&
+        !Array.isArray(answer?.meta?.alignmentUncertainIds)) {
+      const pages = new Map();
+      for (const pageId of new Set(task.units.map(unit => unit.pageId))) {
+        const source = pageId === page.pageId ? page : await getPage(pageId);
+        if (source) pages.set(pageId, source);
+      }
+      wireToAlias = prepareConversationRepairWire(pages, task.units, true).wireToAlias;
+    }
+    const validation = repairValidation(answer, task.units, page.targetLang, wireToAlias);
     const accepted = validation.accepted;
     onProgress({ phase: 'repair_validation', taskId: task.id, unitCount: task.units.length,
       acceptedCount: accepted.length, rejectedCount: task.units.length - accepted.length,
-      wrongLanguageCount: validation.wrongLanguageCount });
+      wrongLanguageCount: validation.wrongLanguageCount,
+      alignmentUncertainCount: validation.alignmentUncertainIds.length,
+      alignmentStatus: validation.alignmentStatus });
     // Save the reply before acknowledging it. A lost ACK can be replayed
     // idempotently without a second provider invocation.
     const acceptedSet = new Set(accepted);
@@ -71,7 +116,8 @@ export async function executeRepairPool({ run, snapshot, executor, signal, getPa
     const wrongLanguageIds = [...new Set(validation.diagnostics
       .filter(row => row.decision === 'reject' && expected.has(row.id) && !acceptedSet.has(row.id))
       .map(row => row.id))];
-    await checkpointTask({ id: task.id, state: 'answered', answer, accepted, wrongLanguageIds });
+    await checkpointTask({ id: task.id, state: 'answered', answer, accepted, wrongLanguageIds,
+      alignmentUncertainIds: validation.alignmentUncertainIds });
     const next = await api(run, `tasks/${task.id}/complete`, {
       accepted, ...(task.route === 'direct-local' ? { answer } : {}),
     }, { signal });
@@ -148,26 +194,58 @@ export async function executeRepairPool({ run, snapshot, executor, signal, getPa
     const first = rows[0];
     const page = await getPage(first?.pageId);
     if (!page) throw Object.assign(new Error('Repair checkpoint missing; no source was resent'), { code: 'repair_checkpoint_missing' });
+    const pages = new Map();
+    for (const pageId of new Set(rows.map(row => row.pageId))) {
+      const captured = pageId === page.pageId ? page : await getPage(pageId);
+      if (!captured) throw Object.assign(new Error('Repair checkpoint missing'), {code:'repair_checkpoint_missing'});
+      pages.set(pageId, captured);
+    }
+    const sourceContextForUnits = units => repairSourceContext(pages, units);
     const resolvedAi = await resolveAi(page);
-    let baseAi = { ...resolvedAi, repair_reason: '' };
+    const conversationRepair = resolvedAi?.translation_mode === "conversation";
+    const prepareRepairWire = units => prepareConversationRepairWire(pages, units, conversationRepair);
+    let baseAi = { ...resolvedAi, page_context: [], repair_reason: '', conversation: {...(resolvedAi.conversation || {}), branch:'repair'} };
     let workloadSession = profiles.get(groupKey);
     if (!workloadSession) {
-      workloadSession = await planner.open({ ai: baseAi, route: page.route, sourceLang: page.sourceLang,
-        targetLang: page.targetLang, image: pageImageEnabled(baseAi.send_image) });
+      workloadSession = await planner.open({ ai: { ...baseAi, repair_reason: "wrong_target_script" }, route: page.route, sourceLang: page.sourceLang,
+        targetLang: page.targetLang, image: pageImageEnabled(baseAi.send_image), phase: "repair", sourceContextForUnits });
       profiles.set(groupKey, workloadSession);
     }
     if (workloadSession.ai) baseAi = { ...workloadSession.ai, repair_reason: '' };
-    value = { groupKey, page, baseAi, workloadSession };
+    value = { groupKey, page, baseAi, workloadSession, sourceContextForUnits, conversationRepair, prepareRepairWire,
+      orderUnits: units => orderRepairUnits(pages, units) };
     groupContexts.set(groupKey, value);
     return value;
   }
 
   async function executePlan(plan) {
     cancelled(signal);
-    const { page, units, estimate, preflightError, groupKey, workloadSession } = plan;
+    const { page, units, wire, estimate, preflightError, groupKey, workloadSession } = plan;
     const ai = { ...plan.ai };
     const taskId = crypto.randomUUID();
     let task;
+    const operationId=`repair:${run.id}:${taskId}`;
+    // The browser owns Local repair just as it owns initial generation.
+    // Reuse the existing relay; no provider call or new logging endpoint.
+    const wireTrace = page.route === 'direct-local' ? createAiWireRecorder({
+      enabled: aiWireTraceEnabled(capabilities), operationId, traceId: run.id,
+      identity: { recordKind: 'provider_request', attemptKind: 'repair', engine: 'runsextension',
+        route: page.route, provider: ai.provider, model: ai.model, batchId: run.batchId, jobId: taskId, origins: wire?.origins },
+      apiBase: run.base, relay: capabilities?.aiWireTraceRelay,
+    }) : null;
+    if (wireTrace) repairRecorders.push(wireTrace);
+    await wireTrace?.('units', units.map(u => ({id:u.id,text:u.text})));
+    const diagnosticScope={operationId,profileId:workloadSession.key?.slice(0,16),attemptKind:'repair'};
+    const reportResult=(observed,error=null,value=null)=>{
+      const result=resultDiagnostic(observed,{...diagnosticScope,error});
+      diagnosticNote('background/repair/executor.js','translationResult',result,run.id);
+      rememberDiagnostic({provider:ai.provider,model:ai.model,operationId,result,layout:value?.meta?.promptLayout,coordination:value?.meta?.cacheCoordination,conversation:value?.meta?.conversation});
+    };
+    const budget=preflightError ? rejectedBudgetDiagnostic(preflightError,{...diagnosticScope,pageUnits:plan.poolUnits || units.length})
+      : budgetDiagnostic({units,estimate,splitReason:plan.splitReason || 'end_of_page'},
+      {...diagnosticScope,pageUnits:plan.poolUnits || units.length});
+    diagnosticNote('background/repair/executor.js','translationBudget',budget,run.id);
+    rememberDiagnostic({provider:ai.provider,model:ai.model,operationId,budget});
 
     const claim = async () => {
       cancelled(signal);
@@ -180,6 +258,9 @@ export async function executeRepairPool({ run, snapshot, executor, signal, getPa
     };
 
     if (preflightError) {
+      await wireTrace?.('terminal', {state:'failed',stage:'input_budget',code:preflightError.code,
+        requestDispatched:false,providerAttempts:0,terminal:true});
+      reportResult(null,preflightError);
       await claim();
       cancelled(signal);
       await api(run, `tasks/${taskId}/fail`, { reason: preflightError.code || 'workload_preflight_rejected' }, { signal });
@@ -207,19 +288,24 @@ export async function executeRepairPool({ run, snapshot, executor, signal, getPa
         }
         await checkpointTask({ id: taskId, state: 'dispatched', ids: active.ids });
         cancelled(signal);
-        return translate(active.units.map(u => ({ id: u.id, text: u.text })), {
+        const activeByAlias = new Set(active.units.map(u => String(u.id)));
+        const providerUnits = wire.wireUnits.filter((_, index) => activeByAlias.has(String(wire.taskUnits[index]?.id)));
+        return translate(providerUnits, {
           route: page.route, ai: { ...ai, workload }, rate: page.rate, unlimited: page.unlimited,
           targetLang: page.targetLang, sourceLang: page.sourceLang, base: run.base,
           imageDataUri: pageImageEnabled(ai.send_image) ? ai._repairImageDataUri || '' : '',
           batchId: run.batchId, operationId: `repair:${run.id}:${taskId}`,
-          jobId: taskId, imageId: '', signal, traceId: run.id, capabilities,
+          jobId: taskId, imageId: '', signal, traceId: run.id, capabilities, wireTrace,
           tabSession: String(page?.ctx?.sessionId || run?.sessionId || ''),
           repairClaim: page.route === 'server' ? { runId: run.id, taskId, token: run.token } : null,
-          trace: (event, data) => onProgress({ phase: 'repair_request', event, taskId,
-            unitCount: active.units.length, ...repairUsageDiagnostic(data) }),
+          trace: (event, data) => onProgress(repairRequestProgress(event, data, taskId, active.units.length)),
         });
       });
     } catch (error) {
+      await wireTrace?.('terminal', {state:signal?.aborted?'cancelled':'failed',stage:'provider_generation',
+        code:String(error?.code || 'repair_generation_failed'), requestDispatched:error?.requestDispatched ?? null,
+        providerAttempts:Number.isFinite(error?.providerAttempts)?error.providerAttempts:null,terminal:true});
+      if (signal?.aborted) reportResult(null,Object.assign(new Error("Cancelled"),{name:"AbortError"}));
       cancelled(signal);
       // If no claim was created, this was a scheduler/capacity failure before
       // provider ownership. There is no durable task to fail.
@@ -228,11 +314,12 @@ export async function executeRepairPool({ run, snapshot, executor, signal, getPa
       try {
         observed = workloadSession.observe({ units: task.units || units, error, plan: estimate });
       } catch {}
+      reportResult(observed,error);
       const latest = await refresh();
       const latestTask = latest.tasks.find(x => x.id === taskId);
       if (latestTask?.state === 'answered') answer = latestTask.answer;
       else if (['failed', 'unknown', 'done'].includes(latestTask?.state)) return { groupKey, taskId, outcome: observed?.outcome || 'failed',
-        capacityFailure: capacityCode(error?.code) || ['length','structure'].includes(observed?.outcome), code: String(error?.code || '') };
+        billingFailure:isProviderBillingFailure(error), capacityFailure: capacityCode(error?.code) || ['length','structure'].includes(observed?.outcome), code: String(error?.code || '') };
       else if (latestTask?.state === 'running' && page.route === 'server') {
         throw Object.assign(new Error('Cloud repair is still running; its receipt can be resumed'), { code: 'repair_receipt_pending' });
       } else {
@@ -241,19 +328,36 @@ export async function executeRepairPool({ run, snapshot, executor, signal, getPa
           unknown: !Number(error.generationAttempts || error.providerAttempts || 0),
         }, { signal });
         return { groupKey, taskId, outcome: observed?.outcome || 'failed',
+          billingFailure:isProviderBillingFailure(error),
           capacityFailure: capacityCode(error?.code) || ['length','structure'].includes(observed?.outcome),
           code: String(error?.code || 'repair_generation_failed') };
 
       }
     }
     cancelled(signal);
-    const validation = repairValidation(answer, task.units || units, page.targetLang);
+    if (page.route === "direct-local" && answer && wire?.wireToAlias) {
+      const mapId = id => wire.wireToAlias.get(String(id)) || String(id);
+      const meta = {...(answer.meta || {})};
+      for (const key of ["omittedIds", "declinedIds", "wrongLanguageIds", "alignmentUncertainIds"])
+        if (Array.isArray(meta[key])) meta[key] = meta[key].map(mapId);
+      answer = {...answer, translations:(answer.translations || []).map(row => ({...row,id:mapId(row.id)})),
+        missing:Array.isArray(answer.missing) ? answer.missing.map(mapId) : answer.missing, meta};
+    }
+    const validation = repairValidation(answer, task.units || units, page.targetLang, wire?.wireToAlias);
     const wrongLanguage = validation.diagnostics.filter(row => row.decision === 'reject').map(row => row.id);
     const acceptedSet = new Set(validation.accepted);
     const missing = (task.units || units).map(row => row.id).filter(id => !acceptedSet.has(id) && !wrongLanguage.includes(id));
     let observed = null;
     try { observed = workloadSession.observe({ units: task.units || units, answer,
       defects: { missing, wrongLanguage }, plan: estimate }); } catch {}
+    reportResult(observed,null,answer);
+    await wireTrace?.('validation', {acceptedIds:validation.accepted,missingIds:missing,
+      wrongLanguageIds:wrongLanguage,alignmentUncertainIds:validation.alignmentUncertainIds,
+      alignmentStatus:validation.alignmentStatus,stage:'target_language_validation'});
+    await wireTrace?.('terminal', {state:missing.length || wrongLanguage.length ? 'partial' : 'succeeded',
+      stage:'target_language_validation', placementStatus:'pending_repair_apply',
+      missingIds:missing,wrongLanguageIds:wrongLanguage,translated:validation.accepted.length,
+      complete:missing.length===0 && wrongLanguage.length===0,terminal:true});
     await commit(task, answer, page);
     return { groupKey, taskId, outcome: observed?.outcome || (missing.length ? 'structure' : wrongLanguage.length ? 'language' : 'ok'),
       capacityFailure: ['length','structure'].includes(observed?.outcome) || missing.length > 0,
@@ -289,7 +393,7 @@ export async function executeRepairPool({ run, snapshot, executor, signal, getPa
     // terminal so the final bulk apply can proceed with earlier successes.
     for (const [groupKey, circuit] of groupCircuits) {
       if (circuit.open && (snapshot.pending || []).some(row => row.groupKey === groupKey))
-        await terminalizeCircuit(groupKey, 'repair_capacity_circuit_open');
+        await terminalizeCircuit(groupKey, circuit.reason || 'repair_reliability_circuit_open');
     }
     if (!(snapshot.pending || []).length) break;
 
@@ -303,9 +407,13 @@ export async function executeRepairPool({ run, snapshot, executor, signal, getPa
       let remaining = pending.filter(row => row.groupKey === groupKey);
       if (!remaining.length) continue;
       const context = await groupContext(groupKey, remaining);
-      for (let planIndex = 0; planIndex < MAX_PLANS_PER_GROUP_WAVE && remaining.length; planIndex++) {
+      if (context.conversationRepair) remaining = context.orderUnits(remaining);
+      const plansPerWave = context.conversationRepair ? 1 : MAX_PLANS_PER_GROUP_WAVE;
+      for (let planIndex = 0; planIndex < plansPerWave && remaining.length; planIndex++) {
         let chunk, preflightError;
-        try { chunk = context.workloadSession.next(remaining, 0); }
+        try { chunk = context.conversationRepair
+          ? context.workloadSession.nextRepair(remaining, context.sourceContextForUnits)
+          : context.workloadSession.next(remaining, 0); }
         catch (error) { chunk = { units: [remaining[0]], estimate: {} }; preflightError = error; }
         let units = Array.isArray(chunk?.units) && chunk.units.length ? chunk.units : [remaining[0]];
         const remainingIds = new Set(remaining.map(row => row.id));
@@ -313,9 +421,11 @@ export async function executeRepairPool({ run, snapshot, executor, signal, getPa
         if (!units.length) units = [remaining[0]];
         const selected = new Set(units.map(row => row.id));
         const repairReason = units.some(row => row.reason === 'wrong_language') ? 'wrong_target_script' : '';
-        plans.push({ ...context, page: context.page,
-          ai: { ...context.baseAi, repair_reason: repairReason }, units,
-          estimate: chunk?.estimate || {}, preflightError });
+        const wire = context.prepareRepairWire(units);
+        plans.push({ ...context, page: context.page, wire,
+          ai: { ...context.baseAi, repair_reason: repairReason, source_context: wire.sourceContext,
+            conversation: {...(context.baseAi.conversation || {}), branch:"repair", origins:wire.origins} }, units:wire.taskUnits,
+          estimate: chunk?.estimate || {}, splitReason:chunk.splitReason, poolUnits:remaining.length, preflightError });
         remaining = remaining.filter(row => !selected.has(row.id));
         if (preflightError) break;
       }
@@ -329,10 +439,15 @@ export async function executeRepairPool({ run, snapshot, executor, signal, getPa
     // until every result in this bounded wave has been measured.
     const settled = await Promise.allSettled(plans.map(executePlan));
     const fatal = settled.find(result => result.status === 'rejected');
-    if (fatal) throw fatal.reason;
+    if (fatal) { await flushRepairEvidence(); throw fatal.reason; }
     for (const result of settled.map(item => item.value).filter(Boolean)) {
       const current = groupCircuits.get(result.groupKey) || { consecutive: 0, open: false };
-      if (result.hardFailure) {
+      if (result.capacityFailure) current.reason = result.hardFailure || result.outcome === 'length'
+        ? 'repair_capacity_circuit_open' : 'repair_reliability_circuit_open';
+      if (result.billingFailure) {
+        current.reason = "billing_required";
+        current.open = true;
+      } else if (result.hardFailure) {
         current.consecutive = 2;
         current.open = true;
       } else if (result.capacityFailure) {
@@ -352,6 +467,7 @@ export async function executeRepairPool({ run, snapshot, executor, signal, getPa
   onProgress({ phase: 'applying', repaired: snapshot.repaired, unresolved: snapshot.unresolved,
     failedUnits: snapshot.failedUnits, initialAccepted: snapshot.initialAccepted, unverified: snapshot.unverified });
   await applyResults(snapshot.results || []);
+  await flushRepairEvidence();
   cancelled(signal);
   return snapshot;
 }

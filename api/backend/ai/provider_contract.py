@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Protocol, runtime_checkable
 
+from backend.ai.reasoning_preference import normalize_reasoning_preference
+
 CancelCheck = Callable[[], bool]
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +51,8 @@ class GenerationRequest:
     expected_ids: tuple[str, ...] = ()
     model_capabilities: Mapping[str, Any] = field(default_factory=dict)
     workload: Mapping[str, Any] = field(default_factory=dict)
+    cache_context: Mapping[str, Any] = field(default_factory=dict, repr=False)
+    history_messages: tuple[Mapping[str, Any], ...] = field(default=(), repr=False)
     cancel_check: CancelCheck | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -60,14 +64,14 @@ class GenerationRequest:
             raise ValueError("model is required")
         if self.unit_count is not None and self.unit_count < 0:
             raise ValueError("unit_count cannot be negative")
-        thinking = str(self.thinking or "off").strip().lower()
-        if thinking not in {"off", "on"}:
-            thinking = "off"
+        thinking = normalize_reasoning_preference(self.thinking, "off")
         object.__setattr__(self, "provider", provider)
         object.__setattr__(self, "model", model)
         object.__setattr__(self, "thinking", thinking)
         object.__setattr__(self, "workload", _frozen_mapping(self.workload))
+        object.__setattr__(self, "cache_context", _frozen_mapping(self.cache_context))
         object.__setattr__(self, "user_parts", tuple(self.user_parts))
+        object.__setattr__(self, "history_messages", tuple(_frozen_mapping(m) for m in self.history_messages))
         object.__setattr__(self, "system_sections", tuple(self.system_sections))
         object.__setattr__(self, "expected_ids", tuple(self.expected_ids))
         object.__setattr__(
@@ -129,10 +133,12 @@ class ProbeResponse:
     status: str = ""
     error: str = ""
     capabilities: Mapping[str, Any] = field(default_factory=dict)
+    error_details: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "error", str(self.error or "")[:240])
         object.__setattr__(self, "capabilities", _frozen_mapping(self.capabilities))
+        object.__setattr__(self, "error_details", _frozen_mapping(self.error_details))
 
 @runtime_checkable
 class ProviderAdapter(Protocol):
@@ -145,7 +151,7 @@ class ProviderAdapter(Protocol):
         """Discover models without changing generation state."""
 
     def probe(self, request: ProbeRequest) -> ProbeResponse:
-        """Perform one tiny native request and validate its success body."""
+        """Verify selected-model usability with the cheapest authoritative native check."""
 
 @dataclass(frozen=True, slots=True)
 class ProviderSpec:

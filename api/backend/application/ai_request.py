@@ -5,10 +5,14 @@ from __future__ import annotations
 from typing import Any
 
 import hashlib, unicodedata, json
+from backend.ai.prompts.localization import LOCALIZATION_POLICY_VERSION
 
 def request_fingerprint(payload: dict[str, Any]) -> str:
     provider = payload.get("provider") if isinstance(payload.get("provider"), dict) else {}
     semantic = {
+        "localizationPolicy": LOCALIZATION_POLICY_VERSION,
+        "translationMode": payload.get("translationMode", "conversation"),
+        "conversation": payload.get("conversation"),
         "units": payload.get("units"),
         "sourceLang": payload.get("sourceLang"),
         "targetLang": payload.get("targetLang"),
@@ -20,6 +24,7 @@ def request_fingerprint(payload: dict[str, Any]) -> str:
         },
         "memory": payload.get("memory"),
         "pageContext": payload.get("pageContext"),
+        "sourceContext": payload.get("sourceContext"),
         "image": payload.get("image"),
         # Repair ownership changes billable generation semantics and therefore
         # must not replay an idempotent result produced under another owner.

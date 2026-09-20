@@ -1,4 +1,4 @@
-import { isEditorArtifact } from "./source-package-policy.mjs";
+import { isEditorArtifact, isPrivateRuntimeArtifact } from "./source-package-policy.mjs";
 import {
   cp,
   mkdir,
@@ -403,6 +403,7 @@ async function walkSourceFiles(root, prefix = "", include = () => true) {
     const absolute = path.join(root, entry.name);
     const relative = path.posix.join(prefix, entry.name);
     if (/^api\/(?:tests|logs|state)(?:\/|$)/i.test(relative)) continue;
+    if (isPrivateRuntimeArtifact(relative)) continue;
     if (!include(relative, { directory: entry.isDirectory() })) continue;
     if (entry.isDirectory()) {
       files.push(...(await walkSourceFiles(absolute, relative, include)));
@@ -424,6 +425,7 @@ for (const filename of [
   "STORE-CHECKLIST-TH.md",
   "PROJECT_CONTEXT.md",
   "RELEASE_NOTES.md",
+  "STREAMING_CONTRACT.md",
   "docs/diagnostics-12.5.md",
   "ENGINE_MODES.md",
   "CONCURRENCY.md",

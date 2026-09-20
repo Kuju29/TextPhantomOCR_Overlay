@@ -12,7 +12,7 @@ export function translationProfileIdentity(state) {
   return { active, provider: provider.provider, endpoint: provider.endpoint,
     thinking: profile.thinking, tokenPolicy: profile.tokenPolicy,
     temperature: profile.temperature, pageImage: profile.pageImage,
-    memoryMode: profile.memoryMode, providerOptions };
+    memoryMode: profile.memoryMode, styleExamples: profile.styleExamples !== false, providerOptions };
 }
 
 export function translationSettingsChanged(changes, area = 'local') {

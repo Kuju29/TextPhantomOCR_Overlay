@@ -9,8 +9,7 @@ import contextvars
 import json
 import logging
 import os
-from pathlib import Path
-import sqlite3
+from collections import OrderedDict
 import time
 import threading
 import uuid
@@ -22,7 +21,7 @@ _active = contextvars.ContextVar('tp_provider_receipt', default=None)
 _scope = contextvars.ContextVar('tp_usage_scope', default={})
 _receipts = contextvars.ContextVar('tp_usage_receipts', default=None)
 
-from contextlib import contextmanager, closing
+from contextlib import contextmanager
 from functools import wraps
 
 @contextmanager
@@ -33,6 +32,21 @@ def receipt_scope(engine, operation_id=''):
     finally:
         _receipts.reset(receipt_token)
         _scope.reset(token)
+
+def adopt_receipt_references(usage: dict) -> None:
+    """Attach internal shared-batch receipts to the caller's error scope only.
+
+    No new receipt/write/charge. A later renderer failure must not hide the
+    already observed request merely because another thread dispatched it.
+    """
+    observations = _receipts.get()
+    if observations is None or not isinstance(usage, dict):
+        return
+    seen = {r.get('receiptId') for r in observations}
+    for row in usage.get('generations') or [usage]:
+        identity = row.get('receiptId')
+        if identity and identity not in seen and row.get('accountingOrigin') == 'server_provider_boundary':
+            observations.append(dict(row)); seen.add(identity)
 
 def api_pipeline_scope(fn):
     @wraps(fn)
@@ -59,60 +73,56 @@ def api_pipeline_scope(fn):
                 raise
     return run
 
-def _path() -> Path:
-    return Path(os.getenv('TP_USAGE_STATE_FILE') or Path(__file__).resolve().parents[2] / 'data' / 'ai-usage.sqlite3')
-
-def _prepare_receipt_store(db) -> None:
-    # WAL is persistent. Re-requesting its mode on every concurrent write can
-    # race the first connection's journal transition, before a receipt exists.
-    # Serialize initialization in-process; other API workers may still start
-    # together, so retry ONLY that SQLite metadata transition, never generation.
-    with _schema_lock:
-        deadline = time.monotonic() + 10
-        while True:
-            try:
-                mode = db.execute('PRAGMA journal_mode').fetchone()[0]
-                if str(mode).lower() != 'wal':
-                    mode = db.execute('PRAGMA journal_mode=WAL').fetchone()[0]
-                if str(mode).lower() != 'wal':
-                    raise RuntimeError('AI_USAGE_WAL_UNAVAILABLE')
-                break
-            except sqlite3.OperationalError as exc:
-                code = getattr(exc, 'sqlite_errorcode', 0) & 0xff
-                if code not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED) or time.monotonic() >= deadline:
-                    raise
-                time.sleep(0.01)
-        db.execute("""CREATE TABLE IF NOT EXISTS provider_usage (
-            receipt_id TEXT PRIMARY KEY, created_ms INTEGER NOT NULL,
-            updated_ms INTEGER NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL,
-            endpoint TEXT NOT NULL, phase TEXT NOT NULL, state TEXT NOT NULL,
-            usage_json TEXT NOT NULL)""")
+MAX_RECEIPTS = 1024
+MAX_RECEIPT_BYTES = 128 * 1024
+MAX_RECEIPT_CACHE_BYTES = 8 * 1024 * 1024
+_receipt_cache = OrderedDict()
+_receipt_bytes = 0
 
 def _store(ctx: dict) -> bool:
+    """Keep a bounded diagnostic snapshot; never claim disk durability.
+
+    Legacy TP_USAGE_STATE_FILE never enables persistent state. TP_USAGE_REQUIRED
+    requires an in-process receipt, not restart durability.
+    Accounting returned to the caller remains authoritative if this cache drops
+    a large/old entry or is disabled.
+    """
+    global _receipt_bytes
     if os.getenv('TP_USAGE_RECEIPTS', 'on').lower() == 'off':
         if os.getenv('TP_USAGE_REQUIRED', '0') == '1':
-            raise RuntimeError('AI_USAGE_PERSISTENCE_REQUIRED_BUT_DISABLED')
+            raise RuntimeError('AI_USAGE_RECEIPT_REQUIRED_BUT_DISABLED')
         return False
     try:
-        path = _path(); path.parent.mkdir(parents=True, exist_ok=True)
-        with closing(sqlite3.connect(path, timeout=10)) as db, db:
-            _prepare_receipt_store(db)
-            db.execute('''INSERT INTO provider_usage VALUES (?,?,?,?,?,?,?,?,?)
-                ON CONFLICT(receipt_id) DO UPDATE SET updated_ms=excluded.updated_ms,
-                state=excluded.state, usage_json=excluded.usage_json''',
-                (ctx['receiptId'], ctx['createdMs'], int(time.time()*1000),
-                 ctx['provider'], ctx['model'], ctx['endpoint'], ctx['phase'], ctx['state'],
-                 json.dumps(ctx['usage'], ensure_ascii=False, allow_nan=False)))
-        try: path.chmod(0o600)
-        except OSError: pass
-        return True
-    except Exception as exc:
-        _log.error('AI usage receipt persistence failed: %s', type(exc).__name__)
-        if os.getenv('TP_USAGE_REQUIRED', '0') == '1':
-            raise RuntimeError('AI_USAGE_PERSISTENCE_FAILED') from exc
+        encoded = json.dumps(ctx['usage'], ensure_ascii=False, allow_nan=False)
+    except (ValueError, TypeError):
+        if os.getenv('TP_USAGE_REQUIRED', '0') == '1' and not ctx.get('dispatched'):
+            raise RuntimeError('AI_USAGE_RECEIPT_INVALID')
+        return False  # Optional diagnostics never hide a billed answer.
+    size = len(encoded.encode())
+    if size > MAX_RECEIPT_BYTES:
+        if os.getenv('TP_USAGE_REQUIRED', '0') == '1' and not ctx.get('dispatched'):
+            raise RuntimeError('AI_USAGE_RECEIPT_SIZE_LIMIT')
         return False
+    with _schema_lock:
+        previous = _receipt_cache.pop(ctx['receiptId'], None)
+        if previous is not None:
+            _receipt_bytes -= len(previous.encode())
+        while _receipt_cache and (len(_receipt_cache) >= MAX_RECEIPTS or
+                _receipt_bytes + size > MAX_RECEIPT_CACHE_BYTES):
+            _, old = _receipt_cache.popitem(last=False)
+            _receipt_bytes -= len(old.encode())
+        _receipt_cache[ctx['receiptId']] = encoded
+        _receipt_bytes += size
+    return False
+
+def diagnostic_identity() -> dict:
+    """Read the current generation identity without changing receipt ownership."""
+    current = _active.get() or _scope.get() or {}
+    return {key: current.get(key, "") for key in ("operationId", "receiptId")}
 
 def mark_dispatched() -> None:
+    from .cache_coordination import mark_dispatched as mark_cache_dispatch
+    mark_cache_dispatch()
     ctx = _active.get()
     if ctx is None or ctx.get('dispatched'):
         return
@@ -153,7 +163,14 @@ def generate_with_receipt(adapter, request, *, phase='initial'):
            'usage': {}, 'responseComplete': False, 'durable': False, **dict(_scope.get())}
     token = _active.set(ctx)
     try:
-        result = adapter.generate(request)
+        from .cache_coordination import coordinate
+        with coordinate(request, operation_id=ctx.get("operationId", "")) as cache_lease:
+            result = adapter.generate(request)
+            observed = result.usage_details or usage_meta(result)
+            cache_evidence = cache_lease.finish(
+                complete=result.terminal_completed is True,
+                cached=observed.get("cachedInputTokens"), input_tokens=observed.get("inputTokens"))
+            result = result._replace(cache_coordination=cache_evidence)
         if not ctx['dispatched']:
             # Custom/mock adapter without an actual transport hook is not an
             # authoritative paid receipt. Do not invent a network dispatch.
@@ -179,6 +196,7 @@ def generate_with_receipt(adapter, request, *, phase='initial'):
             if not isinstance(detail, dict): detail = {}
             gen = dict(detail.get('generationMeta') or getattr(exc, 'generationMeta', None) or {})
             gen['usage'] = info
+            if getattr(exc, 'cacheCoordination', None): gen['cacheCoordination'] = exc.cacheCoordination
             detail['generationMeta'] = gen
             detail.setdefault('generationAttempts', 1)
             try:
@@ -204,7 +222,7 @@ def _finish(ctx: dict) -> None:
     ctx['usage'] = usage
     ctx['durable'] = _store(ctx)
     usage['receiptDurable'] = ctx['durable']
-    # Returned flag reflects actual persistence. No raw prompt/key is stored.
+    # In-process receipts are not durable. No raw prompt/key is stored.
     ctx['usage'] = usage
     observations = _receipts.get()
     if observations is not None:

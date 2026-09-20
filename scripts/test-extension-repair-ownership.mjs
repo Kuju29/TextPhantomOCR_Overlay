@@ -12,6 +12,7 @@ const apiAiStage = await readFile(new URL("../api/backend/jobs/stages/ai_stage.p
 const apiRepair = await readFile(new URL("../api/backend/jobs/stages/ai_repair.py", import.meta.url), "utf8");
 const apiConfig = await readFile(new URL("../api/backend/jobs/stages/config.py", import.meta.url), "utf8");
 const aiContracts = await readFile(new URL("../api/backend/ai/translation/contracts.py", import.meta.url), "utf8");
+const repairCoordinator = await readFile(new URL("../src/background/repair/coordinator.js", import.meta.url), "utf8");
 
 assert.match(transport, /repair:\s*\{\s*owner:\s*"extension",\s*enabled:\s*false\s*\}/,
   "every extension-owned server AI generation must explicitly suppress backend repair");
@@ -41,5 +42,7 @@ assert.match(apiConfig, /repair_enabled=False/,
   "runs:API request configuration must not allow a client to enable repair");
 assert.match(aiContracts, /repair_enabled:\s*bool\s*=\s*False/,
   "AI configuration must default to the one-generation policy");
+assert.match(repairCoordinator, /cancelSettings\(\)[\s\S]*?cancelBatchProviderViaRest\(run\.batchId\)[\s\S]*?cancelBatch\(run\.batchId,'settings_changed'\)/,
+  "changing Thinking/settings must cancel the already-running main provider request as well as repair state");
 
 console.log("AI request ownership passed: Extension and runs:API both enforce one generation per image.");

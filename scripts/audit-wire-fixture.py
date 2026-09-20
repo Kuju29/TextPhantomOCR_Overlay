@@ -25,6 +25,9 @@ def main():
         rows=[v for v in events if v.get('d',{}).get('schema')=='tp.audit/1']
         safe=[sanitize_audit(v) for v in value['vectors']]
         print(json.dumps(dict(events=len(rows),replayedWritten=repeated['written'],
-            everyId=all(v['d']['rows'][0]['id']=='p3' and v['d']['rows'][0]['ref']=='p8' and v['d']['before']['outputTarget']==180 and v['d']['after']['outputTarget']==203 for v in rows),
+            everyId=all(v['d']['rows'][0]['id']=='p3' and v['d']['rows'][0]['ref']=='p8' and v['d']['before']['outputTarget']==180 and v['d']['after']['outputTarget']==203 for v in rows if v['d']['event']=='geometry_overlap'),
+            requestsPreserved=all(v['d'] in safe for v in rows if v['d']['event'] in ('translation_budget','translation_result')),
+            timingsPreserved=len([v for v in rows if v['d']['event'] in ('stream_timing','page_stream_timing')])==2 and all(v['d'] in safe for v in rows if v['d']['event'] in ('stream_timing','page_stream_timing')),
+            localPreserved=all(v['d'] in safe for v in rows if v['d']['event']=='local_discovery') and any(v['d'].get('reason')=='ui_applied' and v['d'].get('ready') is True for v in rows),
             secretFree='PRIVATE_' not in json.dumps(events),schemaParity=safe==value['expected'])))
 if __name__=='__main__':main()

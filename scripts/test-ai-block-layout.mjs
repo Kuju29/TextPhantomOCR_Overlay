@@ -197,7 +197,51 @@ const overlapArea = (a, b) => (
   }
 }
 
-// --- 3. grouping spliced a region: say so, do not draw it in silence ---------
+
+// --- 3. independent horizontal Lens AABBs overlap at their edges ------------
+// Long Thai text uses one AI canvas per paragraph. Lens can return two separate
+// paragraph envelopes that overlap even though they are different bubbles. The
+// renderer may shrink the shared AABB area at the centre boundary, but must not
+// move either paragraph to a different place.
+{
+  const horizontal = (text,[x1,y1,x2,y2]) => ({
+    text,
+    height:(y2-y1)/H,
+    rotation:0,
+    baseline:[[x1/W,((y1+y2)/2)/H],[x2/W,((y1+y2)/2)/H]],
+    valid_text:true,
+  });
+  const paragraphs=[
+    {id:'p3',sourceText:'WHO JUST TELLS A GIRL SHE STINKS LIKE THAT!?',
+      aiText:'ใครเขาพูดกับผู้หญิงว่าเหม็นกันแบบนั้น ไม่มีมารยาทเอาซะเลยจริง ๆ',items:[horizontal('A',[100,200,560,360])]},
+    {id:'p4',sourceText:"IT'S NOT MY FAULT! I HAVEN'T BEEN ABLE TO TAKE A BATH!",
+      aiText:'มันไม่ใช่ความผิดของฉันสักหน่อย ช่วงนี้มีเรื่องวุ่นวายจนไม่มีโอกาสได้อาบน้ำเลย',items:[horizontal('B',[500,200,960,360])]},
+  ];
+  const doc={image:{width:W,height:H},languages:{source:'en',target:'th'},paragraphs,groups:[],uncoveredParagraphIds:[]};
+  const {root,report}=renderOverlay(doc,{source:'ai'});
+  assert.equal(report.error,undefined);
+  const boxes=[];
+  (function walk(el){
+    if(el._cls?.includes('tp-line')){
+      const style=Object.fromEntries(el.style.cssText.split(';').filter(Boolean).map(kv=>{const i=kv.indexOf(':');return [kv.slice(0,i),kv.slice(i+1)];}));
+      const pct=k=>parseFloat(style[k]);
+      const left=(pct('left')/100)*W,top=(pct('top')/100)*H;
+      boxes.push({left,top,right:left+(pct('width')/100)*W,bottom:top+(pct('height')/100)*H});
+    }
+    for(const child of el.children||[])walk(child);
+  })(root);
+  assert.equal(boxes.length,2);
+  assert.equal(overlapArea(boxes[0],boxes[1]),0,'independent horizontal paragraphs must not draw through each other');
+  assert.equal(report.aiIndependentOverlapPartitions,1);
+  assert.ok(report.aiIndependentOverlapPartitionIds.includes('p3|p4'));
+  assert.equal(report.aiBlocksOverlapping,0);
+  // Both centres remain inside their resulting canvases; this is a split, not
+  // a relocation to arbitrary whitespace.
+  assert.ok(boxes[0].left<=330 && boxes[0].right>=330);
+  assert.ok(boxes[1].left<=730 && boxes[1].right>=730);
+}
+
+// --- 4. grouping spliced a region: say so, do not draw it in silence ---------
 // Two units whose SOURCE columns interleave. The renderer cannot place them
 // apart, so it must name the collision in the report.
 {
@@ -236,6 +280,5 @@ const overlapArea = (a, b) => (
 }
 
 console.log(
-  "AI block layout test passed: neighbours split the gap between them, a canvas "
-  + "never leaves its own ink, and an unavoidable collision is named.",
+  "AI block layout test passed: neighbours split gaps, independent horizontal AABB overlap is partitioned, and unavoidable grouped collisions remain named.",
 );

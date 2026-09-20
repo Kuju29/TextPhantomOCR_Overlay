@@ -310,41 +310,15 @@ textarea {
   font-weight: 600;
 }
 
-.ai-usage-strip {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 7px 9px;
-  border: 1px solid var(--tp-line);
-  border-radius: var(--tp-radius-sm);
-  background: var(--tp-surface);
+.ai-compact-panel { margin: 0 0 4px; font-size: 12px; min-width: 0; }
+.ai-compact-panel > summary { cursor: pointer; padding: 4px 0; font-weight: 600; }
+.ai-summary-value { float: right; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--tp-muted); font-weight: 400; font-variant-numeric: tabular-nums; }
+.ai-compact-content { padding: 4px 0 6px 10px; display: flex; flex-direction: column; gap: 5px; align-items: flex-start; }
+.ai-usage-model-line { width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 11px; color: var(--tp-muted); }
+.ai-metric-lines, #ai-diagnostics-text {
+  white-space: pre-wrap; overflow-wrap: anywhere; font-family: inherit; font-size: 12px;
+  font-variant-numeric: tabular-nums; line-height: 1.4; margin: 0; color: var(--tp-text);
 }
-
-.ai-usage-summary {
-  min-width: 0;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 3px 6px;
-  font-size: 10.5px;
-}
-
-.ai-usage-summary>span:first-child {
-  color: var(--tp-accent);
-  font-weight: 700;
-}
-
-.ai-usage-summary strong {
-  max-width: 100%;
-  overflow-wrap: anywhere;
-}
-
-.ai-usage-summary>span:last-child {
-  color: var(--tp-muted);
-  font-variant-numeric: tabular-nums;
-}
-
 .ai-usage-reset {
   flex: 0 0 auto;
   width: auto;

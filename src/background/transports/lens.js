@@ -1,3 +1,4 @@
+import { note as traceNote, isTracing } from "../../shared/trace.js";
 import { API_PATHS, engineApiPath } from "../../shared/constants.js";
 import { readLimitedText } from "../images.js";
 import {
@@ -26,6 +27,15 @@ export async function fetchLensRawViaRest(
     capabilities = null,
   },
 ) {
+  const setupStarted = performance.now();
+  let httpStarted = 0, headersAt = 0;
+  const note = (reason, timing = {}, status = 0) => {
+    if (!isTracing()) return;
+    traceNote("background/transports/lens.js", "requestTiming", {
+      schema:"tp.audit/1", event:"request_timing", reason, phase:"lens",
+      scope:{jobId,imageId,batchId,traceId}, status, timing,
+    }, traceId);
+  };
   const form = new FormData();
   const binary =
     imageBytes instanceof Uint8Array ? imageBytes : new Uint8Array(imageBytes);
@@ -47,6 +57,9 @@ export async function fetchLensRawViaRest(
       API_PATHS.ENGINE_EXTENSION_LENS_RAW,
       API_PATHS.LENS_RAW,
     );
+    httpStarted = performance.now();
+    // This marks the fetch invocation, NOT socket dispatch/network queue exit.
+    note("http_started", {requestSetupMs:httpStarted-setupStarted, httpAttempts:1});
     res = await fetch(base.replace(/\/+$/, "") + path, {
       method: "POST",
       headers: limitHeaders(
@@ -60,14 +73,20 @@ export async function fetchLensRawViaRest(
         }),
       ),
       cache: "no-store",
+      priority: "low",
       body: form,
       signal,
     });
   } catch (error) {
+    note(error?.name === "AbortError" ? "cancelled" : "http_failed", {
+      elapsedMs:performance.now()-setupStarted,
+    });
     if (error?.name === "AbortError")
       throw networkFailure(error, "lens", { cancelled: true });
     throw networkFailure(error, "lens");
   }
+  headersAt = performance.now();
+  note("http_headers", {headersMs:headersAt-httpStarted}, res.status);
   if (!res.ok) {
     const retryAfterMs = noteRetryAfter(res);
     const body = await readLimitedText(res);
@@ -100,5 +119,14 @@ export async function fetchLensRawViaRest(
     throw err;
   }
   noteApiSuccess(base);
-  return readJson(res, "Lens upload failed");
+  try {
+    const result = await readJson(res, "Lens upload failed");
+    const done = performance.now();
+    note("response_complete", {headersMs:headersAt-httpStarted, bodyMs:done-headersAt,
+      httpMs:done-httpStarted, requestSetupMs:httpStarted-setupStarted}, res.status);
+    return result;
+  } catch (error) {
+    note("body_failed", {bodyMs:performance.now()-headersAt}, res.status);
+    throw error;
+  }
 }

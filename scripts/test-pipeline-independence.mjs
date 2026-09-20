@@ -4,6 +4,7 @@ import {createLensDirectPath,rawTreeFingerprint} from '../src/background/pipelin
 import * as scheduler from '../src/background/scheduler.js';
 import { fetchImageDataUriFromUrl } from '../src/background/images.js';
 import { imageErrorMessage } from '../src/background/error-message.js';
+import { attachTpError } from '../src/shared/error-contract.js';
 const recorded=JSON.parse(await readFile(new URL('./fixtures/lens-display-recorded.json',import.meta.url),'utf8'));
 const deferred=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};};
 const tick=()=>new Promise(r=>setTimeout(r,0));
@@ -105,5 +106,33 @@ for(const source of ['original','translated']) {
   assert.equal(lensCalls,0,'cancellation must not become a retryable read failure');
  } finally {globalThis.fetch=originalFetch;}
  console.log('PASS image acquisition errors retain stage, HTTP status and identity; cancellation remains cancellation');checks++;
+}
+{
+ const events=[];
+ const failure=attachTpError(new Error('Lens upload failed: HTTP 502'),{
+  code:'lens_http_error',origin:'upstream_lens',category:'upstream',stage:'lens_upload',
+  httpStatus:502,upstreamStatus:503,retryable:true,traceId:'trace-lens-failure',
+  requestId:'request-lens-failure',imageId:'image-lens-failure',batchId:'batch-lens-failure',jobId:'job-lens-failure'});
+ const pipeline=createLensDirectPath({fetchFromUrl:async()=>image,fetchFromTab:async()=>image,
+  fetchLensRaw:async()=>{throw failure;},runStage:async(_key,fn)=>fn(),markPhase(){},
+  trace:(name,data,traceId)=>events.push({name,data,traceId}),traceLayout(){},getTrace(){return '';},log:{warn(){}}});
+ const decline={};
+ const payload={mode:'lens_text',source:'ai',render:{lensDocument:true},naturalSize:{width:629,height:900},lang:'th',
+  imageDataUri:image,context:{tp_trace:'trace-lens-failure'},metadata:{image_id:'image-lens-failure',batch_id:'batch-lens-failure'}};
+ assert.equal(await pipeline('http://fixture',payload,{tabId:1,jobId:'job-lens-failure',decline}),null);
+ const event=events.find(item=>item.name==='lensFailure');
+ assert(event,'a Lens transport failure must emit one canonical trace event');
+ assert.equal(event.data.schema,'tp.error/1');
+ assert.equal(event.data.code,'lens_http_error');
+ assert.equal(event.data.origin,'upstream_lens');
+ assert.equal(event.data.category,'upstream');
+ assert.equal(event.data.stage,'lens_upload');
+ assert.equal(event.data.httpStatus,502);
+ assert.equal(event.data.upstreamStatus,503);
+ assert.equal(event.data.retryable,true);
+ assert.equal(event.data.requestId,'request-lens-failure');
+ assert.equal(event.data.imageId,'image-lens-failure');
+ assert.doesNotMatch(JSON.stringify(event),/Lens upload failed|private|secret/);
+ console.log('PASS Lens 502 emits one safe canonical failure trace with upstream attribution');checks++;
 }
 console.log(`Pipeline independence: ${checks}/${checks} PASS; real scheduler and pipeline, mocked external I/O.`);

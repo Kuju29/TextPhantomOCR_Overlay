@@ -1,43 +1,34 @@
-"""Bounded SQLite repair ledger; transactions are offloaded by HTTP routes.
+"""Bounded, private repair state for one API process; restart begins empty.
 
-WAL + BEGIN IMMEDIATE makes claiming a unit atomic across API workers. A task
-which may already have called a provider is NEVER put back in the pending pool.
+Atomic transitions retain in-session duplicate protection without disk journals.
+The lock covers state transitions only, never provider generation.
 """
 from __future__ import annotations
 
 import hashlib
 import hmac
 import json
-import os
 import re
-import sqlite3
+import threading
 import time
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable
 from . import state
 
-DEFAULT_PATH = Path(__file__).resolve().parents[3] / "data" / "repair-pool.sqlite3"
 TTL = 24 * 60 * 60
+MAX_RUNS = 512
+MAX_CALLER_RUNS = 64
+MAX_BYTES = 128 * 1024 * 1024
 
 class RepairStore:
     def __init__(self, path: str | Path | None = None, now: Callable = time.time):
-        self.path = Path(path or os.environ.get("TP_REPAIR_STATE_FILE") or DEFAULT_PATH)
+        # Kept for constructor compatibility; never read, create or remove it.
+        self.path = Path(path) if path else None
         self.now = now
-
-    @contextmanager
-    def connect(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        con = sqlite3.connect(str(self.path), timeout=5)
-        try:
-            con.execute("PRAGMA journal_mode=WAL")
-            con.execute("PRAGMA secure_delete=ON")
-            con.execute("CREATE TABLE IF NOT EXISTS repair_runs (id TEXT PRIMARY KEY, secret TEXT NOT NULL, "
-                        "caller TEXT NOT NULL, expires REAL NOT NULL, data TEXT NOT NULL)")
-            with con:
-                yield con
-        finally:
-            con.close()
+        self._lock = threading.RLock()
+        self._runs = {}
+        self._page_runs = {}  # bounded by existing run/manifest limits
+        self._bytes = 0
 
     @staticmethod
     def secret(token: str) -> str:
@@ -45,56 +36,109 @@ class RepairStore:
             raise state.PoolError("invalid_repair_session_token", 401)
         return hashlib.sha256(token.encode()).hexdigest()
 
+    def _drop(self, run_id):
+        row = self._runs.pop(run_id, None)
+        if row:
+            self._bytes -= row["size"]
+            for page in row.get("manifest", ()):
+                owners = self._page_runs.get(page)
+                if owners is not None:
+                    owners.discard(run_id)
+                    if not owners:
+                        self._page_runs.pop(page, None)
+
+    def _prune(self):
+        now = self.now()
+        for run_id in [key for key, row in self._runs.items() if row["expires"] < now]:
+            self._drop(run_id)
+
+    def _owned(self, run_id, hashed):
+        state.identifier(run_id)
+        row = self._runs.get(run_id)
+        if row and row["expires"] < self.now():
+            self._drop(run_id)
+            row = None
+        if not row or not hmac.compare_digest(row["secret"], hashed):
+            raise state.PoolError("repair_run_not_found", 404)
+        return row
+
     def register(self, run_id: str, token: str, manifest: list, caller: str) -> dict:
         hashed = self.secret(token)
         run = state.new_run(run_id, manifest, self.now())
-        with self.connect() as con:
-            con.execute("BEGIN IMMEDIATE")
-            con.execute("DELETE FROM repair_runs WHERE expires < ?", (self.now(),))
-            old = con.execute("SELECT secret, data FROM repair_runs WHERE id=?", (run_id,)).fetchone()
+        with self._lock:
+            self._prune()
+            old = self._runs.get(run_id)
             if old:
-                if not hmac.compare_digest(old[0], hashed):
+                if not hmac.compare_digest(old["secret"], hashed):
                     raise state.PoolError("repair_run_not_found", 404)
-                previous = json.loads(old[1])
+                previous = json.loads(old["data"])
                 if previous["manifest"] != run["manifest"]:
                     raise state.PoolError("repair_manifest_conflict")
                 return state.view(previous)
-            count, size = con.execute("SELECT COUNT(*), COALESCE(SUM(length(data)),0) FROM repair_runs").fetchone()
-            caller_count = con.execute("SELECT COUNT(*) FROM repair_runs WHERE caller=?", (caller,)).fetchone()[0]
-            if count >= 512 or size >= 128 * 1024 * 1024 or caller_count >= 64:
+            data = json.dumps(run, ensure_ascii=False, separators=(",", ":"))
+            size = len(data.encode())
+            if len(self._runs) >= MAX_RUNS or self._bytes + size > MAX_BYTES or sum(
+                    row["caller"] == caller for row in self._runs.values()) >= MAX_CALLER_RUNS:
                 raise state.PoolError("repair_store_capacity", 503)
-            con.execute("INSERT INTO repair_runs VALUES (?,?,?,?,?)", (run_id, hashed, caller,
-                        self.now() + TTL, json.dumps(run, ensure_ascii=False)))
-        return state.view(run)
+            self._runs[run_id] = dict(secret=hashed, caller=caller, expires=self.now() + TTL,
+                                      data=data, size=size, phase=run["phase"], manifest=tuple(run["manifest"]))
+            for page in run["manifest"]:
+                self._page_runs.setdefault(page, set()).add(run_id)
+            self._bytes += size
+            return state.view(run)
 
     def transact(self, run_id: str, token: str, action: Callable) -> dict:
         hashed = self.secret(token)
-        state.identifier(run_id)
-        with self.connect() as con:
-            con.execute("BEGIN IMMEDIATE")
-            row = con.execute("SELECT secret, expires, data FROM repair_runs WHERE id=?", (run_id,)).fetchone()
-            if not row or row[1] < self.now() or not hmac.compare_digest(row[0], hashed):
-                raise state.PoolError("repair_run_not_found", 404)
-            run = json.loads(row[2])
+        with self._lock:
+            row = self._owned(run_id, hashed)
+            # Decode a private working copy: exceptions cannot partially commit.
+            run = json.loads(row["data"])
             result = action(run)
             run["updatedAt"] = self.now()
             data = json.dumps(run, ensure_ascii=False, separators=(",", ":"))
-            if len(data.encode()) > state.MAX_RUN_BYTES:
+            size = len(data.encode())
+            if size > state.MAX_RUN_BYTES:
                 raise state.PoolError("repair_run_size_limit", 413)
-            total = con.execute("SELECT COALESCE(SUM(length(CAST(data AS BLOB))),0) FROM repair_runs").fetchone()[0]
-            if total - len(row[2].encode()) + len(data.encode()) > 128 * 1024 * 1024:
+            if self._bytes - row["size"] + size > MAX_BYTES:
                 raise state.PoolError("repair_store_capacity", 503)
-            con.execute("UPDATE repair_runs SET data=? WHERE id=?", (data, run_id))
+            self._bytes += size - row["size"]
+            row.update(data=data, size=size, phase=run["phase"])
             return result
 
     def read(self, run_id: str, token: str) -> dict:
-        # Uses the same ownership/expiry checks, and gives a coherent snapshot.
-        return self.transact(run_id, token, state.view)
+        hashed = self.secret(token)
+        with self._lock:
+            return state.view(json.loads(self._owned(run_id, hashed)["data"]))
+
+    def active_for_pages(self, page_ids) -> set[str]:
+        """Internal lifecycle lookup only; never exposes source, key or run token."""
+        with self._lock:
+            candidates = {run_id for page in page_ids for run_id in self._page_runs.get(page, ())}
+            return self.active_workflows(candidates)
+
+    def active_workflows(self, run_ids) -> set[str]:
+        with self._lock:
+            now = self.now()
+            return {run_id for run_id in run_ids
+                    if (row := self._runs.get(run_id)) is not None
+                    and row["expires"] >= now and row["phase"] in ("collecting", "repairing")}
+
+    def is_cancelled(self, run_id: str, token: str) -> bool:
+        hashed = self.secret(token)
+        with self._lock:
+            try:
+                row = self._owned(run_id, hashed)
+            except state.PoolError as exc:
+                if str(exc) == "repair_run_not_found":
+                    return True
+                raise
+            return json.loads(row["data"]).get("phase") == "cancelled"
 
     def delete(self, run_id: str, token: str) -> dict:
-        self.read(run_id, token)
-        with self.connect() as con:
-            con.execute("DELETE FROM repair_runs WHERE id=? AND secret=?", (run_id, self.secret(token)))
-        return {"deleted": True}
+        hashed = self.secret(token)
+        with self._lock:
+            self._owned(run_id, hashed)
+            self._drop(run_id)
+            return {"deleted": True}
 
 store = RepairStore()

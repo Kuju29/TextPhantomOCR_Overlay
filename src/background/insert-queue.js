@@ -1,4 +1,5 @@
-// Groups finished results by tab and frame and flushes them to the content script as bulk insert messages.
+// Batches DOM commands per tab/frame. Unrelated ownership binds never wait
+// for a render ACK; commands addressing the same page target remain FIFO.
 
 import { createLogger } from "../shared/logger.js";
 import { requestFromTabEnsured } from "./tabs-messaging.js";
@@ -9,6 +10,10 @@ const INSERT_FLUSH_DELAY_MS = 8;
 const INSERT_BATCH_MAX_ITEMS = 16;
 const INSERT_BATCH_MAX_CHARS = 14_000_000;
 const INSERT_INFLIGHT_MAX_CHARS = 48_000_000;
+// Reserve a small slice of the existing budget for ownership controls, not a
+// second unbounded queue. Large image payloads keep the old single-item escape.
+const INSERT_CONTROL_RESERVE_CHARS = 262_144;
+const INSERT_INFLIGHT_MAX_BATCHES = 16;
 
 let seq = 0;
 const queues = new Map();
@@ -40,33 +45,59 @@ function getGroup(tabId, frameId) {
       bytes: 0,
       timer: 0,
       flushing: false,
+      inFlightChars: 0,
+      inFlightBatches: 0,
+      renderBatches: 0,
+      activeTargets: new Set(),
     };
     queues.set(key, g);
   }
   return g;
 }
 
-// Arms the flush timer for a queue, firing at once when asked.
-function scheduleFlush(g, immediate = false) {
-  if (!g || g.flushing) return;
-  if (g.timer) return;
-  const delay = immediate ? 0 : INSERT_FLUSH_DELAY_MS;
-  g.timer = setTimeout(() => {
-    g.timer = 0;
-    void flushGroup(g);
-  }, delay);
+// Identity must not contain run/revision IDs: a new binding of the SAME image
+// must not overtake its previous overlay. Unknown targets are frame barriers.
+function targetKey(message) {
+  const target = message.generation?.targetKey || message.original ||
+    message.imageId || message.translationRun?.pageId || "";
+  return target ? JSON.stringify([message.generation?.pageInstanceId || "", target]) : "";
 }
 
-// Removes the next batch of queued items, bounded by item count and character budget.
-function takeBatch(g) {
+function scheduleFlush(g, immediate = false) {
+  if (!g) return;
+  if (g.timer) {
+    if (!immediate) return;
+    clearTimeout(g.timer);
+  }
+  g.timer = setTimeout(() => {
+    g.timer = 0;
+    flushGroup(g);
+  }, immediate ? 0 : INSERT_FLUSH_DELAY_MS);
+}
+
+// Select only one command per target, respecting earlier queued commands even
+// when selecting the control lane first. Never mix BIND with expensive renders
+// in a bulk ACK, otherwise a fast bind would still wait for that render.
+function takeBatch(g, control) {
   const batch = [];
+  const blocked = new Set(g.activeTargets);
+  if (blocked.has("")) return batch;
   let chars = 0;
-  while (g.items.length && batch.length < INSERT_BATCH_MAX_ITEMS) {
-    const next = g.items[0];
-    const sz = Number(next.size) || 0;
-    if (batch.length && chars + sz > INSERT_BATCH_MAX_CHARS) break;
-    batch.push(g.items.shift());
-    chars += sz;
+  const budget = INSERT_INFLIGHT_MAX_CHARS - (control ? 0 : INSERT_CONTROL_RESERVE_CHARS);
+  for (let i = 0; i < g.items.length && batch.length < INSERT_BATCH_MAX_ITEMS;) {
+    const entry = g.items[i];
+    const target = entry.target;
+    if (!target && (i || batch.length || g.inFlightBatches)) break;
+    const eligible = !blocked.has(target) && entry.control === control;
+    blocked.add(target);
+    const fits = g.inFlightChars + chars + entry.size <= budget ||
+      (!g.inFlightBatches && !batch.length);
+    if (eligible && fits && (!batch.length || chars + entry.size <= INSERT_BATCH_MAX_CHARS)) {
+      g.items.splice(i, 1);
+      batch.push(entry);
+      chars += entry.size;
+    } else i++;
+    if (!target) break;
   }
   g.bytes = Math.max(0, g.bytes - chars);
   return batch;
@@ -117,38 +148,34 @@ async function sendBatch(g, batch) {
   }
 }
 
-// Drains a queue, dispatching batches concurrently within the in-flight character budget.
-async function flushGroup(g) {
+// A completion releases only its own targets/budget. Newly queued controls
+// can dispatch while unrelated batches are still rendering in the same frame.
+function flushGroup(g) {
   if (!g || g.flushing) return;
-  if (!g.items.length) {
-    queues.delete(g.key);
-    return;
-  }
   g.flushing = true;
   try {
-    while (g.items.length) {
-      const inFlight = [];
-      let bytes = 0;
-      while (
-        g.items.length &&
-        (!inFlight.length || bytes < INSERT_INFLIGHT_MAX_CHARS)
-      ) {
-        const batch = takeBatch(g);
-        if (!batch.length) break;
-        bytes += batch.reduce((n, e) => n + (Number(e.size) || 0), 0);
-        inFlight.push(sendBatch(g, batch));
-      }
-      if (!inFlight.length) break;
-      log.debug?.("bulk insert dispatched", {
-        batches: inFlight.length,
-        chars: bytes,
+    while (g.items.length && g.inFlightBatches < INSERT_INFLIGHT_MAX_BATCHES) {
+      let batch = takeBatch(g, true);
+      if (!batch.length && g.renderBatches < INSERT_INFLIGHT_MAX_BATCHES - 1)
+        batch = takeBatch(g, false);
+      if (!batch.length) break;
+      const chars = batch.reduce((n, e) => n + e.size, 0);
+      const control = batch[0].control;
+      for (const entry of batch) g.activeTargets.add(entry.target);
+      g.inFlightChars += chars;
+      g.inFlightBatches++;
+      if (!control) g.renderBatches++;
+      void sendBatch(g, batch).finally(() => {
+        for (const entry of batch) g.activeTargets.delete(entry.target);
+        g.inFlightChars -= chars;
+        g.inFlightBatches--;
+        if (!control) g.renderBatches--;
+        flushGroup(g);
       });
-      await Promise.all(inFlight);
     }
   } finally {
     g.flushing = false;
-    if (g.items.length) scheduleFlush(g, true);
-    else queues.delete(g.key);
+    if (!g.items.length && !g.inFlightBatches && !g.timer) queues.delete(g.key);
   }
 }
 
@@ -163,12 +190,14 @@ export function enqueueDomInsert(tabId, message, frameId = 0) {
       id: `${Date.now().toString(36)}-${(++seq).toString(36)}`,
       message,
       size,
+      target: targetKey(message),
+      control: message.type === "TP_TRANSLATION_BIND",
       resolve,
     };
     g.items.push(entry);
     g.bytes += size;
     const immediate =
-      g.items.length >= INSERT_BATCH_MAX_ITEMS ||
+      entry.control || g.items.length >= INSERT_BATCH_MAX_ITEMS ||
       g.bytes >= INSERT_BATCH_MAX_CHARS;
     scheduleFlush(g, immediate);
   });

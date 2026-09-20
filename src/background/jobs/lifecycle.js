@@ -65,6 +65,7 @@ export function scheduleOwnedImageJob({
   schedule,
   work,
   laneManaged = false,
+  onRelease = () => {},
 }) {
   const ownership = claimImageJob(identity);
   if (!ownership.claimed) return false;
@@ -73,6 +74,7 @@ export function scheduleOwnedImageJob({
     if (released) return;
     released = true;
     releaseImageJob(ownership);
+    onRelease();
   };
   const shouldStart = () => {
     const allowed = isAdmissible();

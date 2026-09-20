@@ -4,7 +4,7 @@ export const SETTINGS_RESET_KEYS = Object.freeze([
   "customApiUrl", "apiUrlDefault", "apiUrlReset", "apiDefaultsFetchedAt",
   "latestVersion", "updateUrl",
   "aiKey", "aiCloudKey", "aiModel", "aiProvider", "aiBaseUrl",
-  "localAiAdapter", "aiGlossary", "aiCharMemory", "aiMemoryMode",
+  "localAiAdapter", "aiGlossary", "aiCharMemory", "aiMemoryMode", "aiStyleExamples", "aiTranslationMode", "aiConversationReset",
   "aiSendImage", "aiPageImage", "aiOnDevice", "aiThinking", "aiLocalThinking",
   "aiPrompt", "aiPromptByLang", "relayoutTranslated",
   "rateLimitEnabled", "rateProfile", "rateRpm", "rateBurst",

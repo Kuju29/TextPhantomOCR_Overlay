@@ -174,11 +174,14 @@ export function createAiProfilePagehideFlush({
 function defaultsFor(provider) {
   const local = isLocalAiProvider(provider);
   return {
-    thinking: "off",
+    thinking: "minimum",
     tokenPolicy: { mode: "dynamic", maxOutputTokens: 0 },
     temperature: null,
     pageImage: "off",
     memoryMode: "off",
+    styleExamples: true,
+    translationMode: "conversation",
+    conversationReset: "0",
     concurrency: { mode: "auto", max: 0 },
     providerOptions: {},
   };
@@ -244,10 +247,17 @@ export function createAiProfileController({
 
   function render(profile) {
     if (els.aiThinking)
-      els.aiThinking.value = profile.thinking === "on" ? "on" : "off";
+      els.aiThinking.value = profile.thinking || "minimum";
     if (els.aiPageImage)
       els.aiPageImage.checked = profile.pageImage === "always";
     if (els.aiMemoryMode) els.aiMemoryMode.value = profile.memoryMode || "off";
+    const translationMode = "conversation";
+    if (els.aiStyleExamples) {
+      els.aiStyleExamples.checked = profile.styleExamples !== false;
+      els.aiStyleExamples.disabled = translationMode === "conversation";
+    }
+    if (els.aiStyleExamplesWrap) els.aiStyleExamplesWrap.style.display = translationMode === "conversation" ? "none" : "";
+    if (els.aiTranslationMode) els.aiTranslationMode.value = translationMode;
     if (els.aiLocalCapacityMode)
       els.aiLocalCapacityMode.value = profile.concurrency?.mode || "auto";
     if (els.aiLocalManualConcurrency)
@@ -286,8 +296,13 @@ export function createAiProfileController({
     const local = isLocalAiProvider(providerValue());
     const max = Number(profile.concurrency?.max) || 1;
     return {
-      ...(local ? { aiLocalThinking: profile.thinking === "on" ? "on" : "off" } : {}),
+      ...(local ? { aiLocalThinking: profile.thinking || "minimum" } : {}),
       aiCharMemory: profile.memoryMode === "full",
+      aiStyleExamples: profile.styleExamples !== false,
+      // Persist the dormant user preference without making it executable.
+      aiTranslationMode: profile.translationMode === "independent"
+        ? "independent" : "conversation",
+      aiConversationReset: String(profile.conversationReset || "0"),
       aiLocalCapacityMode: profile.concurrency?.mode || "auto",
       aiLocalManualConcurrency: Math.min(4, Math.max(1, max)),
       aiPromptByLang: prompts,
@@ -322,11 +337,13 @@ export function createAiProfileController({
     };
   }
 
-  async function persist(overrides = {}) {
+  async function persist(overrides = {}, isCurrent = () => true) {
     const patch = buildPersistPatch(overrides);
     await setStorage(patch);
-    state.aiProfileBlocked = false;
-    state.aiProfileErrorCode = "";
+    if (isCurrent()) {
+      state.aiProfileBlocked = false;
+      state.aiProfileErrorCode = "";
+    }
     return patch;
   }
 
@@ -582,14 +599,24 @@ export function createAiProfileController({
     await persist();
   }
 
-  async function saveModelCapabilities(modelCapabilities, capabilityAccountHash) {
-    const request = currentRequest();
+  async function saveModelCapabilities(modelCapabilities, capabilityAccountHash,
+    target = currentRequest(), isCurrent = () => true) {
+    const request = currentRequest(target);
+    const selected = currentRequest();
+    if (!isCurrent() ||
+        makeProviderIdentity(request.provider, request.endpoint) !== makeProviderIdentity(selected.provider, selected.endpoint) ||
+        request.model !== selected.model) return false;
     const current = resolveAiProfile(profiles, request).profile?.providerOptions || {};
     modelCapabilities = normalizeModelCapabilities(modelCapabilities);
     const next = { modelCapabilities, capabilityAccountHash };
     if (JSON.stringify(normalizeModelCapabilities(current.modelCapabilities)) === JSON.stringify(modelCapabilities)
         && current.capabilityAccountHash === capabilityAccountHash) return false;
-    await saveProfile({ providerOptions: next });
+    profiles = updateAiProfile(profiles, {
+      ...request, patch: { providerOptions: next }, select: false, now: now(),
+    });
+    // No await between the identity check and starting this write. Late probe
+    // results must not activate a different Provider/model or change intent.
+    await persist(request, isCurrent);
     return true;
   }
 

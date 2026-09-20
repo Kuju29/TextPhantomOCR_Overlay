@@ -45,6 +45,7 @@ export async function submitJobViaRest(
       method: "POST",
       headers,
       cache: "no-store",
+      priority: "high",
       redirect: "follow",
       signal: ctrl.signal,
       body,
@@ -135,6 +136,7 @@ function safeGenerationMeta(value) {
           : "",
     finishReason: String(value.finishReason || value.finish_reason || ""),
     providerMs: finiteNonNegative(value.providerMs ?? value.provider_ms),
+    firstContentMs: finiteNonNegative(value.firstContentMs ?? value.first_content_ms),
     parseMs: finiteNonNegative(value.parseMs ?? value.parse_ms),
     totalMs: finiteNonNegative(value.totalMs ?? value.total_ms),
     timeoutPolicy: String(value.timeoutPolicy || value.timeout_policy || ""),
@@ -262,6 +264,7 @@ export async function translateViaSyncRest(
         }),
       }),
       cache: "no-store",
+      priority: "high",
       signal: ctrl.signal,
       body: JSON.stringify(payload),
     });

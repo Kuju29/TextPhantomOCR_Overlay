@@ -5,89 +5,22 @@ function verificationResult(model, status, extra = {}) {
   return { model: String(model || "").trim(), status, ...extra };
 }
 
-export async function verifyLocalModelGeneration(adapter, model, {
-  signal = null,
-  timeoutMs = 60_000,
-  thinking = "off",
-} = {}) {
+export function verifyLocalModelAvailability(models, capability, model) {
   const selected = String(model || "").trim();
-  if (!selected) return verificationResult("", "not_selected");
-  const controller = new AbortController();
-  const abort = () => controller.abort(signal?.reason);
-  if (signal?.aborted) abort();
-  signal?.addEventListener?.("abort", abort, { once: true });
-  const timer = setTimeout(
-    () => controller.abort(new Error("Local AI selected-model verification timed out")),
-    Math.max(1_000, Number(timeoutMs) || 60_000),
-  );
-  const started = performance.now();
-  try {
-    const requestedThinking = thinking === "on" ? "on" : "off";
-    const thinkingMode = typeof adapter.resolveThinkingMode === "function"
-      ? adapter.resolveThinkingMode(requestedThinking, { model: selected })
-      : requestedThinking;
-    const result = await adapter.generate({
-      model: selected,
-      messages: [
-        { role: "system", content: "Return a short text reply." },
-        { role: "user", content: "Reply only OK." },
-      ],
-      outputTokens: 64,
-      thinkingMode,
-      responseSchema: null,
-    }, {
-      signal: controller.signal,
-      expectedIds: [],
-      onProgress: null,
-      trace: null,
-      wireTrace: null,
+  if (!selected) return verificationResult("", "not_selected", { evidence: "model_list" });
+  if (!Array.isArray(models) || !models.includes(selected))
+    return verificationResult(selected, "model_unavailable", { evidence: "model_list" });
+  const hint = capability?.models?.[selected];
+  if (hint?.generation?.supported === false)
+    return verificationResult(selected, "unsupported_model", {
+      evidence: String(hint.generation.source || "runtime_metadata"),
+      reason: String(hint.generation.reason || "generation_not_supported"),
     });
-    if (!result?.response?.ok) {
-      return verificationResult(selected, "rejected", {
-        httpStatus: Number(result?.response?.status || 0),
-        elapsedMs: Math.round(performance.now() - started),
-      });
-    }
-    // Text received before EOF is not proof that the provider completed a
-    // generation. Apply the same transport integrity gate as translation.
-    const stream = result?.stream;
-    if (stream?.providerStreamErrorCode || stream?.malformedFrameCount > 0 ||
-        stream?.drainStatus === "timeout" ||
-        (stream?.streaming && stream.terminalCompleted !== true)) {
-      return verificationResult(selected, "invalid_output", {
-        code: "provider_protocol_error",
-        elapsedMs: Math.round(performance.now() - started),
-      });
-    }
-    let data = result?.stream?.data;
-    if (!data && result?.stream?.raw) {
-      try { data = JSON.parse(result.stream.raw); } catch {}
-    }
-    let text = "";
-    try { text = String(adapter.responseText(data) || "").trim(); } catch {}
-    if (!text) {
-      return verificationResult(selected, "invalid_output", {
-        elapsedMs: Math.round(performance.now() - started),
-      });
-    }
-    return verificationResult(selected, "passed", {
-      elapsedMs: Math.round(performance.now() - started),
-    });
-  } catch (error) {
-    if (signal?.aborted) throw error;
-    const timedOut = controller.signal.aborted || /timed out|timeout/i.test(String(error?.message || ""));
-    const status = error?.code === "local_ai_thinking_required"
-      ? "thinking_required"
-      : timedOut ? "timeout" : "unreachable";
-    return verificationResult(selected, status, {
-      code: String(error?.code || ""),
-      httpStatus: Number(error?.status || 0),
-      elapsedMs: Math.round(performance.now() - started),
-    });
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener?.("abort", abort);
-  }
+  return verificationResult(selected, "passed", {
+    evidence: hint?.generation?.source || capability?.source || "model_list",
+    metadataOnly: true,
+    checkedAt: Date.now(),
+  });
 }
 
 export async function discoverLocalModels(settings = {}, options = {}) {
@@ -105,27 +38,27 @@ export async function discoverLocalModels(settings = {}, options = {}) {
     throw error;
   }
   try {
-    const result = await adapter.listModels(options);
+    const result = await adapter.listModels({
+      ...options,
+      timeoutMs: Math.max(1_000, Number(options.timeoutMs || options.probeTimeoutMs) || 10_000),
+    });
     if (!result.models.length)
       throw new LocalAiError("Local AI returned no usable model IDs", {
         code: "local_models_empty",
       });
+    options.onProgress?.({ stage: "models_loaded", models: result.models, capability: result.capability, protocol: adapter.id });
     const requested = String(options.model || "").trim();
     const selected = requested && requested.toLowerCase() !== "auto"
       ? requested
       : String(result.models[0] || "").trim();
     let verification = verificationResult(selected, "not_tested");
     if (options.verifySelected === true) {
-      verification = !selected || !result.models.includes(selected)
-        ? verificationResult(selected, "model_unavailable")
-        : await verifyLocalModelGeneration(adapter, selected, {
-            signal: options.signal,
-            timeoutMs: options.probeTimeoutMs,
-            thinking: options.thinking,
-          });
+      options.onProgress?.({ stage: "model_verify", model: selected, reused: false, metadataOnly: true });
+      verification = verifyLocalModelAvailability(result.models, result.capability, selected);
     }
     return {
       ok: true,
+      checkedAt: Date.now(),
       models: result.models,
       protocol: adapter.id,
       endpoint: adapter.requestUrl({}).replace(/\/[^/]+(?:\/[^/]+)?$/, ""),

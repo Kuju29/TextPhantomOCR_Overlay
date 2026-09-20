@@ -58,6 +58,7 @@ const USER_MESSAGES = Object.freeze({
   RENDER_FAILED: "สร้างข้อความทับภาพไม่สำเร็จ",
   INSERT_FAILED: "หน้าเว็บไม่รับข้อความแปล",
   SERVER_BUSY: "เซิร์ฟเวอร์ไม่ว่างชั่วคราว",
+  AI_SOURCE_MAPPING_INVALID: "ข้อมูลจับคู่ข้อความสำหรับแปลไม่ถูกต้อง—ยังไม่ได้ส่งให้ AI กรุณาอัปเดต API และส่วนขยายคู่กัน",
   REQUEST_REJECTED: "เซิร์ฟเวอร์ปฏิเสธคำขอนี้—ลองรีเฟรชหน้าเว็บแล้วสั่งใหม่",
   API_CAPS_UNAVAILABLE:
     "ตรวจสอบความสามารถของเซิร์ฟเวอร์ไม่สำเร็จ—เซิร์ฟเวอร์อาจกำลังเริ่มทำงาน ลองใหม่อีกครั้ง",
@@ -220,6 +221,7 @@ export function userMessageForCode(code) {
     // UNKNOWN, which told the reader nothing while the real cause sat in the
     // `code` field right next to it.
     invalid_request: "REQUEST_REJECTED",
+    ai_conversation_origin_invalid: "AI_SOURCE_MAPPING_INVALID",
     service_unavailable: "API_5XX",
     api_caps_unavailable: "API_CAPS_UNAVAILABLE",
     api_unreachable: "API_UNREACHABLE",
@@ -407,4 +409,25 @@ export function publicTpError(error, traceId = "") {
     imageId: e.imageId,
     correlationId: e.correlationId,
   };
+}
+
+// A proven account payment/quota failure can fence unsent work. Do not treat
+// ordinary 429 throttling, timeouts, malformed output or language defects as it.
+export function isProviderBillingFailure(error) {
+  return [error, error?.tpError, error?.diagnostics, error?.structuralDetails].some(value => {
+    if (!value || typeof value !== 'object') return false;
+    const code = String(value.failureKind || value.code || '').toLowerCase();
+    return ['billing_required', 'ai_billing_required', 'provider_quota_exhausted', 'ai_quota_exhausted'].includes(code) ||
+      Number(value.upstreamStatus) === 402 || Number(value.httpStatus || value.status) === 402;
+  });
+}
+
+export function providerBillingFenceError() {
+  // A queued page did not make the failed provider request. In particular, do
+  // not copy that request's usage, operation ID, attempts or diagnostics here.
+  return Object.assign(new Error('AI provider credits exhausted or payment required; unsent work stopped'), {
+    code:'billing_required', failureKind:'billing_required', origin:'provider', stage:'ai',
+    upstreamStatus:402, httpStatus:402, retryable:false, requestDispatched:false,
+    providerAttempts:0, generationAttempts:0, automaticContentRetry:false, automaticTransportRetry:false,
+  });
 }

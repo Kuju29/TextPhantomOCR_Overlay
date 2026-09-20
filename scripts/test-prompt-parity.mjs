@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { getCanonicalPrompt, getSystemPrompt, validateCanonicalPrompt, forgetPrompts } from "../src/background/ai/prompt-cache.js";
 import { targetLanguagePriority, translateWithLocalOpenAi } from "../src/shared/ai/direct-local/generation.js";
-import { composeCanonicalPrompt, TRANSLATOR_IDENTITY_BASE } from "../src/shared/ai/direct-local/prompt.js";
+import { composeCanonicalPrompt, composeTranslatorIdentitySystem, composeTranslationUserMessage } from "../src/shared/ai/direct-local/prompt.js";
 import { decodeTranslations } from "../src/shared/ai/direct-local/decode.js";
 
 const plan = { version: "translation-plan-2", localContractVersion: "v1", pieces: {
@@ -12,6 +12,8 @@ const plan = { version: "translation-plan-2", localContractVersion: "v1", pieces
   structuredOutputContract: "STRUCTURED JSON SENTINEL",
   seriesNotesHeading: "SERIES NOTES SENTINEL",
 }, editableStylePolicy: { control: "fixed_replace", supportedModes: ["replace"] } };
+import { instructionPack } from "../src/shared/ai/prompt-language.js";
+const pack=instructionPack("th");
 const originalFetch = globalThis.fetch;
 const calls = [];
 async function signedPlan(value) {
@@ -32,7 +34,7 @@ async function run(ai = {}, options = {}) {
   const result = await translateWithLocalOpenAi([{ id: "real-unit", text: "原文" }], { ai: {
     model: "qwen3.5:9b", base_url: "http://localhost:11434",
     local_adapter: { protocol: "ollama", baseUrl: "http://localhost:11434" },
-    prompt: "Target language: Thai\nBUILT-IN STYLE SENTINEL", promptMode: "replace", ...ai,
+    prompt: "Target language: Thai\nBUILT-IN STYLE SENTINEL", promptMode: "replace", style_examples: false, ...ai,
   }, canonicalPrompt: plan, promptAudit: { promptVersion: "th-test", canonicalPromptHash: "safe-hash" },
   targetLang: "th", ...options });
   return { ...calls[0], result };
@@ -41,21 +43,21 @@ async function run(ai = {}, options = {}) {
 try {
   let call = await run({ prompt: "Target language: Thai\nFULL USER STYLE SENTINEL", promptMode: "replace" });
   let system = call.body.messages[0].content;
-  assert.equal(system, TRANSLATOR_IDENTITY_BASE + "\n\nTRANSLATION STYLE\nTarget language: Thai (ภาษาไทย).\nFULL USER STYLE SENTINEL");
+  assert.equal(system, composeTranslatorIdentitySystem("ภาษาปลายทาง: ภาษาไทย\nFULL USER STYLE SENTINEL", "th"));
   assert.equal(system.split("FULL USER STYLE SENTINEL").length - 1, 1);
   assert.doesNotMatch(system, /SOURCE INPUT CONTRACT SENTINEL|SYSTEM POLICY SENTINEL|OUTPUT —/);
-  assert.match(call.body.messages[1].content, /^TRANSLATION TASK\nTranslate every source unit into Thai \(ภาษาไทย\)\./);
-  assert.match(call.body.messages[1].content, /SOURCE INPUT CONTRACT SENTINEL[\s\S]*OUTPUT — tp\.translation\.compact-records\/1/);
-  assert.doesNotMatch(call.body.messages[1].content, /FULL USER STYLE SENTINEL/);
+  assert.match(call.body.messages[1].content, /^งานแปล\nแปลข้อความต้นฉบับทุกหน่วยเป็นภาษาไทย/);
+  assert.match(call.body.messages[1].content, /ข้อมูลนำเข้า[\s\S]*รูปแบบคำตอบ — tp\.translation\.compact-records\/1/);
+  assert.equal(call.body.messages[1].content.split("FULL USER STYLE SENTINEL").length - 1, 0);
   const composed = composeCanonicalPrompt(plan, { prompt: "Target language: Thai\nFULL USER STYLE SENTINEL", promptMode: "replace" }, false, false, "th");
-  assert.deepEqual(Object.keys(composed.sections), ["style", "useStyleExamples", "policy", "language", "source", "output", "runtime"]);
+  assert.deepEqual(Object.keys(composed.sections), ["style", "useStyleExamples", "savedDefault", "policy", "language", "source", "output", "runtime"]);
   assert.equal(composed.sections.runtime, "", "empty runtime remains an internal empty boundary");
   assert.doesNotMatch(system, /BUILT-IN STYLE SENTINEL|STRUCTURED JSON SENTINEL/);
   assert.doesNotMatch(system, /STRUCTURED JSON SENTINEL/);
   assert.equal("format" in call.body, false);
   assert.equal("response_format" in call.body, false);
   assert.equal(call.body.stream, true);
-  assert.equal(call.body.messages[1].content.split("SOURCE TEXT\n")[1], "<<TP_P0:原文>>");
+  assert.equal(call.body.messages[1].content.split("ข้อความต้นฉบับ\n")[1], "<<TP_P0:原文>>");
   assert.equal(call.body.messages[1].content.includes("Source (translate this):"), false,
     "the user source section uses the selected contract, not a retired source label");
   assert.equal(call.body.messages.length, 2, "Local adapters receive one system message and one source message");
@@ -64,10 +66,10 @@ try {
   assert.doesNotMatch(call.body.messages[1].content, /<<TP_(?:END|DONE)>>/);
   assert.equal(call.result.meta.selectedContract, "tp.translation.compact-records/1");
   assert.equal(call.result.meta.promptAudit.promptSource, "saved_custom_replace");
-  assert.equal(call.result.meta.promptAudit.effectiveStyleChars, "FULL USER STYLE SENTINEL".length);
+  assert.equal(call.result.meta.promptAudit.effectiveStyleChars, Array.from("ภาษาปลายทาง: ภาษาไทย\nFULL USER STYLE SENTINEL").length);
   assert.equal(call.result.meta.promptAudit.effectiveStyleFingerprint.length, 64);
   assert.equal(JSON.stringify(call.result.meta.promptAudit).includes("FULL USER STYLE SENTINEL"), false);
-  assert.equal(targetLanguagePriority("ja"), "Translate every source unit into Japanese (日本語).");
+  assert.equal(targetLanguagePriority("ja"), "原文の各単位を日本語に翻訳する。");
   assert.equal(targetLanguagePriority("zh-TW"), "Translate every source unit into Chinese (Traditional) (繁體中文).");
   assert.equal(targetLanguagePriority("es"), "Translate every source unit into Spanish.");
 
@@ -79,21 +81,23 @@ try {
     characters: [{ name: "Rey", gender: "unknown" }], glossary: [{ src: "Captain", tgt: "กัปตัน" }],
     prev_context: [{ src: "Where?", who: "Rey" }] });
   system = call.body.messages[0].content;
-  assert.match(system, /\nTRANSLATION STYLE\nTarget language: Thai \(ภาษาไทย\)\.\nKeep Captain as กัปตัน\.$/);
-  assert.match(call.body.messages[1].content, /CONTEXT[\s\S]*STORY SO FAR[\s\S]*CHARACTER SHEET[\s\S]*TRANSLATION MEMORY[\s\S]*PREVIOUS PAGE[\s\S]*SOURCE INPUT CONTRACT SENTINEL[\s\S]*OUTPUT —/);
+  assert.match(system, /\nสไตล์การแปล\nภาษาปลายทาง: ภาษาไทย\nKeep Captain as กัปตัน\.$/);
+  assert.doesNotMatch(call.body.messages[1].content, /Keep Captain/);
+  assert.match(call.body.messages[1].content, /ข้อมูลนำเข้า[\s\S]*บริบทประกอบ[\s\S]*ความจำเนื้อเรื่อง[\s\S]*ข้อมูลตัวละคร[\s\S]*ศัพท์และชื่อจากความจำเรื่อง[\s\S]*หน้าก่อนหน้า[\s\S]*รูปแบบคำตอบ —/);
   assert.doesNotMatch(system, /STORY SO FAR|CHARACTER SHEET|PREVIOUS PAGE/);
   assert.doesNotMatch(system, /BUILT-IN STYLE SENTINEL|SERIES NOTES SENTINEL/);
 
   call = await run({ prompt: "HEADERLESS COMPLETE STYLE", promptMode: "replace" });
   system = call.body.messages[0].content;
-  assert.match(system, /^You are a professional manga and manhwa translator and localization editor[\s\S]*TRANSLATION STYLE\nTarget language: Thai \(ภาษาไทย\)\.\nHEADERLESS COMPLETE STYLE$/,
-    "replace mode works without a magic Target language header");
+  assert.equal(system, composeTranslatorIdentitySystem("ภาษาปลายทาง: ภาษาไทย\nHEADERLESS COMPLETE STYLE", "th"));
+  assert.match(system, /สไตล์การแปล\nภาษาปลายทาง: ภาษาไทย\nHEADERLESS COMPLETE STYLE$/,
+    "replace mode places one System style without requiring a magic Target language header");
   assert.doesNotMatch(system, /BUILT-IN STYLE SENTINEL|SERIES NOTES SENTINEL/);
 
   const withoutImage = await run();
-  assert.doesNotMatch(JSON.stringify(withoutImage.body.messages), /IMAGE HINT SENTINEL/);
+  assert.doesNotMatch(JSON.stringify(withoutImage.body.messages), /ภาพหน้าปัจจุบัน:/);
   const withImage = await run({}, { imageDataUri: "data:image/png;base64,aW1hZ2U=" });
-  assert.match(withImage.body.messages[1].content, /IMAGE HINT SENTINEL/);
+  assert.match(withImage.body.messages[1].content, /ภาพหน้าปัจจุบัน:/);
 
   calls.length = 0;
   globalThis.fetch = async (url, init = {}) => {
@@ -106,7 +110,7 @@ try {
   const thirteen = Array.from({ length: 13 }, (_, index) => ({ id: `g${index}`, text: `原文${index}` }));
   const oneImage = await translateWithLocalOpenAi(thirteen, {
     ai: { model: "qwen3.5:9b", base_url: "http://localhost:11434",
-      local_adapter: { protocol: "ollama", baseUrl: "http://localhost:11434" }, prompt: "FULL STYLE", promptMode: "replace" },
+      local_adapter: { protocol: "ollama", baseUrl: "http://localhost:11434" }, prompt: "FULL STYLE", promptMode: "replace", style_examples: false },
     canonicalPrompt: plan, targetLang: "th",
   });
   assert.equal(calls.length, 1, "all 13 units in one image must use one provider request");
@@ -116,7 +120,7 @@ try {
     Array.from({ length: 13 }, (_, index) => `P${index}`),
     "the single request must contain every exact wire ID once",
   );
-  assert.match(calls[0].body.messages[1].content, /OUTPUT — tp\.translation\.compact-records\/1/);
+  assert.match(calls[0].body.messages[1].content, /รูปแบบคำตอบ — tp\.translation\.compact-records\/1/);
 
   const off = await run({ thinking: "off" });
   const on = await run({ thinking: "on" });
@@ -222,7 +226,7 @@ try {
     /results are matched by ID/);
   const emptyComposed = composeCanonicalPrompt(offlineBundled,
     { prompt: "Target language: Thai\n  ", promptMode: "replace" }, false, false, "th");
-  assert.match(emptyComposed.sections.style, /professional|natural|manga|dialogue|สร้างประโยค/i,
+  assert.match(emptyComposed.sections.style, /professional|natural|manga|dialogue|นักแปล/i,
     "an empty editable style must use the bundled style rather than fail");
   const realStyle = "Avoid pronouns unless the source makes them indispensable.";
   const realComposed = composeCanonicalPrompt(
@@ -233,23 +237,15 @@ try {
     "th",
   );
   const realSystem = realComposed.system;
-  const orderedPieces = [
-    offlineBundled.pieces.systemPolicy,
-    offlineBundled.pieces.sourceInputContract,
-    offlineBundled.pieces.markerOutputContract,
-    offlineBundled.pieces.targetLanguageInstruction,
-    realStyle,
-  ];
-  for (const piece of orderedPieces)
-    assert.equal(realSystem.split(piece).length - 1, 1, "each real canonical section occurs exactly once");
-  assert.equal(realSystem, `System prompt:\n${orderedPieces.slice(0, 3).join("\n")}\n\nStyle prompt:\n${orderedPieces.slice(3).join("\n")}`,
-    "real bundled plan keeps mandatory system/OCR/output rules followed by the selected style");
-  assert.equal(realSystem.split("SOURCE AND OCR").length - 1, 1);
-  assert.equal(realSystem.split("Correct missing, extra or misread characters").length - 1, 1);
-  assert.equal(realSystem.split("Target language: Thai").length - 1, 1,
-    "the selected target language occurs once inside Style prompt");
-  assert.equal(realSystem.split("INPUT — tp.translation.compact-records/1").length - 1, 1);
-  assert.equal(realSystem.split("OUTPUT — tp.translation.compact-records/1").length - 1, 1);
+  assert.equal(realSystem, composeTranslatorIdentitySystem(`ภาษาปลายทาง: ภาษาไทย\n${realStyle}`,"th"), "System owns the exact style");
+  assert.equal(realSystem.includes(realStyle), true);
+  const realUser = composeTranslationUserMessage({sections:realComposed.sections,
+    requestOutputContract: "OUTPUT CONTRACT SENTINEL", sourceRecords:"<<TP_P0:SOURCE>>", targetLang:"th"});
+  assert.equal(realUser.split(realStyle).length-1, 0);
+  assert.equal(realUser.split("ภาษาปลายทาง: ภาษาไทย").length-1, 0);
+  assert.equal(realUser.split(pack.markerInput).length-1, 1);
+  assert.equal(realUser.split("OUTPUT CONTRACT SENTINEL").length-1, 1);
+  assert.equal(realUser.includes(realStyle),false);
   assert.doesNotMatch(offlineBundled.pieces.markerOutputContract,
     /professional manga scanlation|OCR may contain|Translate every source unit into|INPUT CONTRACT/,
     "output contract cannot carry policy, OCR, target-language or input instructions");

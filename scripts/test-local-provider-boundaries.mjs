@@ -46,7 +46,7 @@ try {
   const ollama = createOllamaAdapter({ baseUrl: "http://localhost:11434" });
   const one = await ollama.generate({ model: "qwen", messages: [], outputTokens: 1024, thinkingMode: "off" }, { expectedIds: ["P0"] });
   assert.equal(request.url, "http://localhost:11434/api/chat");
-  assert.deepEqual(request.body.options, { num_predict: 1024 });
+  assert.deepEqual(request.body.options, { num_predict: 1024, temperature: 0.2, seed: 0 });
   assert.deepEqual(tokenSummary(ollama.usage(one.stream.data)), { inputTokens: 9, outputTokens: 4, totalTokens: 13, source: "provider" });
   assert.equal(one.stream.drainStatus, "terminal_received");
   assert.equal(one.stream.providerTerminalComplete, true);
@@ -257,15 +257,17 @@ await test("body-read and connection failures reach Direct Local timing evidence
   } finally { globalThis.fetch = originalFetch; }
 });
 
-await test("Ollama done ends an open stream even when record output is incomplete", async () => {
+await test("Ollama done is authoritative for stop and length terminals", async () => {
   const ollama = createOllamaAdapter({ baseUrl: "http://localhost:11434" });
-  for (const content of ["", "<<TP_P0:partial>>", "malformed output"]) {
+  for (const finish of ["stop", "length"]) for (const content of ["", "<<TP_P0:partial>>", "malformed output"]) {
     const result = await readOpenStream([
       JSON.stringify({ message: { content } }) + "\n",
-      JSON.stringify({ done: true, done_reason: "stop", prompt_eval_count: 7, eval_count: 3 }) + "\n",
+      JSON.stringify({ done: true, done_reason: finish, prompt_eval_count: 7, eval_count: 3 }) + "\n",
     ], ["P0", "P1"], ollama);
     assert.equal(result.earlyCompleted, false);
+    assert.equal(result.terminalCompleted, true, `done:true must terminate even for ${finish}`);
     assert.equal(result.terminalEvidence, "provider_done");
+    assert.equal(result.data.done_reason, finish);
     assert.equal(result.data.message.content, content);
     assert.equal(result.data.eval_count, 3);
   }

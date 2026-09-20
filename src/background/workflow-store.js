@@ -143,9 +143,11 @@ export async function listStranded(now = Date.now()) {
 }
 
 // Cancels every workflow belonging to a tab and returns how many were cancelled.
-export async function cancelTab(tabId, reason = "navigation") {
+export async function cancelTab(tabId, reason = "navigation", workflowIds = null) {
   const active = await listActive();
-  const mine = active.filter((r) => r.generation?.tabId === tabId);
+  const owned = workflowIds ? new Set(workflowIds) : null;
+  const mine = active.filter((r) => r.generation?.tabId === tabId &&
+    (!owned || owned.has(r.workflowId)));
   for (const record of mine) {
     const result = transition(record, STATES.CANCELLED, { reason });
     if (result.ok) {

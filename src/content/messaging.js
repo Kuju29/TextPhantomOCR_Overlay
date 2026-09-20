@@ -119,8 +119,7 @@
         return sendResponse({ ok: true });
       }
       if (type === "BATCH_STATUS_UPDATE") {
-        // Batch telemetry remains available to extension pages, but the web
-        // page has one compact presenter only: TP_TOAST above.
+        TP.updateBatchProgress?.(msg?.batch || null);
         return sendResponse({ ok: true });
       }
       if (type === "API_STATUS_UPDATE") {

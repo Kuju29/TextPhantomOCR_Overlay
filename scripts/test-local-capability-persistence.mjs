@@ -36,7 +36,7 @@ const records = {
 assert.equal(
   savedLocalCapabilitySnapshot(records, "ollama", `${endpoint}/`)?.capability,
   capability,
-  "the exact provider/endpoint identity restores model thinking metadata",
+  "the exact provider/endpoint identity restores model capability metadata",
 );
 
 const modelOptions = [];
@@ -59,13 +59,13 @@ assert.equal(controller.restoreSnapshot(records), true);
 assert.equal(state.localAiCapability.models["qwen3.5:9b"].reasoning.supported, true);
 assert.deepEqual(modelOptions, ["qwen3.5:9b"]);
 assert.equal(state.lastAiResolve.verification_source, "saved_snapshot");
-assert.match(els.aiLocalStatus.textContent, /was verified/);
+assert.match(els.aiLocalStatus.textContent, /metadata checked/);
 assert.equal(state.aiModelBlocked, false);
 const legacy = structuredClone(records);
 delete legacy[identity].verificationVersion;
 assert.equal(controller.restoreSnapshot(legacy), true, "legacy metadata remains available");
-assert.equal(state.aiModelBlocked, true, "older weaker verification must not authorize translation");
-assert.match(els.aiLocalStatus.textContent, /Verifying the selected model automatically/);
+assert.equal(state.aiModelBlocked, true, "older metadata schema must not authorize translation");
+assert.match(els.aiLocalStatus.textContent, /Refreshing installed models automatically/);
 
 let persistedHint = null;
 const capacityState = { localAiCapability: { models: {
@@ -115,11 +115,11 @@ assert.match(hydration, new RegExp(LOCAL_CAPABILITY_SNAPSHOTS_KEY));
 assert.match(hydration, /restoreSnapshot\(stored\.aiLocalCapabilitySnapshotsV1\)/);
 assert.match(connection, /verification_source:\s*"saved_snapshot"/,
   "a restored snapshot must not masquerade as a live health result");
-assert.match(connection, /Verifying the selected model automatically/);
+assert.match(connection, /Refreshing installed models automatically/);
 assert.doesNotMatch(connection, /aiLocalModelId/,
   "the removed exact-model text box must not remain in the connection flow");
 assert.match(connection, /verifiedModel/);
 assert.match(connection, /forgetSnapshot\(provider,[\s\S]*?\.catch\(\(\) => \{\}\)/,
   "an evidenced discovery failure invalidates that identity's saved snapshot");
 
-console.log("Local capability persistence passed: exact saved identity restores immediately and refreshes automatically.");
+console.log("Local capability persistence passed: exact saved metadata identity restores immediately and stale schema refreshes automatically.");

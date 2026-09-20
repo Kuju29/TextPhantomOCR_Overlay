@@ -1,7 +1,7 @@
 const comparisonSummary = u => Object.fromEntries(["runtime","provider","model","requests","inputTokens","outputTokens","totalTokens","tokensReported","tokenStatus"].map(k => [k,u[k]]));
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import { applyUsageSelectionBoundary, currentUsage, failureUsageDetails, normalizeUsageLedger, persistProviderGeneration, persistUsageSelectionBoundary, recordProviderGeneration, recordUsage, resetActiveUsage, usageHistoryRows, usageKey, usageRows, AI_USAGE_SESSION_LIMIT, AI_USAGE_DELTA_LIMIT } from "../src/shared/ai-usage.js";
+import { applyUsageSelectionBoundary, currentUsage, failureUsageDetails, normalizeUsageLedger, flushUsageReceiptJournal, persistProviderGeneration, persistUsageSelectionBoundary, recordProviderGeneration, recordUsage, resetActiveUsage, usageHistoryRows, usageKey, usageRows, AI_USAGE_SESSION_LIMIT, AI_USAGE_DELTA_LIMIT } from "../src/shared/ai-usage.js";
 
 let sequence = 0;
 const opts = (now) => ({ now, id: () => `s${++sequence}` });
@@ -369,6 +369,7 @@ const receipt={runtime:"cloud",provider:"fixture",model:"trace",engine:"runsexte
   operationId:"same-op",receiptId:"same-receipt",inputTokens:10,outputTokens:2,totalTokens:12};
 await Promise.all([persistProviderGeneration(receipt,{emitTrace:(_name,row)=>deltas.push(row)}),
   persistProviderGeneration(receipt,{emitTrace:(_name,row)=>deltas.push(row)})]);
+await flushUsageReceiptJournal();
 assert.deepEqual(deltas.map(row=>row.deduplicated),[false,true],"duplicate receipt trace retains exact unchanged semantics");
 assert.equal(stored.aiUsageV1.models[usageKey("cloud","fixture","trace")].sessions[0].requests,1);
 const { translateUnits } = await import("../src/background/ai/translation-service.js");

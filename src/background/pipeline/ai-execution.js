@@ -1,3 +1,6 @@
+import {submitConversationPage} from "../ai/translation-paths/batch-dispatch.js";
+import {selectedMode} from "../ai/translation-paths/order.js";
+import { enterConversationJob, finishConversationJob } from "../ai/translation-paths/order.js";
 import { providerLearningSample } from "../../shared/ai/execution-timing.js";
 import { updateImagePresentation } from "../batches.js";
 import { attachTpError } from "../../shared/error-contract.js";
@@ -66,7 +69,7 @@ export function releaseAiLaneFailure(
   return { gated, providerBackpressure, serverDeferred, generationAttempts };
 }
 
-export function createAiExecution({ log, markJobPhase, traceUnitLayout, onCheckpoint = async () => {} }) {
+export function createAiExecution({ log, markJobPhase, traceUnitLayout, onCheckpoint = async () => {}, onProvisionalResult = null }) {
   async function planLocalAi(payload) {
     const ai = payload?.ai && typeof payload.ai === "object" ? payload.ai : null;
     const classification = classifyAiRuntime({
@@ -123,6 +126,7 @@ export function createAiExecution({ log, markJobPhase, traceUnitLayout, onCheckp
     jobId = "",
     beforeRepair = async () => {},
     capabilities = null,
+    conversationSubmit = null,
   ) {
     const traceId = String(payload?.context?.tp_trace || getTrace() || "");
     return translateLensPage({
@@ -137,13 +141,15 @@ export function createAiExecution({ log, markJobPhase, traceUnitLayout, onCheckp
       jobId,
       beforeRepair,
       capabilities,
+      conversationSubmit,
       onCheckpoint: data => onCheckpoint(cancelBatchId, data),
+      onProvisionalResult: (snapshot,state) => onProvisionalResult?.(jobId,snapshot,state),
       onStatus: patch => updateImagePresentation(cancelBatchId, imageKeyFromPayload(payload), patch),
       isCancelled: () =>
         signal?.aborted === true ||
         Boolean(cancelBatchId && getBatch(cancelBatchId)?.cancelled),
       onStreamProgress: ({state}) => {
-        if (["usage_pending", "http_wait", "validating"].includes(state))
+        if (["usage_pending", "sending_request", "http_wait", "response_headers", "validating"].includes(state))
           updateImagePresentation(cancelBatchId, imageKeyFromPayload(payload), {phase:state});
         else if (plan.route === "direct-local") markLocalAiStreamProgress(cancelBatchId, imageKeyFromPayload(payload), state);
       },
@@ -207,6 +213,28 @@ export function createAiExecution({ log, markJobPhase, traceUnitLayout, onCheckp
     jobId = "",
     capabilities = null,
   ) {
+    if (selectedMode(payload.ai) === "conversation") {
+      updateImagePresentation(batchId,imageKeyFromPayload(payload),{translationMode:'conversation'});
+      // Keep OCR and page preparation concurrent. Only the cross-page dispatch
+      // owns an AI slot; the original per-page execution stays below unchanged.
+      const start=performance.now(), traceId=String(payload?.context?.tp_trace||"");
+      traceNote("background/pipeline/ai-execution.js","imageStage",{stage:"ai",state:"started",route:"extension",
+        planner:"conversation_cross_page",imageId:String(payload?.metadata?.image_id||""),providerMs:null},traceId);
+      try {
+        markJobPhase(jobId, "ai_queued");
+        const done=await runLocalAi(base,payload,result,plan,batchId,signal,null,onGenerationAttempt,
+          jobId,async()=>{},capabilities,submitConversationPage);
+        traceNote("background/pipeline/ai-execution.js","imageStage",{stage:"ai",state:"finished",route:"extension",
+          planner:"conversation_cross_page",imageId:String(payload?.metadata?.image_id||""),providerMs:null,
+          roundTripMs:performance.now()-start,usable:done?.usable===true,complete:done?.complete===true,
+          missingUnitIds:done?.missing||[],latencySource:"page_projection_not_provider"},traceId);
+        return done;
+      } finally {
+        markBatchInitialAi(batchId,imageKeyFromPayload(payload));
+        finishConversationJob(payload);
+      }
+    }
+    await enterConversationJob(payload, signal, (event,data)=>traceNote("background/pipeline/ai-execution.js",event,data,String(payload?.context?.tp_trace || "")));
     const key = laneKeyFor(payload);
     // Removing RPM/time pacing is independent from generation concurrency.
     // Capacity is selected per runtime endpoint + model, never globally.
@@ -251,8 +279,17 @@ export function createAiExecution({ log, markJobPhase, traceUnitLayout, onCheckp
         after:{window:slot?.window,ceiling:slot?.maxWindow,running:slot?.running},
         timing:{queueMs:slot?.waitMs},
       }, traceId);
-      markJobPhase(jobId, "ai_generating");
       const queueWaitMs = Number(slot?.waitMs) || 0;
+      markJobPhase(jobId, "ai_generating");
+      updateImagePresentation(batchId, barrierImageKey, {
+        progressEvent: {
+          lane: "ai",
+          state: "running",
+          detail: "Preparing AI request",
+          function: "preparing_request",
+          queueWaitMs,
+        },
+      });
       accumulatedQueueWaitMs += queueWaitMs;
       traceNote(
         "background/jobs.js",
@@ -279,6 +316,9 @@ export function createAiExecution({ log, markJobPhase, traceUnitLayout, onCheckp
       let slotHeld = true;
       try {
         const beforeRepair = async () => {
+          // The initial turn is complete. Do not hold document ordering while
+          // waiting for the batch's later images at the repair barrier.
+          finishConversationJob(payload);
           // A repair must not occupy scarce provider capacity while sibling
           // images are still making their first attempt. Release, join the
           // current batch-pass barrier, then reacquire for the single repair.
@@ -333,6 +373,7 @@ export function createAiExecution({ log, markJobPhase, traceUnitLayout, onCheckp
         // Clean/partial-complete images never enter beforeRepair, so publish
         // their initial terminal boundary before the caller starts rendering.
         markBatchInitialAi(batchId, barrierImageKey);
+        finishConversationJob(payload);
         const roundTripMs = Math.max(0, performance.now() - started);
         const serverWaitMs = Number.isFinite(telemetry.rateWaitMs) && Number.isFinite(telemetry.admissionWaitMs)
           ? telemetry.rateWaitMs + telemetry.admissionWaitMs : null;

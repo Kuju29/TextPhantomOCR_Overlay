@@ -223,9 +223,11 @@ export async function runContentValidatedTranslation({
     ? "wrong_target_script"
     : "missing_or_empty_units";
   if (repair?.enabled === false) {
-    traceAttempt("repair_skipped", 2, {
+    const deferredToBatch = repair?.deferredToBatch === true;
+    traceAttempt(deferredToBatch ? "repair_deferred" : "repair_skipped", 2, {
       reason: repairReason,
       repairEnabled: false,
+      repairDeferredToBatch: deferredToBatch,
       requestAttempted: false,
       generationIntent: false,
       generationAttempts: 0,

@@ -4,7 +4,7 @@ from PIL import Image
 from typing import Any
 import numpy as np
 
-import concurrent.futures, contextlib, copy, io, os, time
+import concurrent.futures, contextlib, contextvars, copy, io, os, time
 
 from backend.ai.translation.contracts import AiConfig
 from backend.config import settings
@@ -355,8 +355,12 @@ def process_image(
             ai_original_tree = copy.deepcopy(original_tree)
             ai_translated_tree = copy.deepcopy(translated_tree)
             _ai_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            invoke_ai = ai_stage.run_ai_layer
+            if getattr(ai_cfg, "translation_mode", "independent") == "conversation":
+                context = contextvars.copy_context()
+                invoke_ai = lambda *args, **kwargs: context.run(ai_stage.run_ai_layer, *args, **kwargs)
             _f_ai = _ai_executor.submit(
-                ai_stage.run_ai_layer,
+                invoke_ai,
                 out, ai_original_tree, ai_translated_tree, ai_cfg, target_lang, W, H, thai_font, latin_font,
                 ai_source_tree=ai_source_tree,
                 base_img=base_img,

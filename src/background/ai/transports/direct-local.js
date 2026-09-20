@@ -21,6 +21,7 @@ export async function translateDirectLocal(
     imageDataUri = "",
     targetLang,
     sourceLang,
+    conversationContext = null,
     canonicalPrompt = null,
     promptAudit = null,
     operationId = "",
@@ -79,8 +80,10 @@ export async function translateDirectLocal(
   let result;
   try {
     result = await translateWithLocalOpenAi(units, {
+      operationId,
       // Strip the key at the trust boundary as well as omitting it in the adapter.
       ai: { ...(ai || {}), api_key: "" },
+      conversationContext,
       canonicalPrompt,
       imageDataUri,
       sourceLang,
@@ -108,6 +111,7 @@ export async function translateDirectLocal(
       requestDispatched: error?.requestDispatched === true,
       providerResponded: error?.providerResponded === true,
       providerAttempts, generationAttempts,
+      ...(error?.code === "ai_workload_budget_insufficient" ? {budget: error.diagnostics || {}} : {}),
     });
     await wireTrace?.("timing", { totalMs: Math.round(performance.now() - started),
       failed: true, providerMs: Number(error?.diagnostics?.providerMs || 0),

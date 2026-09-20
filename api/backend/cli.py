@@ -47,6 +47,7 @@ from typing import Any
 import base64, argparse, json, mimetypes, re, subprocess, sys, tempfile, time
 
 from backend.ai.translation.contracts import AiConfig
+from backend.ai.reasoning_preference import normalize_reasoning_preference
 from backend.config import settings
 from backend.lens.languages import normalize as normalize_lang
 from backend.lens.tree import tree_stats
@@ -663,6 +664,8 @@ def _run_extension(args: argparse.Namespace, image_path: Path) -> int:
             "base_url": args.ai_base_url,
             "prompt": args.ai_prompt,
             "thinking": args.ai_thinking,
+            "translation_mode": args.ai_translation_mode,
+            "conversation": {"documentId":args.ai_conversation} if args.ai_conversation else {},
         },
     }
     project_root = Path(__file__).resolve().parents[2]
@@ -809,11 +812,17 @@ limits:
     parser.add_argument("--source", default="translated", choices=["original", "translated", "ai"])
     parser.add_argument("--ai-key", default="", help="AI API key (required for --source ai)")
     parser.add_argument("--ai-model", default="auto")
+    parser.add_argument("--ai-translation-mode", choices=["conversation","independent"], default="conversation")
+    parser.add_argument("--ai-conversation", default="", help="Private document scope for successive translation turns")
     parser.add_argument("--ai-provider", default="auto")
     parser.add_argument("--ai-base-url", default="auto")
-    parser.add_argument("--ai-thinking", default="off", type=lambda value:
-                        "on" if str(value).strip().lower() == "on" else "off",
-                        choices=["off", "on"])
+    parser.add_argument(
+        "--ai-thinking",
+        default="off",
+        type=lambda value: normalize_reasoning_preference(value, "off"),
+        choices=["minimum", "default", "off", "on", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"],
+        help="provider-neutral reasoning preference; exact model capability maps it to the native provider control",
+    )
     parser.add_argument(
         "--ai-prompt", default="",
         help="style prompt required by --source ai; no built-in fallback is used",
@@ -866,9 +875,11 @@ limits:
     # --- AI config ----------------------------------------------------------
     ai_cfg = None
     if args.mode == "lens_text" and source == "ai":
-        api_key = args.ai_key.strip() or settings.ai_api_key
-        if not api_key:
-            print("error: --source ai needs --ai-key (or AI_API_KEY env)", file=sys.stderr)
+        from backend.ai.credentials import request_api_key, MissingUserApiKey
+        try:
+            api_key = request_api_key(args.ai_provider, args.ai_base_url, args.ai_key)
+        except MissingUserApiKey:
+            print("error: Cloud AI requires --ai-key; server-key fallback is disabled", file=sys.stderr)
             return 2
         ai_cfg = AiConfig(
             api_key=api_key,
@@ -881,6 +892,9 @@ limits:
             prompt_editable=args.ai_prompt,
             prompt_mode="replace",
             thinking=args.ai_thinking,
+            translation_mode=args.ai_translation_mode,
+            conversation=(__import__("backend.ai.translation_paths.mode", fromlist=["descriptor"]).descriptor(
+                {"documentId":args.ai_conversation}, caller="local-cli") if args.ai_conversation else {}),
         )
 
     # --- 6-way cross translation (several images + AI) ----------------------

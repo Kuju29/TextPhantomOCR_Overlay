@@ -1,7 +1,7 @@
 // Offline accounting contracts. Never contacts a provider or browser tab.
 import assert from 'node:assert/strict';
 import { localProviderUsage, aggregateUsage, addDecimal, usageIsComplete } from '../src/shared/ai/usage-values.js';
-import { recordProviderGeneration, currentUsage, normalizeUsageLedger, usageKey, persistProviderGeneration } from '../src/shared/ai-usage.js';
+import { recordProviderGeneration, currentUsage, normalizeUsageLedger, usageKey, persistProviderGeneration, flushUsageReceiptJournal } from '../src/shared/ai-usage.js';
 import { createOpenAiCompatibleAdapter } from '../src/shared/ai/providers/local-openai-compatible.js';
 const target = {runtime:'cloud',provider:'openrouter',model:'m'};
 const complete = {inputTokens:100,outputTokens:20,totalTokens:120,cachedInputTokens:70,
@@ -94,11 +94,13 @@ globalThis.chrome={runtime:{getManifest:()=>({version:'2026.test'})},storage:{lo
 try{
  failWrite=true;await assert.rejects(persistProviderGeneration({...target,operationId:'write-failed',usage:complete}),/write failure/);
  await Promise.all(Array.from({length:24},(_,i)=>persistProviderGeneration({...target,operationId:'write'+i,usage:{...complete,receiptId:'write'+i}})));
- assert.equal(view(stored.aiUsageV1).requests,24);assert.equal(lockCalls,2,"one failed transaction plus one locked coalesced 24-receipt commit");checks++;console.log('PASS storage recovery and serialized updates');
+ assert.equal(stored.aiUsageV1,undefined,'durable receipts do not force a full-ledger write on the caller path');
+ await flushUsageReceiptJournal();
+ assert.equal(view(stored.aiUsageV1).requests,24);assert.equal(lockCalls,1,"24 durable receipts fold through one locked aggregate ledger commit");checks++;console.log('PASS storage recovery and serialized updates');
  const {translateViaServer}=await import('../src/background/ai/transports/server.js');
  const opts={base:'https://api.test',targetLang:'th',sourceLang:'en',operationId:'cloud-route',ai:{provider:'openrouter',model:'m',api_key:'not-real',base_url:'https://openrouter.ai/api/v1',prompt:'style'}};
  globalThis.fetch=async()=>new Response(JSON.stringify({schema:'tp.ai.result/1',translations:[{id:'P0',text:'สวัสดี'}],missing:[],meta:{resolvedProvider:'openrouter',resolvedModel:'m',generationAttempts:1,usage:{...complete,receiptId:'cloud-route'}}}),{headers:{'content-type':'application/json'}});
- await translateViaServer([{id:'P0',text:'Hello'}],opts);assert.equal(view(stored.aiUsageV1).requests,25);assert.equal(view(stored.aiUsageV1).pendingOperations,0);checks++;console.log('PASS runs:Extension Cloud actual transport -> ledger');
+ await translateViaServer([{id:'P0',text:'Hello'}],opts);await flushUsageReceiptJournal();assert.equal(view(stored.aiUsageV1).requests,25);assert.equal(view(stored.aiUsageV1).pendingOperations,0);checks++;console.log('PASS runs:Extension Cloud actual transport -> ledger');
  const {runServerTranslation}=await import('../src/background/pipeline/server-translation.js');
  globalThis.fetch=async()=>new Response(JSON.stringify({Ai:{meta:{provider:'openrouter',model:'m',usage:{...complete,receiptId:'sync-api'}}}}),{headers:{'content-type':'application/json'}});
  await runServerTranslation({base:'https://api.test',jobId:'api-job',tabId:1,frameId:0,batchId:'',workflowId:'',apiEngine:true,
@@ -106,6 +108,7 @@ try{
    {beginInFlight:()=>new AbortController(),endInFlight:()=>{},markJobPhase:()=>{},payloadForFullServer:x=>({...x}),
     handleResult:()=>{},handleJobError:(_id,e)=>{throw e},releaseJob:()=>{},waitForRetry:()=>{throw new Error('unexpected retry')},
     log:{info:()=>{},warn:()=>{},debug:()=>{}}});
+ await flushUsageReceiptJournal();
  assert.equal(view(stored.aiUsageV1).requests,26);assert.equal(stored.aiUsageV1.models[usageKey('cloud','openrouter','m')].sessions.at(-1).engines.runsapi,1);checks++;console.log('PASS runs:API sync actual transport -> ledger');
  const {createResultDelivery,createResultAccountingQueue}=await import('../src/background/jobs/result-delivery.js');
  const waitUntil=async predicate=>{for(let i=0;i<100;i++){if(predicate())return;await new Promise(r=>setTimeout(r,2));}throw new Error('condition timeout')};
@@ -153,10 +156,10 @@ try{
  const delivery=createResultDelivery({pendingByJob:new Map([['q',ctx]]),findContext:()=>ctx,getTabSessionId:()=>'',getSettingsEpoch:()=>1,
    removeJob:()=>{discarded=true},finalizeBatch:()=>{},traceNote:()=>{},log:{warn:()=>{}}});
  await delivery.handleResult('q',{Ai:{meta:{provider:'openrouter',model:'m',usage:{...complete,receiptId:'queued'}}}});
- await delivery.flushAccounting();
+ await delivery.flushAccounting();await flushUsageReceiptJournal();
  assert.equal(view(stored.aiUsageV1).requests,27);assert.equal(discarded,true);checks++;console.log('PASS runs:API queued receipt accounted BEFORE stale-image discard');
  await delivery.handleResult('q',{perf:{cache:'hit'},Ai:{meta:{provider:'openrouter',model:'m',usage:{...complete,receiptId:'old-cache-never-seen'}}}});
- await delivery.flushAccounting();
+ await delivery.flushAccounting();await flushUsageReceiptJournal();
  assert.equal(view(stored.aiUsageV1).requests,27);checks++;console.log('PASS rendered result-cache hit is not a new provider generation');
 
  // A slow or temporarily rejected usage write is never on the render critical
@@ -217,9 +220,11 @@ try{
  const recovered={meta:{resolvedProvider:'openrouter',resolvedModel:'m',usage:{...complete,receiptId:'repair-saved'}}};
  await accountRecoveredRepair({id:'repair-run'},{id:'task'},recovered);
  await accountRecoveredRepair({id:'repair-run'},{id:'task'},recovered);
+ await flushUsageReceiptJournal();
  assert.equal(view(stored.aiUsageV1).requests,28);checks++;console.log('PASS pooled-repair recovery accounts saved receipt once with no generation');
  globalThis.fetch=async()=>{throw new TypeError('network vanished')};
  await assert.rejects(translateViaServer([{id:'P0',text:'Hello'}],{...opts,operationId:'lost-cloud'}));
+ await flushUsageReceiptJournal({recover:true});
  assert.equal(view(stored.aiUsageV1).requests,28);assert.equal(view(stored.aiUsageV1).pendingOperations,1);assert.equal(view(stored.aiUsageV1).tokensReported,false);checks++;console.log('PASS network uncertainty is pending not free/zero');
 }finally{globalThis.chrome=oldChrome;globalThis.fetch=oldFetch;if(oldNavigator)Object.defineProperty(globalThis,'navigator',oldNavigator);else delete globalThis.navigator;}
 const {createUsageViewController}=await import('../src/popup/controllers/usage-view-controller.js');
@@ -229,11 +234,11 @@ test('Usage UI distinguishes cached subsets, unknown cost and incomplete totals'
  const row={...target,requests:2,tokenStatus:'incomplete',inputTokens:100,outputTokens:20,totalTokens:120,
    cachedInputTokens:70,cacheWriteInputTokens:5,thinkingTokens:3,tokenCoverage:{cachedInputTokens:1},
    incompleteRequests:1,providerCostUsd:'0.00001234567890123456789',costReportedRequests:1};
- controller.render(row);assert.match(els.aiUsageCounts.textContent,/known subtotals/);
- assert.match(els.aiUsageCounts.textContent,/cache read 70 \(reported subset\)/);
- assert.match(els.aiUsageCounts.textContent,/reasoning 3 \(included in output\)/);
+ controller.render(row);assert.match(els.aiUsageCounts.textContent,/Recorded total: 120/);
+ assert.match(els.aiUsageCounts.textContent,/Cached input \(included\): 70; 1\/2 calls reported/);
+ assert.match(els.aiUsageCounts.textContent,/Reasoning \(included in output\): 3/);
  assert.ok(els.aiUsageCounts.textContent.includes(row.providerCostUsd));
- controller.render({...row,runtime:'local',providerCostUsd:null});assert.match(els.aiUsageCounts.textContent,/prompt reuse 70/);
- assert.doesNotMatch(els.aiUsageCounts.textContent,/provider cost/);
+ controller.render({...row,runtime:'local',providerCostUsd:null});assert.match(els.aiUsageCounts.textContent,/Cached input \(included\): 70/);
+ assert.doesNotMatch(els.aiUsageCounts.textContent,/Reported cost/);
 });
 console.log(`Usage/cache extension: ${checks} checks passed; no live network.`);

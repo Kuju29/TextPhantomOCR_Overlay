@@ -145,7 +145,8 @@ await test('one unsafe page cannot block other repaired pages, and terminates ap
  assert.equal(r.final.pages.bad.patchError.code,'repair_erase_conflict');assert.equal(r.deletes.length,0,'unsafe saved results must not be deleted');
  assert(r.events.some(e=>e.ev==='repairPatch'&&e.d.pageId==='bad'&&e.d.code==='repair_erase_conflict'));
  assert(r.events.some(e=>e.ev==='repairProgress'&&e.d.phase==='apply_failed'&&e.d.placement?.applyFailedPages===1));
- const m=toasts.filter(m=>m.type==='TP_TOAST').at(-1);assert.equal(m.progress.active,false);assert.match(m.text,/could not be placed safely/);
+ const m=toasts.filter(m=>m.type==='BATCH_STATUS_UPDATE').at(-1);
+ assert.equal(m.batch.repair.phase,'apply_failed');assert.equal(m.batch.active,0);assert.match(m.batch.message,/could not be placed safely/);
  await r.co.resume();await r.co.finishInitial(r.batch);assert.equal(r.executions(),1,'no automatic provider rerun on wake-up');
 });
 await test('mixed permanent refusal and unconfirmed ACK retains apply_pending and both checkpoints',async()=>{

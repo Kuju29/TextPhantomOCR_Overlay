@@ -6,6 +6,15 @@ import { dominantWrongTargetIds } from "../src/background/ai/script-diagnostics.
 import { translateWithLocalOpenAi as translateRaw } from "../src/shared/ai/direct-local/generation.js";
 import { attachCanonicalOriginalTree, translationUnits } from "../src/shared/lens-document.js";
 const translateWithLocalOpenAi = (units, options = {}) => translateRaw(units, { targetLang: "th", ...options, ai: { prompt: "full style", promptMode: "replace", ...(options.ai || {}) } });
+// Examples/context are not requested source IDs; extract the final named block.
+function sourceRecords(text) {
+  const boundary = "ข้อความต้นฉบับ\n";
+  const index = text.lastIndexOf(boundary);
+  assert.ok(index >= 0, "the request must have an explicit SOURCE section");
+  return [...text.slice(index + boundary.length).matchAll(/^<<TP_(P\d+):(.*)>>$/gm)]
+    .map((match) => ({ id: match[1], text: match[2] }));
+}
+
 
 const canonicalPrompt = {
   version: "translation-plan-2",
@@ -45,8 +54,7 @@ async function exerciseLocal(protocol) {
     const rawText = Array.isArray(finalContent)
       ? finalContent.find((part) => part.type === "text")?.text
       : finalContent;
-    const requestUnits = [...rawText.matchAll(/^<<TP_(P\d+):(.*)>>$/gm)]
-      .map((match) => ({ id: match[1], text: match[2] }));
+    const requestUnits = sourceRecords(rawText);
     // Deliberately return the array backwards. IDs, not response position,
     // must associate translations with OCR units.
     const translations = [...requestUnits].reverse().map(({ id }) => ({
@@ -87,8 +95,7 @@ for (const protocol of ["ollama", "openai"]) {
   const rawRequest = Array.isArray(finalContent)
     ? finalContent.find((part) => part.type === "text").text
     : finalContent;
-  const request = { units: [...rawRequest.matchAll(/^<<TP_(P\d+):(.*)>>$/gm)]
-    .map((match) => ({ id: match[1], text: match[2] })) };
+  const request = { units: sourceRecords(rawRequest) };
 
   assert.deepEqual(request.units, mixedUnits.map((unit, index) => ({ id: `P${index}`, text: unit.text })),
     `${protocol}: model-visible input must be the minimal ordered id/text contract`);

@@ -410,12 +410,12 @@ assert.ok(mediaRecheck < capabilitiesProbe,
   "cancelled work must stop before the capabilities probe");
 assert.match(jobsSource, /\{ shouldStart: \(\) => pendingByJob\.has\(jobId\) \}/,
   "resumed polls removed during cancellation must not start from the queue");
-assert.match(jobsSource, /return scheduleOwnedImageJob\(\{[\s\S]{0,700}?work: \(\) => processJob\(payload/,
+assert.match(jobsSource, /const scheduled = scheduleOwnedImageJob\(\{[\s\S]{0,700}?work: \(\) => processJob\(payload/,
   "production enqueue must pass work through atomic image ownership");
 assert.match(jobsSource, /beginInFlight\(prefetchId, tabId, batchId\)/,
   "navigation cancellation must own the prefetch before network work starts");
 assert.match(jobsSource,
-  /try \{\s*return await processJobInner\(payload, tabId, frameId\);\s*\} finally \{\s*releasePreparedDataUri\(payload\);/,
+  /try \{\s*return await processJobInner\(payload, tabId, frameId\);\s*\} finally \{\s*finishConversationJob\(payload\);\s*releasePreparedDataUri\(payload\);/,
   "every processJob exit must release retained data URI admission and its payload copy");
 
 // Exercise the production ownership scheduler itself, not only its map.

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 from fastapi import APIRouter, Response
+from starlette.concurrency import run_in_threadpool
 
 import time
 
@@ -51,6 +52,10 @@ def _refused_base_url(payload: dict[str, Any], exc: SecurityError) -> dict:
 @router.post("/ai/resolve")
 async def resolve(payload: dict[str, Any]) -> dict:
     """Resolve provider / model / model-list from a partial AI config."""
+    return await run_in_threadpool(_resolve, payload)
+
+
+def _resolve(payload: dict[str, Any]) -> dict:
     t0 = time.perf_counter()
     try:
         result = dict(ai_resolve.resolve(payload))
@@ -88,6 +93,10 @@ async def resolve(payload: dict[str, Any]) -> dict:
 @router.post("/ai/probe")
 async def probe(payload: dict[str, Any]) -> dict:
     """Run one tiny real provider call for the selected model (cached)."""
+    return await run_in_threadpool(_probe, payload)
+
+
+def _probe(payload: dict[str, Any]) -> dict:
     t0 = time.perf_counter()
     try:
         result = dict(ai_probe.probe(payload))
@@ -111,6 +120,10 @@ async def probe(payload: dict[str, Any]) -> dict:
             "status": result.get("status") or "unknown",
             "http_status": int(result.get("http_status") or 0),
             "cached": bool(result.get("cached")),
+            "shared": bool(result.get("shared")),
+            **({"probeId": result["probeId"]} if result.get("probeId") else {}),
+            **({"error_details": result["error_details"]} if result.get("error_details") else {}),
+            **({"error_reason": str(result.get("error") or "")[:160]} if not result.get("ok") and result.get("error") else {}),
             "dt_ms": round((time.perf_counter() - t0) * 1000, 1),
         },
         ok=bool(result.get("ok")),

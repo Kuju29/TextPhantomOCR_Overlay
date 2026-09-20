@@ -128,18 +128,17 @@
           <button type="button" id="api-gate-ai-open" class="secondary-btn">Open API settings</button>
         </div>
         <section id="ai-group" class="ai-group" style="display: none">
-          <div class="ai-usage-strip" id="ai-usage-wrap" style="display: none" aria-live="polite">
-            <div class="ai-usage-summary">
-              <span id="ai-usage-kind">Cloud</span>
-              <strong id="ai-usage-model">Provider / Model</strong>
-              <span id="ai-usage-counts">0 requests · 0 tokens</span>
+          <details class="ai-compact-panel" id="ai-usage-wrap" style="display: none">
+            <summary title="Current model · since reset · input + output, including cached input"><span id="ai-usage-label">Tokens used</span> <span id="ai-usage-total" class="ai-summary-value" aria-live="polite">—</span></summary>
+            <div class="ai-compact-content">
+              <div class="ai-usage-model-line"><span id="ai-usage-kind">Cloud</span> · <span id="ai-usage-model">Provider / Model</span></div>
+              <span id="ai-usage-counts" class="ai-metric-lines">Requests: 0</span>
+              <div class="ai-usage-actions">
+                <button type="button" id="ai-usage-reset" class="secondary-btn ai-usage-reset">Reset</button>
+                <button type="button" id="ai-usage-history" class="secondary-btn ai-usage-reset" aria-haspopup="dialog">History</button>
+              </div>
             </div>
-            <div class="ai-usage-actions">
-              <button type="button" id="ai-usage-reset" class="secondary-btn ai-usage-reset">Reset</button>
-              <button type="button" id="ai-usage-history" class="secondary-btn ai-usage-reset"
-                aria-haspopup="dialog">History</button>
-            </div>
-          </div>
+          </details>
           <dialog id="ai-usage-history-dialog" class="ai-usage-history-dialog" aria-labelledby="ai-usage-history-title">
             <div class="ai-usage-history-head">
               <h2 id="ai-usage-history-title">AI usage history</h2>
@@ -187,7 +186,7 @@
           <div class="field" id="ai-model-wrap" style="display: none">
             <label for="ai-model">Model <span aria-hidden="true">(required)</span></label>
             <select id="ai-model" aria-label="AI Model"></select>
-            <div class="hint" id="ai-local-model-hint" style="display: none">Installed models are loaded from the selected Local AI runtime. Choosing a model verifies it automatically.</div>
+            <div class="hint" id="ai-local-model-hint" style="display: none">Installed models are loaded from the selected Local AI runtime. Choosing a model checks its runtime metadata automatically.</div>
             <div id="ai-local-capacity-wrap" style="display: none; margin-top: 10px">
               <label for="ai-local-capacity-mode">Local AI capacity</label>
               <select id="ai-local-capacity-mode" aria-label="Local AI capacity mode">
@@ -211,7 +210,8 @@
           <div class="field" id="ai-thinking-wrap" style="display: none">
             <label for="ai-thinking">AI thinking</label>
             <select id="ai-thinking" aria-label="AI thinking mode">
-              <option value="off" selected>Thinking off</option>
+              <option value="minimum" selected>Lowest available</option>
+              <option value="off">Thinking off</option>
               <option value="on">Thinking on</option>
             </select>
             <div class="hint" id="ai-thinking-hint"></div>
@@ -245,15 +245,19 @@
                 aria-label="Clear this series' memory">🗑</button>
             </label>
             <label class="label-row" style="cursor: pointer">
-              <span>Mode</span>
+              <span>Story memory mode</span>
               <select id="ai-memory-mode">
                 <option value="off">Off</option>
                 <option value="terms">Terms only</option>
                 <option value="full">Full (+ characters)</option>
               </select>
             </label>
+            <label class="label-row" id="ai-style-examples-wrap" style="cursor: pointer">
+              <span>Use style examples</span>
+              <input type="checkbox" id="ai-style-examples" checked />
+            </label>
             <div id="ai-characters-count" class="hint">No memory for this series yet</div>
-            <div id="ai-memory-hint" class="hint">Off, terms, or full character context.</div>
+            <div id="ai-memory-hint" class="hint"></div>
           </div>
 
           <div class="field" id="ai-page-image-wrap" style="display: none">
@@ -282,16 +286,24 @@
             </label>
             <div class="inline-row rate-row" id="rate-custom-fields">
               <label class="rate-field">
-                <span>Images sent to AI / minute</span>
+                <span>AI requests / minute (including repair)</span>
                 <input type="number" id="rate-rpm" min="1" max="600" step="1" placeholder="Auto" />
               </label>
               <label class="rate-field">
-                <span>Images allowed back-to-back</span>
+                <span>Requests allowed back-to-back</span>
                 <input type="number" id="rate-burst" min="1" max="60" step="1" placeholder="Auto" />
               </label>
             </div>
             <div id="rate-preset-hint" class="hint rate-preset" aria-live="polite"></div>
-            <div class="hint">Optional Cloud-only cap. Off means provider managed.</div>
+            <div class="hint">Optional Cloud-only request-rate cap, separate from per-request token limits. Off means provider managed. Unknown token/minute limits are not guessed.</div>
+          </div>
+          <div class="field" id="ai-translation-mode-wrap">
+            <label class="label-row" for="ai-translation-mode">Translation mode</label>
+            <select id="ai-translation-mode">
+              <option value="conversation" selected>Conversation</option>
+              <option value="independent" disabled>Independent (original)</option>
+            </select>
+            <div class="hint">Conversation is used for all extension translations. Independent (original) is temporarily unavailable.</div>
           </div>
         </section>
       </section>

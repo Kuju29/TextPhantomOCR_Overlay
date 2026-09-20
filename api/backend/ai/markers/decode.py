@@ -8,7 +8,18 @@ from backend.ai.errors import ModelOutputContractError
 from .wire import PREFIX, SUFFIX, END_MARKER, DONE_MARKER
 
 _MARKER_RE: Final[re.Pattern[str]] = re.compile(r"<<TP_P(\d+)>>")
-_WIRE_MARKER_RE: Final[re.Pattern[str]] = re.compile(r"<<TP_P(\d+):")
+_WIRE_MARKER_RE: Final[re.Pattern[str]] = re.compile(r"<<(?:TP_P\d+|I[1-9][0-9]{0,6}_P[0-9]{1,6}):")
+_GENERIC_ID_PATTERN: Final[str] = r"(?:P\d+|I[1-9][0-9]{0,6}_P[0-9]{1,6})"
+_GENERIC_HEADER_RE: Final[re.Pattern[str]] = re.compile(rf"<<(?:TP_(P\d+)|(I[1-9][0-9]{{0,6}}_P[0-9]{{1,6}}))(?::|\s)")
+_GENERIC_CLAIM_RE: Final[re.Pattern[str]] = re.compile(rf"<<(?:TP_(P\d+)|(I[1-9][0-9]{{0,6}}_P[0-9]{{1,6}}))")
+
+def _claim_id(match: re.Match[str] | None) -> str | None:
+    if match is None:
+        return None
+    return match.group(1) or match.group(2)
+
+def _record_repr(item: str, value: str) -> str:
+    return f"<<{item}:{value}>>" if item.startswith("I") else f"<<TP_{item}:{value}>>"
 MEMO_MARKER: Final[str] = "<<TP_MEMO>>"
 
 @dataclass(frozen=True)
@@ -25,8 +36,12 @@ class DecodedTranslation:
     # Structural diagnostics only. Never retain response text in metadata.
     discarded_ids: tuple[str, ...] = ()
     malformed_line_count: int = 0
+    recoverable_malformed_line_count: int = 0
+    malformed_records_recoverable: bool = False
     duplicate_ids: tuple[str, ...] = ()
     ignored_prose_chars: int = 0
+    formatting_whitespace_chars: int = 0
+    unexpected_prose_chars: int = 0
 
 class _DuplicateJsonKey(ValueError):
     def __init__(self, key: str) -> None:
@@ -103,12 +118,18 @@ def _strict_contract_error(raw: str, subtype: str, **details: object) -> NoRetur
     raise error
 
 def _decode_strict_records(raw: str, expected: list[str]) -> DecodedTranslation:
-    """Extract expected closed records; provider prose is irrelevant."""
+    """Extract expected closed records; outside prose is never a translation source.
+
+    New Conversation records use ``<<I<image>_P<unit>:...>>`` while the
+    Independent protocol remains ``<<TP_Pn:...>>``. Both share the same
+    ambiguity/partial-salvage rules; the expected ID list decides ownership.
+    """
     text = str(raw or "")
     if not text:
         _strict_contract_error(text, "empty_output", missingIds=expected)
     parsed: list[tuple[str, str]] = []
     malformed: list[str] = []
+    recoverable_malformed: list[str] = []
     all_claims: list[str] = []
     stack: list[dict[str, str]] = []
     pending: list[tuple[str, str]] = []
@@ -119,6 +140,7 @@ def _decode_strict_records(raw: str, expected: list[str]) -> DecodedTranslation:
         island_invalid = True
         island_invalid_ids.update(frame["id"] for frame in stack)
         island_invalid_ids.update(item for item, _ in pending)
+    whitespace = prose = 0
     at = 0
     while at < len(text):
         if text.startswith("<<>>", at) and stack:
@@ -130,58 +152,59 @@ def _decode_strict_records(raw: str, expected: list[str]) -> DecodedTranslation:
                 stack.append({"id": bridge.group(1), "value": ""})
                 at += len(bridge.group(0))
                 continue
-            poison_island()
-            at += 4
-            continue
-        if text.startswith("<<TP_P", at):
-            numeric = re.match(r"<<TP_(P\d+)", text[at:])
-            if numeric:
-                all_claims.append(numeric.group(1))
-            header = re.match(r"<<TP_(P\d+)(?::|\s)", text[at:])
+            poison_island(); at += 4; continue
+        if text.startswith("<<", at):
+            rest = text[at:]
+            claim = _GENERIC_CLAIM_RE.match(rest)
+            header = _GENERIC_HEADER_RE.match(rest)
+            claimed_id = _claim_id(claim)
+            if claimed_id:
+                all_claims.append(claimed_id)
             if header:
+                item = _claim_id(header)
+                # Compact records are a physical-line contract. If a new record
+                # starts on a later line while a prior record is still open, the
+                # prior line is malformed but the new record is independently
+                # attributable. Do not let one missing `>` poison every later
+                # sibling record in the provider response.
+                if stack and at > 0 and text[at - 1] in "\r\n":
+                    line_ids = [frame["id"] for frame in stack] + [old_id for old_id, _ in pending]
+                    malformed.extend(line_ids)
+                    malformed.extend(island_invalid_ids)
+                    if not island_invalid:
+                        recoverable_malformed.extend(line_ids)
+                    stack = []; pending = []; island_invalid = False; island_invalid_ids = set()
                 if not stack:
-                    pending = []
-                    island_invalid = False
-                    island_invalid_ids = set()
-                stack.append({"id": header.group(1), "value": ""})
-                at += len(header.group(0))
-                continue
-            if numeric:
-                malformed.append(numeric.group(1))
+                    pending = []; island_invalid = False; island_invalid_ids = set()
+                stack.append({"id": item, "value": ""})
+                at += len(header.group(0)); continue
             if stack:
                 poison_island()
-            malformed_close = text.find(">>", at + 6)
-            at = len(text) if malformed_close < 0 else malformed_close + 2
-            continue
-        if text.startswith("<<", at) and stack:
-            poison_island()
-            invalid_close = text.find(">>", at + 2)
-            if invalid_close < 0:
-                at = len(text)
-                continue
-            bare_peer = re.match(r"TP_(P\d+)(?::|\s)", text[invalid_close + 2:])
-            if bare_peer:
-                all_claims.append(bare_peer.group(1))
-                malformed.append(bare_peer.group(1))
-                island_invalid_ids.add(bare_peer.group(1))
-            at = invalid_close + 2
-            continue
+            if claimed_id:
+                malformed.append(claimed_id)
+            malformed_close = text.find(">>", at + 2)
+            end_pos = len(text) if malformed_close < 0 else malformed_close + 2
+            # A malformed *recognized* record ID may be repaired at unit
+            # granularity, so do not double-classify its marker bytes as prose.
+            # An unknown top-level <<...>> construct has no owned unit and is
+            # therefore unexpected output, not ignorable formatting.
+            if not claimed_id and not stack:
+                segment = text[at:end_pos]
+                whitespace += sum(c.isspace() for c in segment)
+                prose += sum(not c.isspace() for c in segment)
+            at = end_pos; continue
         if text.startswith(">>", at) and stack:
-            frame = stack.pop()
-            pending.append((frame["id"], frame["value"]))
-            at += 2
+            frame = stack.pop(); pending.append((frame["id"], frame["value"])); at += 2
             if not stack:
                 if island_invalid:
-                    malformed.extend(island_invalid_ids)
-                    malformed.extend(item for item, _ in pending)
+                    malformed.extend(island_invalid_ids); malformed.extend(item for item, _ in pending)
                 else:
                     parsed.extend(pending)
-                pending = []
-                island_invalid = False
-                island_invalid_ids = set()
+                pending=[]; island_invalid=False; island_invalid_ids=set()
             continue
-        if stack:
-            stack[-1]["value"] += text[at]
+        if stack: stack[-1]["value"] += text[at]
+        elif text[at].isspace(): whitespace += 1
+        else: prose += 1
         at += 1
     if stack:
         malformed.extend(frame["id"] for frame in stack)
@@ -190,20 +213,20 @@ def _decode_strict_records(raw: str, expected: list[str]) -> DecodedTranslation:
     received = [item for item, _ in parsed]
     duplicates = sorted({item for item in all_claims if all_claims.count(item) > 1})
     extra = [item for item in all_claims if item not in expected]
+    malformed = list(dict.fromkeys(malformed))
     invalid = set(duplicates + malformed)
-    missing = [item for item in expected if item not in received or item in invalid]
-    empty = [item for item, value in parsed if not value.strip()]
-    by_id = {item: value for item, value in parsed
-             if item in expected and item not in invalid}
+    by_id = {item: value for item, value in parsed if item in expected and item not in invalid}
     omitted = [item for item in expected if item not in by_id or not by_id[item].strip()]
-    record_chars = sum(len(f"<<TP_{item}:{value}>>") for item, value in parsed)
+    record_chars = sum(len(_record_repr(item, value)) for item, value in parsed)
     return DecodedTranslation(
         _canonical_markers([by_id.get(item, "") for item in expected]), "", "plain_records_v1",
-        missing_ids=tuple(omitted),
-        discarded_ids=tuple(sorted(set(extra + duplicates))),
+        missing_ids=tuple(omitted), discarded_ids=tuple(sorted(set(extra + duplicates))),
         malformed_line_count=len(malformed),
+        recoverable_malformed_line_count=len(set(malformed) & set(recoverable_malformed)),
+        malformed_records_recoverable=bool(malformed) and set(malformed).issubset(set(recoverable_malformed)),
         duplicate_ids=tuple(duplicates),
         ignored_prose_chars=max(0, len(text) - record_chars),
+        formatting_whitespace_chars=whitespace, unexpected_prose_chars=prose,
     )
 
 # Rejects an ambiguous id set. A missing id is not ambiguous: it is one unit the
@@ -365,8 +388,9 @@ def decode_legacy_translation_response(
     plain markers.  No value is guessed, filled, merged, renumbered or sent
     back to a model for repair.
     """
-    if not expected or expected != [f"P{i}" for i in range(len(expected))]:
-        raise ValueError("expected IDs must be the exact sequence P0..Pn")
+    from .wire import valid_output_id
+    if not expected or any(not valid_output_id(item) for item in expected) or len(set(expected)) != len(expected):
+        raise ValueError("expected IDs must be unique supported translation IDs")
     text, wrapped = _unwrap_known_response(raw)
     if not text:
         _contract_error("AI returned empty text", "empty", missingIds=expected)
@@ -448,7 +472,7 @@ def decode_legacy_translation_response(
                 _canonical_markers(aligned), memo, shape, missing_ids=tuple(missing_ids)
             )
 
-        p_keys = [key for key in keys if re.fullmatch(r"P\d+", key)]
+        p_keys = [key for key in keys if key in expected]
         if p_keys:
             shape = "flat_json_wrapped" if wrapped else "flat_json"
             allowed = set(expected) | {"memo"}
@@ -462,8 +486,8 @@ def decode_legacy_translation_response(
                     "AI flat JSON does not match the input",
                     shape,
                     missingIds=missing,
-                    extraIds=[key for key in extra if re.fullmatch(r"P\d+", key)],
-                    extraFields=[key for key in extra if not re.fullmatch(r"P\d+", key)],
+                    extraIds=[key for key in extra if valid_output_id(key)],
+                    extraFields=[key for key in extra if not valid_output_id(key)],
                     nonStringFields=wrong_types,
                     topLevelKeys=keys,
                 )
@@ -554,6 +578,7 @@ def decode_translation_response(
     :func:`decode_legacy_translation_response` explicitly.
     """
     del require_complete, allow_complete_without_end
-    if not expected or expected != [f"P{i}" for i in range(len(expected))]:
-        raise ValueError("expected IDs must be the exact sequence P0..Pn")
+    from .wire import valid_output_id
+    if not expected or any(not valid_output_id(item) for item in expected) or len(set(expected)) != len(expected):
+        raise ValueError("expected IDs must be unique supported translation IDs")
     return _decode_strict_records(raw, expected)

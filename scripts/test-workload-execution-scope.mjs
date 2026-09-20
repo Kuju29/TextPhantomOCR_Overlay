@@ -19,7 +19,7 @@ await check('old marker target rejected before all 17 parallel first dispatches'
 });
 await check('valid v6 schema profile is retained, including safely learned small targets',async()=>{
  const io=await seedProfile(opts(),{actualIdentity:'model-a|json_schema_object_v1'});const s=await createWorkloadController(io).open(opts());
- assert.equal(s.next(rows,0).units.length,2);assert.equal(s.snapshot().samples,132);assert.equal(s.snapshot().target,128);
+ const plan=s.next(rows,0);assert.equal(plan.units.length,7);assert.equal(plan.estimate.recordTarget,2,'learned record count remains telemetry only');assert.equal(s.snapshot().samples,132);assert.equal(s.snapshot().target,128);
 });
 await check('contract aliases normalize without throwing away matching learning',async()=>{
  for(const contract of ['schema_object','json_schema_object_v1','tp.translation.schema-object/1']){

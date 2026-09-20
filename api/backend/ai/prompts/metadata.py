@@ -4,6 +4,7 @@ from typing import Final
 import hashlib, hmac, os
 
 from backend.lens.languages import normalize as _normalize_lang
+from .localization import LOCALIZATION_POLICY_VERSION
 from .styles import PROMPT_POLICY_VERSION, normalize_prompt_mode, select_style
 
 _PROMPT_TRACE_SESSION_KEY: Final[bytes] = os.urandom(32)
@@ -22,6 +23,7 @@ def prompt_metadata(
         version = version + "+notes"
     return {
         "promptVersion": version,
+        "localizationPolicyVersion": LOCALIZATION_POLICY_VERSION,
         "promptHash": digest,
         "promptChars": len(style),
         "promptSource": source,
@@ -57,6 +59,7 @@ def prompt_trace_metadata(
     return {
         "targetLang": code,
         "promptVersion": version,
+        "localizationPolicyVersion": LOCALIZATION_POLICY_VERSION,
         "promptSource": source,
         "promptMode": normalize_prompt_mode(prompt_mode),
         "userPromptPresent": bool(override),

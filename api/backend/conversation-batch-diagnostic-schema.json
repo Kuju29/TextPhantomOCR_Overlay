@@ -1,0 +1,133 @@
+{
+  "enums": {
+    "planner": [
+      "conversation_cross_page"
+    ],
+    "phase": [
+      "queued",
+      "dispatch",
+      "distributed",
+      "page_projection",
+      "failed"
+    ],
+    "splitReason": [
+      "ready_queue_drained",
+      "request_source_limit",
+      "output_reliability_estimate",
+      "per_request_budget",
+      "learned_record_target",
+      "learned_output_target",
+      "oversize_single_unit",
+      "per_request_input_limit",
+      "per_request_context_window",
+      "per_request_output_budget",
+      "request_source_limit_before_page",
+      "conversation_page_record_target",
+      "conversation_page_output_target",
+      "whole_page_over_soft_target",
+      "anchor_recovery_retry",
+      "anchor_recovery_exhausted",
+      "hard_application_source_limit_partial_page",
+      "hard_provider_budget_partial_page",
+      "per_request_input_limit_before_page",
+      "per_request_context_window_before_page",
+      "per_request_output_budget_before_page",
+      "conversation_anchor_one_page"
+    ],
+    "queueReason": [
+      "ready",
+      "waiting_for_source_order",
+      "waiting_for_previous_turn",
+      "context_boundary",
+      "image_boundary",
+      "repeated_page_boundary"
+    ],
+    "usageOwner": [
+      "provider_request"
+    ],
+    "mappingStatus": [
+      "validated",
+      "rejected"
+    ],
+    "idPolicy": [
+      "source_opaque_wire_pn",
+      "conversation_image_unit_v1"
+    ],
+    "failureCode": [
+      "ai_conversation_origin_invalid",
+      "invalid_request",
+      "other"
+    ],
+    "failureStage": [
+      "conversation_mapping",
+      "api_request_validation",
+      "provider",
+      "unknown"
+    ],
+    "validationReason": [
+      "invalid_page_list",
+      "invalid_page_origin",
+      "incomplete_mapping",
+      "invalid_wire_id",
+      "duplicate_wire_id",
+      "invalid_source_id",
+      "duplicate_source_id",
+      "too_many_wire_ids",
+      "invalid_page_id",
+      "duplicate_page_id",
+      "invalid_fingerprint",
+      "source_order_mismatch",
+      "image_id_mismatch"
+    ],
+    "conversationCapacity": [
+      "anchor",
+      "continuation_cache_candidate",
+      "continuation_cache_miss",
+      "continuation_prefix_assumed",
+      "continuation_cache_confirmed",
+      "continuation_cache_strong",
+      "continuation_reliability_restricted",
+      "continuation_latency_limited",
+      "anchor_one_page",
+      "continuation_token_budget"
+    ],
+    "anchorRecovery": [
+      "retry_same_anchor",
+      "exhausted_stop_chain"
+    ],
+    "schedulingPolicy": [
+      "webpage_order"
+    ]
+  },
+  "numeric": [
+    "pageCount",
+    "unitCount",
+    "requestUnitCount",
+    "readyPageCount",
+    "readyUnitCount",
+    "firstOrder",
+    "lastOrder",
+    "estimatedInput",
+    "predictedOutput",
+    "mappedUnits",
+    "cancelledUnits",
+    "missingUnits",
+    "providerCallsAdded",
+    "providerRequestCount",
+    "requestMs",
+    "batchTotalMs",
+    "checkpointBeforeMs",
+    "providerRoundTripMs",
+    "projectionMs",
+    "readyQueueWaitMs",
+    "previousTurnWaitMs",
+    "sourceOrderWaitMs",
+    "apiHttpStatus",
+    "cacheRatio"
+  ],
+  "booleans": [
+    "legacyFallback",
+    "requestDispatched",
+    "cacheConfirmed"
+  ]
+}

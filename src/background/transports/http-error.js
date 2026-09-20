@@ -38,6 +38,7 @@ export function httpFailure(
     origin: gateway
       ? "hosting_gateway"
       : String(data?.origin || data?.actor || "api"),
+    category: gateway ? "gateway" : String(data?.category || "http"),
     stage: String(data?.stage || data?.failedStage || stage),
     httpStatus: res.status,
     upstreamStatus: Number(data?.upstreamStatus) || 0,

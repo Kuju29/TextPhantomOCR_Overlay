@@ -32,4 +32,4 @@ updateImagePresentation(batch.id,key,{phase:'http_wait'});
 assert.equal(packets.length,0);
 const exportAt=process.argv.indexOf('--packets');
 if(exportAt>=0)writeFileSync(process.argv[exportAt+1],JSON.stringify(packets,null,2));
-console.log('PASS per-image progress UI disabled: batch state remains durable and no TP_IMAGE_STATUS packets are emitted.');
+console.log('PASS per-image packets remain disabled: durable batch state feeds the single throttled progress board.');

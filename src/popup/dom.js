@@ -34,6 +34,8 @@ export const els = {
   aiGroup: document.getElementById("ai-group"),
   aiProvider: document.getElementById("ai-provider"),
   aiProviderWrap: document.getElementById("ai-provider-wrap"),
+  aiUsageLabel: document.getElementById("ai-usage-label"),
+  aiUsageTotal: document.getElementById("ai-usage-total"),
   aiUsageWrap: document.getElementById("ai-usage-wrap"),
   aiUsageKind: document.getElementById("ai-usage-kind"),
   aiUsageModel: document.getElementById("ai-usage-model"),
@@ -54,6 +56,9 @@ export const els = {
   aiMemoryHint: document.getElementById("ai-memory-hint"),
   aiCharactersClear: document.getElementById("ai-characters-clear"),
   aiMemoryMode: document.getElementById("ai-memory-mode"),
+  aiStyleExamplesWrap: document.getElementById("ai-style-examples-wrap"),
+  aiStyleExamples: document.getElementById("ai-style-examples"),
+  aiTranslationMode: document.getElementById("ai-translation-mode"),
   aiPageImageWrap: document.getElementById("ai-page-image-wrap"),
   aiPageImage: document.getElementById("ai-page-image"),
   aiRateWrap: document.getElementById("ai-rate-wrap"),
@@ -385,7 +390,7 @@ export function toggleUi({ hasEnvKey }) {
   // known models; a valid key then upgrades that list to the provider's LIVE
   // models. The remaining controls still require a usable engine.
   const canConfigureAi =
-    local || (els.aiKey.value || "").trim().length > 0 || hasEnvKey;
+    local || (els.aiKey.value || "").trim().length > 0;
   els.aiModelWrap.style.display = showAi ? "" : "none";
   if (els.aiLocalModelHint)
     els.aiLocalModelHint.style.display = showAi && local ? "" : "none";
@@ -415,9 +420,7 @@ export function toggleUi({ hasEnvKey }) {
   if (els.aiCharactersWrap)
     els.aiCharactersWrap.style.display = showAi && canConfigureAi ? "" : "none";
   if (els.aiMemoryHint) {
-    els.aiMemoryHint.textContent = local
-      ? "Off starts clean; Terms/Full reuse saved context."
-      : "Off starts clean; Terms/Full keep series context.";
+    els.aiMemoryHint.textContent = "Off: no story data. Terms: names and terms. Full: includes story and characters.";
   }
   if (els.aiPageImageWrap)
     els.aiPageImageWrap.style.display = showAi && canConfigureAi ? "" : "none";

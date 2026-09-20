@@ -12,7 +12,7 @@ try {
   globalThis.fetch=async (url,init)=>{bodies.push(JSON.parse(init.body));return new Response(JSON.stringify({model:'fixture-model',
    message:{role:'assistant',content:schema?' {"P0":"อรุณสวัสดิ์"} ':'<<TP_P0:อรุณสวัสดิ์>>'},done:true,done_reason:'stop',prompt_eval_count:750,eval_count:24,prompt_eval_cached_count:512}),
    {status:200,headers:{'Content-Type':'application/json'}});};
-  const ai={provider:'ollama',model:'fixture-model',base_url:'http://localhost:11434',thinking:'off',prompt:'STYLE SENTINEL',promptMode:'replace',
+  const ai={provider:'ollama',model:'fixture-model',base_url:'http://localhost:11434',thinking:'off',style_examples:false,prompt:'STYLE SENTINEL',promptMode:'replace',
    local_adapter:{protocol:'ollama',baseUrl:'http://localhost:11434'},
    model_capabilities:{limits:{contextTokens:4096,maxOutputTokens:1024},reasoning:{supported:false},structuredOutput:{supported:schema,contract:'tp.translation.schema-object/1',source:'fixture'}}};
   const units=[{id:'global_42',text:'Morning.'}];

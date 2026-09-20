@@ -1,7 +1,7 @@
 """Application orchestration for extension-owned text translation."""
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 from fastapi import HTTPException, Request
 
 import time
@@ -20,14 +20,19 @@ from backend.application.ai_translation import idempotency_session, provider_exe
 from backend.application.ai_translation.context import TranslationContext
 from backend.application.ai_translation.provider_errors import trace_failure
 from backend.application.ai_translation.request_validation import MAX_TOTAL_CHARS, MAX_UNIT_CHARS, MAX_UNITS, build_config
-from backend.config import settings
+from backend.ai.credentials import MissingUserApiKey
+from backend.ai.translation_paths.origins import OriginValidationError
 from backend.jobs.admission import identity_of
 
 REQUEST_SCHEMA = "tp.ai.request/1"
 RESULT_SCHEMA = "tp.ai.result/1"
 CANONICAL_ROUTE = "/v2/engine/runsextension/ai/translate"
 
-def _prepare(request: Request, payload: dict[str, Any]) -> TranslationContext:
+def _prepare(
+    request: Request,
+    payload: dict[str, Any],
+    cancel_check: Callable[[], bool] | None = None,
+) -> TranslationContext:
     requested_route = request.url.path
     route_identity = {"engine": "runsextension", "canonicalRoute": CANONICAL_ROUTE,
                       "requestedRoute": requested_route,
@@ -38,11 +43,25 @@ def _prepare(request: Request, payload: dict[str, Any]) -> TranslationContext:
         "requestId": payload.get("operationId"), "jobId": payload.get("operationId"),
         "batchId": payload.get("batchId"), "imageId": payload.get("imageId") or raw_context.get("image_id")})
     def reject(exc: ValueError, stage: str) -> None:
-        detail = error_payload(code="invalid_request", message=str(exc)[:200], user_message=str(exc)[:200],
-                               origin="client", stage=stage, category="input", retryable=False,
-                               http_status=400, trace_id=trace_id,
-                               extra={"validation": safe_validation_reason(str(exc))},
-                               correlation=correlation)
+        is_mapping = isinstance(exc, OriginValidationError)
+        validation = exc.validation if is_mapping else safe_validation_reason(str(exc))
+        detail = error_payload(
+            code=exc.code if is_mapping else "missing_api_key" if isinstance(exc, MissingUserApiKey) else "invalid_request",
+            message=str(exc)[:200], user_message=str(exc)[:200],
+            origin="api" if is_mapping else "client", stage=exc.stage if is_mapping else stage,
+            category="input", retryable=False, http_status=400, trace_id=trace_id,
+            extra={"validation": validation, "providerAttempts": 0, "generationAttempts": 0,
+                   "requestDispatched": False, "providerHttpStatuses": []},
+            correlation=correlation)
+        if isinstance(exc, MissingUserApiKey):
+            detail["category"] = "configuration"
+        if is_mapping:
+            wire_trace.write_json("01_conversation_origin_validation.json", {
+                "schema": "tp.conversation_origin_validation/1", "status": "rejected",
+                "stage": exc.stage, "code": exc.code, "validation": validation,
+                "originalIdPolicy": "opaque_source_id", "wireIdPolicy": "conversation_image_unit_v1",
+                "providerAttempts": 0, "requestDispatched": False,
+            })
         failure_event(requested_route, detail, **route_identity)
         raise HTTPException(400, detail=detail) from exc
     try:
@@ -69,7 +88,8 @@ def _prepare(request: Request, payload: dict[str, Any]) -> TranslationContext:
         requested_route=requested_route, resolved_provider=resolved_provider, resolved_model=resolved_model,
         rate=rate, unlimited=wants_unlimited(request),
         identity=identity_of({"ai": {"api_key": config.api_key}, "context": raw_context}),
-        prompt_meta=ai_prompts.prompt_trace_metadata(target_lang, str(payload.get("prompt") or "").strip()))
+        prompt_meta=ai_prompts.prompt_trace_metadata(target_lang, str(payload.get("prompt") or "").strip()),
+        cancel_check=cancel_check)
 
 def _trace_start(ctx: TranslationContext) -> None:
     repair_owner = "extension" if ai_request.extension_owns_repair(ctx.payload) else "backend"
@@ -84,11 +104,31 @@ def _trace_start(ctx: TranslationContext) -> None:
         "automaticTransportRetry": False, "modelFallback": False, "schemaFallback": False,
         "rateEnabled": ctx.rate["enabled"], "rateRpm": ctx.rate["rpm"],
         "rateBurst": ctx.rate["burst"], "rateMode": ctx.rate["mode"], **ctx.route_identity,
+        "memoryMode": ctx.config.memory_mode or "legacy_filtered", "examplesEnabled": ctx.config.style_examples,
         "memoryEnabled": bool(ctx.config.char_memory), "glossaryItems": len(ctx.config.glossary),
         "characterItems": len(ctx.config.characters), "previousContextItems": len(ctx.config.prev_context),
         "hasSeriesState": bool(ctx.config.series_state), **ctx.prompt_meta}, trace_id=ctx.trace_id)
 
-async def execute(request: Request, payload: dict[str, Any], idempotency_key: str | None = None) -> dict:
+def _ingress_origin_labels(payload: dict[str, Any]) -> list[dict[str, int | None]]:
+    """Label captures before validation without recording rejected origin IDs."""
+    conversation = payload.get("conversation")
+    origins = conversation.get("origins") if isinstance(conversation, dict) else None
+    if not isinstance(origins, list):
+        return []
+    labels = []
+    for row in origins:
+        value = row.get("pageIndex") if isinstance(row, dict) else None
+        labels.append({"pageIndex": value if type(value) is int and 0 <= value < 1000000 else None})
+    return labels
+
+
+async def execute(
+    request: Request,
+    payload: dict[str, Any],
+    idempotency_key: str | None = None,
+    *,
+    cancel_check: Callable[[], bool] | None = None,
+) -> dict:
     """Validate, admit, invoke and map exactly one translation request."""
     started = time.perf_counter()
     raw_context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
@@ -101,6 +141,10 @@ async def execute(request: Request, payload: dict[str, Any], idempotency_key: st
         "schema": "tp.ai-wire-trace/1", "engine": "runsextension",
         "traceId": str(raw_context.get("tp_trace") or request.headers.get("X-TP-Trace-Id") or ""),
         "operationId": provisional_operation,
+        "recordKind": "provider_request",
+        "attemptKind": "repair" if provisional_operation.startswith("repair:") else "initial",
+        "pageIndex": raw_context.get("page_index"),
+        "origins": _ingress_origin_labels(payload),
         "batchId": str(payload.get("batchId") or ""),
         "imageId": str(payload.get("imageId") or request.headers.get("X-TP-Image-Id") or ""),
         "provider": str(raw_provider.get("id") or ""),
@@ -109,7 +153,7 @@ async def execute(request: Request, payload: dict[str, Any], idempotency_key: st
         "providerAttempt": 0, "generationAttempt": 0, "stage": "request_ingress",
     })
     try:
-        ctx = _prepare(request, payload)
+        ctx = _prepare(request, payload, cancel_check)
     except BaseException as exc:
         detail = exc.detail if isinstance(exc, HTTPException) and isinstance(exc.detail, dict) else {}
         stage = str(detail.get("stage") or "request_validation")
@@ -117,11 +161,21 @@ async def execute(request: Request, payload: dict[str, Any], idempotency_key: st
         wire_trace.end(wire_token)
         raise
     try:
+        if ctx.config.translation_mode == "conversation" and ctx.config.conversation.get("origins"):
+            rows = ctx.config.conversation["origins"]
+            wire_trace.write_json("01_conversation_origin_validation.json", {
+                "schema": "tp.conversation_origin_validation/1", "status": "accepted",
+                "stage": "conversation_mapping", "pageCount": len(rows), "unitCount": ctx.unit_count,
+                "originalIdPolicy": "opaque_source_id", "wireIdPolicy": "conversation_image_unit_v1",
+                "providerAttempts": 0, "requestDispatched": False,
+            })
         wire_trace.update_identity(
             traceId=(ctx.trace_id or str(raw_context.get("tp_trace")
                                         or request.headers.get("X-TP-Trace-Id") or "")),
             operationId=str(payload.get("operationId") or provisional_operation),
             provider=ctx.resolved_provider, model=ctx.resolved_model, targetLang=ctx.target_lang,
+            origins=ctx.config.conversation.get("origins", [])
+                if ctx.config.translation_mode == "conversation" else [],
             providerAttempt=1, generationAttempt=1, stage="prepared",
         )
     except BaseException:
@@ -157,7 +211,7 @@ async def execute(request: Request, payload: dict[str, Any], idempotency_key: st
         rate_entry, rate_wait_ms = await rate_admission.acquire(
             rate=dict(ctx.rate), unlimited=ctx.unlimited, provider=ctx.resolved_provider,
             config=ctx.config, context=dict(ctx.request_context), payload=payload,
-            idempotency_key=idempotency_key)
+            idempotency_key=idempotency_key, cancel_check=cancel_check)
     except RateGateCancelled as exc:
         trace_failure(ctx, "cancelled", exc, 409, units=ctx.unit_count, providerAttempts=0)
         wire_trace.record_error(exc, stage="rate_gate_cancelled")
@@ -178,8 +232,11 @@ async def execute(request: Request, payload: dict[str, Any], idempotency_key: st
     try:
         execution = await provider_execution.run(ctx, rate_wait_ms=rate_wait_ms)
         wire_trace.write_json("09_timing.json", {
-            "providerMs": execution.provider_ms,
+            "providerMs": (execution.result.get("meta") or {}).get("provider_ms"),
+            "generationInvocationMs": execution.provider_ms,
+            "cacheWaitMs": ((execution.result.get("meta") or {}).get("cacheCoordination") or {}).get("waitMs", 0),
             "admissionWaitMs": execution.admission_wait_ms,
+            "conversationWaitMs": ((execution.result.get("meta") or {}).get("conversation") or {}).get("queueWaitMs", 0),
             "rateWaitMs": rate_wait_ms,
         })
         body, missing, declined, passthrough = response_mapping.map_result(
@@ -188,7 +245,8 @@ async def execute(request: Request, payload: dict[str, Any], idempotency_key: st
             admission_wait_ms=execution.admission_wait_ms, provider_ms=execution.provider_ms,
             route_identity=dict(ctx.route_identity), rate=dict(ctx.rate), unlimited=ctx.unlimited,
             resolved_provider=ctx.resolved_provider, config=ctx.config, prompt_meta=dict(ctx.prompt_meta))
-        wire_trace.terminal(state="succeeded", stage="response_mapping",
+        wire_trace.terminal(state="partial" if missing else "succeeded", stage="response_mapping",
+                            languageValidation="pending_extension", placement="not_started",
                             translated=len(body.get("translations") or []),
                             missingIds=list(missing or []), declinedIds=list(declined or []))
     except BaseException as exc:
@@ -209,6 +267,6 @@ async def execute(request: Request, payload: dict[str, Any], idempotency_key: st
 async def ai_schema() -> dict:
     return {"ok": True, "request": REQUEST_SCHEMA, "result": RESULT_SCHEMA,
             "limits": {"maxUnits": MAX_UNITS, "maxUnitChars": MAX_UNIT_CHARS,
-                       "maxTotalChars": MAX_TOTAL_CHARS}, "hasServerKey": bool(settings.ai_api_key)}
+                       "maxTotalChars": MAX_TOTAL_CHARS}, "hasServerKey": False, "credentialPolicy": "user_required"}
 
 __all__ = ["execute", "ai_schema"]

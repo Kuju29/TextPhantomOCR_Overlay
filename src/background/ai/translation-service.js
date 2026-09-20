@@ -1,3 +1,5 @@
+import {independentTranslation} from "./translation-paths/independent.js";
+import {conversationTranslation} from "./translation-paths/conversation.js";
 import { translateDirectLocalRoute } from "./routes/direct-local.js";
 import { translateServerRoute } from "./routes/server.js";
 
@@ -14,8 +16,11 @@ export function createTranslationService({
         meta: { route, skipped: "no units" },
       };
     }
-    if (route === "direct-local") return directLocal(units, options);
-    if (route === "server") return server(units, options);
+    const mode=options.ai?.translation_mode || "independent";
+    if(!["conversation","independent"].includes(mode)) throw new Error("Invalid translation mode");
+    const execute=mode === "conversation" ? conversationTranslation : independentTranslation;
+    if (route === "direct-local") return execute(directLocal, units, options);
+    if (route === "server") return execute(server, units, options);
     throw new Error(`unknown AI route ${JSON.stringify(route)}`);
   };
 }

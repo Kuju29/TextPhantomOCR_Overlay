@@ -22,6 +22,7 @@ def invoke_leaf_generate(request: GenerationRequest, generate: Callable):
         image_b64=request.image_b64, image_mime=request.image_mime,
         response_schema=dict(request.response_schema or {}) or None,
         thinking=request.thinking, cancel_check=request.cancel_check,
+        **({"history_messages": request.history_messages} if request.history_messages else {}),
         **({"workload": dict(request.workload), "model_capabilities": dict(request.model_capabilities)}
            if request.workload else {}),
     )

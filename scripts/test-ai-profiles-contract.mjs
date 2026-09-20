@@ -30,13 +30,16 @@ const thinkingDefaults = {
   temperature: null, pageImage: "off", memoryMode: "off",
   concurrency: { mode: "auto", max: 0 }, providerOptions: {},
 };
-for (const legacyThinking of [undefined, null, "auto", "garbage", false, "off"]) {
+for (const [legacyThinking, expected] of [
+  [undefined, "minimum"], [null, "minimum"], ["auto", "minimum"], ["garbage", "minimum"],
+  [false, "off"], ["off", "off"],
+]) {
   const migrated = migrateAiProfiles({ stored: undefined, legacy: {
     aiProvider: "openrouter", aiBaseUrl: "https://openrouter.ai/api/v1",
     aiModel: "thinking-fixture", aiThinking: legacyThinking,
   }});
   const identity = makeProviderIdentity("openrouter", "https://openrouter.ai/api/v1");
-  assert.equal(migrated.state.providers[identity].models["thinking-fixture"].profile.thinking, "off");
+  assert.equal(migrated.state.providers[identity].models["thinking-fixture"].profile.thinking, expected);
 }
 for (const explicitOn of [true, "on"]) {
   const migrated = migrateAiProfiles({ stored: undefined, legacy: {
@@ -46,10 +49,12 @@ for (const explicitOn of [true, "on"]) {
   const identity = makeProviderIdentity("openrouter", "https://openrouter.ai/api/v1");
   assert.equal(migrated.state.providers[identity].models["thinking-fixture"].profile.thinking, "on");
 }
-for (const selected of [undefined, "auto", "garbage", "off"]) {
+for (const [selected, expected] of [
+  [undefined, "minimum"], ["auto", "minimum"], ["default", "minimum"], ["garbage", "minimum"], ["off", "off"],
+]) {
   const effective = resolveEffectiveAiProfile({ prompt: "STYLE", promptMode: "replace",
     profile: { ...thinkingDefaults, thinking: selected } });
-  assert.equal(effective.thinking, "off");
+  assert.equal(effective.thinking, expected);
 }
 assert.equal(resolveEffectiveAiProfile({ prompt: "STYLE", promptMode: "replace",
   profile: { ...thinkingDefaults, thinking: "on" } }).thinking, "on");
@@ -100,8 +105,11 @@ const defaults = {
   temperature: null,
   pageImage: "off",
   memoryMode: "off",
+  styleExamples: true,
   concurrency: { mode: "auto", max: 0 },
   providerOptions: {},
+  translationMode: "conversation",
+  conversationReset: "0",
 };
 
 let profiles = createAiProfiles();

@@ -104,8 +104,10 @@ export async function runServerTranslation(input, deps) {
           : {},
       );
       const slot = await acquire(requestLane, ctrl.signal);
-      if (lensDone) markJobPhase(jobId, "ai_generating");
       queueWaitMs = Number(slot?.waitMs) || 0;
+      if (lensDone) markJobPhase(jobId, "ai_generating", {
+        stage: "Preparing AI request", queueWaitMs,
+      });
       requestStartedAt = Date.now();
       slotHeld = true;
       traceNote(

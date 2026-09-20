@@ -1,4 +1,5 @@
 import { normalizeModelCapabilities } from "./model-capabilities.js";
+import { normalizeUserReasoningPreference } from "./reasoning-preference.js";
 /** Pure, opt-in Provider + Model profile core. Runtime activation is external. */
 import { normalizePrompt, makeProfilePromptKey } from "./prompt.js";
 import { isLocalAiProvider, isLocalAiTarget } from "./constants.js";
@@ -32,6 +33,9 @@ const PROFILE_FIELDS = new Set([
   "temperature",
   "pageImage",
   "memoryMode",
+  "styleExamples",
+  "translationMode",
+  "conversationReset",
   "concurrency",
   "providerOptions",
 ]);
@@ -423,10 +427,9 @@ function mergedProfile(defaults, stored, patch = null) {
       patch != null && Object.hasOwn(change, "providerOptions"),
     ),
   };
-  // Off is the canonical safe default. Historical Auto/missing/malformed
-  // values migrate to Off; only an explicit On survives normalization.
-  output.thinking = output.thinking === true || output.thinking === "on" ? "on"
-    : "off";
+  // Preserve provider-neutral reasoning intent. Old boolean and Auto values
+  // migrate deterministically; exact model capability decides what is representable.
+  output.thinking = normalizeUserReasoningPreference(output.thinking);
   if (
     output.temperature !== null &&
     !(
@@ -437,6 +440,14 @@ function mergedProfile(defaults, stored, patch = null) {
     )
   )
     delete output.temperature;
+  output.styleExamples = output.styleExamples !== false;
+  // Preserve the user's stored mode as a dormant preference. Conversation is
+  // the only executable Extension path in this release, but Independent is a
+  // frozen reference path that will be re-enabled later; normalization must not
+  // destroy an existing Independent selection.
+  output.translationMode = output.translationMode === "independent"
+    ? "independent" : "conversation";
+  output.conversationReset = String(output.conversationReset || "0").slice(0, 80);
   if (!["off", "always"].includes(output.pageImage)) delete output.pageImage;
   if (!["off", "terms", "full"].includes(output.memoryMode))
     delete output.memoryMode;
@@ -590,7 +601,7 @@ export function migrateAiProfiles({
     effective.aiBaseUrl,
   );
   const defaults = {
-    thinking: legacy.aiThinking === true || legacy.aiThinking === "on" ? "on" : "off",
+    thinking: normalizeUserReasoningPreference(legacy.aiThinking),
     tokenPolicy: { mode: "dynamic", maxOutputTokens: 0 },
     temperature: null,
     pageImage:
@@ -600,6 +611,10 @@ export function migrateAiProfiles({
     memoryMode: ["off", "terms", "full"].includes(legacy.aiMemoryMode)
       ? legacy.aiMemoryMode
       : "off",
+    styleExamples: legacy.aiStyleExamples !== false,
+    translationMode: legacy.aiTranslationMode === "independent"
+      ? "independent" : "conversation",
+    conversationReset: String(legacy.aiConversationReset || "0"),
     concurrency: { mode: "auto", max: 0 },
     providerOptions: {},
   };
@@ -685,6 +700,10 @@ export function buildAiProfileStoragePatch({
     aiThinking: profile.thinking,
     aiPageImage: profile.pageImage,
     aiMemoryMode: profile.memoryMode,
+    aiStyleExamples: profile.styleExamples !== false,
+    aiTranslationMode: profile.translationMode === "independent"
+      ? "independent" : "conversation",
+    aiConversationReset: String(profile.conversationReset || "0"),
     aiPrompt: getAiProfilePrompt(
       prompts,
       makeProfilePromptKey(providerIdentity, model, language),

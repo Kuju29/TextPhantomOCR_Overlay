@@ -105,8 +105,10 @@ assert.match(popupDom, /Thinking control is unavailable until this exact model i
 assert.equal(localProviderSpec("ollama").thinking.parameter, "think",
   "native Ollama must own its supported thinking control");
 const directGeneration = await readFile(new URL("../src/shared/ai/direct-local/generation.js", import.meta.url), "utf8");
-assert.doesNotMatch(directGeneration, /ollama/i,
-  "neutral Local generation must not contain provider identity or provider-specific reasons");
+assert.doesNotMatch(directGeneration, /ollama_terminal_drain_timeout/i,
+  "provider-specific error reasons belong to the provider adapter");
+assert.match(directGeneration, /planOllamaContext\(/,
+  "the approved context planner must still match the dispatched Local context");
 assert.match(await readFile(new URL("../src/shared/ai/providers/local-ollama.js", import.meta.url), "utf8"),
   /incompleteUsageReason[\s\S]*ollama_terminal_drain_timeout/,
   "Ollama must own its terminal-drain usage reason");
@@ -161,19 +163,21 @@ assert.equal(thinkingEls.aiThinkingWrap.style.display, "");
 selectedCapability.models.selected.reasoning = { supported: false, control: "none" };
 thinkingUi.toggle();
 assert.equal(thinkingEls.aiThinkingWrap.style.display, "");
-assert.equal(thinkingEls.aiThinking.disabled, true);
+assert.equal(thinkingEls.aiThinking.disabled, false,
+  "a model with verified no-reasoning support must keep the Off selector usable");
 assert.equal(thinkingEls.aiThinking.value, "off",
-  "unsupported models must preserve the safe Off selection while omitting native controls");
+  "capability refresh must keep the user's saved Off intent visible");
 selectedCapability.models.selected.reasoning = { supported: true, mandatory: true, control: "levels" };
 thinkingUi.toggle();
 assert.equal(thinkingEls.aiThinkingWrap.style.display, "");
-assert.equal(thinkingEls.aiThinking.disabled, true,
-  "unrepresentable level controls must remain unavailable");
+assert.equal(thinkingEls.aiThinking.disabled, false,
+  "known reasoning without a verified effort vocabulary must not rewrite or lock the saved user intent");
 thinkingEls.aiModel.value = "other";
 thinkingUi.toggle();
 assert.equal(thinkingEls.aiThinkingWrap.style.display, "",
   "unknown thinking capability must be distinguishable from unsupported");
-assert.equal(thinkingEls.aiThinking.disabled, true);
+assert.equal(thinkingEls.aiThinking.disabled, false);
+assert.equal(thinkingEls.aiThinking.value, "off");
 assert.match(thinkingEls.aiThinkingHint.textContent, /not verified/i);
 
 const geminiReasoning = { supported: true, mandatory: false, default_enabled: true, dynamic: true, control: "toggle" };
@@ -191,16 +195,17 @@ cloudThinkingUi.toggle();
 assert.equal(cloudThinkingEls.aiThinkingWrap.style.display, "",
   "Gemini 2.5 Flash must expose AI thinking after exact-model capability discovery");
 assert.equal(cloudThinkingEls.aiThinking.disabled, false);
-assert.match(cloudThinkingEls.aiThinkingHint.textContent, /Off by default.*Turn it On/i);
+assert.match(cloudThinkingEls.aiThinkingHint.textContent, /Lowest available.*default/i);
 cloudThinkingState.lastAiResolve.model_capabilities.reasoning = { supported: true, mandatory: true, default_enabled: true, dynamic: true, control: "toggle" };
 cloudThinkingUi.toggle();
-assert.equal(cloudThinkingEls.aiThinking.options.find((option) => option.value === "off").disabled, true,
-  "a mandatory-thinking model must not present Off as a usable choice");
+assert.equal(cloudThinkingEls.aiThinking.options.some((option) => option.value === "off"), true,
+  "a mandatory-thinking model keeps the saved Off intent visible even though dispatch will clamp it");
+assert.equal(cloudThinkingEls.aiThinking.value, "off");
 cloudThinkingState.lastAiResolve.model_capabilities.reasoning = { supported: true, mandatory: true, default_enabled: true, dynamic: true, control: "levels" };
 cloudThinkingUi.toggle();
 assert.equal(cloudThinkingEls.aiThinkingWrap.style.display, "");
-assert.equal(cloudThinkingEls.aiThinking.disabled, true,
-  "level-only Cloud reasoning must remain unavailable");
+assert.equal(cloudThinkingEls.aiThinking.disabled, false,
+  "level-only Cloud reasoning must not rewrite the saved user selection");
 cloudThinkingState.lastAiResolve.model_capabilities.reasoning = {
   supported: true, mandatory: false, dynamic: true, control: "levels",
   supported_efforts: ["none", "low"],
@@ -209,18 +214,46 @@ cloudThinkingUi.toggle();
 assert.equal(cloudThinkingEls.aiThinkingWrap.style.display, "",
   "selected-model levels with verified native none + on effort must expose Thinking");
 assert.equal(cloudThinkingEls.aiThinking.disabled, false);
-assert.match(cloudThinkingEls.aiThinkingHint.textContent, /verified for this selected model/i);
-assert.match(popupHtml, /option value="off" selected/i,
-  "Thinking must default to Off");
+assert.match(cloudThinkingEls.aiThinkingHint.textContent, /Verified levels.*none, low/i);
+cloudThinkingState.lastAiResolve.model_capabilities.reasoning = {
+  supported: true, mandatory: false, default_enabled: true, control: "levels", can_disable: true,
+  supported_efforts: ["max", "high", "low"],
+};
+cloudThinkingEls.aiThinking.value = "minimum";
+cloudThinkingUi.toggle();
+assert.deepEqual(
+  cloudThinkingEls.aiThinking.options.map((option) => option.value),
+  ["minimum", "off", "low", "high", "max"],
+  "Lowest available must be an alias over the real ordered options, including a separate Off control",
+);
+assert.equal(cloudThinkingEls.aiThinking.value, "minimum");
+cloudThinkingState.lastAiResolve.model_capabilities.reasoning = {
+  supported: true, mandatory: true, default_enabled: true, dynamic: true, control: "levels",
+  supported_efforts: ["minimal", "low", "medium", "high"], off_effort: "minimal",
+};
+cloudThinkingUi.toggle();
+assert.equal(cloudThinkingEls.aiThinking.disabled, false,
+  "a mandatory level model must expose only its verified native effort vocabulary");
+assert.equal(cloudThinkingEls.aiThinking.options.some((option) => option.value === "off"), false,
+  "after the user explicitly selects Lowest available, a mandatory model must not invent a saved Off choice");
+assert.deepEqual(
+  cloudThinkingEls.aiThinking.options.map((option) => option.value),
+  ["minimum", "minimal", "low", "medium", "high"],
+);
+assert.match(cloudThinkingEls.aiThinkingHint.textContent, /Verified levels.*minimal, low, medium, high/i);
+assert.match(popupHtml, /option value="minimum" selected/i,
+  "Thinking must default to Lowest available until the user chooses another policy");
 const thinkingSelectHtml = popupHtml.match(/<select id="ai-thinking"[\s\S]*?<\/select>/i)?.[0] || "";
+assert.doesNotMatch(thinkingSelectHtml, /option value="default"/i,
+  "Provider default must not be user-selectable; it is an internal fallback only");
 assert.doesNotMatch(thinkingSelectHtml, /option value="auto"/i,
   "Thinking Auto must not be present in the selector");
 assert.match(popupHtml, /For vision models\. Uses more time and memory/,
   "page-image guidance stays short and capability-focused");
 assert.match(popupHtml, /Models load automatically when Local AI is selected/,
   "Local UI must explain that discovery no longer requires repeated Connect clicks");
-assert.match(popupHtml, /Choosing a model verifies it automatically/,
-  "changing the selected Local model must trigger verification automatically");
+assert.match(popupHtml, /Choosing a model checks its runtime metadata automatically/,
+  "changing the selected Local model must trigger a metadata check automatically");
 assert.doesNotMatch(popupHtml, /ai-local-model-id/,
   "the redundant exact Local model ID field must be removed");
 const popupSource = await readFile(new URL("../src/popup/popup.js", import.meta.url), "utf8");
@@ -248,8 +281,10 @@ assert.match(localCapacity, /max \$\{Math\.max\(1, Number\(hint\.recommendedMax\
   "the runtime/model recommendation must be visible without silently changing Manual capacity");
 assert.match(localCapacity, /const clear[\s\S]*aiLocalCapabilityHint: null/,
   "provider and endpoint changes must be able to clear stale in-memory and stored capability hints");
-assert.match(localConnection, /sequence !== state\.localConnectSeq[\s\S]*identity\(\) !== requestIdentity/,
-  "Connect must reject a response from an obsolete provider or endpoint");
+assert.match(localConnection, /const current = \(\) => sequence === state\.localConnectSeq &&[\s\S]*?identity\(\) === requestIdentity/,
+  "Connect must bind its current-operation guard to both sequence and endpoint identity");
+assert.match(localConnection, /if \(!current\(\)\) return/,
+  "Connect must reject obsolete provider or endpoint results through that guard");
 const connectHandler = localConnection.slice(localConnection.indexOf("const connect = async"), localConnection.indexOf("const saveCustomAdapter"));
 assert.match(connectHandler, /state\.localAiCapability\s*=\s*[\s\S]*?response\.capability/,
   "the shared Local refresh path must retain returned runtime capability");
@@ -258,10 +293,10 @@ assert.match(connectHandler, /await persistCapacity\(\)/,
 const modelChangeHandler = localConnection.slice(
   localConnection.indexOf("const markModelChanged"), localConnection.indexOf("const bind ="),
 );
-assert.match(modelChangeHandler, /invalidate\("Selected model changed — restarting verification\."\)/,
-  "changing a Local model must invalidate the prior model verification");
+assert.match(modelChangeHandler, /invalidate\("Selected model changed — refreshing metadata\."\)/,
+  "changing a Local model must invalidate the prior model metadata check");
 assert.match(modelChangeHandler, /if \(selected\) await connect\(\)/,
-  "changing a Local model must verify it without another manual Connect step");
+  "changing a Local model must refresh its metadata without another manual Connect step");
 assert.match(popupEvents, /provider !== previousProvider[\s\S]*?state\.desiredAiModel = "auto"/,
   "changing providers must not reuse a model ID from the previous runtime");
 const providerChange = popupEvents.slice(

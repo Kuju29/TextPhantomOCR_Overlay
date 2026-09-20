@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
-const state={},events=[],progress=[],wire=[];let release,failWrite=false,holdRead=false;
+const state={},events=[],progress=[],wire=[];let failWrite=false,holdWrite=false;const heldWrites=[];
+const release=()=>{for(const finish of heldWrites.splice(0))finish();};
 const tick=()=>new Promise(r=>setImmediate(r));
 globalThis.chrome={runtime:{getManifest:()=>({version:'test'})},storage:{local:{
- get(k,cb){const go=()=>cb(Array.isArray(k)?Object.fromEntries(k.map(x=>[x,state[x]])):{...k,...structuredClone(state)});if(holdRead){release=go;}else go();},
- set(v,cb){if(failWrite){chrome.runtime.lastError={message:'quota'};cb();delete chrome.runtime.lastError;}else{Object.assign(state,structuredClone(v));cb();}}
+ get(k,cb){cb(Array.isArray(k)?Object.fromEntries(k.map(x=>[x,state[x]])):{...k,...structuredClone(state)});},
+ set(v,cb){const finish=()=>{if(failWrite){chrome.runtime.lastError={message:'quota'};cb();delete chrome.runtime.lastError;}else{Object.assign(state,structuredClone(v));cb();}};if(holdWrite)heldWrites.push(finish);else finish();},
+ remove(keys,cb){for(const key of keys)delete state[key];cb();}
 }}};
 const {translateViaServer}=await import('../src/background/ai/transports/server.js');
 globalThis.fetch=async(url,init)=>{wire.push(JSON.parse(init.body));return new Response(JSON.stringify({schema:'tp.ai.result/1',translations:[{id:'g0',text:'ทดสอบ'}],missing:[],
@@ -12,14 +14,14 @@ const opts=(id,signal)=>({base:'https://fixture.invalid',operationId:id,targetLa
  ai:{provider:'openrouter',model:'fixture',prompt:'STYLE',thinking:'off'},trace:(name,data)=>events.push({name,data}),onProgress:p=>progress.push(p.state)});
 const input=[{id:'g0',text:'日本語'}];
 let checks=0;
-holdRead=true;const one=translateViaServer(input,opts('wait-A'));const two=translateViaServer(input,opts('wait-B'));
+holdWrite=true;const one=translateViaServer(input,opts('wait-A'));const two=translateViaServer(input,opts('wait-B'));
 await tick();assert.equal(wire.length,0);assert.equal(progress.filter(p=>p==='usage_pending').length,2);assert(!progress.includes('http_wait'));
-holdRead=false;release();await Promise.all([one,two]);assert.equal(wire.length,2);
+holdWrite=false;release();await Promise.all([one,two]);assert.equal(wire.length,2);
 const started=events.filter(e=>e.name==='requestTiming'&&e.data.reason==='http_started');assert.equal(started.length,2);
 assert(started.every(e=>e.data.timing.persistMs>=0&&e.data.timing.httpAttempts===1));checks++;
-console.log('PASS delayed durable storage is not mislabeled as HTTP or provider time');
-holdRead=true;const abort=new AbortController();const cancelled=translateViaServer(input,opts('cancel-during-persist',abort.signal));await tick();
-abort.abort();holdRead=false;release();await assert.rejects(cancelled,e=>e.name==='AbortError');assert.equal(wire.length,2);checks++;
+console.log('PASS delayed compact receipt writes (not aggregate reads) gate HTTP and are timed separately');
+holdWrite=true;const abort=new AbortController();const cancelled=translateViaServer(input,opts('cancel-during-persist',abort.signal));await tick();
+abort.abort();holdWrite=false;release();await assert.rejects(cancelled,e=>e.name==='AbortError');assert.equal(wire.length,2);checks++;
 assert(events.some(e=>e.name==='requestTiming'&&e.data.reason==='cancelled'&&e.data.timing.httpAttempts===0));
 console.log('PASS cancellation during pending storage cannot dispatch HTTP');
 failWrite=true;await assert.rejects(translateViaServer(input,opts('storage-failed')));failWrite=false;
@@ -40,14 +42,14 @@ globalThis.fetch=async()=>{fixtureNow+=20;return {ok:true,status:200,
     translations:[{id:'g0',text:'ทดสอบ'}],missing:[],meta:{generationAttempts:1,providerMs:7}});}};};
 try {
   const delayedOpts=opts('post-response-delay');
-  delayedOpts.onProgress=p=>{if(p.state==='validating')holdRead=true;};
+  delayedOpts.onProgress=p=>{if(p.state==='validating')holdWrite=true;};
   const pending=translateViaServer(input,delayedOpts);
   await tick();
   const response=events.find(e=>e.name==='requestTiming'&&e.data.scope.operationId==='post-response-delay'&&e.data.reason==='response_complete');
   assert.equal(response.data.timing.httpMs,50);assert.equal(response.data.timing.headersMs,20);assert.equal(response.data.timing.bodyMs,30);
-  fixtureNow+=500;holdRead=false;release();await pending;
+  fixtureNow+=500;holdWrite=false;release();await pending;
   const usage=events.find(e=>e.name==='requestTiming'&&e.data.scope.operationId==='post-response-delay'&&e.data.event==='usage_commit_timing');
   assert.equal(usage.data.timing.usageCallbackMs,500);
   assert.equal(response.data.timing.httpMs,50,'post-response persistence cannot inflate HTTP');
   console.log('PASS isolated post-response usage callback can be slow while HTTP stays 50 ms');
-} finally {globalThis.performance=savedPerformance;globalThis.fetch=originalFetch;holdRead=false;}
+} finally {globalThis.performance=savedPerformance;globalThis.fetch=originalFetch;holdWrite=false;}

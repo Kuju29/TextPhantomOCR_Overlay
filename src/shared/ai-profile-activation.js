@@ -9,6 +9,7 @@ import {
   normalizeAiPrompt,
   normalizeAiPromptMode,
 } from "./ai-prompt-policy.js";
+import { normalizeUserReasoningPreference } from "./reasoning-preference.js";
 
 const clone = (value) => structuredClone(value);
 
@@ -96,9 +97,12 @@ export function resolveEffectiveAiProfile(snapshot) {
     credential: String(snapshot?.credential || ""),
     prompt: normalizeAiPrompt(snapshot?.prompt),
     promptMode,
-    thinking: profile.thinking === "on" ? "on" : "off",
+    thinking: normalizeUserReasoningPreference(profile.thinking),
     pageImage: profile.pageImage || "off",
     memoryMode: profile.memoryMode || "off",
+    styleExamples: profile.styleExamples !== false,
+    translationMode: "conversation",
+    conversationReset: String(profile.conversationReset || "0"),
     concurrency: profile.concurrency || { mode: "auto", max: 0 },
     providerOptions: profile.providerOptions || {},
     unsupported,
@@ -126,8 +130,11 @@ export function buildEffectiveAiPayload(
       prompt: normalizeAiPrompt(effective?.prompt),
       prompt_mode: promptMode,
       memory_mode: String(effective?.memoryMode || "off"),
+      style_examples: effective?.styleExamples !== false,
+      translation_mode: "conversation",
+      conversation_reset: String(effective?.conversationReset || "0"),
       send_image: effective?.pageImage === "always",
-      thinking: effective?.thinking === "on" ? "on" : "off",
+      thinking: normalizeUserReasoningPreference(effective?.thinking),
     },
   });
 }

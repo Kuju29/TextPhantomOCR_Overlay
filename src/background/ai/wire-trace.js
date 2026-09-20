@@ -2,6 +2,28 @@ import { note as traceNote } from "../../shared/trace.js";
 
 const SCHEMA = "tp.ai-wire-trace/1";
 export const AI_WIRE_TRACE_SCHEMA = SCHEMA;
+
+// Diagnostic relay traffic must never open an unbounded number of fetches.
+// Every recorder keeps its own ordering queue, while this shared FIFO limits
+// aggregate relay concurrency across pages/requests. Waiting for a relay slot
+// does not consume the per-fetch transport timeout.
+const RELAY_MAX_IN_FLIGHT = 4;
+let relayInFlight = 0;
+const relayWaiters = [];
+async function acquireRelaySlot() {
+  if (relayInFlight < RELAY_MAX_IN_FLIGHT) { relayInFlight += 1; return; }
+  await new Promise((resolve) => relayWaiters.push(resolve));
+}
+function releaseRelaySlot() {
+  const next = relayWaiters.shift();
+  if (next) next();
+  else relayInFlight = Math.max(0, relayInFlight - 1);
+}
+async function withRelaySlot(work) {
+  await acquireRelaySlot();
+  try { return await work(); }
+  finally { releaseRelaySlot(); }
+}
 const secretKey = /^(?:authorization|proxy-authorization|api[-_]?key|x-api-key|cookie|set-cookie|token|access_token|x-tp-run-token|secret)$/i;
 
 function redactUrl(raw) {
@@ -55,7 +77,7 @@ export function createAiWireRecorder({ enabled = false, operationId = "", traceI
   apiBase = "", relay = null, fetchImpl = globalThis.fetch } = {}) {
   if (!enabled) return null;
   const executionKey = crypto.randomUUID();
-  const fullIdentity = redactAiWireValue({ operationId, traceId, executionKey, ...identity });
+  const fullIdentity = redactAiWireValue({ recordKind: "provider_request", operationId, traceId, executionKey, ...identity });
   const endpoint = `${String(apiBase || "").replace(/\/+$/, "")}${String(relay?.path || "")}`;
   const relayToken = String(relay?.token || "");
   const relayTimeoutMs = Math.max(250, Math.min(10000, Number(relay?.timeoutMs) || 1500));
@@ -68,23 +90,25 @@ export function createAiWireRecorder({ enabled = false, operationId = "", traceI
     const body = JSON.stringify({ schema: SCHEMA, identity: fullIdentity, stage, value });
     const max = Number(relay?.maxEventBytes) || 0;
     if (max && new TextEncoder().encode(body).length > max) throw new Error("Direct Local AI trace event is too large");
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(new Error(`AI wire relay timed out after ${relayTimeoutMs}ms`)), relayTimeoutMs);
-    let response;
-    try { response = await fetchImpl(endpoint, { method: "POST", headers: {
-      "Content-Type": "application/json", "X-TP-AI-Wire-Capability": relayToken,
-      "X-TP-Trace-Id": String(fullIdentity.traceId || traceId || ""),
-      "X-TP-Request-Id": String(fullIdentity.operationId || operationId || ""),
-      "X-TP-Job-Id": String(fullIdentity.jobId || ""),
-      "X-TP-Batch-Id": String(fullIdentity.batchId || ""),
-      "X-TP-Image-Id": String(fullIdentity.imageId || ""),
-    }, body, signal: controller.signal });
-      if (!response.ok) {
-        let reason = "";
-        try { reason = String(await response.text()).slice(0, 240); } catch {}
-        throw new Error(`Direct Local AI trace relay HTTP ${response.status}${reason ? `: ${reason}` : ""}`);
-      }
-    } finally { clearTimeout(timer); }
+    return withRelaySlot(async () => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(new Error(`AI wire relay timed out after ${relayTimeoutMs}ms`)), relayTimeoutMs);
+      try {
+        const response = await fetchImpl(endpoint, { method: "POST", headers: {
+          "Content-Type": "application/json", "X-TP-AI-Wire-Capability": relayToken,
+          "X-TP-Trace-Id": String(fullIdentity.traceId || traceId || ""),
+          "X-TP-Request-Id": String(fullIdentity.operationId || operationId || ""),
+          "X-TP-Job-Id": String(fullIdentity.jobId || ""),
+          "X-TP-Batch-Id": String(fullIdentity.batchId || ""),
+          "X-TP-Image-Id": String(fullIdentity.imageId || ""),
+        }, body, signal: controller.signal });
+        if (!response.ok) {
+          let reason = "";
+          try { reason = String(await response.text()).slice(0, 240); } catch {}
+          throw new Error(`Direct Local AI trace relay HTTP ${response.status}${reason ? `: ${reason}` : ""}`);
+        }
+      } finally { clearTimeout(timer); }
+    });
   };
   const queue = [];
   let queuedBytes = 0, pumping = false, disabled = false;
@@ -100,7 +124,7 @@ export function createAiWireRecorder({ enabled = false, operationId = "", traceI
           const pendingCount = queue.length;
           disabled = true; queue.length = 0; queuedBytes = 0;
           traceNote("background/ai/wire-trace.js", "relayDisabled", {
-            operationId, traceId, stage: event.stage,
+            operationId, traceId, executionKey, recordKind: fullIdentity.recordKind, stage: event.stage,
             reason: "transport_failure", timeoutMs: relayTimeoutMs,
             droppedEvents: 1 + pendingCount,
           });
@@ -116,7 +140,7 @@ export function createAiWireRecorder({ enabled = false, operationId = "", traceI
     if (queue.length >= maxQueuedEvents || queuedBytes + bytes > maxQueuedBytes) {
       disabled = true; queue.length = 0; queuedBytes = 0;
       traceNote("background/ai/wire-trace.js", "relayDisabled", {
-        operationId, traceId, stage, reason: "queue_limit", maxQueuedEvents, maxQueuedBytes,
+        operationId, traceId, executionKey, recordKind: fullIdentity.recordKind, stage, reason: "queue_limit", maxQueuedEvents, maxQueuedBytes,
       });
       return Promise.resolve(false);
     }
@@ -138,6 +162,7 @@ export function createAiWireRecorder({ enabled = false, operationId = "", traceI
       return !disabled && !pumping && queue.length === 0;
     })();
   };
+  recorder.identity = Object.freeze({ ...fullIdentity });
   recorder("trace_started");
   return recorder;
 }

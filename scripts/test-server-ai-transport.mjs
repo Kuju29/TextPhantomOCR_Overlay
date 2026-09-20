@@ -39,6 +39,7 @@ try {
   assert.equal(result.meta.route, "server");
   assert.equal(captured.body.schema, "tp.ai.request/1");
   assert.deepEqual(captured.body.repair, { owner: "extension", enabled: false });
+  assert.equal(captured.init.priority, "high", "AI transport must outrank Lens uploads on the same origin");
   assert.equal(captured.init.headers["Idempotency-Key"], "operation-1");
   assert.equal(captured.init.headers["X-TP-Job-Id"], "job-1");
   assert.equal(captured.init.headers["X-TP-Image-Id"], "image-1");
@@ -52,6 +53,7 @@ try {
   } });
   assert.equal(captured.body.prompt_mode, "replace");
   assert.equal(captured.body.memory.enabled, true);
+  assert.equal(captured.body.memory.styleExamples, true);
   assert.equal(captured.body.image.dataUri, "data:image/png;base64,AQ==");
 
   let emptyPromptDispatches = 0;
@@ -83,8 +85,9 @@ try {
     ai: { provider: "openrouter", model: "model-a", prompt: "style" },
   }), (error) => error?.code === "invalid_result_schema" && error?.status === 200 && error?.generationAttempts === 1);
 
-  const {currentUsage, recordProviderGeneration} = await import("../src/shared/ai-usage.js");
+  const {currentUsage, recordProviderGeneration, flushUsageReceiptJournal} = await import("../src/shared/ai-usage.js");
   const target = {runtime:"cloud",provider:"openrouter",model:"model-a"};
+  await flushUsageReceiptJournal({recover:true});
   const beforeFailure = currentUsage(stored.aiUsageV1, target);
   let failureCalls = 0;
   globalThis.fetch = async () => {
@@ -102,6 +105,7 @@ try {
   }), error => error.code === "provider_timeout" && error.upstreamStatus === 504 &&
     error.providerFailureKind === "http_status" && error.requestDispatched === true);
   assert.equal(failureCalls, 1, "a confirmed HTTP failure never triggers transport retry");
+  await flushUsageReceiptJournal({recover:true});
   assert.match(JSON.stringify(stored.aiUsageV1), /gateway-failure-receipt/,
     "original unknown usage receipt survives repair eligibility classification");
 

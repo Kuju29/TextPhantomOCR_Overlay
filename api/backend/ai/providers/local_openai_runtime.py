@@ -77,7 +77,8 @@ class LocalOpenAIChatAdapter:
         else:
             if source_text:
                 messages.append({"role": "user", "content": source_text})
-        return messages
+        from backend.ai.translation_paths.messages import insert_history
+        return insert_history(messages, request.history_messages, "openai_image_first")
 
     def prepare_payload(self, request: GenerationRequest) -> dict[str, Any]:
         payload: dict[str, Any] = {

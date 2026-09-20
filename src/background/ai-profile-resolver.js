@@ -40,11 +40,14 @@ function immutableCopy(value) {
 
 function canonicalDefaults(local) {
   return {
-    thinking: "off",
+    thinking: "minimum",
     tokenPolicy: { mode: "dynamic", maxOutputTokens: 0 },
     temperature: null,
     pageImage: "off",
     memoryMode: "off",
+    styleExamples: true,
+    translationMode: "conversation",
+    conversationReset: "0",
     concurrency: {
       mode: "auto",
       max: 0,
@@ -126,8 +129,11 @@ export async function resolveJobAiProfile(settings, { language = "en" } = {}) {
     aiPromptMode: activated.promptMode,
     aiPageImage: profile.pageImage || "off",
     aiMemoryMode: profile.memoryMode || "off",
-    aiThinking: profile.thinking === "on" ? "on" : "off",
-    aiLocalThinking: profile.thinking === "on" ? "on" : "off",
+    aiStyleExamples: profile.styleExamples !== false,
+    aiTranslationMode: "conversation",
+    aiConversationReset: String(profile.conversationReset || "0"),
+    aiThinking: profile.thinking || "minimum",
+    aiLocalThinking: profile.thinking || "minimum",
     aiLocalCapacityMode:
       profile.concurrency?.mode || "auto",
     aiLocalManualConcurrency:

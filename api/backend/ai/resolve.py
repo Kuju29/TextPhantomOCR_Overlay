@@ -32,7 +32,6 @@ from backend.ai.provider_resolution import (
     resolve_model,
 )
 from backend.ai.rate_policy import is_local_target
-from backend.config import settings
 from backend.lens.languages import normalize as normalize_lang
 from backend.security import assert_ai_base_url_allowed
 
@@ -89,31 +88,20 @@ def _enumerate_models_detailed(provider: str, api_key: str, base_url: str) -> En
     spec = provider_registry.require(provider)
     listed = spec.adapter.list_models(api_key="" if local else api_key, base_url=base_url)
     from backend.ai.provider_resolution import (
-        forget_model_capabilities, remember_model_capabilities, retain_model_promotions,
+        forget_model_capabilities, remember_model_capabilities, retain_model_promotions, model_capabilities,
     )
     if listed.status == "valid":
-        remember_model_capabilities(provider, base_url, api_key, dict(listed.capabilities))
+        remember_model_capabilities(provider, base_url, api_key, dict(listed.capabilities), models=listed.models)
         retain_model_promotions(provider, base_url, api_key, list(listed.models))
     else:
         forget_model_capabilities(provider, base_url, api_key)
     live = {"models": list(listed.models), "status": listed.status,
             "http_status": listed.http_status, "error": listed.error,
-            "capabilities": dict(listed.capabilities),
+            "capabilities": ({model: model_capabilities(provider, base_url, model, api_key)
+                              for model in listed.models} if listed.status == "valid" else {}),
             "candidates": dict(getattr(listed, "candidates", {}) or {})}
 
     usable_live = _dedupe_sorted(live["models"])
-    from backend import trace
-    candidate_values = list(live["candidates"].values())
-    counts = {state: sum(1 for item in candidate_values
-                         if isinstance(item, dict) and item.get("eligibility") == state)
-              for state in ("usable", "unknown", "blocked")}
-    unspecified = max(0, len(usable_live) - sum(counts.values()))
-    trace.note("model_catalogue_completed", {
-        "provider": provider, "status": live["status"],
-        "httpStatus": live["http_status"], "modelCount": len(usable_live),
-        "usableCount": counts["usable"], "unknownCount": counts["unknown"] + unspecified,
-        "blockedCount": counts["blocked"], "accountScope": hashlib.sha256(api_key.encode()).hexdigest()[:12],
-    }, file="ai/resolve.py")
     if live["status"] == "valid":
         # A successful provider catalogue is authoritative even when filtering
         # leaves zero translation-compatible models. Do not turn an empty valid
@@ -130,7 +118,7 @@ def _enumerate_models_detailed(provider: str, api_key: str, base_url: str) -> En
         )
 
     # Do not put guessed/static models in the picker. A cloud model appears only
-    # after the selected provider/key (or server-owned key) returned it live.
+    # after the selected provider/user key returned it live.
     return EnumerationResult(
         models=[],
         source="none",
@@ -145,9 +133,8 @@ def _enumerate_models_detailed(provider: str, api_key: str, base_url: str) -> En
 def resolve(payload: dict[str, Any]) -> ResolveResult:
     """Resolve provider/model while keeping support/auth/list status explicit."""
     supplied_key = str(payload.get("api_key") or "").strip()
-    server_key = str(settings.ai_api_key or "").strip()
-    candidate_key = supplied_key or server_key
-    key_source = "user" if supplied_key else ("env" if candidate_key else "none")
+    candidate_key = supplied_key
+    key_source = "user" if supplied_key else "none"
     lang = normalize_lang(str(payload.get("lang") or "en"))
     style_default = prompts.lang_style(lang)
 
@@ -203,12 +190,12 @@ def resolve(payload: dict[str, Any]) -> ResolveResult:
     if not candidate_key and looks_local and provider not in provider_registry:
         provider = default_local_provider()
 
-    # Never send a server-owned cloud key to a local/self-hosted endpoint.
+    # Never send a cloud key to a local/self-hosted endpoint.
     # Local providers use no credential (the model-list helper supplies only a
     # harmless placeholder header when required by an OpenAI-compatible server).
     local = is_local_target(provider, base_hint)
-    api_key = "" if local else (supplied_key or server_key)
-    key_source = "none" if local else ("user" if supplied_key else ("env" if api_key else "none"))
+    api_key = "" if local else supplied_key
+    key_source = "user" if api_key else "none"
 
     mismatched_provider = provider_key_mismatch(provider, api_key) if api_key else ""
     if mismatched_provider:
@@ -260,39 +247,57 @@ def resolve(payload: dict[str, Any]) -> ResolveResult:
     requested_is_auto = requested_model.lower() in ("", "auto")
     resolved_model = resolve_model(provider, requested_model)
     base_url = resolve_base_url(provider, str(payload.get("base_url") or "auto"))
-    # This guard exists to stop the SERVER-OWNED key from being posted to an
-    # arbitrary host. It must therefore fire only when that key is what would
-    # actually be sent. A user-supplied key, a local provider, or a server with
-    # no AI_API_KEY at all are none of them cases the guard protects — refusing
-    # those turned plain settings discovery ("pick a provider, list its models
-    # before typing a key") into an unhandled exception.
-    uses_server_key = bool(server_key) and not supplied_key and not local
-    assert_ai_base_url_allowed(
-        provider, base_url,
-        user_key=not uses_server_key,
-        key_present=bool(api_key),
-    )
+    assert_ai_base_url_allowed(provider, base_url, user_key=bool(api_key), key_present=bool(api_key))
 
     remap_reason = ""
     if not requested_is_auto and resolved_model != requested_model:
         remap_reason = "retired_alias"
 
-    enumeration = _enumerate_models_detailed(provider, api_key, base_url)
+    # Missing credentials must not enumerate, probe, or use an operator key.
+    enumeration = (_enumerate_models_detailed(provider, api_key, base_url) if local or api_key
+        else EnumerationResult(models=[], source="none", verified=False, status="missing",
+                               http_status=0, error="missing_api_key", capabilities={}, candidates={}))
     models = enumeration["models"]
     live_verified = enumeration["verified"]
-    from backend.ai.provider_resolution import model_is_promoted
+    from backend.ai.provider_resolution import model_is_promoted, model_rejection
     model_candidates = []
     for candidate_model in models:
         native = dict(enumeration.get("candidates", {}).get(candidate_model) or {})
         eligibility = str(native.get("eligibility") or "unknown")
         evidence = str(native.get("evidence") or "provider_catalogue_only")[:120]
-        if model_is_promoted(provider, base_url, api_key, candidate_model):
+        rejection = model_rejection(provider, base_url, api_key, candidate_model)
+        if rejection:
+            eligibility = "blocked"
+            evidence = f"selected_generation_probe_{rejection.get('status') or 'rejected'}"[:120]
+        elif model_is_promoted(provider, base_url, api_key, candidate_model):
             eligibility, evidence = "usable", "selected_generation_probe"
         if eligibility not in {"usable", "unknown", "blocked"}:
             eligibility = "unknown"
-        model_candidates.append({"id": candidate_model, "eligibility": eligibility,
-                                 "evidence": evidence,
-                                 "capabilities": dict(enumeration["capabilities"].get(candidate_model) or {})})
+        candidate = {"id": candidate_model, "eligibility": eligibility,
+                     "evidence": evidence,
+                     "capabilities": dict(enumeration["capabilities"].get(candidate_model) or {})}
+        if rejection:
+            candidate["probe_status"] = str(rejection.get("status") or "rejected")[:64]
+            candidate["probe_http_status"] = int(rejection.get("http_status") or 0)
+        model_candidates.append(candidate)
+
+    # Log the effective picker state only after deterministic probe rejection
+    # and promotion evidence have been overlaid. Logging the raw catalogue here
+    # used to report blockedCount=0 even while the same resolve call returned a
+    # blocked selected model, which made production diagnostics contradict the
+    # actual UI state.
+    from backend import trace
+    effective_counts = {state: sum(1 for item in model_candidates
+                                   if item.get("eligibility") == state)
+                        for state in ("usable", "unknown", "blocked")}
+    trace.note("model_catalogue_completed", {
+        "provider": provider, "status": enumeration["status"],
+        "httpStatus": enumeration["http_status"], "modelCount": len(model_candidates),
+        "usableCount": effective_counts["usable"],
+        "unknownCount": effective_counts["unknown"],
+        "blockedCount": effective_counts["blocked"],
+        "accountScope": hashlib.sha256(api_key.encode()).hexdigest()[:12],
+    }, file="ai/resolve.py")
 
     list_status = enumeration["status"]
     if local:
@@ -323,15 +328,19 @@ def resolve(payload: dict[str, Any]) -> ResolveResult:
         remap_reason = remap_reason or "auto_live_selection"
 
     if live_verified:
-        model_status = "available" if resolved_model in models else "unavailable"
+        selected_candidate = next((item for item in model_candidates
+                                   if item.get("id") == resolved_model), None)
+        selected_blocked = bool(selected_candidate and selected_candidate.get("eligibility") == "blocked")
+        model_status = "available" if resolved_model in models and not selected_blocked else "unavailable"
     else:
         model_status = "unverified"
 
     # Authentication/plan failure is a real failure and never unlocks an
     # unverified fallback model list.
-    ok = key_status not in ("invalid", "forbidden") and model_status != "unavailable"
+    ok = key_status not in ("missing", "invalid", "forbidden") and model_status != "unavailable"
     error = (
-        "invalid_api_key" if key_status == "invalid"
+        "missing_api_key" if key_status == "missing"
+        else "invalid_api_key" if key_status == "invalid"
         else "provider_access_forbidden" if key_status == "forbidden"
         else "model_unavailable" if model_status == "unavailable"
         else ""
@@ -368,14 +377,15 @@ def prompt_default(lang: str, *, want_memo: bool = True) -> dict[str, Any]:
     """Return the default prompt pieces for ``lang`` (for ``/ai/prompt/default``)."""
     code = normalize_lang(lang)
     style = prompts.lang_style(code)
-    system_text = prompts.build_system_text(code, want_memo=want_memo)
+    system_text = prompts.build_translator_identity_system(style, code)
     metadata = prompts.prompt_metadata(code)
     return {
         "ok": True,
         "lang": code,
         "prompt_editable_default": style,
         "lang_style": style,
-        "system_base": prompts.SYSTEM_BASE.strip(),
+        "system_base": system_text,
+        "styleRole": "system",
         "system_text": system_text,
         "want_memo": bool(want_memo),
         **metadata,

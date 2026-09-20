@@ -7,7 +7,7 @@ from backend.ai.providers.openai_provider_runtime import (
     OpenAIProviderAdapter, OpenAIProviderPolicy, bearer_headers, build_payload,
 )
 from backend.ai.providers.probe_support import openai_chat_probe
-from backend.ai.transports.openai_chat import execute_chat_completion
+from backend.ai.transports.deepseek_chat import execute_deepseek_chat
 from backend.ai.generation_defaults import DEFAULT_GENERATION
 from backend.ai.providers.provider_helpers import resolve_alias
 
@@ -39,24 +39,49 @@ POLICY = OpenAIProviderPolicy(
     model_resolver=resolve_model,
     catalogue_evidence="deepseek_account_model_catalogue",
 )
+def _verified_reasoning(capabilities) -> bool:
+    reasoning = capabilities.get("reasoning", {}) if isinstance(capabilities, dict) else {}
+    return isinstance(reasoning, dict) and reasoning.get("supported") is True \
+        and reasoning.get("control") in {"toggle", "boolean", "levels"}
+
+
 class DeepSeekAdapter(OpenAIProviderAdapter):
-    """DeepSeek owns a documented thinking toggle; default it to Off."""
+    """Use DeepSeek thinking controls only when this exact model proves them."""
 
     def probe(self, request: ProbeRequest) -> ProbeResponse:
-        return openai_chat_probe(
-            request,
-            payload_extra={"max_tokens": 128, "thinking": {"type": "disabled"}},
-        )
+        # The account catalogue marks the exact V4 families that own DeepSeek's
+        # thinking toggle.  Other/future chat models must remain usable even if
+        # they reject that optional field.
+        if _verified_reasoning(dict(request.model_capabilities)):
+            return openai_chat_probe(
+                request,
+                payload_extra={"max_tokens": 128, "thinking": {"type": "disabled"}},
+            )
+        return openai_chat_probe(request, payload_extra={"max_tokens": 128})
 
     def generate(self, request: GenerationRequest):
         model = resolve_model(request.model)
         payload = build_payload(request, model, POLICY)
-        if request.thinking in {"off", "on"}:
-            payload["thinking"] = {"type": "enabled" if request.thinking == "on" else "disabled"}
-        result = execute_chat_completion(
+        control_verified = _verified_reasoning(dict(request.model_capabilities))
+        reasoning = request.model_capabilities.get("reasoning", {})
+        reasoning = reasoning if isinstance(reasoning, dict) else {}
+        efforts = {str(value).strip().lower() for value in reasoning.get("supported_efforts", [])
+                   if isinstance(value, str)}
+        if control_verified:
+            if request.thinking == "off":
+                payload["thinking"] = {"type": "disabled"}
+            elif request.thinking == "on":
+                payload["thinking"] = {"type": "enabled"}
+            elif request.thinking in efforts:
+                if request.thinking == "none":
+                    payload["thinking"] = {"type": "disabled"}
+                else:
+                    payload["thinking"] = {"type": "enabled"}
+                    payload["reasoning_effort"] = request.thinking
+        result = execute_deepseek_chat(
             url=request.base_url.rstrip("/") + "/chat/completions",
             headers=bearer_headers(request.api_key),
-            payload=payload, model=model, provider_id=PROVIDER_ID,
+            payload=payload, model=model,
             timeout=DEFAULT_GENERATION.timeout_sec, timeout_policy="cloud_default",
             expected_ids=list(request.expected_ids), cancel_check=request.cancel_check,
             trace_file="ai/providers/cloud_deepseek.py",
@@ -64,14 +89,18 @@ class DeepSeekAdapter(OpenAIProviderAdapter):
                 "temperatureSent": "temperature" in payload,
                 "outputBudgetField": POLICY.output_budget_field,
                 "requestedOutputTokens": payload.get("max_tokens"),
-                "reasoningPolicy": "deepseek_thinking_toggle",
+                "reasoningPolicy": "deepseek_native_reasoning",
                 "reasoningControlSent": "thinking" in payload,
                 "thinkingMode": request.thinking,
+                "reasoningEffortSent": payload.get("reasoning_effort"),
             },
         )
+        reasoning = request.model_capabilities.get("reasoning", {})
+        mandatory = isinstance(reasoning, dict) and reasoning.get("mandatory") is True
         return result._replace(thinking_applied=(
-            f"requested_{request.thinking}" if request.thinking in {"off", "on"}
-            else "provider_default"
+            f"requested_{request.thinking}" if "thinking" in payload
+            else "provider_default_mandatory" if mandatory
+            else "unverified"
         ))
 
     def list_models(self, *, api_key: str, base_url: str) -> ModelListResult:
@@ -80,7 +109,9 @@ class DeepSeekAdapter(OpenAIProviderAdapter):
             return listed
         reasoning = {
             "supported": True, "mandatory": False, "default_enabled": True,
-            "control": "toggle", "dynamic": True,
+            "control": "levels", "dynamic": True,
+            "supported_efforts": ["none", "low", "high", "max"],
+            "default_effort": "high",
         }
         capabilities = {
             model: {"reasoning": dict(reasoning)}

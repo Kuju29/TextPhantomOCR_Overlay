@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {translateViaServer} from '../src/background/ai/transports/server.js';
 import {mountTranslationSessionStatus} from '../src/popup/controllers/translation-session-controller.js';
 import {diagnoseTargetScripts} from '../src/background/ai/script-diagnostics.js';
+import {repairRequest} from '../src/background/repair/client.js';
 const savedFetch=globalThis.fetch;
 let captured;
 try {
@@ -27,6 +28,16 @@ try {
  assert.match(elements['translation-session-status'].textContent,/unresolved 1 \(1 wrong target language\)/);
  await elements['translation-session-resume'].click();assert.ok(sent.includes('TP_RESUME_REPAIRS'));
 }
+
+{
+ let seen;
+ try {
+  globalThis.fetch=async(_url,options)=>{seen=options.headers;return new Response(JSON.stringify({ok:true}));};
+  await repairRequest({base:'https://example.test',id:'run-a',token:'a'.repeat(64),batchId:'batch-a',sessionId:'tab-session-a'},'register',{runId:'run-a',manifest:['p']});
+  assert.equal(seen['X-TP-Tab-Session'],'tab-session-a','repair quota identity must follow the owning tab session');
+ } finally { globalThis.fetch=savedFetch; }
+}
+
 for(const text of ['@official_scan','++ KUMO TRANSLATION']) {
  const r=diagnoseTargetScripts([{id:'x',text}],'th',[{id:'x',text}]);assert.ok(r.every(x=>x.decision!=='reject'),text);
 }

@@ -4,7 +4,9 @@ import {
   parseLocalAiAdapterJson,
   serializeLocalAiAdapter,
 } from "../../shared/ai/providers/local-registry.js";
+import { normalizeReasoningPreference } from "../../shared/reasoning-preference.js";
 import { note } from "../../shared/trace.js";
+import { broadcast } from "../../shared/messaging.js";
 import {
   LOCAL_CAPABILITY_SNAPSHOTS_KEY,
   LOCAL_MODEL_VERIFICATION_MAX_AGE_MS,
@@ -39,12 +41,9 @@ function localConnectionErrorCode(stage, error) {
   if (stage === "normalize") return "INVALID_LOCAL_ADAPTER";
   if (stage === "persist") return "LOCAL_SETTINGS_PERSIST_FAILED";
   if (error?.name === "AbortError") return "LOCAL_CONNECTION_CANCELLED";
-  if (stage === "model_verify") return "LOCAL_MODEL_VERIFY_FAILED";
+  if (stage === "model_verify") return "LOCAL_MODEL_METADATA_CHECK_FAILED";
   return "LOCAL_DISCOVERY_FAILED";
 }
-
-const THINKING_REQUIRED_HELP =
-  "✕ This model requires thinking. Open [AI option > AI thinking] and enable thinking; verification will retry automatically.";
 
 export function createLocalConnectionController({
   els,
@@ -74,7 +73,7 @@ export function createLocalConnectionController({
   ) => normalizeLocalConnectionIdentity(provider, endpoint);
 
   const persistSnapshot = async ({
-    provider, endpoint, capability, models, verification = null, thinking = "off",
+    provider, endpoint, capability, models, verification = null, thinking = "minimum",
   }, current = () => true) => {
     const stored = await getStorage([LOCAL_CAPABILITY_SNAPSHOTS_KEY]);
     if (!current()) return;
@@ -119,7 +118,7 @@ export function createLocalConnectionController({
     const saved = savedModel();
     const savedPresent = Boolean(saved && models.includes(saved));
     const verifiedModel = String(record.verifiedModel || "").trim();
-    const requestedThinking = els.aiThinking?.value === "on" ? "on" : "off";
+    const requestedThinking = normalizeReasoningPreference(els.aiThinking?.value, "minimum");
     const verification = localVerificationSnapshotStatus(record, {
       provider, endpoint, model: saved, thinking: requestedThinking,
       maxAgeMs: LOCAL_MODEL_VERIFICATION_MAX_AGE_MS,
@@ -137,8 +136,8 @@ export function createLocalConnectionController({
       const when = Number(record.checkedAt) > 0
         ? new Date(record.checkedAt).toLocaleString() : "an earlier session";
       els.aiLocalStatus.textContent = verified
-        ? `✓ ${saved} was verified on ${when}.`
-        : `Saved model metadata from ${when}. Verifying the selected model automatically…`;
+        ? `✓ ${saved} metadata checked on ${when}.`
+        : `Saved model metadata from ${when}. Refreshing installed models automatically…`;
     }
     state.lastAiResolve = {
       provider,
@@ -188,7 +187,7 @@ export function createLocalConnectionController({
       els.aiModelWrap,
       "warn",
       saved
-        ? `⚠ Could not refresh installed models. Keeping ${saved} selected but translation stays paused until verification succeeds.`
+        ? `⚠ Could not refresh installed models. Keeping ${saved} selected but translation stays paused until availability is confirmed.`
         : message || "⚠ Could not load installed models from this Local AI runtime.",
     );
   };
@@ -201,8 +200,13 @@ export function createLocalConnectionController({
     clearResolveTimer();
     const sequence = ++state.localConnectSeq;
     let requestIdentity = "";
+    const discoveryId = globalThis.crypto?.randomUUID?.() || `t${Date.now().toString(36)}${sequence}`;
+    let responseDiscoveryId = discoveryId;
+    const acknowledge = (applied, ready = false) => {
+      broadcast({type:"TP_LOCAL_AI_DISCOVERY_UI", requestId:discoveryId, discoveryId:responseDiscoveryId, applied, ready});
+    };
     const requestedModel = String(state.desiredAiModel || els.aiModel?.value || "").trim();
-    const requestedThinking = els.aiThinking?.value === "on" ? "on" : "off";
+    const requestedThinking = normalizeReasoningPreference(els.aiThinking?.value, "minimum");
     const adapterDraft = String(els.aiLocalAdapter?.value || "");
     const transitionRevision = state.providerTransitionRevision;
     let expectedModel = requestedModel;
@@ -211,9 +215,27 @@ export function createLocalConnectionController({
       identity() === requestIdentity &&
       String(state.desiredAiModel || els.aiModel?.value || "").trim() === expectedModel &&
       String(els.aiModel?.value || "").trim() === expectedModelControl &&
-      (els.aiThinking?.value === "on" ? "on" : "off") === requestedThinking &&
       state.providerTransitionRevision === transitionRevision &&
       (provider !== "customlocal" || String(els.aiLocalAdapter?.value || "") === adapterDraft);
+    const progress = (message) => {
+      if (message?.type !== "TP_LOCAL_AI_DISCOVERY_PROGRESS" || message.requestId !== discoveryId || !current()) return;
+      responseDiscoveryId = message.discoveryId || discoveryId;
+      if (message.stage === "models_loaded" && Array.isArray(message.models)) {
+        const models = message.models;
+        const desired = requestedModel && requestedModel !== "auto" ? requestedModel : "";
+        setModelOptions(models, {keepValue: models.includes(desired) ? desired : "", selectFirst: !desired, placeholder: "Select an installed model"});
+        expectedModelControl = String(els.aiModel?.value || "").trim();
+        if (!requestedModel) expectedModel = expectedModelControl;
+        state.localAiCapability = message.capability ? {...message.capability, provider, baseUrl:endpoint} : null;
+        state.aiModelBlocked = true;
+        setFieldMessage(els.aiModelWrap, "info", "Models found. Checking selected model metadata…");
+        els.aiLocalStatus.textContent = `Connected · ${models.length} usable model(s) found · Checking metadata…`;
+        renderCapacity(); toggleUi();
+      } else if (message.stage === "model_verify") {
+        els.aiLocalStatus.textContent = "Connected · Checking selected model metadata…";
+      }
+    };
+    const onProgress = (message) => { progress(message); return false; };
     let stage = "normalize";
     let endpoint = String(els.aiBaseUrl?.value || "").trim();
     const endpointSource = provider === "customlocal" ? "custom_adapter" : "provider_field";
@@ -248,7 +270,7 @@ export function createLocalConnectionController({
         model: requestedModel, thinking: requestedThinking,
       };
       setBusy(true);
-      els.aiLocalStatus.textContent = "Loading and verifying Local AI models…";
+      els.aiLocalStatus.textContent = "Loading Local AI models…";
       state.aiModelBlocked = true;
       clearCapacity();
       toggleUi();
@@ -263,18 +285,22 @@ export function createLocalConnectionController({
       stage = "message";
       milestone("started");
       stage = "discovery";
+      globalThis.chrome?.runtime?.onMessage?.addListener?.(onProgress);
       const response = await sendMessage({
         type: "TP_LOCAL_AI_DISCOVER",
+        discoveryId,
         adapter,
         provider,
         model: requestedModel,
         thinking: requestedThinking,
         apiBase: normalizeUrl(els.apiUrl.value),
       });
-      if (sequence !== state.localConnectSeq) return;
+      responseDiscoveryId = response?.discoveryId || responseDiscoveryId;
+      if (sequence !== state.localConnectSeq) { acknowledge(false); return; }
       if (!current()) {
+        acknowledge(false);
         els.aiLocalStatus.textContent =
-          "Connection test cancelled because the Local AI provider or URL changed, or the selected model or thinking setting changed.";
+          "Connection test cancelled because the Local AI provider, URL, or selected model changed.";
         return;
       }
       milestone("completed", { ok: Boolean(response?.ok) });
@@ -282,9 +308,10 @@ export function createLocalConnectionController({
         const failure = new Error(
           response?.error ||
             response?.message ||
-            "Local server could not be reached",
+            "Connection status unavailable. Refresh Local AI again.",
         );
         failure.code = String(response?.code || "");
+        failure.snapshotOwner = response?.snapshotOwner;
         throw failure;
       }
       const models = Array.isArray(response.models) ? response.models : [];
@@ -299,7 +326,7 @@ export function createLocalConnectionController({
           verificationStatus,
           modelCount: models.length,
           ...(!["passed", "not_tested"].includes(verificationStatus)
-            ? { errorCode: "LOCAL_MODEL_VERIFY_FAILED", errorName: "ModelVerificationError" }
+            ? { errorCode: "LOCAL_MODEL_METADATA_CHECK_FAILED", errorName: "ModelMetadataError" }
             : {}),
         },
       );
@@ -318,13 +345,16 @@ export function createLocalConnectionController({
         placeholder: explicitRequested && !desiredPresent
           ? "Selected model is unavailable — choose another"
           : "Select a model",
-        selectFirst: !desiredPresent,
+        selectFirst: !explicitRequested,
       });
       const selected = String(els.aiModel?.value || "").trim();
       expectedModelControl = selected;
       const verified = verification.status === "passed" &&
         String(verification.model || "").trim() === selected && models.includes(selected);
       state.aiModelBlocked = !verified;
+      state.lastAiResolve = { provider, model:selected, models, backend_supported:true,
+        key_status:"not_required", models_verified:verified, verified_model: verified ? selected : "",
+        checked_at:response.checkedAt || Date.now(), verification_source:"live_local_metadata" };
       if (selected && selected !== state.desiredAiModel) {
         state.desiredAiModel = selected;
         expectedModel = selected;
@@ -335,26 +365,23 @@ export function createLocalConnectionController({
         scheduleSave();
       }
       const verificationMessages = {
-        passed: ["info", `✓ ${selected} generated a test response successfully`],
+        passed: ["info", `✓ ${selected} is available and its runtime metadata is ready`],
         model_unavailable: ["error", "✕ Selected model is not exposed by this Local AI server"],
-        timeout: ["error", "✕ Selected model did not answer the verification request in time"],
-        rejected: ["error", "✕ Selected model rejected the verification request"],
-        invalid_output: ["error", "✕ Selected model returned no usable text"],
-        unreachable: ["error", "✕ Selected model could not complete a generation test"],
-        thinking_required: ["error", THINKING_REQUIRED_HELP],
-        not_tested: ["warn", "⚠ Select a model; verification will start automatically"],
+        unsupported_model: ["error", "✕ Selected model cannot generate chat completions in this Local AI runtime"],
+        invalid_output: ["error", "✕ Selected model capability metadata is unusable"],
+        unreachable: ["error", "✕ Selected model availability could not be confirmed"],
+        not_tested: ["warn", "⚠ Select a model; its metadata will be checked automatically"],
       };
       const modelMessage = verificationMessages[verification.status] ||
-        ["error", "✕ Selected model could not be verified"];
+        ["error", "✕ Selected model availability could not be confirmed"];
       setFieldMessage(els.aiModelWrap, ...modelMessage);
-      els.aiLocalStatus.textContent = verification.status === "thinking_required"
-        ? THINKING_REQUIRED_HELP
-        : verified
-          ? `✓ Connected to ${adapter.baseUrl} · ${selected} verified · ${models.length} installed model(s)`
-          : `⚠ Connected to ${adapter.baseUrl}, but the selected model is not verified`;
+      els.aiLocalStatus.textContent = verified
+        ? `✓ Ready · ${selected} · ${models.length} usable model(s)`
+        : `⚠ Connected to ${adapter.baseUrl}, but the selected model metadata is not ready`;
       renderCapacity();
       toggleUi();
-      await persistSnapshot({
+      acknowledge(true, verified);
+      if (response.snapshotOwner !== "worker") await persistSnapshot({
         provider,
         endpoint: adapter.baseUrl,
         capability: state.localAiCapability,
@@ -372,16 +399,17 @@ export function createLocalConnectionController({
         errorName: String(error?.name || "Error"),
       });
       state.localAiCapability = null;
+      state.lastAiResolve = null;
       state.aiModelBlocked = true;
-      await forgetSnapshot(provider, endpoint,
+      if (error?.snapshotOwner !== "worker") await forgetSnapshot(provider, endpoint,
         () => sequence === state.localConnectSeq && (!requestIdentity || current())).catch(() => {});
       if (requestIdentity && !current()) return;
-      els.aiLocalStatus.textContent = error?.code === "local_ai_thinking_required"
-        ? THINKING_REQUIRED_HELP
-        : `✕ ${error.message}. Check that the runtime is running and allows extension CORS.`;
+      els.aiLocalStatus.textContent = `✕ ${error.message}`;
       showFallback();
       toggleUi();
+      acknowledge(true, false);
     } finally {
+      globalThis.chrome?.runtime?.onMessage?.removeListener?.(onProgress);
       if (state.localConnectInFlight?.seq === sequence) {
         state.localConnectInFlight = null;
         setBusy(false);
@@ -424,7 +452,7 @@ export function createLocalConnectionController({
         state.localAiCapability = null;
         clearCapacity();
         setFieldMessage(els.aiEndpointWrap, "info",
-          "✓ Custom adapter saved. Loading and verifying its models automatically…");
+          "✓ Custom adapter saved. Loading its models automatically…");
         toggleUi();
         if (revision === adapterSaveRevision &&
             transition === state.providerTransitionRevision &&
@@ -444,14 +472,14 @@ export function createLocalConnectionController({
   const markModelChanged = async (model = els.aiModel?.value) => {
     if (!isCurrentProviderLocal()) return;
     const selected = String(model || "").trim();
-    invalidate("Selected model changed — restarting verification.");
+    invalidate("Selected model changed — refreshing metadata.");
     state.aiModelBlocked = true;
     if (els.aiLocalStatus)
       els.aiLocalStatus.textContent = selected
-        ? `Verifying ${selected}…`
+        ? `Checking ${selected} metadata…`
         : "Select an installed model.";
     setFieldMessage(els.aiModelWrap, "info",
-      selected ? `⏳ Verifying ${selected} with this Local AI runtime…`
+      selected ? `⏳ Checking ${selected} with this Local AI runtime…`
         : "Select an installed model.");
     toggleUi();
     if (selected) await connect();

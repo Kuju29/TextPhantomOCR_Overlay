@@ -1,24 +1,24 @@
 import assert from 'node:assert/strict';
-import {createTranslationSessionStore, TRANSLATION_SESSION_KEY} from '../src/background/translation-session-store.js';
+import {createTranslationSessionStore, translationSessionRunKey} from '../src/background/translation-session-store.js';
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve=r; }); return {promise,resolve}; };
-let saved = {}, writes=0, gate=null, entered=null, fail=false;
-const area={get:async key=>({[key]:structuredClone(saved[key])}),set:async patch=>{
-  writes++; entered?.resolve(); if(gate) await gate.promise;
-  if(fail) throw new Error('write failed'); saved=structuredClone(patch);
-}};
+let saved = {}, writes=0, gate=null, entered=null, fail=false,lastPatch=null;
+const area={get:async key=>key==null?structuredClone(saved):({[key]:structuredClone(saved[key])}),set:async patch=>{
+  writes++; lastPatch=structuredClone(patch);entered?.resolve(); if(gate) await gate.promise;
+  if(fail) throw new Error('write failed'); Object.assign(saved,structuredClone(patch));
+},remove:async keys=>{for(const key of (Array.isArray(keys)?keys:[keys]))delete saved[key];}};
 const store=createTranslationSessionStore({area:()=>area});
 await store.update('r',()=>({createdAt:Date.now(),phase:'collecting',count:0}));
 await store.update('other',()=>({createdAt:Date.now(),phase:'collecting',count:9}));
 writes=0;gate=deferred();entered=deferred();let resolved=0;
 const burst=Array.from({length:24},()=>store.update('r',r=>({...r,count:r.count+1})).then(r=>{resolved++;return r.count;}));
 await entered.promise;
-assert.equal(writes,1);assert.equal(resolved,0,'no caller released before commit');
+assert.equal(writes,1);assert.deepEqual(Object.keys(lastPatch),[translationSessionRunKey('r')],'checkpoint burst writes only the changed run');assert.equal(resolved,0,'no caller released before commit');
 assert.equal((await store.get('other')).count,9,'unrelated reads must not wait for a write');
 let sameRead=false;const read=store.get('r').then(r=>{sameRead=true;return r;});
 await Promise.resolve();assert.equal(sameRead,false);
 gate.resolve();assert.deepEqual(await Promise.all(burst),Array.from({length:24},(_,i)=>i+1));
 assert.equal((await read).count,24);
-assert.equal(saved[TRANSLATION_SESSION_KEY].runs.r.count,24);
+assert.equal(saved[translationSessionRunKey('r')].row.count,24);
 gate=null;entered=null;fail=true;
 await assert.rejects(store.update('r',r=>({...r,count:99})),/write failed/);
 assert.equal((await store.get('r')).count,24,'failed write must not publish');
@@ -49,3 +49,30 @@ console.log('PASS checkpoint burst: 24 updates / 1 durable write; ordered snapsh
  assert.equal(await eviction.get(key),null,'terminal rows still evicted to satisfy exact quota');
 }
 console.log('PASS checkpoint exact UTF-8 limits, escaping, immutable size cache and eviction');
+
+// Different runs must not queue behind one slow chrome.storage.session write.
+// They use independent keys, so checkpoint latency should be per run rather
+// than the sum of every active user's/page's writes.
+{
+ let persisted={},active=0,maxActive=0,releaseBoth;
+ const bothEntered=new Promise(resolve=>{releaseBoth=resolve;});
+ const parallelArea={
+  get:async key=>key==null?structuredClone(persisted):({[key]:structuredClone(persisted[key])}),
+  set:async patch=>{
+   active++;maxActive=Math.max(maxActive,active);
+   if(active===2)releaseBoth();
+   await Promise.race([bothEntered,new Promise((_,reject)=>setTimeout(()=>reject(new Error('unrelated checkpoint writes serialized')),500))]);
+   Object.assign(persisted,structuredClone(patch));active--;
+  },
+  remove:async()=>{},
+ };
+ const parallel=createTranslationSessionStore({area:()=>parallelArea});
+ await Promise.all([
+  parallel.update('run-a',()=>({createdAt:Date.now(),phase:'collecting',count:1})),
+  parallel.update('run-b',()=>({createdAt:Date.now(),phase:'collecting',count:2})),
+ ]);
+ assert.equal(maxActive,2,'different run IDs must be allowed to persist concurrently');
+ assert.equal((await parallel.get('run-a')).count,1);
+ assert.equal((await parallel.get('run-b')).count,2);
+}
+console.log('PASS checkpoint per-run drains: unrelated runs persist concurrently without losing per-run ordering');

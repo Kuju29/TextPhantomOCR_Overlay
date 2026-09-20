@@ -62,17 +62,6 @@ def authorized(candidate: str) -> bool:
     return wire_trace.enabled() and hmac.compare_digest(str(candidate or ""), CAPABILITY_TOKEN)
 
 
-def _safe_part(value: Any, fallback: str) -> str:
-    return wire_trace.safe_path_part(value, fallback=fallback)
-
-
-def _folder(trace_id: Any, operation_id: Any, execution_key: Any) -> Path:
-    trace = _safe_part(trace_id, "no-trace")
-    operation = _safe_part(operation_id, "no-operation")
-    execution = _safe_part(execution_key, "no-execution")
-    return wire_trace.root_dir() / f"{trace}--{operation}--{execution}"
-
-
 def _encoded_size(value: Any) -> int:
     return len(json.dumps(value, ensure_ascii=False, default=str).encode("utf-8"))
 
@@ -90,7 +79,7 @@ def receive(payload: dict[str, Any]) -> Path:
     event_size = _encoded_size(payload)
     if event_size > MAX_EVENT_BYTES:
         raise OverflowError("local wire trace event exceeds size limit")
-    folder = _folder(identity.get("traceId"), identity.get("operationId"), execution_key)
+    folder = wire_trace.root_dir() / wire_trace.folder_name(identity, execution_key)
     size_key = str(folder)
     now = time.monotonic()
     with _lock:

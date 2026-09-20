@@ -37,11 +37,10 @@ a thread), so waiting is cheap and does not pin a worker thread.
 
 from __future__ import annotations
 
-import time, asyncio, hashlib, json, math, os, tempfile
+import time, asyncio, hashlib, math, os
 
 from collections.abc import Callable
 from collections import OrderedDict, deque
-from pathlib import Path
 
 # from backend.ai import providers as _provider_modules  # noqa: F401
 from backend.ai.provider_registry import provider_registry
@@ -87,50 +86,12 @@ def _env_int(name: str, default: int) -> int:
 # full again next time, which is the correct state for one that was quiet.
 _MAX_BUCKETS = _env_int("TP_RATE_MAX_BUCKETS", 512)
 
-# --- learned-rate persistence -------------------------------------------------
-#
-# What a bucket learns is the only expensive thing in this module: reaching a
-# usable rate from the free-tier starting number costs ~64 clean calls, and
-# until 2026-08-19 every one of those calls was paid again on the next process
-# start. On a Hugging Face Space — which restarts whenever it wakes from sleep —
-# that meant the ramp was paid on essentially every session, and the measured
-# result was 19 pages/min on the first chapter against 50 on the fourth.
-#
-# So the rate is written to a small JSON file keyed by the SAME hashed bucket
-# key used in memory (provider|model|sha1(key)[:12]) — the API key itself is
-# never written. Nothing else is persisted: tokens, waiters and timers are all
-# in-flight state that must start clean.
-#
-# This is a cache, not a source of truth. A restored rate that is now too high
-# costs exactly one provider 429, which `report_rate_limited` halves on the same
-# round trip. A restore that fails is REPORTED (see `persistence()`), never
-# silently skipped, because "the ramp is back" with no explanation is the
-# hardest version of this bug to find.
-_STATE_TTL_SEC = _env_float("TP_RATE_STATE_TTL_SEC", 7 * 24 * 3600.0)
-_STATE_SAVE_MIN_INTERVAL_SEC = _env_float("TP_RATE_STATE_SAVE_SEC", 30.0)
-_STATE_SCHEMA = "tp.rategate.state/1"
+# Learned rates exist only in the bounded live bucket map.
+# Legacy file settings are ignored; process restart begins empty.
 
-def _state_path() -> Path | None:
-    """Where the learned rates live, or None when persistence is switched off.
-
-    Order matters and is about WRITABILITY, not preference. A Docker Space runs
-    the app as a non-root user against a root-owned image, so the checkout is
-    usually read-only; `/data` is the only mount that survives a restart, and
-    the temp dir at least survives an in-container reload.
-    """
-    raw = os.environ.get("TP_RATE_STATE_FILE", "").strip()
-    if raw:
-        return Path(raw)
-    if _env_int("TP_RATE_STATE", 1) == 0:
-        return None
-    for candidate in (
-        Path("/data") / "textphantom",                      # HF persistent storage
-        Path(__file__).resolve().parents[2] / "state",      # local install
-    ):
-        parent = candidate if candidate.is_dir() else candidate.parent
-        if parent.is_dir() and os.access(parent, os.W_OK):
-            return candidate / "rate-gate.json"
-    return Path(tempfile.gettempdir()) / "textphantom-rate-gate.json"
+def _state_path() -> None:
+    """Legacy file settings never enable restart persistence."""
+    return None
 
 class _Waiter:
     __slots__ = ("job_id", "session", "future")
@@ -223,87 +184,18 @@ class RateGate:
 
     # --- learned-rate persistence -------------------------------------------
     def _load_state(self) -> dict[str, float]:
-        """Read the saved rates once per process. Never raises."""
-        if self._restored is not None:
-            return self._restored
-        self._restored = {}
-        path = _state_path()
-        if path is None:
-            self._state_error = "disabled by TP_RATE_STATE=0"
-            return self._restored
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return self._restored  # first run on this machine; not an error
-        except (OSError, ValueError) as exc:
-            self._state_error = f"{type(exc).__name__}: {exc}"
-            return self._restored
-        if not isinstance(raw, dict) or raw.get("schema") != _STATE_SCHEMA:
-            self._state_error = "unrecognised state file; ignoring it"
-            return self._restored
-        now = time.time()
-        for key, entry in (raw.get("buckets") or {}).items():
-            if not isinstance(entry, dict):
-                continue
-            try:
-                rpm = float(entry.get("rpm") or 0.0)
-                seen = float(entry.get("at") or 0.0)
-            except (TypeError, ValueError):
-                continue
-            # Evidence has a shelf life. Past the TTL the key may have changed
-            # tier, been rotated, or moved to another quota entirely.
-            if rpm > 0 and 0 < seen and (now - seen) <= _STATE_TTL_SEC:
-                self._restored[str(key)] = rpm
-        self._state_loaded_count = len(self._restored)
+        """Each process learns from its own live provider observations."""
+        if self._restored is None:
+            self._restored = {}
         return self._restored
 
     def _save_state(self, *, force: bool = False) -> None:
-        """Write the learned rates, at most once per interval. Never raises."""
-        if not self._state_dirty and not force:
-            return
-        now = time.monotonic()
-        if not force and (now - self._state_saved_at) < _STATE_SAVE_MIN_INTERVAL_SEC:
-            return
-        path = _state_path()
-        if path is None:
-            return
-        self._state_saved_at = now
+        # Learned rates already live in the bounded bucket map. No disk mirror.
         self._state_dirty = False
-        wall = time.time()
-        payload = {
-            "schema": _STATE_SCHEMA,
-            "at": wall,
-            "buckets": {
-                key: {"rpm": round(bucket.rpm, 3), "at": wall}
-                # A pinned bucket is the user's number, not something learned;
-                # persisting it would resurrect a setting they since changed.
-                for key, bucket in self._buckets.items()
-                if not bucket.pinned and bucket.rpm > 0
-            },
-        }
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(payload), encoding="utf-8")
-            tmp.replace(path)  # atomic: a torn file would read as "no evidence"
-            self._state_error = ""
-        except OSError as exc:
-            self._state_error = f"{type(exc).__name__}: {exc}"
 
     def persistence(self) -> dict:
-        """What the learned-rate cache is doing, for /v1/capabilities and logs.
-
-        Reported rather than assumed: a read-only filesystem turns this feature
-        off completely, and the only symptom is that the ramp comes back.
-        """
-        path = _state_path()
-        self._load_state()
-        return {
-            "path": str(path) if path else "",
-            "enabled": bool(path),
-            "restored": self._state_loaded_count,
-            "error": self._state_error,
-        }
+        return {"path": "", "enabled": False, "restored": 0, "error": "",
+                "storage": "process_memory"}
 
     # --- policy ------------------------------------------------------------
     @staticmethod

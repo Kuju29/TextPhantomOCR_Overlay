@@ -31,7 +31,7 @@ class ImageArtifactStore:
         self._bytes = 0
         self._lock = threading.Lock()
         self._counts = {k: 0 for k in (
-            "stored", "hit", "miss", "expired", "evicted", "rejected", "wrongScope",
+            "stored", "hit", "consumed", "miss", "expired", "evicted", "rejected", "wrongScope",
         )}
 
     @staticmethod
@@ -76,7 +76,7 @@ class ImageArtifactStore:
             self._counts["stored"] += 1
         return token, self.ttl_sec
 
-    def get(self, token: str, scope: str) -> bytes:
+    def _read(self, token: str, scope: str, *, consume: bool) -> bytes:
         if not isinstance(token, str) or not self._valid(token):
             raise ArtifactError("artifact_malformed", "image artifact token is malformed", 400)
         now = self._clock()
@@ -91,9 +91,21 @@ class ImageArtifactStore:
             if rec.scope != str(scope or "anon"):
                 self._counts["wrongScope"] += 1
                 raise ArtifactError("artifact_wrong_scope", "image artifact does not belong to this session", 403)
-            self._items.move_to_end(token)
             self._counts["hit"] += 1
+            if consume:
+                self._items.pop(token, None)
+                self._bytes -= len(rec.data)
+                self._counts["consumed"] += 1
+            else:
+                self._items.move_to_end(token)
             return rec.data
+
+    def get(self, token: str, scope: str) -> bytes:
+        return self._read(token, scope, consume=False)
+
+    def consume(self, token: str, scope: str) -> bytes:
+        """Resolve a one-shot Lens→grouping handoff and free its bytes immediately."""
+        return self._read(token, scope, consume=True)
 
     def stats(self) -> dict:
         with self._lock:

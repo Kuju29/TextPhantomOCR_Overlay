@@ -72,18 +72,19 @@ try {
   assert.equal(schemaBody.format.additionalProperties, false);
   const schemaSystem = schemaBody.messages[0].content;
   const schemaUser = schemaBody.messages[1].content;
-  assert.match(schemaSystem, /professional manga and manhwa translator and localization editor/);
-  assert.match(schemaSystem, /TRANSLATION STYLE\nTarget language: Thai \(ภาษาไทย\)\.\nSTYLE SENTINEL/);
-  assert.doesNotMatch(schemaSystem, /OUTPUT —|P0/);
-  assert.match(schemaUser, /TRANSLATION TASK/);
-  assert.match(schemaUser, /Translate every source unit into Thai \(ภาษาไทย\)\./);
-  assert.doesNotMatch(schemaUser, /TRANSLATION STYLE\nTarget language: Thai \(ภาษาไทย\)\.\nSTYLE SENTINEL/);
-  assert.match(schemaUser, /Return only the JSON object required by the supplied schema/);
+  assert.match(schemaSystem, /คุณคือนักแปลและบรรณาธิการมังงะและมังฮวา/);
+  assert.match(schemaSystem, /STYLE SENTINEL/);
+  assert.equal(schemaSystem.split("STYLE SENTINEL").length - 1, 1);
+  assert.doesNotMatch(schemaSystem, /รูปแบบคำตอบ —|P0/);
+  assert.match(schemaUser, /งานแปล/);
+  assert.match(schemaUser, /แปลข้อความต้นฉบับทุกหน่วยเป็นภาษาไทย/);
+  assert.doesNotMatch(schemaUser, /สไตล์การแปล\nภาษาปลายทาง: ภาษาไทย\nSTYLE SENTINEL/);
+  assert.match(schemaUser, /ตอบเฉพาะวัตถุ JSON ตาม schema ที่ให้/);
   assert.doesNotMatch(schemaUser, /MARKER OUTPUT SENTINEL|compact record|<<TP_Pn:/,
     "schema user content must contain no marker-output grammar");
-  assert.ok(schemaUser.endsWith("SOURCE TEXT\nP0:一\nP1:二\nP2:三"),
+  assert.ok(schemaUser.endsWith("ข้อความต้นฉบับ\nP0:一\nP1:二\nP2:三"),
     "schema source must use plain attributable IDs without compact markers");
-  assert.equal((schemaUser.match(/OUTPUT —/g) || []).length, 1,
+  assert.equal((schemaUser.match(/รูปแบบคำตอบ —/g) || []).length, 1,
     "provider must see exactly one chosen output-contract section in the user message");
   assert.deepEqual(schema.result.translations.map(({ id, text }) => ({ id, text })), [
     { id: "g0", text: "หนึ่ง" }, { id: "g1", text: "สอง" }, { id: "g2", text: "สาม" },
@@ -100,7 +101,10 @@ try {
     kind: "schema_object", reason: "ollama_format_schema_supported",
     capabilitySource: "ollama-api-show", provider: "ollama", model: "qwen3.5:9b",
     automaticRetry: false,
+    promptLayout: schema.result.meta.promptLayout,
   });
+  assert.equal(schemaSelection.promptLayout.cacheHit, null);
+  assert.match(schemaSelection.promptLayout.staticPrefixSha256, /^[a-f0-9]{64}$/);
   assert.equal(schemaApplied.selected, SCHEMA_OBJECT_CONTRACT);
   assert.equal(schemaApplied.applied, "schema-object-v1");
   assert.equal(schemaApplied.providerAttempts, 1);
@@ -117,12 +121,13 @@ try {
     assert.equal("response_format" in body, false);
     const system = body.messages[0].content;
     const user = body.messages[1].content;
-    assert.match(system, /TRANSLATION STYLE\nTarget language: Thai \(ภาษาไทย\)\.\nSTYLE SENTINEL/);
-    assert.doesNotMatch(system, /<<TP_Pn:|OUTPUT —/);
-    assert.match(user, /<<TP_Pn:translated text>>/);
+    assert.doesNotMatch(user, /สไตล์การแปล\nภาษาปลายทาง: ภาษาไทย\nSTYLE SENTINEL/);
+    assert.match(system, /STYLE SENTINEL/);
+    assert.doesNotMatch(system, /<<TP_Pn:|รูปแบบคำตอบ —/);
+    assert.match(user, /<<TP_Pn:คำแปล>>/);
     assert.doesNotMatch(user, /SCHEMA OUTPUT SENTINEL|Return only one JSON object/,
       "fallback user content must contain no schema-output grammar");
-    assert.equal((user.match(/OUTPUT —/g) || []).length, 1);
+    assert.equal((user.match(/รูปแบบคำตอบ —/g) || []).length, 1);
     assert.equal(fallback.result.meta.selectedContract, "tp.translation.compact-records/1");
     assert.equal(fallback.result.meta.selectedContractKind, "compact_records");
     assert.equal(fallback.result.meta.selectedContractReason, expectedReason);

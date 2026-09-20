@@ -320,3 +320,24 @@ const ok = (translations) => ({ translations, missing: [], meta: { generationAtt
 }
 
 console.log("Per-page translation extraction passed: exactly one provider call, explicit partials and cancellation.");
+
+{
+  const checkpoints=[],events=[];let submitted=0;
+  const f=make([], {onCheckpoint:async row=>checkpoints.push(row),trace:(name,data)=>events.push({name,data})});
+  f.args.plan.ai={translation_mode:'conversation',conversation:{owner:'o',documentId:'d'}};
+  f.args.dependencies.workloadController={open:()=>{throw new Error('Conversation incorrectly used per-page planner');}};
+  f.args.conversationSubmit=async (selected,o)=>{
+    submitted++;assert.deepEqual(selected.map(u=>u.id),['P0','P1']);
+    await o.beforeBatchDispatch({batchId:'11111111-1111-4111-8111-111111111111',units:selected,estimate:{estimatedInput:100}});
+    const r={translations:[{id:'P0',text:'คำแปล'}],missing:['P1'],units:selected};
+    await o.afterBatchResult(r);
+    return {...r,meta:{generationAttempts:1,sharedRequestRefs:[{operationId:'11111111-1111-4111-8111-111111111111',pageUnits:2,requestUnits:6}]}};
+  };
+  const out=await translateLensPage(f.args);
+  assert.equal(submitted,1);assert.equal(f.calls.length,0,'new path never calls old per-page translation');
+  assert.equal(out.complete,false);assert.deepEqual(out.missing,['P1']);
+  assert.ok(checkpoints.some(c=>c.stage==='dispatch'&&c.operationId==='11111111-1111-4111-8111-111111111111'));
+  assert.ok(checkpoints.some(c=>c.stage==='progress'&&c.accepted?.[0]?.text==='คำแปล'));
+  assert.ok(events.some(e=>e.name==='conversationPageProjection'&&e.data.requestUnitCount===6));
+  console.log('PASS Conversation prepared-data hook uses shared page validation/checkpoints/render mapping; old per-page dispatch never called');
+}

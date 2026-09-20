@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter
+from starlette.concurrency import run_in_threadpool
 
 import time
 
@@ -23,19 +24,20 @@ _SOURCES = [
 
 @router.get("/meta")
 async def meta() -> dict:
-    """Languages / sources the UI should offer, plus whether a server AI key exists."""
+    """Languages / sources the UI should offer, plus the request-owned cloud-key policy."""
     return {
         "ok": True,
         "languages": UI_LANGUAGES,
         "sources": _SOURCES,
-        "has_env_ai_key": bool(settings.ai_api_key),
+        "has_env_ai_key": False,
+        "credential_policy": "user_required",
     }
 
 @router.get("/warmup")
 async def warmup(lang: str | None = None) -> dict:
     """Pre-fetch the Lens cookie + fonts for ``lang`` (defaults to TP_WARMUP_LANG)."""
     t0 = time.perf_counter()
-    result = run_warmup(lang or settings.warmup_lang)
+    result = await run_in_threadpool(run_warmup, lang or settings.warmup_lang)
     return {
         "ok": True,
         "dt_ms": round((time.perf_counter() - t0) * 1000, 1),

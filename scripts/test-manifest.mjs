@@ -50,6 +50,8 @@ const order = new Map(contentScripts.map((file, index) => [file, index]));
 const mustPrecede = [
   ["shared/compat.js", "content/namespace.js"],
   ["content/namespace.js", "content/dom-utils.js"],
+  ["content/dom-utils.js", "content/progress-panel.js"],
+  ["content/progress-panel.js", "content/messaging.js"],
   ["content/dom-utils.js", "content/overlay.js"],
   ["content/target-key.js", "content/overlay.js"],
   ["content/image-finder.js", "content/overlay.js"],

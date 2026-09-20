@@ -18,12 +18,15 @@ def map_result(*, result: dict, units: list[dict], payload: dict, target_lang: s
     extracted = list(extracted_pair[0]) if extracted_pair else []
     meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
     omitted = {str(item) for item in (meta.get("omitted_ids") or [])}
+    uncertain = {str(item) for item in (meta.get("alignment_uncertain_ids") or [])}
     translations, missing, declined, passthrough = [], [], [], []
     for index, unit in enumerate(units):
         translated = markers.normalize_unit_text(
             extracted[index] if index < len(extracted) else ""
         )
-        if ai_request.language_neutral_unit(unit["text"]):
+        if str(unit["id"]) in uncertain:
+            translated = ""
+        elif ai_request.language_neutral_unit(unit["text"]):
             translated = markers.normalize_unit_text(unit["text"])
             passthrough.append(unit["id"])
         if translated:
@@ -31,7 +34,7 @@ def map_result(*, result: dict, units: list[dict], payload: dict, target_lang: s
                                  "hash": ai_request.unit_hash(unit["text"])})
         else:
             missing.append(unit["id"])
-            if f"P{index}" not in omitted:
+            if str(unit["id"]) not in omitted:
                 declined.append(unit["id"])
     glossary = []
     for unit, translated in zip(units, extracted):
@@ -56,19 +59,32 @@ def map_result(*, result: dict, units: list[dict], payload: dict, target_lang: s
             "usage": meta.get("usage") if isinstance(meta.get("usage"), dict) else {
                 "inputTokens": None, "outputTokens": None, "totalTokens": None, "source": None},
             "modelLimits": meta.get("model_limits") or {},
+            "promptLayout": meta.get("promptLayout") or {},
+            "cacheCoordination": meta.get("cacheCoordination"),
+            "translationMode": meta.get("translationMode", "independent"),
+            "conversation": meta.get("conversation"),
             "thinkingApplied": meta.get("thinking_applied"),
             "terminalCompleted": meta.get("terminal_completed"),
             "selectedContract": meta.get("selected_contract"),
+            **{key: meta.get(key) for key in (
+                "plannedOutputContract", "selectedOutputContract", "selectionReason",
+                "decodedResponseShape", "parserId", "formatSwitch")},
             "requestedOutputTokens": meta.get("requested_output_tokens"),
             "upstreamProvider": meta.get("upstream_provider") or "",
-            "contractDiagnostics": {"duplicateIds": meta.get("duplicate_output_ids") or [],
+            "alignmentUncertainIds": list(meta.get("alignment_uncertain_ids") or []),
+            "alignmentStatus": meta.get("alignment_status", "not_semantically_verified"),
+            "contractDiagnostics": {"formattingWhitespaceChars":meta.get("formatting_whitespace_chars",0),
+                "unexpectedProseChars":meta.get("unexpected_prose_chars",0), "duplicateIds": meta.get("duplicate_output_ids") or [],
                 "ignoredUnknownIds": meta.get("ignored_output_ids") or [],
                 "malformedMarkerIds": ["unknown"] if meta.get("malformed_output_record_count") else []},
             "finishReason": meta.get("finish_reason"), "timeoutPolicy": meta.get("timeout_policy", ""),
             "targetLang": meta.get("target_lang", target_lang), "units": len(units),
             "dt_ms": round((time.perf_counter() - started) * 1000, 1),
             "rateWaitMs": rate_wait_ms, "admissionWaitMs": admission_wait_ms,
-            "providerMs": meta.get("provider_ms") if meta.get("provider_ms") is not None else provider_ms,
+            "providerMs": meta.get("provider_ms"),
+            "firstContentMs": meta.get("first_content_ms"),
+            "generationInvocationMs": provider_ms,
+            "cacheWaitMs": (meta.get("cacheCoordination") or {}).get("waitMs", 0),
             "parseMs": round((time.perf_counter() - parse_started) * 1000, 1),
             **route_identity, "rateMode": rate["mode"], "markersFound": bool(extracted_pair),
             "vision": bool(config.image_b64), "passthroughUnits": len(passthrough),
@@ -84,11 +100,16 @@ def map_result(*, result: dict, units: list[dict], payload: dict, target_lang: s
             "aiFlow": meta.get("ai_flow", ""), **(meta.get("prompt_audit") or prompt_meta),
         },
     }
+    from backend.ai.request_diagnostics import request_diagnostics
+    body["meta"]["diagnostics"] = request_diagnostics(body["meta"], workload=config.workload, rate=rate, missing=len(missing))
+    wire_trace.write_json("07_request_diagnostics.json", body["meta"]["diagnostics"])
     wire_trace.write_json("07_validation.json", {
         "expectedIds": [unit["id"] for unit in units],
         "acceptedIds": [item["id"] for item in translations],
         "missingIds": missing, "declinedIds": declined,
         "passthroughIds": passthrough, "markersFound": bool(extracted_pair),
+        "alignmentUncertainIds": sorted(uncertain),
+        "alignmentStatus": body["meta"]["alignmentStatus"],
     })
     wire_trace.write_json("08_apply_result.json", {"translations": translations})
     return body, missing, declined, passthrough

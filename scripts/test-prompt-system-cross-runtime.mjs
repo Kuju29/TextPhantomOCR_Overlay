@@ -4,7 +4,8 @@ import { getCanonicalPrompt } from "../src/background/ai/prompt-cache.js";
 import {
   composeCanonicalPrompt,
   exactRequestOutputContract,
-  joinCanonicalSystemSections,
+  composeTranslatorIdentitySystem,
+  composeTranslationUserMessage,
 } from "../src/shared/ai/direct-local/prompt.js";
 
 const style = "CROSS-RUNTIME STYLE: ลดคำแทนตัวและรักษาน้ำเสียงต้นฉบับ";
@@ -13,20 +14,16 @@ const plan = await getCanonicalPrompt("", "th", { wantMemo: false });
 const composed = composeCanonicalPrompt(
   plan, { prompt: style, promptMode: "replace" }, false, false, "th",
 );
-const extensionSystem = joinCanonicalSystemSections({
-  ...composed.sections,
-  output: "",
-  request: exactRequestOutputContract(ids),
-});
+const extensionSystem = composeTranslatorIdentitySystem(`${composed.sections.language}\n${composed.sections.style}`, "th");
 
 const program = [
   "from backend.ai import prompts",
   `style = ${JSON.stringify(style)}`,
   `ids = ${JSON.stringify(ids)}`,
-  "sections = prompts.build_system_sections('th', style, prompt_mode='replace', structured_output=False)",
-  "sections = prompts.append_request_output_section(sections, ids)",
+  "from backend.ai.prompts.builder import build_translator_identity_system",
+  "from backend.ai.prompts.styles import select_style",
   "import sys",
-  "sys.stdout.buffer.write(prompts.join_system_sections(sections).encode('utf-8'))",
+  "sys.stdout.buffer.write(build_translator_identity_system(select_style('th', style, 'replace')[0], 'th').encode('utf-8'))",
 ].join("\n");
 const result = spawnSync(process.env.PYTHON || "python", ["-c", program], {
   cwd: new URL("../api", import.meta.url), encoding: "utf8",
@@ -35,8 +32,10 @@ assert.equal(result.status, 0, result.stderr || "Python prompt composer failed")
 assert.equal(extensionSystem, result.stdout,
   "runs:Extension Local and API-backed Cloud/runs:API must use one byte-identical final system contract");
 assert.equal(extensionSystem.split(style).length - 1, 1,
-  "the selected editable style must occur exactly once");
-assert.equal(extensionSystem.split(plan.pieces.targetLanguageInstruction).length - 1, 1,
-  "the selected target language must occur exactly once");
-
-console.log("Cross-runtime prompt system contract passed: one byte-identical system for both execution owners.");
+  "the selected editable style occurs once in System");
+const user = composeTranslationUserMessage({sections:composed.sections,
+  requestOutputContract:"OUTPUT",sourceRecords:"<<TP_P0:Hello>>",targetLang:"th"});
+assert.equal(user.split(style).length-1, 0, "no duplicated style in User");
+assert.equal(user.split("ภาษาปลายทาง: ภาษาไทย").length-1, 0);
+assert.equal(extensionSystem.includes("ภาษาปลายทาง: ภาษาไทย"), true);
+console.log("Cross-runtime prompt contract passed: byte-identical System, one selected System style and target header.");

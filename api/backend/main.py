@@ -54,7 +54,7 @@ from backend.ai import wire_trace
 from backend.ai.rategate import rate_gate
 from backend.jobs.admission import AdmissionGate
 from backend.jobs import stage_admission
-from backend.config import settings
+from backend.config import settings, lens_concurrency_limit
 from backend.jobs.pipeline import process_payload
 from backend.jobs.queue import JobQueue
 from backend.lens import cookie as lens_cookie
@@ -123,13 +123,7 @@ async def lifespan(app: FastAPI):
         flush=True,
     )
 
-    # Whether the AI pacing cache survived this boot, said at boot.
-    #
-    # This is the difference between a first chapter that runs at the rate the
-    # key was already known to sustain and one that re-learns from the free-tier
-    # starting number — 19 pages/min against 50 on the measured run. A read-only
-    # filesystem turns it off completely and the only other symptom is that the
-    # ramp comes back, so the state is printed either way.
+    # Live rate learning never reads or writes restart state.
     if not settings.rate_gate_enabled:
         print(
             "[TextPhantom][api] proactive AI RPM gate OFF — provider quota/backpressure is authoritative; "
@@ -137,23 +131,7 @@ async def lifespan(app: FastAPI):
             flush=True,
         )
     else:
-        _rate_state = rate_gate.persistence()
-        if not _rate_state["enabled"]:
-            print("[TextPhantom][api] AI rate memory OFF (TP_RATE_STATE=0)", flush=True)
-        elif _rate_state["error"]:
-            print(
-                f"[TextPhantom][api] AI rate memory UNAVAILABLE at {_rate_state['path']}: "
-                f"{_rate_state['error']} — every restart will re-learn each key's rate. "
-                "Point TP_RATE_STATE_FILE at a writable path (on Hugging Face, enable "
-                "persistent storage and use /data).",
-                flush=True,
-            )
-        else:
-            print(
-                f"[TextPhantom][api] AI rate memory -> {_rate_state['path']} "
-                f"({_rate_state['restored']} key(s) restored)",
-                flush=True,
-            )
+        print("[TextPhantom][api] AI rate memory: current process only; restart begins empty", flush=True)
 
     logfile.startup_banner()
     # Printing a path that is never written to is how someone ends up grepping
@@ -215,6 +193,11 @@ async def lifespan(app: FastAPI):
             "built-in cookie jar, or point it at your own.",
             flush=True,
         )
+    print(f"[TextPhantom][api] AI endpoint policy: {settings.ai_endpoint_policy}; "
+          "request-owned keys do not bypass network policy", flush=True)
+    if settings.ai_endpoint_policy != "shared" or settings.ai_extra_hosts:
+        print("[TextPhantom][api] WARNING: operator-enabled AI endpoints are trusted; "
+              "protect this API with authentication/firewall before sharing it.", flush=True)
     if settings.allow_private_image_hosts:
         print(
             "[TextPhantom][api] WARNING: TP_ALLOW_PRIVATE_IMAGE_HOSTS=1 — the "
@@ -352,13 +335,14 @@ app.state.ai_executor = ThreadPoolExecutor(
 # admission is pinned to real executor capacity in this build. Provider/client
 # feedback controls request pacing; server latency must not manufacture capacity.
 _ADAPTIVE = str(os.environ.get("TP_ADAPTIVE", "1")).strip().lower() not in ("0", "false", "no", "off")
-_LENS_LIMIT = max(1, settings.sync_max_concurrency or settings.max_workers)
+_LENS_CONFIGURED = max(1, settings.sync_max_concurrency or settings.max_workers)
+_LENS_LIMIT = lens_concurrency_limit(settings)
 app.state.adaptive_gates = _ADAPTIVE
 # Lens is synchronous remote I/O. Keep its executor and admission limit exactly
 # aligned so an admitted upload can start immediately instead of entering an
-# invisible ThreadPoolExecutor FIFO. User-configured TP_SYNC_MAX_CONCURRENCY /
-# SERVER_MAX_WORKERS still define the size; we only make the implementation
-# honour that value literally.
+# invisible ThreadPoolExecutor FIFO. A separate upstream ceiling protects Google
+# Lens from the cold-burst latency cliff observed when 15 uploads fan out at once.
+# TP_LENS_UPSTREAM_MAX_CONCURRENCY can override the measured-safe default.
 app.state.lens_executor = ThreadPoolExecutor(
     max_workers=_LENS_LIMIT,
     thread_name_prefix="tp-lens-http",

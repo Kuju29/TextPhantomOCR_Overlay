@@ -139,6 +139,7 @@ async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict[st
             detail="`rawToDocument` must be a list or object when supplied",
         )
 
+    artifact_started = time.perf_counter()
     try:
         raw, artifact_outcome = resolve_image_bytes(
             payload, identity_of(payload), image_artifacts, b64_to_bytes,
@@ -164,33 +165,44 @@ async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict[st
             status_code=400, detail=f"could not decode the image: {exc}"
         ) from exc
 
+    artifact_resolve_ms = (time.perf_counter() - artifact_started) * 1000
     if len(raw) > MAX_IMAGE_BYTES:
         raise HTTPException(
             status_code=413,
             detail=f"image is {len(raw)} bytes (max {MAX_IMAGE_BYTES})",
         )
+    decode_started = time.perf_counter()
     try:
         image = await run_in_threadpool(_decode_image, raw)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(
             status_code=400, detail=f"not a readable image: {exc}"
         ) from exc
+    decode_ms = (time.perf_counter() - decode_started) * 1000
     width, height = image.size
 
     identity = identity_of(payload)
+    admission_ms = 0.0
+    grouping_worker_ms = 0.0
     try:
         loop = __import__("asyncio").get_running_loop()
         if wants_unlimited(request):
+            worker_started = time.perf_counter()
             service_result = await loop.run_in_executor(
                 request.app.state.grouping_executor,
                 _group_on_worker, tree, image, raw_to_document,
             )
+            grouping_worker_ms = (time.perf_counter() - worker_started) * 1000
         else:
+            admission_started = time.perf_counter()
             async with request.app.state.grouping_admission_gate.slot(identity):
+                admission_ms = (time.perf_counter() - admission_started) * 1000
+                worker_started = time.perf_counter()
                 service_result = await loop.run_in_executor(
                     request.app.state.grouping_executor,
                     _group_on_worker, tree, image, raw_to_document,
                 )
+                grouping_worker_ms = (time.perf_counter() - worker_started) * 1000
     except AdmissionRejected as exc:
         detail = error_payload(
             code="server_busy", message=str(exc),
@@ -234,6 +246,7 @@ async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict[st
         raise HTTPException(status_code=status, detail=detail) from exc
 
     grouping_result = service_result["grouping_result"]
+    source_tree_started = time.perf_counter()
     try:
         loop = __import__("asyncio").get_running_loop()
         ai_source_tree = await loop.run_in_executor(
@@ -257,6 +270,7 @@ async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict[st
         )
         failure_event(requested_route, detail, **route_meta)
         raise HTTPException(status_code=422, detail=detail) from exc
+    source_tree_ms = (time.perf_counter() - source_tree_started) * 1000
     debug = service_result["debug"]
     source_members = sum(
         len(group.get("sourceContract", {}).get("members", []))
@@ -299,6 +313,13 @@ async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict[st
         "total_ms": total_ms,
         "imageArtifact": artifact_outcome,
         "artifactMetrics": image_artifacts.stats(),
+        "timing": {
+            "artifactResolveMs": round(artifact_resolve_ms, 1),
+            "decodeMs": round(decode_ms, 1),
+            "admissionMs": round(admission_ms, 1),
+            "groupingWorkerMs": round(grouping_worker_ms, 1),
+            "sourceTreeMs": round(source_tree_ms, 1),
+        },
         **route_meta,
     })
     trace.write(
@@ -315,6 +336,13 @@ async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict[st
             "mergeOutcome": merge["outcome"],
             "mergeAuthority": merge["authority"],
             "total_ms": total_ms,
+            "timing": {
+                "artifactResolveMs": round(artifact_resolve_ms, 1),
+                "decodeMs": round(decode_ms, 1),
+                "admissionMs": round(admission_ms, 1),
+                "groupingWorkerMs": round(grouping_worker_ms, 1),
+                "sourceTreeMs": round(source_tree_ms, 1),
+            },
             "imageArtifact": artifact_outcome,
         },
         trace_id=trace_id,

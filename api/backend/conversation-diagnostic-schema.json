@@ -1,0 +1,123 @@
+{
+  "enums": {
+    "mode": [
+      "independent",
+      "conversation"
+    ],
+    "path": [
+      "independent",
+      "conversation"
+    ],
+    "phase": [
+      "queued",
+      "acquired",
+      "prepared",
+      "finished",
+      "failed"
+    ],
+    "policy": [
+      "conversation-append-2026.9.14.9",
+      "conversation-ready-2026.9.14.10",
+      "conversation-human-bootstrap-2026.9.15.1",
+      "conversation-immutable-anchor-2026.9.15.2",
+      "conversation-cache-affinity-pages-2026.9.15.3"
+    ],
+    "scopeStatus": [
+      "ready",
+      "scope_missing",
+      "expired_lane_recovered"
+    ],
+    "rolloverReason": [
+      "none",
+      "prefix_changed",
+      "request_profile_changed",
+      "context_budget",
+      "history_storage_budget",
+      "source_changed",
+      "source_replayed",
+      "source_order_rewound"
+    ],
+    "branch": [
+      "initial",
+      "repair"
+    ],
+    "orderPolicy": [
+      "request_arrival",
+      "document_enqueue"
+    ],
+    "commitStatus": [
+      "pending",
+      "pending_commit",
+      "committed",
+      "not_applicable",
+      "ephemeral_not_retained",
+      "history_storage_limit",
+      "stale_lease_not_committed",
+      "read_only_repair",
+      "not_committed_invalid_output",
+      "not_committed_cancelled",
+      "not_committed_stale_lease",
+      "not_committed_storage_error",
+      "not_committed_cancelled_or_failed",
+      "not_committed_failed",
+      "branched_without_new_turn"
+    ],
+    "providerCacheStatus": [
+      "not_reported",
+      "reported_hit",
+      "reported_zero"
+    ],
+    "storage": [
+      "api_sqlite",
+      "ephemeral",
+      "local_indexeddb",
+      "local_memory",
+      "history_storage_limit",
+      "api_memory"
+    ],
+    "historyQuality": [
+      "structural_and_script_checks_not_human_approved"
+    ],
+    "planner": [
+      "conversation_cross_page",
+      "conversation_request"
+    ],
+    "providerAffinityStatus": [
+      "awaiting_first_provider",
+      "pinned_from_committed_turn",
+      "matched",
+      "route_changed"
+    ]
+  },
+  "numeric": [
+    "historyRevision",
+    "turnIndex",
+    "historyTurns",
+    "historyMessages",
+    "historyChars",
+    "historyEstimatedTokens",
+    "estimatedInput",
+    "currentUserChars",
+    "queueWaitMs",
+    "pageQueueWaitMs",
+    "pageOrder",
+    "trimmedTurns",
+    "contextLimit",
+    "outputReserve",
+    "providerCallsAdded",
+    "cachedInputTokens",
+    "actualInputTokens",
+    "actualOutputTokens",
+    "formattingWhitespaceChars",
+    "unexpectedProseChars",
+    "pageCount",
+    "unitCount",
+    "bootstrapExamplesChars"
+  ],
+  "booleans": [
+    "staticUserRepeated",
+    "legacyFallback",
+    "bootstrapExamplesIncluded",
+    "bootstrapExamplesPersisted"
+  ]
+}

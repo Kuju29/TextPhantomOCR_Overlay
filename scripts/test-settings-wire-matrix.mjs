@@ -28,10 +28,10 @@ for(const engineMode of ['extension','api'])for(const aiMemoryMode of ['off','te
  assert.deepEqual(buildLayoutPayload('lens_text',settings),{relayout_translated:enabled});
  assert.equal(buildAiPayload.constructor.name,'AsyncFunction');
  for(const repair of [false,true]){
-  await translateViaServer([{id:'g0',text:'Test'}],{base:'http://fixture.invalid',ai:{...ai,...(repair?{repair_reason:'wrong_target_script'}:{})},rate,targetLang:settings.lang,sourceLang:'ja',imageDataUri:ai.send_image?'data:image/png;base64,AAAA':'',operationId:`settings-${++checks}`,repairClaim:repair?{runId:'fixture',taskId:'task',token:'LOCAL_TEST_TOKEN'}:null});
+  await translateViaServer([{id:'g0',text:'Test'}],{base:'http://fixture.invalid',capabilities:{aiConversation:'tp.conversation/1'},ai:{...ai,...(repair?{repair_reason:'wrong_target_script'}:{})},rate,targetLang:settings.lang,sourceLang:'ja',imageDataUri:ai.send_image?'data:image/png;base64,AAAA':'',operationId:`settings-${++checks}`,repairClaim:repair?{runId:'fixture',taskId:'task',token:'LOCAL_TEST_TOKEN'}:null});
   const q=requests.at(-1);const b=q.body;
   assert.equal(b.targetLang,state.lang);assert.equal(b.provider.model,state.aiModel);assert.equal(b.provider.id,'openrouter');assert.equal(b.provider.baseUrl,state.aiBaseUrl);assert.equal(b.provider.thinking,state.aiThinking);assert.equal(b.provider.apiKey,'FIXTURE_ONLY_SECRET');
-  assert.equal(b.provider.outputContract,enabled?'json_schema_object_v1':'compact_markers_v1');assert.equal(b.provider.modelCapabilities.structured_output.supported,enabled);
+  assert.equal(b.provider.outputContract,'compact_markers_v1');assert.equal(b.provider.modelCapabilities.structured_output.supported,enabled);
   assert.equal(Boolean(b.image),enabled);assert.equal(b.memory.glossary.length,aiMemoryMode==='off'?0:1);assert.equal(b.memory.characters.length,aiMemoryMode==='full'?1:0);assert.equal(b.memory.previousContext.length,aiMemoryMode==='full'?1:0);
   assert.equal(b.memory.enabled,aiMemoryMode==='full');assert.equal(b.rate.enabled,enabled);assert.equal(b.rate.rpm,enabled?42:0);
   assert.equal(b.repair.enabled,false);if(repair){assert.equal(b.repair.reason,'wrong_target_script');assert.match(q.url,/tasks\/task\/translate$/);}else assert.equal(b.repair.reason,undefined);
@@ -77,7 +77,7 @@ const autoSnapshot=await resolveJobAiProfile(await readFullSettings(),{language:
 assert.equal(autoSnapshot.settings.aiThinking,'off');
 const autoJobAi=await buildAiPayload('lens_text','ai',autoSnapshot.settings,'fixture');
 assert.equal(autoJobAi.thinking,'off');
-await translateViaServer([{id:'g0',text:'Auto'}],{base:'http://fixture.invalid',ai:autoJobAi,
+await translateViaServer([{id:'g0',text:'Auto'}],{base:'http://fixture.invalid',capabilities:{aiConversation:'tp.conversation/1'},ai:autoJobAi,
  targetLang:'th',sourceLang:'ja',operationId:`settings-${++checks}`});
 assert.equal(requests.at(-1).body.provider.thinking,'off');
 console.log(`PASS ${checks} settings boundary checks: reader/builders/initial+repair Cloud body, Local key/thinking/capacity/rate isolation, non-AI and explicitly unsupported profile fields; external HTTP mocked.`);

@@ -11,7 +11,10 @@ sys.path.insert(0, str(ROOT / "api"))
 from backend.ai.provider_bootstrap import ensure_provider_registry
 from backend.ai.provider_registry import provider_registry
 ensure_provider_registry()
-from backend.ai.provider_resolution import resolve_base_url
+from backend.ai.provider_resolution import (
+    resolve_base_url, remember_model_rejection, remember_model_promotion,
+    forget_model_capabilities,
+)
 from backend.ai.provider_contract import GenerationRequest, ProbeRequest, ProbeResponse
 from backend.ai.clients.base import ChatResult
 from backend.ai import resolve as resolve_service
@@ -78,16 +81,30 @@ assert _openai_probe_payloads == [
 # OpenRouter: account/plan + chat + text in/out are all required when published.
 router = cloud_openrouter.filter_model_items([
     {"id":"ok", "available_on_current_plan":True, "type":"chat", "architecture":{"input_modalities":["text"], "output_modalities":["text"]}},
+    {"id":"mandatory-reasoner", "available_on_current_plan":True, "type":"chat",
+     "reasoning":{"mandatory":True,"supported_efforts":["low","high"]},
+     "architecture":{"input_modalities":["text"], "output_modalities":["text"]}},
     {"id":"plan-blocked", "available_on_current_plan":False, "type":"chat"},
     {"id":"image-only", "type":"chat", "architecture":{"input_modalities":["image"], "output_modalities":["text"]}},
     {"id":"embed", "type":"embedding"},
 ])
-assert [x["id"] for x in router] == ["ok"]
+assert [x["id"] for x in router] == ["ok", "mandatory-reasoner"], router
+assert router[1]["reasoning"]["mandatory"] is True, "reasoning metadata must describe controls, never model eligibility"
 
-# OpenRouter selected-model probe follows the account catalogue's reasoning
-# capability. Optional reasoning is explicitly disabled so a tiny health probe
-# cannot be consumed entirely by hidden reasoning. Mandatory models use the
-# smallest verified bounded control instead of pretending Thinking Off exists.
+optional_router_caps = cloud_openrouter.normalize_capabilities({
+    "supported_parameters": ["reasoning"],
+    "reasoning": {
+        "mandatory": False, "default_enabled": True,
+        "supported_efforts": ["max", "high", "low"], "default_effort": "high",
+    },
+})["reasoning"]
+assert optional_router_caps["can_disable"] is True, optional_router_caps
+assert optional_router_caps["supported_efforts"] == ["max", "high", "low"], optional_router_caps
+
+
+# OpenRouter selected-model health probing must use only catalogue-proven
+# reasoning controls. A generic `reasoning` parameter with no advertised effort
+# vocabulary is not proof that `enabled:false` is valid for that exact model.
 _probe_payloads = []
 def _capture_probe(request, **kwargs):
     _probe_payloads.append(kwargs.get("payload_extra") or {})
@@ -95,15 +112,25 @@ def _capture_probe(request, **kwargs):
 with patch.object(cloud_openrouter, "openai_chat_probe", _capture_probe):
     cloud_openrouter.ADAPTER.probe(ProbeRequest(
         model="optional-reasoner", api_key="sk-or-fixture", base_url=cloud_openrouter.DEFAULT_BASE_URL,
-        model_capabilities={"reasoning":{"supported":True,"mandatory":False,"control":"toggle"}},
+        model_capabilities={"reasoning":{"supported":True,"mandatory":False,"control":"levels",
+                                         "can_disable":True,"supported_efforts":["max","high","low"]}},
     ))
     cloud_openrouter.ADAPTER.probe(ProbeRequest(
         model="mandatory-reasoner", api_key="sk-or-fixture", base_url=cloud_openrouter.DEFAULT_BASE_URL,
         model_capabilities={"reasoning":{"supported":True,"mandatory":True,"supported_efforts":["low"]}},
     ))
-assert _probe_payloads[0]["reasoning"] == {"enabled": False}, _probe_payloads[0]
+assert _probe_payloads[0]["reasoning"] == {"effort": "none"}, _probe_payloads[0]
+assert _probe_payloads[0]["max_completion_tokens"] == 2048
 assert _probe_payloads[1]["reasoning"] == {"effort": "low"}, _probe_payloads[1]
-assert _probe_payloads[1]["max_completion_tokens"] == 512
+assert _probe_payloads[1]["max_completion_tokens"] == 2048
+
+# O-series-style catalogue metadata with `reasoning` but omitted efforts must
+# defer to the provider rather than fabricate a toggle that can 400.
+normalized = cloud_openrouter.normalize_capabilities({
+    "id":"openai/o3", "supported_parameters":["reasoning"],
+    "reasoning":{"mandatory":False},
+})
+assert normalized["reasoning"]["control"] == "provider", normalized
 
 # Groq: active translation/chat candidates only; audio/safety/compound systems excluded.
 assert cloud_groq.filter_model_items([
@@ -142,9 +169,9 @@ with patch.object(cloud_huggingface, "openai_chat_probe", _hf_reasoning_probe):
         base_url=cloud_huggingface.DEFAULT_BASE_URL, model_capabilities={},
     ))
 assert hf_reasoning.ok is True
-assert [row.get("reasoning_effort") for row in _hf_probe_payloads] == ["none", "low"], _hf_probe_payloads
+assert [row.get("reasoning_effort") for row in _hf_probe_payloads] == ["none"], _hf_probe_payloads
 assert hf_reasoning.capabilities["reasoning"]["control"] == "levels"
-assert hf_reasoning.capabilities["reasoning"]["supported_efforts"] == ["none", "low"]
+assert hf_reasoning.capabilities["reasoning"]["supported_efforts"] == ["none"]
 
 # A route that proves only native Off keeps the `none` mapping active while the
 # popup correctly withholds an On toggle.
@@ -196,14 +223,14 @@ _hf_request = GenerationRequest(
     base_url=cloud_huggingface.DEFAULT_BASE_URL, thinking="off",
     expected_ids=("P0",), unit_count=1, model_capabilities=_hf_caps,
 )
-with patch.object(cloud_huggingface, "execute_chat_completion", _hf_execute):
+with patch.object(cloud_huggingface, "execute_huggingface_chat", _hf_execute):
     hf_off_result = cloud_huggingface.ADAPTER.generate(_hf_request)
 assert _hf_generated_payloads[-1]["reasoning_effort"] == "none"
 assert "temperature" not in _hf_generated_payloads[-1]
 assert hf_off_result.thinking_applied == "provider_ignored_off"
 
 from dataclasses import replace
-with patch.object(cloud_huggingface, "execute_chat_completion", _hf_execute):
+with patch.object(cloud_huggingface, "execute_huggingface_chat", _hf_execute):
     hf_on_result = cloud_huggingface.ADAPTER.generate(replace(_hf_request, thinking="on"))
 assert _hf_generated_payloads[-1]["reasoning_effort"] == "low"
 assert "temperature" not in _hf_generated_payloads[-1]
@@ -211,7 +238,7 @@ assert hf_on_result.thinking_applied == "requested_on_effort_low"
 
 # A route without verified selected-model capability must not receive a guessed
 # reasoning field. Its normal sampling policy remains unchanged.
-with patch.object(cloud_huggingface, "execute_chat_completion", _hf_execute):
+with patch.object(cloud_huggingface, "execute_huggingface_chat", _hf_execute):
     hf_unknown_result = cloud_huggingface.ADAPTER.generate(
         replace(_hf_request, model_capabilities={})
     )
@@ -243,6 +270,7 @@ class _Response:
     def json(self):
         return {"models":[
             {"name":"models/gemini-2.5-flash", "supportedGenerationMethods":["generateContent"], "inputTokenLimit":1000, "outputTokenLimit":2000, "thinking":True},
+            {"name":"models/gemini-2.5-pro", "supportedGenerationMethods":["generateContent"], "inputTokenLimit":1000, "outputTokenLimit":2000, "thinking":True},
             {"name":"models/text-embedding-004", "supportedGenerationMethods":["embedContent"]},
             {"name":"models/imagen-4", "supportedGenerationMethods":["generateContent"]},
         ]}
@@ -254,8 +282,10 @@ class _Client:
 with patch.object(cloud_gemini.httpx, "Client", _Client):
     gem = cloud_gemini.models_status("AIza-fixture")
 assert gem["status"] == "valid"
-assert gem["models"] == ["gemini-2.5-flash"], gem
-assert gem["capabilities"]["gemini-2.5-flash"]["reasoning"]["control"] == "toggle"
+assert gem["models"] == ["gemini-2.5-flash", "gemini-2.5-pro"], gem
+assert gem["capabilities"]["gemini-2.5-flash"]["reasoning"]["control"] == "levels"
+assert gem["capabilities"]["gemini-2.5-pro"]["reasoning"]["mandatory"] is True
+assert gem["capabilities"]["gemini-2.5-flash"]["reasoning"]["supported_efforts"] == ["none", "low", "medium", "high"]
 
 # Named Cloud providers are endpoint-bound: stale OpenRouter URL may never receive an HF key.
 assert resolve_base_url("huggingface", "https://openrouter.ai/api/v1") == "https://router.huggingface.co/v1"
@@ -273,4 +303,47 @@ with patch.object(resolve_service, "_enumerate_models_detailed", return_value=en
     auto = resolve_service.resolve({"provider":"openrouter", "api_key":"sk-or-fixture", "model":"auto", "lang":"th"})
     assert auto["ok"] is True and auto["model"] in enum["models"]
 
-print("Provider/model eligibility matrix passed: 9 cloud providers, live-compatible lists, endpoint binding, no explicit remap.")
+# A deterministic selected-model generation failure outranks a still-present
+# catalogue row for this exact provider/endpoint/account/model. This prevents a
+# 400/403/404 model from reappearing after popup refresh. A later successful
+# probe clears the negative evidence.
+route_key = "sk-or-negative-evidence-fixture"
+route_model = "openai/o3-fixture"
+route_base = cloud_openrouter.DEFAULT_BASE_URL
+route_enum = {
+    "models": [route_model], "source": "live", "verified": True,
+    "status": "valid", "http_status": 200, "error": "", "capabilities": {},
+    "candidates": {route_model: {"eligibility": "usable", "evidence": "openrouter_account_models_user"}},
+}
+forget_model_capabilities("openrouter", route_base, route_key)
+with patch.object(resolve_service, "_enumerate_models_detailed", return_value=route_enum):
+    before = resolve_service.resolve({"provider":"openrouter", "api_key":route_key,
+                                      "model":route_model, "lang":"th"})
+    assert before["ok"] is True
+    assert before["model_candidates"][0]["eligibility"] == "usable"
+
+    remember_model_rejection("openrouter", route_base, route_key, route_model,
+                             status="rejected", http_status=400,
+                             error="reasoning parameter rejected")
+    with patch("backend.trace.note") as trace_note:
+        blocked = resolve_service.resolve({"provider":"openrouter", "api_key":route_key,
+                                           "model":route_model, "lang":"th"})
+    assert blocked["ok"] is False and blocked["error"] == "model_unavailable"
+    assert blocked["model_status"] == "unavailable"
+    assert blocked["model_candidates"][0]["eligibility"] == "blocked"
+    assert blocked["model_candidates"][0]["probe_status"] == "rejected"
+    assert blocked["model_candidates"][0]["probe_http_status"] == 400
+    catalogue_events = [call for call in trace_note.call_args_list
+                        if call.args and call.args[0] == "model_catalogue_completed"]
+    assert len(catalogue_events) == 1, catalogue_events
+    assert catalogue_events[0].args[1]["blockedCount"] == 1, catalogue_events[0]
+    assert catalogue_events[0].args[1]["usableCount"] == 0, catalogue_events[0]
+
+    remember_model_promotion("openrouter", route_base, route_key, route_model)
+    recovered = resolve_service.resolve({"provider":"openrouter", "api_key":route_key,
+                                         "model":route_model, "lang":"th"})
+    assert recovered["ok"] is True
+    assert recovered["model_candidates"][0]["eligibility"] == "usable"
+forget_model_capabilities("openrouter", route_base, route_key)
+
+print("Provider/model eligibility matrix passed: 9 cloud providers, route-scoped probe rejection/promotion, endpoint binding, no explicit remap.")

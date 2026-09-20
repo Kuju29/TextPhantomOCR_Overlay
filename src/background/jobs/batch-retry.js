@@ -39,7 +39,12 @@ export function createBatchRetryCoordinator({
 
     if (batch.pass === 1) {
       if (batch.retryScheduled) return;
-      const { failed, permanentErrors } = selectRetryCandidates(batch.items);
+      const candidates = selectRetryCandidates(batch.items);
+      // AI owns one post-initial unit repair pass. Replaying a whole image
+      // resends successful units and replaces its immutable repair checkpoint.
+      // Failures without captured source remain explicit errors in onComplete.
+      const failed = candidates.failed.filter(key => batch.items.get(key)?.payload?.source !== 'ai');
+      const permanentErrors = candidates.permanentErrors + candidates.failed.length - failed.length;
       if (!failed.length) {
         const label = permanentErrors ? `Done (${permanentErrors} errors)` : "Done";
         if (onComplete) void onComplete(batch, label);

@@ -33,12 +33,45 @@ export function createProviderMetaController({
 
   const probeBlocksModel = (status) => String(status || "") !== "passed";
 
+  // Capture the complete popup context before async work, including a revision
+  // so A -> B -> A cannot revive a response started before the intervening edit.
+  const selectionSnapshot = () => ({
+    apiUrl: normalizeUrl(els.apiUrl?.value || ""),
+    provider: String(els.aiProvider?.value || "").trim(),
+    endpoint: String(els.aiBaseUrl?.value || "").trim(),
+    model: String(els.aiModel?.value || "").trim(),
+    credential: String(els.aiKey?.value || "").trim(),
+    language: String(els.lang?.value || "en"),
+  });
+  const selectionMatches = (snapshot) =>
+    canUse() && JSON.stringify(snapshot) === JSON.stringify(selectionSnapshot());
+
+  const saveCapabilities = async (capabilities, snapshot, isCurrent) => {
+    if (!isCurrent()) return false;
+    if (capabilities && typeof capabilities === "object" &&
+        !Array.isArray(capabilities) && Object.keys(capabilities).length && snapshot.credential) {
+      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(snapshot.credential));
+      if (!isCurrent()) return false;
+      const accountHash = Array.from(new Uint8Array(digest).slice(0, 8), (byte) =>
+        byte.toString(16).padStart(2, "0")).join("");
+      await profile.saveModelCapabilities(capabilities, accountHash, {
+        provider: snapshot.provider, endpoint: snapshot.endpoint, model: snapshot.model,
+      }, isCurrent);
+    }
+    return isCurrent();
+  };
+
   const renderStatus = () => {
     if (!canUse() || !state.lastAiResolve) return;
     const data = state.lastAiResolve;
     const id = String(data.provider || els.aiProvider?.value || "").trim();
     const name = provider.label(id || "provider");
     const protocol = provider.protocolLabel(data.provider_protocol);
+    if (data.configuration_status === "pending") {
+      setFieldMessage(els.aiKeyWrap, "warn", "Enter an API key to load account models.");
+      setFieldMessage(els.aiModelWrap, "info", "Waiting for provider configuration.");
+      return;
+    }
     if (data.error === "provider_key_mismatch") {
       setFieldMessage(
         els.aiProviderWrap,
@@ -116,11 +149,16 @@ export function createProviderMetaController({
         checking: ["info", " • ⏳ Testing selected model…"],
         passed: ["info", " • ✓ Explicit test passed"],
         invalid_key: ["error", " • ✕ Test rejected the API key"],
+        billing_required: ["error", " • ✕ Provider credits exhausted or payment required"],
         provider_key_mismatch: ["error", " • ✕ Provider/key mismatch"],
         model_access_denied: ["error", " • ✕ Account cannot use this model"],
         model_unavailable: ["error", " • ✕ Model unavailable"],
         rate_limited: ["warn", " • ⚠ Provider rate-limited the test"],
         rejected: ["error", " • ✕ Provider rejected the test"],
+        request_rejected: ["error", " • ✕ Test request rejected; model availability is unverified"],
+        provider_error: ["warn", " • ⚠ Provider test failed"],
+        probe_busy: ["warn", " • ⚠ Model verification is busy"],
+        probe_pending: ["info", " • ⏳ The same model verification is still running"],
         unreachable: ["warn", " • ⚠ Provider could not be reached"],
         probe_failed: ["error", " • ✕ Selected model could not be verified"],
       };
@@ -128,12 +166,15 @@ export function createProviderMetaController({
       if (result) {
         type = result[0];
         text += result[1];
+        const reason = String(probe.error_details?.provider_message || probe.error || "").trim();
+        if (probe.status !== "passed" && reason) text += ` • ${reason.slice(0, 240)}`;
       }
     }
     setFieldMessage(els.aiModelWrap, type, text);
   };
 
-  const applyProbeCapabilities = async (result, apiKey, providerId, model) => {
+  // Synchronous UI commit, called only after all awaits and identity checks.
+  const applyProbeCapabilities = (result, providerId, model) => {
     const capabilities = result?.model_capabilities;
     const hasCapabilities = capabilities && typeof capabilities === "object" &&
       !Array.isArray(capabilities) && Object.keys(capabilities).length > 0;
@@ -142,22 +183,44 @@ export function createProviderMetaController({
         String(state.lastAiResolve.model || state.lastAiResolve.requested_model || "") === String(model || "")) {
       state.lastAiResolve = { ...state.lastAiResolve, model_capabilities: capabilities };
     }
-    if (result?.status === "passed" && Array.isArray(state.lastAiResolve?.model_candidates)) {
+    const probeStatus = String(result?.status || "");
+    const hardFailure = new Set([
+      "rejected", "model_unavailable", "model_access_denied", "invalid_model_output", "unsupported_model",
+    ]).has(probeStatus);
+    if ((result?.status === "passed" || hardFailure) && Array.isArray(state.lastAiResolve?.model_candidates)) {
+      // A deterministic failure changes the strongest generation-health
+      // evidence for this exact account/model. Cached resolve data predates that
+      // evidence and could otherwise resurrect a just-blocked model for up to
+      // RESOLVE_TTL_MS. A successful probe does not need to invalidate the
+      // catalogue cache; probeCache will re-apply its richer capabilities.
+      if (hardFailure) resolveCache.clear();
       state.lastAiResolve = {
         ...state.lastAiResolve,
         model_candidates: state.lastAiResolve.model_candidates.map((candidate) =>
           candidate?.id === model
-            ? { ...candidate, eligibility: "usable", evidence: "selected_generation_probe",
+            ? { ...candidate,
+                eligibility: result?.status === "passed" ? "usable" : "blocked",
+                evidence: result?.status === "passed"
+                  ? "selected_generation_probe"
+                  : `selected_generation_probe_${probeStatus || "rejected"}`,
                 ...(capabilities ? { capabilities } : {}) }
             : candidate),
       };
+      if (hardFailure && String(els.aiModel?.value || "").trim() === String(model || "")) {
+        // A deterministic failure belongs to this exact provider/account/model.
+        // Remove it immediately instead of leaving a known-bad choice visible.
+        // Do not auto-select/probe the next model: that would turn one user
+        // selection into a costly cascade across the catalogue.
+        const remaining = state.lastAiResolve.model_candidates.filter((candidate) =>
+          candidate && candidate.eligibility === "usable" && String(candidate.id || "").trim());
+        setModelOptions(remaining, {
+          keepValue: "",
+          placeholder: "Selected model failed verification — choose another",
+          selectFirst: false,
+        });
+      }
     }
-    if (hasCapabilities && apiKey) {
-      const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(apiKey));
-      const accountHash = Array.from(new Uint8Array(digest).slice(0, 8), (byte) =>
-        byte.toString(16).padStart(2, "0")).join("");
-      await profile.saveModelCapabilities(capabilities, accountHash);
-    }
+
   };
 
   const probeSelected = async () => {
@@ -186,51 +249,55 @@ export function createProviderMetaController({
     }
     const id = String(resolved.provider || els.aiProvider?.value || "").trim();
     const apiKey = String(els.aiKey.value || "").trim();
+    if (!apiKey) { setModelBlocked(true); return; }
     const providerBase = String(els.aiBaseUrl?.value || "").trim();
     const identity = JSON.stringify([base, id, providerBase, apiKey, model]);
-    const cached = probeCache.get(identity);
-    if (cached && Date.now() - cached.ts < PROBE_TTL_MS) {
-      state.lastAiProbe = { ...cached.data, provider: id, model, cached: true };
-      await applyProbeCapabilities(state.lastAiProbe, apiKey, id, model);
-      setModelBlocked(probeBlocksModel(state.lastAiProbe.status));
-      renderStatus();
-      toggleUi();
-      return state.lastAiProbe;
-    }
+    const snapshot = selectionSnapshot();
+    const metaRevision = state.aiMetaSeq;
     const sequence = ++state.aiProbeSeq;
+    const isCurrent = () => sequence === state.aiProbeSeq &&
+      metaRevision === state.aiMetaSeq && selectionMatches(snapshot);
+    const cached = probeCache.get(identity);
     state.lastAiProbe = { provider: id, model, status: "checking", cached: false };
     setModelBlocked(true);
     renderStatus();
     toggleUi();
     try {
-      let request = probeInFlight.get(identity);
-      if (!request) {
-        request = api.fetchJson(
-          `${base}${constants.paths.AI_PROBE}`,
-          { api_key: apiKey, model, provider: id, base_url: providerBase },
-          constants.probeTimeout,
-        ).then((data) => {
-          const result = data && typeof data.status === "string"
-            ? { ...data, provider: id, model, cached: false }
-            : { provider: id, model, status: "probe_failed", cached: false };
-          if (!["unreachable", "rate_limited"].includes(String(result.status || "")))
-            probeCache.set(identity, { ts: Date.now(), data: result });
-          return result;
-        }).finally(() => {
-          if (probeInFlight.get(identity) === request) probeInFlight.delete(identity);
-        });
-        probeInFlight.set(identity, request);
+      let result;
+      if (cached && Date.now() - cached.ts < PROBE_TTL_MS) {
+        result = { ...cached.data, provider: id, model, cached: true };
+      } else {
+        let request = probeInFlight.get(identity);
+        if (!request) {
+          request = api.fetchJson(
+            `${base}${constants.paths.AI_PROBE}`,
+            { api_key: apiKey, model, provider: id, base_url: providerBase },
+            constants.probeTimeout,
+          ).then((data) => {
+            const answer = data && typeof data.status === "string"
+              ? { ...data, provider: id, model, cached: Boolean(data.cached) }
+              : { provider: id, model, status: "probe_failed", cached: false };
+            if (!["unreachable", "rate_limited", "probe_busy", "probe_pending", "request_rejected", "billing_required"].includes(String(answer.status || "")))
+              probeCache.set(identity, { ts: Date.now(), data: answer });
+            return answer;
+          }).finally(() => {
+            if (probeInFlight.get(identity) === request) probeInFlight.delete(identity);
+          });
+          probeInFlight.set(identity, request);
+        }
+        result = await request;
       }
-      const result = await request;
-      if (sequence !== state.aiProbeSeq) return;
+      if (!isCurrent()) return;
+      if (!await saveCapabilities(result?.model_capabilities, snapshot, isCurrent)) return;
+      if (!isCurrent()) return;
+      // No awaits from here through gate/render. A hard failure may clear the
+      // model picker itself; it must not make an unrelated selection usable.
       state.lastAiProbe = result;
-      await applyProbeCapabilities(result, apiKey, id, model);
+      applyProbeCapabilities(result, id, model);
       setModelBlocked(probeBlocksModel(result.status));
     } catch {
-      if (sequence !== state.aiProbeSeq) return;
+      if (!isCurrent()) return;
       state.lastAiProbe = { provider: id, model, status: "unreachable", cached: false };
-      // Catalogue eligibility is not generation health. Keep translation paused
-      // until this exact provider/account/model has one successful tiny probe.
       setModelBlocked(true);
     }
     renderStatus();
@@ -248,6 +315,9 @@ export function createProviderMetaController({
       return;
     }
     const sequence = ++state.aiMetaSeq;
+    ++state.aiProbeSeq;
+    let selection = selectionSnapshot();
+    const isCurrent = () => sequence === state.aiMetaSeq && selectionMatches(selection);
     const selectedProvider = String(els.aiProvider?.value || "").trim();
     const selectedBaseUrl = String(els.aiBaseUrl?.value || "").trim();
     if (!selectedProvider) {
@@ -259,17 +329,7 @@ export function createProviderMetaController({
     }
     setFieldMessage(els.aiProviderWrap, "", "");
     if (provider.isLocal(selectedProvider)) {
-      const snapshot = state.lastAiResolve;
-      const selectedModel = String(els.aiModel?.value || state.desiredAiModel || "").trim();
-      if (
-        snapshot?.models_verified === true &&
-        String(snapshot.provider || "") === selectedProvider &&
-        state.aiModelBlocked !== true &&
-        String(snapshot.verified_model || selectedModel) === selectedModel
-      ) return;
-      // Local discovery is part of selecting the provider. A verified saved
-      // snapshot avoids needless probes; otherwise one automatic refresh both
-      // loads the installed model list and verifies the selected/first model.
+      // Check availability live; the worker reuses a verified, still-loaded model.
       if (state.localConnectInFlight) return;
       await local.connect();
       return;
@@ -278,6 +338,17 @@ export function createProviderMetaController({
     if (!base) {
       setModelBlocked(true);
       state.lastAiProbe = null;
+      toggleUi();
+      return;
+    }
+    const key = String(els.aiKey.value || "").trim();
+    if (!key) {
+      state.lastAiResolve = { provider: selectedProvider, key_status: "missing",
+        configuration_status: "pending", models_verified: false, models: [], model_candidates: [] };
+      state.lastAiProbe = null;
+      setModelBlocked(true);
+      setModelOptions([], { placeholder: "Enter API key to load models", selectFirst: false });
+      renderStatus();
       toggleUi();
       return;
     }
@@ -293,7 +364,6 @@ export function createProviderMetaController({
       "info",
       "⏳ Loading models for this provider…",
     );
-    const key = String(els.aiKey.value || "").trim();
     const currentModel =
       String(els.aiModel.value || "").trim() || state.desiredAiModel || "auto";
     try {
@@ -333,7 +403,7 @@ export function createProviderMetaController({
         }
         data = await request;
       }
-      if (sequence !== state.aiMetaSeq) return;
+      if (!isCurrent()) return;
       state.lastAiResolve = data || null;
       const models =
         data?.models_verified && Array.isArray(data.models) ? data.models : [];
@@ -369,28 +439,23 @@ export function createProviderMetaController({
               : "No compatible models available",
         selectFirst: requestedWasAuto && !explicitUnavailable,
       });
-      const resolveBlocked = data?.ok === false && [
-        "provider_key_mismatch", "invalid_api_key", "provider_access_forbidden",
-        "model_unavailable", "unsupported_provider",
-      ].includes(String(data?.error || ""));
-      setModelBlocked(resolveBlocked || explicitUnavailable ||
-        (data?.models_verified === true && usableModels.length === 0));
+      // Model-list eligibility is not generation verification.
+      setModelBlocked(true);
       state.lastResolvedProvider =
         String(data?.provider || "").trim() || state.lastResolvedProvider;
       state.lastResolvedKey = key;
-      if (Object.keys(selectedCapability).length && key) {
-        const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key));
-        const accountHash = Array.from(new Uint8Array(digest).slice(0, 8), (byte) =>
-          byte.toString(16).padStart(2, "0")).join("");
-        if (sequence !== state.aiMetaSeq) return;
-        await profile.saveModelCapabilities(selectedCapability, accountHash);
-      }
+      // Auto model selection above is an intentional synchronous UI update.
+      // Subsequent user edits still invalidate this new captured selection.
+      selection = selectionSnapshot();
+      if (selection.model === String(data?.model || "").trim() &&
+          !await saveCapabilities(selectedCapability, selection, isCurrent)) return;
+      if (!isCurrent()) return;
       toggleUi();
       renderStatus();
       const selectedNow = String(els.aiModel?.value || "").trim();
       if (selectedNow && usableModels.includes(selectedNow)) await probeSelected();
     } catch {
-      if (sequence === state.aiMetaSeq) {
+      if (isCurrent()) {
         state.lastAiResolve = null;
         state.lastAiProbe = null;
         setModelOptions([], { placeholder: "Model list could not be verified" });

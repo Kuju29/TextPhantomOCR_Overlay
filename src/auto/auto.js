@@ -246,6 +246,8 @@ const AI_RESULT_SETTING_KEYS = new Set([
   "aiGlossary",
   "aiCharMemory",
   "aiMemoryMode",
+  "aiTranslationMode",
+  "aiConversationReset",
   "aiSendImage",
   "aiPageImage",
   "aiOnDevice",

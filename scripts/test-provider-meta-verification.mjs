@@ -146,6 +146,31 @@ for (const status of ["unreachable","rate_limited","rejected","invalid_model_out
   assert.equal(t.state.aiModelBlocked,true, `${status} must keep translation paused until a probe passes`);
 }
 
+
+// Deterministic probe failure removes the exact model immediately and invalidates
+// stale resolve-cache evidence so a refresh cannot resurrect it for 60 seconds.
+{
+  const t=fixture({model:"good-model",resolveModels:["good-model","other-model"],probeStatus:"rejected"});
+  await t.controller.refresh();
+  assert.deepEqual(t.els.aiModel.options.map(x=>x.value),["other-model"]);
+  assert.equal(t.els.aiModel.value,"");
+  const firstResolveCount=t.requests.filter(x=>x.url.endsWith("/resolve")).length;
+  await t.controller.refresh();
+  assert.equal(t.requests.filter(x=>x.url.endsWith("/resolve")).length,firstResolveCount+1,
+    "hard probe failure must invalidate stale resolve-cache evidence");
+  assert.equal(t.els.aiModel.options.includes?.("good-model"),false);
+  assert.deepEqual(t.els.aiModel.options.map(x=>x.value),["other-model"]);
+}
+
+// Transient provider health does not prove the model unusable. Keep it visible
+// while translation remains paused until a later probe succeeds.
+{
+  const t=fixture({model:"good-model",resolveModels:["good-model"],probeStatus:"rate_limited"});
+  await t.controller.refresh();
+  assert.deepEqual(t.els.aiModel.options.map(x=>x.value),["good-model"]);
+  assert.equal(t.state.aiModelBlocked,true);
+}
+
 // If the catalogue itself cannot be verified, old models are cleared rather
 // than being kept as a tempting but unverified option.
 {

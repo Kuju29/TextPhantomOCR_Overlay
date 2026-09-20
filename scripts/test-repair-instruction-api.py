@@ -30,7 +30,7 @@ class RepairInstructionAPI(unittest.TestCase):
       _translate_once('<<TP_P0>>\n星野、目をつぶって。',lang,cfg,is_retry=True)
      self.assertEqual(payload,before);self.assertEqual(len(calls),2)
      self.assertEqual(calls[0].system_text,calls[1].system_text);self.assertNotIn('REPAIR —',calls[0].user_parts[0])
-     header=wrong_language_repair_instruction(target_language_priority(lang),'wrong_target_script')
+     header=wrong_language_repair_instruction(target_language_priority(lang),'wrong_target_script',lang=lang)
      self.assertIn(header,calls[1].user_parts[0]);self.assertEqual(calls[1].user_parts[0].replace(header+'\n\n',''),calls[0].user_parts[0])
      self.assertEqual(calls[0].response_schema,calls[1].response_schema)
      self.assertEqual(calls[0].thinking,calls[1].thinking);self.assertEqual(calls[0].expected_ids,('P0',))

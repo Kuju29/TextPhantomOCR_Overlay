@@ -17,7 +17,7 @@ for (const protocol of ["ollama", "openai"]) {
   assert.equal(result.meta.selectedContract, "tp.translation.compact-records/1");
   assert.equal("format" in requestBody, false);
   assert.equal(requestBody.stream, true);
-  assert.equal(requestBody.messages.at(-1).content.split("SOURCE TEXT\n")[1], "<<TP_P0:APPLE>>\n<<TP_P1:BANANA>>\n<<TP_P2:CHERRY>>");
+  assert.equal(requestBody.messages.at(-1).content.split("ข้อความต้นฉบับ\n")[1], "<<TP_P0:APPLE>>\n<<TP_P1:BANANA>>\n<<TP_P2:CHERRY>>");
 
   globalThis.fetch = async () => {
     const answer = "<<TP_P0:แอป\u0085เปิล>>\n<<TP_P1:กล้วย>>\n<<TP_P2:เชอร์รี>>";

@@ -1,7 +1,8 @@
 """Request-boundary security policy.
 
-Two attacks are closed here, both of which were reachable from any web page
-because the API has open CORS and no authentication:
+These guards also protect legacy/internal callers. Since 14.8, public Cloud
+routes require request-owned credentials and never use AI_API_KEY. Historical
+attack cases below explain why the endpoint/image guards remain in place:
 
 1. **Server API-key exfiltration.** ``/translate`` let the caller choose the
    AI ``base_url`` while ``api_key`` silently fell back to the server's own
@@ -95,31 +96,55 @@ def _is_keyless_local_endpoint(provider: str, url: str) -> bool:
 def assert_ai_base_url_allowed(
     provider: str, base_url: str, *, user_key: bool, key_present: bool = True,
 ) -> None:
-    """Raise :class:`UnsafeBaseUrl` if this base URL may not receive this key.
+    """Enforce the server's network policy even for request-owned credentials.
 
-    ``user_key=True``  — the caller supplied their own credential. Only their
-                         key is at risk, so any endpoint is allowed (this is
-                         what makes self-hosted LLM servers work).
-    ``user_key=False`` — the request fell back to the server's ``AI_API_KEY``.
-                         The endpoint must then be one the operator chose.
+    A BYOK credential is not permission to reach server-private networks. Shared
+    installations allow only registry endpoints or exact operator-approved hosts.
+    Personal installations may additionally reach Local AI on loopback. There is
+    no user-controlled switch and no wildcard/suffix allowlist matching.
     """
     url = (base_url or "").strip()
-    if user_key or not url:
+    if not url:
+        spec = provider_registry.get(provider)
+        # Native adapters with no configurable base (currently Gemini) own a
+        # fixed URL internally; empty here is not a caller-selected destination.
+        if spec is not None and not spec.local and spec.default_base_url == "":
+            return
+        raise UnsafeBaseUrl("AI base_url is empty")
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower().rstrip(".")
+        port = parsed.port  # invalid/out-of-range ports fail before any I/O
+        if (parsed.scheme not in ("http", "https") or not host or
+                parsed.username is not None or parsed.password is not None or
+                parsed.query or parsed.fragment or any(c.isspace() or ord(c) < 32 for c in url) or
+                "\\" in url):
+            raise ValueError()
+    except (ValueError, TypeError):
+        raise UnsafeBaseUrl("AI base_url must be an http(s) endpoint without userinfo, query or fragment") from None
+    policy = str(settings.ai_endpoint_policy).strip().lower()
+    if policy not in ("shared", "personal"):
+        raise UnsafeBaseUrl("TP_AI_ENDPOINT_POLICY must be shared or personal")
+    # Explicit exact hostname grants; ports on these hosts are operator-owned.
+    extras = {h.strip().lower().rstrip(".") for h in settings.ai_extra_hosts.split(",") if h.strip()}
+    if host in extras:
         return
-
-    if not key_present and _is_keyless_local_endpoint(provider, url):
+    if policy == "personal" and _is_keyless_local_endpoint(provider, url):
         return
-
-    host = _host_of(url)
-    allowed = server_key_allowed_hosts()
-    if host and host in allowed:
-        return
-
+    for spec in provider_registry:
+        if spec.local:
+            continue
+        default = urlparse(str(spec.default_base_url or ""))
+        default_port = default.port or (443 if default.scheme == "https" else 80)
+        if (host == (default.hostname or "").lower() and parsed.scheme == default.scheme and
+                (port or (443 if parsed.scheme == "https" else 80)) == default_port):
+            return
     raise UnsafeBaseUrl(
-        f"custom AI base_url is not allowed without your own api_key "
-        f"(provider={provider or 'auto'}, host={host or 'none'}). "
-        f"Send an 'ai.api_key' of your own, or ask the operator to add this "
-        f"host to TP_AI_EXTRA_HOSTS."
+        f"AI endpoint is not approved by the server network policy "
+        f"(provider={provider or 'auto'}, host={host}, policy={policy}). "
+        "A user API key does not bypass this policy. The operator can add an exact "
+        "host to TP_AI_EXTRA_HOSTS; for a private personal installation using Local AI "
+        "on loopback, set TP_AI_ENDPOINT_POLICY=personal."
     )
 
 # --- Image URLs (SSRF) ------------------------------------------------------

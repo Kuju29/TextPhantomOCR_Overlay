@@ -74,18 +74,32 @@ def build_messages(request: GenerationRequest) -> list[dict[str, Any]]:
     else:
         if source_text:
             messages.append({"role": "user", "content": source_text})
-    return messages
+    from backend.ai.translation_paths.messages import insert_history
+    return insert_history(messages, request.history_messages)
 
 def build_payload(request: GenerationRequest, model: str, policy: OpenAIProviderPolicy) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": model,
         "messages": build_messages(request),
     }
-    if policy.temperature is not None:
+    reasoning = request.model_capabilities.get("reasoning", {})
+    reasoning = reasoning if isinstance(reasoning, dict) else {}
+    # These generic OpenAI-compatible adapters deliberately do not invent a
+    # provider-specific reasoning wire field.  Still reserve hidden output and
+    # avoid optional sampling fields when exact account/model metadata says the
+    # selected model reasons by default or requires reasoning.  This keeps new
+    # models usable without pretending a control exists.
+    reasoning_active = reasoning.get("supported") is True and (
+        reasoning.get("mandatory") is True
+        or reasoning.get("default_enabled") is True
+        or request.thinking == "on"
+    )
+    if policy.temperature is not None and not reasoning_active:
         payload["temperature"] = policy.temperature
     if policy.output_budget_field is not None:
         payload[policy.output_budget_field] = output_token_budget(
-            request.user_parts, request.system_text, unit_count=request.unit_count,
+            request.user_parts, request.system_text, reasoning=reasoning_active,
+            unit_count=request.unit_count,
         )
     if policy.output_budget_field is not None:
         from backend.ai.workload import guard_request_budget

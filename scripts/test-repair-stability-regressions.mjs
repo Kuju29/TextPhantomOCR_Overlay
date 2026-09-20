@@ -13,7 +13,7 @@ const { makePageCheckpoint, buildPatchedResult } = await from('src/background/re
 const { createRepairCoordinator } = await from('src/background/repair/coordinator.js');
 const { executeRepairPool } = await from('src/background/repair/executor.js');
 const { translationUnits } = await from('src/shared/lens-document.js');
-const { ensureBatch } = await from('src/background/batches.js');
+const { ensureBatch, batchPassStats } = await from('src/background/batches.js');
 const results = [];
 async function check(name, work) {
   try { await work(); results.push({ name, pass: true }); console.log(`PASS ${name}`); }
@@ -21,9 +21,9 @@ async function check(name, work) {
 }
 function doc() { return { schema: 'tp.lens-document/1', image: { width: 100, height: 100 }, languages: { source: 'ja', target: 'th' }, paragraphs: [0,1].map(i => ({ id: `p${i}`, sourceText: `こんにちは ${i}`, items: [] })) }; }
 function result() { return { backgroundMode: 'boxes', layout: { relayout_translated: false }, lensDocument: doc(), eraseBoxes: { schema: 'tp.erase-boxes/1', boxes: [0,1].map(i => ({ l: .1, t: .1 + i*.2, w: .3, h: .1, p: `p${i}` })) } }; }
-async function page(id = 'page') {
+async function page(id = 'page', aiOverrides = {}) {
   const d = result();
-  return makePageCheckpoint({ payload: { metadata: { image_id: id }, lang: 'th' }, result: d, units: translationUnits(d.lensDocument), plan: { route: 'direct-local', ai: { provider: 'ollama', model: 'fixture', thinking: 'off' } }, ctx: { jobId: `gen:${id}` }, operationId: `op:${id}` });
+  return makePageCheckpoint({ payload: { metadata: { image_id: id }, lang: 'th' }, result: d, units: translationUnits(d.lensDocument), plan: { route: 'direct-local', ai: { provider: 'ollama', model: 'fixture', thinking: 'off', ...aiOverrides } }, ctx: { jobId: `gen:${id}` }, operationId: `op:${id}` });
 }
 function bridge() {
   const child = spawn('python', ['-u', 'scripts/repair-ledger-fixture.py'], { cwd: root, stdio: ['pipe','pipe','inherit'] });
@@ -70,9 +70,9 @@ async function runPool(abortAfterSecond = false, abortOnDispatch = false, wrongL
   };
   try {
     const run = { id: `test:${crypto.randomUUID()}`, token: 'a'.repeat(64) };
-    const pages = new Map(await Promise.all([0,1,2].map(async i => { const p = await page(`p${i}`); return [p.pageId, p]; })));
+    const pages = new Map(await Promise.all([0,1,2].map(async i => { const p = await page(`p${i}`, options.conversation ? {translation_mode:'conversation',conversation:{pageId:`p${i}`,pageOrder:i+1,pageIndex:i,documentId:'repair-fixture',owner:'owner'}} : {}); return [p.pageId, p]; })));
     await b.api(run, 'register', { manifest: [...pages.keys()] });
-    for (const p of pages.values()) await b.api(run, 'pages', { pageId: p.pageId, generationId: p.generationId, groupKey: p.groupKey, status: 'finished', initialAccepted: 0, failed: p.units.map(u => ({ id: u.id, text: u.text, sourceHash: u.sourceHash, reason: 'missing' })) });
+    for (const p of pages.values()) await b.api(run, 'pages', { pageId: p.pageId, generationId: p.generationId, groupKey: p.groupKey, status: 'finished', initialAccepted: 0, failed: (options.reverseUnits ? [...p.units].reverse() : p.units).map(u => ({ id: u.id, text: u.text, sourceHash: u.sourceHash, reason: 'missing' })) });
     let caught;
     try {
       await executeRepairPool({ run, snapshot: await b.api(run, 'seal', {}), executor: 'w', signal: ctrl.signal, api: b.api,
@@ -80,6 +80,7 @@ async function runPool(abortAfterSecond = false, abortOnDispatch = false, wrongL
         onProgress: event => progressEvents.push(event),
         applyResults: async rows => applications.push({ calls: calls.length, ids: rows.map(r => r.id) }),
         withCapacity, planner: { open: async () => ({
+          nextRepair(rows) { return this.next(rows); },
           next: rows => ({ units: rows.slice(0, Number(options.planSize) || 2),
             estimate: { predictedOutput: 128, reasoningReserve: 0, estimatedInput: 128, completionAvailable: 1024 } }),
           observe: ({ error, defects = {} }) => {
@@ -96,6 +97,10 @@ async function runPool(abortAfterSecond = false, abortOnDispatch = false, wrongL
           try {
             if (abortAfterSecond && calls.length === 2) ctrl.abort();
             if (options.delayMs) await new Promise(resolve => setTimeout(resolve, options.delayMs));
+            if (options.billingFailure) throw Object.assign(new Error('Credits depleted'), {
+              code:'billing_required', failureKind:'billing_required', upstreamStatus:402,
+              requestDispatched:true, providerAttempts:1, generationAttempts:0,
+            });
             if (calls.length <= Number(options.capacityFailures || 0)) {
               const error = Object.assign(new Error('fixture output budget exhausted'), {
                 code: 'output_budget_exhausted', requestDispatched: true, providerResponded: true,
@@ -148,6 +153,19 @@ await check('two generated capacity failures open the repair circuit without a t
   assert.equal(r.applications.length, 1, 'the terminal partial result still reaches one final apply pass');
   assert.deepEqual(r.applications[0].ids, []);
 });
+await check('billing failure stops remaining Conversation repairs and preserves final unresolved report', async () => {
+  const r=await runPool(false,false,false,{conversation:true,billingFailure:true,planSize:1});
+  if(r.caught)throw r.caught;
+  assert.equal(r.calls.length,1, 'only first request reaches Provider; ledger closes unsent tasks');
+  assert.ok(r.progressEvents.some(event=>event.phase==='repair_circuit_open'));
+  assert.equal(r.applications.length,1);assert.deepEqual(r.applications[0].ids,[]);
+});
+await check('Conversation repair sorts original units before planner slicing, not merely inside each wire batch', async () => {
+  const r=await runPool(false,false,false,{conversation:true,reverseUnits:true,planSize:1});
+  if(r.caught)throw r.caught;
+  assert.deepEqual(r.calls.flatMap(rows=>rows.map(u=>u.id)),['I1_P0','I1_P1','I2_P0','I2_P1','I3_P0','I3_P1']);
+  assert.equal(r.applications[0].ids.length,6);
+});
 await check('cancellation during pooled generation cannot deliver an intermediate repair', async () => {
   const r = await runPool(true);
   assert.equal(r.caught?.name, 'AbortError');
@@ -181,15 +199,16 @@ await check('running cloud receipt pauses quickly and remains durable instead of
   assert.ok(Date.now() - started < 500, 'foreground recovery must not wait for the old 12-minute deadline');
   assert.ok(!actions.some(action => action.includes('/fail')), 'running paid receipt must remain resumable');
 });
-async function runCoordinator({ acknowledge = true, race = false, testProgress = false, partial = false, noSource = false, raceAtFinal = false } = {}) {
+async function runCoordinator({ acknowledge = true, race = false, testProgress = false, partial = false, noSource = false, raceAtFinal = false, deferred = false } = {}) {
   let value = {}, writes = 0, epoch = 7, transientWrites = 0, firstAckSaw = 0;
   const area = { async get(k) { return { [k]: structuredClone(value[k]) }; }, async set(v) {
     writes++; Object.assign(value, structuredClone(v));
-    if (raceAtFinal && Object.values(v).some(saved=>Object.values(saved?.runs || {}).some(run=>run.phase==='done'))) epoch=8;
+    if (raceAtFinal && Object.values(v).some(saved =>
+      saved?.row?.phase === 'done' || Object.values(saved?.runs || {}).some(run => run.phase === 'done'))) epoch=8;
   } };
   const sessions = createTranslationSessionStore({ area: () => area });
   const tabId = 77000 + Math.floor(Math.random() * 100000), batch = ensureBatch(crypto.randomUUID(), tabId, 0);
-  const ctxs = new Map(), queue = [], rendered = [], events = [];
+  const ctxs = new Map(), queue = [], rendered = [], terminalErrors = [], events = [];
   const payloads = (noSource ? [0,1,2,3] : [0,1,2]).map(i => ({ engine:'extension', mode:'lens_text', source:'ai', lang:'th', src:`https://fixture.invalid/${i}`, metadata:{ image_id:`p${i}` } }));
   for (const p of payloads) batch.items.set(p.metadata.image_id, { attempt:1, status:'queued', phase:'waiting', payload:p });
   const reports = [];
@@ -199,7 +218,10 @@ async function runCoordinator({ acknowledge = true, race = false, testProgress =
   };
   const co = createRepairCoordinator({ sessions, api, currentEpoch: () => epoch, currentSession: () => 'session', getBase: async () => 'http://fixture.invalid', getContext: id => ctxs.get(id), getCapabilitiesFor: async () => ({}), emit: (ev,d) => events.push({ ev,d }),
     insert: async (_tab, msg) => {
-      if (msg.type !== 'OVERLAY_HTML') return { ok:true, applied:true };
+      if (msg.type !== 'OVERLAY_HTML') {
+        if (msg.type === 'IMAGE_ERROR') terminalErrors.push(msg);
+        return { ok:true, applied:true };
+      }
       rendered.push(msg);
       if (race) { epoch = 8; return { ok:true, applied:true }; }
       if (!acknowledge) return { ok:true };
@@ -245,17 +267,21 @@ async function runCoordinator({ acknowledge = true, race = false, testProgress =
     ctxs.set(id,ctx); const r = result();
     await co.capture(batch.id,{ stage:'prepared', payload:p, result:r, plan:{ route:'direct-local', ai:{ provider:'ollama',model:'fixture',thinking:'off' } }, units:translationUnits(r.lensDocument), jobId:id, operationId:`op:${id}` });
     await co.capture(batch.id,{ stage:'finished', payload:p, jobId:id, accepted:[{ id:'g0',text:'ของดีเดิม' }], failures:[{ id:'g1',reason:'wrong_language' }] });
-    await co.markDelivered(ctx,true);
+    await co.markDelivered(ctx,!deferred);
+    if (deferred) batch.items.get(p.metadata.image_id).deferredImageError = {
+      type:'IMAGE_ERROR', original:p.src, message:'deferred repair-owned failure', generation:ctx.generation,
+    };
   }
   const initialPresentations=[...batch.items.values()].map(item=>({...item.presentation}));
   await co.finishInitial(batch); await sessions.flush();
-  return { final:await sessions.get(run.id), rendered, firstAckSaw, transientWrites, events, batch, reports, initialPresentations };
+  return { final:await sessions.get(run.id), rendered, terminalErrors, firstAckSaw, transientWrites, events, batch, reports, initialPresentations };
 }
 await check('all repaired pages enter the bulk queue before waiting for the first DOM ACK', async () => {
   const r = await runCoordinator();
   assert.equal(r.final.phase, 'done');
   assert.equal(r.firstAckSaw, 3);
   assert.equal(r.rendered.length, 3);
+  assert.equal(batchPassStats(r.batch).inserted,3,'repair ACKs count once, separately from accepted unit totals');
   for (const msg of r.rendered) assert.equal(msg.result.backgroundMode, 'boxes');
 });
 await check('provider delta telemetry never rewrites the whole session checkpoint', async () => {
@@ -291,14 +317,28 @@ await check('repair reports retain partial, missing-source and exact language co
 await check('an ambiguous ACK remains apply_pending instead of deleting the checkpoint', async () => {
   const r = await runCoordinator({ acknowledge:false });
   assert.equal(r.final.phase, 'apply_pending');
+  assert.equal(batchPassStats(r.batch).inserted,0,'missing ACK never counts as inserted');
   assert.equal(Object.keys(r.final.pages).length, 3);
   for (const p of Object.values(r.final.pages)) assert.ok(p.patchPending);
+});
+await check('repair-owned IMAGE_ERROR stays deferred until recovery is terminal', async () => {
+  const repaired = await runCoordinator({ deferred:true });
+  assert.equal(repaired.final.phase,'done');
+  assert.equal(repaired.terminalErrors.length,0,'successful repair must never flash the deferred IMAGE_ERROR');
+  assert([...repaired.batch.items.values()].every(item=>!item.deferredImageError),
+    'successful repair clears the durable deferred terminal message');
+  const pending = await runCoordinator({ deferred:true, acknowledge:false });
+  assert.equal(pending.final.phase,'apply_pending');
+  assert.equal(pending.terminalErrors.length,0,'ambiguous placement is still recoverable and must not be declared terminal');
+  assert([...pending.batch.items.values()].every(item=>item.deferredImageError?.type==='IMAGE_ERROR'),
+    'apply_pending keeps the terminal message for later recovery');
 });
 await check('settings change during delivery invalidates the run before terminal cleanup', async () => {
   const r = await runCoordinator({ race:true });
   assert.equal(r.final.phase, 'cancelled');
   assert.deepEqual(r.final.pages, {});
   assert.ok(!r.events.some(e => e.ev === 'repairPatch' && e.d.applied === true));
+  assert.equal(batchPassStats(r.batch).inserted,0,'stale repair does not add an insertion');
 });
 await check('settings change during final repair commit cannot emit stale done', async () => {
   const r=await runCoordinator({raceAtFinal:true});

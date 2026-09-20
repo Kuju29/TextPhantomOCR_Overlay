@@ -40,6 +40,8 @@ class ChatResult(NamedTuple):
     cached_input_tokens: int | None = None
     usage_details: dict[str, Any] | None = None
     cache_policy: dict[str, Any] | None = None
+    cache_coordination: dict[str, Any] | None = None
+    first_content_ms: float | None = None
 
 class LineCompletionDetector:
     """Detect an exact, closed records/1 set without trusting marker count."""
@@ -57,14 +59,14 @@ class LineCompletionDetector:
         if any(separator in source for separator in ("\u0085", "\u2028", "\u2029")):
             return None
         record_lines = source.split("\n")
-        matches = [re.fullmatch(r"[ \t]*<<TP_(P\d+):(.*)>>[ \t]*", line)
+        matches = [re.fullmatch(r"[ \t]*<<(?:TP_(P\d+)|(I[1-9][0-9]{0,6}_P[0-9]{1,6})):(.*)>>[ \t]*", line)
                    for line in record_lines]
-        received = [match.group(1) for match in matches if match]
+        received = [(match.group(1) or match.group(2)) for match in matches if match]
         if self.first_all_ids_ms is None and set(received) == set(self.expected):
             self.first_all_ids_ms = elapsed_ms
         if len(matches) == len(self.expected) and all(matches):
-            values = [match.group(2).strip() for match in matches if match]
-            nested = any(re.search(r"<<TP_P\d+:", value) for value in values)
+            values = [match.group(3).strip() for match in matches if match]
+            nested = any(re.search(r"<<(?:TP_P\d+|I[1-9][0-9]{0,6}_P[0-9]{1,6}):", value) for value in values)
             if (len(set(received)) == len(received)
                     and set(received) == set(self.expected)
                     and all(values) and not nested):

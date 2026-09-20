@@ -27,10 +27,17 @@ export function workloadSelection(ai, route) {
   // no native-schema capability, so unknown discovery can use an explicit marker
   // plan without falsely declaring structured_output.supported=false. This keeps
   // planning/dispatch stable even when the server catalogue later refreshes.
-  const contract = route === 'direct-local'
-    ? workloadContract(selectLocalOutputContract({provider:ai.provider, model:ai.model, modelCapabilities:caps}).version)
-    : caps.structured_output?.supported === true ? 'json_schema_object_v1'
-      : 'compact_markers_v1';
+  // Conversation owns one append-only marker grammar regardless of a model's
+  // native structured-output support.  Letting a schema-capable model select
+  // JSON here while dispatch later forces I#_P# markers creates two workload
+  // identities for the same request and can reset/poison learned capacity.
+  // Independent keeps its historical capability-driven contract untouched.
+  const conversation = ai?.translation_mode === 'conversation';
+  const contract = conversation ? 'compact_markers_v1'
+    : route === 'direct-local'
+      ? workloadContract(selectLocalOutputContract({provider:ai.provider, model:ai.model, modelCapabilities:caps}).version)
+      : caps.structured_output?.supported === true ? 'json_schema_object_v1'
+        : 'compact_markers_v1';
   const model = String(ai.model || '').trim();
   return { caps, contract, model: model && model.toLowerCase() !== 'auto' ? model : '',
     kind: contract === 'json_schema_object_v1' ? 'schema_object' : contract ? 'compact_records' : 'auto' };

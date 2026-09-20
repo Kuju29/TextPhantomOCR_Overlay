@@ -28,13 +28,13 @@ class ThinkingAndCompletionTests(unittest.TestCase):
         for selected in ("off", "on"):
             with self.subTest(selected=selected), patch.object(type(adapter), "generate",
                     return_value=ChatResult("<<TP_P0:translated>>", "test-model")), \
-                    patch.object(invocation, "decode_result", side_effect=lambda **values: {**values, "meta": {}}), \
+                    patch.object(invocation, "decode_result", side_effect=lambda **values: {**values, "meta": {"prompt_audit": {}}}), \
                     patch.object(invocation, "assert_ai_base_url_allowed"):
                 result = invocation._translate_once(markers.apply(["source"]), "en", AiConfig(
                     api_key="", provider="lmstudio", model="test-model",
                     base_url="http://localhost:1234/v1", thinking=selected,
                     prompt_mode="replace", prompt_editable="Translate accurately."))
-                self.assertEqual(result["thinking_selected"], selected)
+                self.assertEqual(result["thinking_selected"], "off" if selected == "off" else "default")
                 self.assertEqual(result["thinking_applied"], "unverified")
 
     def test_ollama_omits_unverified_native_control(self):
@@ -43,8 +43,8 @@ class ThinkingAndCompletionTests(unittest.TestCase):
                 result = local_ollama.ADAPTER.generate(GenerationRequest(
                     provider="ollama", model="renamed-model", system_text="style",
                     user_parts=("source",), thinking=selected))
-                self.assertEqual(generate.call_args.kwargs["thinking"], "auto")
-                self.assertEqual(result.thinking_applied, "unverified")
+                self.assertEqual(generate.call_args.kwargs["thinking"], "default")
+                self.assertEqual(result.thinking_applied, "provider_default")
 
     def test_ollama_sends_verified_boolean_control(self):
         capabilities = {"reasoning": {"supported": True, "control": "boolean"}}

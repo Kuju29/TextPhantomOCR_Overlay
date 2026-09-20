@@ -24,7 +24,20 @@ globalThis.fetch = async () => new Response("<!doctype html><h1>Bad Gateway</h1>
 await assert.rejects(fetchLensRawViaRest("https://api.example.test", {
   imageBytes: new Uint8Array([1]), mime: "image/png", lang: "th",
 }), (e) => e.tpError?.code === "GATEWAY_502" && e.tpError.origin === "hosting_gateway" &&
-  e.tpError.stage === "lens" && e.tpError.httpStatus === 502 && e.tpError.retryable === true);
+  e.tpError.category === "gateway" && e.tpError.stage === "lens" &&
+  e.tpError.httpStatus === 502 && e.tpError.retryable === true);
+
+globalThis.fetch = async () => new Response(JSON.stringify({ detail: {
+  schema: "tp.error/1", code: "lens_http_error", origin: "upstream_lens",
+  category: "upstream", stage: "lens_upload", retryable: true, upstreamStatus: 503,
+  traceId: "trace-lens", requestId: "request-lens",
+} }), { status: 502, headers: { "content-type": "application/json" } });
+await assert.rejects(fetchLensRawViaRest("https://api.example.test", {
+  imageBytes: new Uint8Array([1]), mime: "image/png", lang: "th",
+}), (e) => e.tpError?.code === "lens_http_error" && e.tpError.origin === "upstream_lens" &&
+  e.tpError.category === "upstream" && e.tpError.stage === "lens_upload" &&
+  e.tpError.upstreamStatus === 503 && e.tpError.traceId === "trace-lens" &&
+  e.tpError.requestId === "request-lens");
 
 globalThis.fetch = async () => new Response(JSON.stringify({ detail: {
   code: "provider_rate_limited", origin: "ai_provider", stage: "ai", retryable: true,

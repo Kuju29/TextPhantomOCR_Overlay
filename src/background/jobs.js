@@ -1,8 +1,10 @@
+import {requireConversationApi} from "../shared/ai/conversation/support.js";
+import {reserveConversationJob, finishConversationJob, enterConversationJob, cancelConversationJobs} from "./ai/translation-paths/order.js";
 import { applyRuntimeCapacityHints } from "./jobs/capacity-policy.js";
 import { reportTranslationFailure } from "../shared/diagnostic-policy.js";
+import { normalizeReasoningPreference } from "../shared/reasoning-preference.js";
 import { repairCoordinator } from "./repair/coordinator.js";
 // Orchestrates a translation job from enqueue through submit, result handling and batch finalisation.
-
 import { createLogger, setLogLevel } from "../shared/logger.js";
 import { setLogShippingEnabled } from "../shared/log-sink.js";
 import { getApiBase } from "./api.js";
@@ -11,6 +13,7 @@ import {
   getBatch,
   batchMark,
   markImagePhase,
+  updateImagePresentation,
   markBatchInitialAi,
   batchUpdateToast,
   batchStopKeepAlive,
@@ -106,17 +109,9 @@ import {
   submitAndPollServer,
 } from "./pipeline/server-translation.js";
 import {
-  releaseBatchImageJobs,
-  releaseTabImageJobs,
-  scheduleOwnedImageJob,
-  abortBatchInFlight,
-  abortTabInFlight,
-  beginInFlight,
-  bumpSettingsEpoch,
-  endInFlight,
-  getCurrentBatchId,
-  getSettingsEpoch,
-  setCurrentBatchId,
+  releaseBatchImageJobs, releaseTabImageJobs, scheduleOwnedImageJob,
+  abortBatchInFlight, abortTabInFlight, beginInFlight, bumpSettingsEpoch,
+  endInFlight, getCurrentBatchId, getSettingsEpoch, setCurrentBatchId,
 } from "./jobs/lifecycle.js";
 import { idempotencyKeyForPayload } from "./jobs/idempotency.js";
 import {
@@ -125,6 +120,7 @@ import {
 } from "./jobs/image-source-policy.js";
 import { createBatchRetryCoordinator } from "./jobs/batch-retry.js";
 import { createResultDelivery } from "./jobs/result-delivery.js";
+import { cancelBatchProviderViaRest } from "./jobs/cancellation.js";
 
 export { bumpSettingsEpoch, markDomainNeedsDataUri, setCurrentBatchId };
 
@@ -347,7 +343,7 @@ const { finalizeBatch } = createBatchRetryCoordinator({
 });
 export { finalizeBatch };
 
-const { failJobImmediately, handleStaleJob, handleJobError, handleResult } =
+const { failJobImmediately, handleStaleJob, handleJobError, handleResult, handleProvisionalResult } =
   createResultDelivery({
     accumulateSeriesMemory,
     batchUpdateToast,
@@ -363,6 +359,7 @@ const { failJobImmediately, handleStaleJob, handleJobError, handleResult } =
     isUrlOnlyPayload,
     markDomainNeedsDataUri,
     markImagePhase,
+    updateImagePresentation,
     mdCacheKey,
     mdKeyFromUrl,
     normImgSrc,
@@ -376,6 +373,8 @@ const { failJobImmediately, handleStaleJob, handleJobError, handleResult } =
     summarizeResultPresentation,
     traceNote,
     workflow: wf,
+    shouldDeferImageError: ({ batch, imageKey, terminalAiError }) =>
+      terminalAiError === true && repairCoordinator.ownsInitialFailure(batch?.id, imageKey),
     onDelivered: (ctx, ok) => repairCoordinator.markDelivered(ctx, ok),
     log,
   });
@@ -383,6 +382,7 @@ export { handleStaleJob, handleJobError, handleResult };
 
 const { planLocalAi, runLocalAiInLane, waitForRetry } = createAiExecution({
   onCheckpoint: (batchId, data) => repairCoordinator.capture(batchId, data),
+  onProvisionalResult: handleProvisionalResult,
   log,
   markJobPhase,
   traceUnitLayout,
@@ -398,6 +398,7 @@ export async function processJob(payload, tabId, frameId = 0) {
   try {
     return await processJobInner(payload, tabId, frameId);
   } finally {
+    finishConversationJob(payload);
     releasePreparedDataUri(payload);
   }
 }
@@ -672,13 +673,14 @@ async function processJobInner(payload, tabId, frameId = 0) {
       seriesMemoryMode: String(payload?.ai?.memory_mode || "off"),
       removeServerPacing: payload?.limits?.apiUnlimited === true,
       localAiCapacity: Number(payload?.limits?.manualConcurrency) || 1,
-      aiThinking: ["off", "on"].includes(payload?.ai?.thinking)
-        ? payload.ai.thinking : "off",
+      aiThinking: normalizeReasoningPreference(payload?.ai?.thinking, "minimum"),
       aiStyle: String(payload?.ai?.prompt || "").trim() ? "custom" : "empty",
     },
     traceId,
   );
 
+  if (payload?.source === "ai" && payload?.engine === "api") requireConversationApi(payload.ai, caps);
+  if (payload?.engine === "api" && payload?.ai?.translation_mode !== "conversation") await enterConversationJob(payload, null, (event,data)=>traceNote("background/jobs.js",event,data,traceId));
   await dispatchPreparedJob(
     {
       base,
@@ -1063,7 +1065,8 @@ export function enqueue(payload, tabId, frameId = 0) {
     getBatch,
   });
   const isAdmissible = enqueuePolicy.shouldStart;
-  return scheduleOwnedImageJob({
+  reserveConversationJob(payload, tabId);
+  const scheduled = scheduleOwnedImageJob({
     identity: {
       batchId: String(payload?.metadata?.batch_id || getCurrentBatchId() || ""),
       imageKey: imageKeyFromPayload(payload),
@@ -1078,12 +1081,16 @@ export function enqueue(payload, tabId, frameId = 0) {
     work: () => processJob(payload, tabId, frameId),
     // Extension orchestration is governed by its Lens/AI lanes.
     laneManaged: payload?.engine !== "api",
+    onRelease: () => finishConversationJob(payload),
   });
+  if (!scheduled) finishConversationJob(payload);
+  return scheduled;
 }
 
 // Cancels every in-flight job for a tab, on the extension and on the server.
 export function cancelTabWork(tabId, reason = "navigation", sessionId = "") {
   if (!Number.isFinite(tabId)) return;
+  cancelConversationJobs({tabId});
   void repairCoordinator.cancelTab(tabId, reason);
   releaseTabImageJobs(tabId);
   const msg = String(reason || "navigation");
@@ -1174,6 +1181,7 @@ export function cancelTabWork(tabId, reason = "navigation", sessionId = "") {
 export function discardBatchResults(batchId, reason = "user_cancelled") {
   const bid = String(batchId || "").trim();
   if (!bid) return;
+  cancelBatchProviderViaRest(bid);
   void repairCoordinator.cancelBatch(bid, reason);
   releaseBatchImageJobs(bid);
   const batch = ensureBatch(bid, 0, 0);

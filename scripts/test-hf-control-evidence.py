@@ -43,7 +43,7 @@ def execute(**kwargs):
     return ChatResult("<<TP_P0:Hi>>", kwargs["model"], thinking_tokens=0)
 
 for mode, effort in [("off", "none"), ("on", "low")]:
-    with patch.object(hf, "execute_chat_completion", execute):
+    with patch.object(hf, "execute_huggingface_chat", execute):
         result = hf.ADAPTER.generate(replace(request, thinking=mode))
     call = calls[-1]
     assert call["payload"]["reasoning_effort"] == effort
@@ -57,7 +57,7 @@ for mode, effort in [("off", "none"), ("on", "low")]:
     assert fields["reasoningEvidence"]["behavior"] == "not_verified_by_probe"
     assert result.thinking_applied == f"requested_{mode}_effort_{effort}"
 
-with patch.object(hf, "execute_chat_completion", execute):
+with patch.object(hf, "execute_huggingface_chat", execute):
     hf.ADAPTER.generate(replace(request, model_capabilities={}))
 assert calls[-1]["payload"]["temperature"] == 0.7
 assert "reasoning_effort" not in calls[-1]["payload"]
@@ -65,8 +65,8 @@ assert calls[-1]["trace_fields"]["sampling"]["requestedTemperature"] == 0.7
 assert calls[-1]["trace_fields"]["sampling"]["effectiveTemperature"] == "unknown"
 assert calls[-1]["trace_fields"]["sampling"]["temperatureOmissionReason"] is None
 
-with patch.object(hf, "execute_chat_completion", return_value=ChatResult("Hi", "fixture-model", thinking_tokens=4)):
-    assert hf.ADAPTER.generate(request).thinking_applied == "provider_ignored_off"
+with patch.object(hf, "execute_huggingface_chat", return_value=ChatResult("Hi", "fixture-model", thinking_tokens=4)):
+    assert hf.ADAPTER.generate(replace(request, thinking="off")).thinking_applied == "provider_ignored_off"
 
 # A rejected optional control must keep the ordinary health probe fallback.
 with patch.object(hf, "openai_chat_probe", side_effect=[ProbeResponse(False, 400), ProbeResponse(True, 200)]) as probe:

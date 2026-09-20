@@ -46,6 +46,19 @@ assert.equal(prose.translations[0].text, "หนึ่ง");
 assert.equal(prose.diagnostics.ignoredProse, true);
 assert.doesNotMatch(JSON.stringify(prose.diagnostics), /หนึ่ง|commentary|trailing/);
 
+// logs-14.21 regression: the parser may diagnose outside prose, but it must
+// never steal that prose as the translation. The source echo remains the
+// marker value so the target-script validator can reject/repair that unit.
+const sourceEchoOutsideTranslation = decodeTranslations(
+  "<<I1_P0:I'LL SHOW YOU>>\nฉันจะโชว์ให้ดูนี่แหละ", [{ id: "a" }], {
+    compactMarkers: true, wireUnits: [{ id: "I1_P0" }],
+  },
+);
+assert.deepEqual(sourceEchoOutsideTranslation.translations, [{ id: "a", text: "I'LL SHOW YOU" }]);
+assert.equal(sourceEchoOutsideTranslation.diagnostics.ignoredProse, true);
+assert.ok(Number(sourceEchoOutsideTranslation.diagnostics.unexpectedProseChars) > 0);
+assert.doesNotMatch(sourceEchoOutsideTranslation.translations[0].text, /โชว์/);
+
 const duplicate = decodeTranslations("<<TP_P0:a>>\n<<TP_P0:b>>\n<<TP_P1:c>>", units, options);
 assert.deepEqual(duplicate.missing, ["a"]);
 assert.deepEqual(duplicate.diagnostics.duplicateIds, ["P0"]);

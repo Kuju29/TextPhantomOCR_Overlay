@@ -114,8 +114,8 @@ class LensGroupingApplicationTests(unittest.TestCase):
         self.assertTrue(result["coverage"]["complete"])
 
     def test_artifact_resolution_uses_request_identity(self):
-        with patch("backend.jobs.image_artifacts.image_artifacts.get",
-                   return_value=png_bytes()) as get, \
+        with patch("backend.jobs.image_artifacts.image_artifacts.consume",
+                   return_value=png_bytes()) as consume, \
              patch.object(lens_grouping, "group_vertical_lens",
                           return_value=service_output()):
             result = self.run_call({
@@ -123,7 +123,7 @@ class LensGroupingApplicationTests(unittest.TestCase):
                 "imageArtifactToken": "ia_" + "a" * 40,
                 "context": {"tp_tab_session": "tab-a"},
             })
-        get.assert_called_once_with("ia_" + "a" * 40, "s:tab-a")
+        consume.assert_called_once_with("ia_" + "a" * 40, "s:tab-a")
         self.assertEqual(result["imageArtifact"], "hit")
 
     def test_detector_free_failure_is_structured_and_stops(self):

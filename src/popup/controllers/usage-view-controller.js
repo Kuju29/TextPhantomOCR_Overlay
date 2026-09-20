@@ -1,3 +1,4 @@
+import { formatUsageLines, formatUsageSummary, formatUsageLabel } from "../../shared/ai/usage-view.js";
 export function createUsageViewController({
   els,
   state,
@@ -6,6 +7,7 @@ export function createUsageViewController({
   storageKey,
   currentUsage,
   historyRows,
+  flushUsage = null,
 }) {
   const target = (modelOverride = null) => {
     const provider = String(els.aiProvider?.value || "").trim();
@@ -30,31 +32,16 @@ export function createUsageViewController({
     els.aiUsageWrap.style.display = row.provider === "unknown" ? "none" : "";
     els.aiUsageKind.textContent = row.runtime === "local" ? "Local" : "Cloud";
     els.aiUsageModel.textContent = `${row.provider} / ${row.model}`;
-    const count = (value) => Number(value).toLocaleString();
-    let tokenText = "not used yet";
-    if (row.tokenStatus === "reported")
-      tokenText = `input ${count(row.inputTokens)} · output ${count(row.outputTokens)} · total ${count(row.totalTokens)}`;
-    else if (row.tokenStatus === "incomplete")
-      tokenText = `usage incomplete (input ${row.inputTokens == null ? "—" : count(row.inputTokens)} · output ${row.outputTokens == null ? "—" : count(row.outputTokens)} · total ${row.totalTokens == null ? "—" : count(row.totalTokens)})`;
-    else if (row.tokenStatus === "unavailable")
-      tokenText = "token usage unavailable from provider";
-    const details = [];
-    const subset = (key) => (row.tokenCoverage?.[key] || 0) < row.requests ? " (reported subset)" : "";
-    if (row.pendingOperations || row.pendingOverflow) details.push(`${row.pendingOperations || 0} operation(s) awaiting confirmed usage${row.pendingOverflow ? ` + ${row.pendingOverflow} older unresolved operations` : ""}; not counted as zero`);
-    if (row.incompleteRequests > 0) details.push(`usage missing/incomplete for ${row.incompleteRequests} request(s); shown counts are known subtotals`);
-    if (row.cachedInputTokens != null) details.push(`${row.runtime === "local" ? "prompt reuse" : "cache read"} ${count(row.cachedInputTokens)}${(row.tokenCoverage?.cachedInputTokens || 0) < row.requests ? " (reported subset)" : ""}`);
-    else if (row.requests > 0) details.push("cache read — not reported");
-    if (row.cacheWriteInputTokens != null) details.push(`cache write ${count(row.cacheWriteInputTokens)}${subset("cacheWriteInputTokens")}`);
-    if (row.uncachedInputTokens != null) details.push(`not cache-read ${count(row.uncachedInputTokens)}${subset("uncachedInputTokens")}`);
-    if (row.thinkingTokens != null) details.push(`reasoning ${count(row.thinkingTokens)} (included in output)${subset("thinkingTokens")}`);
-    if (row.providerCostUsd != null && row.runtime !== "local") details.push(`provider cost $${row.providerCostUsd}${row.costReportedRequests < row.requests ? " (known subtotal)" : ""}`);
-    else if (row.requests > 0 && row.runtime !== "local") details.push("provider cost — not reported");
-    els.aiUsageCounts.textContent = `${row.requests} request${row.requests === 1 ? "" : "s"} · ${tokenText}${details.length ? " · " + details.join(" · ") : ""}`;
-    els.aiUsageCounts.title = "Translation usage only. Cache reads/writes are included in Input; reasoning is included in Output. Browser totals are not a customer billing balance.";
+    els.aiUsageCounts.textContent = formatUsageLines(row);
+    els.aiUsageCounts.title = "Input + output. Cached input is included, not subtracted. Token counts are not a bill.";
+    if (els.aiUsageLabel) els.aiUsageLabel.textContent = formatUsageLabel(row);
+    if (els.aiUsageTotal) els.aiUsageTotal.textContent = formatUsageSummary(row);
+    els.aiUsageModel.title = `${row.provider} / ${row.model}`;
+
   };
 
   let refreshSequence = 0;
-  const refresh = async (...snapshots) => {
+  const refreshImpl = async (recoverReceipts, snapshots) => {
     const sequence = ++refreshSequence;
     if (
       !els.aiUsageWrap ||
@@ -68,7 +55,13 @@ export function createUsageViewController({
       els.aiUsageWrap.style.display = "none";
       return;
     }
-    // Storage change events already carry the complete committed ledger.
+    // Storage change events already carry the complete committed ledger. A
+    // normal direct refresh folds durable receipts left by a stopped worker.
+    // While translation is live, popup hydration uses refreshPassive() instead:
+    // token display is read-only and must not scan/fold the whole receipt journal
+    // on the same storage path the active worker is committing into.
+    if (recoverReceipts && !snapshots.length && flushUsage)
+      await flushUsage({ recover: true });
     const ledger = snapshots.length ? snapshots[0]
       : (await getStorage({ [storageKey]: null }))[storageKey];
     const current = target();
@@ -76,14 +69,17 @@ export function createUsageViewController({
         current.provider !== selected.provider || current.model !== selected.model) return;
     render(currentUsage(ledger, selected));
   };
+  const refresh = async (...snapshots) => refreshImpl(true, snapshots);
+  const refreshPassive = async (...snapshots) => refreshImpl(false, snapshots);
 
   const formatNumber = (value) =>
-    value == null ? "—" : Number(value).toLocaleString();
+    value == null ? "—" : Number(value).toLocaleString("en-US");
   const formatTime = (value) =>
-    value > 0 ? new Date(value).toLocaleString() : "Unknown time";
+    value > 0 ? new Date(value).toLocaleString("en-GB") : "Unknown time";
 
   const renderHistory = async () => {
     if (!els.aiUsageHistoryList) return;
+    if (flushUsage) await flushUsage({ recover: true });
     const ledger = (await getStorage({ [storageKey]: null }))[storageKey];
     const rows = historyRows(ledger);
     els.aiUsageHistoryList.replaceChildren();
@@ -107,16 +103,13 @@ export function createUsageViewController({
       const period = document.createElement("div");
       period.className = "ai-usage-history-period";
       period.textContent = `${formatTime(row.startedAt)} — ${row.current ? "Current" : row.endedAt ? formatTime(row.endedAt) : "Ended"}${row.resetReason ? ` · ${row.resetReason.replaceAll("_", " ")}` : ""}`;
-      const requests = document.createElement("div");
-      requests.textContent = `${row.requests} requests · ${row.successes} success · ${row.failures} failure`;
-      const tokens = document.createElement("div");
-      tokens.textContent = `Input ${formatNumber(row.inputTokens)} · Output ${formatNumber(row.outputTokens)} · Total ${formatNumber(row.totalTokens)}`;
-      const detail = document.createElement("div");
-      detail.textContent = `Cache read ${formatNumber(row.cachedInputTokens)} · Cache write ${formatNumber(row.cacheWriteInputTokens)} · Reasoning ${formatNumber(row.thinkingTokens)} · Provider cost ${row.providerCostUsd == null ? "—" : "$"+row.providerCostUsd}${row.costReportedRequests < row.requests ? " (known subtotal)" : ""} · Cache-read coverage ${row.tokenCoverage?.cachedInputTokens || 0}/${row.requests}${row.incompleteRequests ? ` · Incomplete usage: ${row.incompleteRequests} request(s); known subtotals only` : ""}`;
-      const engines = document.createElement("div");
-      engines.className = "ai-usage-history-engines";
-      engines.textContent = `Extension ${row.extensionRequests} · API ${row.apiRequests}`;
-      item.append(title, period, requests, tokens, detail, engines);
+      const metrics = document.createElement("div");
+      metrics.className = "ai-metric-lines";
+      metrics.textContent = formatUsageLines(row);
+      const outcomes = document.createElement("div");
+      outcomes.className = "ai-metric-lines";
+      outcomes.textContent = `Completed calls: ${formatNumber(row.successes)}\nFailed calls: ${formatNumber(row.failures)}`;
+      item.append(title, period, metrics, outcomes);
       els.aiUsageHistoryList.appendChild(item);
     }
   };
@@ -140,5 +133,5 @@ export function createUsageViewController({
     else dialog.setAttribute("open", "");
   };
 
-  return { target, render, refresh, openHistory, closeHistory };
+  return { target, render, refresh, refreshPassive, openHistory, closeHistory };
 }

@@ -52,7 +52,7 @@ try {
     : new Response(JSON.stringify({ models: [{ name: "still-listed", size: 2 * GiB }] }), { status: 200 });
   const compatible = await discoverLocalModels({ protocol: "ollama", baseUrl: "http://localhost:11434" });
   assert.deepEqual(compatible.models, ["still-listed"]);
-  assert.equal(compatible.capability.models["still-listed"].loaded, false);
+  assert.equal(compatible.capability.models["still-listed"].loaded, null, "unsupported /api/ps is unknown, not proof that a model is unloaded");
 } finally { globalThis.fetch = originalFetch; }
 console.log("local AI capability metadata tests passed");
 
@@ -64,14 +64,15 @@ assert.equal(resolveOllamaThinkingMode("off", { supported: null, control: "unkno
 assert.equal(resolveOllamaThinkingMode("off", { supported: false, control: "none" }), "default");
 assert.equal(resolveOllamaThinkingMode("off", { supported: true, control: "boolean" }), "off");
 assert.equal(resolveOllamaThinkingMode("on", { supported: true, control: "boolean" }), "on");
-assert.throws(
-  () => resolveOllamaThinkingMode("off", { supported: true, mandatory: true, control: "levels" }),
-  (error) => error.code === "local_ai_thinking_required",
+assert.equal(
+  resolveOllamaThinkingMode("off", { supported: true, mandatory: true, control: "levels", supported_efforts: ["low", "medium", "high"] }),
+  "low",
+  "a saved Off preference remains user-owned while a mandatory level model executes its lowest verified effort",
 );
 const levelCapability = ollamaReasoningCapability({ capabilities: ["thinking"], model_info: { "general.architecture": "gptoss" } });
 assert.equal(levelCapability.control, "levels");
 assert.equal(levelCapability.mandatory, true);
-assert.deepEqual(levelCapability.levels, ["low", "medium", "high"]);
+assert.deepEqual(levelCapability.supported_efforts, ["low", "medium", "high"]);
 
 const native = createOllamaAdapter({ baseUrl: "http://localhost:11435" });
 let showPayload = { capabilities: ["thinking"], model_info: { "general.architecture": "gptoss" } };
@@ -91,8 +92,8 @@ try {
   assert.equal(native.payload({ model: "selected", thinkingMode: "off" }).think, undefined);
   assert.equal(native.thinkingApplied("off", { model: "selected" }), "provider_default_levels");
   const otherEndpoint = createOllamaAdapter({ baseUrl: "http://localhost:11436" });
-  assert.equal(otherEndpoint.thinkingApplied("off", { model: "selected" }), "requested_off_unverified");
-  assert.equal(native.thinkingApplied("off", { model: "first" }), "requested_off_unverified");
+  assert.equal(otherEndpoint.thinkingApplied("off", { model: "selected" }), "provider_default");
+  assert.equal(native.thinkingApplied("off", { model: "first" }), "provider_default");
 
   showPayload = { capabilities: ["thinking"] };
   await native.listModels({ model: "selected" });
@@ -108,7 +109,7 @@ try {
     : new Response(JSON.stringify({ models: [{ name: "selected" }] }));
   const unavailable = await native.listModels({ model: "selected" });
   assert.equal(unavailable.capability.models.selected.reasoning.supported, null);
-  assert.equal(native.thinkingApplied("on", { model: "selected" }), "requested_on_unverified", "rediscovery invalidates stale support");
+  assert.equal(native.thinkingApplied("on", { model: "selected" }), "provider_default", "rediscovery invalidates stale support and omits unverified controls");
   assert.ok(metadataCalls.every((call) => !/\/(?:chat|generate)$/.test(call.url)), "metadata discovery must never generate or cold-load a model");
 } finally { globalThis.fetch = originalFetch; }
 console.log("Ollama selected-model thinking discovery passed: unknown, unsupported, boolean and levels-only metadata; endpoint/model isolation.");

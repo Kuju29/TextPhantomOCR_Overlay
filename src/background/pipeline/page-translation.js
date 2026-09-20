@@ -1,3 +1,6 @@
+import {bindConversation} from "../ai/translation-paths/order.js";
+import { budgetDiagnostic, rejectedBudgetDiagnostic, resultDiagnostic } from "../../shared/ai/request-diagnostics.js";
+import { rememberDiagnostic } from "../ai/recent-diagnostics.js";
 import { selectPageContext } from "../../shared/ai/page-context.js";
 import { summarizeExecutionTiming } from "../../shared/ai/execution-timing.js";
 import { reportTranslationFailure } from "../../shared/diagnostic-policy.js";
@@ -28,6 +31,7 @@ import { aiWireTraceEnabled, createAiWireRecorder } from "../ai/wire-trace.js";
 import { classifyAiOutcomeIds } from "./ai-outcome-classification.js";
 import { workloadController as defaultWorkloadController } from "../ai/workload-controller.js";
 import { WORKLOAD_POLICY } from "../../shared/ai/workload/model.js";
+import { normalizeReasoningPreference } from "../../shared/reasoning-preference.js";
 
 import { workloadOperationId } from "../ai/workload-identity.js";
 import { pageImageEnabled } from "../../shared/page-image-policy.js";
@@ -128,8 +132,10 @@ export async function translateLensPage({
   traceLayout = noop,
   log = quietLog,
   dependencies = {},
+  conversationSubmit = null,
   onCheckpoint = async () => {},
   onStatus = () => {},
+  onProvisionalResult = null,
 }) {
   const requireDocument =
     dependencies.requireAiLensDocument || defaultRequireDocument;
@@ -187,6 +193,7 @@ export async function translateLensPage({
     operationId: operationBase,
     batchId: String(cancelBatchId || ""),
     imageId: String(payload?.metadata?.image_id || ""),
+    pageIndex: payload?.context?.page_index,
     jobId: String(jobId || ""),
     engine: payload?.engine === "api" ? "api" : "extension",
     route: String(plan?.route || ""),
@@ -195,7 +202,7 @@ export async function translateLensPage({
   };
   const wireTrace = createAiWireRecorder({
     enabled: aiWireTraceEnabled(capabilities, plan?.route), operationId: operationBase, traceId,
-    identity: correlation, apiBase: base, relay: plan?.route === "direct-local"
+    identity: { ...correlation, recordKind: "page_summary" }, apiBase: base, relay: plan?.route === "direct-local"
       ? capabilities?.aiWireTraceRelay : null,
   });
   const childWireTraces = [];
@@ -266,6 +273,8 @@ export async function translateLensPage({
     );
   }
 
+  bindConversation(payload);
+  if (payload.ai?.conversation) plan.ai = {...plan.ai, conversation: payload.ai.conversation};
   const memoryMode = String(plan.ai?.memory_mode || "off");
   const seriesKey = String(payload?.context?.series_key || "");
   if (seriesKey && memoryMode !== "off") {
@@ -320,9 +329,9 @@ export async function translateLensPage({
   };
   const workloadController = dependencies.workloadController || defaultWorkloadController;
   const workloadStartedAt = clock();
-  const workloadSession = await workloadController.open({ ai: plan.ai, route: plan.route, pageUnits: sendable,
+  const workloadSession = conversationSubmit ? {key:"conversation_cross_page", ai:plan.ai} : await workloadController.open({ ai: plan.ai, route: plan.route, pageUnits: sendable,
     sourceLang: String(doc?.languages?.source || ""), targetLang: String(payload.lang || ""),
-    image: pageImageEnabled(plan.ai?.send_image), singleRequest: false });
+    image: pageImageEnabled(plan.ai?.send_image), wholePageFirst: true, phase: "initial", singleRequest: false });
   const workloadOpenMs = Math.max(0, clock() - workloadStartedAt);
   // Capture the same snapshot that selected the workload before any async
   // metadata refresh can change what the transport or repair sees.
@@ -330,7 +339,8 @@ export async function translateLensPage({
   trace("effectiveSettings", {schema:"tp.audit/1",event:"settings_effective",reason:"initial",
     scope:{profileId:workloadSession.key.slice(0,16),imageId:correlation.imageId,batchId:cancelBatchId},
     engine:payload.engine === 'api' ? 'api' : 'extension',route:plan.route,
-    planned:{thinking:plan.ai.thinking === 'on' ? 'on' : 'off',pageImage:pageImageEnabled(plan.ai.send_image),
+    planned:{thinking:normalizeReasoningPreference(plan.ai.thinking, 'minimum'),pageImage:pageImageEnabled(plan.ai.send_image),
+      examplesEnabled:plan.ai.style_examples!==false,memoryMode:plan.ai.memory_mode || "off",
       memoryEnabled:plan.ai.char_memory===true,temperature:plan.ai.temperature ?? null,
       maxOutput:plan.ai.max_output_tokens ?? null,glossaryItems:plan.ai.glossary?.length || 0,
       characterItems:plan.ai.characters?.length || 0,previousItems:plan.ai.prev_context?.length || 0}},traceId);
@@ -386,7 +396,60 @@ export async function translateLensPage({
 
   // Re-plan only the unsent units after each measured generation. Never resend
   // successful units, change their IDs, or turn one attempt into a hidden retry.
+  let provisionalVisible=false;
   const translate = async (selectedUnits, operationId) => {
+    if (conversationSubmit) {
+      const bytes=new TextEncoder().encode(JSON.stringify(sendable.map(u=>[u.id,u.text])));
+      const sourceFingerprint=Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256",bytes)),b=>b.toString(16).padStart(2,"0")).join("");
+      const answer=await conversationSubmit(selectedUnits,{
+        payload,route:plan.route,ai:plan.ai,rate:payload.rate || null,unlimited:payload?.limits?.aiUnlimited===true,
+        imageDataUri:pageImageEnabled(plan.ai?.send_image)?String(result?.sourceImageDataUri||payload?.imageDataUri||""):"",
+        targetLang:String(payload.lang||""),sourceLang:String(doc?.languages?.source||""),base,
+        operationId,batchId:cancelBatchId,jobId,imageId:correlation.imageId,signal,traceId,
+        sourceFingerprint,tabSession:String(payload?.context?.tp_tab_session||""),trace,
+        onConversationStatus:status=>onStatus?.({translationMode:'conversation',conversation:status}),
+        beforeBatchDispatch:async data=>checkpoint("dispatch",{ids:data.units.map(u=>u.id),operationId:data.batchId,workload:data.estimate}),
+        onProvisionalResult:async data=>{
+          if(!onProvisionalResult||isCancelled())return;
+          const validationStarted=performance.now();
+          const defects=contentDefects(data,sendable);
+          const bad=new Set([...defects.missing,...defects.wrongLanguage]);
+          const accepted=data.translations.filter(t=>!bad.has(String(t.id)));
+          const complete=bad.size===0;
+          const streamTiming={...data.streamTiming,validatedAt:Date.now(),
+            validationMs:performance.now()-validationStarted};
+          trace('conversationPageValidated',{schema:'tp.audit/1',event:'page_stream_timing',reason:'page_validated',...streamTiming,batchId:data.batchId,
+            imageId:correlation.imageId,complete,missingCount:bad.size},traceId);
+          if(!complete&&!provisionalVisible)return;
+          const applied=applyTranslations(doc,[...accepted,...passthrough]);
+          const snapshot={...result,lensDocument:applied.document,
+            meta:{...(result.meta||{}),provisional:true},
+            aiRoute:{route:plan.route,translationMode:'conversation',provisional:true},
+            aiPartial:{partial:!complete,translated:accepted.length,missing:[...bad]}};
+          if(!complete){
+            const safe=erasePartial(applied.document,result.eraseBoxes);
+            snapshot.eraseBoxes=safe.ok?safe.eraseBoxes:[];
+          }
+          await onProvisionalResult(snapshot,{complete,failure:data.failure,
+            invalidated:provisionalVisible&&!complete,missing:[...bad],isCancelled,streamTiming});
+          provisionalVisible=true;
+          trace('conversationProvisionalPage',{batchId:data.batchId,imageId:correlation.imageId,
+            complete,terminal:false,translated:accepted.length,missing:[...bad],
+            streamTerminal:data.terminal===true},traceId);
+        },
+        afterBatchResult:async data=>{
+          const defects=contentDefects(data,data.units),bad=new Set([...defects.missing,...defects.wrongLanguage]);
+          await checkpoint("progress",{accepted:data.translations.filter(t=>!bad.has(t.id)),
+            failures:[...bad].map(id=>({id,reason:defects.wrongLanguage.includes(id)?"wrong_language":"missing"}))});
+        },
+        onProgress:onStreamProgress,capabilities});
+      await wireTrace?.("contractSelection",{recordKind:"page_summary",planner:"conversation_cross_page",
+        sharedRequestRefs:answer.meta?.sharedRequestRefs||[],usageScope:"shared_request_references"});
+      for(const ref of answer.meta?.sharedRequestRefs || [])
+        trace("conversationPageProjection",{schema:"tp.conversation_batch/1",phase:"page_projection",planner:"conversation_cross_page",
+          batchId:ref.operationId,unitCount:ref.pageUnits,requestUnitCount:ref.requestUnits,usageOwner:"provider_request",legacyFallback:false},traceId);
+      return answer;
+    }
     const translations = [], missing = [], memoryCharacters = [], memoryGlossary = [], subBatches = [];
     const unsentIds = [];
     let offset = 0;
@@ -421,12 +484,18 @@ export async function translateLensPage({
         const childTrace = subOperationId !== operationId;
         if (childTrace) {
           recorder = createAiWireRecorder({ enabled: aiWireTraceEnabled(capabilities, plan.route),
-            operationId: subOperationId, traceId, identity: { ...correlation, operationId: subOperationId },
+            operationId: subOperationId, traceId, identity: { ...correlation, operationId: subOperationId, parentOperationId: operationId,
+              recordKind: "provider_request", attemptKind: "initial" },
             apiBase: base, relay: plan.route === "direct-local" ? capabilities?.aiWireTraceRelay : null });
           childWireTraces.push(recorder);
           await recorder?.("units", chunk.units.map(u => ({ id: String(u.id), text: String(u.text || "") })));
         }
         const { estimate } = chunk;
+        const diagnosticScope = {operationId:subOperationId,imageId:correlation.imageId,
+          profileId:workloadSession.key.slice(0,16),pageUnits:selectedUnits.length};
+        const budget = budgetDiagnostic(chunk,diagnosticScope);
+        trace("translationBudget",budget,traceId);
+        rememberDiagnostic({provider:plan.ai.provider,model:plan.ai.model,operationId:subOperationId,budget});
         const workload = { version: 1, predictedOutput: estimate.predictedOutput,
           reasoningReserve: estimate.reasoningReserve, estimatedInput: estimate.estimatedInput,
           completionAvailable: estimate.completionAvailable, limits: estimate.limits };
@@ -443,7 +512,7 @@ export async function translateLensPage({
         let answer;
         try {
           const dispatchCheckpointStartedAt = clock();
-          if (!priorDispatch) await checkpoint("dispatch", { ids: chunk.units.map(u => String(u.id)), operationId: subOperationId, workload:chunk.estimate });
+          if (!priorDispatch) await checkpoint("dispatch", { ids: chunk.units.map(u => String(u.id)), operationId: subOperationId, workload:chunk.estimate, contextIds:selectPageContext(sendable, chunk.units).map(u => u.id) });
           const checkpointDispatchMs = Math.max(0, clock() - dispatchCheckpointStartedAt);
           if (isCancelled()) throw signal?.reason || new DOMException("Aborted", "AbortError");
           trace("aiPreProviderTiming", {
@@ -466,12 +535,18 @@ export async function translateLensPage({
           answer = await translateOne(chunk.units, subOperationId, workload, recorder);
         } catch (error) {
           if (isCancelled()) {
+            const cancelledResult=resultDiagnostic(null,{...diagnosticScope,error:Object.assign(new Error('Cancelled'),{name:'AbortError'})});
+            trace('translationResult',cancelledResult,traceId);
+            rememberDiagnostic({provider:plan.ai.provider,model:plan.ai.model,operationId:subOperationId,result:cancelledResult});
             if (childTrace) await recorder?.("terminal", { state: "cancelled", stage: "provider_generation",
               code: String(error?.code || "cancelled"), terminal: true });
             throw error;
           }
           const observed = workloadSession.observe({ units: chunk.units, error, plan: estimate });
           trace("aiModelWorkload", { event: "observation", operationId: subOperationId, ...observed }, traceId);
+          const diagnosticResult=resultDiagnostic(observed,{...diagnosticScope,error});
+          trace("translationResult",diagnosticResult,traceId);
+          rememberDiagnostic({provider:plan.ai.provider,model:plan.ai.model,operationId:subOperationId,result:diagnosticResult});
           const code = String(error?.code || "");
           const generated = error?.providerResponded === true || error?.requestDispatched === true ||
             Number(error?.generationAttempts || 0) > 0 || Number(error?.providerAttempts || 0) > 0 ||
@@ -507,7 +582,7 @@ export async function translateLensPage({
           consecutiveCapacityFailures = ["length", "structure"].includes(observed.outcome)
             ? consecutiveCapacityFailures + 1 : 0;
           if (consecutiveCapacityFailures >= WORKLOAD_POLICY.circuitFailureThreshold)
-            await markRemainingUnsent("repeated_generated_capacity_failure");
+            await markRemainingUnsent(observed.outcome === "length" ? "repeated_output_budget_exhausted" : "repeated_invalid_model_output");
           continue;
         }
         if (isCancelled()) throw signal?.reason || new DOMException("Aborted", "AbortError");
@@ -516,6 +591,10 @@ export async function translateLensPage({
           defects: chunkDefects, plan: estimate });
         trace("aiModelWorkload", { event: "observation", operationId: subOperationId,
           ...observed }, traceId);
+        const diagnosticResult=resultDiagnostic(observed,diagnosticScope);
+        trace("translationResult",diagnosticResult,traceId);
+        rememberDiagnostic({provider:plan.ai.provider,model:plan.ai.model,operationId:subOperationId,
+          result:diagnosticResult,layout:answer?.meta?.promptLayout,coordination:answer?.meta?.cacheCoordination,conversation:answer?.meta?.conversation});
         consecutiveCapacityFailures = ["length", "structure"].includes(observed.outcome)
           ? consecutiveCapacityFailures + 1 : 0;
         const rejected = new Set([...chunkDefects.missing, ...chunkDefects.wrongLanguage]);
@@ -544,6 +623,7 @@ export async function translateLensPage({
             ids: preparedDispatch.chunk.units.map(u => String(u.id)),
             operationId: preparedDispatch.operationId,
             workload: preparedDispatch.chunk.estimate,
+            contextIds: selectPageContext(sendable, preparedDispatch.chunk.units).map(u => u.id),
           }} : {}),
           accepted: (answer?.translations || []).filter(x => !rejected.has(String(x.id))),
           failures: [...rejected].map(id => ({ id, reason: chunkDefects.wrongLanguage.includes(id) ? "wrong_language"
@@ -568,8 +648,8 @@ export async function translateLensPage({
             ...(answer?.meta || {}),
             route: plan.route,
             adaptiveBatching: true,
-            workloadPolicy: "adaptive_sequential_sub_batches_v3",
-            hardBudgetSplit: chunk.splitReason === "context_or_completion_reserve",
+            workloadPolicy: "page_first_guarded_v1",
+            hardBudgetSplit: String(chunk.splitReason).startsWith("per_request_"),
             circuitOpened: false,
             batchCount: 1,
             subBatches,
@@ -578,8 +658,8 @@ export async function translateLensPage({
       }
       return { schema: "tp.ai.result/1", translations, missing: [...new Set(missing.map(String))],
         memoryDelta: { characters: memoryCharacters, glossary: memoryGlossary },
-        meta: { route: plan.route, adaptiveBatching: true, workloadPolicy: "adaptive_sequential_sub_batches_v3",
-          hardBudgetSplit: subBatches.some(batch => batch.splitReason === "context_or_completion_reserve"),
+        meta: { route: plan.route, adaptiveBatching: true, workloadPolicy: "page_first_guarded_v1",
+          hardBudgetSplit: subBatches.some(batch => String(batch.splitReason).startsWith("per_request_")),
           circuitOpened, circuitReason, unsentIds: [...new Set(unsentIds)],
           batchCount: subBatches.length, subBatches,
           generationAttempts: subBatches.reduce((n, batch) =>
@@ -588,6 +668,15 @@ export async function translateLensPage({
             n + Math.max(1, Number(batch.meta?.providerAttempts || batch.meta?.provider_attempts || 1)), 0),
           omittedIds: subBatches.flatMap(b => b.meta.omittedIds || []),
           declinedIds: subBatches.flatMap(b => b.meta.declinedIds || []) } };
+    } catch (error) {
+      if (String(error?.code || '').toLowerCase() === 'ai_workload_budget_insufficient' && error?.requestDispatched !== true) {
+        const scope={operationId,imageId:correlation.imageId,profileId:workloadSession.key.slice(0,16)};
+        const budget=rejectedBudgetDiagnostic(error,{...scope,pageUnits:selectedUnits.length});
+        const result=resultDiagnostic(null,{...scope,error});
+        trace('translationBudget',budget,traceId);trace('translationResult',result,traceId);
+        rememberDiagnostic({provider:plan.ai.provider,model:plan.ai.model,operationId,budget,result});
+      }
+      throw error;
     } finally {
       if (workloadSession.flush) await workloadSession.flush();
       else await workloadController.flush();
@@ -699,7 +788,7 @@ export async function translateLensPage({
       traceScripts,
       beforeRepair,
       isCancelled,
-      repair: { enabled: false },
+      repair: { enabled: false, deferredToBatch: true },
       preserveWrongLanguagePartial: true,
       warn: (error) =>
         reportTranslationFailure(log, trace,
@@ -719,6 +808,7 @@ export async function translateLensPage({
       providerResponded: error?.providerResponded === true,
       providerAttempts: Number(error?.providerAttempts || 0),
       generationAttempts: Number(error?.generationAttempts || 0),
+      ...(error?.code === "ai_workload_budget_insufficient" ? {budget: error.diagnostics || {}} : {}),
     });
     await flushWireTrace();
     if (Number(error?.generationAttempts || 0) > 0) onGenerationAttempt?.();
@@ -976,6 +1066,9 @@ export async function translateLensPage({
     translated: translatedCount, missingIds: missingIdsBeforeApply,
     omittedIds, emptyIds, wrongLanguageIds, preservedIds,
     unresolvedIds: missingIds, complete: missingIds.length === 0, terminal: true,
+    recordKind: "page_summary", children: childWireTraces.filter(r => r?.identity).map(r => ({
+      operationId: r.identity.operationId, executionKey: r.identity.executionKey,
+    })),
   });
   await flushWireTrace();
   return report;

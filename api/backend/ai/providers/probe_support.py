@@ -4,22 +4,65 @@ from __future__ import annotations
 
 from typing import Any
 
+import re
 import httpx
 
 from backend.ai.provider_contract import ProbeRequest, ProbeResponse
 
-def response_error(response: httpx.Response) -> str:
+_SECRET = re.compile(r"Bearer\s+[A-Za-z0-9._\-]{4,}|(?:sk-|hf_|gsk_|AIza)[A-Za-z0-9._\-]{8,}", re.I)
+_SECRET_FIELD = re.compile(
+    r"([\"']?(?:api[_-]?key|authorization|access[_-]?token|token|secret)[\"']?\s*[:=]\s*)"
+    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;}&]+)", re.I,
+)
+
+def _safe_error(value: Any, api_key: str = "") -> str:
+    text = " ".join(str(value or "").split())
+    if api_key:
+        text = text.replace(api_key, "[redacted]")
+    text = _SECRET.sub("[redacted]", text)
+    return _SECRET_FIELD.sub(lambda match: match.group(1) + "[redacted]", text)[:240]
+
+def response_error_details(response: httpx.Response, *, api_key: str = "") -> dict[str, str]:
+    """Allowlisted, bounded diagnostics, never raw provider metadata/requests.
+
+    Gateways often put the useful cause inside metadata.raw (JSON). Extract
+    only its error fields and discard headers, prompts and arbitrary keys.
+    The caller's exact credential is scrubbed even for unfamiliar key formats.
+    """
+    import json
     try:
         data = response.json()
-        if isinstance(data, dict):
-            error = data.get("error")
-            if isinstance(error, dict):
-                return str(error.get("message") or error.get("type") or "")[:240]
-            if error:
-                return str(error)[:240]
     except ValueError:
-        pass
-    return str(response.text or "")[:240]
+        return {"message": _safe_error(response.text, api_key)}
+    error = data.get("error") if isinstance(data, dict) else None
+    if not isinstance(error, dict):
+        return {"message": _safe_error(error or response.text, api_key)}
+    details = {key: error.get(key) for key in ("message", "code", "type", "param")}
+    metadata = error.get("metadata")
+    if isinstance(metadata, dict):
+        for key in ("error_type", "provider_code", "provider_name"):
+            details[key] = metadata.get(key)
+        raw = metadata.get("raw")
+        if isinstance(raw, str) and len(raw) <= 16_384:
+            try:
+                raw = json.loads(raw)
+            except ValueError:
+                raw = None
+        nested = raw.get("error", raw) if isinstance(raw, dict) else None
+        if isinstance(nested, dict):
+            details["provider_message"] = nested.get("message")
+            for key in ("code", "type", "param"):
+                details.setdefault("provider_" + key, nested.get(key))
+                if not details.get("provider_" + key):
+                    details["provider_" + key] = nested.get(key)
+    return {key: _safe_error(value, api_key) for key, value in details.items()
+            if isinstance(value, (str, int, float)) and not isinstance(value, bool) and str(value)}
+
+def response_error(response: httpx.Response, *, api_key: str = "") -> str:
+    details = response_error_details(response, api_key=api_key)
+    message = details.get("message") or details.get("type") or "Provider test failed"
+    cause = details.get("provider_message") or details.get("error_type") or details.get("provider_code")
+    return _safe_error(f"{message}; {cause}" if cause and cause != message else message, api_key)
 
 def openai_chat_probe(
     request: ProbeRequest,
@@ -46,7 +89,9 @@ def openai_chat_probe(
             json=payload,
         )
     if not response.is_success:
-        return ProbeResponse(False, response.status_code, error=response_error(response))
+        return ProbeResponse(False, response.status_code,
+            error=response_error(response, api_key=request.api_key),
+            error_details=response_error_details(response, api_key=request.api_key))
     try:
         data = response.json()
         choices = data.get("choices") if isinstance(data, dict) else None
@@ -60,4 +105,4 @@ def openai_chat_probe(
         return ProbeResponse(False, response.status_code, "invalid_model_output", str(exc))
     return ProbeResponse(True, response.status_code)
 
-__all__ = ["openai_chat_probe", "response_error"]
+__all__ = ["openai_chat_probe", "response_error", "response_error_details"]

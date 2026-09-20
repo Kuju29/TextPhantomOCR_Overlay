@@ -92,12 +92,12 @@ class CacheTests(unittest.TestCase):
         self.payload={'model':'any','messages':[{'role':'system','content':'Exact style'}, {'role':'user','content':'OCR A'}], 'response_format':{'type':'json_object'}}
     def apply(self, provider='openrouter',model='deepseek/example',url='https://openrouter.ai/api/v1/chat/completions',body=None,key='secret'):
         return apply_chat_cache(body or self.payload,provider=provider,model=model,url=url,headers={'Authorization':'Bearer '+key})
-    def test_openrouter_sticky_key_static_without_history(self):
+    def test_openrouter_does_not_overpin_unrelated_conversations(self):
         a,p=self.apply();b,_=self.apply(body={**self.payload,'messages':[self.payload['messages'][0],{'role':'user','content':'OCR B'}]})
-        self.assertEqual(a['session_id'],b['session_id']);self.assertLessEqual(len(a['session_id']),256)
+        self.assertNotIn('session_id',a);self.assertNotIn('session_id',b)
         self.assertEqual(a['messages'],self.payload['messages']);self.assertNotIn('session_id',self.payload)
         self.assertFalse(p['discountGuaranteed']);self.assertIsNone(p['hit'])
-        self.assertNotEqual(a['session_id'],self.apply(key='other')[0]['session_id'])
+        self.assertEqual(p.get('stickyRouting'),'openrouter_conversation_fingerprint')
     def test_explicit_only_documented_model_family(self):
         for model in ('anthropic/claude-sonnet-4-6','qwen/qwen3-coder-plus'):
             body,p=self.apply(model=model);self.assertEqual(body['messages'][0]['content'][0]['text'],'Exact style')
@@ -119,11 +119,11 @@ class ReceiptTests(unittest.TestCase):
         self.tmp=tempfile.TemporaryDirectory();self.path=Path(self.tmp.name)/'receipts.sqlite'
         self.env=patch.dict(os.environ,{'TP_USAGE_STATE_FILE':str(self.path),'TP_USAGE_REQUIRED':'1','TP_USAGE_RECEIPTS':'on'})
         self.env.start();FakeClient.calls=[]
+        accounting._receipt_cache.clear();accounting._receipt_bytes=0
     def tearDown(self):self.env.stop();self.tmp.cleanup()
     def rows(self):
-        if not self.path.exists():return []
-        with closing(sqlite3.connect(self.path)) as db:
-            return [json.loads(r[0]) for r in db.execute('select usage_json from provider_usage')]
+        self.assertFalse(self.path.exists())
+        return [json.loads(value) for value in accounting._receipt_cache.values()]
     def test_all_19_provider_boundaries_both_engine_scopes(self):
         specs=list(compose_providers(ProviderRegistry()));self.assertEqual(len(specs),19)
         for engine in ('runsextension','runsapi'):
@@ -137,7 +137,7 @@ class ReceiptTests(unittest.TestCase):
                     self.assertEqual((result.input_tokens,result.output_tokens,result.total_tokens),(100,20,120))
                     self.assertEqual(result.usage_details['cachedInputTokens'],70)
                     self.assertEqual(result.usage_details['engine'],engine)
-                    self.assertTrue(result.usage_details['receiptDurable']);self.assertFalse(result.usage_details['billingEligible'])
+                    self.assertFalse(result.usage_details['receiptDurable']);self.assertFalse(result.usage_details['billingEligible'])
                     self.assertEqual(result.text,ANSWER)
         rows=self.rows();self.assertEqual(len(rows),38);self.assertEqual(len(FakeClient.calls),38)
         self.assertEqual(len({v['receiptId'] for v in rows}),38)
@@ -163,7 +163,7 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual(self.rows(),[]);self.assertEqual(len(FakeClient.calls),0)
         from dataclasses import replace
         with patch.dict(os.environ,{'TP_USAGE_RECEIPTS':'off'}),patch.object(httpx,'Client',FakeClient):
-            with self.assertRaisesRegex(RuntimeError,'PERSISTENCE_REQUIRED'):accounting.generate_with_receipt(spec.adapter,replace(req,cancel_check=None))
+            with self.assertRaisesRegex(RuntimeError,'RECEIPT_REQUIRED'):accounting.generate_with_receipt(spec.adapter,replace(req,cancel_check=None))
         self.assertEqual(len(FakeClient.calls),0)
     def test_untrusted_observe_without_active_generation_creates_nothing(self):
         accounting.observe(RAW_USAGE,cost_authoritative=True);accounting.mark_dispatched();self.assertEqual(self.rows(),[])
@@ -196,17 +196,16 @@ class ReceiptTests(unittest.TestCase):
             rows=list(pool.map(run,range(32)))
         self.assertEqual(len(self.rows()),32);self.assertEqual(len({r['receiptId'] for r in rows}),32)
         self.assertEqual(sum(r['totalTokens'] for r in self.rows()),3840)
-    def test_readonly_operator_audit_flags_pending_without_zero(self):
-        import runpy
+    def test_memory_receipts_do_not_create_operator_database(self):
         from backend.ai.provider_registry import provider_registry
         spec=provider_registry.require('openrouter')
         req=GenerationRequest(provider='openrouter',model=spec.default_model,api_key='secret',base_url=spec.default_base_url,system_text='style',user_parts=('source',))
         with patch.object(httpx,'Client',FakeClient),accounting.receipt_scope('runsapi','audit'):
-            accounting.generate_with_receipt(spec.adapter,req)
-        audit=runpy.run_path(str(Path(__file__).with_name('audit-provider-usage.py')))['audit']
-        before=self.path.read_bytes();result=audit(self.path,'runsapi')
-        self.assertEqual(result['receiptCount'],1);self.assertEqual(result['knownTokenSubtotals']['totalTokens'],120)
-        self.assertFalse(result['customerDebitAuthorized']);self.assertEqual(before,self.path.read_bytes())
+            result=accounting.generate_with_receipt(spec.adapter,req)
+        self.assertEqual(result.usage_details['totalTokens'],120)
+        self.assertFalse(result.usage_details['receiptDurable'])
+        self.assertEqual(len(self.rows()),1)
+        self.assertFalse(self.path.exists())
     def test_queue_attempts_use_all_observed_generations_even_after_cancel(self):
         from backend.jobs.queue import _exception_generation_attempts, _result_generation_attempts, _queue_error
         exc=RuntimeError('cancelled');exc.requestDispatched=True

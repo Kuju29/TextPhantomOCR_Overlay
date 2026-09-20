@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 
 import { createApiHealthController } from "../src/popup/controllers/api-health-controller.js";
 import { createProviderMetaController } from "../src/popup/controllers/provider-meta-controller.js";
@@ -49,7 +50,7 @@ function metaController({ provider = "openrouter", model = "saved-model", fetch 
 }
 
 // Local startup performs one automatic discovery/verification. A verified live
-// snapshot suppresses duplicate refreshes.
+// snapshot never suppresses a requested live status refresh (worker deduplicates probes).
 {
   let calls = 0;
   const t = metaController({ provider: "ollama", model: "qwen", fetch: async () => { calls++; } });
@@ -61,8 +62,8 @@ function metaController({ provider = "openrouter", model = "saved-model", fetch 
     models: ["qwen", "llama"], verified_model: "qwen" };
   t.state.aiModelBlocked = false;
   await t.controller.refresh();
-  assert.equal(t.writes().connectCalls, 1,
-    "a verified Local snapshot started a duplicate model verification");
+  assert.equal(t.writes().connectCalls, 2,
+    "a saved verification must not suppress a fresh connection check");
 }
 
 // Concurrent/repeated Cloud refreshes share one live catalogue request and
@@ -167,9 +168,19 @@ function metaController({ provider = "openrouter", model = "saved-model", fetch 
 // Strict canonical failure is contained at the AI boundary: no rejection,
 // compatibility write, or provider dispatch; callers receive a stable message.
 globalThis.document ??= { getElementById: () => null };
-const { activateAiProfileSafely } = await import(
+const { activateAiProfileSafely, hasActiveTranslationSession } = await import(
   "../src/popup/controllers/settings-hydration-controller.js"
 );
+assert.equal(hasActiveTranslationSession({runs:[{phase:"collecting"}]}), true);
+assert.equal(hasActiveTranslationSession({runs:[{phase:"repairing"}]}), true);
+assert.equal(hasActiveTranslationSession({runs:[{phase:"done"}]}), false);
+assert.equal(hasActiveTranslationSession({runs:[{phase:"cancelled"}]}), false);
+const hydrationSource = await readFile(new URL(
+  "../src/popup/controllers/settings-hydration-controller.js", import.meta.url
+), "utf8");
+assert.match(hydrationSource, /translationActive && usageViewController\.refreshPassive/);
+assert.match(hydrationSource, /if \(translationActive\) providerMetaController\.renderStatus/);
+assert.match(hydrationSource, /else providerMetaController\.refresh\(\)/);
 {
   let writes = 0;
   let dispatches = 0;
@@ -222,8 +233,8 @@ const { activateAiProfileSafely } = await import(
     els.aiLocalTest, els.aiPrompt,
     els.aiPromptMode, els.aiPromptReset, els.aiPromptStudio])
     assert.equal(control.disabled, false, "profile recovery control must remain enabled");
-  assert.equal(els.aiThinking.disabled, true,
-    "unknown Thinking capability is status-only until exact verification");
+  assert.equal(els.aiThinking.disabled, false,
+    "unknown capability must not disable the user's saved reasoning policy");
   assert.equal(els.translatePageBtn.disabled, true);
   els.sources.value = "translated";
   ui.toggle();

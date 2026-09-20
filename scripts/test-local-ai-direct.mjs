@@ -177,11 +177,12 @@ try {
     },
     canonicalPrompt,
   });
-  assert.match(calls[0].body.messages[0].content,
-    /^You are a professional manga and manhwa translator and localization editor[\s\S]*\nTRANSLATION STYLE\nTarget language: Thai \(ภาษาไทย\)\.\nMY COMPLETE STYLE$/);
-  assert.doesNotMatch(calls[0].body.messages[0].content, /BUILT-IN STYLE|USER TRANSLATION NOTES/,
+  assert.match(calls[0].body.messages[0].content, /^คุณคือนักแปลและบรรณาธิการมังงะและมังฮวา/);
+  assert.match(calls[0].body.messages[0].content, /สไตล์การแปล\nภาษาปลายทาง: ภาษาไทย\nMY COMPLETE STYLE(?:\n|$)/);
+  assert.doesNotMatch(calls[0].body.messages[1].content, /MY COMPLETE STYLE/);
+  assert.doesNotMatch(calls[0].body.messages[1].content, /BUILT-IN STYLE|USER TRANSLATION NOTES/,
     "a full editable style replaces the built-in style exactly as on Cloud");
-  assert.match(calls[0].body.messages[1].content, /<<TP_Pn:translated text>>/);
+  assert.match(calls[0].body.messages[1].content, /<<TP_Pn:คำแปล>>/);
   assert.equal("format" in calls[0].body, false, "new Ollama calls never request JSON/schema output");
   assert.equal(calls[0].body.stream, true, "new Local calls request streaming");
   assert.equal(calls[0].body.think, true);
@@ -189,8 +190,8 @@ try {
     "Ollama thinking must receive the full safe completion ceiling");
   assert.equal(thinkingAnswer.meta.requestedOutputTokens, calls[0].body.options.num_predict,
     "logged requestedOutputTokens must equal the value sent to Ollama");
-  assert.equal(calls[0].body.messages[1].content.split("SOURCE TEXT\n")[1], "<<TP_P0:hello>>");
-  assert.match(calls[0].body.messages[1].content, /^TRANSLATION TASK\nTranslate every source unit into Thai/);
+  assert.equal(calls[0].body.messages[1].content.split("ข้อความต้นฉบับ\n")[1], "<<TP_P0:hello>>");
+  assert.match(calls[0].body.messages[1].content, /^งานแปล\nแปลข้อความต้นฉบับทุกหน่วยเป็นภาษาไทย/);
   assert.doesNotMatch(calls[0].body.messages[1].content, /<<TP_(?:END|DONE)>>/);
 
   calls.length = 0;
@@ -199,9 +200,10 @@ try {
       local_adapter: { protocol: "ollama", baseUrl: "http://localhost:11434" } },
     canonicalPrompt,
   });
-  assert.match(calls[0].body.messages[0].content,
-    /^You are a professional manga and manhwa translator and localization editor[\s\S]*\nTRANSLATION STYLE\nTarget language: Thai \(ภาษาไทย\)\.\nTarget languages: Thai edge policy$/);
-  assert.doesNotMatch(calls[0].body.messages[0].content, /BUILT-IN STYLE|SERIES NOTES HEADING/,
+  assert.match(calls[0].body.messages[0].content, /^คุณคือนักแปลและบรรณาธิการมังงะและมังฮวา/);
+  assert.match(calls[0].body.messages[0].content, /สไตล์การแปล\nภาษาปลายทาง: ภาษาไทย\nTarget languages: Thai edge policy(?:\n|$)/);
+  assert.doesNotMatch(calls[0].body.messages[1].content, /Target languages: Thai edge policy/);
+  assert.doesNotMatch(calls[0].body.messages[1].content, /BUILT-IN STYLE|SERIES NOTES HEADING/,
     "explicit replace mode does not depend on a magic prompt heading");
 
   calls.length = 0;
@@ -216,12 +218,13 @@ try {
     },
     canonicalPrompt,
   });
+  assert.doesNotMatch(calls[0].body.messages[1].content, /Use the established nickname/);
   assert.match(calls[0].body.messages[0].content,
-    /Use the established nickname\.$/,
+    /Use the established nickname\.(?:\n|$)/,
     "saved AI Style replaces the built-in style exactly like Cloud");
-  assert.doesNotMatch(calls[0].body.messages[0].content, /BUILT-IN STYLE|SERIES NOTES HEADING/);
+  assert.doesNotMatch(calls[0].body.messages[1].content, /BUILT-IN STYLE|SERIES NOTES HEADING/);
   assert.doesNotMatch(calls[0].body.messages[0].content, /USER TRANSLATION NOTES/);
-  assert.match(calls[0].body.messages[1].content, /CONTEXT[\s\S]*STORY SO FAR[\s\S]*CHARACTER SHEET[\s\S]*TRANSLATION MEMORY[\s\S]*PREVIOUS PAGE[\s\S]*OUTPUT —/,
+  assert.match(calls[0].body.messages[1].content, /บริบทประกอบ[\s\S]*ความจำเนื้อเรื่อง[\s\S]*ข้อมูลตัวละคร[\s\S]*ศัพท์และชื่อจากความจำเรื่อง[\s\S]*หน้าก่อนหน้า[\s\S]*รูปแบบคำตอบ —/,
     "Local context is carried in the user task before its exact output contract");
   assert.doesNotMatch(calls[0].body.messages[1].content, /Hi → หวัดดี/,
     "short context-dependent fragments are filtered exactly like Cloud glossary memory");
@@ -435,7 +438,7 @@ try {
   globalThis.fetch = async (_url, options) => {
     const request = JSON.parse(options.body);
     batchBodies.push(request);
-    const source = String(request.messages.at(-1).content || "");
+    const source = String(request.messages.at(-1).content || "").split("ข้อความต้นฉบับ\n").at(-1);
     const count = [...source.matchAll(/<<TP_P(\d+):/g)]
       .reduce((max, match) => Math.max(max, Number(match[1]) + 1), 0);
     const markerAnswer = Array.from({ length: count }, (_, index) =>
@@ -462,9 +465,9 @@ try {
   assert.equal(batchBodies.length, 1);
   assert.equal(streamed.meta.batchCount, 1);
   assert.equal(streamed.meta.thinkingSelected, "off",
-    "missing/legacy Direct Local thinking selection must normalize to Off, never Auto");
+    "unknown exact-model reasoning capability must preserve the user's saved Off intent");
   assert.equal(streamed.meta.thinkingApplied, "unverified",
-    "unknown capability omits the provider field without turning user selection into Auto");
+    "unknown capability omits the provider field while keeping Off as user intent");
   assert.deepEqual(tokenSummary(streamed.meta.usage), { inputTokens: 44, outputTokens: 88, totalTokens: 132, source: "provider" });
   assert.ok(batchBodies.every((body) => !("think" in body)),
     "unknown Ollama capability must omit think instead of relying on a model name or stale adapter state");

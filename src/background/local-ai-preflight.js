@@ -2,12 +2,13 @@
  * Background-owned Local AI readiness gate.
  *
  * The popup is not guaranteed to be open before a batch starts. A saved popup
- * snapshot is therefore only a short-lived cache; the service worker verifies
- * the exact provider + endpoint + model + thinking mode before admitting a
- * Local AI batch.
+ * snapshot is therefore only a short-lived cache; the service worker confirms
+ * the exact provider + endpoint + model and its capability metadata before
+ * admitting a Local AI batch. No dummy generation is allowed here.
  */
 import { getStorage, setStorage } from "../shared/storage.js";
 import { classifyAiRuntime } from "../shared/ai-settings-contract.js";
+import { normalizeReasoningPreference } from "../shared/reasoning-preference.js";
 import {
   localAiPreset,
   normalizeLocalAiAdapter,
@@ -50,21 +51,13 @@ function readinessError(verification, cause = null) {
       "LOCAL_MODEL_UNAVAILABLE",
       "The selected Local AI model is not installed or is not exposed by the current runtime.",
     ],
-    timeout: [
-      "LOCAL_MODEL_VERIFY_TIMEOUT",
-      "The selected Local AI model did not answer the automatic verification request in time.",
-    ],
-    rejected: [
-      "LOCAL_MODEL_VERIFY_FAILED",
-      "The selected Local AI model rejected the automatic verification request.",
+    unsupported_model: [
+      "LOCAL_MODEL_UNSUPPORTED",
+      "The selected Local AI model is installed but its runtime metadata says it cannot generate chat completions.",
     ],
     invalid_output: [
-      "LOCAL_MODEL_VERIFY_FAILED",
-      "The selected Local AI model returned no usable verification response.",
-    ],
-    thinking_required: [
-      "LOCAL_MODEL_THINKING_REQUIRED",
-      "The selected Local AI model requires thinking. Enable AI thinking or choose a model whose thinking can be turned off.",
+      "LOCAL_MODEL_METADATA_INVALID",
+      "The selected Local AI model did not expose usable capability metadata.",
     ],
     local_models_empty: [
       "LOCAL_MODELS_EMPTY",
@@ -80,12 +73,12 @@ function readinessError(verification, cause = null) {
     ],
     unreachable: [
       "LOCAL_AI_UNREACHABLE",
-      "The selected Local AI model could not complete the automatic verification request.",
+      "The Local AI runtime could not confirm the selected model's availability.",
     ],
   };
   const [code, message] = table[status] || [
-    "LOCAL_MODEL_VERIFY_FAILED",
-    "The selected Local AI model could not be verified before translation started.",
+    "LOCAL_MODEL_METADATA_INVALID",
+    "The selected Local AI model could not be confirmed from runtime metadata before translation started.",
   ];
   const error = new Error(message);
   if (cause) error.cause = cause;
@@ -124,16 +117,16 @@ function trace(event, data, traceId, emit = traceNote) {
 }
 
 /**
- * Verify the exact Local AI execution identity before a batch is admitted.
- * Returns an enriched immutable-ish settings object carrying the verified
- * selected-model capabilities required by generation (especially think:false
- * and native structured-output routing).
+ * Confirm the exact Local AI execution identity before a batch is admitted.
+ * Returns settings enriched with selected-model capability metadata. The first
+ * real translation request is the first generation request; readiness must not
+ * load a model merely to produce a throw-away "OK".
  */
 export async function ensureLocalAiBatchReady(settings, {
   traceId = "",
   now = Date.now(),
   maxAgeMs = LOCAL_MODEL_VERIFICATION_MAX_AGE_MS,
-  probeTimeoutMs = 60_000,
+  probeTimeoutMs = 5_000,
   force = false,
   get = getStorage,
   set = setStorage,
@@ -150,9 +143,10 @@ export async function ensureLocalAiBatchReady(settings, {
   const provider = String(settings?.aiProvider || "").trim().toLowerCase();
   const endpoint = normalizeLocalConnectionEndpoint(settings?.aiBaseUrl);
   const model = String(settings?.aiModel || "").trim();
-  const thinking = settings?.aiLocalThinking === "on" || settings?.aiThinking === "on"
-    ? "on"
-    : "off";
+  const thinking = normalizeReasoningPreference(
+    settings?.aiLocalThinking ?? settings?.aiThinking,
+    "off",
+  );
 
   if (!provider || !endpoint || !model || model.toLowerCase() === "auto") {
     throw readinessError({ status: !model || model.toLowerCase() === "auto"
@@ -161,7 +155,7 @@ export async function ensureLocalAiBatchReady(settings, {
   }
 
   const identity = normalizeLocalConnectionIdentity(provider, endpoint);
-  const executionKey = `${identity}|${model}|${thinking}`;
+  const executionKey = `${identity}|${model}`;
   const run = async () => {
     const stored = await get([
       LOCAL_CAPABILITY_SNAPSHOTS_KEY,
@@ -215,7 +209,7 @@ export async function ensureLocalAiBatchReady(settings, {
       }
     }
 
-    trace("verification_started", {
+    trace("metadata_check_started", {
       provider,
       model,
       thinking,
@@ -233,7 +227,7 @@ export async function ensureLocalAiBatchReady(settings, {
         probeTimeoutMs,
       });
     } catch (cause) {
-      trace("verification_failed", {
+      trace("metadata_check_failed", {
         provider,
         model,
         thinking,
@@ -251,7 +245,7 @@ export async function ensureLocalAiBatchReady(settings, {
       String(verification.model || "").trim() === model &&
       Array.isArray(result?.models) && result.models.includes(model);
     if (!passed) {
-      trace("verification_failed", {
+      trace("metadata_check_failed", {
         provider,
         model,
         thinking,
@@ -266,7 +260,7 @@ export async function ensureLocalAiBatchReady(settings, {
       : null;
     const hint = buildLocalCapabilityHint({ provider, endpoint, model, capability });
     if (!hint) {
-      trace("verification_failed", {
+      trace("metadata_check_failed", {
         provider,
         model,
         thinking,
@@ -293,7 +287,7 @@ export async function ensureLocalAiBatchReady(settings, {
       },
       aiLocalCapabilityHint: hint,
     });
-    trace("verification_passed", {
+    trace("metadata_check_passed", {
       provider,
       model,
       thinking,
@@ -304,7 +298,7 @@ export async function ensureLocalAiBatchReady(settings, {
       hint,
       audit: {
         status: "passed",
-        source: "live_verification",
+        source: "live_metadata",
         ageMs: 0,
         provider,
         model,
@@ -320,10 +314,10 @@ export async function ensureLocalAiBatchReady(settings, {
     });
     inFlight.set(executionKey, pending);
   } else {
-    trace("verification_joined", { provider, model, thinking }, traceId, emitTrace);
+    trace("metadata_check_joined", { provider, model }, traceId, emitTrace);
   }
-  // Share readiness evidence only. Each batch still owns its prompt, language,
-  // memory mode and other execution settings, even when it joins the same probe.
+  // Share availability/capability evidence only. Each batch still owns its prompt, language,
+  // memory mode and other execution settings, even when it joins the same metadata check.
   const evidence = await pending;
   return {
     settings: enrichSettings(settings, evidence.hint),

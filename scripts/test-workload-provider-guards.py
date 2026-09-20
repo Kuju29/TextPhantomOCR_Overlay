@@ -15,6 +15,8 @@ assert normalize_workload({'version':2})=={}
 assert normalize_limits({'contextTokens':True,'maxOutputTokens':-1})=={}
 assert guard_output_budget(1234)==1234
 assert guard_output_budget(2048,workload={'version':1,'predictedOutput':100},limits={'maxOutputTokens':256},system='style',parts=('text',))==256
+assert guard_output_budget(8192,workload={'version':1,'predictedOutput':500,'reasoningReserve':9000,'completionAvailable':16384},limits={'contextTokens':65536,'maxOutputTokens':16384},system='style',parts=('text',))>8192
+assert guard_output_budget(8192,workload={'version':1,'predictedOutput':500,'reasoningReserve':1000,'completionAvailable':8192},limits={'contextTokens':65536,'maxOutputTokens':16384},system='style',parts=('text',))<=8192
 try: guard_output_budget(1024,workload={'version':1,'predictedOutput':100,'reasoningReserve':300},limits={'maxOutputTokens':256})
 except WorkloadBudgetError: pass
 else: raise AssertionError('reasoning must count towards allowance')

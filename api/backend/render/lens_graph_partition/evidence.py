@@ -10,10 +10,21 @@ from .model import BoundaryEvidence, VerticalNode
 
 
 def prepare_pixels(image: Any):
-    """Convert the page once; boundary probes reuse the same grayscale view."""
+    """Convert the page once; boundary probes reuse the same grayscale view.
+
+    Lens grouping used to call NumPy ``mean(axis=2)`` over the full RGB page,
+    which allocates a float64 image and costs hundreds of milliseconds on
+    manga-sized pages. Production images arrive as Pillow RGB objects, so use
+    Pillow's C implementation with equal RGB weights. The result differs from
+    the former arithmetic mean only by the unavoidable <= 1/3 grayscale
+    rounding step, while avoiding the large float allocation. ndarray/test
+    inputs keep the exact legacy path.
+    """
     if image is None:
         return None
     try:
+        if hasattr(image, "convert"):
+            return np.asarray(image.convert("L", (1 / 3, 1 / 3, 1 / 3, 0)))
         arr = np.asarray(image)
         return arr[..., :3].mean(axis=2) if arr.ndim == 3 else arr
     except Exception:

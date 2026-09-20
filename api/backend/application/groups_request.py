@@ -10,7 +10,7 @@ def resolve_image_bytes(
     token = str(payload.get("imageArtifactToken") or "").strip()
     data_uri = str(payload.get("imageDataUri") or "")
     if token:
-        return store.get(token, identity), "hit"
+        return store.consume(token, identity), "hit"
     if data_uri:
         return decode_b64(data_uri.split(",", 1)[-1]), "legacy"
     raise ValueError("`imageArtifactToken` or `imageDataUri` is required")

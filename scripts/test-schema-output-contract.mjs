@@ -55,7 +55,7 @@ for (const [structuredOutput, reason] of [
 }
 
 const schemaPrompt = exactOutputInstruction(ids, supported, "th");
-assert.match(schemaPrompt, /Return only the JSON object required by the supplied schema/);
+assert.match(schemaPrompt, /ตอบเฉพาะวัตถุ JSON ตาม schema ที่ให้/);
 assert.match(schemaPrompt, /P0, P1, P2/);
 assert.doesNotMatch(schemaPrompt, /<<TP_|compact record|MARKER/i,
   "schema prompt must contain no marker-output grammar");
@@ -66,7 +66,7 @@ const compact = selectLocalOutputContract({
   modelCapabilities: {},
 });
 const compactPrompt = exactOutputInstruction(ids, compact, "th");
-assert.match(compactPrompt, /<<TP_Pn:translated text>>/);
+assert.match(compactPrompt, /<<TP_Pn:คำแปล>>/);
 assert.doesNotMatch(compactPrompt, /JSON object|schema/i,
   "compact prompt must contain no schema-output grammar");
 

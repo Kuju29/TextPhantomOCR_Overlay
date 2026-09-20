@@ -169,7 +169,7 @@ async function occupy(key, n) {
     "provider 429 and permanent 4xx responses must be classified as rejected HTTP attempts");
   assert.match(apiRoute, /"providerAttempts": providers, "generationAttempts": generations/,
     "the typed failure payload must expose actual batched provider and generation counts");
-  assert.match(apiRoute, /error_payload\([\s\S]*?code=code[\s\S]*?extra=\{"providerAttempts": providers/,
+  assert.match(apiRoute, /error_payload\([\s\S]*?code=code[\s\S]*?extra=\{[^}]*"providerAttempts": providers/,
     "the route must publish failure_reason semantics through the canonical error payload");
 
   const main = await readFile(new URL("../api/backend/main.py", import.meta.url), "utf8");

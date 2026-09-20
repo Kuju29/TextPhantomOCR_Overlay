@@ -81,7 +81,7 @@ await test('cold reasoning-capable large windows stay adaptive until measured',(
   const context={...ctx,reasoningSupported:true,limits:{contextTokens:16384,maxOutputTokens:8192}};
   const cold=partition(rows,initialProfile(),context);
   assert.ok(cold.length>1,'unknown hidden reasoning must not receive a cold whole-page bootstrap');
-  const trusted={...initialProfile(),successes:2};
+  const trusted={...initialProfile(),successes:2,zeroReasoningSamples:2};
   const measured=partition(rows,trusted,context);
   assert.equal(measured.length,1,'two valid measured generations may use the large-window bootstrap');
 });
@@ -147,7 +147,7 @@ await test('missing, duplicate and foreign IDs are not learned as success',()=>{
     if(kind==='duplicate')answer.translations.push({...answer.translations[0]});
     if(kind==='foreign')answer.translations.push({id:'stranger',text:'เพิ่ม'});
     const o=observation(p,{answer});assert.equal(o.outcome,'structure');
-    const next=learnWorkload(p,o);assert.equal(next.ratios.length,0);assert.equal(next.records,9);
+    const next=learnWorkload(p,o);assert.equal(next.ratios.length,0);assert.equal(next.records,10);assert.equal(next.lastDecision,"structure_observed_no_capacity_claim");
   }
 });
 await test('network errors, cancellation, and unknown terminal do not poison profile',()=>{
@@ -174,6 +174,27 @@ await test('truncated provider reasoning is reserved on the next sub-batch',()=>
   const next=estimateRequest(units(1),learned,{...ctx,reasoningSupported:true,limits:{contextTokens:16384,maxOutputTokens:8192}});
   assert.ok(next.reasoningReserve>=3900,'measured hidden reasoning must survive a failed visible answer');
   assert.equal(next.observedReasoning,true);
+});
+await test('two measured Off successes retire stale hidden-reasoning pressure',()=>{
+  let p=initialProfile();
+  const rows=units(8,'A moderately long sentence for the model.');
+  const plan=estimateRequest(rows,p,{...ctx,reasoningSupported:true,limits:{contextTokens:16384,maxOutputTokens:8192}});
+  const hidden=Object.assign(new Error('budget exhausted'),{
+    code:'output_budget_exhausted',requestDispatched:true,providerResponded:true,
+    generationAttempts:1,providerAttempts:1,
+    generationMeta:{model:'fixture',selectedContract:'schema_object',finishReason:'length',
+      usage:{source:'provider',outputTokens:4096,thinkingTokens:3900}},
+  });
+  p=learnWorkload(p,observeWorkload({units:rows,error:hidden,plan,ai:{model:'fixture'}}));
+  assert.ok(estimateRequest(units(1),p,{...ctx,reasoningSupported:true}).reasoningReserve>=3900);
+  for(let i=0;i<2;i++){
+    const sample=units(2),samplePlan=estimateRequest(sample,p,{...ctx,reasoningSupported:true});
+    p=learnWorkload(p,observeWorkload({units:sample,answer:result(sample,{usage:{source:'provider',inputTokens:100,outputTokens:20,thinkingTokens:0}}),
+      plan:samplePlan,ai:{model:'fixture'}}));
+  }
+  const next=estimateRequest(units(1),p,{...ctx,reasoningSupported:true});
+  assert.equal(next.observedReasoning,false);
+  assert.equal(next.reasoningReserve,0,'confirmed zero-reasoning telemetry should stop stale Off pressure');
 });
 await test('unreported reasoning is unknown, not zero',()=>{
   const p=initialProfile(),o=observation(p,{answer:result(units(10),{thinkingApplied:'requested_off_unverified',usage:{source:'provider',outputTokens:80}})});
@@ -213,6 +234,120 @@ await test('profiles persist and isolate model, endpoint, style, language and re
   }
   const stored=JSON.stringify(disk);assert.ok(!stored.includes('secret-never-store'));assert.ok(!stored.includes('private-style'));assert.ok(!stored.includes('คำแปล'));
 });
+await test('Conversation packs complete pages by content budget, not unit count/cache/latency',async()=>{
+  const c=createWorkloadController({read:async()=>({}),write:async()=>{}});
+  const ai={provider:'huggingface',model:'fixture',translation_mode:'conversation',thinking:'off',prompt:'',style_examples:true,
+    model_capabilities:{reasoning:{supported:true,control:'levels',supported_efforts:['none']},structured_output:{supported:false},
+      limits:{contextTokens:32768,maxOutputTokens:8192}}};
+  const session=await c.open({route:'server',ai,sourceLang:'en',targetLang:'th'});
+  const anchorRows=units(9,'Short line');
+  const anchor=session.nextReady(anchorRows,[9],{continuation:false,cacheConfirmed:false,cacheRatio:0});
+  assert.equal(anchor.units.length,9);
+  assert.equal(anchor.wholePages,1);
+  assert.equal(anchor.splitReason,'ready_queue_drained');
+  assert.equal(anchor.estimate.conversationCapacity,'anchor');
+
+  // Many short vertical-text units must not hit a record-count gate. All three
+  // complete pages fit the measured content/output target.
+  const page2=Array.from({length:7},(_,i)=>({id:`P${9+i}`,text:'Short line'}));
+  const page3=Array.from({length:12},(_,i)=>({id:`P${16+i}`,text:'Short line'}));
+  const page4=Array.from({length:12},(_,i)=>({id:`P${28+i}`,text:'Short line'}));
+  const remaining=[...page2,...page3,...page4],pages=[7,12,12];
+  const miss=session.nextReady(remaining,pages,{continuation:true,cacheConfirmed:false,cacheRatio:0,cacheMissStreak:1,previousUnitCount:9,previousTurnMs:2000});
+  assert.equal(miss.units.length,31);
+  assert.equal(miss.wholePages,3);
+  assert.equal(miss.splitReason,'ready_queue_drained');
+  assert.equal(miss.estimate.conversationCapacity,'continuation_token_budget');
+
+  // Prompt-cache telemetry is economics only: it must not change packing.
+  const cached=session.nextReady(remaining,pages,{continuation:true,cacheConfirmed:true,cacheRatio:.9,cacheMissStreak:0,previousUnitCount:19,previousTurnMs:3000});
+  assert.equal(cached.units.length,miss.units.length);
+  assert.equal(cached.estimate.target,miss.estimate.target);
+  assert.equal(cached.estimate.conversationCapacity,'continuation_token_budget');
+
+  // Provider latency is not capacity evidence either. Reasoning still reserves
+  // completion headroom, but the prior turn duration does not impose a unit cap.
+  const slowReasoning={...ai,thinking:'on',model_capabilities:{...ai.model_capabilities,reasoning:{supported:true,mandatory:true,supports_max_tokens:false},limits:{contextTokens:65536,maxOutputTokens:16384}}};
+  const heavy=await c.open({route:'server',ai:slowReasoning,sourceLang:'en',targetLang:'th'});
+  const limited=heavy.nextReady(remaining,pages,{continuation:true,cacheConfirmed:true,cacheRatio:.9,cacheMissStreak:0,previousUnitCount:9,previousTurnMs:35000});
+  assert.equal(limited.units.length,31);
+  assert.equal(limited.wholePages,3);
+  assert.equal(limited.estimate.conversationCapacity,'continuation_token_budget');
+  assert.ok(limited.estimate.completionAvailable>8192);
+
+  const original=await c.open({route:'server',ai:{...slowReasoning,translation_mode:'independent'},sourceLang:'en',targetLang:'th'});
+  const originalPlan=original.next(remaining,0);
+  assert.ok(originalPlan.estimate.completionAvailable<=8192,'Independent keeps its original completion ceiling while frozen');
+});
+
+
+await test('Independent generic workload retains latency learning',()=>{
+  const base={...initialProfile(),target:160};
+  const rows=units(26,'This is a short translated dialogue line.');
+  const planning={...ctx,limits:{contextTokens:32768,maxOutputTokens:8192}};
+  const plan=estimateRequest(rows,{...base,target:1536},planning);
+  const observed=observeWorkload({units:rows,answer:result(rows,{providerMs:20000,firstContentMs:1200,usage:{inputTokens:900,outputTokens:450,thinkingTokens:0,source:'provider'}}),plan,
+    ai:{model:'fixture',model_capabilities:{reasoning:{supported:false}}}});
+  const learned=learnWorkload(base,observed);
+  assert.equal(learned.lastDecision,'reduce_output_after_slow_generation');
+  assert.ok(learned.latencyOutputTarget>0&&learned.latencyOutputTarget<plan.predictedOutput,
+    '20s generation must create a smaller speed cap for the next request');
+  const next=estimateRequest(units(54,'This is a short translated dialogue line.'),{...learned,target:1536},planning);
+  assert.equal(next.target,learned.latencyOutputTarget,'large-window bootstrap must not bypass the learned speed cap');
+  assert.equal(next.fitsTarget,false,'the same large multi-page request must no longer fit the learned speed target');
+});
+
+await test('Conversation main and repair use content budgets despite slow generation',async()=>{
+  const c=createWorkloadController({read:async()=>({}),write:async()=>{},emit:()=>{}});
+  const ai={provider:'huggingface',model:'fixture',translation_mode:'conversation',thinking:'off',prompt:'',style_examples:true,
+    model_capabilities:{reasoning:{supported:false},structured_output:{supported:false},limits:{contextTokens:32768,maxOutputTokens:8192}}};
+  const session=await c.open({route:'server',ai,sourceLang:'en',targetLang:'th'});
+  const make=(n,start=0)=>Array.from({length:n},(_,i)=>({id:`S${start+i}`,text:'This is a short translated dialogue line.'}));
+  const firstRows=make(26), first=session.nextReady(firstRows,[13,13],{});
+  assert.equal(first.pageCount,2);
+  session.observe({units:first.units,plan:first.estimate,answer:{translations:first.units.map(u=>({id:u.id,text:'คำแปล'})),missing:[],meta:{
+    finishReason:'stop',model:'fixture',selectedContract:'tp.translation.lines/1',terminalCompleted:true,
+    providerMs:20000,firstContentMs:1200,usage:{inputTokens:1200,outputTokens:450,thinkingTokens:0,source:'provider'}}}});
+  const remaining=make(67,26);
+  const next=session.nextReady(remaining,[12,11,10,12,11,11],{continuation:true});
+  assert.ok(session.snapshot().latencyOutputTarget>0,'keep learned latency telemetry');
+  assert.equal(next.estimate.latencyOutputTarget,null,'latency must not cap serialized Conversation capacity');
+  assert.equal(next.estimate.conversationCapacity,'continuation_token_budget');
+  const repair=session.nextRepair(remaining);
+  const rowPlan=session.nextReady(remaining,[],{continuation:true});
+  assert.deepEqual(repair.units,rowPlan.units,'main and repair use one content planner');
+  assert.equal(repair.estimate.target,rowPlan.estimate.target);
+  assert.ok(repair.units.length>1,'do not fragment ready repair rows into one-unit calls');
+  const withEvidence=session.nextRepair(remaining,()=>[]);
+  assert.ok(withEvidence.units.length>0);
+
+});
+
+await test('slow startup with fast generation does not fragment the next Conversation turn',()=>{
+  const base={...initialProfile(),target:160};
+  const rows=units(26,'This is a short translated dialogue line.');
+  const plan=estimateRequest(rows,{...base,target:1536},{...ctx,limits:{contextTokens:32768,maxOutputTokens:8192}});
+  const observed=observeWorkload({units:rows,answer:result(rows,{providerMs:20000,firstContentMs:17000,usage:{inputTokens:900,outputTokens:450,thinkingTokens:0,source:'provider'}}),plan,
+    ai:{model:'fixture',model_capabilities:{reasoning:{supported:false}}}});
+  const learned=learnWorkload(base,observed);
+  assert.equal(learned.latencyOutputTarget,null);
+  assert.equal(learned.lastDecision,'slow_startup_no_batch_reduction');
+  assert.equal(learned.lastGenerationMs,3000);
+});
+await test('two fast generations relax an old latency workload cap',()=>{
+  let p={...initialProfile(),target:160,latencyOutputTarget:300};
+  const rows=units(12,'Short line');
+  for(let i=0;i<2;i++){
+    const plan=estimateRequest(rows,{...p,target:1536},{...ctx,limits:{contextTokens:32768,maxOutputTokens:8192}});
+    const observed=observeWorkload({units:rows,answer:result(rows,{providerMs:5000,firstContentMs:800}),plan,
+      ai:{model:'fixture',model_capabilities:{reasoning:{supported:false}}}});
+    p=learnWorkload(p,observed);
+  }
+  assert.ok(p.latencyOutputTarget===null||p.latencyOutputTarget>300,
+    'speed cap must recover after repeated fast generations');
+  assert.match(p.lastDecision,/relax_latency|release_latency/);
+});
+
 await test('parallel page observations serialize without losing sample counts',async()=>{
   let disk={},writes=0;const c=createWorkloadController({read:async()=>disk,write:async x=>{await new Promise(r=>setTimeout(r,2));disk=x;writes++;}});
   const opts={route:'server',ai:{model:'m',prompt:'style',model_capabilities:{structured_output:{supported:true}}},targetLang:'th'}, sessions=await Promise.all(Array.from({length:12},()=>c.open(opts)));

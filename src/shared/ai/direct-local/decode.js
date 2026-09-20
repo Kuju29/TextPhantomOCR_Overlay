@@ -183,7 +183,7 @@ function observedShape(raw) {
   if (text.startsWith("{") || text.startsWith("[")) return "json";
   if (text.includes("<<TP_DONE>>")) return "tp_done_marker";
   if (/<<TP_(?:P\d+|END)>>/u.test(text)) return "legacy_open_end_markers";
-  if (/<<TP_P\d+:/u.test(text)) return "compact_records_malformed";
+  if (/<<(?:TP_P\d+|I[1-9][0-9]{0,6}_P[0-9]{1,6}):/u.test(text)) return "compact_records_malformed";
   if (text.startsWith("<")) return "xml_or_tagged";
   return "unmarked_text";
 }
@@ -201,8 +201,8 @@ function observedHash(raw) {
 
 function grammarDiagnostics(raw, expectedIds = []) {
   const source = String(raw || "");
-  const claims = [...source.matchAll(/<<TP_(P\d+)(?::|>>)/gu)];
-  const receivedIds = claims.map((match) => match[1]);
+  const claims = [...source.matchAll(/<<(?:TP_(P\d+)|(I[1-9][0-9]{0,6}_P[0-9]{1,6}))(?::|>>)/gu)];
+  const receivedIds = claims.map((match) => match[1] || match[2]);
   const expected = new Set(expectedIds);
   const first = claims[0];
   const lastClose = source.lastIndexOf(">>");
@@ -246,6 +246,7 @@ function decodeStrictRecords(raw, units, wireUnits) {
   // a closed child inside an unclosed parent is never salvaged ambiguously.
   const parsed = [];
   const malformedClaims = [];
+  const recoverableMalformedClaims = [];
   const allClaims = [];
   const stack = [];
   let pending = [];
@@ -256,6 +257,7 @@ function decodeStrictRecords(raw, units, wireUnits) {
     for (const frame of stack) islandInvalidIds.add(frame.id);
     for (const [id] of pending) islandInvalidIds.add(id);
   };
+  let formattingWhitespaceChars = 0, unexpectedProseChars = 0;
   let at = 0;
   while (at < source.length) {
     if (source.startsWith("<<>>", at) && stack.length) {
@@ -272,24 +274,39 @@ function decodeStrictRecords(raw, units, wireUnits) {
       at += 4;
       continue;
     }
-    if (source.startsWith("<<TP_P", at)) {
-      const numeric = /^<<TP_(P\d+)/u.exec(source.slice(at));
-      if (numeric) allClaims.push(numeric[1]);
-      const header = /^<<TP_(P\d+)(?::|\s)/u.exec(source.slice(at));
+    if (source.startsWith("<<TP_P", at) || /^<<I[1-9]/u.test(source.slice(at))) {
+      const claim = /^<<(?:TP_(P\d+)|(I[1-9][0-9]{0,6}_P[0-9]{1,6}))/u.exec(source.slice(at));
+      const claimedId = claim ? (claim[1] || claim[2]) : "";
+      if (claimedId) allClaims.push(claimedId);
+      const header = /^<<(?:TP_(P\d+)|(I[1-9][0-9]{0,6}_P[0-9]{1,6}))(?::|\s)/u.exec(source.slice(at));
       if (header) {
-        if (!stack.length) {
-          pending = [];
-          islandInvalid = false;
-          islandInvalidIds = new Set();
+        const id = header[1] || header[2];
+        // A new physical-line record closes attribution for a prior malformed
+        // line. Preserve later siblings instead of poisoning the whole answer.
+        if (stack.length && at > 0 && /[\r\n]/u.test(source[at - 1])) {
+          const lineIds = [...stack.map(frame => frame.id), ...pending.map(([oldId]) => oldId)];
+          malformedClaims.push(...lineIds, ...islandInvalidIds);
+          if (!islandInvalid) recoverableMalformedClaims.push(...lineIds);
+          stack.length = 0; pending = []; islandInvalid = false; islandInvalidIds = new Set();
         }
-        stack.push({ id: header[1], value: "" });
+        if (!stack.length) { pending = []; islandInvalid = false; islandInvalidIds = new Set(); }
+        stack.push({ id, value: "" });
         at += header[0].length;
         continue;
       }
-      if (numeric) malformedClaims.push(numeric[1]);
+      if (claimedId) malformedClaims.push(claimedId);
       if (stack.length) poisonIsland();
-      const malformedClose = source.indexOf(">>", at + 6);
-      at = malformedClose < 0 ? source.length : malformedClose + 2;
+      const malformedClose = source.indexOf(">>", at + 2);
+      const end = malformedClose < 0 ? source.length : malformedClose + 2;
+      // A malformed recognized ID remains eligible for unit-level repair.
+      // Unknown top-level <<...>> output owns no unit and must not disappear:
+      // count it as unexpected prose so the response is repaired/rejected.
+      if (!claimedId && !stack.length) {
+        for (const c of source.slice(at, end)) {
+          if (/\s/u.test(c)) formattingWhitespaceChars++; else unexpectedProseChars++;
+        }
+      }
+      at = end;
       continue;
     }
     if (source.startsWith("<<", at) && stack.length) {
@@ -322,6 +339,8 @@ function decodeStrictRecords(raw, units, wireUnits) {
       continue;
     }
     if (stack.length) stack.at(-1).value += source[at];
+    else if (/\s/u.test(source[at])) formattingWhitespaceChars++;
+    else unexpectedProseChars++;
     at += 1;
   }
   // Any open outer island invalidates every record in that island, including
@@ -330,13 +349,17 @@ function decodeStrictRecords(raw, units, wireUnits) {
   const receivedIds = parsed.map(([id]) => id);
   const duplicateIds = [...new Set(allClaims.filter((id, index) => allClaims.indexOf(id) !== index))];
   const extraIds = [...new Set(allClaims.filter((id) => !expected.includes(id)))];
-  const invalidIds = new Set([...duplicateIds, ...malformedClaims]);
+  const malformedMarkerIds = [...new Set(malformedClaims)];
+  const recoverableMalformedMarkerIds = [...new Set(recoverableMalformedClaims)];
+  const malformedMarkersRecoverable = malformedMarkerIds.length > 0 &&
+    malformedMarkerIds.every(id => recoverableMalformedMarkerIds.includes(id));
+  const invalidIds = new Set([...duplicateIds, ...malformedMarkerIds]);
   const missingIds = expected.filter((id) => !receivedIds.includes(id) || invalidIds.has(id));
   const emptyIds = parsed.filter(([, value]) => !value.trim()).map(([id]) => id);
   const byId = new Map(parsed.filter(([id]) =>
     expected.includes(id) && !invalidIds.has(id)));
   const ignoredProseChars = source.length - parsed.reduce((total, [id, value]) =>
-    total + `<<TP_${id}:${value}>>`.length, 0);
+    total + (id.startsWith("I") ? `<<${id}:${value}>>` : `<<TP_${id}:${value}>>`).length, 0);
   return {
     translations: wireUnits.map((wire, index) => ({ id: units[index].id, text: byId.get(wire.id) || "" })),
     missing: [...new Set([...missingIds, ...emptyIds])].map((wireId) => {
@@ -352,10 +375,13 @@ function decodeStrictRecords(raw, units, wireUnits) {
       markerCount: parsed.length,
       validatorSubtype: missingIds.length || emptyIds.length ? "repairable_ids" : "complete_closed_records",
       receivedIds, missingIds, emptyIds, duplicateIds, extraIds,
-      malformedMarkerIds: malformedClaims,
+      malformedMarkerIds,
+      recoverableMalformedMarkerIds,
+      malformedMarkersRecoverable,
       ignoredUnknownIds: extraIds,
       ignoredProse: ignoredProseChars > 0,
       ignoredProseChars: Math.max(0, ignoredProseChars),
+      formattingWhitespaceChars, unexpectedProseChars,
     },
   };
 }
@@ -535,7 +561,7 @@ function decodeOneLineMarkers(raw, units, wireUnits) {
 
 function decodeClosedRecords(raw, units, wireUnits) {
   const source = String(raw || "").replace(/\r\n?/g, "\n");
-  if (!source || !/<<TP_P\d+:/u.test(source)) return null;
+  if (!source || !/<<(?:TP_P\d+|I[1-9][0-9]{0,6}_P[0-9]{1,6}):/u.test(source)) return null;
   // ECMAScript's dot accepts NEL (U+0085), unlike U+2028/U+2029. Treat all
   // Unicode line separators identically so one record cannot hide two
   // physical lines from either the JS or Python validator.
@@ -551,10 +577,12 @@ function decodeClosedRecords(raw, units, wireUnits) {
   }
   const lines = source.split("\n");
   const parsed = lines.map((line) =>
-    /^[ \t]*<<TP_(P\d+):(.*)>>[ \t]*$/u.exec(line),
+    /^[ \t]*<<(?:TP_(P\d+)|(I[1-9][0-9]{0,6}_P[0-9]{1,6})):(.*)>>[ \t]*$/u.exec(line),
   );
   const valid = parsed.filter(Boolean);
-  const receivedSoFar = valid.map((match) => match[1]);
+  const recordId = (match) => match?.[1] || match?.[2] || "";
+  const recordValue = (match) => String(match?.[3] ?? "");
+  const receivedSoFar = valid.map(recordId);
   // A malformed line is not allowed to poison independently valid records.
   // Keep the latter as a partial result so the bounded repair pass requests
   // only the defective IDs. Marker ambiguity remains a hard error: an ID
@@ -563,7 +591,8 @@ function decodeClosedRecords(raw, units, wireUnits) {
   // `P1abc` and `P1_x` are ambiguous marker-looking tokens (underscore is a
   // word character, so neither form has a boundary after the numeric ID).
   const markerClaimsByLine = lines.map((line) =>
-    [...line.matchAll(/<<TP_(P\d+)\b/gu)].map((match) => match[1]),
+    [...line.matchAll(/<<(?:TP_(P\d+)|(I[1-9][0-9]{0,6}_P[0-9]{1,6}))(?=[:>\s]|$)/gu)]
+      .map((match) => match[1] || match[2]),
   );
   const markerClaims = markerClaimsByLine.flat();
   const claimCounts = new Map();
@@ -577,8 +606,8 @@ function decodeClosedRecords(raw, units, wireUnits) {
     ...new Set(markerClaims.filter((id) => !expected.includes(id))),
   ];
   if (
-    valid.some((match) => /<<TP_P\d+:/u.test(match[2])) ||
-    lines.some((line) => (line.match(/<<TP_P\d+:/gu) || []).length > 1)
+    valid.some((match) => /<<(?:TP_P\d+|I[1-9][0-9]{0,6}_P[0-9]{1,6}):/u.test(recordValue(match))) ||
+    lines.some((line) => (line.match(/<<(?:TP_P\d+|I[1-9][0-9]{0,6}_P[0-9]{1,6}):/gu) || []).length > 1)
   ) {
     throw markerError(
       "Local AI returned nested or concatenated translation records",
@@ -594,7 +623,7 @@ function decodeClosedRecords(raw, units, wireUnits) {
     lines.some(
       (line, index) =>
         !parsed[index] &&
-        line.includes("<<TP_P") &&
+        /<<(?:TP_P|I[1-9])/u.test(line) &&
         markerClaimsByLine[index].length === 0,
     )
   ) {
@@ -623,7 +652,7 @@ function decodeClosedRecords(raw, units, wireUnits) {
       [],
     );
   }
-  const received = valid.map((match) => match[1]);
+  const received = valid.map(recordId);
   const duplicateIds = [
     ...new Set(received.filter((id, index) => received.indexOf(id) !== index)),
   ];
@@ -632,8 +661,8 @@ function decodeClosedRecords(raw, units, wireUnits) {
   ];
   const omittedIds = expected.filter((id) => !received.includes(id));
   const emptyIds = valid
-    .filter((match) => !match[2].trim())
-    .map((match) => match[1]);
+    .filter((match) => !recordValue(match).trim())
+    .map(recordId);
   const malformedMarkerIds = [
     ...new Set(
       markerClaimsByLine
@@ -644,7 +673,7 @@ function decodeClosedRecords(raw, units, wireUnits) {
   const missingIds = [
     ...new Set([...omittedIds, ...emptyIds, ...malformedMarkerIds]),
   ];
-  const byId = new Map(valid.map((match) => [match[1], match[2].trim()]));
+  const byId = new Map(valid.map((match) => [recordId(match), recordValue(match).trim()]));
   const partialTranslations = wireUnits.flatMap((wire, index) =>
     byId.get(wire.id) ? [{ id: units[index].id, text: byId.get(wire.id) }] : [],
   );

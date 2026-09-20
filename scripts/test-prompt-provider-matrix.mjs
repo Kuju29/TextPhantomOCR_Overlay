@@ -1,4 +1,5 @@
-import { TRANSLATOR_IDENTITY_BASE } from "../src/generated/localization-content.js";
+import { instructionPack } from "../src/shared/ai/prompt-language.js";
+const pack=instructionPack("th");
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -11,12 +12,10 @@ import {
 } from "../src/shared/ai/providers/local-registry.js";
 
 const plan = await getCanonicalPrompt("", "th", { wantMemo: false });
-const ocrOutputRule = "Correct missing, extra or misread characters only when the supplied text makes the intended reading unambiguous";
-assert.equal(plan.pieces.systemPolicy.includes(ocrOutputRule), true,
-  "the shared fixed system policy must distinguish mixed OCR input from target-language output");
+assert.equal(plan.pieces.systemPolicy, pack.identity, "bundled policy matches live System identity");
 const style = "Avoid pronouns unless the source makes them indispensable.";
 const source = "  OCR source  ";
-const expectedSystem = TRANSLATOR_IDENTITY_BASE + "\n\nTRANSLATION STYLE\n" + plan.pieces.targetLanguageInstruction + "\n" + style;
+const expectedSystem = `${pack.identity}\n\n${pack.styleHeading}\nภาษาปลายทาง: ภาษาไทย\n${style}`;
 // Capture the live API invocation boundary, not the legacy build_system_text helper.
 const api = JSON.parse(execFileSync(process.env.PYTHON || "python", ["-c", `
 import json
@@ -45,18 +44,18 @@ assert.equal(api.system, expectedSystem,
   "API and Local preserve identical identity, target header and selected style");
 assert.equal(api.schema, null, "unknown model uses markers, not an invented schema capability");
 const expectedUser = api.user;
-assert.match(expectedUser, /^TRANSLATION TASK\nTranslate every source unit into Thai \(ภาษาไทย\)\./);
-assert.equal(expectedUser.split("SOURCE TEXT\n")[1], `<<TP_P0:${source}>>`);
-assert.match(expectedUser, /Expected IDs: P0\./);
+assert.match(expectedUser, /^งานแปล\nแปลข้อความต้นฉบับทุกหน่วยเป็นภาษาไทย/);
+assert.equal(expectedUser.split("ข้อความต้นฉบับ\n")[1], `<<TP_P0:${source}>>`);
+assert.match(expectedUser, /รายการ ID ที่ต้องตอบ: P0/);
 function verifySections(messages, name) {
   assert.equal(messages[0].content, expectedSystem, `${name}: translator identity + exact style`);
   assert.equal(messages[1].content, expectedUser, `${name}: live API and Local task/source/ID parity`);
   assert.equal(messages[0].content.split(style).length - 1, 1);
-  assert.equal(messages[1].content.includes(style), false);
+  assert.equal(messages[1].content.split(style).length - 1, 0);
   assert.equal(messages[0].content.includes(plan.pieces.sourceInputContract), false);
-  assert.equal(messages[1].content.split(plan.pieces.sourceInputContract).length - 1, 1);
-  assert.equal(messages[1].content.split("OUTPUT — tp.translation.compact-records/1").length - 1, 1);
-  assert.equal(messages[0].content.includes(plan.pieces.systemPolicy), false,
+  assert.equal(messages[1].content.split(pack.markerInput).length - 1, 1);
+  assert.equal(messages[1].content.split("รูปแบบคำตอบ — tp.translation.compact-records/1").length - 1, 1);
+  assert.equal(messages[0].content.startsWith(plan.pieces.systemPolicy+"\n\n"), true,
     `${name}: retired verbose system composition must not leak into the live identity`);
 }
 
@@ -100,7 +99,7 @@ try {
     assert.equal(wire.get("systemPrompt"), messages[0].content,
       `${spec.id}: trace system is byte-identical to the native provider system message`);
     assert.equal(wire.has("stylePrompt"), false,
-      `${spec.id}: no separate style trace exists outside the final wire system`);
+      `${spec.id}: no redundant style copy is emitted as an extra provider role`);
     verifySections(messages, spec.id);
   }
 

@@ -2,7 +2,7 @@
 import asyncio,sys,tempfile, unittest
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'api'))
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 import httpx
 from backend.api.routes import repair_runs as routes
 from backend.application.repair_pool.store import RepairStore
@@ -14,10 +14,15 @@ class HttpTest(unittest.IsolatedAsyncioTestCase):
   routes.store=RepairStore(Path(self.tmp.name)/'http.sqlite')
   self.app=FastAPI();self.app.include_router(routes.router)
   self.client=httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app),base_url='http://test')
-  self.root='/v2/engine/runsextension/repair-runs';self.headers={'X-TP-Run-Token':'a'*64}
+  self.root='/v2/engine/runsextension/repair-runs';self.headers={'X-TP-Run-Token':'a'*64,'X-TP-Tab-Session':'tab-session-a'}
   self.payloads=[];self.calls=0;self.started=asyncio.Event();self.finish=asyncio.Event()
-  async def generate(req,payload,op):
-   self.calls+=1; self.payloads.append(payload); self.started.set();await self.finish.wait()
+  async def generate(req,payload,op,*,cancel_check=None):
+   self.calls+=1; self.payloads.append(payload); self.started.set()
+   while not self.finish.is_set():
+    if cancel_check is not None and cancel_check():
+     raise HTTPException(409,detail={'code':'CANCELLED'})
+    try: await asyncio.wait_for(self.finish.wait(),timeout=.02)
+    except asyncio.TimeoutError: pass
    return dict(schema='tp.ai.result/1',translations=[dict(id='R0',text='สวัสดี')],missing=[],meta={'generationAttempts':1})
   routes.execute=generate
  async def asyncTearDown(self):
@@ -62,7 +67,7 @@ class HttpTest(unittest.IsolatedAsyncioTestCase):
   self.assertEqual(r.json()['repaired'],1);self.assertEqual(self.calls,0)
  async def test_cancel_while_provider_running_never_commits(self):
   payload=await self.prepare();first=asyncio.create_task(self.post('/r/tasks/t/translate',payload));await self.started.wait()
-  await self.post('/r/cancel',{});self.finish.set();await first
+  await self.post('/r/cancel',{});response=await first;self.assertEqual(response.status_code,409)
   r=await self.client.get(self.root+'/r',headers=self.headers);self.assertEqual(r.json()['phase'],'cancelled');self.assertEqual(r.json()['results'],[])
  async def test_wrong_language_reason_is_selected_from_the_durable_task(self):
   payload=await self.prepare(reason='wrong_language');payload['repair']={'reason':'untrusted','enabled':True}
@@ -74,6 +79,17 @@ class HttpTest(unittest.IsolatedAsyncioTestCase):
   self.finish.set();r=await self.post('/r/tasks/t/translate',payload)
   self.assertEqual(r.status_code,200);self.assertEqual(self.calls,1)
   self.assertEqual(self.payloads[0]['repair'],{'owner':'extension','enabled':False,'reason':''})
+
+ async def test_repair_registration_quota_is_scoped_by_tab_session_not_nat_ip(self):
+  first=await self.client.post(self.root,json={'runId':'scope-a','manifest':['p']},headers={**self.headers,'X-TP-Tab-Session':'tab-session-a'})
+  second=await self.client.post(self.root,json={'runId':'scope-b','manifest':['p']},headers={**self.headers,'X-TP-Tab-Session':'tab-session-b'})
+  self.assertEqual(first.status_code,200,first.text);self.assertEqual(second.status_code,200,second.text)
+  with routes.store._lock:
+   rows={key:routes.store._runs[key]['caller'] for key in ('scope-a','scope-b')}
+  self.assertFalse((Path(self.tmp.name)/'http.sqlite').exists())
+  self.assertNotEqual(rows['scope-a'],rows['scope-b'])
+  self.assertEqual(rows['scope-a'],routes.caller_scope(type('Req',(),{'headers':{'x-tp-tab-session':'tab-session-a','origin':''},'client':None})()))
+
  async def test_bad_input_400_and_bounded_body(self):
   r=await self.post('',[]);self.assertEqual(r.status_code,400)
   r=await self.post('',{'runId':'r','manifest':['p'],'extra':'x'*(2*1024*1024)})

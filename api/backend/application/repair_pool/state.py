@@ -178,6 +178,19 @@ def normalized_answer(answer: dict, ids: list[str]) -> dict:
     meta = answer.get("meta") if isinstance(answer.get("meta"), dict) else {}
     safe_meta = {k: meta[k] for k in ("usage", "provider", "model", "finishReason", "finish_reason",
         "providerAttempts", "generationAttempts", "omittedIds", "declinedIds", "providerMs") if k in meta}
+    if "alignmentUncertainIds" in meta:
+        uncertain = meta["alignmentUncertainIds"]
+        if not isinstance(uncertain, list) or any(uid not in ids for uid in uncertain):
+            raise PoolError("invalid_repair_alignment", 400)
+        safe_meta["alignmentUncertainIds"] = list(dict.fromkeys(uncertain))
+        safe_meta["alignmentStatus"] = "uncertain" if uncertain else "not_semantically_verified"
+    diagnostic = meta.get("contractDiagnostics")
+    if isinstance(diagnostic, dict):
+        # Retain bounded structural evidence for recovered receipts, not source text.
+        safe_meta["contractDiagnostics"] = {
+            key: list(dict.fromkeys(uid for uid in diagnostic.get(key, [])
+                if isinstance(uid, str) and re.fullmatch(r"(?:I[1-9][0-9]{0,6}_P[0-9]{1,6}|P[0-9]{1,6})", uid)))[:2000]
+            for key in ("ignoredUnknownIds", "duplicateIds") if isinstance(diagnostic.get(key), list)}
     return {"schema": "tp.ai.result/1", "translations": clean,
             "missing": [x for x in ids if x not in seen], "meta": safe_meta}
 
@@ -208,6 +221,9 @@ def complete(run: dict, task_id: str, body: dict) -> dict:
     accepted = body.get("accepted", [])
     if not isinstance(accepted, list) or any(not isinstance(x, str) for x in accepted) or len(set(accepted)) != len(accepted):
         raise PoolError("invalid_repair_acceptance", 400)
+    uncertain = set(((task.get("answer") or {}).get("meta") or {}).get("alignmentUncertainIds", []))
+    if uncertain.intersection(accepted):
+        raise PoolError("repair_alignment_uncertain", 409)
     returned = {x["id"]: x["text"] for x in (task.get("answer") or {}).get("translations", [])}
     if any(x not in task["ids"] or not returned.get(x, "").strip() for x in accepted):
         raise PoolError("invalid_repair_acceptance", 400)

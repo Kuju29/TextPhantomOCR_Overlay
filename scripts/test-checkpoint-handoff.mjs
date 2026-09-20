@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 globalThis.crypto ||= webcrypto;
 import {translateLensPage} from '../src/background/pipeline/page-translation.js';
-import {createTranslationSessionStore,TRANSLATION_SESSION_KEY} from '../src/background/translation-session-store.js';
+import {createTranslationSessionStore,translationSessionRunKey} from '../src/background/translation-session-store.js';
 import {createRepairCoordinator} from '../src/background/repair/coordinator.js';
 import {ensureBatch} from '../src/background/batches.js';
 const deferred=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};};
@@ -10,12 +10,12 @@ async function fixture({cancel=false,planningFailure=false}={}) {
  const id=crypto.randomUUID(),ac=new AbortController(),entered=deferred(),release=deferred();
  let saved={},writes=0,providerCalls=0,observations=0,nextCalls=0,epoch=7;
  const checkpoints=[],snapshots=[];
- const area={get:async key=>({[key]:structuredClone(saved[key])}),set:async patch=>{
+ const area={get:async key=>key==null?structuredClone(saved):({[key]:structuredClone(saved[key])}),set:async patch=>{
   writes++;
-  const page=Object.values(patch[TRANSLATION_SESSION_KEY].runs)[0]?.pages?.page;
+  const page=Object.values(patch).map(v=>v?.row?.pages?.page).find(Boolean);
   if(page?.accepted?.length===2 && page.inFlight?.length===2){entered.resolve();await release.promise;}
-  saved=structuredClone(patch);
- }};
+  Object.assign(saved,structuredClone(patch));
+ },remove:async keys=>{for(const key of (Array.isArray(keys)?keys:[keys]))delete saved[key];}};
  const sessions=createTranslationSessionStore({area:()=>area});
  const batch=ensureBatch(id,777,0),payload={engine:'extension',mode:'lens_text',source:'ai',lang:'th',src:'http://fixture/page.png',metadata:{image_id:'page'},context:{}};
  batch.items.set('page',{attempt:1,status:'queued',phase:'waiting',payload});
@@ -46,7 +46,7 @@ async function fixture({cancel=false,planningFailure=false}={}) {
  if(planningFailure){await assert.rejects(pending,/controlled planning failure/);}
  else {
   await entered.promise;assert.equal(providerCalls,1,'next provider blocked on combined durable write');
-  assert.equal(saved[TRANSLATION_SESSION_KEY].runs[run.id].pages.page.accepted.length,0,'uncommitted answer is not published');
+  assert.equal(saved[translationSessionRunKey(run.id)].row.pages.page.accepted.length,0,'uncommitted answer is not published');
   if(cancel)ac.abort();release.resolve();
   if(cancel)await assert.rejects(pending);else await pending;
  }

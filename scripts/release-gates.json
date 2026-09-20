@@ -23,12 +23,14 @@
   "separate": {
     "browser": {
       "reason": "Requires a local Chromium executable; offline real DOM/canvas gate, not live provider.",
-      "command": "npm run test:browser-display && python scripts/test-repair-browser.py --browser /path/to/chromium --out /tmp/tp-repair && npm run test:browser-status",
+      "command": "npm run test:browser-display && python scripts/test-repair-browser.py --browser /path/to/chromium --out /tmp/tp-repair && npm run test:browser-status && npm run test:browser-usage && npm run test:browser-conversation",
       "files": [
         "scripts/test-display-browser.py",
         "scripts/test-native-axis-browser.py",
         "scripts/test-repair-browser.py",
-        "scripts/test-image-status-browser.py"
+        "scripts/test-image-status-browser.py",
+        "scripts/test-compact-usage-browser.py",
+        "scripts/test-conversation-browser.py"
       ]
     },
     "windows": {

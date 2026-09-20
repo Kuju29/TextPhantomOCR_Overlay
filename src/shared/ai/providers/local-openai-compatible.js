@@ -49,7 +49,12 @@ export function createOpenAiCompatibleAdapter(settings = {}) {
     buildUserContent: (text, dataUri) => dataUri
       ? [{ type: "text", text }, { type: "image_url", image_url: { url: dataUri } }] : text,
     userImageFields: () => ({}), defaultThinking: "default", outputTokens: ({ standard }) => standard,
-    thinkingApplied: (mode) => mode === "default" ? "provider_default" : mode,
+    thinkingApplied: (mode, { payload = null } = {}) => {
+      if (mode === "default") return "provider_default";
+      const parameter = String(settings.thinking?.parameter || "");
+      return parameter && payload && Object.prototype.hasOwnProperty.call(payload, parameter)
+        ? `requested_${mode}` : "unverified";
+    },
     isStreamingResponse: (response) => Boolean(response.body?.getReader) &&
       String(response.headers?.get?.("content-type") || "").toLowerCase().includes("event-stream"),
     normalizeLine: normalizeOpenAiLine,

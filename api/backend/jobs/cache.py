@@ -11,9 +11,10 @@ from collections import OrderedDict
 from threading import Lock
 from typing import Any
 
-import hashlib, copy, json
+import hashlib, copy, json, hmac, secrets
 
 from backend.ai.translation.contracts import AiConfig
+from backend.ai.prompts.localization import LOCALIZATION_POLICY_VERSION
 from backend.config import settings
 from backend.lens.languages import normalize as normalize_lang
 
@@ -71,12 +72,20 @@ def _ai_context_signature(ai_cfg: AiConfig) -> str:
             "speakers": getattr(ai_cfg, "speakers", None) or {},
             "prev": getattr(ai_cfg, "prev_context", None) or [],
             "page": getattr(ai_cfg, "page_context", None) or [],
+            "captured": getattr(ai_cfg, "source_context", None) or [],
+            "sourceLang": getattr(ai_cfg, "source_lang", ""),
+            "styleExamples": getattr(ai_cfg, "style_examples", True),
+            "memoryMode": getattr(ai_cfg, "memory_mode", None),
+            "glossary": getattr(ai_cfg, "glossary", None) or [],
+            "characters": getattr(ai_cfg, "characters", None) or [],
         },
         ensure_ascii=False,
         sort_keys=True,
         default=str,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
+_scope_salt = secrets.token_bytes(32)
 
 def build_cache_key(
     img_hash: str,
@@ -85,6 +94,7 @@ def build_cache_key(
     source: str,
     ai_cfg: AiConfig | None,
     layout: dict[str, Any] | None = None,
+    *, owner_scope: str = "",
 ) -> str:
     """Build a deterministic cache key for one translation request.
 
@@ -104,10 +114,15 @@ def build_cache_key(
     if ai_cfg and (source or "").strip().lower() == "ai":
         parts.extend(
             [
+                "owner_" + hmac.new(_scope_salt,
+                    json.dumps([owner_scope, ai_cfg.api_key or ""]).encode(), hashlib.sha256).hexdigest(),
                 (ai_cfg.provider or "").strip(),
                 (ai_cfg.model or "").strip(),
                 (ai_cfg.base_url or "").strip(),
                 _ai_prompt_signature(ai_cfg.prompt_editable),
+                LOCALIZATION_POLICY_VERSION,
+                f"examples_{getattr(ai_cfg, 'style_examples', True) is not False}",
+                f"memory_{getattr(ai_cfg, 'memory_mode', None)}",
                 # Vision / character-memory settings produce different results.
                 # send_image may be False / True / "always" / "auto".
                 f"img_{str(getattr(ai_cfg, 'send_image', False) or 'off').lower()}",
@@ -116,7 +131,7 @@ def build_cache_key(
                 f"think_{str(getattr(ai_cfg, 'thinking', '') or 'off').lower()}",
             ]
         )
-        # Frozen series context: immutable per batch -> correct AND cacheable.
-        if bool(getattr(ai_cfg, "context_frozen", False)):
-            parts.append("ctx_" + _ai_context_signature(ai_cfg))
+        # Never reuse a private translation across different contexts, even
+        # before a caller freezes its memory snapshot.
+        parts.append("ctx_" + _ai_context_signature(ai_cfg))
     return "|".join(p for p in parts if p is not None)

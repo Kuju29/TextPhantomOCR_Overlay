@@ -1,0 +1,31 @@
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import {createAiProfiles,updateAiProfile,resolveAiProfile} from '../src/shared/ai-profiles.js';
+import {createAiProfileActivationController,resolveEffectiveAiProfile,buildEffectiveAiPayload} from '../src/shared/ai-profile-activation.js';
+import {translateViaServer} from '../src/background/ai/transports/server.js';
+const defaults={thinking:'off',memoryMode:'off',styleExamples:true,translationMode:'conversation',conversationReset:'0'};
+const target={provider:'huggingface',model:'fixture',endpoint:'https://router.huggingface.co/v1',runtime:'cloud'};
+let state=createAiProfiles();
+assert.equal(resolveAiProfile(state,{...target,defaults:{}}).profile.translationMode,'conversation','migrate missing option to new default');
+state=updateAiProfile(state,{...target,defaults,patch:{translationMode:'independent'},select:true,now:1});
+assert.equal(resolveAiProfile(state,{...target,defaults}).profile.translationMode,'independent','stored Independent preference must remain frozen for later re-enable');
+assert.equal(resolveAiProfile(state,{...target,model:'another',defaults}).profile.translationMode,'conversation');
+let controller=createAiProfileActivationController({state,defaults});
+let selected=resolveEffectiveAiProfile(controller.select(target,{language:'th'}));
+for(const engine of ['runsextension','runsapi']) assert.equal(buildEffectiveAiPayload(selected,{engine}).ai.translation_mode,'conversation');
+state=updateAiProfile(state,{...target,defaults,patch:{translationMode:'conversation',conversationReset:'new-session'},select:true,now:2});
+controller=createAiProfileActivationController({state,defaults});selected=resolveEffectiveAiProfile(controller.select(target,{language:'th'}));
+const a=buildEffectiveAiPayload(selected,{engine:'runsextension'}),b=buildEffectiveAiPayload(selected,{engine:'runsapi'});
+assert.deepEqual(a,b);assert.equal(a.ai.conversation_reset,'new-session');assert.equal(a.ai.translation_mode,'conversation');
+assert.equal(a.ai.style_examples,true);assert.equal(a.ai.memory_mode,'off','session history setting does not rewrite Series memory');
+const html=await readFile(new URL('../src/popup/popup.html',import.meta.url),'utf8');
+assert.ok(html.indexOf('ai-translation-mode')>html.indexOf('Optional Cloud-only request-rate cap'));
+assert.ok(html.indexOf('ai-translation-mode')<html.indexOf('<section class="panel" id="panel-tools"'));
+assert.ok(html.includes('value="conversation" selected'));assert.ok(html.includes('value="independent" disabled>Independent (original)</option>'));assert.doesNotMatch(html,/id="ai-translation-mode"[^>]*\sdisabled/);
+let called=0;const oldFetch=globalThis.fetch;
+try{
+ globalThis.fetch=()=>{called++;throw new Error('Unexpected network');};
+ await assert.rejects(translateViaServer([{id:'p',text:'Hello'}],{ai:{translation_mode:'conversation'},base:'http://localhost:7860',targetLang:'th',capabilities:{}}),{code:'ai_conversation_unsupported'});
+ assert.equal(called,0,'unsupported API must reject before spending a generation');
+} finally{globalThis.fetch=oldFetch;}
+console.log('PASS Conversation execution gate preserves dormant Independent preference, both engines, reset, examples/Series memory unchanged, negotiated old-API rejection');

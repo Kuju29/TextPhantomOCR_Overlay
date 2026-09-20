@@ -6,7 +6,7 @@ import {webcrypto} from 'node:crypto';
 import vm from 'node:vm';
 globalThis.crypto ||= webcrypto;
 const root = pathToFileURL(`${process.env.TP_TEST_ROOT || process.cwd()}/`);
-const {persistProviderGeneration, currentUsage} = await import(new URL('src/shared/ai-usage.js',root));
+const {persistProviderGeneration, currentUsage, flushUsageReceiptJournal} = await import(new URL('src/shared/ai-usage.js',root));
 const results=[];
 async function check(name, fn) {
   try {await fn(); results.push({name,pass:true}); console.log('PASS',name);}
@@ -14,34 +14,36 @@ async function check(name, fn) {
 }
 const target={runtime:'cloud',provider:'openrouter',model:'fixture',engine:'runsextension'};
 const usage={inputTokens:100,outputTokens:20,totalTokens:120,cachedInputTokens:70,providerCostUsd:'0.000123',usageStatus:'reported',receiptId:'stable-receipt'};
-const storage={}; let writes=0;
+const storage={}; let writes=0,ledgerWrites=0;
 globalThis.chrome={runtime:{},storage:{local:{
  get(keys,cb){cb({...keys,...structuredClone(storage)});},
- set(data,cb){writes++; Object.assign(storage,structuredClone(data));cb?.();},
+ set(data,cb){writes++;if(Object.hasOwn(data,'aiUsageV1'))ledgerWrites++;Object.assign(storage,structuredClone(data));cb?.();},
+ remove(keys,cb){for(const key of keys||[])delete storage[key];cb?.();},
 }}};
 await check('100 identical recovered receipts produce no storage changes or extra usage',async()=>{
- await persistProviderGeneration({...target,operationId:'first',usage});
- const before=writes;
+ await persistProviderGeneration({...target,operationId:'first',usage});await flushUsageReceiptJournal();
+ const before=ledgerWrites;
  for(let i=0;i<100;i++) await persistProviderGeneration({...target,operationId:`recovery-${i}`,usage,replayed:true});
+ await flushUsageReceiptJournal();
  const row=currentUsage(storage.aiUsageV1,target);
  assert.equal(row.requests,1); assert.equal(row.totalTokens,120); assert.equal(row.cachedInputTokens,70);
- assert.equal(writes-before,0,'duplicate receipts must not write the entire ledger again');
+ assert.equal(ledgerWrites-before,0,'duplicate receipts must not write the entire ledger again');
 });
 await check('late counters are persisted once and preserve cost/cache accounting',async()=>{
  const partial={...target,operationId:'late',usage:{receiptId:'late-receipt',inputTokens:100,usageStatus:'incomplete'}};
- await persistProviderGeneration(partial);const before=writes;
- await persistProviderGeneration({...partial,usage:{...usage,receiptId:'late-receipt'}});
- assert.equal(writes-before,1);const row=currentUsage(storage.aiUsageV1,target);
+ await persistProviderGeneration(partial);await flushUsageReceiptJournal();const before=ledgerWrites;
+ await persistProviderGeneration({...partial,usage:{...usage,receiptId:'late-receipt'}});await flushUsageReceiptJournal();
+ assert.equal(ledgerWrites-before,1);const row=currentUsage(storage.aiUsageV1,target);
  assert.equal(row.requests,2);assert.equal(row.totalTokens,240);assert.equal(row.cachedInputTokens,140);
  assert.equal(row.providerCostUsd,'0.000246');assert.equal(row.incompleteRequests,0);
 });
 await check('pending cleanup writes even when the completed receipt is already known',async()=>{
  const event={...target,operationId:'pending-replay',usage};
- await persistProviderGeneration({...event,pending:true});
+ await persistProviderGeneration({...event,pending:true});await flushUsageReceiptJournal();
  assert.equal(currentUsage(storage.aiUsageV1,target).pendingOperations,1);
- const before=writes;
- await persistProviderGeneration({...event,replayed:true});
- assert.equal(writes-before,1);const row=currentUsage(storage.aiUsageV1,target);
+ const before=ledgerWrites;
+ await persistProviderGeneration({...event,replayed:true});await flushUsageReceiptJournal();
+ assert.equal(ledgerWrites-before,1);const row=currentUsage(storage.aiUsageV1,target);
  assert.equal(row.pendingOperations,0);assert.equal(row.requests,2);
 });
 function frameRuntime(visibility='visible') {

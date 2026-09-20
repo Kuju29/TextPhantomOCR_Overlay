@@ -4,6 +4,10 @@ import { fileURLToPath } from 'node:url';
 import '../src/shared/diagnostic-schema.js';
 
 const events = [
+  {schema:'tp.audit/1',event:'page_visibility',reason:'changed',hidden:true,observedAt:123,visibilityChanges:2},
+  {schema:'tp.audit/1',event:'render_timing',reason:'success',hiddenAtStart:false,hiddenAtFinish:true,
+    timing:{readableSourceMs:1,canvasReadMs:2,erasePaintMs:3,encodeMs:4,backgroundMs:10,layoutMs:2,domApplyMs:1,renderMs:13,visibilityChanges:1}},
+
   {schema:'tp.audit/1',event:'usage_commit_timing',reason:'success',timing:{usageCallbackMs:45,callbackMs:4,persistMs:40}},
   {schema:'tp.audit/1',event:'request_timing',reason:'body_failed',timing:{httpMs:45,bodyMs:4}},
   {schema:'tp.audit/1',event:'request_timing',reason:'response_complete',route:'direct-local',
@@ -25,6 +29,7 @@ const api = spawnSync('python3',['-c',
   {cwd:fileURLToPath(new URL('../api/',import.meta.url)),input:JSON.stringify(sanitized),encoding:'utf8'});
 assert.equal(api.status,0,api.stderr);
 assert.deepEqual(JSON.parse(api.stdout),events,'all timing fields must also survive API filtering');
-const privateEvent = {...events[0],api_key:'secret',prompt:'private',timing:{...events[0].timing,rawText:'private'}};
-assert.deepEqual(globalThis.TPAuditSchema.sanitize(privateEvent),events[0],'do not broaden content/credential logging');
+const privateBase = events.find(event => event.event === "usage_commit_timing");
+const privateEvent = {...privateBase,api_key:'secret',prompt:'private',timing:{...privateBase.timing,rawText:'private'}};
+assert.deepEqual(globalThis.TPAuditSchema.sanitize(privateEvent),privateBase,'do not broaden content/credential logging');
 console.log('PASS: timing events survive both browser and API; private fields remain excluded');

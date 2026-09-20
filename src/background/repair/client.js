@@ -14,6 +14,7 @@ export async function repairRequest(run, action = '', body = undefined, { signal
       method: method || (body === undefined ? 'GET' : 'POST'), cache: 'no-store',
       headers: { 'Content-Type': 'application/json', 'X-TP-Run-Token': run.token,
         'X-TP-Run-Id': String(run.id || ''),
+        ...(run.sessionId ? {'X-TP-Tab-Session': String(run.sessionId)} : {}),
         ...(run.batchId ? {'X-TP-Batch-Id': String(run.batchId)} : {}),
         ...(action.match(/tasks\/([^/]+)/)?.[1]
           ? {'X-TP-Task-Id': decodeURIComponent(action.match(/tasks\/([^/]+)/)[1])} : {}) },

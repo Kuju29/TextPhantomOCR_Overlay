@@ -68,7 +68,7 @@ await test('uncertain geometry reaches AI preparation and one failed unit repair
     assert.deepEqual(buildPatchedResult(page,rows),patched,'repeat apply is idempotent');}
   });
   assert.equal(final.repaired,1);assert.equal(final.unavailablePages,0);assert.equal(patches,1);
-  assert.match(wire[0].messages[1].content,/REPAIR — WRONG TARGET LANGUAGE/);
+  assert.match(wire[0].messages[1].content,/ซ่อมคำแปล — ผิดภาษาปลายทาง/);
   assert(events.some(e=>e.name==='repair'&&e.data.acceptedCount===1));
  }finally{globalThis.fetch=savedFetch;b.close();}
 });
@@ -80,7 +80,7 @@ for(const lang of ['th','en'])for(const schema of [false,true])await test(`Local
   await translateWithLocalOpenAi(units,opts);
   const out=await translateWithLocalOpenAi(units,{...opts,ai:{...config,repair_reason:'wrong_target_script'}});
   assert.equal(wire.length,2);assert.equal(wire[0].messages[0].content,wire[1].messages[0].content);
-  assert.doesNotMatch(wire[0].messages[1].content,/REPAIR —/);assert.match(wire[1].messages[1].content,/previous response/);
+  assert.doesNotMatch(wire[0].messages[1].content,/ซ่อมคำแปล —/);assert.match(wire[1].messages[1].content,lang==='th'?/คำตอบก่อนหน้า/:/previous response/);
   assert(wire[1].messages[1].content.includes(targetLanguagePriority(lang)));assert.equal(out.translations[0].id,'failed-global-id');
   assert.equal(out.meta.usage.cachedInputTokens,512);assert.equal(out.meta.usage.outputTokens,24);
  }finally{globalThis.fetch=savedFetch;}
@@ -104,7 +104,7 @@ await test('actual Local/Cloud route owners preserve repair reason and account e
    const answer=await routeTranslate([{id:'global-failed',text:'星野、目をつぶって。'}],{route,base:'https://fixture.invalid',ai:{...config,repair_reason:'wrong_target_script'},targetLang:'th',sourceLang:'ja',operationId:'repair-route-'+route});
    assert.equal(answer.translations[0].id,'global-failed');
   }
-  assert.equal(wire.length,2);assert.match(wire[0].body.messages[1].content,/REPAIR — WRONG TARGET LANGUAGE/);
+  assert.equal(wire.length,2);assert.match(wire[0].body.messages[1].content,/ซ่อมคำแปล — ผิดภาษาปลายทาง/);
   assert.deepEqual(wire[1].body.repair,{owner:'extension',enabled:false,reason:'wrong_target_script'});
   const sessions=Object.values(storage.aiUsageV1.models).flatMap(m=>m.sessions||[]);
   assert.equal(sessions.reduce((n,s)=>n+s.requests,0),2);

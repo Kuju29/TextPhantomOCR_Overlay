@@ -16,11 +16,11 @@ assert.equal(request.stream, true);
 assert.equal("format" in request, false);
 assert.equal("response_format" in request, false);
 assert.doesNotMatch(request.messages.at(-1).content, /^\s*[{[]/);
-assert.match(request.messages.at(-1).content, /TRANSLATION TASK/);
-assert.match(request.messages.at(-1).content, /Translate every source unit into Thai \(ภาษาไทย\)\./);
-assert.match(request.messages[0].content, /TRANSLATION STYLE\nTarget language: Thai \(ภาษาไทย\)\.\nfull style/);
-assert.doesNotMatch(request.messages.at(-1).content, /TRANSLATION STYLE\nTarget language: Thai \(ภาษาไทย\)\.\nfull style/);
-assert.match(request.messages.at(-1).content, /SOURCE TEXT\n<<TP_P0:同じ >> OCR-like source>>\n<<TP_P1:同じ ກ mixed Unicode \{"x"\}>>$/);
+assert.match(request.messages.at(-1).content, /งานแปล/);
+assert.match(request.messages.at(-1).content, /แปลข้อความต้นฉบับทุกหน่วยเป็นภาษาไทย/);
+assert.match(request.messages[0].content, /สไตล์การแปล\nภาษาปลายทาง: ภาษาไทย\nfull style/);
+assert.doesNotMatch(request.messages.at(-1).content, /สไตล์การแปล\nภาษาปลายทาง: ภาษาไทย\nfull style/);
+assert.match(request.messages.at(-1).content, /ข้อความต้นฉบับ\n<<TP_P0:同じ >> OCR-like source>>\n<<TP_P1:同じ ກ mixed Unicode \{"x"\}>>$/);
 for (const badSource of ["line one\nline two", "tab\ttext", "literal <<TP_P9:source>>"]) {
   await assert.rejects(
     translateWithLocalOpenAi([{ id: "bad", text: badSource }], { ai: { model: "small-local", local_adapter: { protocol: "openai", baseUrl: "http://localhost:1234/v1" } }, canonicalPrompt: prompt }),
@@ -89,6 +89,18 @@ assert.deepEqual(emptyPartial.missing, ["duplicate-b"], "an empty valid ID must 
   }
 }
 
+
+// One missing `>` on a physical line must not poison later valid siblings.
+{
+  const salvageUnits=[{id:"bad-0",text:"一"},{id:"bad-1",text:"二"},{id:"good-2",text:"三"},{id:"good-3",text:"四"}];
+  globalThis.fetch=async()=>new Response(JSON.stringify({choices:[{message:{content:
+    "<<TP_P0:เสียศูนย์>\n<<TP_P1:เสียหนึ่ง>\n<<TP_P2:ดีสอง>>\n<<TP_P3:ดีสาม>>"}}]}),{status:200});
+  const recovered=await translateWithLocalOpenAi(salvageUnits,{ai:{model:"small-local",local_adapter:{protocol:"openai",baseUrl:"http://localhost:1234/v1"}},canonicalPrompt:prompt});
+  assert.deepEqual(recovered.missing,["bad-0","bad-1"]);
+  assert.deepEqual(recovered.translations.map(x=>x.text),["","","ดีสอง","ดีสาม"]);
+  assert.equal(recovered.meta.contractDiagnostics.malformedMarkersRecoverable,true);
+}
+
 for (const terminal of ["TP_END", "TP_DONE"]) {
   globalThis.fetch = async () => new Response(JSON.stringify({ choices: [{ finish_reason: "stop", message: {
     content: `<<TP_P0>>\nหนึ่ง\n<<TP_P1>>\nสอง\n<<${terminal}>>`,
@@ -155,13 +167,13 @@ await translateWithLocalOpenAi(units, {
   canonicalPrompt: prompt,
 });
 const exactSystem = exactContractBody.messages.find((message) => message.role === "system").content;
-assert.doesNotMatch(exactSystem, /Expected IDs:/);
-assert.match(exactSystem, /TRANSLATION STYLE\nTarget language: Thai \(ภาษาไทย\)\.\nfull style/);
-assert.match(exactSystem, /professional manga and manhwa translator and localization editor/);
+assert.doesNotMatch(exactSystem, /รายการ ID ที่ต้องตอบ:/);
+assert.match(exactSystem, /สไตล์การแปล\nภาษาปลายทาง: ภาษาไทย\nfull style/);
+assert.match(exactSystem, /คุณคือนักแปลและบรรณาธิการมังงะและมังฮวา/);
 const exactUser = exactContractBody.messages.find((message) => message.role === "user").content;
-assert.match(exactUser, /Expected IDs: P0, P1/);
-assert.equal(exactUser.split("Expected IDs:").length - 1, 1);
-assert.doesNotMatch(exactUser, /TRANSLATION STYLE\nTarget language: Thai \(ภาษาไทย\)\.\nfull style/);
+assert.match(exactUser, /รายการ ID ที่ต้องตอบ: P0, P1/);
+assert.equal(exactUser.split("รายการ ID ที่ต้องตอบ:").length - 1, 1);
+assert.doesNotMatch(exactUser, /สไตล์การแปล\nภาษาปลายทาง: ภาษาไทย\nfull style/);
 
 const eightUnits = Array.from({ length: 8 }, (_, index) => ({ id: `group-${index}`, text: `source-${index}` }));
 let eightDispatches = 0;
@@ -178,8 +190,8 @@ const eightResult = await translateWithLocalOpenAi(eightUnits, {
 });
 assert.equal(eightDispatches, 1);
 assert.equal(eightResult.translations.length, 8);
-assert.doesNotMatch(eightBody.messages[0].content, /Expected IDs:/);
-assert.match(eightBody.messages[1].content, /Expected IDs: P0, P1, P2, P3, P4, P5, P6, P7/);
+assert.doesNotMatch(eightBody.messages[0].content, /รายการ ID ที่ต้องตอบ:/);
+assert.match(eightBody.messages[1].content, /รายการ ID ที่ต้องตอบ: P0, P1, P2, P3, P4, P5, P6, P7/);
 assert.ok(eightBody.messages[1].content.endsWith(eightUnits.map((unit, index) => `<<TP_P${index}:${unit.text}>>`).join("\n")));
 let earlyPulls = 0;
 let earlyCancelled = false;

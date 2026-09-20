@@ -227,29 +227,119 @@
   }
 
   let toastEl = null;
+  let toastMainEl = null;
+  let toastTextEl = null;
+  let toastToggleEl = null;
+  let toastDetailsEl = null;
+  let toastProgressMode = false;
   let toastTimer = 0;
   const liveToasts = new Map();
   const toastVersions = new Map();
   let toastPageStarted = 0;
 
-  function paintToast(text, ms) {
-    if (!toastEl) {
-      toastEl = document.createElement("div");
-      Object.assign(toastEl.style, {
-        position: "fixed", right: "10px", bottom: "10px", zIndex: 2147483647,
-        padding: "8px 10px", borderRadius: "10px", background: "rgba(0,0,0,.75)",
-        color: "#fff", fontSize: "12px", lineHeight: "1.2", maxWidth: "68vw",
-        pointerEvents: "none",
-      });
-      document.documentElement.appendChild(toastEl);
+  function ensureToastShell() {
+    if (toastEl?.isConnected) {
+      return {
+        root: toastEl,
+        main: toastMainEl,
+        text: toastTextEl,
+        toggle: toastToggleEl,
+        details: toastDetailsEl,
+      };
     }
-    toastEl.textContent = String(text);
-    toastEl.style.display = "block";
+    toastEl = document.createElement("section");
+    toastEl.id = "tp-toast";
+    Object.assign(toastEl.style, {
+      position: "fixed", right: "10px", bottom: "10px", zIndex: 2147483647,
+      padding: "0", borderRadius: "10px", background: "rgba(0,0,0,.75)",
+      color: "#fff", fontSize: "12px", lineHeight: "1.2", maxWidth: "68vw",
+      boxShadow: "0 5px 22px rgba(0,0,0,.28)", overflow: "hidden",
+      pointerEvents: "none",
+    });
+    toastMainEl = document.createElement("div");
+    Object.assign(toastMainEl.style, {
+      display: "flex", alignItems: "center", gap: "8px", minWidth: "0",
+      padding: "8px 10px",
+    });
+    toastTextEl = document.createElement("span");
+    Object.assign(toastTextEl.style, {
+      display: "block", flex: "1 1 auto", minWidth: "0", maxWidth: "100%", whiteSpace: "normal",
+      overflow: "hidden", textOverflow: "ellipsis",
+    });
+    toastToggleEl = document.createElement("button");
+    toastToggleEl.type = "button";
+    toastToggleEl.textContent = "+";
+    toastToggleEl.setAttribute("aria-expanded", "false");
+    toastToggleEl.setAttribute("aria-label", "Show TextPhantom details");
+    Object.assign(toastToggleEl.style, {
+      display: "none", flex: "0 0 auto", width: "22px", height: "22px", padding: "0",
+      marginLeft: "auto", alignItems: "center", justifyContent: "center", textAlign: "center",
+      border: "1px solid rgba(255,255,255,.16)", borderRadius: "6px",
+      background: "rgba(255,255,255,.06)", color: "#fff", cursor: "pointer",
+      font: "700 15px/1 system-ui,-apple-system,Segoe UI,sans-serif",
+      pointerEvents: "auto",
+    });
+    toastDetailsEl = document.createElement("div");
+    Object.assign(toastDetailsEl.style, {
+      display: "none", maxHeight: "calc(46vh - 38px)", overflow: "auto",
+      borderTop: "1px solid rgba(255,255,255,.10)", pointerEvents: "auto",
+      background: "rgba(10,10,12,.97)",
+    });
+    toastMainEl.append(toastTextEl, toastToggleEl);
+    toastEl.append(toastMainEl, toastDetailsEl);
+    document.documentElement.appendChild(toastEl);
+    return {
+      root: toastEl,
+      main: toastMainEl,
+      text: toastTextEl,
+      toggle: toastToggleEl,
+      details: toastDetailsEl,
+    };
+  }
+
+  function setToastProgressMode(active) {
+    const shell = ensureToastShell();
+    toastProgressMode = Boolean(active);
+    // The live batch presenter reuses the original toast DOM. A timeout that
+    // was armed by an earlier one-off toast (for example "collecting images")
+    // must never hide that shared DOM while batch progress is still active.
+    if (toastProgressMode && toastTimer) {
+      clearTimeout(toastTimer);
+      toastTimer = 0;
+    }
+    shell.toggle.style.display = toastProgressMode ? "inline-flex" : "none";
+    if (!toastProgressMode) {
+      shell.details.style.display = "none";
+      shell.details.textContent = "";
+      shell.toggle.textContent = "+";
+      shell.toggle.setAttribute("aria-expanded", "false");
+      shell.root.style.width = "auto";
+      shell.root.style.maxWidth = "68vw";
+      shell.root.style.maxHeight = "none";
+      shell.text.style.whiteSpace = "normal";
+      shell.main.style.borderBottom = "0";
+    }
+    return shell;
+  }
+
+  function getToastProgressHost() {
+    return ensureToastShell();
+  }
+
+  function paintToast(text, ms) {
+    const shell = ensureToastShell();
+    shell.text.textContent = String(text);
+    if (!toastProgressMode) shell.text.style.whiteSpace = "normal";
+    shell.root.style.display = "block";
     if (toastTimer) clearTimeout(toastTimer);
     toastTimer = 0;
     if (ms > 0) toastTimer = setTimeout(() => {
       toastTimer = 0;
-      if (!liveToasts.size && toastEl) toastEl.style.display = "none";
+      // Progress mode owns the same shell. Never let a stale one-off toast
+      // timeout make live work disappear; the progress presenter decides when
+      // the shell may be hidden after the batch is actually terminal.
+      if (!toastProgressMode && !liveToasts.size && toastEl)
+        toastEl.style.display = "none";
     }, Math.max(800, ms));
   }
 
@@ -279,6 +369,8 @@
     liveToasts.clear(); toastVersions.clear();
     if (toastTimer) clearTimeout(toastTimer);
     toastTimer = 0;
+    TP.clearBatchProgress?.();
+    setToastProgressMode(false);
     if (toastEl) toastEl.style.display = "none";
   };
 
@@ -360,6 +452,8 @@
     buildPositionFromElement,
     computeScale,
     showToast,
+    getToastProgressHost,
+    setToastProgressMode,
     emitViewerEvent,
   });
 })();

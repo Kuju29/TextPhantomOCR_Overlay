@@ -88,6 +88,32 @@ assert.deepEqual(
       error.diagnostics?.wrongLanguageIds?.[0] === "g0",
   );
 }
+{
+  const seen = [];
+  const result = await runContentValidatedTranslation({
+    translate: async () => ({
+      translations: [{ id: "g0", text: "คำแปล" }],
+      meta: { generationAttempts: 1, providerAttempts: 1 },
+    }),
+    units: [{ id: "g0", text: "one" }, { id: "g1", text: "two" }],
+    operationBase: "defer-post-batch-repair",
+    contentDefects: (answer) => ({
+      missing: answer.translations.some(x => x.id === "g1") ? [] : ["g1"],
+      wrongLanguage: [],
+      languageDiagnostics: [],
+      invalid: !answer.translations.some(x => x.id === "g1"),
+    }),
+    traceAttempt: (event, attempt, detail) => seen.push({ event, attempt, detail }),
+    repair: { enabled: false, deferredToBatch: true },
+  });
+  assert.deepEqual(result.outcome.translations, [{ id: "g0", text: "คำแปล" }]);
+  const deferred = seen.find(x => x.event === "repair_deferred");
+  assert.ok(deferred, "post-batch repair ownership must be logged as deferred, not skipped");
+  assert.equal(deferred.attempt, 2);
+  assert.equal(deferred.detail.repairDeferredToBatch, true);
+  assert.deepEqual(deferred.detail.missingIds, ["g1"]);
+  assert.equal(seen.some(x => x.event === "repair_skipped"), false);
+}
 assert.equal(summarizeUnitScripts([{ id: "g0", text: "아니요 잠깐" }])[0].hangul, 5,
   "trace script summaries must count Hangul explicitly");
 {
@@ -228,6 +254,35 @@ for (const [source, output] of [
     ["g0"],
     `a different source script must not exempt invented output: ${source} -> ${output}`,
   );
+}
+
+
+// Single-image regression from logs-14.21: if a model echoes the English source
+// inside the marker and writes Thai outside it, the outside prose is never
+// salvaged. The marker value is rejected as wrong-language and the existing
+// bounded repair owns the unit.
+{
+  const units = [{ id: "g0", text: "I'LL SHOW YOU" }];
+  let calls = 0;
+  const seen = [];
+  const result = await runContentValidatedTranslation({
+    units, operationBase: "single-image-source-echo",
+    translate: async (selected) => {
+      calls++; seen.push(selected.map(unit => unit.id));
+      return calls === 1
+        ? { translations: [{ id: "g0", text: "I'LL SHOW YOU" }], meta: { generationAttempts: 1 } }
+        : { translations: [{ id: "g0", text: "ฉันจะโชว์ให้ดูนี่แหละ" }], meta: { generationAttempts: 1 } };
+    },
+    contentDefects: (answer) => {
+      const wrongLanguage = dominantWrongTargetIds(answer.translations, "th", units);
+      return { missing: [], wrongLanguage, invalid: wrongLanguage.length > 0 };
+    },
+    repair: { enabled: true },
+  });
+  assert.equal(calls, 2);
+  assert.deepEqual(seen, [["g0"],["g0"]]);
+  assert.deepEqual(result.outcome.translations, [{ id: "g0", text: "ฉันจะโชว์ให้ดูนี่แหละ" }]);
+  assert.equal(result.repairReason, "wrong_target_script");
 }
 
 // A failed repair preserves valid initial units and exposes only unresolved
@@ -409,8 +464,8 @@ assert.match(aiExecution, /return translateLensPage\(\{/,
   "AI execution must delegate content translation to page-translation");
 assert.match(pageTranslation, /runContentValidatedTranslation\(\{/,
   "page-translation must use the production content-repair orchestrator");
-assert.match(pageTranslation, /repair:\s*\{\s*enabled:\s*false\s*\}/,
-  "production page translation must enforce one image/one provider generation");
+assert.match(pageTranslation, /repair:\s*\{\s*enabled:\s*false,\s*deferredToBatch:\s*true\s*\}/,
+  "production page translation must defer defects to the post-batch repair owner without a second per-page generation");
 assert.doesNotMatch(`${jobs}\n${aiExecution}\n${pageTranslation}`, /generatedContentFailure|repairReason = "malformed_output"|\$\{operationBase\}:repair-1/,
   "jobs must not retain a second malformed-output repair branch outside the shared policy");
 assert.match(aiExecution, /releaseSuccess\([\s\S]*?waitForBatchInitialAi\([\s\S]*?await acquire\(/,

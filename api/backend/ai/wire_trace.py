@@ -8,6 +8,7 @@ Credentials are the only values rewritten before persistence.
 from __future__ import annotations
 
 import contextvars
+import hashlib
 import json
 import os
 import re
@@ -65,14 +66,51 @@ def start_session() -> dict[str, Any]:
 def safe_path_part(value: Any, *, fallback: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or fallback))[:80] or fallback
 
+def image_label(identity: dict[str, Any]) -> str:
+    """Source page indexes are zero-based; reservation pageOrder is unrelated."""
+    origins = identity.get("origins")
+    rows = origins if isinstance(origins, list) and origins else [identity]
+    numbers = set()
+    unknown = False
+    for row in rows:
+        value = row.get("pageIndex") if isinstance(row, dict) else None
+        if type(value) is int and 0 <= value < 1000000:
+            numbers.add(value + 1)
+        else:
+            unknown = True
+    labels = [f"{n:04d}" for n in sorted(numbers)[:4]]
+    if len(numbers) > 4:
+        labels.append(f"more{len(numbers)-4}")
+    if unknown:
+        labels.append("unknown")
+    return ("imgs-" if len(rows) > 1 else "img-") + "+".join(labels)
+
+
+def folder_name(identity: dict[str, Any], execution_key: Any = None) -> str:
+    kind = ("page-summary" if identity.get("recordKind") == "page_summary"
+            else "repair" if identity.get("attemptKind") == "repair" else "initial")
+    suffix = [safe_path_part(identity.get("traceId"), fallback="no-trace"),
+              safe_path_part(identity.get("operationId"), fallback="no-operation")]
+    if execution_key is not None:
+        suffix.append(safe_path_part(execution_key, fallback="no-execution"))
+    name = "--".join([image_label(identity), kind, *suffix])
+    raw_parts = [identity.get("traceId"), identity.get("operationId")]
+    if execution_key is not None:
+        raw_parts.append(execution_key)
+    lossy = any(raw and str(raw) != safe for raw, safe in zip(raw_parts, suffix))
+    if len(name) > 120 or lossy:
+        # Keep the Windows filename component bounded; full IDs stay in identity.
+        digest = hashlib.sha256(json.dumps([identity.get("traceId"), identity.get("operationId"), execution_key], default=str).encode()).hexdigest()[:16]
+        name = name[:102] + "--" + digest
+    return name
+
+
 def begin(identity: dict[str, Any]) -> contextvars.Token:
     if not enabled():
         return _active.set(None)
     identity = {**dict(identity or {}), "wireTracePid": os.getpid()}
-    trace_id = safe_path_part(identity.get("traceId"), fallback="no-trace")
-    operation = safe_path_part(identity.get("operationId"), fallback="no-operation")
     root = root_dir()
-    folder = root / f"{trace_id}--{operation}"
+    folder = root / folder_name(identity)
     try:
         folder.mkdir(parents=True, exist_ok=True)
         token = _active.set(folder)
@@ -137,7 +175,9 @@ def begin_in(folder: Path, identity: dict[str, Any]) -> None:
     try:
         folder.mkdir(parents=True, exist_ok=True)
         write_json_in(folder, "00_identity.json", identity)
-        write_json_in(folder, "04_provider_request.json", {"status": "not_reached"})
+        write_json_in(folder, "04_provider_request.json",
+                      {"status": "not_applicable", "recordKind": "page_summary", "reason": "provider_requests_in_children"}
+                      if identity.get("recordKind") == "page_summary" else {"status": "not_reached"})
         write_text_in(folder, "05_provider_response.raw", "")
         write_text_in(folder, "05_provider_response.assembled.txt", "")
         write_json_in(folder, "11_terminal.json", {"terminal": False, "state": "started"})
@@ -238,14 +278,24 @@ def assembled_response(value: str) -> None:
 
 def record_error(exc: BaseException, *, stage: str) -> None:
     """Persist a credential-safe terminal failure without swallowing it."""
-    message = _scrub_text(str(exc or ""))
+    detail = getattr(exc, "detail", None)
+    detail = detail if isinstance(detail, dict) and detail.get("schema") == "tp.error/1" else {}
+    message = _scrub_text(str(detail.get("message") or exc or ""))
     message = re.sub(r"(?i)(bearer\s+)[^\s,;]+", r"\1<redacted>", message)
     message = re.sub(r"([?&](?:key|api_key|token)=)[^&\s]+", r"\1<redacted>", message)
+    code = detail.get("code") or getattr(exc, "code", None)
+    evidence = {}
+    for key in ("origin", "httpStatus", "upstreamStatus", "requestDispatched", "providerAttempts", "generationAttempts"):
+        if key in detail:
+            evidence[key] = detail[key]
+    validation = detail.get("validation")
+    if isinstance(validation, dict):
+        evidence["validation"] = {key: str(validation.get(key, ""))[:120] for key in ("field", "reason")}
     write_json("10_error.json", {
         "stage": stage, "type": type(exc).__name__,
-        "code": getattr(exc, "code", None), "message": message,
+        "code": code, "message": message, **evidence,
     })
-    terminal(state="failed", stage=stage, code=getattr(exc, "code", None), message=message)
+    terminal(state="failed", stage=stage, code=code, message=message, **evidence)
 
 def terminal(*, state: str, stage: str = "", code: Any = None,
              message: str = "", **details: Any) -> None:

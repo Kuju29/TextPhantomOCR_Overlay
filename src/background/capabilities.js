@@ -46,6 +46,8 @@ function legacyCapabilities(reason, probe = {}) {
   return {
     apiVersion: "legacy",
     syncTranslate: false,
+    aiConversation: "",
+    aiConversationBatch: "",
     engineRoutesV2: false,
     clientBackground: false,
     trace: false,
@@ -117,6 +119,8 @@ function parse(data) {
   return {
     apiVersion: String(data?.apiVersion || ""),
     syncTranslate: features.syncTranslate === true,
+    aiConversation: features.aiConversation === "tp.conversation/1" ? "tp.conversation/1" : "",
+    aiConversationBatch: features.aiConversationBatch === "tp.conversation_batch/1" ? "tp.conversation_batch/1" : "",
     engineRoutesV2: features.engineRoutesV2 === true,
     clientBackground: features.clientBackground === true,
     // Tracing is switched on by the server only; the extension has no setting of its own.

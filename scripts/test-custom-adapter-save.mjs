@@ -36,7 +36,7 @@ await test('valid JSON blur saves once, then automatically connects, loads and v
  assert.ok(Object.keys(f.data[KEY]).includes('customlocal|http://localhost:9999'));
  assert.equal(f.els.aiBaseUrl.value,f.data.aiBaseUrl);assert.ok(f.clears>=2);assert.equal(f.discoveries.length,1);
  assert.equal(f.discoveries[0].type,'TP_LOCAL_AI_DISCOVER');assert.equal(f.discoveries[0].thinking,'off');
- assert.equal(f.state.aiModelBlocked,false);assert.match(f.els.aiLocalStatus.textContent,/verified/);
+ assert.equal(f.state.aiModelBlocked,false);assert.match(f.els.aiLocalStatus.textContent,/Ready/);
  const reopened=JSON.parse(JSON.stringify(f.data));assert.equal(reopened.localAiAdapter.baseUrl,f.els.aiBaseUrl.value);
 });
 await test('invalid JSON keeps saved endpoint and capability unchanged',async()=>{const f=fixture();f.els.aiLocalAdapter.value='{';await f.save();assert.equal(f.writes.length,0);assert.equal(f.els.aiBaseUrl.value,'http://localhost:1234');assert.deepEqual(f.state.localAiCapability,{old:true});assert.equal(f.clears,0);assert.match(f.messages[0].text,/Not saved/);});

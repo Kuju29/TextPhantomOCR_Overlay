@@ -62,83 +62,36 @@ except ValueError:
     pass
 else:
     raise AssertionError("header-only style accepted")
-assert select_style("th", "Target language: Thai\\nUse natural wording", "replace") == ("Target language: Thai (ภาษาไทย).\\nUse natural wording", "saved_custom_replace")
+assert select_style("th", "Target language: Thai\\nUse natural wording", "replace") == ("ภาษาปลายทาง: ภาษาไทย\\nUse natural wording", "saved_custom_replace")
 assert select_style("th", lang_style("th"), "replace")[1] == "saved_default"
 `], { cwd: apiRoot, encoding: "utf8" });
 
-// Exercise real cloud/local composition in all six source/target directions.
-// These are wiring checks, not a model-quality benchmark.
-const { readFileSync } = await import("node:fs");
-const { composeCanonicalPrompt } = await import("../src/shared/ai/direct-local/prompt.js");
-const { exactRequestOutputContract, joinCanonicalSystemSections } = await import("../src/shared/ai/direct-local/prompt.js");
-const { BUNDLED_CANONICAL_PROMPT_PLANS } = await import("../src/generated/canonical-prompt-plans.js");
-const evaluation = JSON.parse(readFileSync(new URL("./fixtures/neutral-translation-six-directions.json", import.meta.url), "utf8"));
-const cloudCases = JSON.parse(execFileSync(process.env.PYTHON || "python", ["-c", `
-import json, sys
-from backend.ai import prompts
-from backend.ai.prompts.builder import build_user_parts
-from backend.ai.prompts.styles import lang_style
-cases = json.load(sys.stdin)
-results = []
-for c in cases:
-    sections = prompts.build_system_sections(c["target"], lang_style(c["target"]), want_memo=False, series_state="An ordinary school day.", characters=[{"name": "Mina", "gender": "unknown", "speech": "calm"}], structured_output=False)
-    sections = prompts.append_request_output_section(sections, ["P0"], structured_output=False)
-    results.append({"system": prompts.join_system_sections(sections), "user": build_user_parts(c["text"])[0]})
-print(json.dumps(results, ensure_ascii=True))
-`], {
-  cwd: apiRoot, encoding: "utf8",
-  input: JSON.stringify(evaluation.directions.map(({ source, target }) => ({
-    target, text: `<<TP_P0:${evaluation.cases[1].sources[source]}>>`,
-  }))),
-}));
-const normalizeSpace = (text) => text.replace(/\s+/gu, " ").trim();
-for (const [index, { source, target }] of evaluation.directions.entries()) {
-  const plan = BUNDLED_CANONICAL_PROMPT_PLANS[target];
-  const local = composeCanonicalPrompt(plan, { prompt: plan.pieces.editableStyle, promptMode: "replace", series_state: "An ordinary school day.", characters: [{ name: "Mina", gender: "unknown", speech: "calm" }] }, false, false, target);
-  const localSystem = joinCanonicalSystemSections({
-    ...local.sections, output: "", request: exactRequestOutputContract(["P0"]),
-  });
-  const cloud = cloudCases[index];
-  assert.equal(normalizeSpace(localSystem), normalizeSpace(cloud.system), `${source}>${target}: complete cloud/local instructions differ`);
-  assert.equal(cloud.user, `<<TP_P0:${evaluation.cases[1].sources[source]}>>`,
-    "cloud user payload contains literal OCR records only");
-  assert.match(local.sections.language, /^Target language: /, "target selection belongs only to Style prompt");
-  assert.equal(localSystem.indexOf(local.sections.language) > localSystem.indexOf("Style prompt:"), true,
-    "target selection must be inside Style prompt, not System prompt");
-  assert.match(local.sections.source, /Each source record is <<TP_Pn:source text>>/);
-  assert.match(local.sections.policy, /Correct missing, extra or misread characters/);
-  assert.doesNotMatch(local.sections.policy, /rules below control output structure only/);
-  assert.match(localSystem, /OUTPUT — tp\.translation\.compact-records\/1/);
-  assert.match(localSystem, /Return every supplied ID exactly once/);
+// Active provider prompt parity: all six source/target directions, not the
+// deprecated all-in-System canonical fixture.
+const { composeCanonicalPrompt,composeTranslatorIdentitySystem,composeTranslationUserMessage } = await import("../src/shared/ai/direct-local/prompt.js");
+const { exactOutputInstruction } = await import("../src/shared/ai/direct-local/output-contract.js");
+const { instructionPack } = await import("../src/shared/ai/prompt-language.js");
+const directions=['en','ja','th'].flatMap(source=>['en','ja','th'].filter(target=>target!==source).map(target=>({source,target})));
+const result=JSON.parse(execFileSync(process.env.PYTHON||'python',['-c',`
+import json,sys
+from backend.ai.prompts.styles import select_style
+from backend.ai.prompts.builder import build_translation_user_message,build_translator_identity_system
+out=[]
+for c in json.load(sys.stdin):
+ style,_=select_style(c['target'],'')
+ out.append({'system':build_translator_identity_system(style,c['target']),
+  'user':build_translation_user_message(c['target'],'','<<TP_P0:NEUTRAL_SOURCE>>',['P0'],source_lang=c['source'],structured_output=False,style_examples=True,memory_mode='full',series_state='Story context')})
+print(json.dumps(out,ensure_ascii=True))
+`],{cwd:apiRoot,encoding:'utf8',input:JSON.stringify(directions)}));
+for(let i=0;i<directions.length;i++) {
+ const {source,target}=directions[i],plan=await getCanonicalPrompt('',target);
+ const c=composeCanonicalPrompt(plan,{memory_mode:'full',style_examples:true,series_state:'Story context'},false,false,target);
+ const system=composeTranslatorIdentitySystem(`${c.sections.language}\n${c.sections.style}`,target);
+ const user=composeTranslationUserMessage({sections:c.sections,requestOutputContract:exactOutputInstruction(['P0'],{kind:'compact_records'},target),sourceRecords:'<<TP_P0:NEUTRAL_SOURCE>>',targetLang:target,sourceLang:source,expectedIds:['P0'],structuredOutput:false});
+ assert.equal(system,result[i].system,`${source}->${target}: native system`);
+ assert.equal(user,result[i].user,`${source}->${target}: native user`);
+ assert(user.endsWith(instructionPack(target).sourceHeading+'\n<<TP_P0:NEUTRAL_SOURCE>>'));
+ assert.equal(system.split(c.sections.language).length-1,1);
+ assert.equal(user.split(c.sections.language).length-1,0);
 }
-assert.match(BUNDLED_CANONICAL_PROMPT_PLANS.th.pieces.editableStyle, /rather than finding a Thai replacement for each I, me, you, my or your/);
-assert.match(BUNDLED_CANONICAL_PROMPT_PLANS.th.pieces.editableStyle, /contrasting or correcting ownership/);
-assert.match(BUNDLED_CANONICAL_PROMPT_PLANS.en.pieces.editableStyle, /Supply subjects, objects and articles that English grammar requires/);
-assert.match(BUNDLED_CANONICAL_PROMPT_PLANS.en.pieces.editableStyle, /singular they/);
-assert.match(BUNDLED_CANONICAL_PROMPT_PLANS.ja.pieces.editableStyle, /省ける主語や代名詞は省き/);
-assert.match(BUNDLED_CANONICAL_PROMPT_PLANS.ja.pieces.editableStyle, /人物像が不明なら/);
-
-// Python is the canonical byte reference for the final provider boundary.
-const boundaryFixture = JSON.parse(execFileSync(process.env.PYTHON || "python", ["-c", `
-import json
-from backend.ai import prompts
-source = "<<TP_P0:原文หนึ่ง>>\\n<<TP_P1:原文สอง>>"
-print(json.dumps(prompts.canonical_boundary_fixture(
-    "th", prompts.lang_style("th"), ("P0", "P1"), source,
-    prompt_mode="replace", structured_output=False, want_memo=False,
-), ensure_ascii=True))
-`], { cwd: apiRoot, encoding: "utf8" }));
-const boundaryPlan = BUNDLED_CANONICAL_PROMPT_PLANS.th;
-const boundaryLocal = composeCanonicalPrompt(boundaryPlan, {
-  prompt: boundaryPlan.pieces.editableStyle, promptMode: "replace",
-}, false, false, "th");
-const boundarySystem = joinCanonicalSystemSections({
-  ...boundaryLocal.sections,
-  output: "",
-  request: exactRequestOutputContract(["P0", "P1"]),
-});
-assert.equal(boundarySystem, boundaryFixture.system,
-  "Direct Local final system bytes must equal the API canonical fixture");
-assert.equal(boundaryFixture.user, "<<TP_P0:原文หนึ่ง>>\n<<TP_P1:原文สอง>>",
-  "canonical provider user bytes must be literal TP OCR records");
-console.log("Six-direction cloud/local prompt composition and source/target ownership passed.");
+console.log('PASS all six source/target directions preserve native System/User bytes, source ownership and story context.');

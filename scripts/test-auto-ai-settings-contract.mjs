@@ -154,10 +154,10 @@ assert.equal(settings.aiKey, "service-worker-secret",
 assert.ok(!JSON.stringify({ ...settings, aiKey: "[redacted]" }).includes("service-worker-secret"),
   "a redacted settings snapshot must not contain the credential");
 
-assert.equal(autoAiSettingsIssue({ aiProvider: "gemini", aiKey: "" }, { hasServerKey: true }), null,
-  "a server-owned cloud key must remain valid");
-assert.equal(autoAiSettingsIssue({ aiProvider: "auto", aiModel: "auto", aiKey: "" }, { hasServerKey: null }), null,
-  "unknown server key state and auto resolution must not be falsely blocked");
+assert.equal(autoAiSettingsIssue({ aiProvider: "gemini", aiKey: "" }, { hasServerKey: true })?.code, "missing_api_key",
+  "legacy server-key metadata must not authorize a keyless cloud request");
+assert.equal(autoAiSettingsIssue({ aiProvider: "auto", aiModel: "auto", aiKey: "" }, { hasServerKey: null })?.code, "missing_api_key",
+  "auto provider still requires a user key for Cloud");
 assert.equal(autoAiSettingsIssue(
   { aiOnDevice: true, aiProvider: "auto", aiModel: "auto", aiKey: "", aiBaseUrl: "" },
   { hasServerKey: false },
@@ -299,8 +299,9 @@ assert.equal(autoAiSettingsIssue({
 
 // Keep this test dependency-light: context-menu imports the whole service-worker
 // graph, which expects browser APIs at module evaluation time. The source checks
-// protect the authoritative placement and its conservative server-key policy.
-assert.match(contextMenuSource, /has_env_ai_key/);
+// protect the authoritative placement and its request-owned credential policy.
+assert.doesNotMatch(contextMenuSource, /has_env_ai_key|serverHasAiKey/,
+  "preflight must not fetch or authorize a central/server key");
 assert.match(contextMenuSource, /const usesAi = mode === "lens_text" && preliminarySource === "ai";/,
   "preflight must cover both manual and Auto text.ai paths");
 assert.match(contextMenuSource, /(?:const|let) profileSnapshot = usesAi[\s\S]*?resolveJobAiProfile/,

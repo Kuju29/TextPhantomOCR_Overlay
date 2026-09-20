@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -46,7 +48,9 @@ class Response:
     is_success = True
     status_code = 200
 
-    def __init__(self, lines): self.lines = lines
+    def __init__(self, lines, headers=None):
+        self.lines = lines
+        self.headers = headers or {}
     def __enter__(self): return self
     def __exit__(self, *_): return False
     def raise_for_status(self): return None
@@ -57,6 +61,7 @@ class Response:
 class Client:
     _textphantom_streaming = True
     lines = []
+    headers = {}
 
     def __init__(self, *_, **__): pass
     def __enter__(self): return self
@@ -64,7 +69,25 @@ class Client:
 
     @contextmanager
     def stream(self, *_args, **_kwargs):
-        yield Response(self.lines)
+        yield Response(self.lines, self.headers)
+
+
+class BlockingBeforeHeadersClient:
+    """A provider socket which never reaches response headers until closed."""
+    _textphantom_streaming = True
+
+    def __init__(self, *_, **__):
+        self.closed = threading.Event()
+    def __enter__(self): return self
+    def __exit__(self, *_): return False
+    def close(self): self.closed.set()
+
+    @contextmanager
+    def stream(self, *_args, **_kwargs):
+        self.closed.wait(5.0)
+        request = httpx.Request("POST", "https://example.invalid/chat")
+        raise httpx.ReadError("closed before response headers", request=request)
+        yield  # pragma: no cover
 
 
 def run(chunks, *, after=(), terminal=True, expected_ids=("P0", "P1"), cancel_check=None):
@@ -77,6 +100,22 @@ def run(chunks, *, after=(), terminal=True, expected_ids=("P0", "P1"), cancel_ch
             expected_ids=list(expected_ids), cancel_check=cancel_check,
         )
 
+
+class ProviderHeaderTests(unittest.TestCase):
+    def test_hf_inference_provider_header_is_retained(self):
+        Client.lines = [
+            "data: " + json.dumps({"id":"r","model":"actual-model","choices":[{"delta":{"content":"<<TP_P0:ok>>"},"finish_reason":None}]}),
+            "data: " + json.dumps({"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":2,"total_tokens":13}}),
+            "data: [DONE]",
+        ]
+        Client.headers = {"x-inference-provider":"scaleway"}
+        try:
+            with patch.object(httpx, "Client", Client):
+                result=execute_chat_completion(url="https://router.huggingface.co/v1/chat/completions",headers={},
+                    payload={"messages":[]},model="requested-model",provider_id="huggingface",timeout=1,timeout_policy="test",expected_ids=["P0"])
+            self.assertEqual(result.upstream_provider,"scaleway")
+        finally:
+            Client.headers = {}
 
 class JsonDetectorTests(unittest.TestCase):
     def valid(self, source):
@@ -141,6 +180,30 @@ class JsonDetectorTests(unittest.TestCase):
 
 
 class StreamTests(unittest.TestCase):
+    def test_total_timeout_is_real_wall_clock_even_before_response_headers(self):
+        started = time.perf_counter()
+        with patch.object(httpx, "Client", BlockingBeforeHeadersClient):
+            with self.assertRaisesRegex(TimeoutError, "provider total timeout"):
+                execute_chat_completion(
+                    url="https://example.invalid/chat", headers={}, payload={},
+                    model="m", provider_id="openrouter", timeout=.12,
+                    timeout_policy="test", expected_ids=["P0"],
+                )
+        self.assertLess(time.perf_counter() - started, .8)
+
+    def test_owner_cancel_interrupts_request_before_response_headers(self):
+        started = time.perf_counter()
+        with patch.object(httpx, "Client", BlockingBeforeHeadersClient):
+            from backend.ai.clients.base import ProviderGenerationCancelled
+            with self.assertRaises(ProviderGenerationCancelled):
+                execute_chat_completion(
+                    url="https://example.invalid/chat", headers={}, payload={},
+                    model="m", provider_id="openrouter", timeout=2,
+                    timeout_policy="test", expected_ids=["P0"],
+                    cancel_check=lambda: time.perf_counter() - started >= .12,
+                )
+        self.assertLess(time.perf_counter() - started, .8)
+
     def test_wire_trace_on_persists_exact_raw_assembled_and_terminal(self):
         lines = sse(["<<TP_P0:one>>"], terminal=True)
         Client.lines = lines
@@ -150,6 +213,7 @@ class StreamTests(unittest.TestCase):
             os.environ["TP_AI_WIRE_TRACE"] = "1"
             os.environ["TP_AI_WIRE_TRACE_DIR"] = temp
             token = wire_trace.begin({"traceId": "trace", "operationId": "stream"})
+            folder = wire_trace.active_folder()
             try:
                 with patch.object(httpx, "Client", Client):
                     result = execute_chat_completion(
@@ -163,7 +227,7 @@ class StreamTests(unittest.TestCase):
                 for key, value in previous.items():
                     if value is None: os.environ.pop(key, None)
                     else: os.environ[key] = value
-            folder = Path(temp) / "trace--stream"
+            self.assertIsNotNone(folder)
             self.assertEqual((folder / "05_provider_response.raw").read_text("utf-8"),
                              "\n".join(lines) + "\n")
             self.assertEqual((folder / "05_provider_response.assembled.txt").read_text("utf-8"),

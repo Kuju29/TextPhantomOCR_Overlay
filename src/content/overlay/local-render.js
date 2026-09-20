@@ -21,9 +21,10 @@
   }
 
   // Builds the overlay DOM from the result's LensDocument geometry.
-  async function buildLocalRender(result, source) {
+  async function buildLocalRender(result, source, traceId = "") {
     const renderer = await loadRenderer();
     TP.ensureOverlayStyle(renderer.OVERLAY_CSS);
+    const trace = (file, fn, data) => TP.traceNoteFor?.(traceId, file, fn, data) ?? TP.traceNote?.(file, fn, data);
     const { root, report } = renderer.renderOverlay(result.lensDocument, {
       source,
       relayoutTranslated: result?.layout?.relayout_translated,
@@ -57,7 +58,7 @@
       const unitsMissing = Array.isArray(partial?.missing)
         ? partial.missing.length
         : null;
-      TP.traceNote?.(
+      trace(
         "content/overlay/local-render.js",
         "aiPartial",
         {
@@ -88,10 +89,17 @@
         },
       );
     }
+    if (report.aiIndependentOverlapPartitions) {
+      trace("content/overlay/local-render.js", "aiAabbPartition", {
+        event: "overlay: partitioned overlapping independent Lens paragraph envelopes",
+        count: report.aiIndependentOverlapPartitions,
+        ids: report.aiIndependentOverlapPartitionIds || [],
+      });
+    }
     if (report.aiBlocksOverlapping) {
       const rows = report.aiBlockOverlapGeometry || [];
       const chunks = Math.max(1, Math.ceil(rows.length / 12));
-      for (let chunk=0; chunk<chunks; chunk++) TP.traceNote?.(
+      for (let chunk=0; chunk<chunks; chunk++) trace(
         "content/overlay/local-render.js", "aiBlockOverlap",
         {schema:"tp.audit/1",event:"geometry_overlap",reason:"overlap_detected",sourceKind:source,
           totalRows:report.aiBlocksOverlapping,capturedRows:rows.length,complete:rows.length===report.aiBlocksOverlapping,
@@ -100,7 +108,7 @@
     if (structural.length) {
       // A different failure: the grouping names a paragraph this document does
       // not have, so the sentence has nowhere honest to go.
-      TP.traceNote?.(
+      trace(
         "content/overlay/local-render.js", "groupingDocumentMismatch",
         {
           event: "overlay: grouping and document disagree; these paragraphs were not drawn",

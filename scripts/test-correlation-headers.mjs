@@ -12,7 +12,7 @@ const { translateUnits } = await import("../src/background/ai/translation-servic
 
 const requests = [];
 globalThis.fetch = async (url, init = {}) => {
-  const record = { url: String(url), headers: new Headers(init.headers), body: init.body };
+  const record = { url: String(url), headers: new Headers(init.headers), body: init.body, priority: init.priority };
   requests.push(record);
   let body = { ok: true };
   if (record.url.endsWith("/v1/lens/raw") || record.url.endsWith("/v2/engine/runsextension/lens/raw")) body = { lens: {} };
@@ -49,5 +49,8 @@ for (const request of requests) {
   requestIds.add(requestId);
 }
 assert.equal(requestIds.size, requests.length, "request ids must be unique per HTTP attempt");
+assert.equal(requests[0].priority, "low", "Lens uploads are background network work");
+assert.equal(requests[2].priority, "high", "sync AI translation must outrank Lens uploads");
+assert.equal(requests[3].priority, "high", "extension-owned AI translation must outrank Lens uploads");
 
 console.log("Correlation header test passed: all split/full endpoints carry optional stable IDs.");

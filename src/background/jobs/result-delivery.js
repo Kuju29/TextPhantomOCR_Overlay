@@ -197,6 +197,7 @@ export function createResultDelivery(deps) {
     imageErrorMessage,
     markDomainNeedsDataUri,
     markImagePhase,
+    updateImagePresentation,
     mdCacheKey,
     mdKeyFromUrl,
     normImgSrc,
@@ -230,6 +231,20 @@ export function createResultDelivery(deps) {
     },
   });
   const deliveringJobs = new Set();
+
+  function deferImageError(ctx, batch, imageKey, error, terminalAiError = false) {
+    return Boolean(
+      batch &&
+        imageKey &&
+        deps.shouldDeferImageError?.({
+          ctx,
+          batch,
+          imageKey,
+          error,
+          terminalAiError,
+        }),
+    );
+  }
 
   function accountQueued(ctx, value, success) {
     if (!ctx?.serverQueued) return Promise.resolve();
@@ -335,17 +350,66 @@ export function createResultDelivery(deps) {
       markDomainNeedsDataUri(item.payload.src);
       if (cls.permanent) cls = { permanent: false };
     }
-    if (ctx?.tabId && !isStale)
-      sendToTab(ctx.tabId, imageErrorMessage(ctx, error), ctx.frameId || 0);
+    const publicError = imageErrorMessage(ctx, error);
+    const deferred = deferImageError(
+      ctx,
+      batch,
+      imageKey,
+      error,
+      terminalAiError,
+    );
+    if (ctx?.tabId && !isStale && !deferred)
+      sendToTab(ctx.tabId, publicError, ctx.frameId || 0);
     removeJob(jobId, ctx?.metadata?.image_id);
     if (batch && imageKey) {
       markImagePhase(batchId, imageKey, "error", {
         lastError: errMsg,
         permanent: !!cls.permanent,
+        deferredImageError: deferred ? publicError : null,
+        suppressToast: deferred,
       });
-      batchUpdateToast(batch, cls.permanent ? "Error (permanent)" : "Error");
+      if (!deferred)
+        batchUpdateToast(batch, cls.permanent ? "Error (permanent)" : "Error");
       finalizeBatch(batch);
     }
+  }
+
+  // Render a complete image while its shared request is still open. Never
+  // account, cache, remove the job, release the initial barrier or finalize it.
+  async function handleProvisionalResult(jobId,result,state={}) {
+    const ctx=findContext(jobId,result?.metadata?.image_id);
+    if(!ctx||deliveringJobs.has(jobId))return;
+    const batchId=String(ctx.batchId||ctx.metadata?.batch_id||'');
+    const batch=batchId?ensureBatch(batchId,ctx.tabId,ctx.frameId||0):null;
+    const stale=()=>state.isCancelled?.()||!pendingByJob.has(jobId)||batch?.cancelled||
+      (typeof ctx.settingsEpoch==='number'&&ctx.settingsEpoch!==getSettingsEpoch())||
+      (ctx.sessionId&&getTabSessionId(ctx.tabId)&&ctx.sessionId!==getTabSessionId(ctx.tabId));
+    if(stale())return;
+    const streamTiming={...state.streamTiming,domEnqueuedAt:Date.now(),
+      runId:ctx.translationRun?.runId||'',generationId:ctx.translationRun?.generationId||''};
+    traceNote('background/jobs/result-delivery.js','provisionalEnqueued',{
+      schema:'tp.audit/1',event:'page_stream_timing',reason:'dom_enqueued',...streamTiming,jobId,batchId,imageId:ctx.imageKey||ctx.metadata?.image_id,
+      complete:state.complete===true},ctx.traceId||'');
+    const response=await enqueueDomInsert(ctx.tabId,{type:'OVERLAY_HTML',original:ctx.imgUrl,
+      tpStreamTiming:streamTiming,
+      result,mode:ctx.mode||ctx.metadata?.mode||'',source:ctx.source||'ai',
+      generation:ctx.generation||null,translationRun:ctx.translationRun||null,tpTrace:ctx.traceId||'',
+      streamError:state.invalidated||state.failure ? String(state.failure?.message||`AI output invalid: ${(state.missing||[]).join(', ')}`):''},ctx.frameId||0);
+    if(stale())return;
+    if(response===false||response?.ok===false||response?.applied!==true)
+      throw new Error(`Provisional overlay not applied: ${response?.reason||response?.error||'no applied acknowledgement'}`);
+    updateImagePresentation?.(batchId, ctx.imageKey || ctx.metadata?.image_id, {
+      insertionAck: {present:response.drawn!==false, complete:state.complete===true && !state.invalidated && !state.failure,
+        provisional:true, acknowledgedAt:Date.now()},
+      progressEvent: {lane:'insert', state:'done', detail:response.drawn===false ? 'No translation layer; request still running' : state.complete===true && !state.invalidated && !state.failure
+        ? 'Placed during stream; request still running' : 'Partial translation placed; validation incomplete'},
+    });
+    traceNote('background/jobs/result-delivery.js','provisionalOverlay',{
+      schema:'tp.audit/1',event:'page_stream_timing',reason:'dom_acknowledged',jobId,batchId,imageId:ctx.imageKey||ctx.metadata?.image_id,
+      ...streamTiming,domAckAt:Date.now(),
+      completeToAckMs:Number.isFinite(streamTiming.recordsCompleteAt)
+        ? Math.max(0,Date.now()-streamTiming.recordsCompleteAt):null,
+      complete:state.complete===true,invalidated:state.invalidated===true,terminal:false},ctx.traceId||'');
   }
 
   async function handleResult(jobId, result) {
@@ -505,13 +569,16 @@ export function createResultDelivery(deps) {
           source: ctx.source || "",
           generation: ctx.generation || null,
           translationRun: ctx.translationRun || null,
+          streamError: String(result?.aiRoute?.streamFailure?.message || ""),
           tpTrace: ctx.traceId || "",
         },
         frameId,
       );
     }
+    if (stopStaleDraw()) return stop();
     let ok = true;
     let errMsg = "";
+    let deferredImageError = null;
     if (!hasHtml && !(newImg && mode !== "lens_text") && !newImg) {
       if (
         evaluateTextNoOverlaySkippable(
@@ -527,11 +594,17 @@ export function createResultDelivery(deps) {
           errMsg = "No text detected (retrying)";
         } else errMsg = "No text detected";
       } else {
-        await enqueueDomInsert(
-          tabId,
-          imageErrorMessage(ctx, "API returned no overlay data"),
-          frameId,
-        );
+        const publicError = imageErrorMessage(ctx, "API returned no overlay data");
+        if (
+          deferImageError(
+            ctx,
+            batch,
+            imageKey,
+            "API returned no overlay data",
+            Boolean(ctx?.aiGenerationAttempted || ctx?.aiRouteEntered),
+          )
+        ) deferredImageError = publicError;
+        else await enqueueDomInsert(tabId, publicError, frameId);
         ok = false;
         errMsg = "API returned no overlay data";
       }
@@ -543,6 +616,23 @@ export function createResultDelivery(deps) {
     if (hasHtml && (!overlayOk?.ok || overlayOk?.stale || overlayOk?.notFound || overlayOk?.expired)) {
       ok = false;
       errMsg = "Overlay insert failed";
+    }
+    if (batch && imageKey && typeof updateImagePresentation === "function") {
+      const inserted = Boolean((newImg && mode !== "lens_text") || hasHtml || shouldShowSkipBadge);
+      const acknowledged = Boolean((hasHtml && overlayOk?.applied === true && !overlayOk?.stale && overlayOk?.drawn !== false) ||
+        (newImg && mode !== "lens_text" && replaceOk?.ok === true));
+      updateImagePresentation(batchId, imageKey, {
+        ...((acknowledged || overlayOk?.applied === true) ? {insertionAck:{present:acknowledged,
+          provisional:false, acknowledgedAt:Date.now()}} : {}),
+        progressEvent: {
+          lane: "insert",
+          state: ok ? (inserted ? "done" : "skipped") : "error",
+          detail: ok ? (inserted ? "Placed on page" : "No DOM insert needed") : (errMsg || "Insert failed"),
+        },
+      });
+      if (ok) updateImagePresentation(batchId, imageKey, {
+        progressEvent: { lane: "overall", state: "done", resultState: "pending", detail: "Visible complete; finalizing receipt" },
+      });
     }
     await deps.onDelivered?.(ctx, ok && overlayOk?.applied === true && overlayOk?.stale !== true);
     if (ok) await workflow.applied(workflowId);
@@ -574,6 +664,7 @@ export function createResultDelivery(deps) {
         markImagePhase(batchId, imageKey, "done", {
           status: skipped ? "skipped" : "done",
           lastError: skipped ? errMsg : "",
+          deferredImageError: null,
         });
         batchUpdateToast(batch, skipped ? "Skipped: no text" : "1 image done");
       } else {
@@ -584,8 +675,11 @@ export function createResultDelivery(deps) {
         markImagePhase(batchId, imageKey, "error", {
           lastError: errMsg || "PROCESSING_FAILED",
           permanent: !!cls.permanent,
+          deferredImageError,
+          suppressToast: Boolean(deferredImageError),
         });
-        batchUpdateToast(batch, cls.permanent ? "Error (permanent)" : "Error");
+        if (!deferredImageError)
+          batchUpdateToast(batch, cls.permanent ? "Error (permanent)" : "Error");
       }
       finalizeBatch(batch);
     }
@@ -595,7 +689,7 @@ export function createResultDelivery(deps) {
   }
 
   return {
-    failJobImmediately, handleStaleJob, handleJobError, handleResult,
+    failJobImmediately, handleStaleJob, handleJobError, handleResult, handleProvisionalResult,
     flushAccounting: () => accounting.flush(),
     accountingState: () => accounting.describe(),
   };

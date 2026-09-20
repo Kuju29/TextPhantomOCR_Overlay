@@ -37,6 +37,23 @@ import {
   isKnownLocalEndpoint,
 } from "./provider-model-display.js";
 
+export function hasActiveTranslationSession(response) {
+  const runs = Array.isArray(response?.runs) ? response.runs : [];
+  return runs.some((run) =>
+    !["done", "cancelled", "unavailable"].includes(String(run?.phase || "")),
+  );
+}
+
+async function readTranslationActivity() {
+  try {
+    return hasActiveTranslationSession(
+      await sendRuntimeMessage({ type: "TP_GET_TRANSLATION_SESSIONS" }),
+    );
+  } catch {
+    return false;
+  }
+}
+
 export async function activateAiProfileSafely({
   profileController,
   stored,
@@ -349,7 +366,16 @@ export async function loadPopupSettings(deps) {
 
   toggleUi();
 
-  await usageViewController.refresh();
+  // Opening the popup to inspect token usage must be observational while a
+  // translation is live. In 18.5 popup hydration could otherwise run a live
+  // provider catalogue refresh (and selected-model probe) concurrently with
+  // the active translation. Read committed usage only; explicit provider/model
+  // edits still use the normal live verification path.
+  const translationActive = await readTranslationActivity();
+  if (translationActive && usageViewController.refreshPassive)
+    await usageViewController.refreshPassive();
+  else
+    await usageViewController.refresh();
   const initialApiUrl = normalizeUrl(els.apiUrl.value);
   if (initialApiUrl) {
     // Read the background snapshot first. Only a stale/missing snapshot needs
@@ -398,9 +424,12 @@ export async function loadPopupSettings(deps) {
 
   if (aiProfileReady && canUseAiUi()) {
     applyPromptForLang(state.desiredLang);
-    // Restore any verified Local snapshot first, then refresh only when the
-    // current provider/model still needs live discovery. Cloud keeps the same
-    // provider-authoritative refresh path.
-    providerMetaController.refresh();
+    // During a live translation the popup is read-only by default. Do not turn
+    // a token/usage inspection into provider catalogue traffic or a generation
+    // probe. Explicit provider/model interaction still calls refresh() through
+    // the normal popup event handlers. Once no translation is active, startup
+    // keeps the provider-authoritative verification behavior.
+    if (translationActive) providerMetaController.renderStatus?.();
+    else providerMetaController.refresh();
   }
 }

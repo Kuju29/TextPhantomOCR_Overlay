@@ -25,7 +25,7 @@ export function mountTranslationSessionStatus({ document: doc = globalThis.docum
     } finally { busy = false; }
   };
   const changed = (items, area) => {
-    if (area !== 'session' || !items.tpTranslationRunsV1) return;
+    if (area !== 'session' || !Object.keys(items || {}).some(key => key === 'tpTranslationRunsV1' || key.startsWith('tpTranslationRunV1:'))) return;
     clearTimeout(timer); timer = setTimeout(refresh, 100);
   };
   button.addEventListener('click', async () => {

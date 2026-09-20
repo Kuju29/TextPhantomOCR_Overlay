@@ -1,4 +1,7 @@
-import { guardOutputBudget } from "../workload/budget.js";
+import { uncertainRepairIds } from "../repair-alignment.js";
+import { promptLayout } from "../prompt-layout.js";
+import { planOllamaContext } from "../providers/ollama-context.js";
+import { guardOutputBudget, estimateProviderInput } from "../workload/budget.js";
 import { emitPreviewChunks, tracePreviewUnits } from "../../trace-preview.js";
 import { diagnosticPreviewsEnabled } from "../../trace.js";
 import { completedLineContract } from "../contracts/marker-completion.js";
@@ -8,7 +11,6 @@ import { classifyDirectLocalMissingIds } from "./result-classification.js";
 import {
   composeCanonicalPrompt,
   composeTranslationUserMessage,
-  composeTranslatorIdentitySystem,
   sessionPromptFingerprint,
   withoutLeadingTargetLanguageHeader,
 } from "./prompt.js";
@@ -18,10 +20,12 @@ import {
 } from "./decode.js";
 import {
   SCHEMA_OBJECT_CONTRACT,
+  COMPACT_RECORDS_CONTRACT,
   exactOutputInstruction,
   selectLocalOutputContract,
   translationObjectSchema,
 } from "./output-contract.js";
+import { normalizeReasoningPreference, resolveReasoningPreference } from "../../reasoning-preference.js";
 
 export { LocalAiError } from "./error.js";
 export { localOpenAiBase } from "./endpoint.js";
@@ -56,7 +60,7 @@ export function encodeLocalSourceBlocks(wireUnits) {
   const records = (wireUnits || []).map((unit) => {
     const id = String(unit?.id || "");
     const source = String(unit?.text ?? "");
-    if (!source || /[\r\n\t\u0085\u2028\u2029]/u.test(source) || /<<TP_P\d+/u.test(source)) {
+    if (!source || /[\r\n\t\u0085\u2028\u2029]/u.test(source) || /<<(?:TP_P\d+|I[1-9][0-9]{0,6}_P[0-9]{1,6})/u.test(source)) {
       throw new LocalAiError("Local AI source does not match the compact record contract", {
         code: "local_source_contract_invalid",
         attempted: false,
@@ -72,7 +76,7 @@ export function encodeLocalSourceBlocks(wireUnits) {
         },
       });
     }
-    return `<<TP_${id}:${source}>>`;
+    return id.startsWith("I") ? `<<${id}:${source}>>` : `<<TP_${id}:${source}>>`;
   });
   return records
     .join("\n");
@@ -82,15 +86,16 @@ export function encodeLocalSchemaSource(wireUnits) {
   return (wireUnits || []).map((unit, index) => {
     const id = String(unit?.id || "");
     const source = String(unit?.text ?? "");
-    if (id !== `P${index}` || !source || /[\r\n\t\u0085\u2028\u2029]/u.test(source)) {
+    const validId = id === `P${index}` || /^I[1-9][0-9]{0,6}_P[0-9]{1,6}$/.test(id);
+    if (!validId || !source || /[\r\n\t\u0085\u2028\u2029]/u.test(source)) {
       throw new LocalAiError("Local AI source does not match the schema source contract", {
         code: "local_source_contract_invalid",
         attempted: false,
         retryable: false,
         diagnostics: {
           responseGrammar: SCHEMA_OBJECT_CONTRACT,
-          validatorSubtype: id !== `P${index}`
-            ? "non_contiguous_source_id"
+          validatorSubtype: !validId
+            ? "invalid_source_id"
             : !source ? "empty_source" : "non_physical_line_source",
           sourceId: id,
         },
@@ -168,6 +173,7 @@ async function translateSingle(
   units,
   {
     ai,
+    conversationContext = null,
     canonicalPrompt = null,
     promptAudit = null,
     systemText = "",
@@ -178,6 +184,7 @@ async function translateSingle(
     timeoutMs = 0,
     trace = null,
     wireTrace = null,
+    operationId = "",
     onProgress = null,
   } = {},
 ) {
@@ -201,17 +208,40 @@ async function translateSingle(
     { ...settings, baseUrl: settings.baseUrl || ai?.base_url },
     ai?.provider,
   );
-  const outputContract = selectLocalOutputContract({
+  const conversationRecords = Boolean(conversationContext) && units.length > 0 && units.every(unit=>/^I[1-9][0-9]{0,6}_P[0-9]{1,6}$/.test(String(unit?.id||"")));
+  const capabilityContract = selectLocalOutputContract({
     provider: ai?.provider || adapter.id,
     model,
     modelCapabilities: ai?.model_capabilities,
   });
+  // Keep Conversation on one marker protocol. Per-turn exact-key JSON schemas
+  // change provider-visible request metadata and can destroy prefix-cache reuse.
+  const outputContract = conversationRecords ? {
+    kind:"compact_records", version:COMPACT_RECORDS_CONTRACT,
+    reason:"conversation_image_records_cache_stable", capabilitySource:capabilityContract.capabilitySource,
+  } : capabilityContract;
+  const formatDiagnostics = {
+    plannedOutputContract: outputContract.version,
+    selectedOutputContract: outputContract.version,
+    selectionReason: conversationRecords ? "conversation_marker_contract" : outputContract.reason,
+    parserId: outputContract.kind,
+    decodedResponseShape: null,
+    formatSwitch: false,
+  };
+  const effectiveStyleExamples = conversationContext ? false : ai?.style_examples !== false;
+  const promptAi = effectiveStyleExamples === (ai?.style_examples !== false) ? ai : {...ai, style_examples:false};
+  const wireUnits = units.map((unit, index) => ({
+    id: conversationRecords ? String(unit?.id||"") : `P${index}`,
+    text: String(unit?.text || ""),
+  }));
   const composed = composeCanonicalPrompt(
     canonicalPrompt,
-    ai,
+    promptAi,
     Boolean(imageDataUri),
     outputContract.kind === "schema_object",
     targetLang,
+    units,
+    wireUnits.map(unit => unit.id),
   );
   if (!composed.system)
     throw new LocalAiError("Local AI canonical translation prompt is missing", {
@@ -222,17 +252,12 @@ async function translateSingle(
     canonicalPrompt?.pieces?.editableStyle || "",
   ).trim();
   const userPromptPresent = Boolean(userPrompt);
-  const savedDefault = userPromptPresent &&
-    withoutLeadingTargetLanguageHeader(userPrompt) ===
-    withoutLeadingTargetLanguageHeader(builtInStyle);
-  const wireUnits = units.map((unit, index) => ({
-    id: `P${index}`,
-    text: String(unit?.text || ""),
-  }));
+  const savedDefault = userPromptPresent && composed.sections.savedDefault;
   const requestOutputContract = exactOutputInstruction(
     wireUnits.map((unit) => unit.id), outputContract, targetLang,
   );
-  const effectiveSystemPrompt = composeTranslatorIdentitySystem(`${composed.sections.language}\n${composed.sections.style}`);
+  const selectedStyle = `${composed.sections.language}\n${composed.sections.style}`;
+  const effectiveSystemPrompt = composed.system;
   const audit = {
     promptPolicyVersion: String(promptAudit?.promptVersion || ""),
     canonicalPromptVersion: String(
@@ -245,11 +270,9 @@ async function translateSingle(
     promptMode: "replace",
     userPromptPresent,
     userPromptChars: userPrompt.length,
-    effectiveStyleChars: composed.sections.style.length,
-    effectiveStyleFingerprint: await sessionPromptFingerprint(
-      composed.sections.style,
-    ),
-    effectiveSystemPromptChars: effectiveSystemPrompt.length,
+    effectiveStyleChars: Array.from(selectedStyle).length,
+    effectiveStyleFingerprint: await sessionPromptFingerprint(selectedStyle),
+    effectiveSystemPromptChars: Array.from(effectiveSystemPrompt).length,
     effectiveSystemPromptFingerprint: await sessionPromptFingerprint(
       effectiveSystemPrompt,
     ),
@@ -274,14 +297,70 @@ async function translateSingle(
     },
     requestOutputContract,
     sourceRecords,
-    targetLang, repairReason: ai?.repair_reason,
+    targetLang, sourceLang, repairReason: ai?.repair_reason,
     expectedIds: wireUnits.map(unit => unit.id),
     structuredOutput: outputContract.kind === "schema_object",
+    conversationRecords,
   });
-  const userTextFingerprint = await sessionPromptFingerprint(userText);
+  audit.promptLayout = await promptLayout(effectiveSystemPrompt, userText, {targetLang,sourceLang,
+    structured:outputContract.kind === "schema_object",examples:effectiveStyleExamples,
+    memoryMode:ai?.memory_mode,selectedStyle,conversationRecords});
+  for (const key of ["styleRole", "systemStyleCopies", "userStyleCopies", "userStaticChars"])
+    audit[key] = audit.promptLayout[key];
+  const reasoning = ai?.model_capabilities?.reasoning;
+  const thinkingRequested = normalizeReasoningPreference(ai?.thinking, "minimum");
+  const thinkingSelected = resolveReasoningPreference(thinkingRequested, reasoning);
+  // Resolve provider-neutral user intent once against exact model capability.
+  // Local provider leaves only map the concrete result to their native wire.
+  const thinkingMode = typeof adapter.resolveThinkingMode === "function"
+    ? adapter.resolveThinkingMode(thinkingSelected, { model, reasoning })
+    : thinkingSelected;
+  const standardOutputTokens = adapter.outputTokens({
+    standard: dynamicOutputTokens(units, effectiveSystemPrompt, ai?.workload),
+    thinkingMode,
+  });
+  const responseSchema = outputContract.kind === "schema_object"
+    ? translationObjectSchema(wireUnits.map(u => u.id)) : null;
+  let conversationOutputReserve = standardOutputTokens;
+  if (conversationContext) {
+    const baseBudgetInput = { history: [], system: effectiveSystemPrompt, user: userText,
+      schema: responseSchema, image: Boolean(imageDataUri) };
+    // Conversation trimming and the provider request must reserve the same
+    // completion budget. Native Ollama may grow only to its bounded request
+    // ceiling, so use that exact ceiling here rather than an inflated
+    // pre-guard heuristic that can discard otherwise valid history.
+    const ceilingPlan = adapter.id === "ollama"
+      ? planOllamaContext(ai?.model_capabilities?.limits, { estimatedInput: 1e9 }) : null;
+    const reserveLimits = ceilingPlan?.limits || ai?.model_capabilities?.limits;
+    const reserveWorkload = ai?.workload || (ceilingPlan
+      ? { version: 1, predictedOutput: standardOutputTokens } : null);
+    try {
+      conversationOutputReserve = guardOutputBudget({ standard: standardOutputTokens,
+        workload: reserveWorkload, limits: reserveLimits, ...baseBudgetInput });
+    } catch (error) {
+      error.diagnostics = { ...error.diagnostics, ...(ceilingPlan?.evidence || {}) };
+      throw error;
+    }
+  }
+  const conversation = conversationContext ? await conversationContext.prepare({
+    layout:audit.promptLayout,system:effectiveSystemPrompt,user:userText,
+    schema:responseSchema,
+    imageDataUri,executedModel:model,protocol:adapter.id,selectedContract:outputContract.version,
+    outputReserve:conversationOutputReserve}) : null;
+  if (conversation?.layout) audit.promptLayout=conversation.layout;
+  for (const key of ["styleRole", "systemStyleCopies", "userStyleCopies", "userStaticChars"])
+    audit[key] = audit.promptLayout[key];
+  diagnosticTrace?.("AI prompt layout", audit.promptLayout);
+  const effectiveUserText=conversation?.current ?? userText;
+  const userTextFingerprint = await sessionPromptFingerprint(effectiveUserText);
   diagnosticTrace?.("AI local request contract", {
-    requestedContract: SCHEMA_OBJECT_CONTRACT,
+    styleRole: audit.styleRole,
+    systemStyleCopies: audit.systemStyleCopies,
+    userStyleCopies: audit.userStyleCopies,
+    policyVersion: audit.promptLayout.policyVersion,
+    requestedContract: outputContract.version,
     selectedContract: outputContract.version,
+    ...formatDiagnostics,
     selectedContractKind: outputContract.kind,
     selectedContractReason: outputContract.reason,
     capabilitySource: outputContract.capabilitySource,
@@ -294,41 +373,51 @@ async function translateSingle(
     styleFingerprint: audit.effectiveStyleFingerprint,
     instructionChars: audit.effectiveSystemPromptChars,
     instructionFingerprint: audit.effectiveSystemPromptFingerprint,
-    userMessageChars: userText.length,
+    userMessageChars: effectiveUserText.length,
     userMessageFingerprint: userTextFingerprint,
+    historyMessages: conversation?.history?.length || 0,
     streamRequested: true,
   });
+  const budgetInput = {history:conversation?.history || [],system: effectiveSystemPrompt, user: conversation?.current ?? userText,
+    schema: responseSchema, image: Boolean(imageDataUri)};
+  const contextPlan = adapter.id === "ollama" ? planOllamaContext(ai?.model_capabilities?.limits, {
+    estimatedInput: estimateProviderInput(budgetInput),
+    predictedOutput: conversation ? conversationOutputReserve : (ai?.workload?.predictedOutput || standardOutputTokens),
+    reasoningReserve: ai?.workload?.reasoningReserve || 0,
+    minimumContextTokens: ai?.workload?.limits?.contextTokens,
+  }) : null;
   await wireTrace?.("contractSelection", {
-    requested: SCHEMA_OBJECT_CONTRACT,
+    requested: outputContract.version,
     selected: outputContract.version,
+    ...formatDiagnostics,
     kind: outputContract.kind,
     reason: outputContract.reason,
     capabilitySource: outputContract.capabilitySource,
     provider: String(ai?.provider || adapter.id), model,
     automaticRetry: false,
+    promptLayout: audit.promptLayout,
+    ...(conversation ? {conversation:conversation.evidence, historyOrigins:conversation.origins} : {}),
+    ...(contextPlan ? {contextPlan: contextPlan.evidence} : {}),
   });
-  const thinkingSelected = ["off", "on"].includes(ai?.thinking)
-    ? ai.thinking : "off";
-  const reasoning = ai?.model_capabilities?.reasoning;
-  const representable = reasoning?.supported === true &&
-    ["toggle", "boolean"].includes(reasoning?.control);
-  const thinkingMode = typeof adapter.resolveThinkingMode === "function"
-    ? adapter.resolveThinkingMode(
-        thinkingSelected,
-        { model, reasoning },
-      )
-    : representable
-      ? thinkingSelected : "default";
-  const standardOutputTokens = adapter.outputTokens({
-    standard: dynamicOutputTokens(units, effectiveSystemPrompt, ai?.workload),
-    thinkingMode,
-  });
-  const outputTokens = guardOutputBudget({ standard: standardOutputTokens,
-    workload: ai?.workload, limits: ai?.model_capabilities?.limits,
-    system: effectiveSystemPrompt, user: userText,
-    schema: outputContract.kind === "schema_object" ? translationObjectSchema(wireUnits.map(u => u.id)) : null,
-    image: Boolean(imageDataUri) });
-  const messages = [
+  // The final guard checks the actual composed message and the exact window
+  // being requested, not the smaller allocation from the earlier health probe.
+  const budgetHint = ai?.workload || (contextPlan ? {version:1, predictedOutput:standardOutputTokens} : null);
+  let outputTokens;
+  try {
+    outputTokens = guardOutputBudget({ standard: standardOutputTokens, workload: budgetHint,
+      limits: contextPlan?.limits || ai?.model_capabilities?.limits, ...budgetInput });
+  } catch (error) {
+    error.diagnostics = {...error.diagnostics, ...(contextPlan?.evidence || {})};
+    throw error;
+  }
+  if (contextPlan) {
+    const evidence = {schema:"tp.audit/1", event:"local_context", route:"direct-local", reason:"prepared",
+      planned:{estimatedInput:estimateProviderInput(budgetInput), estimatedOutput:budgetHint.predictedOutput,
+        contextLimit:contextPlan.limits.contextTokens, ...contextPlan.evidence}, requestDispatched:false};
+    diagnosticTrace?.("localContext", evidence);
+
+  }
+  const messages = conversation ? conversationContext.messages(conversation,effectiveSystemPrompt,adapter) : [
     { role: "system", content: effectiveSystemPrompt },
     {
       role: "user",
@@ -337,7 +426,7 @@ async function translateSingle(
     },
   ];
   await wireTrace?.("systemPrompt", effectiveSystemPrompt);
-  await wireTrace?.("userPrompt", messages[1]?.content || "");
+  await wireTrace?.("userPrompt", messages.at(-1)?.content || "");
   await wireTrace?.("wireUnits", wireUnits);
   const controller = new AbortController(),
     abort = () => controller.abort(signal?.reason);
@@ -353,12 +442,15 @@ async function translateSingle(
     : null;
   let exchange;
   try {
-    const responseSchema = outputContract.kind === "schema_object"
-      ? translationObjectSchema(wireUnits.map((unit) => unit.id)) : null;
     exchange = await adapter.generate(
-      { model, messages, outputTokens, thinkingMode, thinkingCapability: reasoning, responseSchema },
+      { model, messages, outputTokens, thinkingMode, thinkingCapability: reasoning, responseSchema,
+        ...(contextPlan ? {contextTokens:contextPlan.evidence.requestedContext} : {}) },
       {
         expectedIds: wireUnits.map((unit) => unit.id),
+        emitTranslationDeltas: conversationRecords,
+        cacheContext: conversation ? {...audit.promptLayout, staticPrefixSha256:conversation.evidence.prefixSha256} : audit.promptLayout,
+        cacheOperationId: operationId,
+        cacheRevision: ai?.model_capabilities?.limits?.modelRevision || "",
         signal: controller.signal,
         trace: diagnosticTrace,
         wireTrace,
@@ -374,11 +466,13 @@ async function translateSingle(
         retryable: false,
       });
       error.name = "AbortError";
+      error.diagnostics = { ...formatDiagnostics, ...(cause?.diagnostics || {}) };
       error.requestDispatched = cause?.requestDispatched === true;
       error.providerResponded = cause?.providerResponded === true;
       error.generationAttempts = error.providerResponded ? 1 : 0;
       if (cause?.observedUsage) error.generationMeta = {
         provider: String(ai?.provider || adapter.id), model, usage: cause.observedUsage, generationAttempts: error.generationAttempts,
+      cacheCoordination: cause.cacheCoordination,
       };
       throw error;
     }
@@ -399,17 +493,24 @@ async function translateSingle(
     error.providerResponded = providerResponded;
     error.status = Number(cause?.status || 0);
     error.generationAttempts = providerResponded ? 1 : 0;
-    error.diagnostics = { ...(cause?.diagnostics || {}) };
+    error.diagnostics = { ...formatDiagnostics, ...(cause?.diagnostics || {}) };
+    if (cause?.cacheCoordination) error.cacheCoordination = cause.cacheCoordination;
     if (cause?.observedUsage) error.generationMeta = {
       provider: String(ai?.provider || adapter.id), model, usage: cause.observedUsage, generationAttempts: error.generationAttempts,
+      cacheCoordination: cause.cacheCoordination,
     };
     throw error;
   } finally {
     if (timer) clearTimeout(timer);
     signal?.removeEventListener?.("abort", abort);
   }
-  const { response, stream, providerMs } = exchange;
-  if (!response.ok) throw rejectedResponse(response, stream.raw);
+  const { response, stream, providerMs, cacheCoordination, thinkingApplied: transportThinkingApplied } = exchange;
+  if (!response.ok) {
+    const error = rejectedResponse(response, stream.raw);
+    error.diagnostics = { ...formatDiagnostics, ...(error.diagnostics || {}) };
+    error.cacheCoordination = cacheCoordination;
+    throw error;
+  }
   try {
   if (
     !stream.earlyCompleted &&
@@ -493,9 +594,8 @@ async function translateSingle(
     usage.reason = adapter.incompleteUsageReason?.(stream) || null;
   }
   const timings = adapter.timing(data, usage.outputTokens),
-    thinkingApplied = thinkingMode === "default"
-      ? "unverified"
-      : `requested_${thinkingSelected}`;
+    thinkingApplied = String(transportThinkingApplied || (thinkingMode === "default"
+      ? "provider_default" : "unverified"));
   const attach = (error, extra = 0) => {
     error.generationMeta = {
       provider: String(ai?.provider || adapter.id),
@@ -518,8 +618,9 @@ async function translateSingle(
     return error;
   };
   diagnosticTrace?.("AI diagnostic provider response", {
-    requestedContract: SCHEMA_OBJECT_CONTRACT,
+    requestedContract: outputContract.version,
     selectedContract: outputContract.version,
+    ...formatDiagnostics,
     selectedContractKind: outputContract.kind,
     selectedContractReason: outputContract.reason,
     capabilitySource: outputContract.capabilitySource,
@@ -587,6 +688,15 @@ async function translateSingle(
     error.providerResponded = true;
     throw attach(error, performance.now() - translationStarted);
   }
+  const uncertainWireIds = ai?.conversation?.branch === "repair"
+    ? uncertainRepairIds(wireUnits.map(u => u.id), decoded.diagnostics?.ignoredUnknownIds || []) : [];
+  const uncertainSet = new Set(uncertainWireIds);
+  const alignmentUncertainIds = wireUnits.flatMap((wire, i) => uncertainSet.has(wire.id) ? [units[i].id] : []);
+  if (alignmentUncertainIds.length) {
+    const rejected = new Set(alignmentUncertainIds);
+    decoded.translations = decoded.translations.map(row => rejected.has(row.id) ? {...row, text:""} : row);
+    decoded.missing = [...new Set([...(decoded.missing || []), ...alignmentUncertainIds])];
+  }
   parseMs += performance.now() - translationStarted;
   const missing = [
     ...new Set([
@@ -606,24 +716,33 @@ async function translateSingle(
         ignoredUnknownIds: decoded.diagnostics.ignoredUnknownIds || [],
         ignoredProse: decoded.diagnostics.ignoredProse === true,
         ignoredProseChars: Number(decoded.diagnostics.ignoredProseChars || 0),
+        formattingWhitespaceChars: Number(decoded.diagnostics.formattingWhitespaceChars || 0),
+        unexpectedProseChars: Number(decoded.diagnostics.unexpectedProseChars ?? (decoded.diagnostics.ignoredProse ? 1 : 0)),
         malformedMarkerIds: decoded.diagnostics.malformedMarkerIds || [],
+        recoverableMalformedMarkerIds: decoded.diagnostics.recoverableMalformedMarkerIds || [],
+        malformedMarkersRecoverable: decoded.diagnostics.malformedMarkersRecoverable === true,
         malformedLineCount: Number(decoded.diagnostics.malformedLineCount || 0),
       }
     : null;
-  const { omittedIds, declinedIds } = classifyDirectLocalMissingIds(
+  let { omittedIds, declinedIds } = classifyDirectLocalMissingIds(
     contractDiagnostics, wireUnits, units,
   );
+  omittedIds = [...new Set([...omittedIds, ...alignmentUncertainIds])];
+  declinedIds = declinedIds.filter(id => !alignmentUncertainIds.includes(id));
   await wireTrace?.("parsedRecords", decoded.translations);
   await wireTrace?.("providerValidation", { missingIds: missing, ...(contractDiagnostics || {}) });
   await wireTrace?.("contractApplied", {
-    requested: SCHEMA_OBJECT_CONTRACT,
+    requested: outputContract.version,
     selected: outputContract.version,
+    ...formatDiagnostics,
     applied: decoded.responseShape,
+    decodedResponseShape: decoded.responseShape,
     reason: outputContract.reason,
     providerAttempts: 1,
     automaticRetry: false,
   });
   await wireTrace?.("timing", { providerMs: Math.round(providerMs), parseMs: Math.round(parseMs),
+    ...(cacheCoordination ? {cacheCoordination} : {}),
     dispatchToHeadersMs: stream.dispatchToHeadersMs == null ? null : Math.round(stream.dispatchToHeadersMs),
     firstByteMs: stream.firstByteMs == null ? null : Math.round(stream.firstByteMs),
     firstContentMs: stream.firstContentMs == null ? null : Math.round(stream.firstContentMs),
@@ -639,6 +758,7 @@ async function translateSingle(
         duplicateIds: contractDiagnostics?.duplicateIds || [],
         ignoredProseChars: contractDiagnostics?.ignoredProseChars || 0 },
     );
+  conversationContext?.capture(text);
   onProgress?.({ state: "completed" });
   return {
     schema: "tp.ai.result/1",
@@ -646,7 +766,11 @@ async function translateSingle(
     missing,
     meta: {
       route: "direct-local",
+      translationMode:conversation ? "conversation" : "independent",
+      ...(conversation ? {conversation:conversation.evidence, historyOrigins:conversation.origins} : {}),
       responseShape: decoded.responseShape,
+      ...formatDiagnostics,
+      decodedResponseShape: decoded.responseShape,
       acceptedLosslessly: decoded.acceptedLosslessly === true,
       omittedIds,
       declinedIds,
@@ -663,8 +787,9 @@ async function translateSingle(
       providerResponded: true,
       providerMs: Math.round(providerMs),
       parseMs: Math.round(parseMs),
-      modelLimits: ai?.model_capabilities?.limits || {},
-      requestedContract: SCHEMA_OBJECT_CONTRACT,
+      modelLimits: contextPlan?.limits || ai?.model_capabilities?.limits || {},
+      ...(contextPlan ? {contextPlan:contextPlan.evidence} : {}),
+      requestedContract: outputContract.version,
       selectedContract: outputContract.version,
       selectedContractKind: outputContract.kind,
       selectedContractReason: outputContract.reason,
@@ -694,11 +819,16 @@ async function translateSingle(
       runtime: "local",
       totalMs: Math.round(performance.now() - started),
       timeoutMs: configuredTimeoutMs,
+      promptLayout: audit.promptLayout,
+      cacheCoordination,
       promptAudit: audit,
       contractDiagnostics,
+      alignmentUncertainIds,
+      alignmentStatus: alignmentUncertainIds.length ? "uncertain" : "not_semantically_verified",
     },
   };
   } catch (error) {
+    error.diagnostics = { ...formatDiagnostics, ...(error.diagnostics || {}) };
     // Decode/protocol failure does not erase tokens already reported by the
     // runtime. This snapshot is deliberately incomplete without a terminal.
     if (!error.generationMeta?.usage) {

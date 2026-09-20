@@ -26,6 +26,10 @@ def target_language_priority(lang: str) -> str:
         if normalized in aliases:
             code = candidate
             break
+    if code == "th":
+        return "แปลข้อความต้นฉบับทุกหน่วยเป็นภาษาไทย"
+    if code == "ja":
+        return "原文の各単位を日本語に翻訳する。"
     name = names.get(code, raw)
     native = _TARGET_NATIVE_NAMES.get(code) or _TARGET_NATIVE_NAMES.get(code.split("-")[0], "")
     label = f"{name} ({native})" if native and native not in name else name

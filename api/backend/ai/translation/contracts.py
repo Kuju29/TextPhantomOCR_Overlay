@@ -3,6 +3,8 @@
 from dataclasses import dataclass, field
 from typing import Any, TypedDict
 
+from backend.ai.reasoning_preference import normalize_reasoning_preference
+
 @dataclass
 class AiConfig:
     api_key: str
@@ -15,6 +17,8 @@ class AiConfig:
     glossary: list = field(default_factory=list)
     characters: list = field(default_factory=list)
     char_memory: bool = False
+    memory_mode: str | None = None
+    style_examples: bool = True
     send_image: bool | str = False
     image_b64: str = ""
     image_mime: str = "image/jpeg"
@@ -31,12 +35,15 @@ class AiConfig:
     speakers: dict = field(default_factory=dict)
     prev_context: list = field(default_factory=list)
     page_context: list = field(default_factory=list)
+    source_lang: str = ""
+    source_context: list = field(default_factory=list)
     context_frozen: bool = False
+    # Low-level callers remain independent unless the UI/HTTP selects the new route.
+    translation_mode: str = "independent"
+    conversation: dict = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
-        # Auto is retained only as a historical/diagnostic label. Runtime
-        # configuration has a two-state user selection and defaults safely Off.
-        self.thinking = "on" if str(self.thinking or "off").strip().lower() == "on" else "off"
+        self.thinking = normalize_reasoning_preference(self.thinking, "off")
 
 class AiResult(TypedDict):
     aiTextFull: str

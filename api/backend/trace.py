@@ -127,7 +127,7 @@ _NUMERIC_TOKEN_COUNTERS = {
 }
 _PRIVATE_CONTENT_NAMES = {
     "ai_text", "body", "character_sheet", "content", "input", "memo",
-    "messages", "original_text_full", "paragraphs", "prev_context", "page_context", "pagecontext", "prompt",
+    "messages", "original_text_full", "paragraphs", "prev_context", "page_context", "pagecontext", "source_context", "sourcecontext", "prompt",
     "prompt_editable", "prompt_override", "raw", "series_state", "source_text",
     "speakers", "system_dynamic", "system_static", "system_text", "text",
     "translated_text", "user_parts", "source_chars", "target_source_chars", "estimated_response_chars",
@@ -450,9 +450,21 @@ def _sanitize_string(value: str) -> str:
     return text
 
 def _short(value: Any, depth: int = 0) -> Any:
+    if isinstance(value,dict) and value.get("schema")=="tp.conversation_batch/1":
+        from .diagnostic_schema import sanitize_conversation_batch
+        return sanitize_conversation_batch(value)
+    if isinstance(value, dict) and value.get("schema") == "tp.conversation/1":
+        from .diagnostic_schema import sanitize_conversation
+        return sanitize_conversation(value)
     if isinstance(value, dict) and value.get("schema") == "tp.audit/1":
         from .diagnostic_schema import sanitize_audit
         return sanitize_audit(value)
+    if isinstance(value, dict) and value.get("schema") == "tp.cache_coordination/1":
+        from .diagnostic_schema import sanitize_cache_coordination
+        return sanitize_cache_coordination(value)
+    if isinstance(value, dict) and value.get("schema") == "tp.prompt_layout/1":
+        from .diagnostic_schema import sanitize_prompt_layout
+        return sanitize_prompt_layout(value)
     """A value small enough to read, with its shape intact."""
     if value is None or isinstance(value, (bool, int)):
         return value

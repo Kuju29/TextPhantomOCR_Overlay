@@ -15,6 +15,22 @@ export function __setStoreForTests(next) {
 }
 
 let storeBroken = false;
+// These states describe work already completed or owned by the live job. Their
+// persistence must not delay provider dispatch or showing its result. Actual
+// generation receipts / repair dispatch checkpoints are persisted by their owners
+// before provider I/O; this tracking store is only reported on startup (not replayed).
+// Keep observations ordered per image, including terminal/cancellation writes.
+const pending = new Map();
+const workflowTabs = new Map();
+const cancellingWorkflows = new Set();
+const observational = new Set([
+  STATES.LENS_READY, STATES.AI_REQUESTED,
+  STATES.TEXT_READY, STATES.RENDER_READY, STATES.APPLY_REQUESTED, STATES.APPLIED,
+]);
+
+export async function flushTracking() {
+  await Promise.all([...pending.values()]);
+}
 
 // Reports the first storage failure and turns tracking off for the rest of the session.
 function noteStoreFailure(what, error) {
@@ -48,16 +64,25 @@ export async function begin({ itemId, request, generation }) {
   const created = await track("begin", () =>
     store.create({ workflowId, itemId, request, generation }),
   );
+  if (created) workflowTabs.set(workflowId, generation?.tabId);
   return created ? workflowId : "";
 }
 
 // Builds a step function that advances a record to one state, doing nothing for an untracked job.
 function step(state, { reason = "", operation } = {}) {
   return (workflowId) => {
-    if (!workflowId) return Promise.resolve(null);
-    return track(`advance:${state}`, () =>
+    if (!workflowId || cancellingWorkflows.has(workflowId)) return Promise.resolve(null);
+    const previous = pending.get(workflowId) || Promise.resolve();
+    const writing = previous.then(() => track(`advance:${state}`, () =>
       store.advance(workflowId, state, { reason, operation }),
-    );
+    ));
+    pending.set(workflowId, writing);
+    void writing.then(() => {
+      if (pending.get(workflowId) === writing) pending.delete(workflowId);
+      if (state === STATES.APPLIED || state === STATES.FAILED || storeBroken)
+        workflowTabs.delete(workflowId);
+    });
+    return observational.has(state) ? Promise.resolve(null) : writing;
   };
 }
 
@@ -75,7 +100,8 @@ export const lensReady = (workflowId) => step(STATES.LENS_READY)(workflowId);
 export const lensDegraded = (workflowId, reason) =>
   step(STATES.LENS_DEGRADED, { reason })(workflowId);
 
-// Records the AI request before it is made, committing the operation id a retry reuses.
+// Observes entry into the live AI route. This diagnostic operation label is not
+// the provider idempotency key; its authoritative dispatch receipt stays awaited.
 export const aiRequested = (workflowId, operation) =>
   step(STATES.AI_REQUESTED, { operation })(workflowId);
 
@@ -103,7 +129,23 @@ export const failed = (workflowId, reason) =>
 
 // Cancels every workflow belonging to a tab.
 export function cancelTab(tabId, reason = "navigation") {
-  return track("cancelTab", () => store.cancelTab(tabId, reason));
+  // Fence observations now, then drain only this navigation's captured jobs.
+  // A new job can start in the SAME tab while these writes are outstanding;
+  // it must not be cancelled by the old page's delayed store transaction.
+  const own = [...workflowTabs].filter(([, owner]) => owner === tabId).map(([id]) => id);
+  const previous = own.map(id => pending.get(id));
+  for (const id of own) cancellingWorkflows.add(id);
+  const writing = Promise.all(previous).then(() =>
+    track("cancelTab", () => store.cancelTab(tabId, reason, own)),
+  );
+  for (const id of own) pending.set(id, writing);
+  return writing.finally(() => {
+    for (const id of own) {
+      if (pending.get(id) === writing) pending.delete(id);
+      cancellingWorkflows.delete(id);
+      workflowTabs.delete(id);
+    }
+  });
 }
 
 // Reports the workflows that survived a service-worker restart.

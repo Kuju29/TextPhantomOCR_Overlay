@@ -18,7 +18,6 @@ from backend.api.errors import (
     merged_request_correlation,
 )
 from backend.application import translate_context
-from backend.config import settings
 from backend.jobs.admission import identity_of
 
 @dataclass(frozen=True, slots=True)
@@ -55,19 +54,19 @@ def prepare(payload: dict[str, Any], request: Any, *, trace_id_hint: str = "") -
     })
     local_detector = lambda provider, base_url="": is_local_target(provider, base_url)
     if not translate_context.ai_server_execution_configured(
-        payload, fallback_api_key=settings.ai_api_key, is_local_target=local_detector,
+        payload, is_local_target=local_detector,
     ):
         detail = error_payload(
             code="ai_not_configured",
-            message="AI is selected but no API key or server-local provider is configured.",
-            user_message="AI translation is not configured on this server.",
+            message="Cloud AI requires a user API key; no server key is used.",
+            user_message="Add your API key or select a Local provider.",
             origin="client", stage="ai_configuration", category="configuration",
             retryable=False, http_status=400, trace_id=trace_id, correlation=correlation,
         )
         failure_event(requested_route, detail, **route_identity)
         raise HTTPException(status_code=400, detail=detail)
     lane = translate_context.lane_for(
-        payload, fallback_api_key=settings.ai_api_key, is_local_target=local_detector,
+        payload, is_local_target=local_detector,
     )
     mode = str(payload.get("mode") or "")
     source = str(payload.get("source") or "")

@@ -14,7 +14,7 @@ def positive(value):
 def normalize_limits(value):
     if not isinstance(value, Mapping):
         return {}
-    result = {key: value[key] for key in ('contextTokens', 'maxOutputTokens', 'outputHintTokens', 'maxInputTokens')
+    result = {key: value[key] for key in ('contextTokens', 'maxOutputTokens', 'outputHintTokens', 'maxInputTokens', 'runtimeContextTokens', 'modelContextTokens', 'configuredContextTokens')
               if positive(value.get(key))}
     for key in ('source', 'scope', 'modelRevision', 'tokenizer'):
         if isinstance(value.get(key), str):
@@ -51,22 +51,40 @@ class WorkloadBudgetError(ValueError):
     generationAttempts = 0
 
 
-def guard_output_budget(standard, *, workload=None, limits=None, system='', parts=(), schema=None, image=False):
+def estimate_provider_input(*, system='', parts=(), schema=None, image=False, history=()):
+    if history:
+        from backend.ai.translation_paths.messages import history_parts
+        extra = sum(bool(m.get('image_b64')) for m in history) * 2048 + len(history) * 8
+        return math.ceil((text_weight(system) + text_weight('\n\n'.join(history_parts(history) + list(parts))) +
+            (text_weight(json.dumps(schema, ensure_ascii=False)) if schema else 0) + 64 +
+            (2048 if image else 0) + extra) * 1.25)
+    return math.ceil((text_weight(system) + text_weight('\n\n'.join(parts)) +
+                     (text_weight(json.dumps(schema, ensure_ascii=False)) if schema else 0) +
+                     64 + (2048 if image else 0)) * 1.25)
+
+
+def guard_output_budget(standard, *, workload=None, limits=None, system='', parts=(), schema=None, image=False, history=()):
     hint = normalize_workload(workload)
     if not hint:
         return standard
     bounds = normalize_limits(limits)
-    inp = math.ceil((text_weight(system) + text_weight('\n\n'.join(parts)) +
-                     (text_weight(json.dumps(schema, ensure_ascii=False)) if schema else 0) +
-                     64 + (2048 if image else 0)) * 1.25)
+    inp = estimate_provider_input(system=system, parts=parts, schema=schema, image=image, history=history)
     expected = hint.get('predictedOutput', 1)
     reasoning = hint.get('reasoningReserve', 0)
-    available = min(8192, bounds.get('maxOutputTokens', math.inf), bounds.get('outputHintTokens', math.inf),
+    application_ceiling = max(8192, hint.get('completionAvailable', 0) or 8192)
+    available = min(application_ceiling, bounds.get('maxOutputTokens', math.inf), bounds.get('outputHintTokens', math.inf),
                     bounds['contextTokens'] - inp - 128 if bounds.get('contextTokens') else math.inf,
                     hint.get('completionAvailable', math.inf))
     if inp > bounds.get('maxInputTokens', math.inf) or available < expected + reasoning:
-        raise WorkloadBudgetError('The composed prompt and estimated response exceed the available model budget')
-    requested = max(standard, min(8192, expected + reasoning + max(128, math.ceil(expected * .5))))
+        error = WorkloadBudgetError('The composed prompt and estimated response exceed the available model budget')
+        error.diagnostics = {"constraintScope":"per_request", "estimatedInput":inp,
+            "estimatedOutput":expected, "reasoningReserve":reasoning,
+            "contextLimit":bounds.get("contextTokens"),"outputLimit":bounds.get("maxOutputTokens"),"inputLimit":bounds.get("maxInputTokens"),
+            "completionAvailable":max(0,int(available)) if math.isfinite(available) else None,
+            "constraint":"input_limit" if inp > bounds.get('maxInputTokens', math.inf) else
+                "context_window" if bounds.get('contextTokens') and inp+expected+reasoning+128 > bounds['contextTokens'] else "output_budget"}
+        raise error
+    requested = max(standard, min(application_ceiling, expected + reasoning + max(128, math.ceil(expected * .5))))
     return max(1, math.floor(min(available, requested)))
 
 
@@ -74,4 +92,4 @@ def guard_request_budget(request, standard):
     return guard_output_budget(standard, workload=request.workload,
         limits=request.model_capabilities.get('limits'), system=request.system_text,
         parts=request.user_parts, schema=dict(request.response_schema) if request.response_schema else None,
-        image=bool(request.image_b64))
+        image=bool(request.image_b64), history=request.history_messages)

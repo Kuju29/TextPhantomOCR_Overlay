@@ -35,6 +35,7 @@ import {
 } from "./ai/providers/local-registry.js";
 import { classifyAiRuntime } from "./ai-settings-contract.js";
 import { normalizeEngineModePreference } from "./engine-mode.js";
+import { normalizeUserReasoningPreference } from "./reasoning-preference.js";
 
 // aiProfilesV1 is intentionally not read here yet. readFullSettings() remains
 // the compatibility boundary until the popup/background activation stage.
@@ -136,6 +137,9 @@ export async function readFullSettings(options = {}) {
     "aiGlossary",
     "aiCharMemory",
     "aiMemoryMode",
+    "aiStyleExamples",
+    "aiTranslationMode",
+    "aiConversationReset",
     "aiSendImage",
     "aiPageImage",
     "aiOnDevice",
@@ -253,6 +257,12 @@ export async function readFullSettings(options = {}) {
     aiCharMemory: it.aiCharMemory === true, // legacy boolean (Full == true)
     // Series-memory mode: "off" (default) | "terms" (glossary only) | "full"
     // (glossary + character sheet). Migrates the old boolean when unset.
+    aiStyleExamples: it.aiStyleExamples !== false,
+    // Keep the dormant Independent preference intact while execution is gated
+    // to Conversation. The active job builder owns that temporary gate.
+    aiTranslationMode: it.aiTranslationMode === "independent"
+      ? "independent" : "conversation",
+    aiConversationReset: String(it.aiConversationReset || "0"),
     aiMemoryMode: ["off", "terms", "full"].includes(it.aiMemoryMode)
       ? it.aiMemoryMode
       : it.aiCharMemory === true
@@ -276,15 +286,13 @@ export async function readFullSettings(options = {}) {
     // Text overlays are extension-first. Ignore the hidden legacy false value;
     // it caused an entire batch to fall back to server erase/render/PNG.
     clientBackground: true,
-    // Missing or malformed legacy values default to the user's safe selection:
-    // Off. Provider boundaries still omit native controls unless capability is
-    // verified for the exact selected model.
-    aiThinking: it.aiThinking === true || it.aiThinking === "on" ? "on"
-      : "off",
-    // Kept separate from cloud thinking so enabling/disabling a local model
-    // never silently changes Gemini. New Local AI installs default to off.
-    aiLocalThinking: it.aiLocalThinking === true || it.aiLocalThinking === "on" ? "on"
-      : "off",
+    // Preserve the provider-neutral reasoning preference. Exact selected-model
+    // capability later resolves an unsupported/stale preference to Provider
+    // default instead of hiding the model or silently escalating reasoning.
+    aiThinking: normalizeUserReasoningPreference(it.aiThinking),
+    // Kept separate from cloud reasoning so changing a Local model never
+    // silently changes a Cloud model's effective preference.
+    aiLocalThinking: normalizeUserReasoningPreference(it.aiLocalThinking),
     aiPrompt,
     // Orientation relayout for the Translated overlay. Default ON.
     relayoutTranslated: readBool(

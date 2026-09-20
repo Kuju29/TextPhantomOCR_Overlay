@@ -111,6 +111,41 @@ assert.equal(isPermanentSemanticGroupingFailure(
   assert.equal(finalized, 1);
 }
 
+// Direct AI failures that already belong to the repair lifecycle are not
+// terminal UI events yet. Keep the sanitized message on the batch item so the
+// repair owner can either discard it after a successful patch or publish it
+// only after terminal repair failure.
+{
+  const imageKey = "https://example/repair-owned.jpg";
+  const batchId = "batch-repair-owned";
+  const jobId = "job-repair-owned";
+  const item = { attempt:1, status:"processing", phase:"ai_generating", payload:{src:imageKey} };
+  const batch = { id:batchId, items:new Map([[imageKey,item]]) };
+  let sent = 0, finalized = 0;
+  const delivery = createResultDelivery({
+    accumulateSeriesMemory() {}, batchUpdateToast() {}, classifyJobError,
+    enqueueDomInsert() {}, ensureBatch:()=>batch, evaluateTextNoOverlaySkippable() {},
+    finalizeBatch:()=>{ finalized++; }, findContext() {}, getSettingsEpoch:()=>0,
+    getTabSessionId:()=>"session-1", imageErrorMessage, isUrlOnlyPayload:()=>false,
+    markDomainNeedsDataUri() {},
+    markImagePhase:(_batchId,key,phase,details)=>Object.assign(batch.items.get(key),{status:phase,...details}),
+    mdCacheKey() {}, mdKeyFromUrl() {}, normImgSrc() {},
+    pendingByJob:new Map([[jobId,{ batchId,imageKey,tabId:7,frameId:0,sessionId:"session-1",
+      imgUrl:imageKey,traceId:"repair-trace",aiGenerationAttempted:true,
+      metadata:{batch_id:batchId,image_id:imageKey} }]]),
+    removeJob() {}, resolveSeriesKey() {}, sendToTab(){ sent++; }, setCachedDataUri() {},
+    setCachedResult() {}, stripImageFields() {}, summarizeResultPresentation() {}, traceNote() {},
+    shouldDeferImageError:({terminalAiError})=>terminalAiError === true,
+    workflow:{}, log:{warn(){},info(){}},
+  });
+  delivery.handleJobError(jobId,Object.assign(new Error("wrong target language"),{code:"wrong_language_output"}));
+  assert.equal(sent,0,"repair-owned AI failure must not send IMAGE_ERROR before repair");
+  assert.equal(item.deferredImageError?.type,"IMAGE_ERROR");
+  assert.equal(item.deferredImageError?.tpTrace,"repair-trace");
+  assert.equal(item.suppressToast,true,"the same deferred failure must not show an Error toast");
+  assert.equal(finalized,1,"batch recovery still starts after deferring terminal UI");
+}
+
 assert.equal(isUrlOnlyImageAcquisitionFailure(
   new Error("could not read the image bytes: HTTP 403"),
 ), true);

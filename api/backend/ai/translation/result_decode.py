@@ -33,6 +33,15 @@ def decode_result(*, result, ids: list[str], provider: str, base_url: str,
                   contract_selection_reason: str = "legacy_compact_default",
                   thinking_selected: str, thinking_applied: str, system_text: str,
                   user_parts: list, capture_request: bool, is_retry: bool) -> AiResult:
+    format_diagnostics = {
+        "plannedOutputContract": selected_wire_contract,
+        "selectedOutputContract": selected_wire_contract,
+        "selectionReason": contract_selection_reason,
+        "parserId": "schema_object" if native_schema else "compact_records",
+        # Decoder selection is fixed before inspecting the answer. Shape errors
+        # are typed failures, never a trigger to switch output contracts.
+        "formatSwitch": False,
+    }
     finish_reason = str(result.finish_reason or "").strip().lower()
     provider_output_truncated = finish_reason in {
         "length", "max_tokens", "max_output_tokens", "truncated",
@@ -66,6 +75,9 @@ def decode_result(*, result, ids: list[str], provider: str, base_url: str,
         # same public typed failure, including errors raised by compatibility
         # JSON decoding before the stricter schema-shape checks below.
         exc.code = "AI_OUTPUT_CONTRACT_MISMATCH"
+        exc.structural_details.update(format_diagnostics)
+        exc.structural_details["decodedResponseShape"] = exc.response_shape
+        exc.structural_details["expectedContract"] = selected_wire_contract
         raw_bytes = str(result.text or "").encode("utf-8")
         exc.structural_details.setdefault("responseChars", len(str(result.text or "")))
         exc.structural_details.setdefault(
@@ -77,6 +89,7 @@ def decode_result(*, result, ids: list[str], provider: str, base_url: str,
             "usage": usage_meta(result),
             "finish_reason": result.finish_reason,
             "provider_ms": result.provider_ms,
+            "first_content_ms": result.first_content_ms,
             "provider_parse_ms": result.parse_ms,
             "timeout_policy": (
                 "local_connect_bounded_read_unbounded"
@@ -85,6 +98,7 @@ def decode_result(*, result, ids: list[str], provider: str, base_url: str,
             ),
         })
         trace_preview.note("AI diagnostic contract failure", {
+            **format_diagnostics, "decodedResponseShape": exc.response_shape,
             "selectedContract": selected_wire_contract,
             "validatorSubtype": exc.structural_details.get("validatorSubtype", "unknown"),
             "endMarkerPresent": exc.structural_details.get("endMarkerPresent", False),
@@ -122,6 +136,19 @@ def decode_result(*, result, ids: list[str], provider: str, base_url: str,
             "responseChars": len(str(result.text or "")),
         })
     ai_text_full = decoded.ai_text_full
+    uncertain_ids = []
+    if (ai.conversation or {}).get("branch") == "repair":
+        from backend.ai.repair_alignment import uncertain_repair_ids
+        uncertain_ids = uncertain_repair_ids(ids, decoded.discarded_ids)
+        if uncertain_ids:
+            values = markers.extract_paragraphs_exact(ai_text_full, len(ids))
+            if values:
+                rejected = set(uncertain_ids)
+                ai_text_full = markers.apply(["" if uid in rejected else value
+                    for uid, value in zip(ids, values[0])])
+            trace_preview.note("AI repair alignment uncertain", {
+                "reason": "unexpected_repair_ids", "alignmentUncertainIds": uncertain_ids,
+                "unexpectedIds": list(decoded.discarded_ids), "semanticVerified": False})
     trace_preview.emit(
         "AI diagnostic decoded response units", trace_preview.marked_units(ai_text_full),
         selectedContract=selected_wire_contract, missingIds=list(decoded.missing_ids),
@@ -132,6 +159,7 @@ def decode_result(*, result, ids: list[str], provider: str, base_url: str,
     characters = parsing.parse_character_memo(memo) if memo else []
 
     meta: dict[str, Any] = {
+        **format_diagnostics, "decodedResponseShape": decoded.response_shape,
         "model": used_model,
         "requested_output_tokens": result.requested_output_tokens,
         "upstream_provider": result.upstream_provider,
@@ -154,16 +182,23 @@ def decode_result(*, result, ids: list[str], provider: str, base_url: str,
         "terminal_ms": result.terminal_ms,
         "thinking_selected": thinking_selected,
         "thinking_applied": thinking_applied,
-        "accepted_losslessly": decoded.accepted_losslessly,
-        "content_modified": decoded.content_modified,
-        "omitted_ids": list(decoded.missing_ids),
+        "accepted_losslessly": decoded.accepted_losslessly and not uncertain_ids,
+        "content_modified": decoded.content_modified or bool(uncertain_ids),
+        "omitted_ids": list(dict.fromkeys([*decoded.missing_ids, *uncertain_ids])),
+        "alignment_uncertain_ids": uncertain_ids,
+        "alignment_status": "uncertain" if uncertain_ids else "not_semantically_verified",
         "ignored_output_ids": list(decoded.discarded_ids),
         "duplicate_output_ids": list(decoded.duplicate_ids),
         "ignored_output_prose_chars": decoded.ignored_prose_chars,
+        "formatting_whitespace_chars": decoded.formatting_whitespace_chars,
+        "unexpected_prose_chars": decoded.unexpected_prose_chars,
         "malformed_output_record_count": decoded.malformed_line_count,
+        "recoverable_malformed_output_record_count": decoded.recoverable_malformed_line_count,
+        "malformed_output_recoverable": decoded.malformed_records_recoverable,
         "usage": usage_meta(result),
         "finish_reason": result.finish_reason,
         "provider_ms": result.provider_ms,
+        "first_content_ms": result.first_content_ms,
         "provider_parse_ms": result.parse_ms,
         "prompt_eval_ms": result.prompt_eval_ms,
         "timeout_policy": (

@@ -1,3 +1,5 @@
+import {requireConversationApi} from "../../../shared/ai/conversation/support.js";
+import "../../../shared/diagnostic-schema.js";
 import { repairRunPath } from "../../repair/client.js";
 import { workloadSelection } from "../../../shared/ai/workload/contract.js";
 import {
@@ -11,6 +13,41 @@ import {
 } from "../../../shared/ai-usage.js";
 import { AI_PROMPT_MODE, normalizeAiPrompt } from "../../../shared/ai-prompt-policy.js";
 import { beginApiRequest, noteApiActivity, noteApiSuccess } from "../../api.js";
+
+/** Read only the negotiated transport envelope; model output is never reparsed here. */
+export async function readAiStream(response, onDelta) {
+  const reader = response.body?.getReader?.();
+  const invalid = message => Object.assign(new Error(message), {code:"invalid_ai_stream"});
+  if (!reader) throw invalid("AI stream has no readable body");
+  const decoder = new TextDecoder();
+  let pending = "", sequence = 0;
+  try {
+    while (true) {
+      const {value, done} = await reader.read();
+      pending += decoder.decode(value, {stream:!done});
+      let newline;
+      while ((newline = pending.indexOf("\n")) >= 0) {
+        const line = pending.slice(0, newline); pending = pending.slice(newline + 1);
+        if (!line.trim()) continue;
+        let event;
+        try { event = JSON.parse(line); } catch { throw invalid("AI stream contains invalid NDJSON"); }
+        if (event?.schema !== "tp.ai.stream/1" || event.sequence !== ++sequence)
+          throw invalid("AI stream schema or sequence mismatch");
+        if (event.type === "delta" && typeof event.text === "string") {
+          onDelta?.(event.text);
+        } else if (event.type === "result" && event.body && typeof event.body === "object") {
+          return {status:200, body:event.body};
+        } else if (event.type === "error" && Number.isInteger(event.status) && event.status >= 400 && event.status <= 599 && event.body && typeof event.body === "object") {
+          return {status:event.status, body:event.body};
+        } else throw invalid("AI stream contains an invalid event");
+      }
+      if (done) throw invalid("AI stream ended without a result or error event");
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
 
 function sourceChars(units) {
   return units.reduce((sum, unit) => sum + Array.from(String(unit?.text || "")).length, 0);
@@ -56,9 +93,12 @@ export async function translateViaServer(
   const apiBase = String(base || "").replace(/\/+$/, "");
   if (!apiBase) throw new Error("server AI route has no API base URL");
 
+  requireConversationApi(ai, capabilities);
   const outputSelection = workloadSelection(ai || {}, "server");
   const body = {
     schema: "tp.ai.request/1",
+    translationMode: ai?.translation_mode === "conversation" ? "conversation" : "independent",
+    conversation: {...(ai?.conversation || {}), ...(repairClaim ? {branch:"repair"} : {})},
     operationId,
     ...(batchId ? { batchId } : {}),
     context: {
@@ -67,6 +107,7 @@ export async function translateViaServer(
     },
     units: units.map(({ id, text }) => ({ id, text })),
     pageContext: Array.isArray(ai?.page_context) ? ai.page_context : [],
+    sourceContext: Array.isArray(ai?.source_context) ? ai.source_context : [],
     targetLang,
     sourceLang,
     repair: { owner: "extension", enabled: false },
@@ -78,11 +119,13 @@ export async function translateViaServer(
       model: String(ai?.model || "auto"),
       baseUrl: String(ai?.base_url || "auto"),
       apiKey: String(ai?.api_key || ""),
-      thinking: ai?.thinking === "on" ? "on" : "off",
+      thinking: String(ai?.thinking || "minimum"),
       ...(outputSelection.contract ? { outputContract: outputSelection.contract } : {}),
       modelCapabilities: outputSelection.caps,
     },
     memory: {
+      ...(["off", "terms", "full"].includes(ai?.memory_mode) ? { mode: ai.memory_mode } : {}),
+      styleExamples: ai?.translation_mode === "conversation" ? false : ai?.style_examples !== false,
       enabled: ai?.char_memory === true,
       glossary: Array.isArray(ai?.glossary) ? ai.glossary : [],
       characters: Array.isArray(ai?.characters) ? ai.characters : [],
@@ -98,9 +141,11 @@ export async function translateViaServer(
   const requestPath = repairClaim
     ? repairRunPath(repairClaim.runId, `tasks/${encodeURIComponent(repairClaim.taskId)}/translate`)
     : engineApiPath(capabilities, API_PATHS.ENGINE_EXTENSION_AI_TRANSLATE, API_PATHS.AI_TRANSLATE_V1);
+  const progressiveRequested = body.translationMode === "conversation" && !repairClaim;
   const requestId = crypto.randomUUID();
   const headers = {
     "Content-Type": "application/json",
+    ...(progressiveRequested ? {Accept:"application/x-ndjson"} : {}),
     ...(repairClaim ? { "X-TP-Run-Token": repairClaim.token } : {}),
     "X-TP-Request-Id": requestId,
     ...(jobId ? { "X-TP-Job-Id": String(jobId) } : {}),
@@ -159,9 +204,10 @@ export async function translateViaServer(
       }); } catch {}
     }
   };
+  let streamedBody = null;
   const readResponseBody = async () => {
     try {
-      const raw = String(await res.text());
+      const raw = streamedBody !== null ? streamedBody : String(await res.text());
       const bodyCompleteAt = performance.now();
       emitTiming("response_complete", {httpMs:bodyCompleteAt-httpStarted,
         headersMs:headersAt-httpStarted, bodyMs:bodyCompleteAt-headersAt});
@@ -192,18 +238,21 @@ export async function translateViaServer(
       throw signal.reason || new DOMException("Aborted", "AbortError");
     }
     const requestBody = JSON.stringify(body);
-    progress("http_wait");
+    progress("sending_request");
     httpStarted = performance.now(); httpAttempts = 1;
     const pendingResponse = fetch(`${apiBase}${path}`, {
       method: "POST",
       headers,
       cache: "no-store",
+      priority: "high",
       signal,
       body: requestBody,
     });
+    progress("http_wait");
     emitTiming("http_started");
     res = await pendingResponse;
     headersAt = performance.now();
+    progress("response_headers");
     emitTiming("http_headers", {status:res.status, headersMs: headersAt-httpStarted});
     // fetch() resolves when response headers are available. The JSON body is
     // buffered below, so this is not a provider-stream first-token signal.
@@ -240,6 +289,53 @@ export async function translateViaServer(
     throw error;
   }
   finishApiRequest();
+
+  if (res.ok && progressiveRequested && !res.headers.get("content-type")?.includes("application/x-ndjson")) {
+    // A successful full-body response cannot silently satisfy a negotiated
+    // progressive request. Do not resend it: the old server may have generated.
+    await res.body?.cancel?.().catch(() => {});
+    emitTiming("stream_unsupported", {httpMs:performance.now()-httpStarted});
+    trace?.("text-only AI failed", {
+      stage:"response_stream", failureKind:"ai_stream_unsupported", httpAttempts:1,
+      generationAttempts:null, requestDispatched:null, usageStatus:"unconfirmed_transport",
+      automaticContentRetry:false, automaticTransportRetry:false,
+      modelFallback:false, schemaFallback:false,
+    });
+    throw Object.assign(new Error("This API did not return the requested translation stream. Update the API."), {
+      code:"ai_stream_unsupported", status:res.status, origin:"api", category:"configuration",
+      stage:"response_stream", retryable:false, generationAttempts:null,
+    });
+  }
+
+  if (res.ok && res.headers.get("content-type")?.includes("application/x-ndjson")) {
+    let terminal, receivedDelta = false;
+    try {
+      terminal = await readAiStream(res, text => {
+        receivedDelta = true;
+        try { onProgress?.({state:"translation_delta", text}); } catch {}
+      });
+    } catch (error) {
+      // A broken envelope cannot invent final provider usage. Keep its durable
+      // pending receipt unresolved and distinguish known content from headers.
+      if (receivedDelta) error.requestDispatched = true;
+      error.generationAttempts = receivedDelta ? 1 : null;
+      error.stage = "response_stream";
+      emitTiming("stream_failed", {httpMs:performance.now()-httpStarted});
+      trace?.("text-only AI failed", {
+        stage:"response_stream", failureKind:error?.code || "stream_interrupted",
+        httpAttempts:1, generationAttempts:error.generationAttempts,
+        requestDispatched:receivedDelta ? true : null,
+        usageStatus:"unconfirmed_transport", automaticContentRetry:false,
+        automaticTransportRetry:false, modelFallback:false, schemaFallback:false,
+      });
+      throw error;
+    }
+    streamedBody = JSON.stringify(terminal.body);
+    if (terminal.status >= 400) {
+      // Reuse the same typed error/accounting path as a normal HTTP error.
+      res = {ok:false, status:terminal.status, headers:res.headers};
+    }
+  }
 
   if (!res.ok) {
     const rawText = await readResponseBody();
@@ -306,7 +402,8 @@ export async function translateViaServer(
       automaticContentRetry: false,
       automaticTransportRetry: false,
       httpAttempts: 1,
-      providerHttpStatuses: [res.status],
+      apiHttpStatus: res.status,
+      providerHttpStatuses: Number.isInteger(detailObject?.upstreamStatus) ? [detailObject.upstreamStatus] : [],
       generationAttempts,
       modelFallback: false,
       schemaFallback: false,
@@ -315,6 +412,15 @@ export async function translateViaServer(
       `Text-only AI failed: HTTP ${res.status}${detailText ? ` - ${detailText}` : ""}`,
     );
     error.status = res.status;
+    if (["api", "client", "upstream_ai"].includes(detailObject?.origin)) error.origin = detailObject.origin;
+    if (code === "ai_conversation_origin_invalid") {
+      error.stage = "conversation_mapping";
+      error.category = "input";
+      error.retryable = false;
+      const v = detailObject?.validation;
+      if (v && /^conversation\.origins(?:\.[a-zA-Z0-9]+)*$/.test(String(v.field || "")))
+        error.validation = {field: String(v.field).slice(0,120), reason: String(v.reason || "invalid").slice(0,80)};
+    }
     error.code = code;
     error.retryAfterMs = retryAfterMs;
     error.providerAttempts = providerAttempts;
@@ -443,6 +549,14 @@ export async function translateViaServer(
     throw error;
   }
 
+  if (result.meta?.conversation) {
+    const evidence = globalThis.TPAuditSchema.sanitizeConversation(result.meta.conversation);
+    if (evidence) trace?.("AI conversation path", evidence);
+  }
+  if (result.meta?.cacheCoordination) {
+    const evidence = globalThis.TPAuditSchema.sanitizeCacheCoordination({...result.meta.cacheCoordination,operationId});
+    if (evidence) trace?.("cacheCoordination", evidence);
+  }
   trace?.("text-only AI reply", {
     targetLang: String(targetLang || ""),
     status: res.status,

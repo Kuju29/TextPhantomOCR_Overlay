@@ -146,7 +146,9 @@ export function createLensDirectPath({
         {
           signal, stage: "lens", imageId, traceId,
           onGranted: ({ queueWaitMs, accumulatedQueueWaitMs, attempt }) => {
-            markPhase(jobId, "lens");
+            markPhase(jobId, "lens", {
+              stage: "Reading text with Lens", queueWaitMs, accumulatedQueueWaitMs, attempt,
+            });
             trace("imageStage", { stage: "lens", state: "started", imageId,
               queueWaitMs, accumulatedQueueWaitMs, attempt }, traceId);
           },
@@ -179,6 +181,25 @@ export function createLensDirectPath({
       );
     } catch (error) {
       if (error?.name === "AbortError") throw error;
+      const structured = error?.tpError || attachTpError(error, {
+        code: "LENS_FAILED", origin: "extension", category: "processing", stage: "lens",
+        retryable: !classifyJobError(error).permanent, traceId, imageId, batchId, jobId,
+      }).tpError;
+      trace("lensFailure", {
+        schema: structured.schema || "tp.error/1",
+        code: String(structured.code || "LENS_FAILED"),
+        origin: String(structured.origin || "extension"),
+        category: String(structured.category || "processing"),
+        stage: String(structured.stage || "lens"),
+        httpStatus: Number(structured.httpStatus) || 0,
+        upstreamStatus: Number(structured.upstreamStatus) || 0,
+        retryable: structured.retryable === true,
+        requestId: String(structured.requestId || ""),
+        correlationId: String(structured.correlationId || ""),
+        upstream: String(structured.upstream || ""),
+        errorType: String(error?.name || "Error"),
+        imageId, batchId, jobId,
+      }, traceId);
       log.warn("lens upload failed for this image; extension route stopped", {
         error: error?.message || String(error),
         permanent: Boolean(error?.permanent),
@@ -259,7 +280,9 @@ export function createLensDirectPath({
           {
             signal, stage: "grouping", imageId, traceId,
             onGranted: ({ queueWaitMs, accumulatedQueueWaitMs, attempt }) => {
-              markPhase(jobId, "grouping");
+              markPhase(jobId, "grouping", {
+                stage: "Grouping text", queueWaitMs, accumulatedQueueWaitMs, attempt,
+              });
               trace("groupingStage", { state: "started", imageId, batchId,
                 queueWaitMs, accumulatedQueueWaitMs, attempt }, traceId);
             },

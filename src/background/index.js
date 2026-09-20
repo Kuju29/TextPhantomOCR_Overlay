@@ -1,3 +1,4 @@
+import { recentDiagnostic, clearRecentDiagnostics } from "./ai/recent-diagnostics.js";
 import { repairCoordinator } from "./repair/coordinator.js";
 import {
   getSettingsEpoch,
@@ -10,7 +11,7 @@ import { translationSettingsChanged } from "./translation-settings.js";
 import "../shared/compat.js";
 import { createLogger, getLogLevel } from "../shared/logger.js";
 import { ensureApiDefaults } from "../shared/api-defaults.js";
-import { getStorage } from "../shared/storage.js";
+import { getStorage, setStorage } from "../shared/storage.js";
 import { getTab, queryTabs } from "../shared/browser-api.js";
 import { KEEPALIVE_PORT_NAME } from "../shared/constants.js";
 import { publicTpError } from "../shared/error-contract.js";
@@ -70,7 +71,7 @@ import { setHandlers } from "./transports/polling.js";
 import { cancelJobsViaRest } from "./transports/cancel.js";
 import { onContextMenuClicked, recreateMenus } from "./context-menu.js";
 import { ensureThunderbirdMessageScripts } from "./thunderbird.js";
-import { discoverLocalModels } from "../shared/ai/direct-local/generation.js";
+import { createLocalDiscoveryController } from "./ai/local-discovery-controller.js";
 import {
   ensureTraceHandshake,
   getTraceHandshakeState,
@@ -179,145 +180,48 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   dropTabSession(tabId);
 });
 
+const localDiscovery = createLocalDiscoveryController({
+  read: getStorage, write: setStorage,
+  emit: event => traceNote("background/ai/local-discovery-controller.js", "localModelDiscovery", event, event.operationId),
+  publish: message => {
+    try { chrome.runtime.sendMessage(message, () => void chrome.runtime.lastError); } catch {}
+  },
+  keepAlive: () => chrome.runtime.getPlatformInfo(() => void chrome.runtime.lastError),
+});
+const trustedUi = sender => sender?.id === chrome.runtime.id &&
+  (!sender?.tab || String(sender.url || '').startsWith(chrome.runtime.getURL('')));
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const type = String(msg?.type || "");
 
   switch (type) {
     case "TP_LOCAL_AI_DISCOVER": {
-      const discoveryId = String(msg?.discoveryId || crypto.randomUUID());
-      const provider = String(
-        msg?.provider || msg?.adapter?.protocol || "local",
-      );
-      const endpointClass = (() => {
-        try {
-          const host = new URL(String(msg?.adapter?.baseUrl || "")).hostname
-            .toLowerCase().replace(/^\[|\]$/g, "");
-          if (host === "localhost" || host.endsWith(".localhost") ||
-              host === "::1" || host === "0.0.0.0" || host.startsWith("127."))
-            return "loopback";
-          if (host.endsWith(".local") || /^10\./.test(host) ||
-              /^192\.168\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host))
-            return "private";
-          return "public";
-        } catch {
-          return "invalid";
-        }
-      })();
-      traceNote(
-        "background/index.js",
-        "localModelDiscovery",
-        {
-          event: "start",
-          discoveryId,
-          provider,
-          endpointClass,
-        },
-        discoveryId,
-      );
-      const traceBase = String(msg?.apiBase || "").replace(/\/+$/, "");
-      ensureTraceHandshake(traceBase)
-        .then(async (traceState) => {
-          const tabs = await queryTabs({});
-          await Promise.allSettled(
-            (tabs || [])
-              .filter((tab) => Number.isFinite(tab?.id))
-              .map(
-                (tab) =>
-                  new Promise((resolve) =>
-                    chrome.tabs.sendMessage(
-                      tab.id,
-                      {
-                        type: "TP_DIAGNOSTICS_STATE",
-                        enabled: traceState.known && traceState.trace,
-                        detail: traceState?.caps?.traceDetail || "off",
-                        consoleLevel: traceState?.caps?.consoleLevel || "warn",
-                      },
-                      () => {
-                        void chrome.runtime.lastError;
-                        resolve();
-                      },
-                    ),
-                  ),
-              ),
-          );
-          return discoverLocalModels(msg?.adapter || {}, {
-            provider: msg?.provider,
-            model: msg?.model,
-            thinking: msg?.thinking === "on" ? "on" : "off",
-            verifySelected: true,
-            probeTimeoutMs: 60_000,
-          });
-        })
-        .then(async (result) => {
-          traceNote(
-            "background/index.js",
-            "localModelDiscovery",
-            {
-              event: "result",
-              discoveryId,
-              provider,
-              endpointClass,
-              protocol: String(result?.protocol || ""),
-              modelCount: Array.isArray(result?.models)
-                ? result.models.length
-                : 0,
-              verificationStatus: String(
-                result?.selectedModelVerification?.status || "not_tested",
-              ),
-              verificationCode: String(
-                result?.selectedModelVerification?.code || "",
-              ),
-              verificationHttpStatus: Number(
-                result?.selectedModelVerification?.httpStatus || 0,
-              ),
-            },
-            discoveryId,
-          );
-          await flushTrace();
-          sendResponse({ ...result, discoveryId });
-        })
-        .catch(async (error) => {
-          traceNote(
-            "background/index.js",
-            "localModelDiscovery",
-            {
-              event: "error",
-              discoveryId,
-              provider,
-              endpointClass,
-              code: String(error?.code || "local_ai_discovery_failed"),
-              status: Number(error?.status || 0),
-            },
-            discoveryId,
-          );
-          await flushTrace();
-          sendResponse({
-            ok: false,
-            discoveryId,
-            code: String(error?.code || "local_ai_discovery_failed"),
-            error: String(error?.message || "Local AI discovery failed"),
-          });
-        });
+      if (!trustedUi(sender)) { sendResponse({ok:false, code:"trusted_ui_only"}); return true; }
+      // Tracing is observational. A slow/offline log sink cannot delay recovery.
+      void ensureTraceHandshake(String(msg.apiBase || '').replace(/\/+$/, '')).catch(() => {});
+      const reply = result => {
+        // A closed popup must not turn successful discovery into another error.
+        try { sendResponse(result); } catch {}
+        void flushTrace();
+      };
+      localDiscovery.run(msg).then(reply, error => reply({ok:false,
+        code:"invalid_local_adapter", error:String(error?.message || "Invalid Local AI settings")}));
       return true;
     }
-
+    case "TP_LOCAL_AI_DISCOVERY_UI":
     case "TP_LOCAL_AI_DISCOVERY_STALE": {
-      const discoveryId = String(msg?.discoveryId || "");
-      traceNote(
-        "background/index.js",
-        "localModelDiscovery",
-        {
-          event: "stale_discard",
-          discoveryId,
-          provider: String(msg?.provider || "local"),
-        },
-        discoveryId,
-      );
-      flushTrace().finally(() => sendResponse({ ok: true }));
+      if (!trustedUi(sender)) { sendResponse({ok:false, code:"trusted_ui_only"}); return true; }
+      localDiscovery.acknowledge(msg);
+      sendResponse({ok:true}); void flushTrace();
       return true;
     }
 
+    case "TP_GET_AI_DIAGNOSTICS":
+      if (sender?.tab || sender?.id !== chrome.runtime.id) { sendResponse({ok:false,error:"trusted_ui_only"}); return true; }
+      sendResponse({ok:true,record:recentDiagnostic(String(msg.provider||""),String(msg.model||""))});
+      return true;
     case "AI_SETTINGS_CHANGED":
+      clearRecentDiagnostics();
       forgetPrompts();
       sendResponse({ ok: true });
       return true;

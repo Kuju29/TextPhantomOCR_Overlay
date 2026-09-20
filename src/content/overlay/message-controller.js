@@ -4,6 +4,8 @@
   const translationReceipts = new WeakMap();
   const targetInserts = new WeakMap();
   const replacementOwners = new WeakMap();
+  const pageHidden = () => globalThis.document?.visibilityState
+    ? globalThis.document.visibilityState === "hidden" : null;
 
   function replacementOwnerIsCurrent(owner) {
     if (!owner || owner.pageInstanceId !== TP.pageInstanceId) return false;
@@ -65,6 +67,9 @@
   }
 
   async function applyOverlayMessage(msg) {
+    const contentReceivedAt=Date.now();
+    const hiddenAtStart=pageHidden();
+    const visibilityEpoch=TP.getVisibilityEpoch?.() || 0;
     const ovMode = typeof msg?.mode === "string" ? msg.mode : "";
     if (!ovMode) return { ok: true, ignored: true };
     const isText = ovMode === "lens_text";
@@ -128,7 +133,7 @@
           if (seen.phase === 'repair' && stamp.phase === 'initial')
             return {ok:true, applied:false, stale:true, reason:'initial result arrived after repair'};
           if (stamp.phase === 'repair' && seen.revision === stamp.revision)
-            return {ok:true, applied:true, replayed:true};
+            return {ok:true, applied:true, replayed:true, drawn:seen.drawn!==false};
         }
         const canApply = () => {
           const target = TP.isStillCurrent?.(img, msg.generation);
@@ -136,6 +141,7 @@
           return target?.ok !== false && !(stamp && binding &&
             (binding.runId !== stamp.runId || binding.generationId !== stamp.generationId));
         };
+        const renderStartedAt=Date.now();
         const rendered = await TP.applyHtmlOverlay(
           img,
           msg.result,
@@ -143,14 +149,30 @@
           isText,
           msg.original,
           canApply,
+          msg.tpTrace || "",
+          JSON.stringify([msg.generation || null, stamp?.runId || "", stamp?.generationId || ""]),
         );
         if (rendered?.stale || !canApply())
           return {ok:true, applied:false, stale:true, reason:'translation superseded during rendering'};
         const after = translationReceipts.get(img);
         if (stamp && after && (after.runId !== stamp.runId || after.generationId !== stamp.generationId))
           return {ok:true, applied:false, stale:true, reason:'translation superseded during rendering'};
-        if (stamp) translationReceipts.set(img, {...stamp});
-        return { ok: true, applied: true };
+        if (msg.streamError && canApply())
+          TP.markImageError?.(msg.original, String(msg.streamError), msg.generation);
+        if (stamp) translationReceipts.set(img, {...stamp, drawn:rendered?.drawn!==false});
+        if(msg.tpStreamTiming){
+          const timing={schema:'tp.audit/1',event:'page_stream_timing',reason:'dom_acknowledged',
+            ...msg.tpStreamTiming,contentReceivedAt,renderStartedAt,renderFinishedAt:Date.now(),
+            contentToAckMs:Date.now()-contentReceivedAt,
+            domQueueMs:Number.isFinite(msg.tpStreamTiming.domEnqueuedAt)
+              ? Math.max(0,contentReceivedAt-msg.tpStreamTiming.domEnqueuedAt):null,
+            hiddenAtStart,hiddenAtFinish:pageHidden(),
+            visibilityChanges:(TP.getVisibilityEpoch?.() || 0)-visibilityEpoch,
+            reused:rendered?.reused===true,runId:stamp?.runId||'',generationId:stamp?.generationId||''};
+          (TP.traceNoteFor?.bind(TP,msg.tpTrace||'')||TP.traceNote)?.(
+            'content/overlay/message-controller.js','provisionalRenderAck',timing);
+        }
+        return { ok: true, applied: true, drawn:rendered?.drawn!==false, reused:rendered?.reused===true };
       } catch (e) {
         TP.log.warn("OVERLAY_HTML failed", e?.message || String(e));
         return { ok: false, applied: false, error: e?.message || String(e) };

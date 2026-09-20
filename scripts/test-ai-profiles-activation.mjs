@@ -19,8 +19,11 @@ const defaults = {
   temperature: null,
   pageImage: "off",
   memoryMode: "off",
+  styleExamples: true,
   concurrency: { mode: "auto", max: 0 },
   providerOptions: {},
+  translationMode: "conversation",
+  conversationReset: "0",
 };
 
 const targets = [

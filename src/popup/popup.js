@@ -4,6 +4,7 @@ import { ensureApiDefaults } from "../shared/api-defaults.js";
 import {
   AI_USAGE_STORAGE_KEY,
   currentUsage,
+  flushUsageReceiptJournal,
   persistUsageSelectionBoundary,
   usageHistoryRows,
 } from "../shared/ai-usage.js";
@@ -70,7 +71,6 @@ import {
   providerFromKey,
   providerLabel,
 } from "./controllers/provider-model-display.js";
-
 const state = {
   userInteractedApi: false,
   lastApiOk: false,
@@ -106,15 +106,15 @@ const state = {
   aiProfileBlocked: false, aiModelBlocked: false,
   aiProfileErrorCode: "",
 };
-
 const usageViewController = createUsageViewController({
   els,
   state,
   isLocalProvider: isLocalAiProvider,
   getStorage,
-  storageKey: AI_USAGE_STORAGE_KEY,
+  storageKey: AI_USAGE_STORAGE_KEY, sendMessage: sendRuntimeMessage,
   currentUsage,
   historyRows: usageHistoryRows,
+  flushUsage: flushUsageReceiptJournal,
 });
 const selectedUsageTarget = usageViewController.target;
 const usageController = createAiUsageController({

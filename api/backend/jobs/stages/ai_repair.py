@@ -465,6 +465,16 @@ def translate_with_one_repair(
         from copy import copy
         repair_config = copy(config)
         repair_config.repair_reason = "wrong_target_script" if reason == "wrong_target_script" else ""
+        from backend.ai.prompts.source_context import normalize_source_context
+        original_ids = [{"id": f"P{index}"} for index in defective]
+        repair_config.source_context = normalize_source_context(config.source_context, original_ids)
+        siblings = [{"id": f"P{index}", "text": text}
+                    for index, text in enumerate(source_units) if index not in defective]
+        if siblings:
+            repair_config.source_context.append({
+                "targetIds": [f"P{index}" for index in range(len(repair_source_units))],
+                "units": siblings, "origin": "initial_request",
+            })
         repaired = translate_fn(
             repair_source, target_lang, repair_config,
             is_retry=True, capture_request=capture_request,

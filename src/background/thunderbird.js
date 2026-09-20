@@ -7,6 +7,7 @@ const MESSAGE_DISPLAY_SCRIPTS = [
   "content/namespace.js",
   "content/keepalive.js",
   "content/dom-utils.js",
+  "content/progress-panel.js",
   "content/image-finder.js",
   "content/payload.js",
   "content/overlay.js",

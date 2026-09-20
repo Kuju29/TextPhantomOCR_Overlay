@@ -24,7 +24,8 @@ export function createLocalCapacityController({
     if (vram) facts.push(`VRAM ${vram}`);
     if (Number(hint.contextLength) > 0)
       facts.push(`context ${Number(hint.contextLength).toLocaleString()}`);
-    facts.push(hint.loaded ? "loaded" : "not loaded");
+    if (state.aiModelBlocked !== true && state.lastAiResolve?.models_verified && state.lastAiResolve?.verified_model === model) facts.push("ready");
+    else facts.push(hint.loaded === true ? "loaded at last check" : hint.loaded === false ? "not loaded at last check" : "load status unknown");
     els.aiLocalCapacityHint.textContent = `${facts.join(" · ")} · max ${Math.max(1, Number(hint.recommendedMax) || 1)}`;
   };
 

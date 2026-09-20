@@ -92,6 +92,33 @@ releaseTerminal();
 assert.equal(await ownerFlush, true);
 assert.deepEqual(persistedStages, ["trace_started", "failure", "terminal"]);
 
+let relayInFlight = 0, relayPeak = 0;
+const concurrentStages = new Map();
+const concurrentRecorders = Array.from({ length: 12 }, (_, index) => createAiWireRecorder({
+  enabled: true, operationId: `op-concurrent-${index}`, traceId: `trace-concurrent-${index}`,
+  identity: { route: "direct-local", imageId: `image-${index}` }, apiBase: "http://api",
+  relay: { path: "/relay", token: "x", timeoutMs: 250 },
+  fetchImpl: async (_url, init) => {
+    relayInFlight += 1; relayPeak = Math.max(relayPeak, relayInFlight);
+    assert.ok(relayInFlight <= 4, "AI wire relays must be globally bounded across recorders");
+    const payload = JSON.parse(init.body);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const key = payload.identity.operationId;
+    concurrentStages.set(key, [...(concurrentStages.get(key) || []), payload.stage]);
+    relayInFlight -= 1;
+    return { ok: true, status: 202 };
+  },
+}));
+for (const [index, item] of concurrentRecorders.entries()) {
+  await item("units", [{ id: `P${index}`, text: "source" }]);
+  await item("terminal", { state: "succeeded" });
+}
+assert.deepEqual(await Promise.all(concurrentRecorders.map((item) => item.flush(1000))),
+  Array(12).fill(true), "bounded relay traffic must still persist terminal events");
+assert.equal(relayPeak, 4);
+for (let index = 0; index < concurrentRecorders.length; index += 1)
+  assert.deepEqual(concurrentStages.get(`op-concurrent-${index}`), ["trace_started", "units", "terminal"]);
+
 let invoked = false;
 assert.equal(createAiWireRecorder({ enabled: false, fetchImpl: async () => { invoked = true; } }), null);
 const cloud = createAiWireRecorder({ enabled: true, identity: { route: "server" },

@@ -1,6 +1,7 @@
 from __future__ import annotations
+from .instruction_packs import instruction_pack
 
-def build_glossary_block(glossary: list[dict] | None, limit: int = 40) -> str:
+def build_glossary_block(glossary: list[dict] | None, limit: int = 40, *, lang: str = "en") -> str:
     """Render a short glossary / translation-memory block for the prompt.
 
     ``glossary`` is a list of ``{"src": ..., "tgt": ...}`` pairs collected from
@@ -37,12 +38,7 @@ def build_glossary_block(glossary: list[dict] | None, limit: int = 40) -> str:
     if not lines:
         return ""
     lines.reverse()  # restore chronological order for readability
-    return (
-        "TRANSLATION MEMORY (names, places, skills, items from earlier pages — use the SAME target wording "
-        "for the SAME source term). This binds recurring names/terms only; everyday words and interjections "
-        "are always free to follow the scene:\n"
-        + "\n".join(lines)
-    )
+    return instruction_pack(lang)["glossary"] + "\n".join(lines)
 
 def looks_like_term(src: str, tgt: str, min_len: int = 3) -> bool:
     """Heuristic: is ``src => tgt`` a reusable TERM (name/place/skill/item)?
@@ -70,17 +66,14 @@ def looks_like_term(src: str, tgt: str, min_len: int = 3) -> bool:
 # ยัง ACTIVE ในโค้ด (ถูกเรียกจาก build_system_split) แต่ปัจจุบันได้ค่า "ว่าง" เสมอ
 # เพราะข้อมูลต้นทาง (bible/speakers/prev_context) มาจาก chapter-brief flow ที่
 # dormant อยู่ — บล็อกพวกนี้จึงไม่ปรากฏใน prompt จริงตอนนี้
-def build_series_block(series_state: str) -> str:
+def build_series_block(series_state: str, *, lang: str = "en") -> str:
     """Render the frozen series bible (STORY SO FAR) block, or ``""``."""
     state = (series_state or "").strip()
     if not state:
         return ""
-    return (
-        "STORY SO FAR (series bible from reading the whole chapter — background evidence for tone, "
-        "relationships and scene; current source evidence takes precedence. NEVER restate or translate it in the output):\n" + state
-    )
+    return instruction_pack(lang)["series"] + state
 
-def build_speaker_block(speakers: dict | None) -> str:
+def build_speaker_block(speakers: dict | None, *, lang: str = "en") -> str:
     """Render this page's marker->speaker map (from the chapter brief).
 
     ``speakers`` maps paragraph indices to character names, e.g.
@@ -98,12 +91,9 @@ def build_speaker_block(speakers: dict | None) -> str:
             break
     if not lines:
         return ""
-    return (
-        "SPEAKER MAP (decided from the WHOLE chapter — trust it over per-line guessing; give each "
-        "line the voice its speaker has in the character sheet):\n" + "\n".join(lines)
-    )
+    return instruction_pack(lang)["speakers"] + "\n".join(lines)
 
-def build_prev_context_block(prev_context: list | None, limit: int = 6) -> str:
+def build_prev_context_block(prev_context: list | None, limit: int = 6, *, lang: str = "en") -> str:
     """Render the previous page's SOURCE tail for cross-page flow (R4).
 
     ``prev_context`` is ``[{"src": ..., "who": ...?}, ...]`` in reading order —
@@ -123,13 +113,10 @@ def build_prev_context_block(prev_context: list | None, limit: int = 6) -> str:
         lines.append(f"  [{who}] {src}"[:200] if who else f"  {src}"[:200])
     if not lines:
         return ""
-    return (
-        "PREVIOUS PAGE (source text tail, context only — the conversation may continue from here; "
-        "do NOT translate or output these lines):\n" + "\n".join(lines)
-    )
+    return instruction_pack(lang)["previous"] + "\n".join(lines)
 
 def build_character_block(
-    characters: list[dict] | None, limit: int = 30, has_image: bool = False
+    characters: list[dict] | None, limit: int = 30, has_image: bool = False, *, lang: str = "en"
 ) -> str:
     """Render the accumulated per-series character sheet for the prompt.
 
@@ -153,20 +140,11 @@ def build_character_block(
         for key in ("gender", "speech", "note"):
             val = str(c.get(key) or "").strip()
             if val:
-                bits.append(f"{key}: {val}")
+                bits.append(f"{instruction_pack(lang)[key]}: {val}")
         lines.append("  - " + " | ".join(bits))
     if not lines:
         return ""
-    return (
-        "CHARACTER SHEET (accumulated from earlier pages of this series — use as evidence; current explicit source text takes precedence):\n"
-        + "\n".join(lines)
-        + "\nGendered wording requires explicit source evidence or an identified character with known gender. "
-        "Appearance alone is insufficient. Unknown entries do not override new explicit evidence. Known "
-        "gender permits suitable wording; it does not require extra pronouns or polite particles. Preserve "
-        "necessary register and conversational functions according to the target-language style. Use "
-        "speech and note fields as context, not sentence templates; do not assign an unknown speaker "
-        "another character's voice."
-    )
+    return instruction_pack(lang)["characters"] + "\n".join(lines) + instruction_pack(lang)["characterRules"]
 
 
 
@@ -189,7 +167,7 @@ def normalize_page_context(entries, target_units=None) -> list:
             break
     return result
 
-def build_page_context_block(entries) -> str:
+def build_page_context_block(entries, *, lang="en") -> str:
     import json
     normalized = normalize_page_context(entries)
-    return PAGE_CONTEXT_HEADER + "\n" + json.dumps([{"context": f"C{index + 1}", "text": entry["text"]} for index, entry in enumerate(normalized)], ensure_ascii=False, separators=(",", ":")) if normalized else ""
+    return instruction_pack(lang)["page"] + "\n" + json.dumps([{"context": f"C{index + 1}", "text": entry["text"]} for index, entry in enumerate(normalized)], ensure_ascii=False, separators=(",", ":")) if normalized else ""

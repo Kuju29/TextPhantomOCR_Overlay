@@ -118,6 +118,12 @@ def _cookie_trace(state: str, **data: Any) -> None:
     if callable(note):
         note("lens_cookie", {"state": state, **data}, file="lens/client.py")
 
+def _cache_trace(state: str, **data: Any) -> None:
+    """Cache/singleflight evidence only; never emit image keys or OCR data."""
+    note = getattr(trace, "note", None)
+    if callable(note):
+        note("lens_cache", {"state": state, **data}, file="lens/client.py")
+
 def _lens_cache_get(key: str) -> dict[str, Any] | None:
     with _lens_cache_lock:
         hit = _lens_cache.get(key)
@@ -222,7 +228,9 @@ def fetch_lens_data(image_path: str, lang: str, firebase_url: str | None = None)
     cache_key = hashlib.sha256(img_bytes).hexdigest() + "|" + (lang or "")
     cached = _lens_cache_get(cache_key)
     if cached is not None:
+        _cache_trace("hit")
         return cached
+    _cache_trace("miss")
 
     leader = False
     with _flights_lock:
@@ -232,6 +240,7 @@ def fetch_lens_data(image_path: str, lang: str, firebase_url: str | None = None)
             _flights[cache_key] = flight
             leader = True
     if flight is not None and not leader:
+        _cache_trace("singleflight_wait")
         # The route's admission/cancellation boundary remains outside this
         # synchronous client. Waiting shares the leader's network result; it
         # never starts a second Google upload.

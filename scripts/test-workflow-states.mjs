@@ -202,6 +202,8 @@ const ALL = new Set(Object.values(STATES));
     "retry pass must reopen terminal errors with a new attempt and clear the stale reason");
   assert.match(jobs, /discardBatchResults[\s\S]*?markImagePhase\(bid, key, "cancelled"/,
     "discarding a batch must terminally cancel active per-image phases");
+  assert.match(jobs, /discardBatchResults[\s\S]*?cancelBatchProviderViaRest\(bid\)/,
+    "discarding a batch must immediately propagate cancellation to the server provider owner");
   assert.match(serverTranslation, /apiEngine && !lensDone[\s\S]*?"server_processing"[\s\S]*?Server processing \(Lens\/AI\)/,
     "the combined API engine must not pretend its opaque server pipeline is still only in Lens");
 }

@@ -3,6 +3,8 @@ import { isForbiddenProjectArchiveEntry } from "./source-package-policy.mjs";
 
 for (const forbidden of [
   "src/shared/ai/workload/learning.js.tmp", "x.py.orig", "src/.#edit.js", "src/thing.js~",
+  "api/data/ai-conversations.sqlite3", "api/data/ai-conversations.sqlite3-wal",
+  "api/.env", "api/.env.production", "api/data/history.db",
   "e2e", "e2e/README.md", "./e2e/src/cli.mjs",
   "launcher", "launcher/run.ps1", "LAUNCHER/build.bat",
   "api/tests", "api/tests/test_queue.py",

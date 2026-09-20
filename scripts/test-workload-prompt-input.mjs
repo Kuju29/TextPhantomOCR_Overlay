@@ -19,7 +19,7 @@ for (const targetLang of ['th', 'en', 'ja']) for (const structured of [false, tr
     const units = page.slice(1), ids = ['P0'];
     const composed = composeCanonicalPrompt(BUNDLED_CANONICAL_PROMPT_PLANS[targetLang],
       { ...ai, page_context: selectPageContext(page, units) }, false, structured, targetLang);
-    const system = composeTranslatorIdentitySystem(`${composed.sections.language}\n${composed.sections.style}`);
+    const system = composed.system;
     const user = composeTranslationUserMessage({ sections: { ...composed.sections, source: structured
       ? 'INPUT — tp.translation.schema-object/1\nEach source record is Pn:source text.' : composed.sections.source },
       requestOutputContract: exactOutputInstruction(ids, { kind }, targetLang),
@@ -36,6 +36,9 @@ for (const targetLang of ['th', 'en', 'ja']) for (const structured of [false, tr
 }
 const builtIn = createPromptInputEstimator({ targetLang: 'th' })(page);
 assert.ok(builtIn > 512, 'full built-in style/examples must replace old constant allowance');
+const conversationAnchor = createPromptInputEstimator({ ai: { translation_mode: 'conversation', style_examples: false }, targetLang: 'th' })(page);
+const independentNoExamples = createPromptInputEstimator({ ai: { translation_mode: 'independent', style_examples: false }, targetLang: 'th' })(page);
+assert.ok(conversationAnchor > independentNoExamples, 'Conversation logical/context planning must keep immutable human examples even when the old prefix is expected to be cached');
 const tooSmall = estimateRequest(page, initialProfile(), { contract: 'compact_records',
   limits: { maxInputTokens: 1000 }, reasoningActive: false, fixedInput: 0,
   estimateFixedInput: createPromptInputEstimator({ targetLang: 'th' }) });

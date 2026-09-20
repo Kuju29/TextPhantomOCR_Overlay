@@ -4,6 +4,14 @@
   const TP = window.__TP;
   if (!TP || TP.bail) return;
 
+  // Retain only an acknowledged provisional presentation on its actual DOM
+  // record. A final result still runs status/events/accounting; identical
+  // pixels do not need a second erase/font-layout/DOM construction pass.
+  const provisionalPresentations = new WeakMap();
+  const clock = () => globalThis.performance?.now?.() ?? Date.now();
+  const pageHidden = () => globalThis.document?.visibilityState
+    ? globalThis.document.visibilityState === "hidden" : null;
+
   // Builds a small status badge element for a given label.
   function createOverlayBadge(label) {
     const badge = document.createElement("div");
@@ -55,8 +63,25 @@
     isTextMode,
     original = "",
     canApply = () => true,
+    traceId = "",
+    presentationOwner = "",
   ) {
     if (!canApply()) return { stale: true };
+    const renderingStarted = clock();
+    const hiddenAtStart = pageHidden();
+    const visibilityEpoch = TP.getVisibilityEpoch?.() || 0;
+    const timing = {backgroundMs:0, layoutMs:0, domApplyMs:0};
+    const reportTiming = (reason, reused = false) => {
+      (TP.traceNoteFor?.bind(TP, traceId) || TP.traceNote)?.("content/overlay.js", "renderTiming", {
+        schema:"tp.audit/1", event:"render_timing", reason, phase:"rendering",
+        scope:{imageId:result?.metadata?.image_id || ""},
+        hiddenAtStart, hiddenAtFinish:pageHidden(),
+        visibilityChanges:(TP.getVisibilityEpoch?.() || 0) - visibilityEpoch,
+        reused, timing:{...timing, renderMs:clock()-renderingStarted},
+      });
+    };
+    const previousPresentation = provisionalPresentations.get(imgElement);
+    provisionalPresentations.delete(imgElement);
     // A successful result or an intentional skip replaces any terminal marker
     // from an earlier retry/pass.
     TP.clearImageError?.(imgElement);
@@ -135,7 +160,7 @@
               }
             : null;
         })();
-    if (!ops) return;
+    if (!ops) return {drawn:false};
 
     /**
      * Tell a page that drives translation itself (the local viewer, the Auto
@@ -147,7 +172,7 @@
      * @param {boolean} drawn Whether translated text actually reached the page.
      */
     const announce = (drawn, note = "") => {
-      if (useMd) return;
+      if (useMd || result?.meta?.provisional === true) return;
       TP.emitViewerEvent("textphantom:overlay-updated", {
         original,
         result,
@@ -171,7 +196,7 @@
       );
       nudgeOverlay(imgElement, ops.schedule);
       announce(false, TP.overlayStatus.label(statusReason));
-      return;
+      return {drawn:false};
     }
 
     if (
@@ -191,7 +216,7 @@
       rec.scope.appendChild(createOverlayBadge("AI output unavailable"));
       nudgeOverlay(imgElement, ops.schedule);
       announce(false, "AI output unavailable");
-      return;
+      return {drawn:false};
     }
 
     if (!html && !(isTextMode && TP.overlayLocalRender.wants(result))) {
@@ -204,11 +229,11 @@
         rec.scope.textContent = "";
         nudgeOverlay(imgElement, ops.schedule);
         announce(false, "no overlay text for this image");
-        return;
+        return {drawn:false};
       }
       ops.hide();
       announce(false, "no overlay text for this image");
-      return;
+      return {drawn:false};
     }
 
     // The font sizes actually drawn, from whichever route drew them. Both
@@ -244,7 +269,7 @@
         mode: isTextMode ? "lens_text" : "lens_images",
         serverMarkupAvailable: Boolean(html),
       });
-      TP.traceNote?.("content/overlay.js", "applyHtmlOverlay", {
+      (TP.traceNoteFor?.bind(TP, traceId) || TP.traceNote)?.("content/overlay.js", "applyHtmlOverlay", {
         ev: "route decided",
         outcome,
         reason,
@@ -255,17 +280,43 @@
       });
     };
 
+    // Only presentation inputs participate. Provisional/final flags, usage,
+    // provider receipts and other diagnostics must not trigger a redraw.
+    const presentationSignature = JSON.stringify([chosen, isTextMode, baseW, baseH,
+      html, cssText, meta, localBg,
+      isTextMode && TP.overlayLocalRender.wants(result) ? result?.lensDocument : null,
+      result?.layout?.relayout_translated ?? null, localBg ? result?.eraseBoxes : null]);
+    const old = previousPresentation;
+    const reusable = old && old.owner === presentationOwner &&
+      old.signature === presentationSignature && old.newImgSrc === newImgSrc &&
+      old.sourceImage === (localBg ? result?.sourceImageDataUri : null) &&
+      old.rec.host?.isConnected === true && old.rec.scope?.isConnected === true &&
+      old.rec.scope.firstChild === old.child && old.child &&
+      (!localBg || (old.rec.cleanImg === old.cleanImg && old.cleanImg?.isConnected === true &&
+        old.cleanImg.src === old.cleanSrc));
+    if (reusable && canApply()) {
+      if (result?.meta?.provisional === true) provisionalPresentations.set(imgElement, old);
+      reportRoute("reused", "identical acknowledged provisional presentation");
+      nudgeOverlay(imgElement, ops.schedule);
+      announce(true);
+      reportTiming("unchanged", true);
+      return { reused: true, drawn:true };
+    }
+
     let builtRoot = null;
     let preparedLocalBackground = null;
     let localFailure = "";
     if (isTextMode && TP.overlayLocalRender.wants(result)) {
       try {
-        if (localBg)
-          preparedLocalBackground = await TP.overlayBackground.prepare(
-            imgElement,
-            result,
-          );
-        const built = await TP.overlayLocalRender.build(result, chosen);
+        if (localBg) {
+          const backgroundStarted = clock();
+          preparedLocalBackground = await TP.overlayBackground.prepare(imgElement, result);
+          timing.backgroundMs = clock() - backgroundStarted;
+          Object.assign(timing, preparedLocalBackground?.timing || {});
+        }
+        const layoutStarted = clock();
+        const built = await TP.overlayLocalRender.build(result, chosen, traceId);
+        timing.layoutMs = clock() - layoutStarted;
         builtRoot = built.root;
         if (!builtRoot) localFailure = "local renderer refused the document";
       } catch (e) {
@@ -279,8 +330,10 @@
       if (preparedLocalBackground?.url) {
         try { URL.revokeObjectURL(preparedLocalBackground.url); } catch {}
       }
+      reportTiming("stale_discard");
       return { stale: true };
     }
+    const domApplyStarted = clock();
     const rec = ops.upsert("html");
     if (isTextMode && localBg) {
       const applied = await TP.overlayBackground.apply(
@@ -308,8 +361,17 @@
         );
       TP.overlaySanitize.fill(rec.scope, html);
     }
+    if (result?.meta?.provisional === true && canApply()) {
+      provisionalPresentations.set(imgElement, { owner: presentationOwner,
+        signature: presentationSignature, newImgSrc,
+        sourceImage: localBg ? result?.sourceImageDataUri : null,
+        rec, child: rec.scope.firstChild, cleanImg: rec.cleanImg, cleanSrc: rec.cleanImg?.src });
+    }
     nudgeOverlay(imgElement, ops.schedule);
     announce(true);
+    timing.domApplyMs = clock() - domApplyStarted;
+    reportTiming(localFailure ? "failed" : "success");
+    return {drawn:true};
   }
   Object.assign(TP, {
     createOverlayBadge,

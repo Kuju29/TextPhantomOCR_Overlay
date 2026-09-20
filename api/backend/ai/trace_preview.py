@@ -36,9 +36,9 @@ def marked_units(marked: str) -> list[dict]:
     raw = str(marked or "")
     # Provider output is one compact record per line.  Prefer that grammar so
     # diagnostics never claim items=[] for a valid provider response.
-    compact = list(re.finditer(r"(?:^|\n)<<TP_(P\d+):(.*?)>>(?=\n|$)", raw, re.S))
+    compact = list(re.finditer(r"(?:^|\n)<<(?:TP_(P\d+)|(I[1-9][0-9]{0,6}_P[0-9]{1,6})):(.*?)>>(?=\n|$)", raw, re.S))
     if compact:
-        return [{"id": match.group(1), **preview(match.group(2).strip())}
+        return [{"id": match.group(1) or match.group(2), **preview(match.group(3).strip())}
                 for match in compact]
     opened = list(re.finditer(r"<<TP_(P\d+)>>", raw))
     return [{"id": match.group(1), **preview(

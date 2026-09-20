@@ -6,8 +6,9 @@ import { repairCoordinator } from "./repair/coordinator.js";
 import { createLogger } from "../shared/logger.js";
 import { readFullSettings } from "../shared/settings.js";
 import { effectiveEngineMode } from "../shared/engine-mode.js";
-import { API_PATHS, isLocalAiProvider } from "../shared/constants.js";
+import { isLocalAiProvider } from "../shared/constants.js";
 import { AI_PROMPT_MODE } from "../shared/ai-prompt-policy.js";
+import { normalizeReasoningPreference } from "../shared/reasoning-preference.js";
 import { attachTpError, publicTpError } from "../shared/error-contract.js";
 import {
   aiConfigurationIssueForError,
@@ -49,47 +50,14 @@ import {
 const log = createLogger("SW.menu");
 
 const KEEPALIVE_MS = 10 * 60 * 1000;
-const AI_PREFLIGHT_TIMEOUT_MS = 2500;
-
-// Ask the configured server only when key ownership affects the decision.
-// Network/legacy uncertainty deliberately returns null and lets the normal
-// transport produce its more accurate error instead of a false config block.
-async function serverHasAiKey() {
-  const base = String(await getApiBase().catch(() => "")).replace(/\/+$/, "");
-  if (!base) return null;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), AI_PREFLIGHT_TIMEOUT_MS);
-  try {
-    const response = await fetch(`${base}${API_PATHS.META}`, {
-      cache: "no-store",
-      headers: { accept: "application/json" },
-      signal: controller.signal,
-    });
-    if (!response.ok) return null;
-    const meta = await response.json();
-    return typeof meta?.has_env_ai_key === "boolean"
-      ? meta.has_env_ai_key
-      : null;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 async function assertAutoAiReady(settings, {
   checkConfiguration = true,
   checkPageImage = true,
 } = {}) {
   if (checkConfiguration) {
-    // The current text.ai plan is server-owned even when the legacy
-    // `aiOnDevice` preference is present. Do not treat that preference as a
-    // working keyless route until an executable on-device translator exists.
-    const local = classifyAiRuntime(settings).local;
-    const needsServerKeyFact = !local && !String(settings?.aiKey || "").trim();
+    // Cloud always uses the selected user key; no metadata/network preflight for a server key.
     const mainApiBaseUrl = await getApiBase().catch(() => "");
     const issue = autoAiSettingsIssue(settings, {
-      hasServerKey: needsServerKeyFact ? await serverHasAiKey() : null,
       mainApiBaseUrl,
       requireComplete: true,
     });
@@ -243,12 +211,15 @@ export async function buildAiPayload(mode, source, settings, seriesKey) {
     prev_context: useChars ? memory.prevContext || [] : [],
     char_memory: useChars,
     memory_mode: memMode,
+    style_examples: settings.aiStyleExamples !== false,
+    translation_mode: "conversation",
+    conversation_reset: String(settings.aiConversationReset || "0"),
     send_image: sendImage,
-    thinking: (() => {
-      const value = isLocalAiProvider(settings.aiProvider)
-        ? settings.aiLocalThinking : settings.aiThinking;
-      return value === "on" ? "on" : "off";
-    })(),
+    thinking: normalizeReasoningPreference(
+      isLocalAiProvider(settings.aiProvider)
+        ? settings.aiLocalThinking : settings.aiThinking,
+      "off",
+    ),
     model_capabilities: local
       ? sameLocalCapability
         ? (storedCapability.modelCapabilities &&

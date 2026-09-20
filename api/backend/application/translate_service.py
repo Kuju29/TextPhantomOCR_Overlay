@@ -65,6 +65,8 @@ async def capability_snapshot(request: Request) -> dict:
             "clientBackground": True,
             "legacyJobQueue": True,
             "aiTranslate": True,
+            "aiConversation": "tp.conversation/1",
+            "aiConversationBatch": "tp.conversation_batch/1",
             # One server-owned switch enables matching raw-wire diagnostics
             # in runs:API and runs:Extension. The extension never guesses.
             "aiWireTrace": wire_trace.enabled(),
@@ -160,6 +162,8 @@ async def execute(payload: dict[str, Any], request: Request) -> dict:
         "schema": "tp.ai-wire-trace/1", "engine": "runsapi",
         "traceId": provisional_trace,
         "operationId": provisional_operation,
+        "recordKind": "page_summary", "attemptKind": "initial",
+        "pageIndex": raw_context.get("page_index"),
         "batchId": str(raw_metadata.get("batch_id") or payload.get("batch_id") or ""),
         "imageId": str(raw_metadata.get("image_id") or payload.get("image_id")
                        or request.headers.get("X-TP-Image-Id") or ""),

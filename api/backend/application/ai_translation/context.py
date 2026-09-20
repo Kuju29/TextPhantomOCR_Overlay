@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from fastapi import Request
 
@@ -28,6 +28,7 @@ class TranslationContext:
     unlimited: bool
     identity: str
     prompt_meta: Mapping[str, Any]
+    cancel_check: Callable[[], bool] | None = None
 
     @property
     def unit_count(self) -> int:

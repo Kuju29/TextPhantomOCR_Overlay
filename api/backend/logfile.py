@@ -19,6 +19,10 @@ _SECRET_KEYS = (
     "signature", "policy",
 )
 
+# Usage counts are measurements, not credential tokens. Strings remain redacted.
+_USAGE_COUNTS = frozenset(("inputTokens", "outputTokens", "totalTokens", "cachedInputTokens",
+    "cacheWriteInputTokens", "thinkingTokens", "uncachedInputTokens", "ordinaryInputTokens", "visibleOutputTokens"))
+
 # Resolved once. Relative to `api/`, so `uvicorn backend.main:app` run from
 # there puts logs where the source is.
 _ROOT = Path(os.environ.get("TP_LOG_DIR") or (Path(__file__).resolve().parents[1] / "logs"))
@@ -71,7 +75,8 @@ def sanitize(value: Any) -> Any:
         return value
     if isinstance(value, dict):
         return {
-            k: ("<redacted>" if _secret_key(k) else sanitize(v))
+            k: (v if k in _USAGE_COUNTS and (v is None or type(v) in (int, float))
+                else "<redacted>" if _secret_key(k) else sanitize(v))
             for k, v in value.items()
         }
     if isinstance(value, list):

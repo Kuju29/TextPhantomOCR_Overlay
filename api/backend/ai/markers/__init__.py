@@ -6,8 +6,8 @@ from .sanitize import (
 )
 from .wire import (
     DONE_MARKER, END_MARKER, LINE_CONTRACT_VERSION, PREFIX, SUFFIX,
-    apply, apply_schema_source, apply_wire, expected_count, expected_ids, normalize_unit_text,
-    translation_schema,
+    apply, apply_schema_source, apply_schema_source_ids, apply_wire, apply_wire_ids, expected_count, expected_ids, normalize_unit_text,
+    translation_schema, translation_schema_ids, valid_output_id, record_open,
 )
 
 MEMO_MARKER = "<<TP_MEMO>>"

@@ -16,9 +16,14 @@ sys.path.insert(0, str(ROOT / "api"))
 from backend import cli  # noqa: E402
 from backend.ai.translation.contracts import AiConfig  # noqa: E402
 
-for value in (None, "", "auto", "garbage", False, 7, "off"):
+for value in (None, "", "garbage", 7):
     assert AiConfig(api_key="", thinking=value).thinking == "off"
-assert AiConfig(api_key="", thinking="on").thinking == "on"
+assert AiConfig(api_key="", thinking="minimum").thinking == "minimum"
+for value in (False, "off"):
+    assert AiConfig(api_key="", thinking=value).thinking == "off"
+assert AiConfig(api_key="", thinking="auto").thinking == "default"
+for value in ("on", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"):
+    assert AiConfig(api_key="", thinking=value).thinking == value
 
 
 with tempfile.TemporaryDirectory(prefix="tp-cli-contract-") as temp_dir:
@@ -52,9 +57,9 @@ assert (
     and thinking.attr == "ai_thinking"
 ), "--ai-thinking must be forwarded into AiConfig instead of being silently ignored"
 
-# Parser normalization is exercised before image decoding: historical Auto and
-# malformed CLI values become Off rather than provider-managed behavior.
-for value in ("auto", "garbage"):
+# Parser normalization is exercised before image decoding. Historical Auto maps
+# to Provider default; malformed values fail safe to Thinking Off.
+for value in ("auto", "garbage", "low", "high"):
     stderr = io.StringIO()
     with contextlib.redirect_stderr(stderr):
         status = cli.main(["missing.jpg", "--source", "ai", "--ai-thinking", value])

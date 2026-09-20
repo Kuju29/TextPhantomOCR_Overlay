@@ -81,42 +81,43 @@ assert.deepEqual(successEvents.map((event) => [event.status, event.stage]), [
 assert.equal(successEvents.every((event) => event.endpointClass === "loopback"), true);
 assert.doesNotMatch(JSON.stringify(successEvents), /qwen|localhost|11434/);
 
-const mandatoryMessages = [];
-const mandatoryEls = {
+const unsupportedMessages = [];
+const unsupportedEls = {
   aiProvider: element("ollama"), aiBaseUrl: element("http://localhost:11434"),
-  aiLocalStatus: element(), aiLocalTest: element(), aiModel: element("gpt-oss"),
+  aiLocalStatus: element(), aiLocalTest: element(), aiModel: element("nomic-embed-text"),
 apiUrl: element("http://localhost:7860"), aiModelWrap: {},
 };
-const mandatoryState = {
+const unsupportedState = {
   localConnectSeq: 0, localConnectInFlight: null, providerTransitionRevision: 10,
-  desiredAiModel: "gpt-oss", aiMetaSeq: 0, aiModelBlocked: true,
+  desiredAiModel: "nomic-embed-text", aiMetaSeq: 0, aiModelBlocked: true,
 };
-const mandatoryController = createLocalConnectionController({
-  els: mandatoryEls, state: mandatoryState, profile: { selectModel() {} },
+const unsupportedController = createLocalConnectionController({
+  els: unsupportedEls, state: unsupportedState, profile: { selectModel() {} },
   persist: async () => {}, getStorage: async () => ({}),
   sendMessage: async () => ({
-    ok: true, models: ["gpt-oss"], capability: {},
+    ok: true, models: ["qwen"], capability: {},
     selectedModelVerification: {
-      model: "gpt-oss", status: "thinking_required",
-      code: "local_ai_thinking_required",
+      model: "nomic-embed-text", status: "unsupported_model",
+      evidence: "ollama-api-show",
     },
   }),
   normalizeUrl: (v) => v,
-  setModelOptions(models, { keepValue } = {}) {
-    mandatoryEls.aiModel.value = keepValue || models[0] || "";
+  setModelOptions(models, { keepValue, selectFirst = true } = {}) {
+    const list = [...models];
+    unsupportedEls.aiModel.value = list.includes(keepValue) ? keepValue : selectFirst ? list[0] || "" : "";
   },
-  setFieldMessage(_wrap, type, message) { mandatoryMessages.push({ type, message }); },
+  setFieldMessage(_wrap, type, message) { unsupportedMessages.push({ type, message }); },
   renderPrompt: async () => {}, scheduleSave() {}, clearResolveTimer() {},
   clearCapacity() {}, renderCapacity() {}, persistCapacity: async () => {}, toggleUi() {},
   traceLocalConnection() {},
 });
-mandatoryController.bind();
-await mandatoryEls.aiLocalTest.handlers.click();
-assert.equal(mandatoryState.aiModelBlocked, true);
-assert.equal(mandatoryMessages.at(-1).type, "error");
-assert.match(mandatoryMessages.at(-1).message, /\[AI option > AI thinking\]/);
-assert.match(mandatoryEls.aiLocalStatus.textContent, /\[AI option > AI thinking\]/);
-assert.doesNotMatch(mandatoryEls.aiLocalStatus.textContent, /CORS|runtime is running/i);
+unsupportedController.bind();
+await unsupportedEls.aiLocalTest.handlers.click();
+assert.equal(unsupportedState.aiModelBlocked, true);
+assert.equal(unsupportedEls.aiModel.value, "", "an explicit unusable Local model must be cleared, not silently replaced");
+assert.equal(unsupportedMessages.at(-1).type, "error");
+assert.match(unsupportedMessages.at(-1).message, /cannot generate chat completions/i);
+assert.doesNotMatch(unsupportedEls.aiLocalStatus.textContent, /CORS|runtime is running/i);
 
 let releaseDiscovery;
 const staleEvents = [];

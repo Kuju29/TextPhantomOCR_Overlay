@@ -164,10 +164,14 @@ async def lens_raw(
     (`src/shared/lens-tree.js`), and it cannot use it unless something gives it
     the undecoded bytes.
 
-    No decode, no geometry, no erase boxes, no grouping. `originalParagraphs`
-    goes out exactly as Google sent it: base64 protobuf. The image size travels
-    with it because Lens normalises its geometry against the picture it was
-    given, and the caller cannot infer that from the response.
+    The response is not converted into a server-side document and no erase
+    boxes or grouping are produced here. A conservative geometry inspection may
+    decode the source only to decide whether the optional one-shot image
+    artifact is worth retaining; it never changes the Lens payload or decides
+    whether grouping runs. `originalParagraphs` still goes out exactly as Google
+    sent it: base64 protobuf. The image size travels with it because Lens
+    normalises its geometry against the picture it was given, and the caller
+    cannot infer that from the response.
     """
     t0 = time.perf_counter()
     route_meta = lens_request.route_meta(request, LENS_RAW_CANONICAL_ROUTE)
@@ -300,7 +304,7 @@ async def lens_raw(
 
     paragraphs = len(data.get("originalParagraphs") or [])
     artifact_info, artifact_outcome = lens_request.optional_image_artifact(
-        image_artifacts, raw, identity
+        image_artifacts, raw, identity, lens=data, width=width, height=height
     )
     trace.write(
         "api", "api/routes/lens_v1.py", "lens_raw", "<-",

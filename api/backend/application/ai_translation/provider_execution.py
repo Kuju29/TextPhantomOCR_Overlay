@@ -7,6 +7,9 @@ import time
 import contextvars
 import hashlib
 from dataclasses import dataclass
+from contextlib import asynccontextmanager
+from backend.ai import content_stream
+from backend.ai.clients.base import ProviderGenerationCancelled
 
 from fastapi import HTTPException
 
@@ -24,7 +27,64 @@ class ExecutionResult:
     admission_wait_ms: float
     provider_ms: float
 
+def _cancelled(ctx: TranslationContext) -> bool:
+    if cancellation.is_cancelled(ctx.payload):
+        return True
+    # Some lightweight/offline callers construct a context-shaped object
+    # directly.  Preserve that compatibility; repair cancellation is an
+    # optional extension, never a new requirement for ordinary translation.
+    checker = getattr(ctx, "cancel_check", None)
+    return bool(checker is not None and checker())
+
+@asynccontextmanager
+async def _admission_slot(gate, identity):
+    """Cancel a queued acquire, never a running executor's slot ownership."""
+    cancel_event = content_stream.cancellation_event()
+    manager = gate.slot(identity)
+    if cancel_event is None:
+        async with manager:
+            yield
+        return
+    entered = asyncio.create_task(manager.__aenter__())
+    cancelled = asyncio.create_task(cancel_event.wait())
+    acquired = False
+    try:
+        await asyncio.wait((entered, cancelled), return_when=asyncio.FIRST_COMPLETED)
+        if cancel_event.is_set():
+            entered.cancel()
+            await asyncio.gather(entered, return_exceptions=True)
+            acquired = not entered.cancelled() and entered.exception() is None
+            raise ProviderGenerationCancelled("Translation cancelled while queued")
+        await entered
+        acquired = True
+        yield
+    finally:
+        cancelled.cancel()
+        await asyncio.gather(cancelled, return_exceptions=True)
+        if not entered.done():
+            entered.cancel()
+            await asyncio.gather(entered, return_exceptions=True)
+        if acquired or (entered.done() and not entered.cancelled() and entered.exception() is None):
+            await manager.__aexit__(None, None, None)
+
+
 async def run(ctx: TranslationContext, *, rate_wait_ms: float) -> ExecutionResult:
+    # History dependency belongs OUTSIDE scarce AI admission slots.
+    from backend.ai.translation_paths.store import async_execution_scope
+    from backend.ai.translation_paths.store import ConversationError
+    try:
+        async with async_execution_scope(ctx.config, ctx.target_lang,
+                                         lambda: _cancelled(ctx)):
+            return await _run(ctx, rate_wait_ms=rate_wait_ms)
+    except ConversationError as exc:
+        from backend.api.errors import payload as error_payload
+        detail = error_payload(code=exc.code, message=str(exc), user_message=str(exc),
+            origin="api", stage="conversation_wait", category="capacity", retryable=False,
+            http_status=409, trace_id=ctx.trace_id, correlation=dict(ctx.correlation),
+            extra={"providerAttempts":0,"generationAttempts":0,"requestDispatched":False})
+        raise HTTPException(409,detail=detail) from exc
+
+async def _run(ctx: TranslationContext, *, rate_wait_ms: float) -> ExecutionResult:
     timing: dict[str, float] = {}
 
     def invoke() -> dict:
@@ -32,7 +92,7 @@ async def run(ctx: TranslationContext, *, rate_wait_ms: float) -> ExecutionResul
             started = time.perf_counter()
             try:
                 return translate(ctx.marked, ctx.target_lang, ctx.config,
-                                 cancel_check=lambda: cancellation.is_cancelled(ctx.payload))
+                                 cancel_check=lambda: _cancelled(ctx))
             finally:
                 timing["provider_ms"] = round((time.perf_counter() - started) * 1000, 1)
 
@@ -67,7 +127,7 @@ async def run(ctx: TranslationContext, *, rate_wait_ms: float) -> ExecutionResul
             result = await loop.run_in_executor(ctx.request.app.state.ai_executor, threaded_invoke)
         else:
             admission_note("waiting", final=False)
-            async with gate.slot(ctx.identity):
+            async with _admission_slot(gate, ctx.identity):
                 admission_wait_ms = round((time.perf_counter() - admission_started) * 1000, 1)
                 admission_note("admitted", final=False, queue_wait_ms=admission_wait_ms)
                 result = await loop.run_in_executor(ctx.request.app.state.ai_executor, threaded_invoke)
@@ -86,7 +146,7 @@ async def run(ctx: TranslationContext, *, rate_wait_ms: float) -> ExecutionResul
     provider_ms = timing.get("provider_ms", 0.0)
     if not ctx.unlimited:
         admission_note("released", final=True, queue_wait_ms=admission_wait_ms, outcome="succeeded")
-    if cancellation.is_cancelled(ctx.payload):
+    if _cancelled(ctx):
         exc = RuntimeError("batch was cancelled while AI was running")
         trace_failure(ctx, "cancelled", exc, 409, units=ctx.unit_count,
                       providerMs=provider_ms, providerAttempts=1)

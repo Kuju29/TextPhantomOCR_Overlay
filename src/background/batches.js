@@ -1,4 +1,5 @@
 import { publishImageStatus } from "./image-status.js";
+import { createImageProgress, mergeProgressDetail, publicImageProgress, reduceImageProgress } from "./progress/image-progress-store.js";
 import { note as traceNote } from "../shared/trace.js";
 // Tracks the per-image state of one context-menu run across its two passes and renders its progress toast.
 
@@ -100,9 +101,14 @@ export function serializeBatchSnapshot(b) {
       phase: canonicalPhase(item),
       phaseAt: Number(item?.phaseAt) || Number(b.createdAt) || Date.now(),
       lastError: String(item?.lastError || "").slice(0, 500),
+      deferredImageError:
+        item?.deferredImageError && typeof item.deferredImageError === "object"
+          ? item.deferredImageError
+          : null,
       initialAiTerminal: item?.initialAiTerminal === true,
       statusSequence: Number(item.statusSequence)||0,
       presentation: item.presentation || null,
+      progress: item.progress || null,
       pageIndex: Number.isFinite(Number(item?.payload?.context?.page_index))
         ? Number(item.payload.context.page_index)
         : null,
@@ -145,6 +151,11 @@ export function restoreBatchSnapshot(raw) {
       initialAiTerminal: item.initialAiTerminal === true,
       statusSequence: Number(item.statusSequence)||0,
       presentation: item.presentation || null,
+      progress: item.progress || null,
+      deferredImageError:
+        item?.deferredImageError && typeof item.deferredImageError === "object"
+          ? item.deferredImageError
+          : null,
       lastError: String(item.lastError || ""),
       payload: Number.isFinite(item.pageIndex)
         ? { context: { page_index: item.pageIndex } }
@@ -283,6 +294,9 @@ export function batchPassStats(b) {
     if (!it || it.attempt !== pass) continue;
     if (it.status in counts) counts[it.status]++;
   }
+  const inserted = [...(b?.items?.values?.() || [])].filter(
+    it => it?.attempt === pass && it?.presentation?.insertionAck?.present === true,
+  ).length;
   const finished = counts.done + counts.error + counts.aborted + counts.skipped;
   const scanSkipped =
     pass === 2 ? Number(b?.skipped2) || 0 : Number(b?.skipped1) || 0;
@@ -296,6 +310,7 @@ export function batchPassStats(b) {
     declaredTotal: total,
     scanSkipped,
     ...counts,
+    inserted,
     finished,
   };
 }
@@ -306,7 +321,7 @@ function canonicalPhase(item) {
   return LEGACY_STATUS_PHASE[String(item?.status || "")] || "waiting";
 }
 
-function publicItem(imageKey, item, fallbackPhaseAt) {
+function publicItem(imageKey, item, fallbackPhaseAt, now = Date.now()) {
   const phase = canonicalPhase(item);
   const pageIndex = Number(item?.payload?.context?.page_index);
   return {
@@ -315,8 +330,10 @@ function publicItem(imageKey, item, fallbackPhaseAt) {
     phase,
     phaseAt: Number(item?.phaseAt) || fallbackPhaseAt,
     terminal: TERMINAL_PHASES.has(phase),
+    inserted: item?.presentation?.insertionAck?.present === true,
     error: phase === "error" ? String(item?.lastError || "") : "",
     detail: String(item?.stage || "").slice(0, 100),
+    progress: publicImageProgress(item?.progress || reduceImageProgress(null, phase, item || {}, Number(item?.phaseAt) || fallbackPhaseAt), now),
   };
 }
 
@@ -326,7 +343,7 @@ export function batchProgressSnapshot(b, stage = "", now = Date.now()) {
   const items = [];
   for (const [imageKey, item] of b.items?.entries?.() || []) {
     if (!item || item.attempt !== stats.pass) continue;
-    items.push(publicItem(imageKey, item, b.createdAt || now));
+    items.push(publicItem(imageKey, item, b.createdAt || now, now));
   }
   items.sort(
     (a, z) => Number(a.terminal) - Number(z.terminal) || z.phaseAt - a.phaseAt,
@@ -335,11 +352,16 @@ export function batchProgressSnapshot(b, stage = "", now = Date.now()) {
   const active = items.length - terminal;
   const phaseCounts = {};
   for (const item of items) phaseCounts[item.phase] = (phaseCounts[item.phase] || 0) + 1;
+  const pageInstanceId = [...(b.items?.values?.() || [])]
+    .map(item => item?.payload?.generation?.pageInstanceId).find(Boolean) || "";
   return {
     id: b.id,
     tabId: b.tabId || 0,
     frameId: b.frameId || 0,
     pass: stats.pass,
+    startedAt: Number(b.createdAt) || now,
+    pageInstanceId,
+    sequence: Number(b.progressSequence) || 0,
     stage: String(stage || ""),
     repair: b.repair || null,
     stats,
@@ -347,7 +369,7 @@ export function batchProgressSnapshot(b, stage = "", now = Date.now()) {
     active,
     terminal,
     phaseCounts,
-    items: items.slice(0, 2),
+    items,
     ts: now,
   };
 }
@@ -359,7 +381,7 @@ export function batchToast(b, text, ms = 2000, force = false) {
   if (!force && now - (b.lastToastTs || 0) < TOAST_MIN_INTERVAL_MS) return;
   b.lastToastTs = now;
   const stats = batchPassStats(b);
-  const repairPending = ["collecting", "repairing", "repair_request", "applying",
+  const repairPending = ["collecting", "repairing", "repair_request", "repair_wave", "repair_circuit_open", "applying",
     "blocked", "apply_pending"].includes(b.repair?.phase);
   const pageInstanceId = [...(b.items?.values?.() || [])]
     .map(item => item?.payload?.generation?.pageInstanceId).find(Boolean) || "";
@@ -402,19 +424,62 @@ function queueSuffix() {
   return "";
 }
 
+function conversationPresentation(b) {
+  const rows=[...(b?.items?.values?.()||[])].filter(item=>item?.attempt===(b?.pass||1) &&
+    (item?.presentation?.translationMode==='conversation'||item?.presentation?.conversation));
+  if(!rows.length)return null;
+  rows.sort((a,z)=>Number(z?.presentation?.conversation?.updatedAt||0)-Number(a?.presentation?.conversation?.updatedAt||0));
+  const state=rows[0]?.presentation?.conversation||null;
+  return {enabled:true,state};
+}
+
 // Renders the batch's current progress into a toast and broadcasts it.
 export function batchUpdateToast(b, stage, force = false) {
   if (!b) return;
   pruneBatches();
+  b.progressSequence = (Number(b.progressSequence) || 0) + 1;
   const s = batchPassStats(b);
   const head = b.pass === 2 ? "TextPhantom: retry" : "TextPhantom:";
   const parts = [];
-  if (s.total) parts.push(`${s.finished}/${s.total}`);
+  if (s.total) parts.push(`inserted ${s.inserted}/${s.total}`);
   const snapshot = batchProgressSnapshot(b, stage);
   const current =
     snapshot?.items?.find((item) => !item.terminal) || snapshot?.items?.[0];
-  if (b.repair && ["collecting","repairing","repair_request","applying","apply_pending","apply_failed","done","blocked","unavailable"].includes(b.repair.phase) && (s.finished >= s.total || b.repair.phase !== "collecting")) {
+  const conversation=conversationPresentation(b);
+  if (b.repair && ["collecting","repairing","repair_request","repair_wave","repair_circuit_open","applying","apply_pending","apply_failed","done","blocked","unavailable"].includes(b.repair.phase) && (s.finished >= s.total || b.repair.phase !== "collecting")) {
     parts.push(String(stage || b.repair.label || "Repair"));
+  } else if (conversation?.enabled) {
+    const c=conversation.state||{};
+    if(c.phase==='translating') {
+      const turn=Number(c.turn)||1,pageCount=Number(c.pageCount)||0,unitCount=Number(c.unitCount)||0;
+      let text=`Conversation turn ${turn} • translating ${pageCount} page${pageCount===1?'':'s'} / ${unitCount} units`;
+      const ready=Number(c.readyPageCount)||0,queued=Math.max(0,Number(c.queuedPageCount)||0);
+      if(queued)text+=` • ${queued} page${queued===1?'':'s'} ready next`;
+      else if(ready>pageCount)text+=` • ${ready-pageCount} pages ready next`;
+      if(c.cacheConfirmed===true)text+=` • prev cache ${Math.round((Number(c.cacheRatio)||0)*100)}%`;
+      const upstream=String(c.previousUpstreamProvider||'').trim();
+      if(upstream)text+=` • upstream ${upstream}`;
+      const previousProviderMs=Number(c.previousProviderMs)||0;
+      if(previousProviderMs>=1000)text+=` • prev AI ${(previousProviderMs/1000).toFixed(previousProviderMs>=10000?0:1)}s`;
+      parts.push(text);
+    } else if(c.phase==='anchor_recovering') {
+      parts.push(`Conversation turn ${Number(c.turn)||1} • recovering first anchor before continuing`);
+    } else if(c.phase==='turn_complete') {
+      const cached=Number(c.cachedInputTokens),actual=Number(c.actualInputTokens);
+      let text=`Conversation turn ${Number(c.turn)||1} complete • preparing next turn`;
+      if(Number.isFinite(cached)&&cached>0&&Number.isFinite(actual)&&actual>0)text+=` • prompt cache hit ${Math.round(cached/actual*100)}%`;
+      const upstream=String(c.upstreamProvider||'').trim();
+      if(upstream)text+=` • upstream ${upstream}`;
+      const providerMs=Number(c.providerMs)||0;
+      if(providerMs>=1000)text+=` • AI ${(providerMs/1000).toFixed(providerMs>=10000?0:1)}s`;
+      parts.push(text);
+    } else if(c.phase==='turn_failed') {
+      parts.push(`Conversation turn ${Number(c.turn)||1} has unresolved units • repair/next turn pending`);
+    } else {
+      const counts=snapshot?.phaseCounts||{};
+      const preparing=(Number(counts.scanning)||0)+(Number(counts.downloading)||0)+(Number(counts.lens)||0)+(Number(counts.lens_queued)||0)+(Number(counts.grouping)||0)+(Number(counts.grouping_queued)||0);
+      parts.push(`Conversation • preparing translation chain${preparing?` • ${preparing} page${preparing===1?'':'s'} preparing`:''}`);
+    }
   } else if (current && s.total > 1) {
     const counts = snapshot?.phaseCounts || {};
     const pipeline = [];
@@ -455,8 +520,10 @@ export function batchUpdateToast(b, stage, force = false) {
   if (queue) parts.push(queue);
   const msg = `${head} ${parts.join(" • ")}`.trim();
 
-  const ms = s.finished >= s.total && s.total ? 2400 : 60000;
-  batchToast(b, msg, ms, force);
+  // The page-level progress board is the single live presenter for batch work.
+  // Keep TP_TOAST for explicit one-off notices/errors from other call sites;
+  // duplicating this continuously-changing batch state in a second overlay made
+  // parallel work look frozen and unreadable.
 
   lastBatchStatus = {
     ...batchProgressSnapshot(b, stage),
@@ -480,6 +547,11 @@ export function batchMark(batchId, imageKey, patch) {
   const cur = b.items.get(k);
   if (cur) {
     const next = { ...cur, ...patch };
+    // A retry is a new presentation attempt; an ACK from its predecessor is
+    // not evidence that this attempt has been placed.
+    if (Number(next.attempt) > Number(cur.attempt || 1)) {
+      next.presentation = {...(next.presentation || {}), insertionAck:null};
+    }
     const before = canonicalPhase(cur);
     // During migration, an old caller's explicit status update remains
     // authoritative when it did not also provide a canonical phase.
@@ -493,6 +565,7 @@ export function batchMark(batchId, imageKey, patch) {
     const after = canonicalPhase(next);
     if (after !== before || !next.phaseAt) next.phaseAt = Date.now();
     next.phase = after;
+    next.progress = reduceImageProgress(cur.progress, after, { ...patch, ...next }, Date.now());
     b.items.set(k, next);
     publishImageStatus(b, k, next);
   }
@@ -503,8 +576,23 @@ export function batchMark(batchId, imageKey, patch) {
 export function updateImagePresentation(batchId, imageKey, patch = {}) {
   const b = getBatch(batchId), item = b?.items?.get(String(imageKey || ""));
   if (!item || b.cancelled) return;
+  const now = Date.now();
   item.presentation = {...(item.presentation || {}), ...patch};
+  item.progress = mergeProgressDetail(item.progress, patch, now);
+  // Repair owns the deferred terminal boundary for initial AI failures. Once it
+  // is durably done, the canonical batch row must become terminal too; keeping
+  // only Result=done left Total RUN forever and kept the batch at 25/26.
+  if (String(patch?.repairPhase || "") === "done") {
+    item.phase = "done";
+    item.status = "done";
+    item.phaseAt = now;
+    item.progress = reduceImageProgress(item.progress, "done", { stage:"Repair complete", status:"done" }, now);
+    // Terminal means no work remains, not that every unit translated correctly.
+    item.progress = mergeProgressDetail(item.progress, patch, now);
+  }
   publishImageStatus(b, String(imageKey), item);
+  if(patch?.insertionAck || patch?.translationMode==='conversation'||patch?.conversation)
+    batchUpdateToast(b, patch?.insertionAck ? 'Translation placed' : patch?.conversation?.phase || '', false);
 }
 
 export function markImagePhase(batchId, imageKey, phase, details = {}) {
@@ -524,14 +612,15 @@ export function markImagePhase(batchId, imageKey, phase, details = {}) {
   ) {
     return currentBatch;
   }
+  const { suppressToast = false, ...storedDetails } = details || {};
   const b = batchMark(batchId, imageKey, {
-    ...details,
-    stage: String(details.stage || "").slice(0, 100),
+    ...storedDetails,
+    stage: String(storedDetails.stage || "").slice(0, 100),
     attempt: nextAttempt,
     phase: normalized,
-    status: details.status || PHASE_LEGACY_STATUS[normalized],
+    status: storedDetails.status || PHASE_LEGACY_STATUS[normalized],
   });
-  if (b) batchUpdateToast(b, details.stage || "");
+  if (b && !suppressToast) batchUpdateToast(b, storedDetails.stage || "");
   if (b && TERMINAL_PHASES.has(normalized)) notifyInitialAiBarrier(b);
   return b;
 }

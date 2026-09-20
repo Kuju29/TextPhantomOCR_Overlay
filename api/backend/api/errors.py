@@ -187,6 +187,9 @@ def failure_event(route: str, detail: dict[str, Any], **safe_meta: Any) -> None:
         {
             "route": route,
             "code": detail.get("code", "internal_error"),
+            **({"validationField": str(detail["validation"].get("field", ""))[:120],
+                "validationReason": str(detail["validation"].get("reason", ""))[:80]}
+               if isinstance(detail.get("validation"), dict) else {}),
             "origin": detail.get("origin", "api"),
             "stage": detail.get("stage", "unknown"),
             "category": detail.get("category", "internal"),

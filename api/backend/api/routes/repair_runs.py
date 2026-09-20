@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import time
 from fastapi import APIRouter, HTTPException, Request
 from backend import trace
 from backend.application.repair_pool import state
@@ -18,6 +19,24 @@ _activity_transitions = TransitionDedupe(max_entries=1024, ttl_sec=3600)
 
 def token(request: Request) -> str:
     return str(request.headers.get("x-tp-run-token") or "")
+
+def caller_scope(request: Request) -> str:
+    """Opaque per-extension-workflow quota identity for repair registration.
+
+    The random tab session is the same fairness identity already used by Lens,
+    Grouping and AI admission.  Falling back to IP+origin keeps old clients
+    compatible, but current clients behind one NAT/proxy no longer consume one
+    another's 64-run repair quota.  This scope is quota-only; the 256-bit run
+    token remains the authorization boundary for every repair read/mutation.
+    """
+    session = str(request.headers.get("x-tp-tab-session") or "").strip()[:160]
+    origin = str(request.headers.get("origin") or "")[:256]
+    if session:
+        material = f"session:{session}|origin:{origin}"
+    else:
+        client = request.client.host if request.client else ""
+        material = f"legacy:{client}|origin:{origin}"
+    return hashlib.sha256(material.encode()).hexdigest()
 
 async def body(request: Request) -> dict:
     # Bound before decoding; never copy an unbounded request into the ledger.
@@ -65,8 +84,7 @@ async def change(request: Request, run_id: str, action):
 @router.post("")
 async def register(request: Request):
     data = await body(request)
-    caller = hashlib.sha256(f"{request.client.host if request.client else ''}|{request.headers.get('origin', '')}".encode()).hexdigest()
-    return await call(store.register, data.get("runId"), token(request), data.get("manifest"), caller)
+    return await call(store.register, data.get("runId"), token(request), data.get("manifest"), caller_scope(request))
 
 @router.get("/{run_id}")
 async def status(run_id: str, request: Request):
@@ -121,7 +139,28 @@ async def translate(run_id: str, task_id: str, request: Request):
     if not task or task["route"] != "server":
         raise HTTPException(409, detail={"code": "repair_task_route_mismatch"})
     expected = [{"id": x["id"], "text": x["text"]} for x in task["units"]]
-    if payload.get("units") != expected:
+    repair_wire_to_alias = {}
+    if payload.get("translationMode") == "conversation":
+        conversation = payload.get("conversation") if isinstance(payload.get("conversation"), dict) else {}
+        from backend.ai.translation_paths.origins import checked_origins, OriginValidationError
+        try:
+            origins = checked_origins(conversation.get("origins"))
+        except OriginValidationError as error:
+            raise HTTPException(409, detail={"code": error.code, "validation": error.validation}) from None
+        expected_pages = {str(row["id"]): str(row["pageId"]) for row in task["units"]}
+        if any(expected_pages.get(alias) != row["pageId"]
+               for row in origins for alias in row["originalIds"]):
+            raise HTTPException(409, detail={"code": "repair_task_source_mismatch"})
+        wire_ids = [str(uid) for row in origins if isinstance(row, dict) for uid in (row.get("unitIds") or [])]
+        alias_ids = [str(uid) for row in origins if isinstance(row, dict) for uid in (row.get("originalIds") or [])]
+        incoming = payload.get("units") if isinstance(payload.get("units"), list) else []
+        if (alias_ids != [x["id"] for x in expected] or
+                [x.get("id") for x in incoming if isinstance(x, dict)] != wire_ids or
+                [x.get("text") for x in incoming if isinstance(x, dict)] != [x["text"] for x in expected] or
+                len(incoming) != len(expected)):
+            raise HTTPException(409, detail={"code": "repair_task_source_mismatch"})
+        repair_wire_to_alias = dict(zip(wire_ids, alias_ids))
+    elif payload.get("units") != expected:
         raise HTTPException(409, detail={"code": "repair_task_source_mismatch"})
     begun = await call(store.transact, run_id, run_token,
                        lambda run: state.begin(run, task_id, task["executor"]))
@@ -137,9 +176,44 @@ async def translate(run_id: str, task_id: str, request: Request):
     operation_id = f"repair:{run_id}:{task_id}"
     payload["operationId"] = operation_id
 
+    # A disconnected HTTP client must not kill recoverable cloud work, but an
+    # explicit repair-run cancel *does* revoke ownership of that provider call.
+    # Check current-process ownership; session state is temporary and disappears
+    # on restart. The short cache avoids an ownership lookup per output token.
+    cancel_state = {"checked": 0.0, "cancelled": False}
+    def repair_cancelled() -> bool:
+        if cancel_state["cancelled"]:
+            return True
+        now = time.monotonic()
+        if now - cancel_state["checked"] < 0.25:
+            return False
+        cancel_state["checked"] = now
+        try:
+            cancel_state["cancelled"] = store.is_cancelled(run_id, run_token)
+        except Exception:
+            # A transient ownership lookup failure must not turn into a false user
+            # cancellation; the normal provider/session error path remains the
+            # authority for persistent storage failures.
+            return False
+        return cancel_state["cancelled"]
+
     async def generate():
         try:
-            result = await execute(request, payload, operation_id)
+            result = await execute(request, payload, operation_id,
+                                   cancel_check=repair_cancelled)
+            if repair_wire_to_alias:
+                def map_id(value):
+                    return repair_wire_to_alias.get(str(value), str(value))
+                result = {**result,
+                    "translations": [{**row, "id": map_id(row.get("id"))}
+                        for row in (result.get("translations") or []) if isinstance(row, dict)],
+                    "missing": [map_id(value) for value in (result.get("missing") or [])]}
+                if isinstance(result.get("meta"), dict):
+                    meta = dict(result["meta"])
+                    for key in ("omittedIds", "declinedIds", "wrongLanguageIds", "alignmentUncertainIds"):
+                        if isinstance(meta.get(key), list):
+                            meta[key] = [map_id(value) for value in meta[key]]
+                    result["meta"] = meta
             await asyncio.to_thread(store.transact, run_id, run_token,
                                     lambda run: state.answer_task(run, task_id, result))
             return result
@@ -153,7 +227,7 @@ async def translate(run_id: str, task_id: str, request: Request):
                 pass  # retain running/unknown; never make it pending again
             raise
 
-    # A client disconnect must not discard the cloud receipt or cause a new
+    # A client disconnect must not discard the active receipt or cause a new
     # provider call on reconnect. This task dies only with the API process.
     work = asyncio.create_task(generate())
     _running.add(work)

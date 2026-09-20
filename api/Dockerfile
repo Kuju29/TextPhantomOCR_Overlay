@@ -35,4 +35,4 @@ USER 1000
 ENV PORT=7860
 EXPOSE 7860
 
-CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "7860", "--no-access-log", "--log-level", "warning", "--ws-ping-interval", "45", "--ws-ping-timeout", "45"]
+CMD ["uvicorn", "backend.main:app", "--workers", "1", "--host", "0.0.0.0", "--port", "7860", "--no-access-log", "--log-level", "warning", "--ws-ping-interval", "45", "--ws-ping-timeout", "45"]

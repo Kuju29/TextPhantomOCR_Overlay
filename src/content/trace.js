@@ -45,6 +45,7 @@
   let detail = "off";
   let currentTrace = "";
   let lineNo = 0;
+  let visibilityEpoch = 0;
   const producerId = (() => {
     try {
       return String(
@@ -124,13 +125,13 @@
   }
 
   // Emits one trace line for the current trace id.
-  function line(file, fn, ev, data) {
+  function line(file, fn, ev, data, traceOverride = undefined) {
     if (!enabled) return;
     try {
       relay({
         t: Date.now(),
         n: ++lineNo,
-        trace: currentTrace,
+        trace: traceOverride === undefined ? currentTrace : String(traceOverride || ""),
         side: "page",
         producerId,
         file,
@@ -217,8 +218,10 @@
     "repositionImageError",
     "log",
     "traceNote",
+    "traceNoteFor",
     "setTrace",
     "getTrace",
+    "getVisibilityEpoch",
     "installTrace",
     "setTracingEnabled",
     "isTracing",
@@ -252,14 +255,37 @@
 
   TP.installTrace = installTrace;
   TP.traceNote = (file, fn, data) => line(file, fn, "..", data);
+  // Async overlay inserts can run concurrently; bind diagnostics to the message
+  // trace explicitly instead of whichever insert most recently touched the
+  // page-global currentTrace.
+  TP.traceNoteFor = (traceId, file, fn, data) => line(file, fn, "..", data, traceId);
   TP.setTrace = (id) => {
     const previous = currentTrace;
     currentTrace = String(id || "");
     return previous;
   };
   TP.getTrace = () => currentTrace;
+  function recordVisibility(reason = "changed") {
+    if (!enabled || typeof document === "undefined") return;
+    if (reason === "changed") visibilityEpoch++;
+    // Page producer + sender tab/frame identify this document without logging a URL.
+    line("content/trace.js", "pageVisibility", "..", {
+      schema: "tp.audit/1", event: "page_visibility", reason,
+      hidden: document.visibilityState === "hidden", observedAt: Date.now(),
+      visibilityChanges: visibilityEpoch,
+    }, "");
+  }
+  const onVisibilityChange = () => recordVisibility();
+  TP.getVisibilityEpoch = () => visibilityEpoch;
   TP.setTracingEnabled = (on, traceDetail = "compact") => {
+    const wasEnabled = enabled;
     enabled = Boolean(on);
+    if (enabled !== wasEnabled && typeof document !== "undefined") {
+      if (enabled) {
+        document.addEventListener?.("visibilitychange", onVisibilityChange);
+        recordVisibility("initial");
+      } else document.removeEventListener?.("visibilitychange", onVisibilityChange);
+    }
     detail =
       enabled && traceDetail === "full" ? "full" : enabled ? "compact" : "off";
   };

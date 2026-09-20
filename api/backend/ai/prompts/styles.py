@@ -37,9 +37,9 @@ LANG_STYLE: Final[dict[str, str]] = {
 THAI_STYLE_COMPACT: Final[str] = TH_STYLE
 
 PROMPT_POLICY_VERSION: Final[dict[str, str]] = {
-    "th": "th-contextual-localization-10",
-    "en": "en-contextual-localization-8",
-    "ja": "ja-contextual-localization-8",
+    "th": "th-system-style-wrapper-2026.9.14.6",
+    "en": "en-system-style-wrapper-2026.9.14.6",
+    "ja": "ja-system-style-wrapper-2026.9.14.6",
 }
 
 CANONICAL_PROMPT_CONTRACT_VERSION: Final[str] = "translation-plan-2"
@@ -76,10 +76,19 @@ RESPONSE_CONTRACT_JSON: Final[str] = RESPONSE_CONTRACT_TEXT
 def lang_style(lang: str) -> str:
     code = _normalize_lang(lang)
     selected = (LANG_STYLE.get(code) or LANG_STYLE["default"]).strip()
+    if code in ("th", "ja"):
+        for english, native in (("CHARACTER SHEET", "ข้อมูลตัวละคร" if code == "th" else "人物情報"),
+                                ("SERIES MEMORY", "ความจำเรื่อง" if code == "th" else "物語の記憶")):
+            selected = selected.replace(english, native)
     return _with_canonical_target_header(lang, selected)
 
 
 def _target_language_header(lang: str) -> str:
+    code = _normalize_lang(lang).lower()
+    if code == "th":
+        return "ภาษาปลายทาง: ภาษาไทย"
+    if code == "ja":
+        return "訳先言語: 日本語"
     instruction = target_language_priority(lang).strip()
     prefix = "Translate every source unit into "
     if instruction.startswith(prefix):
@@ -89,9 +98,9 @@ def _target_language_header(lang: str) -> str:
 
 
 def _without_prompt_headers(value: str) -> str:
-    text = re.sub(r"\A\s*style prompt\s*:\s*(?:\r?\n)?", "", value,
+    text = re.sub(r"\A\s*(?:style prompt|สไตล์การแปล|翻訳方針)\s*:\s*(?:\r?\n)?", "", value,
                   count=1, flags=re.IGNORECASE)
-    return re.sub(r"\A\s*target language\s*:[^\r\n]*(?:\r?\n)?", "", text,
+    return re.sub(r"\A\s*(?:target language|ภาษาปลายทาง|訳先言語)\s*:[^\r\n]*(?:\r?\n)?", "", text,
                   count=1, flags=re.IGNORECASE).strip()
 
 
@@ -117,6 +126,7 @@ def select_style(
     if not override:
         return built_in, "built_in_default_endpoint"
     effective = _with_canonical_target_header(lang, override)
-    if effective == built_in:
-        return effective, "saved_default"
+    raw_default = _with_canonical_target_header(lang, LANG_STYLE.get(_normalize_lang(lang), "") or LANG_STYLE["default"])
+    if effective == built_in or effective == raw_default:
+        return built_in, "saved_default"
     return effective, "saved_custom_replace"

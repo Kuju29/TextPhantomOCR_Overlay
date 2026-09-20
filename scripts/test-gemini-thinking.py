@@ -90,40 +90,72 @@ def main():
     caps = listed["capabilities"]
     flash = caps["gemini-2.5-flash"]["reasoning"]
     assert flash == {"supported": True, "mandatory": False, "default_enabled": True,
-                     "control": "toggle", "dynamic": True}
-    assert caps["gemini-2.5-flash-lite"]["reasoning"]["default_enabled"] is False
+                     "control": "levels", "dynamic": True,
+                     "supported_efforts": ["none", "low", "medium", "high"]}
+    lite_cap = caps["gemini-2.5-flash-lite"]["reasoning"]
+    assert lite_cap["default_enabled"] is False
+    assert lite_cap["supported_efforts"] == ["none", "low", "medium", "high"]
+    assert lite_cap["default_effort"] == "none"
     assert caps["gemini-2.5-pro"]["reasoning"]["mandatory"] is True
-    assert caps["gemini-3.6-flash"]["reasoning"]["control"] == "levels"
+    g3 = caps["gemini-3.6-flash"]["reasoning"]
+    assert g3["control"] == "levels" and g3["mandatory"] is True
+    assert "off_effort" not in g3
+    assert g3["supported_efforts"] == ["minimal", "low", "medium", "high"]
     normalized = normalize_model_capabilities({"reasoning": flash})["reasoning"]
-    assert normalized["control"] == "toggle" and normalized["dynamic"] is True
+    assert normalized["control"] == "levels" and normalized["dynamic"] is True
+    assert normalized["supported_efforts"] == ["none", "low", "medium", "high"]
 
     default_payload, default_result = capture_generate("gemini-2.5-flash", "default")
     off_payload, off_result = capture_generate("gemini-2.5-flash", "off")
+    flash_low_payload, flash_low_result = capture_generate("gemini-2.5-flash", "low")
+    flash_medium_payload, flash_medium_result = capture_generate("gemini-2.5-flash", "medium")
+    flash_high_payload, flash_high_result = capture_generate("gemini-2.5-flash", "high")
     on_payload, on_result = capture_generate("gemini-2.5-flash", "on")
     lite_payload, lite_result = capture_generate("gemini-2.5-flash-lite", "default")
+    lite_off_payload, lite_off_result = capture_generate("gemini-2.5-flash-lite", "off")
     pro_off_payload, pro_off_result = capture_generate("gemini-2.5-pro", "off")
+    pro_low_payload, pro_low_result = capture_generate("gemini-2.5-pro", "low")
+    pro_medium_payload, pro_medium_result = capture_generate("gemini-2.5-pro", "medium")
+    pro_high_payload, pro_high_result = capture_generate("gemini-2.5-pro", "high")
     g3_off_payload, g3_off_result = capture_generate("gemini-3.6-flash", "off")
+    g3_min_payload, g3_min_result = capture_generate("gemini-3.6-flash", "minimal")
 
     assert "thinkingConfig" not in default_payload["generationConfig"]
-    assert default_result.thinking_applied == "provider_default"
+    assert default_result.thinking_applied == "provider_default_levels"
     assert default_result.requested_output_tokens > off_result.requested_output_tokens
     assert off_payload["generationConfig"]["thinkingConfig"] == {"thinkingBudget": 0}
     assert off_result.thinking_applied == "requested_off"
-    assert on_payload["generationConfig"]["thinkingConfig"] == {"thinkingBudget": -1}
-    assert on_result.thinking_applied == "requested_on"
+    assert flash_low_payload["generationConfig"]["thinkingConfig"] == {"thinkingBudget": 1024}
+    assert flash_low_result.thinking_applied == "requested_effort_low"
+    assert flash_medium_payload["generationConfig"]["thinkingConfig"] == {"thinkingBudget": 8192}
+    assert flash_medium_result.thinking_applied == "requested_effort_medium"
+    assert flash_high_payload["generationConfig"]["thinkingConfig"] == {"thinkingBudget": 24576}
+    assert flash_high_result.thinking_applied == "requested_effort_high"
+    assert "thinkingConfig" not in on_payload["generationConfig"]
+    assert on_result.thinking_applied == "provider_default_levels"
     assert "thinkingConfig" not in lite_payload["generationConfig"]
-    assert lite_result.thinking_applied == "provider_default"
+    assert lite_result.thinking_applied == "provider_default_levels"
     assert lite_result.requested_output_tokens == off_result.requested_output_tokens
+    assert lite_off_payload["generationConfig"]["thinkingConfig"] == {"thinkingBudget": 0}
+    assert lite_off_result.thinking_applied == "requested_off"
     assert "thinkingConfig" not in pro_off_payload["generationConfig"]
-    assert pro_off_result.thinking_applied == "provider_default_mandatory"
+    assert pro_off_result.thinking_applied == "provider_default_levels"
     assert pro_off_result.requested_output_tokens > off_result.requested_output_tokens
+    assert pro_low_payload["generationConfig"]["thinkingConfig"] == {"thinkingBudget": 1024}
+    assert pro_low_result.thinking_applied == "requested_effort_low"
+    assert pro_medium_payload["generationConfig"]["thinkingConfig"] == {"thinkingBudget": 8192}
+    assert pro_medium_result.thinking_applied == "requested_effort_medium"
+    assert pro_high_payload["generationConfig"]["thinkingConfig"] == {"thinkingBudget": 24576}
+    assert pro_high_result.thinking_applied == "requested_effort_high"
     assert "thinkingConfig" not in g3_off_payload["generationConfig"]
     assert g3_off_result.thinking_applied == "provider_default_levels"
     assert g3_off_result.requested_output_tokens > off_result.requested_output_tokens
+    assert g3_min_payload["generationConfig"]["thinkingConfig"] == {"thinkingLevel": "minimal"}
+    assert g3_min_result.thinking_applied == "requested_effort_minimal"
 
     # Provider usage is still the source of truth for hidden reasoning tokens.
     assert default_result.thinking_tokens == 500
-    print("Gemini thinking capability/wire test passed: 2.5 toggle semantics, budget reserve, 3 level guard.")
+    print("Gemini thinking capability/wire test passed: Gemini 2.5 exposes provider-specific budget levels (with Off only where supported), while Gemini 3 maps exact levels to thinkingLevel.")
 
 
 if __name__ == "__main__":

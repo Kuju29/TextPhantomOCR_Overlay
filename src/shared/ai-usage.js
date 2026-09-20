@@ -1,8 +1,9 @@
 import { createUsageCommitQueue } from "./ai/usage-commit-queue.js";
-import { getStorage, setStorage } from "./storage.js";
+import { getStorage, removeStorage, setStorage } from "./storage.js";
 import { TOKEN_FIELDS, token, decimal, addDecimal, aggregateUsage, usageIsComplete } from "./ai/usage-values.js";
 
 export const AI_USAGE_STORAGE_KEY = "aiUsageV1";
+export const AI_USAGE_RECEIPT_PREFIX = "aiUsageReceiptV1:";
 export const AI_USAGE_VERSION = 1;
 export const AI_USAGE_SESSION_LIMIT = 20;
 export const AI_USAGE_DELTA_LIMIT = 200;
@@ -21,8 +22,17 @@ const compactStoredRecord = (value) => Object.fromEntries(
   Object.entries(value || {}).filter(([, item]) => item !== null && item !== ""),
 );
 
-// Provider failures do not all carry telemetry at the same nesting level.
-// Normalize only the documented envelopes; never estimate missing token counts.
+// One selection rule for the ledger writer and its diagnostic reader.
+function generationSelection(event) {
+  const runtime = event?.runtime === "local" ? "local" : "cloud";
+  const provider = String(event?.provider || "unknown").trim() || "unknown";
+  const resolvedModel = String(event?.model || "unknown").trim() || "unknown";
+  const requestedModel = String(event?.requestedModel || "").trim();
+  const modelName = requestedModel && requestedModel.toLowerCase() !== "auto" ? requestedModel : resolvedModel;
+  return { runtime, provider, resolvedModel, requestedModel, modelName };
+}
+
+// Normalize documented provider envelopes only; never estimate missing token counts.
 export function failureUsageDetails(errorLike) {
   const root = errorLike && typeof errorLike === "object" ? errorLike : {};
   const structural =
@@ -429,15 +439,7 @@ export function recordProviderGeneration(
           : undefined }, { now, id }), ledger);
   }
   event = { ...(event?.usage || {}), ...event };
-  const runtime = event?.runtime === "local" ? "local" : "cloud";
-  const provider = String(event?.provider || "unknown").trim() || "unknown";
-  const resolvedModel = String(event?.model || "unknown").trim() || "unknown";
-  const requestedModel = String(event?.requestedModel || "").trim();
-  // Group the comparison UI by the explicitly requested selection, while
-  // retaining the actual serving model on each receipt/delta. Do not guess
-  // aliases from string similarity (and keep auto-model resolution unchanged).
-  const modelName = requestedModel && requestedModel.toLowerCase() !== "auto"
-    ? requestedModel : resolvedModel;
+  const { runtime, provider, resolvedModel, requestedModel, modelName } = generationSelection(event);
   const key = usageKey(runtime, provider, modelName);
   const engine = event?.engine === "runsapi" ? "runsapi" : "runsextension";
   const dedupeKey = generationDedupeKey(event, runtime, provider, modelName);
@@ -814,59 +816,154 @@ const commitUsage = createUsageCommitQueue({
   normalize: normalizeUsageLedger,
   lock: usageStorageLock,
 });
-export function persistProviderGeneration(event, { emitTrace = null, onTiming = null } = {}) {
-  // Capture an immutable event before the asynchronous batch commit. Callers
-  // cannot mutate an in-flight receipt or pending intent while storage waits.
-  event = structuredClone(event);
-  return commitUsage(before => recordProviderGeneration(before, event), {
-    onTiming,
-    onCommit: typeof emitTrace === "function" ? ({before, next, unchanged}) => {
-      const eventKey = usageKey(
-        event?.runtime === "local" ? "local" : "cloud",
-        event?.provider,
-        event?.model,
-      );
-      const latest = (ledger) =>
-        ledger.models[eventKey]?.sessions.at(-1) || null;
-      const beforeSession = latest(before);
-      const afterSession = latest(next);
-      emitTrace("AI usage ledger delta", {
-        sessionId: afterSession?.id || "",
-        traceId: cleanId(event?.traceId),
-        requestId: cleanId(event?.requestId),
-        operationId: cleanId(event?.operationId),
-        provider: String(event?.provider || "unknown"),
-        model: String(event?.model || "unknown"),
-        runtime: event?.runtime === "local" ? "local" : "cloud",
-        engine: event?.engine === "runsapi" ? "runsapi" : "runsextension",
-        reason: String(
-          event?.reason ||
-            (event?.success === false
-              ? "provider_charged_failure"
-              : "translation_success"),
-        ),
-        inputTokens: nullableToken(event?.inputTokens),
-        outputTokens: nullableToken(event?.outputTokens),
-        totalTokens: nullableToken(event?.totalTokens),
-        generationAttempts: Number(
-          event?.generationAttempts || event?.requests || 1,
-        ),
-        replayed: Boolean(event?.replayed),
-        idempotent: Boolean(generationIdentity(event)),
-        deduplicated: unchanged,
-        beforeRequests: Number(beforeSession?.requests || 0),
-        afterRequests: Number(afterSession?.requests || 0),
-        beforeTotalTokens: beforeSession?.totalTokens ?? null,
-        afterTotalTokens: afterSession?.totalTokens ?? null,
-      });
-    } : undefined,
+
+// Translation accounting uses a tiny durable receipt on the request path. The
+// large aggregate ledger is a materialized view and is folded afterwards. A
+// service-worker stop can delay the fold, but cannot lose a provider receipt.
+// This keeps accounting durable without making every provider request wait for
+// a read/normalize/stringify/write of the complete usage history.
+const usageReceiptKeys = new Set();
+const usageReceiptObservers = new Map();
+let usageReceiptFlushTask = null;
+let usageReceiptFlushRunning = null;
+let usageReceiptFlushRequested = false;
+let usageReceiptSequence = 0;
+const usageReceiptClock = () => globalThis.performance?.now?.() ?? Date.now();
+const usageReceiptId = () => globalThis.crypto?.randomUUID?.() ||
+  `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+const usageReceiptRank = event => event?.pending === true ? 0 : event?.resolvePending === true ? 2 : 1;
+const usageReceiptTrace = (emitTrace, event, before, next, unchanged) => {
+  if (typeof emitTrace !== "function") return;
+  const observation = { ...(event?.usage || {}), ...event };
+  const selection = generationSelection(observation);
+  const eventKey = usageKey(selection.runtime, selection.provider, selection.modelName);
+  const latest = ledger => ledger.models[eventKey]?.sessions.at(-1) || null;
+  const beforeSession = latest(before);
+  const afterSession = latest(next);
+  emitTrace("AI usage ledger delta", {
+    schema: "tp.audit/1", event: "usage_ledger",
+    sessionId: afterSession?.id || "",
+    traceId: cleanId(event?.traceId), requestId: cleanId(event?.requestId),
+    operationId: cleanId(event?.operationId), provider: String(event?.provider || "unknown"),
+    model: String(event?.model || "unknown"), runtime: event?.runtime === "local" ? "local" : "cloud",
+    engine: event?.engine === "runsapi" ? "api" : "extension",
+    reason: String(event?.pending === true ? "usage_pending" : event?.resolvePending === true ? "acknowledged" :
+      event?.reason || (event?.success === false ? "provider_charged_failure" : "translation_success")),
+    inputTokens: nullableToken(observation?.inputTokens), outputTokens: nullableToken(observation?.outputTokens),
+    totalTokens: nullableToken(observation?.totalTokens),
+    generationAttempts: event?.pending === true || event?.resolvePending === true ? 0 : Number(
+      event?.generationAttempts || event?.requests || 1),
+    replayed: Boolean(event?.replayed), idempotent: Boolean(generationIdentity(event)), deduplicated: unchanged,
+    beforeRequests: Number(beforeSession?.requests || 0), afterRequests: Number(afterSession?.requests || 0),
+    beforeTotalTokens: beforeSession?.totalTokens ?? null, afterTotalTokens: afterSession?.totalTokens ?? null,
+  });
+};
+
+async function receiptSnapshot({ recover = false } = {}) {
+  if (recover) {
+    const all = await getStorage(null);
+    const keys = Object.keys(all).filter(key => key.startsWith(AI_USAGE_RECEIPT_PREFIX));
+    return { all, keys };
+  }
+  const keys = [...usageReceiptKeys];
+  if (!keys.length) return { all: {}, keys };
+  return { all: await getStorage([...keys, AI_USAGE_STORAGE_KEY]), keys };
+}
+
+export async function flushUsageReceiptJournal({ recover = false } = {}) {
+  if (usageReceiptFlushRunning) return usageReceiptFlushRunning;
+  usageReceiptFlushRunning = usageStorageLock(async () => {
+    const { all, keys } = await receiptSnapshot({ recover });
+    const records = keys.map(key => ({ key, value: all[key] }))
+      .filter(item => item.value?.version === 1 && item.value?.event && item.value?.nonce)
+      .sort((a, b) => Number(a.value.storedAt || 0) - Number(b.value.storedAt || 0) ||
+        Number(a.value.sequence || 0) - Number(b.value.sequence || 0) ||
+        usageReceiptRank(a.value.event) - usageReceiptRank(b.value.event) || a.key.localeCompare(b.key));
+    if (!records.length) return { folded: 0, changed: false };
+    const rawLedger = Object.hasOwn(all, AI_USAGE_STORAGE_KEY)
+      ? all[AI_USAGE_STORAGE_KEY]
+      : (await getStorage({ [AI_USAGE_STORAGE_KEY]: blankLedger() }))[AI_USAGE_STORAGE_KEY];
+    let next = normalizeUsageLedger(rawLedger);
+    const original = JSON.stringify(next);
+    const observations = [];
+    for (const record of records) {
+      const before = next;
+      const observer = usageReceiptObservers.get(record.value.nonce);
+      const beforeEncoded = observer ? JSON.stringify(before) : null;
+      next = recordProviderGeneration(next, record.value.event);
+      const unchanged = observer ? beforeEncoded === JSON.stringify(next) : undefined;
+      if (observer) observations.push({ observer, event: record.value.event, before, next, unchanged });
+    }
+    const changed = original !== JSON.stringify(next);
+    if (changed) await setStorage({ [AI_USAGE_STORAGE_KEY]: next });
+    await removeStorage(records.map(record => record.key));
+    for (const record of records) {
+      usageReceiptKeys.delete(record.key);
+      usageReceiptObservers.delete(record.value.nonce);
+    }
+    for (const item of observations)
+      usageReceiptTrace(item.observer.emitTrace, item.event, item.before, item.next, item.unchanged);
+    return { folded: records.length, changed };
+  }).finally(() => {
+    usageReceiptFlushRunning = null;
+    if (usageReceiptFlushRequested) scheduleUsageReceiptFlush();
+  });
+  return usageReceiptFlushRunning;
+}
+
+function scheduleUsageReceiptFlush() {
+  usageReceiptFlushRequested = true;
+  if (usageReceiptFlushTask != null || usageReceiptFlushRunning) return;
+  usageReceiptFlushTask = setTimeout(() => {
+    usageReceiptFlushTask = null;
+    usageReceiptFlushRequested = false;
+    void flushUsageReceiptJournal({ recover: true }).catch(() => {});
+  }, 0);
+}
+
+async function persistUsageReceipt(event, { emitTrace = null, onTiming = null } = {}) {
+  const started = usageReceiptClock();
+  const immutable = structuredClone(event);
+  const nonce = usageReceiptId();
+  const key = `${AI_USAGE_RECEIPT_PREFIX}${nonce}`;
+  const record = { version: 1, nonce, storedAt: Date.now(), sequence: ++usageReceiptSequence, event: immutable };
+  const writeAt = usageReceiptClock();
+  await setStorage({ [key]: record });
+  const ended = usageReceiptClock();
+  usageReceiptKeys.add(key);
+  if (typeof emitTrace === "function") usageReceiptObservers.set(nonce, { emitTrace });
+  try {
+    onTiming?.({ lockMs: 0, readMs: 0, computeMs: Math.max(0, writeAt - started),
+      writeMs: Math.max(0, ended - writeAt), batchSize: 1, queueMs: 0,
+      persistMs: Math.max(0, ended - started), journaled: true });
+  } catch {}
+  // Initial dispatch intent stays as a compact receipt while the provider is
+  // running. Terminal/uncertain events trigger a fold after this awaited
+  // durable write has already completed.
+  if (immutable?.pending !== true || immutable?.pendingReason === "local_transport_unconfirmed")
+    scheduleUsageReceiptFlush();
+  return immutable;
+}
+
+export function persistProviderGeneration(event, options = {}) {
+  // Operation IDs are present on every real translation path. Keep the old
+  // aggregate transaction only for compatibility callers that have no durable
+  // request identity.
+  const immutable = structuredClone(event);
+  if (cleanId(immutable?.operationId)) return persistUsageReceipt(immutable, options);
+  return commitUsage(before => recordProviderGeneration(before, immutable), {
+    onTiming: options.onTiming,
+    onCommit: typeof options.emitTrace === "function" ? ({ before, next, unchanged }) =>
+      usageReceiptTrace(options.emitTrace, immutable, before, next, unchanged) : undefined,
   });
 }
 export const persistUsageEvent = persistProviderGeneration;
-export function persistUsageReset() {
+export async function persistUsageReset() {
+  await flushUsageReceiptJournal({ recover: true });
   return commitUsage(before => resetActiveUsage(before));
 }
-export function persistUsageSelectionBoundary(target) {
+export async function persistUsageSelectionBoundary(target) {
+  await flushUsageReceiptJournal({ recover: true });
   target = structuredClone(target);
   return commitUsage(before => applyUsageSelectionBoundary(before, target));
 }

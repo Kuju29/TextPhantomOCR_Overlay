@@ -304,6 +304,7 @@
       return null;
     }
 
+    const readableStarted = performance.now();
     const readableSource = canReadImagePixels(img)
       ? img
       : await loadReadableImage(sourceImageDataUri);
@@ -317,6 +318,7 @@
     }
 
     const t0 = performance.now();
+    const readableSourceMs = t0 - readableStarted;
     let canvas;
     let ctx;
     let data;
@@ -334,6 +336,7 @@
       return null;
     }
 
+    const pixelsReady = performance.now();
     const contrast = lensDocument?.paragraphs?.length
       ? annotateDocumentTextLightPixels(lensDocument, data, W, H)
       : { annotated: 0, light: 0 };
@@ -365,6 +368,7 @@
       painted++;
     }
 
+    const encodeStarted = performance.now();
     const blob = await new Promise((resolve) =>
       canvas.toBlob(resolve, "image/webp", 0.92),
     );
@@ -378,6 +382,11 @@
       painted,
       skipped,
       contrast,
+      timing: {
+        readableSourceMs, canvasReadMs: pixelsReady - t0,
+        erasePaintMs: encodeStarted - pixelsReady,
+        encodeMs: performance.now() - encodeStarted,
+      },
       ms: Math.round(performance.now() - t0),
     };
     TP.log.debug("erase: background built locally", {

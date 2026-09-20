@@ -8,13 +8,13 @@ export function completedLineContract(text, expectedIds) {
   if (/[\u0085\u2028\u2029]/u.test(source)) return "";
   const records = source
     .split("\n")
-    .map((line) => /^[ \t]*<<TP_(P\d+):(.*)>>[ \t]*$/u.exec(line));
+    .map((line) => /^[ \t]*<<(?:TP_(P\d+)|(I[1-9][0-9]{0,6}_P[0-9]{1,6})):(.*)>>[ \t]*$/u.exec(line));
   if (
     records.length === expectedIds.length &&
     records.every(Boolean) &&
-    records.every((match) => match[2].trim() && !/<<TP_P\d+:/u.test(match[2]))
+    records.every((match) => match[3].trim() && !/<<(?:TP_P\d+|I[1-9][0-9]{0,6}_P[0-9]{1,6}):/u.test(match[3]))
   ) {
-    const ids = records.map((match) => match[1]);
+    const ids = records.map((match) => match[1] || match[2]);
     if (
       new Set(ids).size === ids.length &&
       ids.every((id) => expectedIds.includes(id))

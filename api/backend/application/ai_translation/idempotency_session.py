@@ -67,4 +67,7 @@ def _caller_scope(request: Request, payload: dict) -> str:
     auth = str(request.headers.get("authorization") or "")
     auth_hash = hashlib.sha256(auth.encode()).hexdigest()[:16] if auth else ""
     caller = session or f"{client}|{origin}|{auth_hash}"
-    return "c:" + hashlib.sha256(f"{identity}|{caller}".encode()).hexdigest()[:20]
+    # A tab may change credentials without changing its session or idempotency
+    # key. Never replay the previous account's result into that new request.
+    credential = hashlib.sha256(str(provider.get("apiKey") or "").strip().encode()).hexdigest()
+    return "c:" + hashlib.sha256(f"{identity}|{caller}|{credential}".encode()).hexdigest()[:20]

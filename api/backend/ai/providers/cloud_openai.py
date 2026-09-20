@@ -9,7 +9,7 @@ import re, httpx
 from backend.ai.provider_contract import GenerationRequest, ModelListResult, ProbeRequest, ProbeResponse, ProviderSpec
 from backend.ai.providers.probe_support import openai_chat_probe
 from backend.ai.providers.provider_helpers import resolve_alias
-from backend.ai.transports.openai_chat import execute_chat_completion
+from backend.ai.transports.openai_cloud_chat import execute_openai_cloud_chat
 
 PROVIDER_ID = "openai"
 DEFAULT_BASE_URL = "https://api.openai.com/v1"
@@ -74,8 +74,10 @@ def _verified_reasoning_mapping(request: GenerationRequest) -> tuple[str | None,
         return None, efforts
     if request.thinking == "off" and "none" in efforts:
         return "none", efforts
+    if request.thinking in efforts:
+        return request.thinking, efforts
     if request.thinking == "on":
-        for effort in ("low", "medium", "high", "xhigh", "max"):
+        for effort in ("low", "minimal", "medium", "high", "xhigh", "max", "ultra"):
             if effort in efforts:
                 return effort, efforts
     return None, efforts
@@ -115,6 +117,8 @@ def prepare_payload(request: GenerationRequest) -> dict[str, Any]:
     else:
         if source_text:
             messages.append({"role": "user", "content": source_text})
+    from backend.ai.translation_paths.messages import insert_history
+    messages = insert_history(messages, request.history_messages, "openai_image_first")
     verified_effort, _ = _verified_reasoning_mapping(request)
     reasoning_capability = request.model_capabilities.get("reasoning", {})
     verified_reasoning = isinstance(reasoning_capability, dict) and reasoning_capability.get("supported") is True
@@ -186,9 +190,9 @@ class OpenAIAdapter:
         if request.api_key:
             headers["Authorization"] = f"Bearer {request.api_key}"
         payload = prepare_payload(request)
-        result = execute_chat_completion(
+        result = execute_openai_cloud_chat(
             url=base + "/chat/completions", headers=headers, payload=payload,
-            model=model, provider_id=PROVIDER_ID, timeout=120.0,
+            model=model, timeout=120.0,
             timeout_policy="provider_total_bounded",
             expected_ids=list(request.expected_ids), cancel_check=request.cancel_check,
             trace_event="openai.generate", trace_file="ai/providers/cloud_openai.py",
@@ -199,7 +203,7 @@ class OpenAIAdapter:
                           "capabilityKnown": bool(request.model_capabilities)},
         )
         applied = (f"requested_{request.thinking}" if "reasoning_effort" in payload
-                   else "provider_default" if request.thinking == "auto" else "unverified")
+                   else "provider_default" if request.thinking == "default" else "unverified")
         return result._replace(thinking_applied=applied)
 
     def list_models(self, *, api_key: str, base_url: str) -> ModelListResult:

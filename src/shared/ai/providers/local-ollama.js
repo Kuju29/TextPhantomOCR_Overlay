@@ -1,9 +1,12 @@
+import { ollamaContextMetadata } from "./ollama-context.js";
+import { OLLAMA_TRANSLATION_SAMPLING } from "../../../generated/ollama-sampling.js";
 import { localProviderUsage } from "../usage-values.js";
 import { LocalAiError } from "../direct-local/error.js";
 import { assertPrivateCredentialFreeEndpoint } from "../direct-local/endpoint.js";
 import { dispatchProviderRequest, getProviderJson } from "./local-transport-runtime.js";
 import { defineLocalProvider } from "./local-spec.js";
 import { SCHEMA_OBJECT_CONTRACT } from "../direct-local/output-contract.js";
+import { normalizeReasoningPreference, resolveReasoningPreference } from "../../reasoning-preference.js";
 
 export const localProvider = defineLocalProvider({
   id: "ollama",
@@ -27,18 +30,11 @@ export const OLLAMA_TERMINAL_DRAIN_GRACE_MS = 2000;
 const reasoningByEndpoint = new Map();
 
 export function resolveOllamaThinkingMode(selected = "off", reasoning = null) {
-  const requested = selected === "on" ? "on" : "off";
+  const requested = normalizeReasoningPreference(selected, "off");
   const capability = reasoning && typeof reasoning === "object" ? reasoning : null;
-  if (capability?.mandatory === true && requested === "off") {
-    throw new LocalAiError(
-      "The selected Ollama model requires thinking; choose a model whose thinking can be turned off or explicitly enable thinking",
-      { code: "local_ai_thinking_required", attempted: false, retryable: false },
-    );
-  }
-  return capability?.supported === true &&
-    ["toggle", "boolean"].includes(String(capability?.control || ""))
-      ? requested
-      : "default";
+  // One shared resolver owns user intent. The Ollama adapter only maps the
+  // resulting concrete value to its native `think` field.
+  return resolveReasoningPreference(requested, capability);
 }
 
 export function ollamaReasoningCapability(show = null) {
@@ -50,8 +46,20 @@ export function ollamaReasoningCapability(show = null) {
   const families = [show?.model_info?.["general.architecture"], show?.details?.family,
     ...(Array.isArray(show?.details?.families) ? show.details.families : [])];
   const levelsOnly = families.some((family) => /^(?:gptoss|gpt-oss)$/i.test(String(family || "")));
-  return { supported: true, mandatory: levelsOnly, control: levelsOnly ? "levels" : "boolean",
-    ...(levelsOnly ? { levels: ["low", "medium", "high"] } : {}), source: "ollama-api-show" };
+  return { supported: true, mandatory: levelsOnly, default_enabled: levelsOnly, control: levelsOnly ? "levels" : "boolean",
+    ...(levelsOnly ? { supported_efforts: ["low", "medium", "high"] } : {}), source: "ollama-api-show" };
+}
+
+
+export function ollamaGenerationCapability(show = null) {
+  const capabilities = Array.isArray(show?.capabilities) &&
+    show.capabilities.every((value) => typeof value === "string")
+      ? show.capabilities : null;
+  if (!capabilities) return { supported: null, source: "ollama-api-show",
+    reason: "model_capability_metadata_unavailable" };
+  if (!capabilities.includes("completion")) return { supported: false,
+    source: "ollama-api-show", reason: "selected_model_is_not_a_completion_model" };
+  return { supported: true, source: "ollama-api-show", reason: "completion_capability_confirmed" };
 }
 
 export function ollamaStructuredOutputCapability(show = null) {
@@ -85,6 +93,20 @@ async function showOllamaModel(base, model, { signal, timeoutMs }) {
   } finally { clearTimeout(timer); signal?.removeEventListener?.("abort", abort); }
 }
 
+async function boundedMap(values, limit, worker) {
+  const items = Array.from(values || []);
+  const results = new Array(items.length);
+  let cursor = 0;
+  const runners = Array.from({ length: Math.max(1, Math.min(Number(limit) || 1, items.length || 1)) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor++;
+      results[index] = await worker(items[index], index);
+    }
+  });
+  await Promise.all(runners);
+  return results;
+}
+
 function safePath(raw, fallback) {
   const value = String(raw || "").trim();
   if (!value) return fallback;
@@ -107,7 +129,7 @@ function responseContractError(detail) {
   return error;
 }
 
-export function ollamaCapabilityHints(modelsData = null, runningData = null, reasoning = new Map(), structured = new Map()) {
+export function ollamaCapabilityHints(modelsData = null, runningData = null, reasoning = new Map(), structured = new Map(), context = new Map(), generation = new Map()) {
   const installed = Array.isArray(modelsData?.models) ? modelsData.models : [];
   const running = Array.isArray(runningData?.models) ? runningData.models : [];
   const active = new Map(running.map((item) => [String(item?.name ?? item?.model ?? "").trim(), item]));
@@ -120,10 +142,12 @@ export function ollamaCapabilityHints(modelsData = null, runningData = null, rea
     const contextLength = integer(loaded?.context_length), gpuRatio = modelBytes > 0 && vramBytes != null ? vramBytes / modelBytes : null;
     const canTryTwo = Boolean(loaded) && modelBytes != null && modelBytes <= 8 * 1024 ** 3 && gpuRatio >= .9 && contextLength <= 8192;
     const short = (value) => String(value || "").trim().slice(0, 120) || null;
-    models[model] = { model, modelBytes, vramBytes, contextLength, loaded: Boolean(loaded),
-      limits: { ...(contextLength > 0 ? { contextTokens: contextLength } : {}),
+    models[model] = { model, modelBytes, vramBytes, contextLength, loaded: Array.isArray(runningData?.models) ? Boolean(loaded) : null,
+      limits: { ...(contextLength > 0 ? { contextTokens: contextLength, runtimeContextTokens: contextLength } : {}),
+        ...(context.get(model) || {}),
         modelRevision: String(loaded?.digest || tag?.digest || '').slice(0,160),
-        source: 'ollama-api-ps', scope: 'runtime' },
+        source: context.has(model) ? 'ollama-api-show-and-ps' : 'ollama-api-ps', scope: 'runtime' },
+      generation: generation.get(model) || { supported: null, source: "ollama-api-tags", reason: "model_capability_metadata_unavailable" },
       reasoning: reasoning.get(model) || ollamaReasoningCapability(),
       structuredOutput: structured.get(model) || ollamaStructuredOutputCapability(),
       details: { family: short(details?.family), parameterSize: short(details?.parameter_size),
@@ -157,9 +181,13 @@ export function createOllamaAdapter(settings = {}) {
     payload: (request) => {
       const body = buildOllamaGeneration(request);
       const reasoning = request.thinkingCapability || modelReasoning(request.model);
-      if ("think" in body && !(reasoning?.supported === true &&
-          ["toggle", "boolean"].includes(String(reasoning?.control || ""))))
-        delete body.think;
+      if ("think" in body) {
+        const control = String(reasoning?.control || "");
+        const validBoolean = ["toggle", "boolean"].includes(control) && typeof body.think === "boolean";
+        const validLevel = control === "levels" && typeof body.think === "string" &&
+          Array.isArray(reasoning?.supported_efforts) && reasoning.supported_efforts.includes(body.think);
+        if (!(reasoning?.supported === true && (validBoolean || validLevel))) delete body.think;
+      }
       return body;
     },
     resolveThinkingMode: (selected, { model, reasoning = null } = {}) =>
@@ -169,15 +197,18 @@ export function createOllamaAdapter(settings = {}) {
       ),
     buildUserContent: (text) => text,
     userImageFields: (dataUri) => dataUri ? { images: [String(dataUri).replace(/^data:image\/[^;]+;base64,/i, "")] } : {},
-    defaultThinking: "off",
-    outputTokens: ({ standard, thinkingMode }) => thinkingMode === "on" ? 8192 : standard,
-    thinkingApplied: (mode, { model } = {}) => {
-      const reasoning = modelReasoning(model);
-      if (reasoning?.supported === false) return "unsupported";
-      if (reasoning?.control === "levels") return "provider_default_levels";
-      if (mode === "default") return "provider_default";
-      // A request field is not evidence that the runtime honored it.
-      return `requested_${mode}${reasoning?.control === "boolean" ? "" : "_unverified"}`;
+    defaultThinking: "minimum",
+    outputTokens: ({ standard, thinkingMode }) => (!["default", "off"].includes(thinkingMode) ? 8192 : standard),
+    thinkingApplied: (mode, { model, reasoning = null, payload = null } = {}) => {
+      const capability = reasoning || modelReasoning(model);
+      if (capability?.supported === false) return "unsupported";
+      const effective = resolveOllamaThinkingMode(mode, capability);
+      if (effective === "default")
+        return capability?.control === "levels" ? "provider_default_levels" : "provider_default";
+      // The adapter strips `think` when exact-model capability is unknown. Do not
+      // claim requested_off/on unless the control was actually present on wire.
+      if (!payload || !Object.prototype.hasOwnProperty.call(payload, "think")) return "unverified";
+      return `requested_${effective}${capability?.control === "levels" ? "_effort" : ""}`;
     },
     isStreamingResponse: (response) => Boolean(response.body?.getReader) &&
       String(response.headers?.get?.("content-type") || "").toLowerCase().includes("ndjson"),
@@ -186,7 +217,7 @@ export function createOllamaAdapter(settings = {}) {
     mergeEnvelope: (target, item) => Object.assign(target, item),
     finalizeEnvelope: (value, content) => ({ ...value, message: { ...(value.message || {}), content } }),
     finishReason: (data) => String(data?.done_reason || "unknown").slice(0, 80),
-    terminalCompleted: ({ providerDone, normalFinish }) => providerDone && normalFinish,
+    terminalCompleted: ({ providerDone }) => providerDone,
     shouldDrainAfterCompletion: (providerDone) => !providerDone,
     responseText: (data) => {
       const value = data?.message?.content;
@@ -210,7 +241,8 @@ export function createOllamaAdapter(settings = {}) {
   adapter.listModels = async ({ signal = null, timeoutMs = 10000, model = "" } = {}) => {
     const reasoning = new Map();
     const structured = new Map();
-    reasoningByEndpoint.set(base, reasoning);
+    const context = new Map();
+    const generation = new Map();
     const modelsPath = safePath(settings.modelsPath, "/api/tags");
     const [data, running] = await Promise.all([
       getProviderJson(`${base}${modelsPath}`, { signal, timeoutMs }),
@@ -218,18 +250,39 @@ export function createOllamaAdapter(settings = {}) {
     ]);
     if (!Array.isArray(data?.models)) throw responseContractError("models array is missing");
     const raw = data.models;
-    const models = [...new Set(raw.map((item) => String(item?.name ?? "").trim()).filter(Boolean))];
+    const installed = [...new Set(raw.map((item) => String(item?.name ?? "").trim()).filter(Boolean))];
+
+    // /api/show is metadata-only and does not load/generate with the model.
+    // Do not inherit inference-sized timeouts here: one sick metadata endpoint
+    // must not make the Settings popup look as if it is loading the model.
+    // Prioritize the selected model and inspect the rest with wide, bounded
+    // concurrency. A timed-out show remains unknown/visible rather than being
+    // guessed unusable.
     const requested = String(model || "").trim();
+    const ordered = requested && installed.includes(requested)
+      ? [requested, ...installed.filter((name) => name !== requested)] : installed;
+    const metadataTimeoutMs = Math.min(2_000, Math.max(750, Number(timeoutMs) || 2_000));
+    await boundedMap(ordered, Math.min(16, Math.max(1, ordered.length)), async (name) => {
+      const show = await showOllamaModel(base, name, { signal, timeoutMs: metadataTimeoutMs });
+      reasoning.set(name, ollamaReasoningCapability(show));
+      structured.set(name, ollamaStructuredOutputCapability(show));
+      context.set(name, ollamaContextMetadata(show));
+      generation.set(name, ollamaGenerationCapability(show));
+    });
+
+    // Explicit metadata that says "no completion" is authoritative: image/
+    // embedding-only models cannot serve TextPhantom translation. Unknown
+    // metadata remains visible instead of being guessed unusable.
+    const models = installed.filter((name) => generation.get(name)?.supported !== false);
     const selected = requested && requested !== "auto" ? requested : models[0];
-    if (selected) {
-      const show = await showOllamaModel(base, selected, { signal, timeoutMs });
-      reasoning.set(selected, ollamaReasoningCapability(show));
-      structured.set(selected, ollamaStructuredOutputCapability(show));
-    }
-    const capability = ollamaCapabilityHints(data, running, reasoning, structured);
+    const capability = ollamaCapabilityHints(data, running, reasoning, structured, context, generation);
     if (selected && !capability.models[selected]) capability.models[selected] = {
-      model: selected, reasoning: reasoning.get(selected), structuredOutput: structured.get(selected),
+      model: selected,
+      generation: generation.get(selected) || { supported: null, source: "ollama-api-show" },
+      reasoning: reasoning.get(selected),
+      structuredOutput: structured.get(selected),
     };
+    reasoningByEndpoint.set(base, reasoning);
     return { data, models, capability: { ...capability, baseUrl: base } };
   };
   return adapter;
@@ -239,10 +292,13 @@ export async function generateWithOllama(settings, request, context) {
   return dispatchProviderRequest(createOllamaAdapter(settings), request, context);
 }
 
-export function buildOllamaGeneration({ model, messages, outputTokens, thinkingMode, responseSchema = null }) {
-  const body = { model, messages, stream: true, options: { num_predict: outputTokens } };
+export function buildOllamaGeneration({ model, messages, outputTokens, thinkingMode, responseSchema = null, contextTokens = null }) {
+  const body = { model, messages, stream: true, options: { num_predict: outputTokens, ...OLLAMA_TRANSLATION_SAMPLING } };
+  if (Number.isSafeInteger(contextTokens) && contextTokens > 0) body.options.num_ctx = contextTokens;
   if (responseSchema) body.format = responseSchema;
-  if (thinkingMode !== "default") body.think = thinkingMode === "on";
+  if (thinkingMode === "off") body.think = false;
+  else if (thinkingMode === "on") body.think = true;
+  else if (!["default", ""].includes(String(thinkingMode || ""))) body.think = thinkingMode;
   return body;
 }
 

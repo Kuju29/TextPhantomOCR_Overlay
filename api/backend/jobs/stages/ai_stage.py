@@ -7,6 +7,7 @@ from PIL import Image
 
 from backend.ai import markers, wire_trace
 from backend.ai.translation.contracts import AiConfig
+from backend.ai.reasoning_preference import reasoning_is_active
 from backend.jobs.stages import ai_conservation, ai_repair, render_stage
 from backend.grouping.ai_source_tree import AiSourceTreeError, require_ai_source_tree
 from backend.lens.tree import paragraph_texts, tree_stats
@@ -240,18 +241,19 @@ def run_ai_layer(
                     ok=False,
                 )
 
-    # Measured on a real page (api/logs, 2026-08-06): text-only ~2s, the same
-    # page with the image attached and thinking left on took 85s. That is a
-    # 40x cost from two switches that look independent in the UI and are not.
-    #
-    # Not changed automatically — silently overriding a setting is how the last
-    # three regressions happened. Stated, so the cost is attributable.
-    if want_image and str(getattr(ai_cfg, "thinking", "off")).lower() != "off":
+    # Vision + active reasoning can be materially slower, but requested
+    # preference names are not enough to decide that.  `minimum` may resolve to
+    # Off for one model and to Low/On for another, so diagnostics must use the
+    # exact model capability instead of treating every non-"off" label as active.
+    reasoning_caps = (ai_cfg.model_capabilities or {}).get("reasoning", {})
+    if want_image and reasoning_is_active(
+        getattr(ai_cfg, "thinking", "off"), reasoning_caps
+    ):
         event(
             "ai.vision.expensive",
             {
-                "note": "page image + thinking is the slow combination; "
-                "setting AI thinking to 'off' is the single biggest saving",
+                "note": "page image + active reasoning can be slower; "
+                "Lowest available uses the least capability-proven reasoning mode",
                 "model": getattr(ai_cfg, "model", ""),
             },
         )
@@ -276,12 +278,19 @@ def run_ai_layer(
     # not re-enable a second provider generation.  Attributable empty units are
     # retained as an explicit partial result below.
     ai_cfg.repair_enabled = False
-    with stage_slot("ai", admission_identity, unlimited=admission_unlimited):
-        result = ai_repair.translate_with_one_repair(
-            src_text, target_lang, ai_cfg, n_src,
-            capture_request=capture_request,
-            cancel_check=cancel_check,
-        )
+    if getattr(ai_cfg, "translation_mode", "independent") == "conversation":
+        from backend.ai.translation_paths.ready_batch import translate_ready
+        result = translate_ready(merged_src_paras,target_lang,ai_cfg,cancel_check=cancel_check,
+            admission_identity=admission_identity,admission_unlimited=admission_unlimited,capture_request=capture_request)
+    else:
+        from backend.ai.translation_paths.store import execution_scope
+        with execution_scope(ai_cfg, target_lang, cancel_check):
+            with stage_slot("ai", admission_identity, unlimited=admission_unlimited):
+                result = ai_repair.translate_with_one_repair(
+                    src_text, target_lang, ai_cfg, n_src,
+                    capture_request=capture_request,
+                    cancel_check=cancel_check,
+                )
 
     # OUTPUT clamp — deterministic, always on. A repetition runaway in the
     # model's answer (thousands of repeated chars/clusters) can strike at any

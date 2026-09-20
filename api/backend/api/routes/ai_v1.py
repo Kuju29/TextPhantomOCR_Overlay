@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Header, Request
 
 from backend.application.ai_translation.orchestration import ai_schema, execute
+from backend.application.ai_translation.streaming import respond
 
 router = APIRouter()
 
@@ -19,5 +20,7 @@ async def ai_translate_v1(
     request: Request,
     payload: dict[str, Any],
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-) -> dict:
+):
+    if payload.get("translationMode") == "conversation" and "application/x-ndjson" in request.headers.get("accept", ""):
+        return await respond(request, lambda **kwargs: execute(request, payload, idempotency_key, **kwargs))
     return await execute(request, payload, idempotency_key)

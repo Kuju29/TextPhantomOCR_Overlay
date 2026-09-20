@@ -18,7 +18,7 @@ const {buildPatchedResult,makePageCheckpoint}=await import('../src/background/re
 const {translateLensPage}=await import('../src/background/pipeline/page-translation.js');
 
 let checks=0;
-function memory(){let value={};return {async get(k){return {[k]:structuredClone(value[k])}},async set(v){Object.assign(value,structuredClone(v))}}}
+function memory(){let value={};return {async get(k){if(k==null)return structuredClone(value);if(Array.isArray(k))return Object.fromEntries(k.map(key=>[key,structuredClone(value[key])]));return {[k]:structuredClone(value[k])}},async set(v){Object.assign(value,structuredClone(v))}}}
 {
  const area=memory(),store=createTranslationSessionStore({area:()=>area});
  await store.update('r',()=>({createdAt:Date.now(),phase:'collecting',count:0,ai:{api_key:'SECRET',prompt:'STYLE'}}));
@@ -67,9 +67,10 @@ function erase(count=3){return {schema:'tp.erase-boxes/1',boxes:Array.from({leng
  assert.deepEqual(patch.missing,['g2']);assert.deepEqual(patch.result.eraseBoxes.boxes.map(x=>x.p),['p0','p1']);checks+=4;
 }
 {
- const b=bridge();try{
+ const b=bridge(),previousFetch=globalThis.fetch,wirePackets=[];try{
+  globalThis.fetch=async(_url,init)=>{wirePackets.push(JSON.parse(init.body));return new Response('{}',{status:202});};
   // Real executor + source-character planner + real SQLite state. 32 pages, 20 failed.
-  const run={id:'executor',token:'a'.repeat(64)};await b.api(run,'register',{manifest:Array.from({length:32},(_,i)=>`p${i}`)});
+  const run={id:'executor',token:'a'.repeat(64),base:'http://fixture.invalid'};await b.api(run,'register',{manifest:Array.from({length:32},(_,i)=>`p${i}`)});
   const ai={provider:'ollama',model:'fixture',prompt:'KEEP STYLE',thinking:'off'};
   const pages=new Map();
   for(let i=0;i<32;i++){
@@ -79,17 +80,26 @@ function erase(count=3){return {schema:'tp.erase-boxes/1',boxes:Array.from({leng
   }
   const snapshot=await b.api(run,'seal',{});const calls=[],checkpoints={},usageProgress=[];
   const end=await executeRepairPool({run,snapshot,executor:'w',signal:new AbortController().signal,api:b.api,
+   capabilities:{aiWireTrace:true,aiWireTraceRelay:{path:'/relay',token:'fixture-capability'}},
    getPage:async id=>pages.get(id),resolveAi:async p=>p.ai,checkpointTask:async t=>checkpoints[t.id]={...checkpoints[t.id],...t},
    onProgress:data=>usageProgress.push(data),applyResults:async()=>{},withCapacity:async(_p,_a,_s,f)=>f(),
    planner:createWorkloadController({read:async()=>({}),write:async()=>{}}),
-   translate:async (units,options)=>{calls.push(units);assert.equal(options.ai.prompt,'KEEP STYLE');options.trace('AI usage ledger delta',{inputTokens:100,outputTokens:20,totalTokens:120,beforeRequests:0,afterRequests:1,beforeTotalTokens:null,afterTotalTokens:120,deduplicated:false,prompt:'SECRET',api_key:'SECRET'});return {translations:units.map(u=>({id:u.id,text:'สวัสดี'})),meta:{generationAttempts:1}}}});
+   translate:async (units,options)=>{calls.push(units);assert.equal(options.ai.prompt,'KEEP STYLE');
+    assert.equal(options.wireTrace.identity.attemptKind,'repair');
+    await options.wireTrace('providerRequest',{body:{model:'fixture',messages:[]}});
+    await options.wireTrace('providerResponse',{raw:'{"done":true,"prompt_eval_count":100,"eval_count":20}'});options.trace('AI usage ledger delta',{inputTokens:100,outputTokens:20,totalTokens:120,beforeRequests:0,afterRequests:1,beforeTotalTokens:null,afterTotalTokens:120,deduplicated:false,prompt:'SECRET',api_key:'SECRET'});return {translations:units.map(u=>({id:u.id,text:'สวัสดี'})),meta:{generationAttempts:1}}}});
   assert.equal(end.phase,'done');assert.equal(end.repaired,20);assert.equal(end.initialAccepted,80);
   assert.ok(calls.length>1);assert.equal(calls.flat().length,20);assert.equal(new Set(calls.flat().map(u=>u.id)).size,20);
   const usageRows=usageProgress.filter(row=>row.event==='AI usage ledger delta');
   assert.equal(usageRows.length,calls.length);
   for(const row of usageRows){assert.equal(row.inputTokens,100);assert.equal(row.outputTokens,20);assert.equal(row.totalTokens,120);assert.equal(row.beforeTotalTokens,null);assert.equal(row.deduplicated,false);assert.equal(row.prompt,undefined);assert.equal(row.api_key,undefined);}
-  console.log('Real planner repair batches:',calls.map(x=>x.length));checks+=8;
- }finally{b.close()}
+  assert.equal(wirePackets.filter(p=>p.stage==='providerRequest').length,calls.length);
+  assert.equal(wirePackets.filter(p=>p.stage==='providerResponse').length,calls.length);
+  const terminals=wirePackets.filter(p=>p.stage==='terminal');assert.equal(terminals.length,calls.length);
+  assert(terminals.every(p=>p.identity.recordKind==='provider_request'&&p.identity.attemptKind==='repair'&&p.value.placementStatus==='pending_repair_apply'));
+  assert.equal(wirePackets.filter(p=>p.stage==='validation').length,calls.length);
+  console.log('Real planner repair batches with full Local wire recorder:',calls.map(x=>x.length));checks+=12;
+ }finally{b.close();globalThis.fetch=previousFetch;}
 }
 {
  const b=bridge();try{

@@ -59,9 +59,9 @@ function storageHarness(initial = {}) {
   };
 }
 
-// A batch started with the popup closed must perform one live discovery and
-// selected-model generation verification, then carry the exact model controls
-// into the generation settings and durable snapshot.
+// A batch started with the popup closed must perform one metadata-only live
+// discovery, then carry the exact model controls into the generation settings
+// and durable snapshot. Connect/preflight must not load or generate with a model.
 {
   clearLocalAiPreflightInflightForTest();
   const store = storageHarness();
@@ -84,12 +84,14 @@ function storageHarness(initial = {}) {
           model,
           status: "passed",
           elapsedMs: 12,
+          metadataOnly: true,
+          evidence: "ollama-api-show",
         },
       };
     },
   });
   assert.equal(discoverCalls, 1);
-  assert.equal(result.audit.source, "live_verification");
+  assert.equal(result.audit.source, "live_metadata");
   assert.equal(result.settings.aiModelCapabilities.reasoning.control, "boolean");
   assert.equal(result.settings.aiModelCapabilities.structuredOutput.supported, true);
   assert.equal(store.state.aiLocalCapabilityHint.model, model);
@@ -98,10 +100,11 @@ function storageHarness(initial = {}) {
   assert.equal(snapshot.verifiedModel, model);
   assert.equal(snapshot.verifiedThinking, "off");
   assert.equal(snapshot.verificationStatus, "passed");
+  assert.equal(snapshot.metadataOnly, true);
+  assert.equal(snapshot.verificationEvidence, "ollama-api-show");
 
-  // The capability discovered by the background gate must reach the first
-  // real generation. This is the behavior that previously existed only after
-  // the user pressed Refresh models in the popup.
+  // The capability discovered by the metadata gate must reach the first real
+  // generation. The first translation is intentionally the first generation.
   const originalFetch = globalThis.fetch;
   let generationBody = null;
   globalThis.fetch = async (_url, init) => {
@@ -144,9 +147,9 @@ function storageHarness(initial = {}) {
     });
     assert.equal(answer.translations[0].text, "สวัสดี");
     assert.equal(generationBody.think, false,
-      "automatic background verification must apply think:false on the first batch");
+      "metadata discovery must apply exact native think:false on the first real generation");
     assert.equal(typeof generationBody.format, "object",
-      "automatic background verification must apply the selected model's native schema capability");
+      "metadata discovery must apply the selected model's native schema capability");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -157,7 +160,7 @@ function storageHarness(initial = {}) {
     emitTrace: () => {},
     discover: async () => {
       discoverCalls += 1;
-      throw new Error("fresh exact snapshot should avoid another probe");
+      throw new Error("fresh exact metadata snapshot should avoid another discovery");
     },
   });
   assert.equal(discoverCalls, 1);
@@ -173,14 +176,14 @@ function storageHarness(initial = {}) {
         selectedModelVerification: { model, status: "passed" } };
     },
   });
-  assert.equal(discoverCalls, 2, "an older weaker proof requires a fresh generation probe");
-  assert.equal(upgraded.audit.source, "live_verification");
+  assert.equal(discoverCalls, 2, "an older metadata schema requires a fresh metadata check");
+  assert.equal(upgraded.audit.source, "live_metadata");
   assert.equal(store.state[LOCAL_CAPABILITY_SNAPSHOTS_KEY][identity].verificationVersion,
     LOCAL_MODEL_VERIFICATION_VERSION);
 }
 
-// Verification is bound to thinking mode. A snapshot that proved think:false
-// cannot silently authorize a think:true execution (or the reverse).
+// Availability metadata is independent from the user's reasoning preference.
+// Changing Off/On/Lowest must not repeat Local discovery or load the model.
 {
   clearLocalAiPreflightInflightForTest();
   const identity = normalizeLocalConnectionIdentity("ollama", endpoint);
@@ -194,6 +197,7 @@ function storageHarness(initial = {}) {
         capability,
         verifiedModel: model,
         verifiedThinking: "off",
+        metadataOnly: true,
         verificationStatus: "passed",
         verificationVersion: LOCAL_MODEL_VERIFICATION_VERSION,
         checkedAt: Date.now(),
@@ -202,26 +206,18 @@ function storageHarness(initial = {}) {
   });
   let calls = 0;
   const onSettings = { ...baseSettings, aiLocalThinking: "on", aiThinking: "on" };
-  await ensureLocalAiBatchReady(onSettings, {
+  const result = await ensureLocalAiBatchReady(onSettings, {
     get: store.get,
     set: store.set,
     emitTrace: () => {},
-    discover: async (_adapter, options) => {
+    discover: async () => {
       calls += 1;
-      assert.equal(options.thinking, "on");
-      return {
-        ok: true,
-        models: [model],
-        capability,
-        selectedModelVerification: { model, status: "passed" },
-      };
+      throw new Error("reasoning preference must not invalidate model availability");
     },
   });
-  assert.equal(calls, 1);
-  assert.equal(
-    store.state[LOCAL_CAPABILITY_SNAPSHOTS_KEY][identity].verifiedThinking,
-    "on",
-  );
+  assert.equal(calls, 0);
+  assert.equal(result.audit.source, "fresh_snapshot");
+  assert.equal(result.settings.aiModelCapabilities.reasoning.control, "boolean");
 }
 
 // All images must be stopped before enqueue when the exact selected model is
@@ -253,7 +249,7 @@ function storageHarness(initial = {}) {
     "failed automatic verification must clear stale active capabilities");
 }
 
-// Simultaneous start paths coalesce into one discovery/model-load/probe.
+// Simultaneous start paths coalesce into one metadata discovery.
 {
   clearLocalAiPreflightInflightForTest();
   const store = storageHarness();
@@ -294,7 +290,7 @@ function storageHarness(initial = {}) {
   a.audit.source = "changed";
   assert.equal(b.settings.aiLocalCapabilityHint.modelCapabilities.reasoning.control, "boolean");
   assert.equal(b.settings.aiModelCapabilities.reasoning.control, "boolean");
-  assert.equal(b.audit.source, "live_verification");
+  assert.equal(b.audit.source, "live_metadata");
 }
 
 const contextMenu = await readFile(
@@ -308,4 +304,4 @@ assert.ok(
   "Local verification must complete before the batch and per-image jobs exist",
 );
 
-console.log("Background Local AI preflight passed: popup refresh is optional, exact model readiness is a single batch gate.");
+console.log("Background Local AI preflight passed: metadata-only readiness is shared and first translation is first generation.");

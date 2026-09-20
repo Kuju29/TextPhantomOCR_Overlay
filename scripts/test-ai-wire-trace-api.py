@@ -121,7 +121,7 @@ with tempfile.TemporaryDirectory(prefix="tp-wire-api-") as temp:
         wire_trace.terminal(state="succeeded", stage="validation", translated=1)
         wire_trace.end(token)
 
-        folder = Path(temp) / "trace-one--operation-one"
+        folder = Path(temp) / "img-unknown--initial--trace-one--operation-one"
         assert EXPECTED == {item.name for item in folder.iterdir()}
         assert (folder / "02_system_prompt.txt").read_text(encoding="utf-8") == "SYSTEM-จริง"
         assert (folder / "05_provider_response.raw").read_text(encoding="utf-8") == '{"text":"<<TP_P0:คำแปล>>"}'
@@ -183,7 +183,7 @@ with tempfile.TemporaryDirectory(prefix="tp-wire-provider-fail-") as temp:
         wire_trace.write_json("09_timing.json", {"providerMs": 42, "completed": False})
         wire_trace.end(token)
 
-        folder = Path(temp) / "trace-failure--operation-failure"
+        folder = Path(temp) / "img-unknown--initial--trace-failure--operation-failure"
         assert (folder / "00_identity.json").exists()
         assert (folder / "04_provider_request.json").exists()
         partial = (folder / "05_provider_response.raw").read_text("utf-8")
@@ -240,7 +240,7 @@ with tempfile.TemporaryDirectory(prefix="tp-wire-runsapi-ingress-") as temp:
         assert response.status_code == 400, response.text
         folders = [item for item in Path(temp).iterdir() if item.is_dir()]
         assert len(folders) == 1, "runs:API rejection must create exactly one operation folder"
-        assert folders[0].name == "trace-runsapi--runsapi-invalid"
+        assert folders[0].name == "img-unknown--page-summary--trace-runsapi--runsapi-invalid"
         terminal = json.loads((folders[0] / "11_terminal.json").read_text("utf-8"))
         error = json.loads((folders[0] / "10_error.json").read_text("utf-8"))
         assert terminal["terminal"] is True and terminal["state"] == "failed"
@@ -411,7 +411,7 @@ with tempfile.TemporaryDirectory(prefix="tp-wire-route-") as temp:
         with TestClient(app) as client:
             response = client.post("/v2/engine/runsextension/ai/translate", json={
                 "schema": "tp.ai.request/1", "operationId": "route-success",
-                "context": {"tp_trace": "trace-route"},
+                "context": {"tp_trace": "trace-route", "page_index": 0},
                 "units": [{"id": "g0", "text": "原文"}], "targetLang": "Thai",
                 "prompt_mode": "replace", "prompt": "Translate manga into Thai.",
                 "repair": {"owner": "extension", "enabled": False},
@@ -421,7 +421,7 @@ with tempfile.TemporaryDirectory(prefix="tp-wire-route-") as temp:
             translated = response.json()["translations"]
             assert [(item["id"], item["text"]) for item in translated] == [("g0", "คำแปล")]
             assert translated[0]["hash"]
-        folder = Path(temp) / "trace-route--route-success"
+        folder = Path(temp) / "img-0001--initial--trace-route--route-success"
         assert {"00_identity.json", "01_units.json", "02_system_prompt.txt",
                 "04_provider_request.json", "05_provider_response.raw",
                 "05_provider_response.assembled.txt", "06_parsed_records.json",
@@ -453,7 +453,7 @@ with tempfile.TemporaryDirectory(prefix="tp-wire-route-") as temp:
                 "provider": {"id": "openrouter", "model": "test-model", "apiKey": "route-secret"},
             })
             assert rejected.status_code == 400, rejected.text
-        rejected_folder = Path(temp) / "trace-invalid--route-invalid"
+        rejected_folder = Path(temp) / "img-unknown--initial--trace-invalid--route-invalid"
         rejected_terminal = json.loads((rejected_folder / "11_terminal.json").read_text("utf-8"))
         rejected_error = json.loads((rejected_folder / "10_error.json").read_text("utf-8"))
         assert rejected_terminal["terminal"] is True and rejected_terminal["state"] == "failed"

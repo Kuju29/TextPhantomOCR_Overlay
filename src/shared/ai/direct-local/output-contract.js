@@ -1,9 +1,14 @@
+import { instructionPack, formatInstruction } from "../prompt-language.js";
 export const SCHEMA_OBJECT_CONTRACT = "tp.translation.schema-object/1";
 export const COMPACT_RECORDS_CONTRACT = "tp.translation.compact-records/1";
 
 function exactIds(ids) {
   const values = (ids || []).map((value) => String(value || ""));
-  if (!values.length || values.some((id, index) => id !== `P${index}`))
+  const legacy = values.every(id=>/^P[0-9]{1,6}$/.test(id));
+  const image = values.every(id=>/^I[1-9][0-9]{0,6}_P[0-9]{1,6}$/.test(id));
+  if (!values.length || (!legacy && !image) || new Set(values).size!==values.length)
+    throw new TypeError("Translation output IDs must be one unique supported ID family");
+  if (legacy && values.some((id,index)=>id!==`P${index}`))
     throw new TypeError("Translation output IDs must be contiguous P0..Pn");
   return values;
 }
@@ -46,14 +51,5 @@ export function selectLocalOutputContract({ provider, model, modelCapabilities }
 
 export function exactOutputInstruction(ids, contract, targetLang = "") {
   const values = exactIds(ids);
-  void targetLang;
-  if (contract?.kind === "schema_object")
-    return "OUTPUT — tp.translation.schema-object/1\n" +
-      "Return only the JSON object required by the supplied schema. " +
-      `Its keys must be exactly ${values.join(", ")}; each value is that unit's complete non-empty translation. ` +
-      "Do not add, omit, merge, split or rename records. Do not insert manual line breaks for visual layout.";
-  return "OUTPUT — tp.translation.compact-records/1\n" +
-    `Return every supplied ID exactly once as <<TP_Pn:translated text>>. Expected IDs: ${values.join(", ")}. ` +
-    "Record order is irrelevant because results are matched by ID. Do not add, omit, merge, split or rename records. " +
-    "Do not insert manual line breaks inside a payload. Return only the records, with no JSON, markdown, commentary or explanations.";
+  return formatInstruction(instructionPack(targetLang)[contract?.kind === "schema_object" ? "schemaOutput" : "markerOutput"], { ids: values.join(", ") });
 }

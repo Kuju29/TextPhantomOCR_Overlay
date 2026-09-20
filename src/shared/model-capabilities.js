@@ -18,6 +18,11 @@ export function normalizeModelCapabilities(value) {
     ).map(v => v.trim().toLowerCase()))].sort();
     if (efforts.length) reasoning.supported_efforts = efforts;
   }
+  for (const key of ['default_effort']) {
+    if (typeof source.reasoning?.[key] === 'string' &&
+        /^[a-z0-9_-]{1,32}$/.test(source.reasoning[key].trim().toLowerCase()))
+      reasoning[key] = source.reasoning[key].trim().toLowerCase();
+  }
   if (reasoning.mandatory === true) reasoning.supported = true;
   if (Object.keys(reasoning).length) out.reasoning = reasoning;
   if (source.vision && typeof source.vision === 'object' &&

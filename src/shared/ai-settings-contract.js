@@ -90,13 +90,12 @@ export function classifyAiRuntime(settings) {
 
 /**
  * Return a definitive Auto-text.ai configuration problem, or null.
- * `hasServerKey=null` means the server could not be checked, so absence of a
- * browser key is not grounds for blocking: the server may own the credential.
+ * Cloud credentials must belong to this request; server-key hints are ignored.
  * Provider/model "auto" are valid legacy/server-resolved contracts.
  */
 export function autoAiSettingsIssue(
   settings,
-  { hasServerKey = null, mainApiBaseUrl = "", requireComplete = false } = {},
+  { mainApiBaseUrl = "", requireComplete = false } = {},
 ) {
   const provider = String(settings?.aiProvider || "")
     .trim()
@@ -179,7 +178,7 @@ export function autoAiSettingsIssue(
       AI_SETTINGS_UI_PATHS.localUrl,
     );
   }
-  if (!local && !userKey && hasServerKey === false) {
+  if (!local && !userKey) {
     return configurationIssue(
       "missing_api_key",
       "ยังไม่ได้ตั้งค่า API key กรุณาตั้งค่าที่",

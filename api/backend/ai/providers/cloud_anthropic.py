@@ -4,7 +4,8 @@
 from __future__ import annotations
 
 import time, httpx
-from backend.ai import wire_trace, accounting
+from functools import partial
+from backend.ai import wire_trace, accounting, content_stream
 from backend.ai.workload import guard_output_budget
 from backend.ai.prompt_cache import enabled as cache_enabled
 
@@ -15,7 +16,8 @@ from backend.ai.clients.base import (
 from backend.ai.clients.provider_error import ProviderTransportError, safe_http_error
 from backend.ai.transports.cancellable_http import post_json
 from backend.ai.provider_contract import GenerationRequest, ModelListResult, ProbeRequest, ProbeResponse, ProviderSpec, SystemPromptSection
-from backend.ai.providers.probe_support import response_error
+from backend.ai.reasoning_preference import resolve_reasoning_preference
+from backend.ai.providers.probe_support import response_error, response_error_details
 from backend.ai.providers.provider_helpers import (
     contract_model_status, invoke_leaf_generate, model_status,
 )
@@ -42,6 +44,94 @@ def _safe_error_text(response: httpx.Response) -> str:
     if isinstance(error, dict):
         return str(error.get("message") or error.get("type") or "")[:240]
     return str(error or "")[:240]
+
+def _reasoning_capability(model_id: str) -> dict:
+    """Documented Anthropic reasoning controls for current adaptive families.
+
+    Unknown and legacy manual-thinking models deliberately return no capability:
+    they remain usable with Provider default rather than receiving guessed fields.
+    """
+    model = (model_id or "").strip().lower()
+
+    def levels(efforts, *, default_enabled: bool, mandatory: bool = False, default_effort: str = "high"):
+        supported = list(efforts)
+        if not mandatory and "none" not in supported:
+            supported.insert(0, "none")
+        return {
+            "supported": True,
+            "mandatory": mandatory,
+            "default_enabled": default_enabled,
+            "control": "levels",
+            "dynamic": True,
+            "supported_efforts": supported,
+            "default_effort": default_effort,
+        }
+
+    # Claude 5: adaptive thinking is provider-default ON. Opus/Sonnet can be
+    # disabled explicitly; Fable/Mythos are adaptive-thinking-only.
+    if _is_model_or_snapshot(model, "claude-opus-5") or _is_model_or_snapshot(model, "claude-sonnet-5"):
+        return levels(("low", "medium", "high", "xhigh", "max"), default_enabled=True)
+    if any(_is_model_or_snapshot(model, prefix) for prefix in (
+        "claude-fable-5-1", "claude-mythos-5-1", "claude-fable-5", "claude-mythos-5"
+    )):
+        return levels(("low", "medium", "high", "xhigh", "max"),
+                      default_enabled=True, mandatory=True)
+    if _is_model_or_snapshot(model, "claude-mythos-preview"):
+        return levels(("low", "medium", "high", "max"),
+                      default_enabled=True, mandatory=True)
+
+    # Claude 4.6-4.8 adaptive thinking is opt-in: omitting `thinking` keeps it
+    # off. The exact effort ladders differ by family/version.
+    if _is_model_or_snapshot(model, "claude-opus-4-7") or _is_model_or_snapshot(model, "claude-opus-4-8"):
+        return levels(("low", "medium", "high", "xhigh", "max"), default_enabled=False)
+    if _is_model_or_snapshot(model, "claude-opus-4-6") or _is_model_or_snapshot(model, "claude-sonnet-4-6"):
+        return levels(("low", "medium", "high", "max"), default_enabled=False)
+
+    # 4.5 and earlier use manual budget_tokens rather than the adaptive/effort
+    # shape used above. TextPhantom does not invent a generic budget here.
+    return {}
+
+
+def _apply_reasoning(payload: dict, model: str, requested: str, model_capabilities=None) -> str:
+    """Map TextPhantom's provider-neutral preference to Anthropic-native fields.
+
+    Provider default means *omit* the reasoning fields. This is important because
+    Claude 4.6-4.8 default to thinking off while Claude 5 defaults to adaptive
+    thinking on. TextPhantom's `minimum` preference (and stale Off on a
+    mandatory-reasoning family) resolves through the shared capability layer to
+    the lowest exact native mode instead of inheriting a potentially heavier
+    provider default.
+    """
+    external = (model_capabilities or {}).get("reasoning", {}) if isinstance(model_capabilities, dict) else {}
+    external = external if isinstance(external, dict) else {}
+    native = _reasoning_capability(model)
+    cap = native or external
+    selected = resolve_reasoning_preference(requested, cap) if cap else "default"
+    if selected == "default":
+        return "provider_default"
+
+    # Only emit native Anthropic fields for model families whose exact wire
+    # contract is known here. Generic/externally-described models stay on the
+    # provider default instead of receiving guessed Anthropic syntax.
+    if not native:
+        return "provider_default_unverified_wire"
+
+    if selected == "off":
+        payload["thinking"] = {"type": "disabled"}
+        return "requested_off"
+
+    efforts = {str(value).strip().lower() for value in native.get("supported_efforts", [])
+               if isinstance(value, str)}
+    if selected in efforts and selected != "none":
+        payload["thinking"] = {"type": "adaptive"}
+        payload["output_config"] = {**(payload.get("output_config") or {}), "effort": selected}
+        return f"requested_effort_{selected}"
+
+    # `on` has no single stable Anthropic meaning across current families.
+    # If it reaches this provider through a stale profile, preserve provider
+    # default rather than silently choosing an effort.
+    return "provider_default_incompatible_preference"
+
 
 def models_status(api_key: str, *, timeout_sec: float = 10.0) -> dict:
     """List Claude models visible to this key using Anthropic's native API."""
@@ -70,6 +160,13 @@ def models_status(api_key: str, *, timeout_sec: float = 10.0) -> dict:
     result["candidates"] = {model: {
         "eligibility": "usable", "evidence": "anthropic_account_models_api"
     } for model in models}
+    capabilities = {}
+    for model in models:
+        reasoning = _reasoning_capability(model)
+        if reasoning:
+            capabilities[model] = {"reasoning": reasoning}
+    if capabilities:
+        result["capabilities"] = capabilities
     return result
 
 class AnthropicAdapter:
@@ -83,7 +180,9 @@ class AnthropicAdapter:
         with httpx.Client(timeout=request.timeout_sec) as client:
             response = client.post(_ENDPOINT, headers=headers, json=payload)
         if not response.is_success:
-            return ProbeResponse(False, response.status_code, error=response_error(response))
+            return ProbeResponse(False, response.status_code,
+                error=response_error(response, api_key=request.api_key),
+                error_details=response_error_details(response, api_key=request.api_key))
         try:
             data = response.json()
             blocks = data.get("content") if isinstance(data, dict) else None
@@ -95,7 +194,10 @@ class AnthropicAdapter:
         return ProbeResponse(True, response.status_code)
 
     def generate(self, request: GenerationRequest) -> ChatResult:
-        return invoke_leaf_generate(request, generate)
+        return invoke_leaf_generate(request, partial(
+            generate,
+            conversation_mode=request.cache_context.get("translationMode") == "conversation",
+        ))
 
     def list_models(self, *, api_key: str, base_url: str) -> ModelListResult:
         _ = base_url
@@ -199,6 +301,8 @@ def generate(
     cancel_check=None,
     workload=None,
     model_capabilities=None,
+    history_messages=(),
+    conversation_mode: bool = False,
 ) -> ChatResult:
     """Call Anthropic's Messages API exactly once and return its reply.
 
@@ -211,7 +315,6 @@ def generate(
     pages of the same series reuse it cheaply. When omitted, ``system_text`` is
     sent verbatim.
     """
-    _ = thinking  # Unified adapter option; Anthropic currently has no matching control.
     if cancel_check is not None and cancel_check():
         raise ProviderGenerationCancelled("Anthropic generation was cancelled")
     if (image_b64 or "").strip():
@@ -232,20 +335,35 @@ def generate(
     else:
         source_text = "\n\n".join(p for p in user_parts if p != "")
         messages = [{"role": "user", "content": source_text}] if source_text else []
+    from backend.ai.translation_paths.messages import native_history
+    messages = native_history(history_messages, "anthropic") + messages
     payload = {
         "model": model,
         "max_tokens": guard_output_budget(output_token_budget(user_parts, system_text),
                 workload=workload, limits=(model_capabilities or {}).get("limits"),
-                system=system_text, parts=user_parts, schema=response_schema, image=bool(image_b64)),
+                system=system_text, parts=user_parts, schema=response_schema, image=bool(image_b64), history=history_messages),
         "system": _build_system_field(system_text, system_static, system_dynamic, system_sections),
         "messages": messages,
     }
-    if _accepts_temperature(model):
+    if conversation_mode and cache_enabled() and messages:
+        # Anthropic's moving breakpoint reuses the previous request prefix and
+        # writes only its new suffix. Keep native messages/history byte-for-byte;
+        # this is a request hint, not proof of a hit. The default 5m TTL is kept.
+        # Documented: platform.claude.com/docs/en/build-with-claude/prompt-caching
+        system_blocks = payload["system"]
+        if isinstance(system_blocks, list):
+            marked = [i for i, block in enumerate(system_blocks) if "cache_control" in block]
+            # One of the provider's four slots belongs to automatic caching.
+            for i in marked[:-3]:
+                system_blocks[i].pop("cache_control", None)
+        payload["cache_control"] = {"type": "ephemeral"}
+    reasoning_state = _apply_reasoning(payload, model, thinking, model_capabilities)
+    if _accepts_temperature(model) and not payload.get("thinking"):
         payload["temperature"] = DEFAULT_GENERATION.temperature
     # Translation generation is always plain lines/1. JSON remains decoder-only.
     use_schema = False
     if use_schema:
-        payload["output_config"] = {
+        payload["output_config"] = {**(payload.get("output_config") or {}),
             "format": {"type": "json_schema", "schema": response_schema}
         }
     headers = {
@@ -253,11 +371,17 @@ def generate(
         "anthropic-version": _API_VERSION,
         "content-type": "application/json",
     }
+    if content_stream.active():
+        payload["stream"] = True
+        from backend.ai.transports.native_stream import post_native_stream
+        post = post_native_stream
+    else:
+        post = post_json
     wire_trace.provider_request(url=_ENDPOINT, headers=headers, payload=payload)
 
     provider_started = time.perf_counter()
     try:
-        r = post_json(
+        r = post(
             _ENDPOINT, json=payload, headers=headers,
             timeout=DEFAULT_GENERATION.timeout_sec, cancel_check=cancel_check,
             provider="anthropic", model=model,
@@ -307,5 +431,6 @@ def generate(
     parse_ms = round((time.perf_counter() - parse_started) * 1000, 1)
     return ChatResult(text, model, inp, out, total, stop_reason or None, provider_ms, parse_ms,
                       "provider" if any(v is not None for v in (inp, out, total)) else None,
-                      None, True, "non_stream_body_read", usage_details=usage_details,
-                      cached_input_tokens=usage_details.get("cachedInputTokens"), requested_output_tokens=payload["max_tokens"])
+                      None, True, "native_sse_terminal" if content_stream.active() else "non_stream_body_read", usage_details=usage_details,
+                      cached_input_tokens=usage_details.get("cachedInputTokens"), requested_output_tokens=payload["max_tokens"],
+                      first_content_ms=getattr(r, "extensions", {}).get("first_content_ms"))

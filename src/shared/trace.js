@@ -329,7 +329,11 @@ const SAFE_OPERATIONAL_BOOLEANS = new Set([
 ]);
 
 export function shortenValue(value, depth = 0) {
+  if (value?.schema === "tp.conversation_batch/1") return globalThis.TPAuditSchema.sanitizeConversationBatch(value);
+  if (value?.schema === "tp.conversation/1") return globalThis.TPAuditSchema.sanitizeConversation(value);
   if (value?.schema === "tp.audit/1") return globalThis.TPAuditSchema.sanitize(value);
+  if (value?.schema === "tp.cache_coordination/1") return globalThis.TPAuditSchema.sanitizeCacheCoordination(value);
+  if (value?.schema === "tp.prompt_layout/1") return globalThis.TPAuditSchema.sanitizePromptLayout(value);
   if (value === null || value === undefined) return value ?? null;
   const t = typeof value;
   if (t === "boolean") return value;
@@ -448,9 +452,11 @@ export function enrichOperationalTrace(fn, ev, data, traceId = "") {
   };
   if (normalizedScopes.clientInstanceHash) out.clientInstanceHash = normalizedScopes.clientInstanceHash;
   if (normalizedScopes.userScopeHash) out.userScopeHash = normalizedScopes.userScopeHash;
-  const cached = Number(out?.usage?.cachedInput ?? out?.usage?.cachedInputTokens ?? 0);
+  const rawCached = out?.usage?.cachedInput ?? out?.usage?.cachedInputTokens;
+  const cached = Number.isSafeInteger(rawCached) && rawCached >= 0 ? rawCached : null;
   if (fn === "aiModelWorkload" && out.event === "observation")
-    out.cache = { kind: "provider_prompt", hit: cached > 0, cachedInputTokens: Math.max(0, cached) };
+    out.cache = { kind: "provider_prompt", hit: cached == null ? null : cached > 0,
+      cachedInputTokens: cached, status: cached == null ? "not_reported" : cached > 0 ? "reported_hit" : "reported_zero" };
   const failed = ev === "!!" || /(?:failed|error|unresolved|rejected)/i.test(String(out.event || out.state || out.phase || "")) ||
     Number(out.unresolved || out.rejectedCount || 0) > 0;
   const terminal = out.final === true || out.event === "final" || ["done", "cancelled", "failed"].includes(String(out.phase || out.state || ""));

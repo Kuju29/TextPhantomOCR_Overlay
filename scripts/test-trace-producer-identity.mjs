@@ -77,7 +77,7 @@ const cachedObservation = cold.enrichOperationalTrace("aiModelWorkload", "..", {
   event: "observation", operationId: "op-cache", usage: { cachedInput: 768 },
 });
 assert.deepEqual(cachedObservation.cache,
-  { kind: "provider_prompt", hit: true, cachedInputTokens: 768 },
+  { kind: "provider_prompt", hit: true, cachedInputTokens: 768, status: "reported_hit" },
   "provider prompt cache requires positive cached-input evidence");
 const uncachedObservation = cold.enrichOperationalTrace("aiModelWorkload", "..", {
   event: "observation", operationId: "op-no-cache", usage: { cachedInput: 0 },
