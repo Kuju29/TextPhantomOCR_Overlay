@@ -1,3 +1,7 @@
+<p align="right">
+  <strong>English</strong> · <a href="./README_TH.md">ไทย</a>
+</p>
+
 # ✨ TextPhantomOCR Overlay | [![Website](https://img.shields.io/badge/Website-kuju29.github.io-blue?style=flat-square&logo=github&logoColor=white)](https://kuju29.github.io/)
  [![Installation](https://img.shields.io/badge/-Guide-red.svg?logo=youtube&labelColor=555555&style=for-the-badge)](https://youtu.be/5GuW_qyg1GU "Installation Guide")
 ### Note: 
