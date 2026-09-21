@@ -5,7 +5,11 @@
 # ✨ TextPhantomOCR Overlay | [![Website](https://img.shields.io/badge/Website-kuju29.github.io-blue?style=flat-square&logo=github&logoColor=white)](https://kuju29.github.io/)
  [![Installation](https://img.shields.io/badge/-Guide-red.svg?logo=youtube&labelColor=555555&style=for-the-badge)](https://youtu.be/5GuW_qyg1GU "Installation Guide")
 ### Note: 
-- text.Ai โมเดลที่ผมใช้ทดสอบ HuggingFace/(deepseek-ai/DeepSeek-V4-Pro)"ฟรีใช้เยอะต้องลงทะเบียน" | OpenRouter/(deepseek/deepseek-v4-flash-0731)"เสียเงิน" | Google Gemini/gemini-2.5-flash"ใช้เยอะเสียเงิน" | Ollama(qwen3.5:9b)"ฟรี" 
+- Models tested with **text.AI**:
+  - Hugging Face — `deepseek-ai/DeepSeek-V4-Pro` — Free (heavy usage may require adding credits)
+  - OpenRouter — `deepseek/deepseek-v4-flash-0731` — Paid
+  - Google Gemini — `gemini-2.5-flash` — Free usage is limited; higher usage may incur charges
+  - Ollama — `qwen3.5:9b` — Free
 
 ![Desktop2026 02 06-08 11 52 01-ezgif com-video-to-gif-converter](https://github.com/user-attachments/assets/43cc9a1e-eb79-46f0-b4a1-08ca9bcd49f5)
 
@@ -73,7 +77,7 @@
 | :--- | :--- |
 | 🖼️ **Right-click an image** | 🔍 Translates **only that image** |
 | 📚 **Right-click an empty area** | 🔍 Translates **all images on the page** |
-| 🚧 **`Translates tab` → Page actions** | Alternative buttons for websites where right-click translation doesn't work |
+| 🚧 **`Translate tab` → Page actions** | Use these buttons on websites where right-click translation is not available |
 
 ### 🎨 Choose How Translations Appear
 
@@ -81,55 +85,55 @@ Open the `Translate tab` and select a **Mode**.
 
 | Mode | How it works | Result |
 | :--- | :--- | :--- |
-| **Image** | Original image → **Google Translate** → Translated image | Replaces the original with the translated image from Google Translate. |
-| **Text** | Original image → **Detect text** → Place text over image | Keeps the original image and displays **HTML text over it**. Choose a **Source** below to decide how the text is translated. |
+| **Image** | Original image → **Google Translate** → Translated image | Replaces the original image with the translated image returned by Google Translate |
+| **Text** | Original image → **Detect & remove text** → Place text over the image | Uses an image with the original text removed, then places **text over the image**. Choose the text source from **Source** |
 
-#### 💬 Mode Text → Source
+#### 💬 Text Mode → Source
 
-When using **Text** mode, choose a **Source**:
+When using **Text Mode**, choose where the displayed text comes from:
 
-| Source | Translation | How it works |
+| Source | What it displays | How it works |
 | :--- | :--- | :--- |
-| 🌐 **Original** | **Browser Translate** | Shows the original detected text as HTML. Then use your browser's **Translate to...** to translate it. |
-| 🔤 **Translated** | **Google Translate** | Uses Google's translated text and displays it as HTML over the original image. |
-| 🤖 **AI** | **AI Model** | Sends the detected text to your selected AI model for translation. |
+| 🌐 **Original** | **Original detected text** | Places the original text over the image. You can then right-click an empty area and use your browser's **Translate to...** to translate the text on the image |
+| 🔤 **Translated** | **Google-translated text** | Uses the same translated text as **Image Mode**, but displays it as text over the image instead |
+| 🤖 **AI** | **AI-translated text** | Sends the detected text to your selected AI model and displays the AI translation over the image |
 
-> 💡 **Free alternative:** Use **Text → Original**, then right-click an empty area of the page and select your browser's **Translate to...**
+> 💡 **Free alternative:** Use **Text → Original**, then right-click an empty area of the page and select your browser's **Translate to...**. This lets the browser translate the text placed over the images and can give better results than Image Mode.
 
+### 🤖 AI Translation
 
-### 🤖 Using AI Translation
-
-If you choose **Text → AI**, open the **AI option** tab and complete the basic setup:
+To use **Text → AI**, open the `AI option` tab and complete these settings:
 
 | Step | Setting | What to do |
 | :---: | :--- | :--- |
 | **1** | **Provider** | Choose your AI provider |
 | **2** | **API key** | Enter the API key for that provider |
 | **3** | **Model** | Choose the AI model you want to use |
-| **4** | **Set prompt** | Configure the translation instructions |
+| **4** | **Set prompt** | Set the translation instructions |
 
-> ⚠️ **First time using a model?**  
-> Open **Set prompt** and click **↺ Reset** to load the default prompt from the TextPhantom API.
+> ⚠️ **Using a model for the first time?**  
+> In **Set prompt**, you must click **↺ Reset** first to load TextPhantom's default prompt from the API.
 
 <details>
 <summary><strong>Show optional AI features</strong></summary>
 
 | Option | What it does |
 | :--- | :--- |
-| 🧠 **Series memory** | Remembers character names, terms, and story context |
-| 👁️ **Page image to AI** | Lets supported AI models see the image for additional context |
-| 🚦 **Manual AI request-rate cap** | Limits how many AI requests can be sent per minute |
+| 🧠 **Series memory** | Remembers character names, terms, and story context to help keep translations consistent |
+| 👁️ **Page image to AI** | Sends the image to supported AI models so they can use visual context while translating |
+| 🚦 **Manual AI request-rate cap** | Limits the number of AI requests that can be sent per minute |
+
 </details>
 
 ### 🧰 Tools
 
-Need to translate images stored on your computer? Open the `Tools tab`.
+Want to translate images stored on your computer? Open the `Tools tab`.
 
 | Tool | What it does |
 | :--- | :--- |
-| 🖼️ **Select an image** | Open a local image and translate it with right-click |
-| 📁 **Select folder** | Open a folder of images for translation |
-| ⚡ **Auto translate** | Drop, paste, or upload an image to translate it automatically |
+| 🖼️ **Select an image** | Open an image from your computer and right-click it to translate |
+| 📁 **Select folder** | Open a folder of images |
+| ⚡ **Auto translate** | Paste, drop, or upload an image to start translating automatically |
 | ↺ **Reset** | Restore the settings in that section to their defaults |
 
 ---
