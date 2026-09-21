@@ -2,8 +2,11 @@
   <strong>English</strong> · <a href="./README_TH.md">ไทย</a>
 </p>
 
-# ✨ TextPhantomOCR Overlay | [![Website](https://img.shields.io/badge/Website-kuju29.github.io-blue?style=flat-square&logo=github&logoColor=white)](https://kuju29.github.io/)
- [![Installation](https://img.shields.io/badge/-Guide-red.svg?logo=youtube&labelColor=555555&style=for-the-badge)](https://youtu.be/5GuW_qyg1GU "Installation Guide")
+# ✨ TextPhantomOCR Overlay 
+![Version](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FKuju29%2FTextPhantomOCR_Overlay%2Fmain%2Fplatform%2Fbase.json&query=%24.version&label=Version&color=blue)
+[![Website](https://img.shields.io/badge/Website-kuju29.github.io-blue?style=flat-square&logo=github&logoColor=white)](https://kuju29.github.io/)
+[![Video Guide](https://img.shields.io/badge/Video_Guide-YouTube-red?style=flat-square&logo=youtube&logoColor=white)](https://youtu.be/5GuW_qyg1GU)
+ 
 ### Note: 
 - Models tested with **text.AI**:
   - Hugging Face — `deepseek-ai/DeepSeek-V4-Pro` — Free (heavy usage may require adding credits)
