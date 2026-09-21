@@ -97,8 +97,8 @@ When using **Text Mode**, choose where the displayed text comes from:
 | 🌐 **Original** | **Original detected text** | Places the original text over the image. You can then right-click an empty area and use your browser's **Translate to...** to translate the text on the image |
 | 🔤 **Translated** | **Google-translated text** | Uses the same translated text as **Image Mode**, but displays it as text over the image instead |
 | 🤖 **AI** | **AI-translated text** | Sends the detected text to your selected AI model and displays the AI translation over the image |
-
-> 💡 **Free alternative:** Use **Text → Original**, then right-click an empty area of the page and select your browser's **Translate to...**. This lets the browser translate the text placed over the images and can give better results than Image Mode.
+> [!TIP]
+> **Free alternative:** Use **Text → Original**, then right-click an empty area of the page and select your browser's **Translate to...**. This lets the browser translate the text placed over the images and can give better results than Image Mode.
 
 ### 🤖 AI Translation
 
@@ -110,8 +110,7 @@ To use **Text → AI**, open the `AI option` tab and complete these settings:
 | **2** | **API key** | Enter the API key for that provider |
 | **3** | **Model** | Choose the AI model you want to use |
 | **4** | **Set prompt** | Set the translation instructions |
-
-> ⚠️ **Using a model for the first time?**  
+> [!WARNING]
 > In **Set prompt**, you must click **↺ Reset** first to load TextPhantom's default prompt from the API.
 
 <details>
@@ -179,7 +178,7 @@ Run the AI model directly on your computer.
 5. Click **Connect** and select your installed model.
 
 6. Go back to **Translate → Text → Source: AI** and start translating. 🎉
-
+> [!NOTE]
 > **Ollama must be running** while using Local AI.
 
 
@@ -207,7 +206,7 @@ Run the AI model in the cloud.
 6. Select **Google Gemma** as your model.
 
 7. Go back to **Translate → Text → Source: AI** and start translating. 🎉
-
+> [!NOTE]
 > **Hugging Face is the easier option for computers that cannot comfortably run AI models locally.**
 
 
