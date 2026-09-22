@@ -42,7 +42,7 @@ const check = (ok, message) => {
 // --- every content script exists, in the order the page needs --------------
 const contentScripts = base.content_scripts?.[0]?.js || [];
 check(contentScripts.length > 0, "base.json declares no content scripts");
-for (const file of contentScripts) {
+for (const file of (base.content_scripts || []).flatMap(group => group.js || [])) {
   check(await isFile(path.join(sourceRoot, file)), `content script missing: ${file}`);
 }
 
@@ -62,6 +62,9 @@ const mustPrecede = [
   ["content/overlay.js", "content/mangadex.js"],
   ["content/overlay.js", "content/messaging.js"],
   ["content/messaging.js", "content/index.js"],
+  ["content/reader/sources.js", "content/reader/classification.js"],
+  ["content/reader/classification.js", "content/reader/runtime.js"],
+  ["content/reader/runtime.js", "content/messaging.js"],
 ];
 for (const [first, second] of mustPrecede) {
   const a = order.get(first);
@@ -105,6 +108,13 @@ for (const [platform, expectations] of Object.entries({
 })) {
   const overlay = await json(path.join(projectRoot, `platform/${platform}.json`));
   const permissions = new Set(overlay.permissions || []);
+  // AMO 19.23-new-id used this stable identity. Do not generate a new ID at build time.
+  if (platform === "firefox") {
+    check(overlay.browser_specific_settings?.gecko?.id === "textphantom-v3@kuju29", "firefox: restore the AMO identity from 19.23-new-id (textphantom-v3@kuju29)");
+    check(Boolean(overlay.browser_specific_settings?.gecko?.data_collection_permissions?.required?.length), "firefox: data collection disclosure missing");
+  }
+  if (platform === "thunderbird")
+    check(overlay.browser_specific_settings?.gecko?.id === "textphantom@kuju29", "thunderbird: do not replace the ATN identity with the Firefox AMO identity");
   if (expectations.serviceWorker) {
     check(Boolean(overlay.background?.service_worker), `${platform}: service_worker missing`);
     check(!overlay.background?.scripts, `${platform}: background.scripts is forbidden`);

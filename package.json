@@ -57,7 +57,8 @@
     "test:release-1921": "node scripts/test-process-latency-1921.mjs && python scripts/test-anthropic-conversation-cache-1921.py && node scripts/test-process-diagnostics-1921.mjs && node scripts/test-ai-timing-schema.mjs",
     "test:stream-lifecycle": "node scripts/test-local-progressive-stream.mjs && node scripts/test-release-19-13.mjs && node scripts/test-repair-chat-continuity.mjs && node scripts/test-repair-empty-pool.mjs && node scripts/test-repair-progress-phase.mjs && node scripts/test-repair-progress-terminal.mjs && node scripts/test-repair-restart-lifecycle.mjs && node scripts/test-server-progressive-stream.mjs && node scripts/test-stream-review-1917.mjs && node scripts/test-workflow-visible-delivery.mjs",
     "test:release-1922": "node scripts/test-live-audit-1922.mjs && python scripts/test-live-audit-1922.py && node scripts/test-repair-stability-regressions.mjs",
-    "test:release-1923": "node scripts/test-live-audit-1922.mjs && python scripts/test-multiuser-release-1923.py && python scripts/test-request-owned-credentials.py"
+    "test:release-1923": "node scripts/test-live-audit-1922.mjs && python scripts/test-multiuser-release-1923.py && python scripts/test-request-owned-credentials.py",
+    "test:reader-sources": "python scripts/test-reader-sources-browser.py"
   },
-  "version": "2026.9.22-8"
+  "version": "2026.9.22-9"
 }

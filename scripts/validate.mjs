@@ -100,6 +100,11 @@ for (const target of targets) {
   }
 
   const permissions = new Set(manifest.permissions || []);
+  if (["firefox", "thunderbird"].includes(target)) {
+    const overlay = JSON.parse(await readFile(path.join(projectRoot, "platform", `${target}.json`), "utf8"));
+    assert(manifest.browser_specific_settings?.gecko?.id === overlay.browser_specific_settings?.gecko?.id,
+      `${target}: generated add-on ID must match the persistent platform source`);
+  }
   if (["chrome", "edge", "opera"].includes(target)) {
     assert(Boolean(manifest.background?.service_worker), `${target}: service_worker missing`);
     assert(!manifest.background?.scripts, `${target}: background.scripts is forbidden`);

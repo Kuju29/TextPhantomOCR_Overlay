@@ -302,7 +302,7 @@
           TP.log.warn('reader sources incomplete',detail);
           const why=plan.sourceDiagnostics;
           throw Object.assign(new Error(`READER_SOURCE_UNAVAILABLE: ${missing.length}/${run.ids.length} logical pages have no source; profile=${plan.profile}`+
-            (why ? `; inline=${why.inline}; bridge=${why.bridge}; legacy=${why.legacy}` : '')),
+            (why ? `; inline=${why.inline}; bridge=${why.bridge}` : '')),
             {code:'READER_SOURCE_UNAVAILABLE',missing});
         }
         TP.log.info('reader sources ready',detail);

@@ -198,6 +198,11 @@ function manifestToNpmVersion(v) {
   }
 }
 
+// Fail before creating release archives if a platform identity or referenced
+// content script is wrong. build.bat and build.sh use this same entry point.
+execFileSync(process.execPath, [path.join(projectRoot, "scripts", "test-manifest.mjs")],
+  { cwd: projectRoot, stdio: "inherit" });
+
 const targets = [
   {
     id: "chrome",

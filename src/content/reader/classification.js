@@ -63,7 +63,7 @@
       for (const el of document.querySelectorAll(selector)) {
         const id = number(el, attr);
         if (!id || own(el) || el.matches('button,a,input,option')) continue;
-        const scope = el.parentElement?.closest('[data-reader],.rpage-main,[class*="reader" i],[id*="reader" i],main') || el.parentElement;
+        const scope = el.parentElement?.closest('[data-reader],[class*="reader" i],[id*="reader" i],main') || el.parentElement;
         if (!groups.has(scope)) groups.set(scope, []);
         groups.get(scope).push({el, id});
       }
@@ -74,9 +74,10 @@
         const slots = rows.map(row => row.el), root = ancestor(slots);
         if (!root) continue;
         const hints = `${root.id} ${root.className} ${root.parentElement?.className || ''} ${slots[0].className}`;
-        const semantic = /reader|rpage|manga|comic|chapter/i.test(hints) || !!root.closest('[data-reader]');
+        const semantic = /reader|manga|comic|chapter|(?:^|[\s_-])pages?(?:$|[\s_-])/i.test(hints) || !!root.closest('[data-reader]');
         const missing = slots.filter(slot => !image(slot)).length;
-        const virtual = /virtual|rpage-page/i.test(hints) || root.hasAttribute('data-virtual');
+        const virtual = /virtual/i.test(hints) || root.hasAttribute('data-virtual') ||
+          slots.some(slot => surface(slot)?.matches('canvas'));
         const large = slots.filter(slot => {
           const img = image(slot), rect = img?.getBoundingClientRect?.();
           return img && Math.max(img.naturalWidth || 0, rect?.width || 0) >= 140 &&
@@ -96,18 +97,18 @@
   async function sources(plan, signal) {
     const urls = new Map();
     for (const [id, slot] of plan.slots) { const url = source(slot); if (url) urls.set(id,url); }
-    const mergeSpecific = async (doc, pageWorld) => {
-      const specific = await TP.comixReaderSources?.([...plan.slots.values()], source,
+    const mergeReaderData = async (doc, pageWorld) => {
+      const resolved = await TP.readerSources?.(plan, source,
         {document:doc, pageWorld, signal, knownSources:urls});
-      if (specific) {
-        plan.profile = specific.profile;
+      if (resolved) {
+        plan.profile = resolved.profile;
         const previous = plan.sourceDiagnostics;
-        plan.sourceDiagnostics = !pageWorld && previous ? {...specific.detail,
-          bridge:previous.bridge, propsFound:previous.propsFound, propsResolved:previous.propsResolved} : specific.detail;
-        for (const [id,url] of specific.urls) if (plan.slots.has(id)) urls.set(id,url);
+        plan.sourceDiagnostics = !pageWorld && previous ? {...resolved.detail,
+          bridge:previous.bridge, propsFound:previous.propsFound, propsResolved:previous.propsResolved} : resolved.detail;
+        for (const [id,url] of resolved.urls) if (plan.slots.has(id)) urls.set(id,url);
       }
     };
-    if (urls.size !== plan.ids.length) await mergeSpecific(document, true);
+    if (urls.size !== plan.ids.length) await mergeReaderData(document, true);
     // Only fetch HTML when known logical slots lack sources. Never execute its scripts.
     if (urls.size !== plan.ids.length && /^https?:/.test(location.href)) {
       try {
@@ -118,7 +119,7 @@
             const id = number(slot, plan.attr), url = source(slot);
             if (plan.slots.has(id) && !urls.has(id) && url) urls.set(id,url);
           }
-          if (urls.size !== plan.ids.length) await mergeSpecific(doc, false);
+          if (urls.size !== plan.ids.length) await mergeReaderData(doc, false);
         }
       } catch (error) { if (signal?.aborted) throw error; TP.log.info('reader manifest HTML unavailable', {profile:plan.profile}); }
     }
