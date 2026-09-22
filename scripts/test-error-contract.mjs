@@ -128,3 +128,38 @@ assert.equal(publicTpError({ code: "UNKNOWN", stage: "ai" }).code, "AI_FAILED");
 assert.equal(publicTpError({ tpError: { schema: "tp.error/1", code: "UNKNOWN", stage: "render" } }).code, "RENDER_FAILED");
 
 console.log("Error contract test passed: public errors are structured, concise and safe.");
+
+// Actual worker logger must preserve Error fields in both copied console text
+// and the structured sink. The same normalizer runs before content messaging.
+{
+  const {createLogger,setLogSink,getLogLevel,setLogLevel} = await import('../src/shared/logger.js');
+  const {default:vm} = await import('node:vm');
+  const oldLevel=getLogLevel(), oldConsole=console.error, lines=[], records=[];
+  try {
+    console.error=(...parts)=>lines.push(parts.join(' '));
+    setLogLevel('error');setLogSink(row=>records.push(row));
+    const cause=new TypeError('inner failure');
+    const error=Object.assign(new Error('image start failed',{cause}),{code:'START_FAILED',status:503});
+    error.circular=error;
+    createLogger('SW.menu').error('menu handler error',error);
+    assert.match(lines[0], /"name":"Error"/);
+    assert.match(lines[0], /"message":"image start failed"/);
+    assert.match(lines[0], /"code":"START_FAILED"/);
+    assert.match(lines[0], /"stack":/);
+    assert.equal(records[0].data.cause.message,'inner failure');
+    assert.equal(records[0].data.circular,'[Circular]');
+    const remote=vm.runInNewContext('new TypeError("other realm")');
+    createLogger('content').error('nested',{error:remote,exception:new DOMException('timeout','TimeoutError')});
+    assert.equal(records[1].data.error.name,'TypeError');
+    assert.equal(records[1].data.exception.name,'TimeoutError');
+    const normalized=globalThis.__TPLogSerialization.normalize({error,authorization:'Bearer private',
+      api_key:'private',tokenCount:12n,note:'Bearer private-token sk-abcdefghijklmnop'});
+    assert.doesNotThrow(()=>JSON.stringify(normalized));
+    assert.doesNotMatch(JSON.stringify(normalized),/private-token|abcdefghijklmnop|Bearer private|"api_key":"private"/);
+    assert.equal(normalized.tokenCount,'12');
+    assert.equal(error.circular,error,'logging must not mutate the original error');
+    setLogSink(()=>{throw new Error('sink unavailable');});
+    assert.doesNotThrow(()=>createLogger('SW.menu').error('sink failure is isolated',error));
+  } finally {console.error=oldConsole;setLogSink(null);setLogLevel(oldLevel);}
+  console.log('Logger error serialization passed: console + sink, nested/circular errors, foreign realm, DOMException and secret fields.');
+}

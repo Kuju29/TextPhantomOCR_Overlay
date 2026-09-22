@@ -7,6 +7,8 @@
  * trace console.
  */
 
+import "./log-serialization.js";
+
 const LEVELS = { debug: 0, info: 1, warn: 2, error: 3 };
 
 let currentLevelName = "warn";
@@ -43,7 +45,7 @@ function safeSerialize(value) {
  *
  * `console.warn(msg, obj)` is expandable in DevTools and the literal text
  * "[object Object]" everywhere else — copied lines, screenshots, bug reports.
- * The structured object still goes to the log FILE untouched; only the console
+ * JSON-safe structured fields also go to the diagnostic sink; only the console
  * copy is flattened.
  */
 function readable(value) {
@@ -78,6 +80,7 @@ export function setLogSink(fn) {
 
 export function createLogger(namespace) {
   const emit = (level, args) => {
+    args = args.map(value => globalThis.__TPLogSerialization.normalize(value));
     // The SINK gets every level regardless of the console threshold: raising
     // the console level is about noise, and the file exists to answer "what
     // happened" afterwards — the debug lines are the ones that explain a

@@ -548,6 +548,7 @@ export function createResultDelivery(deps) {
         tabId,
         {
           type: "REPLACE_IMAGE",
+          workflowId,
           original: imgUrl,
           newSrc: newImg,
           generation: ctx.generation || null,
@@ -563,6 +564,7 @@ export function createResultDelivery(deps) {
         tabId,
         {
           type: "OVERLAY_HTML",
+          workflowId,
           original: imgUrl,
           result,
           mode: mode || "",
@@ -617,25 +619,30 @@ export function createResultDelivery(deps) {
       ok = false;
       errMsg = "Overlay insert failed";
     }
+    const storedForReader = Boolean(ctx.generation?.readerRunId &&
+      ((overlayOk?.stored && !overlayOk?.applied) || (replaceOk?.stored && !replaceOk?.applied)));
     if (batch && imageKey && typeof updateImagePresentation === "function") {
       const inserted = Boolean((newImg && mode !== "lens_text") || hasHtml || shouldShowSkipBadge);
       const acknowledged = Boolean((hasHtml && overlayOk?.applied === true && !overlayOk?.stale && overlayOk?.drawn !== false) ||
-        (newImg && mode !== "lens_text" && replaceOk?.ok === true));
+        (newImg && mode !== "lens_text" && replaceOk?.ok === true && !replaceOk?.stale &&
+          (!ctx.generation?.readerRunId || replaceOk?.applied === true)));
       updateImagePresentation(batchId, imageKey, {
+        ...(storedForReader ? {placementPending:true} : {}),
         ...((acknowledged || overlayOk?.applied === true) ? {insertionAck:{present:acknowledged,
           provisional:false, acknowledgedAt:Date.now()}} : {}),
         progressEvent: {
           lane: "insert",
-          state: ok ? (inserted ? "done" : "skipped") : "error",
-          detail: ok ? (inserted ? "Placed on page" : "No DOM insert needed") : (errMsg || "Insert failed"),
+          state: storedForReader ? "queued" : ok ? (inserted ? "done" : "skipped") : "error",
+          detail: storedForReader ? "Saved result; waiting for reader placement" : ok ? (inserted ? "Placed on page" : "No DOM insert needed") : (errMsg || "Insert failed"),
         },
       });
-      if (ok) updateImagePresentation(batchId, imageKey, {
+      if (ok && !storedForReader) updateImagePresentation(batchId, imageKey, {
         progressEvent: { lane: "overall", state: "done", resultState: "pending", detail: "Visible complete; finalizing receipt" },
       });
     }
     await deps.onDelivered?.(ctx, ok && overlayOk?.applied === true && overlayOk?.stale !== true);
-    if (ok) await workflow.applied(workflowId);
+    if (ok && storedForReader) await workflow.placementPending?.(workflowId);
+    else if (ok) await workflow.applied(workflowId);
     else
       await workflow.failed(
         workflowId,

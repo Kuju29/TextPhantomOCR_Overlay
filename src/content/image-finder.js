@@ -131,6 +131,8 @@
 
   // Resolves the image element a result belongs to from every known index.
   function findTargetImage(original, generation = null) {
+    if (generation?.readerRunId) return TP.findReaderTarget?.(generation) || null;
+    if (String(original || "").startsWith("tp-reader:")) return TP.readerImageForKey?.(original) || null;
     if (generation?.targetInstanceId) {
       return Array.from(document.images || []).find(img => img.isConnected &&
         TP.targetInstanceFor?.(img) === generation.targetInstanceId) || null;
@@ -194,6 +196,48 @@
 
   const imageErrorBadges = new WeakMap();
   const imageErrorTargets = new Set();
+  const imageErrorGenerations = new WeakMap();
+  const dismissedErrors = new WeakSet();
+  let errorFrame = 0, errorResize = null, errorListeners = false;
+  function errorAnchorCurrent(img, generation) {
+    if (!generation) return {ok:true};
+    if (generation.readerRunId && TP.readerErrorCurrent)
+      return TP.readerErrorCurrent(img, generation);
+    return TP.isStillCurrent?.(img, generation) || {ok:true};
+  }
+  function refreshErrorBadges() {
+    errorFrame = 0;
+    for (const img of Array.from(imageErrorTargets)) {
+      if (!img.isConnected || !errorAnchorCurrent(img,imageErrorGenerations.get(img)).ok) {
+        clearImageError(img);continue;
+      }
+      positionImageErrorBadge(img,imageErrorBadges.get(img));
+    }
+  }
+  function scheduleErrorBadges() {
+    if (!errorFrame && imageErrorTargets.size && window.requestAnimationFrame)
+      errorFrame = window.requestAnimationFrame(refreshErrorBadges);
+  }
+  function trackErrorBadge(img) {
+    if (!errorListeners) {
+      // Capture also catches a reader's nested scrolling container. No document
+      // scan/polling; only existing error markers are repositioned once per frame.
+      window.addEventListener?.('scroll',scheduleErrorBadges,{capture:true,passive:true});
+      window.addEventListener?.('resize',scheduleErrorBadges,{passive:true});
+      errorListeners=true;
+    }
+    if (!errorResize && typeof ResizeObserver==='function') errorResize=new ResizeObserver(scheduleErrorBadges);
+    errorResize?.observe(img);
+  }
+  function untrackErrorBadge(img) {
+    errorResize?.unobserve(img);
+    if (imageErrorTargets.size) return;
+    errorResize?.disconnect();errorResize=null;
+    window.removeEventListener?.('scroll',scheduleErrorBadges,true);
+    window.removeEventListener?.('resize',scheduleErrorBadges);
+    if(errorFrame)window.cancelAnimationFrame?.(errorFrame);
+    errorFrame=0;errorListeners=false;
+  }
 
   // Converts technical terminal errors into short text a normal reader can
   // report from a screenshot. The full diagnostic remains in the title.
@@ -264,9 +308,11 @@
       imageErrorBadges.delete(img);
     }
     imageErrorTargets.delete(img);
+    imageErrorGenerations.delete(img);
+    untrackErrorBadge(img);
     if (img.dataset?.lensError) delete img.dataset.lensError;
-    if (img.style) {
-      img.style.outline = String(img.dataset?.tpLensPrevOutline || "");
+    if (img.style && img.dataset?.tpLensPrevOutline !== undefined) {
+      img.style.outline = String(img.dataset.tpLensPrevOutline || "");
     }
     if (img.dataset?.tpLensPrevOutline !== undefined)
       delete img.dataset.tpLensPrevOutline;
@@ -291,6 +337,7 @@
     if (!img?.isConnected || !badge?.isConnected) return false;
     const r = img.getBoundingClientRect?.();
     if (!r) return false;
+    badge.style.display = r.width >= 2 && r.height >= 2 ? 'block' : 'none';
     Object.assign(badge.style, {
       left: `${r.left + window.scrollX + 4}px`,
       top: `${r.top + window.scrollY + 4}px`,
@@ -302,16 +349,17 @@
   // to translate. Users should not need to inspect a title/HTML attribute to
   // know why one page failed.
   function markImageError(original, msg, generation = null) {
-    if (!shouldShowReplaceError(original)) return;
+    if (!generation && msg?.schema !== "tp.error/1" && !shouldShowReplaceError(original)) return false;
 
-    const img = findTargetImage(original, generation);
-    if (!img || (generation && !TP.isStillCurrent?.(img, generation)?.ok)) return false;
+    const img = generation?.readerRunId
+      ? TP.findReaderErrorTarget?.(generation) : findTargetImage(original, generation);
+    if (!img || !errorAnchorCurrent(img,generation).ok) return false;
 
     const full =
       msg && typeof msg === "object"
         ? `${String(msg.userMessage || "เกิดข้อผิดพลาด")} · ${String(msg.code || "PROCESSING_FAILED")}`
         : String(msg || "PROCESSING_FAILED");
-    const short = shortImageError(full);
+    const short = shortImageError(msg?.schema === "tp.error/1" ? msg : full);
     let badge = imageErrorBadges.get(img);
     if (!badge || !badge.isConnected) {
       badge = document.createElement("button");
@@ -320,9 +368,14 @@
       badge.dataset.tpImageError = "1";
       imageErrorBadges.set(img, badge);
       imageErrorTargets.add(img);
-      document.body.appendChild(badge);
-      badge.addEventListener("click", () => clearImageError(img));
+      badge.addEventListener("click", () => {clearImageError(img);dismissedErrors.add(img);});
     }
+    dismissedErrors.delete(img);
+    imageErrorGenerations.set(img,generation);
+    trackErrorBadge(img);
+    // Keep the warning above the translation layer (whose z-index is maximal).
+    if (!badge.isConnected || (badge.parentNode === document.body && badge !== document.body.lastElementChild))
+      document.body.appendChild(badge);
     if (!img.dataset.lensError)
       img.dataset.tpLensPrevOutline = img.style.outline || "";
     img.style.outline = "3px solid red";
@@ -345,12 +398,14 @@
       fontFamily: "system-ui,sans-serif",
       fontSize: "12px",
       lineHeight: "1.25",
-      zIndex: 9999,
+      zIndex: 2147483647,
       boxShadow: "0 1px 4px rgba(0,0,0,0.25)",
       cursor: "pointer",
       textAlign: "left",
       appearance: "none",
     });
+    for (const [key,value] of Object.entries({visibility:'visible',opacity:'1','pointer-events':'auto','z-index':'2147483647'}))
+      badge.style.setProperty?.(key,value,'important');
     positionImageErrorBadge(img, badge);
     img.dataset.lensError = "1";
     TP.log.info("markImageError", {
@@ -358,7 +413,7 @@
       message: full,
       visibleMessage: short,
     });
-    return true;
+    return badge.style.display !== 'none';
   }
 
   // Drops the per-URL image indexes so a client-side route change cannot resolve a stale element.
@@ -381,6 +436,11 @@
     markImageError,
     clearImageError,
     clearAllImageErrors,
+    hasImageError: img => imageErrorBadges.get(img)?.isConnected === true || dismissedErrors.has(img),
+    clearReaderImageErrors: runId => {
+      for (const img of Array.from(imageErrorTargets))
+        if (imageErrorGenerations.get(img)?.readerRunId===runId) clearImageError(img);
+    },
     shortImageError,
     positionImageErrorBadge,
     repositionImageError: img => positionImageErrorBadge(img, imageErrorBadges.get(img)),

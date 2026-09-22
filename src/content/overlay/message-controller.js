@@ -24,6 +24,10 @@
       return { ok: true, legacy: true };
     if (typeof runtime?.isStillCurrent !== "function")
       return { ok: true, legacy: true };
+    if (generation.readerRunId && runtime.readerErrorCurrent) {
+      const anchor = runtime.findReaderErrorTarget?.(generation);
+      return runtime.readerErrorCurrent(anchor, generation);
+    }
     const img = runtime.findTargetImage?.(msg?.original, msg?.generation) || null;
     return runtime.isStillCurrent(img, generation);
   }
@@ -56,14 +60,20 @@
       message: text,
       error,
     });
-    setTimeout(() => {
-      if (TP.shouldShowReplaceError(msg?.original)) {
-        if (!checkImageErrorGeneration(TP, msg).ok) return;
-        const badged = TP.markImageError(msg?.original, error || text, msg?.generation);
-        if (!badged) TP.showToast?.(`Not translated: ${text}`, 12000);
-      }
-    }, 1200);
-    return { ok: true };
+    // An explicit current-generation failure must not be hidden by a prior
+    // successful replacement of this URL, or wait for the failed IMG to load.
+    if (!msg.generation && !error && !TP.shouldShowReplaceError(msg?.original))
+      return { ok:true, applied:false, suppressed:true };
+    const badged = TP.markImageError(msg?.original, error || text, msg?.generation);
+    if (!badged) TP.showToast?.(`Not translated: ${text}`, 12000);
+    return { ok:true, applied:badged === true, drawn:false, errorDisplayed:badged === true };
+  }
+
+  async function showPlacementError(msg) {
+    // The reader owns its bounded retries. NORMAL has no deferred replay owner.
+    if (msg.generation?.readerRunId) return;
+    await applyImageErrorMessage({...msg,type:'IMAGE_ERROR',
+      error:{schema:'tp.error/1',code:'INSERT_FAILED',userMessage:'ไม่สามารถแทรกผลแปลบนภาพได้'}});
   }
 
   async function applyOverlayMessage(msg) {
@@ -80,7 +90,7 @@
       : "translated";
     if (isText && !source) return { ok: true, ignored: true };
 
-    let img = TP.findTargetImage(msg.original, msg.generation);
+    let img = msg.readerReplayTarget || TP.findTargetImage(msg.original, msg.generation);
 
     if (!img && TP.waitForTarget && msg?.generation?.targetKey) {
       img = await TP.waitForTarget(msg.generation.targetKey, () =>
@@ -132,7 +142,8 @@
         if (stamp && seen?.runId === stamp.runId && seen?.generationId === stamp.generationId) {
           if (seen.phase === 'repair' && stamp.phase === 'initial')
             return {ok:true, applied:false, stale:true, reason:'initial result arrived after repair'};
-          if (stamp.phase === 'repair' && seen.revision === stamp.revision)
+          if (stamp.phase === 'repair' && seen.revision === stamp.revision &&
+              (!msg.generation?.readerRunId || TP.overlayMount?.hasHtmlOverlay?.(msg.generation.targetKey,img)))
             return {ok:true, applied:true, replayed:true, drawn:seen.drawn!==false};
         }
         const canApply = () => {
@@ -151,6 +162,7 @@
           canApply,
           msg.tpTrace || "",
           JSON.stringify([msg.generation || null, stamp?.runId || "", stamp?.generationId || ""]),
+          msg.generation?.readerRunId ? msg.generation.targetKey : "",
         );
         if (rendered?.stale || !canApply())
           return {ok:true, applied:false, stale:true, reason:'translation superseded during rendering'};
@@ -174,7 +186,8 @@
         }
         return { ok: true, applied: true, drawn:rendered?.drawn!==false, reused:rendered?.reused===true };
       } catch (e) {
-        TP.log.warn("OVERLAY_HTML failed", e?.message || String(e));
+        TP.log.warn("OVERLAY_HTML failed", e);
+        await showPlacementError(msg);
         return { ok: false, applied: false, error: e?.message || String(e) };
       } finally {
         release();
@@ -196,6 +209,8 @@
   async function applyInsertMessage(message) {
     const msg = message || {};
     const type = String(msg.type || "");
+    if (msg.generation?.readerRunId && !msg.readerReplay)
+      return TP.stageReaderInsert?.(msg) || {ok:false,error:"Reader placement unavailable"};
 
     // IMAGE_ERROR must validate its generation before adopting the producer's
     // trace. Other message types are safe to attach immediately.
@@ -207,7 +222,7 @@
     });
 
     if (type === 'TP_TRANSLATION_BIND') {
-      const img = TP.findTargetImage(msg.original, msg.generation);
+      const img = msg.readerReplayTarget || TP.findTargetImage(msg.original, msg.generation);
       if (!img) return {ok:true, applied:false, notFound:true};
       const current = TP.isStillCurrent?.(img, msg.generation);
       if (current && !current.ok) return {ok:true, applied:false, stale:true};
@@ -219,10 +234,19 @@
     }
 
     if (type === "REPLACE_IMAGE") {
-      const applied = await replaceImageInDOM(msg.original, msg.newSrc, msg.generation);
-      if (!applied && TP.isMangaDexHost())
-        TP.mdRememberPending(msg.original, { newSrc: msg.newSrc });
-      return { ok: true, applied: !!applied };
+      try {
+        const applied = await replaceImageInDOM(msg.original, msg.newSrc, msg.generation, msg.readerReplayTarget);
+        if (!applied && TP.isMangaDexHost())
+          TP.mdRememberPending(msg.original, { newSrc: msg.newSrc });
+        else if (!applied && TP.findTargetImage(msg.original,msg.generation))
+          await showPlacementError(msg);
+        return { ok: true, applied: !!applied };
+      } catch(error) {
+        if(msg.generation?.readerRunId) throw error; // reported once by reader retry owner
+        TP.log.warn('REPLACE_IMAGE failed',error);
+        await showPlacementError(msg);
+        return {ok:false,applied:false,error:error?.message || String(error)};
+      }
     }
     if (type === "OVERLAY_HTML") return applyOverlayMessage(msg);
     if (type === "IMAGE_ERROR") return applyImageErrorMessage(msg);
@@ -257,12 +281,15 @@
   }
 
   // Swaps an image's src for a translated one, returning 1 when applied.
-  async function replaceImageInDOM(original, newSrc, generation = null) {
+  async function replaceImageInDOM(original, newSrc, generation = null, replayTarget = null) {
     if (TP.isMangaDexHost?.() && TP.mdKeyFromUrl?.(original)) {
       return TP.replaceMangaDexImageWithOverlay(original, newSrc, generation);
     }
 
-    const img = TP.findTargetImage(original, generation);
+    // A reader replay pins the target across async bindings/conversion. Looking
+    // up a fresh IMG here can draw on a new node while its caller still owns the
+    // old node, losing the insertion receipt and blob ownership on fast scroll.
+    const img = replayTarget || TP.findTargetImage(original, generation);
     if (img && TP.isStillCurrent?.(img, generation)?.ok === false) return 0;
     if (!img) {
       TP.log.warn("REPLACE_IMAGE target not found", {
@@ -275,7 +302,7 @@
     // node after any React update. Keep the translated raster in the same
     // fixed, identity-aware portal used by X text overlays instead of mutating
     // page-owned image attributes.
-    if (TP.isXHost?.() && TP.imageIdentity?.(original)) {
+    if (generation?.readerRunId || (TP.isXHost?.() && TP.imageIdentity?.(original))) {
       if (TP.isStillCurrent?.(img, generation)?.ok === false) return 0;
       let nextSrc = newSrc;
       let ownsNextBlob = false;
@@ -295,7 +322,7 @@
         return 0;
       }
 
-      const key = TP.normUrl(original);
+      const key = generation?.readerRunId ? generation.targetKey : TP.normUrl(original);
       if (!key || !nextSrc) {
         if (ownsNextBlob) {
           try {
@@ -371,16 +398,20 @@
         generation,
         pageInstanceId: TP.pageInstanceId,
       });
-      if (img.dataset) img.dataset.tpOriginal = key;
+      if (img.dataset && !generation?.readerRunId) img.dataset.tpOriginal = key;
       TP.noteReplaceState(original, "pending");
+      // Clear the previous attempt's warning when applying a new result, not
+      // on its delayed load event (which may follow a newer terminal error).
+      TP.clearImageError?.(img);
       TP.overlayBackground.update(rec, img, nextSrc);
+      rec.rasterSource = nextSrc;
       TP.overlayMount.scheduleHtmlOverlayUpdate(key);
       TP.emitViewerEvent("textphantom:image-updated", {
         original,
         newSrc: nextSrc,
         rawNewSrc: newSrc,
       });
-      TP.log.info("REPLACE_IMAGE overlaid for X", {
+      TP.log.info(generation?.readerRunId ? "Reader raster placed" : "REPLACE_IMAGE overlaid for X", {
         original: TP.truncate(original),
       });
       return 1;
@@ -429,8 +460,17 @@
       if (blobUrl) nextSrc = blobUrl;
     }
 
+    // Conversion yields. Fast scrolling may replace the target while it runs.
+    // Validate BEFORE revoking/assigning per-IMG ownership, and release only the
+    // new blob created by this attempt when its original target is gone.
+    if (TP.isStillCurrent?.(img, generation)?.ok === false) {
+      if (nextSrc !== newSrc && typeof nextSrc === 'string' && nextSrc.startsWith('blob:'))
+        try { URL.revokeObjectURL(nextSrc); } catch {}
+      return 0;
+    }
+
     const prevBlob = img.dataset.tpBlobUrl;
-    if (prevBlob && prevBlob.startsWith("blob:")) {
+    if (prevBlob && prevBlob !== nextSrc && prevBlob.startsWith("blob:")) {
       try {
         URL.revokeObjectURL(prevBlob);
       } catch {}
@@ -441,6 +481,7 @@
 
     if (TP.isStillCurrent?.(img, generation)?.ok === false) return 0;
     TP.noteAppliedImageSource?.(img, nextSrc);
+    TP.clearImageError?.(img);
     img.src = nextSrc;
     img.removeAttribute("srcset");
     img.removeAttribute("sizes");

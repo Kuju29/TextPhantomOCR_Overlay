@@ -282,21 +282,15 @@ export async function runServerTranslation(input, deps) {
         let browserFetchError = "";
         try {
           let dataUri = "";
-          if (tabId)
-            try {
-              dataUri = await fetchImageDataUriFromTab(
-                tabId,
-                src,
-                frameId || 0,
-              );
-            } catch (tabError) {
-              browserFetchError = tabError?.message || String(tabError);
-            }
-          if (!dataUri)
+          try {
             dataUri = await fetchImageDataUriFromUrl(
-              src,
-              payload?.context?.page_url || "",
+              src, payload?.context?.page_url || "",
             );
+          } catch (networkError) {
+            browserFetchError = networkError?.message || String(networkError);
+          }
+          if (!dataUri && tabId)
+            dataUri = await fetchImageDataUriFromTab(tabId, src, frameId || 0);
           if (dataUri) {
             payload.imageDataUri = dataUri;
             const key = normImgSrc(src);
@@ -396,7 +390,10 @@ export async function runServerTranslation(input, deps) {
               )
             : retryAfterMs;
         if (slotHeld) {
-          if (gated) releaseGated(requestLane, retryAfterMs);
+          // A Lens session rejection delays this request, not every image on
+          // the lane. Other pages can succeed with the same refreshed session.
+          if (code === "lens_session_unavailable") releaseFailed(requestLane);
+          else if (gated) releaseGated(requestLane, retryAfterMs);
           else if (localRequest)
             releaseLocalFailure(requestLane, error, retryAfterMs);
           else if (code === "provider_rate_limited")
@@ -430,6 +427,7 @@ export async function runServerTranslation(input, deps) {
             status,
             retryAfterMs,
             serverRetryMs,
+            retryScope: code === "lens_session_unavailable" ? "image" : "lane",
             code,
             generationAttempts,
             attempt: attempt + 1,

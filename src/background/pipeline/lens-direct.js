@@ -81,9 +81,11 @@ export function createLensDirectPath({
     if (payload?.mode !== "lens_text") return stop("not a lens_text job");
     if (!payload?.render?.lensDocument)
       return stop("this job did not ask for a local document");
-    const size = payload?.naturalSize;
-    if (!(size?.width > 0) || !(size?.height > 0))
-      return stop("the page did not report the image size");
+    // Virtual readers can own source bytes before an IMG is mounted. The DOM
+    // dimensions are diagnostic hints only; /v1/lens/raw already reports the
+    // authoritative dimensions of the uploaded image (also after orientation).
+    const domSize = payload?.naturalSize;
+    const hasDomSize = Number(domSize?.width) > 0 && Number(domSize?.height) > 0;
 
     let image;
     try {
@@ -168,13 +170,14 @@ export function createLensDirectPath({
         "lensImageDimensions",
         {
           authoritative: lensImageSize,
-          domNatural: {
-            width: Number(size.width),
-            height: Number(size.height),
-          },
-          mismatch:
-            lensImageSize.width !== Number(size.width) ||
-            lensImageSize.height !== Number(size.height),
+          domNatural: hasDomSize ? {
+            width: Number(domSize.width),
+            height: Number(domSize.height),
+          } : null,
+          mismatch: hasDomSize ? (
+            lensImageSize.width !== Number(domSize.width) ||
+            lensImageSize.height !== Number(domSize.height)
+          ) : null,
           artifactToken: imageArtifactToken ? "present" : "absent",
         },
         traceId,
@@ -361,8 +364,8 @@ export function createLensDirectPath({
       lensDocument: document,
       layout: payload?.layout || null,
       htmlMeta: {
-        baseW: size.width,
-        baseH: size.height,
+        baseW: lensImageSize.width,
+        baseH: lensImageSize.height,
         format: "tp",
         path: "lens_direct",
       },

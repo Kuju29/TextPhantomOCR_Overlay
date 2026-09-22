@@ -94,3 +94,9 @@ export function sendToastToTab(tabId, frameId, text, ms = 1600, progress = null)
     );
   } catch {}
 }
+
+// Ownership-sensitive reader controls must never fall back into another frame.
+export async function requestFromTabExact(tabId, message, frameId = 0) {
+  const result = await attemptSend(tabId, message, {frameId:Number(frameId)||0});
+  return result.ok ? result.resp : null;
+}

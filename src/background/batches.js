@@ -89,6 +89,8 @@ export function serializeBatchSnapshot(b) {
     cancelled: b.cancelled === true,
     cancelRequestedAt: Number(b.cancelRequestedAt) || 0,
     repair: b.repair || null,
+    lifecycle: b.lifecycle || "processing", completedAt: b.completedAt || 0,
+    reader: b.reader || null,
     progressSequence: Number(b.progressSequence) || 0,
     total1: Number(b.total1) || 0,
     total2: Number(b.total2) || 0,
@@ -108,7 +110,12 @@ export function serializeBatchSnapshot(b) {
       initialAiTerminal: item?.initialAiTerminal === true,
       statusSequence: Number(item.statusSequence)||0,
       presentation: item.presentation || null,
+      workflowId: item.workflowId || "",
       progress: item.progress || null,
+      generation: item?.payload?.generation || null,
+      reader: item?.payload?.reader || null,
+      source: item?.payload?.src || "",
+      sessionId: item?.payload?.context?.tp_tab_session || "",
       pageIndex: Number.isFinite(Number(item?.payload?.context?.page_index))
         ? Number(item.payload.context.page_index)
         : null,
@@ -117,7 +124,7 @@ export function serializeBatchSnapshot(b) {
 }
 
 export function restoreBatchSnapshot(raw) {
-  if (!raw?.id || Date.now() - (Number(raw.createdAt) || 0) > BATCH_TTL_MS)
+  if (!raw?.id || (raw.completedAt && !raw.reader && Date.now() - Number(raw.completedAt) > BATCH_TTL_MS))
     return null;
   const b = {
     id: String(raw.id),
@@ -136,6 +143,8 @@ export function restoreBatchSnapshot(raw) {
     cancelled: raw.cancelled === true,
     cancelRequestedAt: Number(raw.cancelRequestedAt) || 0,
     repair: raw.repair || null,
+    lifecycle: raw.lifecycle || "processing", completedAt: raw.completedAt || 0,
+    reader: raw.reader || null,
     progressSequence: Number(raw.progressSequence) || 0,
     items: new Map(),
   };
@@ -151,6 +160,7 @@ export function restoreBatchSnapshot(raw) {
       initialAiTerminal: item.initialAiTerminal === true,
       statusSequence: Number(item.statusSequence)||0,
       presentation: item.presentation || null,
+      workflowId: item.workflowId || "",
       progress: item.progress || null,
       deferredImageError:
         item?.deferredImageError && typeof item.deferredImageError === "object"
@@ -158,8 +168,9 @@ export function restoreBatchSnapshot(raw) {
           : null,
       lastError: String(item.lastError || ""),
       payload: Number.isFinite(item.pageIndex)
-        ? { context: { page_index: item.pageIndex } }
-        : null,
+        ? { src:item.source || "", generation:item.generation || null, reader:item.reader || null,
+            context: { page_index: item.pageIndex, tp_tab_session:item.sessionId || "" } }
+        : { src:item.source || "", generation:item.generation || null, reader:item.reader || null },
     });
   }
   const restoredCount = [...b.items.values()].filter(
@@ -229,10 +240,39 @@ export const getLastBatchStatus = () => lastBatchStatus;
 // checks use this so a late queued task cannot resurrect a cancelled batch.
 export const getBatch = (batchId) => batches.get(String(batchId || "")) || null;
 
-// Drops expired batches.
+export const batchesForTab = tabId => [...batches.values()].filter(b => b.tabId === tabId);
+
+// Called at admission from an actual payload/manifest, never from a telemetry
+// event. Missing status rows cannot silently discard every subsequent update.
+export function registerBatchPayload(b, payload, imageKey) {
+  if (!b || b.cancelled || !payload || !imageKey) return b;
+  const existing = b.items.get(String(imageKey));
+  b.items.set(String(imageKey), existing ? {...existing,payload} :
+    {payload,attempt:b.pass || 1,status:'queued',phase:'waiting',phaseAt:Date.now(),lastError:''});
+  const count=[...b.items.values()].filter(item=>item.attempt === (b.pass || 1)).length;
+  if (b.pass === 2) b.total2=Math.max(b.total2 || 0,count);
+  else b.total1=Math.max(b.total1 || 0,count);
+  b.lifecycle='processing';
+  if(payload.reader?.runId && !b.reader) b.reader={runId:payload.reader.runId,
+    pageInstanceId:payload.generation?.pageInstanceId || '',barrier:payload.reader.barrier===true,
+    released:payload.reader.barrier!==true,processingComplete:false};
+  persistBatchesSoon();
+  return b;
+}
+
+function placementProgress(item) {
+  if (!item?.presentation?.placementPending || !item.progress || item.phase === 'cancelled') return;
+  const at=Date.now(), label='Saved result; waiting for reader placement';
+  item.progress.insert={...item.progress.insert,state:'queued',finishedAt:0,detail:label};
+  item.progress.overall={...item.progress.overall,state:'running',finishedAt:0,detail:label};
+  item.progress.result={state:'pending',detail:label,updatedAt:at};
+}
+
+// Drops only expired terminal runs, not a slow active chapter or pending placement.
 export function pruneBatches(now = Date.now()) {
   for (const [id, b] of batches.entries()) {
-    if (!b || now - (b.createdAt || now) > BATCH_TTL_MS) {
+    if (!b || ((b.cancelled || b.completedAt) && now - (b.completedAt || b.cancelRequestedAt || now) > BATCH_TTL_MS &&
+        ![...b.items.values()].some(item=>!b.cancelled && item.presentation?.placementPending))) {
       batches.delete(id);
       for (const key of initialAiWaiters.keys()) {
         if (key.startsWith(`${id}:`)) settleInitialAiWaiters(key);
@@ -260,13 +300,14 @@ export function ensureBatch(batchId, tabId, frameId) {
       scanStats: null,
       lastToastTs: 0,
       retryScheduled: false,
+      lifecycle:"discovering", completedAt:0,
       items: new Map(),
     };
     batches.set(id, b);
     persistBatchesSoon();
   } else {
-    if (Number.isFinite(tabId)) b.tabId = tabId;
-    if (Number.isFinite(frameId)) b.frameId = Number(frameId) || 0;
+    if (!b.tabId && Number.isFinite(tabId) && tabId > 0) b.tabId = tabId;
+    if (tabId === b.tabId && Number.isFinite(frameId)) b.frameId = Number(frameId) || 0;
   }
   return b;
 }
@@ -342,7 +383,7 @@ export function batchProgressSnapshot(b, stage = "", now = Date.now()) {
   const stats = batchPassStats(b);
   const items = [];
   for (const [imageKey, item] of b.items?.entries?.() || []) {
-    if (!item || item.attempt !== stats.pass) continue;
+    if (!item || (!b.reader && item.attempt !== stats.pass)) continue;
     items.push(publicItem(imageKey, item, b.createdAt || now, now));
   }
   items.sort(
@@ -363,9 +404,15 @@ export function batchProgressSnapshot(b, stage = "", now = Date.now()) {
     pageInstanceId,
     sequence: Number(b.progressSequence) || 0,
     stage: String(stage || ""),
+    lifecycle: b.cancelled ? "cancelled" : b.lifecycle || "processing",
+    completedAt: b.completedAt || 0,
+    processingComplete: b.reader?.processingComplete === true,
+    placement: b.reader ? {released:b.reader.released === true,
+      waiting:[...b.items.values()].filter(i=>i.presentation?.placementPending).length,
+      placed:items.filter(i=>i.inserted).length} : null,
     repair: b.repair || null,
     stats,
-    total: Math.max(stats.total, active + terminal),
+    total: b.reader ? b.items.size : Math.max(stats.total, active + terminal),
     active,
     terminal,
     phaseCounts,
@@ -388,7 +435,8 @@ export function batchToast(b, text, ms = 2000, force = false) {
   sendToastToTab(b.tabId, b.frameId || 0, text, ms, {
     batchId: b.id, startedAt: b.createdAt, pageInstanceId,
     sequence: b.progressSequence = (Number(b.progressSequence) || 0) + 1,
-    active: !b.cancelled && (!stats.total || stats.finished < stats.total || repairPending),
+    active: !b.cancelled && (b.lifecycle === "discovering" || stats.finished < stats.total ||
+      (repairPending && !b.reader?.processingComplete)),
   });
 }
 
@@ -566,6 +614,7 @@ export function batchMark(batchId, imageKey, patch) {
     if (after !== before || !next.phaseAt) next.phaseAt = Date.now();
     next.phase = after;
     next.progress = reduceImageProgress(cur.progress, after, { ...patch, ...next }, Date.now());
+    placementProgress(next);
     b.items.set(k, next);
     publishImageStatus(b, k, next);
   }
@@ -577,6 +626,7 @@ export function updateImagePresentation(batchId, imageKey, patch = {}) {
   const b = getBatch(batchId), item = b?.items?.get(String(imageKey || ""));
   if (!item || b.cancelled) return;
   const now = Date.now();
+  if (patch.placementPending && item.presentation?.placementConfirmed) patch={...patch,placementPending:false};
   item.presentation = {...(item.presentation || {}), ...patch};
   item.progress = mergeProgressDetail(item.progress, patch, now);
   // Repair owns the deferred terminal boundary for initial AI failures. Once it
@@ -590,6 +640,11 @@ export function updateImagePresentation(batchId, imageKey, patch = {}) {
     // Terminal means no work remains, not that every unit translated correctly.
     item.progress = mergeProgressDetail(item.progress, patch, now);
   }
+  if (patch.placementConfirmed && TERMINAL_PHASES.has(canonicalPhase(item))) {
+    item.progress = reduceImageProgress(item.progress, canonicalPhase(item), {stage:'Reader placement confirmed',status:item.status,lastError:item.lastError}, now);
+    item.progress = mergeProgressDetail(item.progress, patch, now);
+  }
+  placementProgress(item);
   publishImageStatus(b, String(imageKey), item);
   if(patch?.insertionAck || patch?.translationMode==='conversation'||patch?.conversation)
     batchUpdateToast(b, patch?.insertionAck ? 'Translation placed' : patch?.conversation?.phase || '', false);

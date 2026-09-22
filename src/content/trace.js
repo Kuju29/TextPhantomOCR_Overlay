@@ -210,6 +210,8 @@
   }
 
   const SKIP = new Set([
+    "readerCurrent", "findReaderTarget", "readerOriginalFor", "readerImageForKey",
+    "readerOwnsRun", "noteReaderAppliedSource",
     "updateImageStatus",
     "clearImageStatuses",
     "targetInstanceFor",

@@ -152,3 +152,28 @@ export function cancelTab(tabId, reason = "navigation") {
 export function reportOnStartup() {
   return track("reportOnStartup", () => store.reportOnStartup());
 }
+
+// Serialized, idempotent placement observations may race a content ACK with
+// the worker's pending receipt. Read the real state rather than guessing order.
+function observePlacement(workflowId, applied) {
+  if(!workflowId || cancellingWorkflows.has(workflowId))return Promise.resolve(null);
+  const previous=pending.get(workflowId)||Promise.resolve();
+  const work=previous.then(()=>track('readerPlacement',async()=>{
+    let record=await store.get(workflowId);
+    if(!record || cancellingWorkflows.has(workflowId))return null;
+    if(applied && record.state===STATES.APPLY_PENDING){
+      await store.advance(workflowId,STATES.APPLY_REQUESTED,{operation:`reader:${workflowId}`});
+      record=await store.get(workflowId);
+    }
+    if(record.state===STATES.APPLY_REQUESTED){
+      await store.advance(workflowId,applied ? STATES.APPLIED : STATES.APPLY_PENDING);
+      if(applied)workflowTabs.delete(workflowId);
+    }
+    return null;
+  }));
+  pending.set(workflowId,work);
+  void work.then(()=>{if(pending.get(workflowId)===work)pending.delete(workflowId);});
+  return work;
+}
+export const placementPending = workflowId => observePlacement(workflowId,false);
+export const confirmPlacement = workflowId => observePlacement(workflowId,true);

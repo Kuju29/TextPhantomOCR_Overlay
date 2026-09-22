@@ -4,6 +4,7 @@ const MESSAGE_SCRIPT_ID = "textphantom-message-display";
 
 const MESSAGE_DISPLAY_SCRIPTS = [
   "shared/compat.js",
+  "shared/log-serialization.js",
   "content/namespace.js",
   "content/keepalive.js",
   "content/dom-utils.js",

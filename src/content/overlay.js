@@ -46,7 +46,7 @@
 
   function nudgeOverlay(imgElement, schedule) {
     schedule();
-    if (!imgElement.complete) {
+    if (imgElement.tagName !== 'CANVAS' && !imgElement.complete) {
       imgElement.addEventListener("load", schedule, {
         once: true,
         passive: true,
@@ -65,6 +65,7 @@
     canApply = () => true,
     traceId = "",
     presentationOwner = "",
+    logicalKey = "",
   ) {
     if (!canApply()) return { stale: true };
     const renderingStarted = clock();
@@ -143,7 +144,7 @@
         }
       : (() => {
           const key =
-            TP.normUrl(original) || TP.normUrl(TP.getBestImgUrl(imgElement));
+            logicalKey || TP.normUrl(original) || TP.normUrl(TP.getBestImgUrl(imgElement));
           return key
             ? {
                 key,

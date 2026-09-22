@@ -25,7 +25,7 @@ import {
 } from "../shared/series.js";
 import { getApiBase } from "./api.js";
 import { getSeriesMemory, selectPromptMemory } from "./series-memory.js";
-import { ensureBatch, batchUpdateToast } from "./batches.js";
+import { ensureBatch, batchUpdateToast, batchStopKeepAlive, registerBatchPayload } from "./batches.js";
 import { fetchImageDataUriFromTab } from "./images.js";
 import { describeLimits } from "./job-queue.js";
 import { imageKeyFromPayload } from "./job-keys.js";
@@ -475,13 +475,7 @@ async function handleTranslateOne(menuInfo, tab, ctx) {
   const batch = ensureBatch(batchId, tab.id, frameId);
   batch.total1 = 1;
   const key = imageKeyFromPayload(payload);
-  if (key)
-    batch.items.set(key, {
-      payload,
-      attempt: 1,
-      status: "queued",
-      lastError: "",
-    });
+  registerBatchPayload(batch,payload,key);
   batchUpdateToast(batch, "Collecting", true);
 
   await repairCoordinator.registerBatch(batch, [payload]);
@@ -491,6 +485,7 @@ async function handleTranslateOne(menuInfo, tab, ctx) {
 
 // Normalises a page image-scan response into its items and stats.
 function unpackImageScanResponse(resp) {
+  if (resp?.ok === false) throw Object.assign(new Error(resp.error || "Image discovery failed"),{code:resp.code});
   if (Array.isArray(resp)) return { items: resp, stats: null };
   const items = Array.isArray(resp?.items) ? resp.items : [];
   return { items, stats: resp?.stats || null };
@@ -543,6 +538,7 @@ async function handleTranslateAll(menuInfo, tab, ctx) {
     { type: "GET_IMAGES" },
     scanFrameId,
   );
+  if (primaryResp == null && !menuInfo.frameId) throw new Error("IMAGE_DISCOVERY_UNAVAILABLE");
   const primary = unpackImageScanResponse(primaryResp);
   images = primary.items;
   scanStats = primary.stats;
@@ -552,6 +548,7 @@ async function handleTranslateAll(menuInfo, tab, ctx) {
       { type: "GET_IMAGES" },
       menuInfo.frameId,
     );
+    if (altResp == null && primaryResp == null) throw new Error("IMAGE_DISCOVERY_UNAVAILABLE");
     const alt = unpackImageScanResponse(altResp);
     scanStats = mergeScanStats(scanStats, alt.stats);
     if (alt.items.length) {
@@ -639,14 +636,7 @@ async function handleTranslateAll(menuInfo, tab, ctx) {
     Number(scanStats?.skipped || 0) + Number(scanStats?.duplicates || 0);
   for (const pl of payloads) {
     const k = imageKeyFromPayload(pl);
-    if (k && !batch.items.has(k)) {
-      batch.items.set(k, {
-        payload: pl,
-        attempt: 1,
-        status: "queued",
-        lastError: "",
-      });
-    }
+    registerBatchPayload(batch,pl,k);
   }
   batchUpdateToast(batch, "Collecting", true);
 
@@ -672,6 +662,7 @@ async function handleTranslateAll(menuInfo, tab, ctx) {
  *          debug?: {raw?: boolean}|null, propagateErrors?: boolean}} [options]
  */
 async function dispatchContextMenuClick(menuInfo, tab, options = {}) {
+  let startingBatch = null;
   if (!tab?.id) return;
   await Promise.all([restoreSettingsEpoch(), restoreTabSessions()]);
   log.info("menu click", menuInfo.menuItemId);
@@ -782,6 +773,8 @@ async function dispatchContextMenuClick(menuInfo, tab, options = {}) {
 
     const batchId = crypto.randomUUID();
     setCurrentBatchId(batchId);
+    startingBatch = ensureBatch(batchId,tab.id,menuInfo.menuItemId === "img_all" ? 0 : Number(menuInfo.frameId)||0);
+    batchUpdateToast(startingBatch,"Discovering images",true);
 
     await getApiBase().catch(() => "");
 
@@ -830,12 +823,20 @@ async function dispatchContextMenuClick(menuInfo, tab, options = {}) {
       }
     }
 
-    if (menuInfo.menuItemId === "img_one") {
-      return await handleTranslateOne(menuInfo, tab, ctx);
-    } else if (menuInfo.menuItemId === "img_all") {
-      return await handleTranslateAll(menuInfo, tab, ctx);
+    const result = menuInfo.menuItemId === "img_one" ? await handleTranslateOne(menuInfo,tab,ctx)
+      : menuInfo.menuItemId === "img_all" ? await handleTranslateAll(menuInfo,tab,ctx) : null;
+    if (!result && !startingBatch.items.size) {
+      startingBatch.lifecycle='empty';startingBatch.completedAt=Date.now();
+      batchUpdateToast(startingBatch,'No eligible images',true);
+      await batchStopKeepAlive(startingBatch);
     }
+    return result;
   } catch (e) {
+    if (startingBatch) {
+      startingBatch.lifecycle="failed";startingBatch.completedAt=Date.now();
+      batchUpdateToast(startingBatch,`Discovery failed: ${e?.message || String(e)}`,true);
+      await batchStopKeepAlive(startingBatch);
+    }
     log.error("menu handler error", e);
     if (aiConfigurationIssueForError(e) || [
       "AI_PROFILE_INVALID",
@@ -856,6 +857,10 @@ async function dispatchContextMenuClick(menuInfo, tab, options = {}) {
         getTrace(),
       );
       e = showAiConfigurationError(menuInfo, tab, e);
+    } else {
+      const shown = publicTpError(e);
+      sendToastToTab(tab?.id, Number(menuInfo?.frameId) || 0,
+        `TextPhantom: ${shown.userMessage} · ${shown.code}`, 12000);
     }
     // Browser context-menu clicks historically report errors through logging,
     // toast/image messages. Programmatic callers need the rejected Promise so

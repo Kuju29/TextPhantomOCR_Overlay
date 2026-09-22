@@ -139,46 +139,51 @@
         continue;
       }
 
+      const readerKey=key.startsWith('tp-reader:');
       let img = rec.img;
-      if (!img || !img.isConnected) img = TP.findTargetImage(key);
+      if (readerKey) img = TP.readerImageForKey?.(key);
+      else {
+        if (!img || !img.isConnected) img = TP.findTargetImage(key);
+      }
       if (!img) {
-        setOverlayStyleIfChanged(host, "display", "none");
+        setOverlayStyleIfChanged(host, "display", "none", readerKey ? "important" : "");
         disconnectOverlayResizeObserver(rec);
         rec.img = null;
         continue;
       }
 
+      const expectedKey = TP.readerOriginalFor?.(key) || key;
       const curKey = TP.normUrl(TP.getBestImgUrl(img));
       const sameIdentity =
-        TP.imageIdentity?.(curKey) === TP.imageIdentity?.(key);
-      if (curKey && curKey !== key && !sameIdentity) {
-        setOverlayStyleIfChanged(host, "display", "none");
+        TP.imageIdentity?.(curKey) === TP.imageIdentity?.(expectedKey);
+      if (!readerKey && curKey && curKey !== expectedKey && !sameIdentity) {
+        setOverlayStyleIfChanged(host, "display", "none", readerKey ? "important" : "");
         disconnectOverlayResizeObserver(rec);
         rec.img = null;
         continue;
       }
 
       if (img !== rec.img) {
-        if (img?.dataset) img.dataset.tpOriginal = key;
+        if (img?.dataset && !key.startsWith('tp-reader:')) img.dataset.tpOriginal = key;
       }
       bindOverlayResizeObserver(rec, img, key);
 
       const parent = ensureOverlayHostMountedNearImage(rec, img);
       if (!parent) {
-        setOverlayStyleIfChanged(host, "display", "none");
+        setOverlayStyleIfChanged(host, "display", "none", readerKey ? "important" : "");
         rec.img = img;
         continue;
       }
 
       const { r, left, top } = getOverlayBoxFromParent(img, parent);
       if (r.width < 2 || r.height < 2) {
-        setOverlayStyleIfChanged(host, "display", "none");
+        setOverlayStyleIfChanged(host, "display", "none", readerKey ? "important" : "");
         rec.img = img;
         continue;
       }
 
       rec.img = img;
-      setOverlayStyleIfChanged(host, "display", "block");
+      setOverlayStyleIfChanged(host, "display", "block", readerKey ? "important" : "");
       setOverlayStyleIfChanged(host, "left", `${left}px`, "important");
       setOverlayStyleIfChanged(host, "top", `${top}px`, "important");
       setOverlayStyleIfChanged(host, "width", `${r.width}px`, "important");
@@ -307,8 +312,8 @@
     rec.baseW = Number.isFinite(baseW) && baseW > 0 ? baseW : 1;
     rec.baseH = Number.isFinite(baseH) && baseH > 0 ? baseH : 1;
     rec.kind = kind || "html";
-    if (img?.dataset && !img.dataset.tpOriginal) img.dataset.tpOriginal = key;
-    bindOverlayResizeObserver(rec, img);
+    if (img?.dataset && !key.startsWith('tp-reader:') && !img.dataset.tpOriginal) img.dataset.tpOriginal = key;
+    bindOverlayResizeObserver(rec, img, key);
     return rec;
   }
 
@@ -361,10 +366,31 @@
     return removed;
   }
 
+  function hasHtmlOverlay(key,img) {
+    const rec = htmlOverlaysByKey.get(key);
+    return !!rec && rec.img === img && rec.host?.isConnected === true && rec.scope?.isConnected === true &&
+      (!key.startsWith('tp-reader:') || (rec.host.parentElement===img?.parentElement &&
+        rec.scope.parentElement===rec.host && (!rec.cleanImg?.getAttribute('src') ||
+          (rec.cleanImg.isConnected && rec.cleanImg.parentElement===rec.host))));
+  }
+
+  function dropHtmlOverlay(key) {
+    const rec = htmlOverlaysByKey.get(key);
+    if (!rec) return;
+    disconnectOverlayResizeObserver(rec);
+    TP.overlayBackground.release(rec);
+    if (rec.rasterBlobUrl?.startsWith('blob:')) {
+      try { URL.revokeObjectURL(rec.rasterBlobUrl); } catch {}
+    }
+    rec.cleanImg?.remove(); rec.host?.remove();
+    htmlOverlaysByKey.delete(key);
+    htmlOverlayPendingKeys.delete(key);
+  }
+
   function hideHtmlOverlay(key) {
     const rec = htmlOverlaysByKey.get(key);
     if (rec?.cleanImg) rec.cleanImg.style.display = "none";
-    if (rec?.host) rec.host.style.display = "none";
+    if (rec?.host) rec.host.style.setProperty("display", "none", key.startsWith("tp-reader:") ? "important" : "");
   }
 
   // Schedules an overlay update now and again once the image finishes loading.
@@ -374,6 +400,13 @@
     ensureOverlayHostMountedNearImage,
     getOverlayBoxFromParent,
     hideHtmlOverlay,
+    hasHtmlOverlay,
+    hasRasterOverlay: (key,img) => {
+      const rec=htmlOverlaysByKey.get(key);
+      return hasHtmlOverlay(key,img) && rec.kind==='raster' && rec.cleanImg?.isConnected === true &&
+        rec.cleanImg.src===rec.rasterSource && rec.cleanImg.style.display!=='none';
+    },
+    dropHtmlOverlay,
     overlayMutationsNeedUpdate,
     resetForNavigation,
     scheduleHtmlOverlayUpdate,

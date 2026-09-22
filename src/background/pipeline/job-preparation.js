@@ -1,81 +1,11 @@
-// Image acquisition happens before the Lens/AI lanes. Keep it independently
-// bounded so a large chapter cannot fetch and base64-encode every image at once.
-export function createPrefetchAdmission(maxActive = 4) {
-  const limit = Math.max(1, Math.floor(Number(maxActive) || 4));
-  let active = 0;
-  const waiters = [];
+import { note as traceNote } from "../../shared/trace.js";
 
-  function pump() {
-    while (active < limit && waiters.length) {
-      const waiter = waiters.shift();
-      if (waiter.signal?.aborted) {
-        waiter.reject(new DOMException("The operation was aborted", "AbortError"));
-        continue;
-      }
-      active += 1;
-      waiter.signal?.removeEventListener?.("abort", waiter.onAbort);
-      waiter.resolve(() => {
-        if (waiter.released) return;
-        waiter.released = true;
-        active = Math.max(0, active - 1);
-        pump();
-      });
-    }
-  }
-
-  function acquire(signal = null) {
-    if (signal?.aborted)
-      return Promise.reject(new DOMException("The operation was aborted", "AbortError"));
-    return new Promise((resolve, reject) => {
-      const waiter = { signal, resolve, reject, released: false, onAbort: null };
-      waiter.onAbort = () => {
-        const index = waiters.indexOf(waiter);
-        if (index >= 0) waiters.splice(index, 1);
-        reject(new DOMException("The operation was aborted", "AbortError"));
-      };
-      signal?.addEventListener?.("abort", waiter.onAbort, { once: true });
-      waiters.push(waiter);
-      pump();
-    });
-  }
-
-  return {
-    acquire,
-    async run(work, signal = null) {
-      const release = await acquire(signal);
-      try {
-        if (signal?.aborted)
-          throw new DOMException("The operation was aborted", "AbortError");
-        return await work();
-      } finally {
-        release();
-      }
-    },
-    describe: () => ({ active, queued: waiters.length, limit }),
-  };
-}
-
-export const imagePrefetchAdmission = createPrefetchAdmission(4);
-
-// Fetch completion does not end the lifetime of a large base64 allocation.
-// Keep its admission lease outside the serializable payload until the complete
-// image job has consumed it (or stopped on any error/cancellation path).
-const retainedPayloads = new WeakMap();
-
-function retainPreparedDataUri(payload, release) {
-  retainedPayloads.get(payload)?.();
-  retainedPayloads.set(payload, release);
-}
-
+// Image jobs are admitted by their existing resource lanes. Preparing one
+// image must not hold a chapter-wide permit until that image's AI has finished.
 export function releasePreparedDataUri(payload) {
   if (!payload || typeof payload !== "object") return;
-  const release = retainedPayloads.get(payload);
-  if (release) {
-    retainedPayloads.delete(payload);
-    release();
-  }
-  // Repair/checkpoint owns an independently bounded cache entry.  Do not let
-  // pending/batch records retain a second per-job reference after terminal.
+  // Repair/checkpoint has its own cache. Do not retain a second payload
+  // reference in terminal batch records.
   delete payload.imageDataUri;
 }
 
@@ -88,6 +18,7 @@ export function createJobPreparation(dependencies) {
     shouldPrefetch,
     fetchFromTab,
     fetchFromUrl,
+    acquireReader,
     getCached,
     setCached,
     normalizeImageKey,
@@ -97,7 +28,6 @@ export function createJobPreparation(dependencies) {
     onPermanentReadError,
     logInfo,
     logWarn,
-    prefetchAdmission = imagePrefetchAdmission,
   } = dependencies;
 
   async function stopIfBatchWasCancelled() {
@@ -114,7 +44,7 @@ export function createJobPreparation(dependencies) {
     if (signal?.aborted) return { stopped: true, cancelled: true };
     onDownloadStarted();
     const src = String(payload.src || "").trim();
-    const key = normalizeImageKey(src);
+    const key = payload.reader?.runId ? `reader:${payload.reader.runId}:${src}` : normalizeImageKey(src);
     const cached = getCached(key);
     if (cached) {
       payload.imageDataUri = cached;
@@ -125,45 +55,43 @@ export function createJobPreparation(dependencies) {
     const browserOnlySrc =
       /^(?:blob:|file:|chrome-extension:|moz-extension:)/i.test(src);
     try {
-      const { dataUri, release } = await fetchWithRetention(() => src.startsWith("data:")
+      const dataUri = await (payload.reader?.runId && acquireReader
+        ? acquireReader(payload,{tabId,frameId,pageUrl,signal})
+        : src.startsWith("data:")
         ? src
         : browserOnlySrc
           ? fetchFromTab(tabId, src, frameId, signal)
-          : fetchFromUrl(src, pageUrl, signal), signal);
+          : fetchFromUrl(src, pageUrl, signal));
       if (signal?.aborted) {
-        release();
         return { stopped: true, cancelled: true };
       }
       if (dataUri) {
-        applyRetainedDataUri(payload, dataUri, key, "prefetch_datauri", release, {
+        applyPreparedDataUri(payload, dataUri, key, "prefetch_datauri", {
           ms: Date.now() - startedAt,
+          acquisitionMs: Date.now() - startedAt,
           kb: Math.round(dataUri.length / 1024),
         });
-      } else {
-        release();
       }
       return { stopped: false };
     } catch (error) {
       if (error?.name === "AbortError")
         return { stopped: true, cancelled: true };
       let message = error?.message || String(error);
-      if (!browserOnlySrc && /\bHTTP 403\b/i.test(message) && tabId) {
+      if (!payload.reader && !browserOnlySrc && /\bHTTP 403\b/i.test(message) && tabId) {
         try {
-          const { dataUri, release } = await fetchWithRetention(
-            () => fetchFromTab(tabId, src, frameId, signal), signal);
+          const fallbackAt = Date.now();
+          const dataUri = await fetchFromTab(tabId, src, frameId, signal);
           if (signal?.aborted) {
-            release();
             return { stopped: true, cancelled: true };
           }
           if (dataUri) {
-            applyRetainedDataUri(
-              payload, dataUri, key, "prefetch_datauri_tab", release,
-              { ms: Date.now() - startedAt, kb: Math.round(dataUri.length / 1024) },
+            applyPreparedDataUri(
+              payload, dataUri, key, "prefetch_datauri_tab",
+              { ms: Date.now() - startedAt, acquisitionMs: Date.now() - fallbackAt,
+                kb: Math.round(dataUri.length / 1024) },
               "datauri prefetch ok (tab fallback)",
             );
             message = null;
-          } else {
-            release();
           }
         } catch (fallbackError) {
           if (fallbackError?.name === "AbortError")
@@ -174,7 +102,7 @@ export function createJobPreparation(dependencies) {
       }
 
       if (!message) return { stopped: false };
-      const classification = browserOnlySrc
+      const classification = browserOnlySrc || payload.reader?.runId
         ? { permanent: true }
         : classifyError(message);
       logWarn("datauri prefetch failed", {
@@ -195,34 +123,21 @@ export function createJobPreparation(dependencies) {
     }
   }
 
-  async function fetchWithRetention(work, signal) {
-    const release = await prefetchAdmission.acquire(signal);
-    try {
-      if (signal?.aborted)
-        throw new DOMException("The operation was aborted", "AbortError");
-      return { dataUri: await work(), release };
-    } catch (error) {
-      release();
-      throw error;
-    }
-  }
-
-  function applyRetainedDataUri(
-    payload, dataUri, key, stage, release, details, message = "datauri prefetch ok",
+  function applyPreparedDataUri(
+    payload, dataUri, key, stage, details, message = "datauri prefetch ok",
   ) {
-    let transferred = false;
     try {
-      logInfo(message, details);
+      logInfo(message, { ...details, admission: "stage_owned" });
+      traceNote("background/pipeline/job-preparation.js", "imageAcquisition", {
+        schema:'tp.audit/1',event:'image_status',phase:'downloading',reason:'finished',
+        scope:{batchId:payload.metadata?.batch_id || '',imageId:payload.metadata?.image_id || '',
+          runId:payload.reader?.runId || '',pageId:`p${payload.reader?.pageId ?? ((payload.context?.page_index ?? 0) + 1)}`},
+        timing:{queueMs:0,readMs:details.acquisitionMs || 0,elapsedMs:details.ms || 0},
+      }, payload.context?.tp_trace || "");
       applyDataUri(payload, dataUri, key, stage);
-      retainPreparedDataUri(payload, release);
-      transferred = true;
-    } finally {
-      // Observer/cache failures are unusual, but must not leak an admission
-      // slot and deadlock every later image in the chapter.
-      if (!transferred) {
-        delete payload.imageDataUri;
-        release();
-      }
+    } catch (error) {
+      delete payload.imageDataUri;
+      throw error;
     }
   }
 

@@ -196,7 +196,9 @@ export function mergeProgressDetail(progress, patch = {}, now = Date.now()) {
   // This is a DOM receipt, not AI/accounting completion. A later conflict may
   // replace a provisional translation with a badge; keep Insert truthful.
   if (typeof patch?.insertionAck?.present === "boolean") {
-    next.insert = {...next.insert, state:patch.insertionAck.present ? "done" : "skipped",
+    // An acknowledged error badge is not an intentionally skipped image.
+    const terminalFailure = progressEvent?.lane === "insert" && ["error", "cancelled"].includes(progressEvent.state);
+    next.insert = {...next.insert, state:terminalFailure ? progressEvent.state : patch.insertionAck.present ? "done" : "skipped",
       startedAt:next.insert.startedAt || now, finishedAt:now,
       detail:String(progressEvent?.detail || (patch.insertionAck.present ? "Placed on page" : "No translation layer")).slice(0,180)};
   }

@@ -2,7 +2,8 @@
   "permissions": [
     "menus",
     "storage",
-    "activeTab"
+    "activeTab",
+    "declarativeNetRequestWithHostAccess"
   ],
   "background": {
     "scripts": [

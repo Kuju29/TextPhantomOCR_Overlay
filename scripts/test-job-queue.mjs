@@ -4,7 +4,6 @@ import { readFile } from "node:fs/promises";
 import { buildEnqueuePolicy } from "../src/background/pipeline/enqueue-policy.js";
 import {
   createJobPreparation,
-  createPrefetchAdmission,
   releasePreparedDataUri,
 } from "../src/background/pipeline/job-preparation.js";
 import { fetchImageDataUriFromUrl } from "../src/background/images.js";
@@ -289,78 +288,66 @@ function preparationFixture(overrides = {}) {
   releasePreparedDataUri(payload);
 }
 
-// Fast fetches followed by a blocked downstream consumer must still bound the
-// number of fetched data URIs retained by job payloads.  Fetch concurrency alone
-// is not the memory invariant.
-{
-  const admission = createPrefetchAdmission(3);
+// Preparation must not wait for a whole image job's Lens/AI to finish. Both
+// NORMAL and DYNAMIC share stage-owned admission, with no chapter-wide cap.
+for (const dynamic of [false, true]) {
   let fetched = 0;
-  let retained = 0;
-  let peakRetained = 0;
   const ready = [];
-  const fixture = preparationFixture({
-    prefetchAdmission: admission,
-    fetchFromUrl: async () => {
-      fetched++;
-      return "data:image/png;base64,BOUNDED";
-    },
-  });
-  const payloads = Array.from({ length: 18 }, (_, index) => ({
-    src: `https://cdn.test/${index}.png`, metadata: {},
+  const fetchImage = async () => { fetched++; return "data:image/png;base64,PARALLEL"; };
+  const fixture = preparationFixture({ fetchFromUrl: fetchImage, acquireReader: fetchImage });
+  const payloads = Array.from({length:28}, (_,index) => ({
+    src:`https://cdn.test/${index}.png`,metadata:{},
+    ...(dynamic ? {reader:{runId:'reader',pageId:String(index+1)}} : {}),
   }));
-  const jobs = payloads.map((payload) => fixture.preparation.prefetchDataUri(payload).then(result => {
-    if (!result.stopped) {
-      retained++;
-      peakRetained = Math.max(peakRetained, retained);
-      ready.push(payload);
-    }
-    return result;
-  }));
-  await waitUntil(() => ready.length === 3 && admission.describe().queued === 15);
-  assert.equal(fetched, 3, "fast fetches must stop when retained payloads fill admission");
-  let released = 0;
-  while (released < payloads.length) {
-    if (!ready.length) await waitUntil(() => ready.length > 0);
-    const payload = ready.shift();
+  await Promise.all(payloads.map(payload => fixture.preparation.prefetchDataUri(payload).then(result => {
+    assert.equal(result.stopped,false);ready.push(payload);
+  })));
+  assert.equal(fetched,28);
+  assert.equal(ready.length,28,"later images must prepare before any downstream job releases its bytes");
+  for(const payload of payloads) {
+    assert.ok(payload.imageDataUri);
     releasePreparedDataUri(payload);
-    retained--;
-    released++;
+    assert.equal(payload.imageDataUri,undefined);
+    releasePreparedDataUri(payload); // terminal cleanup is idempotent
   }
-  await Promise.all(jobs);
-  assert.ok(peakRetained <= 3, `retained ${peakRetained} exceeded configured limit`);
-  assert.equal(admission.describe().active, 0);
-  assert.equal(admission.describe().queued, 0);
 }
 
-// Navigation abort removes waiting acquisitions before they fetch and releases
-// active acquisitions without reporting an image-read failure.
+// Navigation still aborts every in-flight preparation without a read failure.
 {
-  const admission = createPrefetchAdmission(2);
   const ctrl = new AbortController();
   let startedFetches = 0;
   const fixture = preparationFixture({
-    prefetchAdmission: admission,
     fetchFromUrl: (_src, _pageUrl, signal) => new Promise((_resolve, reject) => {
       startedFetches++;
       signal.addEventListener("abort", () =>
         reject(new DOMException("The operation was aborted", "AbortError")), { once: true });
     }),
   });
-  const jobs = Array.from({ length: 12 }, (_, index) =>
-    fixture.preparation.prefetchDataUri(
-      { src: `https://cdn.test/cancel-${index}.png`, metadata: {} },
-      { signal: ctrl.signal },
-    ));
-  await waitUntil(() => admission.describe().active === 2 && admission.describe().queued === 10);
+  const jobs = Array.from({length:12},(_,index)=>fixture.preparation.prefetchDataUri(
+    {src:`https://cdn.test/cancel-${index}.png`,metadata:{}},{signal:ctrl.signal}));
+  assert.equal(startedFetches,12);
   ctrl.abort();
-  const outcomes = await Promise.all(jobs);
-  assert.equal(startedFetches, 2, "queued cancelled prefetches must never call fetch");
-  assert.ok(outcomes.every(result => result.stopped && result.cancelled));
-  assert.deepEqual(admission.describe(), { active: 0, queued: 0, limit: 2 });
-  assert.equal(fixture.calls.some(([name]) => name === "updated"), false,
-    "cancelled preparation must not publish stale Lens/AI/DOM payload state");
-  assert.equal(fixture.calls.some(([name]) => name === "permanent"), false,
-    "navigation abort must not become a user-visible image error");
+  const outcomes=await Promise.all(jobs);
+  assert.ok(outcomes.every(result=>result.stopped && result.cancelled));
+  const before=startedFetches;
+  assert.deepEqual(await fixture.preparation.prefetchDataUri(
+    {src:'https://cdn.test/already-aborted.png',metadata:{}},{signal:ctrl.signal}),
+    {stopped:true,cancelled:true});
+  assert.equal(startedFetches,before,"pre-cancelled work must never fetch");
+  assert.equal(fixture.calls.some(([name])=>name==='updated'),false);
+  assert.equal(fixture.calls.some(([name])=>name==='permanent'),false);
+}
+
+// A transport which resolves after cancellation must not publish stale bytes.
+{
+  const ctrl=new AbortController();let finish;
+  const fixture=preparationFixture({fetchFromUrl:()=>new Promise(resolve=>{finish=resolve;})});
+  const payload={src:'https://cdn.test/late.png',metadata:{}};
+  const work=fixture.preparation.prefetchDataUri(payload,{signal:ctrl.signal});
+  ctrl.abort();finish('data:image/png;base64,LATE');
+  assert.deepEqual(await work,{stopped:true,cancelled:true});
+  assert.equal(payload.imageDataUri,undefined);
+  assert.equal(fixture.calls.some(([name])=>name==='updated'),false);
 }
 
 // The worker-side URL fetch receives the same signal, so cancellation stops

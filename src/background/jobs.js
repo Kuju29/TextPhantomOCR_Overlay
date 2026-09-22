@@ -1,3 +1,6 @@
+import { completeBatch } from "./reader-placement.js";
+import { cancelTrackedBatches, cancelBatchState } from "./reader-events.js";
+import { acquireReaderImage } from "./reader-acquisition.js";
 import {requireConversationApi} from "../shared/ai/conversation/support.js";
 import {reserveConversationJob, finishConversationJob, enterConversationJob, cancelConversationJobs} from "./ai/translation-paths/order.js";
 import { applyRuntimeCapacityHints } from "./jobs/capacity-policy.js";
@@ -10,6 +13,7 @@ import { setLogShippingEnabled } from "../shared/log-sink.js";
 import { getApiBase } from "./api.js";
 import {
   ensureBatch,
+  registerBatchPayload,
   getBatch,
   batchMark,
   markImagePhase,
@@ -21,10 +25,10 @@ import {
 } from "./batches.js";
 import {
   classifyJobError,
-  fetchImageDataUriFromUrl,
   fetchImageDataUriFromTab,
   selectBatchRetryCandidates,
 } from "./images.js";
+import { fetchImageDataUriWithReferer as fetchImageDataUriFromUrl } from "./image-acquisition.js";
 import { addTask } from "./job-queue.js";
 import { imageKeyFromPayload, normImgSrc } from "./job-keys.js";
 import {
@@ -276,7 +280,7 @@ async function runStageInLane(
       if (code === "server_busy" || Number(error?.status) === 429) {
         releaseRejected(key, retryAfterMs);
       } else {
-        // Session refresh / other temporary service conditions are time waits,
+        // Other temporary service conditions are lane-wide time waits,
         // not evidence that client concurrency itself was too high.
         releaseGated(key, retryAfterMs);
       }
@@ -335,21 +339,16 @@ const { finalizeBatch } = createBatchRetryCoordinator({
   setCachedDataUri,
   classifyJobError,
   enqueue,
-  onComplete: async (batch, label) => {
-    const owned = await repairCoordinator.finishInitial(batch);
-    if (!owned) { batchUpdateToast(batch, batch.repair?.phase === 'unavailable'
-      ? `${label}; repair unavailable: ${batch.repair.code || 'API/session error'}` : label, true); await batchStopKeepAlive(batch); }
-  },
+  onComplete: (batch,label) => completeBatch(batch,label,repairCoordinator),
 });
 export { finalizeBatch };
-
 const { failJobImmediately, handleStaleJob, handleJobError, handleResult, handleProvisionalResult } =
   createResultDelivery({
     accumulateSeriesMemory,
     batchUpdateToast,
     classifyJobError,
     enqueueDomInsert,
-    ensureBatch,
+    ensureBatch: getBatch,
     evaluateTextNoOverlaySkippable,
     finalizeBatch,
     findContext,
@@ -389,7 +388,7 @@ const { planLocalAi, runLocalAiInLane, waitForRetry } = createAiExecution({
 });
 
 function shouldPrefetchDataUri(payload) {
-  return applyImageSourcePolicy(payload, evaluateDataUriPrefetch);
+  return Boolean(payload?.reader?.runId && !payload.imageDataUri) || applyImageSourcePolicy(payload, evaluateDataUriPrefetch);
 }
 
 // Processes one image payload end to end, from data-URI prefetch to the translate call.
@@ -416,8 +415,10 @@ async function processJobInner(payload, tabId, frameId = 0) {
   // function is admitted. Do not recreate workflow/status or contact Lens/AI.
   if (batchId && getBatch(batchId)?.cancelled) return;
   const imageKey = imageKeyFromPayload(payload);
-  const batch = batchId ? ensureBatch(batchId, tabId, frameId) : null;
-  let traceId = "";
+  const batch = batchId ? registerBatchPayload(ensureBatch(batchId,tabId,frameId),payload,imageKey) : null;
+  const traceId = newTraceId();
+  if (!payload.context || typeof payload.context !== "object") payload.context = {};
+  payload.context.tp_trace = traceId;
   if (batch && imageKey) markImagePhase(batchId, imageKey, "waiting");
 
   const pageUrl = payload?.context?.page_url || "";
@@ -460,12 +461,14 @@ async function processJobInner(payload, tabId, frameId = 0) {
     },
   });
 
+  if (batch && imageKey) batchMark(batchId,imageKey,{workflowId});
   const preparation = createJobPreparation({
     batchIsCancelled: () => Boolean(batchId && getBatch(batchId)?.cancelled),
     failWorkflow: (reason) => wf.failed(workflowId, reason),
     shouldPrefetch: shouldPrefetchDataUri,
     fetchFromTab: fetchImageDataUriFromTab,
     fetchFromUrl: fetchImageDataUriFromUrl,
+    acquireReader: acquireReaderImage,
     getCached: getCachedDataUri,
     setCached: setCachedDataUri,
     normalizeImageKey: normImgSrc,
@@ -558,13 +561,7 @@ async function processJobInner(payload, tabId, frameId = 0) {
     ...extra,
   });
 
-  // Create and stamp the trace before capability routing so a compatibility
-  // stop and the registry context are correlated just like a request that
-  // reaches either engine.
-  traceId = newTraceId();
-  if (!payload.context || typeof payload.context !== "object")
-    payload.context = {};
-  payload.context.tp_trace = traceId;
+  // Reuse the trace stamped before acquisition for capability/engine routing.
   setTrace(traceId);
 
   if (payload?.metadata?.image_id) {
@@ -1095,7 +1092,7 @@ export function cancelTabWork(tabId, reason = "navigation", sessionId = "") {
   releaseTabImageJobs(tabId);
   const msg = String(reason || "navigation");
   const cancelledJobIds = [];
-  const cancelledBatchIds = new Set();
+  const cancelledBatchIds = cancelTrackedBatches(tabId,reason,discardBatchResults);
 
   for (const [jobId, ctx] of Array.from(pendingByJob.entries())) {
     if ((ctx?.tabId || 0) !== tabId) continue;
@@ -1184,9 +1181,9 @@ export function discardBatchResults(batchId, reason = "user_cancelled") {
   cancelBatchProviderViaRest(bid);
   void repairCoordinator.cancelBatch(bid, reason);
   releaseBatchImageJobs(bid);
-  const batch = ensureBatch(bid, 0, 0);
-  batch.cancelled = true;
-  batch.cancelRequestedAt = Date.now();
+  const batch = getBatch(bid);
+  if (!batch) return;
+  cancelBatchState(batch,reason);
   abortBatchInFlight(bid, "tp:cancelled");
   for (const [key, item] of batch.items.entries()) {
     if (["done", "error", "aborted", "skipped"].includes(item?.status))

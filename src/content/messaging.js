@@ -6,6 +6,9 @@
 
   // Collects the payloads for a GET_IMAGES request, including the MangaDex path.
   async function collectImages(mode, lang) {
+    const reader = await TP.collectReaderImages?.(mode, lang);
+    if (reader) return reader;
+    TP.cancelReaderRun?.("normal_run", true);
     TP.removeLazyScriptsAndForceSrc();
     TP.normalizeLazyImages();
 
@@ -134,6 +137,13 @@
         );
       }
 
+      if (type === "TP_READER_DOM_FETCH") return sendResponse(await TP.readReaderDomImage(msg));
+      if (type === "TP_READER_RELEASE") return sendResponse(await TP.releaseReaderPlacement(msg.readerRunId));
+      if (type === "TP_READER_CANCEL") {
+        if (!msg.readerRunId || TP.readerOwnsRun?.(msg.readerRunId)) TP.cancelReaderRun?.(msg.reason || "worker_cancel");
+        return sendResponse({ok:true});
+      }
+
       const { mode, lang } = await TP.getSettings();
 
       if (type === "GET_IMAGES") {
@@ -164,7 +174,8 @@
         // than the one that is about to run.
         const wantMode = String(msg?.overrides?.mode || "").trim() || mode;
         const wantLang = String(msg?.overrides?.lang || "").trim() || lang;
-        const payload = img
+        const readerPayload = img ? await TP.buildReaderImagePayload?.(img,wantMode,wantLang) : null;
+        const payload = readerPayload || (img
           ? await TP.buildPayloadFromImage(
               img,
               wantMode,
@@ -173,7 +184,7 @@
               "context_menu_single",
               true,
             )
-          : null;
+          : null);
         return sendResponse({ ok: Boolean(payload), payload });
       }
 
@@ -238,7 +249,10 @@
       }
 
       sendResponse({ ok: true, ignored: true });
-    })();
+    })().catch(error => {
+      TP.log.warn("content request failed", {type:msg?.type,error:error?.message || String(error)});
+      sendResponse({ok:false,error:error?.message || String(error),code:error?.code || ""});
+    });
     return true;
   });
 })();

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TextPhantom — แปลข้อความในภาพมังงะ มังฮวา",
-  "version": "2026.9.19.23",
+  "version": "2026.9.22.8",
   "description": "🧠 Right-click any image → translate images",
   "host_permissions": [
     "<all_urls>"
@@ -13,6 +13,7 @@
       ],
       "js": [
         "shared/compat.js",
+        "shared/log-serialization.js",
         "content/namespace.js",
         "shared/diagnostic-schema.js",
         "shared/image-status-view.js",
@@ -38,11 +39,26 @@
         "content/sites/mangadex/adapter.js",
         "content/sites/mangadex/collector.js",
         "content/mangadex.js",
+        "content/reader/comix-source.js",
+        "content/reader/classification.js",
+        "content/reader/runtime.js",
         "content/messaging.js",
         "content/index.js"
       ],
       "run_at": "document_start",
       "all_frames": true
+    },
+    {
+      "matches": [
+        "*://comix.to/*",
+        "*://*.comix.to/*"
+      ],
+      "js": [
+        "content/reader/comix-page.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
     }
   ],
   "web_accessible_resources": [

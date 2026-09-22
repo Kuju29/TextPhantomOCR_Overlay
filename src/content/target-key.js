@@ -53,6 +53,7 @@
   // Returns whether a result still addresses the image in front of us, with a reason when not.
   function isStillCurrent(img, generation) {
     if (!generation) return { ok: true, reason: "" };
+    if (generation.readerRunId) return TP.readerCurrent?.(img,generation) || {ok:false,reason:"reader unavailable"};
 
     if (
       generation.pageInstanceId &&
@@ -117,6 +118,7 @@
 
   // Starts a new page instance and drops parked waiters, so results from the previous route are refused.
   function resetPageInstance(reason = "") {
+    TP.cancelReaderRun?.(reason || "page_instance_reset", true);
     TP.clearAllImageErrors?.();
     TP.clearToasts?.();
     TP.clearImageStatuses?.();
@@ -134,7 +136,7 @@
   TP.pageInstanceId = pageInstanceId;
   TP.resetPageInstance = resetPageInstance;
   TP.targetKeyFor = targetKeyFor;
-  TP.noteAppliedImageSource = (img, source) => { const entry=targets.get(img); if(entry) entry.appliedSource=TP.normUrl(source); };
+  TP.noteAppliedImageSource = (img, source) => { TP.noteReaderAppliedSource?.(img,source); const entry=targets.get(img); if(entry) entry.appliedSource=TP.normUrl(source); };
   TP.targetInstanceFor = img => targets.get(img)?.instanceId || "";
   TP.targetRevisionFor = targetRevisionFor;
   TP.generationFor = generationFor;

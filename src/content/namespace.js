@@ -53,6 +53,7 @@
   }
 
   function emit(level, args) {
+    args = args.map(value => globalThis.__TPLogSerialization?.normalize(value) ?? value);
     relay(level, args);
     if (LEVELS[level] < currentLevel) return;
     const prefix = `[${new Date().toISOString()}][content][${level.toUpperCase()}]`;

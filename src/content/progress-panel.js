@@ -1,10 +1,10 @@
 (function(){
   const TP=window.__TP;if(!TP||TP.bail)return;
   let root=null,main=null,textEl=null,body=null,toggleBtn=null,timer=0,hideTimer=0,paintTimer=0,latest=null,pending=null,collapsed=true,pageStarted=Date.now();
-  const versions=new Map(),batchStates=new Map();
+  const versions=new Map(),batchStates=new Map(),terminalDeadlines=new Map();
   const TERMINAL=new Set(['done','skipped','error','cancelled']);
-  const repairActive=batch=>['collecting','repairing','repair_request','repair_wave','repair_circuit_open','applying','apply_pending','blocked'].includes(String(batch?.repair?.phase||''));
-  const batchActive=batch=>repairActive(batch)||Number(batch?.terminal||0)<Number(batch?.total||0);
+  const repairActive=batch=>!batch?.processingComplete && !['cancelled','failed','empty'].includes(batch?.lifecycle) && ['collecting','repairing','repair_request','repair_wave','repair_circuit_open','applying','apply_pending','blocked'].includes(String(batch?.repair?.phase||''));
+  const batchActive=batch=>!['cancelled','failed','empty'].includes(batch?.lifecycle) && (batch?.lifecycle==='discovering'||repairActive(batch)||Number(batch?.terminal||0)<Number(batch?.total||0));
   const chooseVisible=()=>{const all=[...batchStates.values()];const active=all.filter(batchActive).sort((a,b)=>(Number(b.startedAt)||0)-(Number(a.startedAt)||0));if(active.length)return active[0];return all.sort((a,b)=>(Number(b.ts)||0)-(Number(a.ts)||0))[0]||null;};
   const fmtMs=ms=>{ms=Math.max(0,Number(ms)||0);if(ms<1000)return `${Math.round(ms)}ms`;const sec=ms/1000;return `${sec>=10?sec.toFixed(0):sec.toFixed(1)}s`;};
   const nowMs=lane=>{const start=Number(lane?.startedAt)||Number(lane?.queuedAt)||0;if(!start)return 0;return Math.max(0,(Number(lane?.finishedAt)||Date.now())-start);};
@@ -84,7 +84,11 @@
   const compactText=batch=>{
     const items=itemsOf(batch),total=Math.max(Number(batch?.total)||0,items.length),terminal=items.filter(item=>item?.terminal||TERMINAL.has(String(item?.progress?.overall?.state||''))).length;
     const inserted=items.filter(item=>item?.inserted===true).length;
+    if (!total) return batch?.lifecycle==='discovering' ? 'TextPhantom: discovering images…'
+      : `TextPhantom: ${batch?.stage || (batch?.lifecycle==='cancelled' ? 'Cancelled' : 'No eligible images')}`;
     const parts=[`TextPhantom: inserted ${inserted}/${total}`];
+    if(batch?.lifecycle==='cancelled')parts.push('cancelled');
+    else if(batch?.processingComplete)parts.push(`processed ${terminal}/${total}${batch?.placement?.waiting ? ` · waiting to place ${batch.placement.waiting}` : ''}`);
     const lens=simpleLaneSummary(batch,'lens','Lens','reading text');if(lens)parts.push(lens);
     const group=simpleLaneSummary(batch,'grouping','Group','grouping text');if(group)parts.push(group);
     const repair=batch?.repair||{};
@@ -96,7 +100,7 @@
     const ai=aiSummary(batch);if(ai)parts.push(ai);
     const insert=insertSummary(batch);if(insert)parts.push(insert);
     parts.push(...resultAlerts(batch));
-    if(total>0&&terminal>=total&&!repairActive(batch))parts.splice(1,0,`done ${batchElapsed(batch)}`);
+    if(total>0&&terminal>=total&&!repairActive(batch)&&!batch?.placement?.waiting&&batch?.lifecycle!=="cancelled")parts.splice(1,0,`done ${batchElapsed(batch)}`);
     return parts.join(' · ');
   };
 
@@ -167,7 +171,12 @@
   function render(batch){
     latest=batch;if(!batch||!ensure())return;if(hideTimer){clearTimeout(hideTimer);hideTimer=0;}
     updateCompact(batch);renderDetails(batch);setCollapsed(collapsed);
-    const terminal=Number(batch.terminal)||0,total=Number(batch.total)||0;if(total>0&&terminal>=total&&!repairActive(batch))hideTimer=setTimeout(()=>{if(root)root.style.display='none';TP.setToastProgressMode?.(false);if(timer){clearInterval(timer);timer=0;}},6000);
+    if(!batchActive(batch) && (!batch?.placement?.waiting || batch?.lifecycle==='cancelled')) {
+      const deadline=terminalDeadlines.get(batch.id) || Date.now()+6000;
+      terminalDeadlines.set(batch.id,deadline);
+      while(terminalDeadlines.size>128)terminalDeadlines.delete(terminalDeadlines.keys().next().value);
+      hideTimer=setTimeout(()=>{if(root)root.style.display='none';TP.setToastProgressMode?.(false);if(timer){clearInterval(timer);timer=0;}},Math.max(0,deadline-Date.now()));
+    } else terminalDeadlines.delete(batch.id);
   }
   function tick(){
     if(!root?.isConnected||root.style.display==='none')return;if(latest)updateCompact(latest);
@@ -180,7 +189,7 @@
     batchStates.set(String(batch.id),batch);while(batchStates.size>16)batchStates.delete(batchStates.keys().next().value);pending=chooseVisible();if(paintTimer)return;paintTimer=setTimeout(()=>{paintTimer=0;const next=pending;pending=null;render(next);},80);
   };
   TP.clearBatchProgress=()=>{
-    pageStarted=Date.now();collapsed=true;versions.clear();batchStates.clear();latest=pending=null;if(hideTimer)clearTimeout(hideTimer);hideTimer=0;if(paintTimer)clearTimeout(paintTimer);paintTimer=0;if(timer)clearInterval(timer);timer=0;
+    pageStarted=Date.now();collapsed=true;versions.clear();batchStates.clear();terminalDeadlines.clear();latest=pending=null;if(hideTimer)clearTimeout(hideTimer);hideTimer=0;if(paintTimer)clearTimeout(paintTimer);paintTimer=0;if(timer)clearInterval(timer);timer=0;
     TP.setToastProgressMode?.(false);root=main=textEl=body=toggleBtn=null;
   };
   window.addEventListener('pagehide',()=>{

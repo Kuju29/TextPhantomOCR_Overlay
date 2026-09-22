@@ -1,3 +1,4 @@
+import { handleReaderReceipt } from "./reader-events.js";
 import { recentDiagnostic, clearRecentDiagnostics } from "./ai/recent-diagnostics.js";
 import { repairCoordinator } from "./repair/coordinator.js";
 import {
@@ -18,7 +19,7 @@ import { publicTpError } from "../shared/error-contract.js";
 import { resetAdaptiveLearning } from "./scheduler.js";
 
 import { apiHealthSnapshot, getApiBase, healthCache, warmupApi } from "./api.js";
-import { getLastBatchStatus, noteQueueStatus } from "./batches.js";
+import { getLastBatchStatus, noteQueueStatus, batchesForTab } from "./batches.js";
 import { blobToDataUri } from "./images.js";
 import {
   setMaxConcurrency,
@@ -169,7 +170,12 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (!Number.isFinite(tabId) || changeInfo.status !== "loading") return;
+  if (!Number.isFinite(tabId)) return;
+  if (changeInfo.status !== "loading") {
+    if(changeInfo.url && batchesForTab(tabId).some(batch=>batch.reader && !batch.cancelled))
+      sessionLifecycle.onTabLoading(tabId,changeInfo.url);
+    return;
+  }
   const href = changeInfo.url || tab?.url || "";
   if (isMangaDexPageUrl(href)) return;
   sessionLifecycle.onTabLoading(tabId, href);
@@ -195,6 +201,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const type = String(msg?.type || "");
 
   switch (type) {
+    case "TP_READER_PLACED":
+    case "TP_READER_PLACEMENT_FAILED":
+    case "TP_READER_CANCELLED":
+      if(sender?.id!==chrome.runtime.id || !Number.isFinite(sender?.tab?.id)){sendResponse({ok:false});return true;}
+      handleReaderReceipt(msg,sender,discardBatchResults).then(sendResponse,error=>sendResponse({ok:false,error:error.message}));
+      return true;
     case "TP_LOCAL_AI_DISCOVER": {
       if (!trustedUi(sender)) { sendResponse({ok:false, code:"trusted_ui_only"}); return true; }
       // Tracing is observational. A slow/offline log sink cannot delay recovery.

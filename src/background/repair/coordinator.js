@@ -1,3 +1,5 @@
+import { requestFromTabExact } from '../tabs-messaging.js';
+import { releaseReaderBatch } from "../reader-placement.js";
 import { captureSourceEvidence, sourceEvidenceForDispatch, applySourceEvidence } from "./source-evidence.js";
 import { translationSessions } from '../translation-session-store.js';
 import { conversationDispatchJournal } from './dispatch-journal.js';
@@ -6,7 +8,7 @@ import { repairRequest } from './client.js';
 import { makePageCheckpoint, digestText, buildPatchedResult, pageInitialReport } from './page-checkpoint.js';
 import { executeRepairPool, repairUsageDiagnostic } from './executor.js';
 import { findContext } from '../job-registry.js';
-import { getBatch, ensureBatch, batchMark, batchUpdateToast, batchStopKeepAlive, updateImagePresentation } from '../batches.js';
+import { getBatch, ensureBatch, registerBatchPayload, batchMark, batchUpdateToast, batchStopKeepAlive, updateImagePresentation } from '../batches.js';
 import { getTabSessionId } from '../tab-sessions.js';
 import { getSettingsEpoch, abortBatchInFlight } from '../jobs/lifecycle.js';
 import { cancelBatchProviderViaRest } from '../jobs/cancellation.js';
@@ -165,7 +167,7 @@ export function createRepairCoordinator({
       batchId: batch.id, tabId: batch.tabId, frameId: batch.frameId || 0,
       sessionId: currentSession(batch.tabId), settingsEpoch: currentEpoch(),
       base: await getBase(), manifest: [...batch.items.keys()], targets:payloads.map(p => normImgSrc(p.src)),
-      ownerWorker:workerId(), pages: {}, tasks: {}, summary: {} };
+      ownerWorker:workerId(), reader:batch.reader || null, pages: {}, tasks: {}, summary: {} };
     try {
       for (const prior of await sessions.list()) {
         if (prior.tabId === run.tabId && prior.frameId === run.frameId &&
@@ -297,6 +299,8 @@ export function createRepairCoordinator({
     }
   }
   async function markDelivered(ctx, applied) {
+    // A delayed stored ACK cannot undo a real content placement receipt.
+    if (ctx?.generation?.readerRunId && applied !== true) return;
     const id = ctx?.translationRun?.runId;
     if (!id || cancelledRuns.has(id)) return;
     const pageId = String(ctx.translationRun.pageId || '');
@@ -384,6 +388,8 @@ export function createRepairCoordinator({
         } else {
           delete target.patchError;
           target.patchPending = entry.revision;
+          if(entry.page.ctx.generation?.readerRunId) target.pendingPatch={revision:entry.revision,
+            accepted:entry.patch.accepted,repairedIds:entry.wanted.map(x=>x.id)};
         }
       }
       return value;
@@ -403,10 +409,11 @@ export function createRepairCoordinator({
       try {
         receipt = await insert(page.ctx.tabId, { type:'OVERLAY_HTML', original:page.ctx.imgUrl,
           mode:page.ctx.mode || 'lens_text', source:page.ctx.source || 'ai', result:patch.result,
-          generation:page.ctx.generation, tpTrace:page.ctx.traceId,
+          generation:page.ctx.generation, tpTrace:page.ctx.traceId, workflowId:page.ctx.workflowId || '',
           translationRun:{runId:run.id, pageId, generationId:page.generationId, phase:'repair', revision}
         }, page.ctx.frameId || 0);
       } catch (error) { errorCode = error.code || 'repair_delivery_unconfirmed'; }
+      if(receipt?.stored && page.ctx.generation?.readerRunId) updateImagePresentation(run.batchId,pageId,{placementPending:true});
       const applied = live(prepared) && receipt?.ok === true && receipt.applied === true &&
         !receipt.stale && !receipt.notFound && !receipt.pending && !receipt.expired;
       // Presentation ACK is observable now; durable repair acceptance below
@@ -425,7 +432,7 @@ export function createRepairCoordinator({
         if (!plan.applied || target?.generationId !== plan.page.generationId || target.patchPending !== plan.revision) continue;
         target.accepted = plan.patch.accepted;
         target.repaired = [...new Set([...target.repaired, ...plan.wanted.map(x => x.id)])];
-        target.patchPending = ''; target.delivered = true;
+        target.patchPending = ''; target.delivered = true; delete target.pendingPatch;
         committed.add(plan.pageId);
       }
       return value;
@@ -523,6 +530,8 @@ export function createRepairCoordinator({
       for (const page of finalPages) presentPage(value, page, value.phase);
       progress(value || run, {...(value?.summary || summary), phase:value?.phase || summary.phase});
       await settleDeferredImageErrors(value || run, finalPages, value?.phase || summary.phase);
+      const readerBatch=getBatch(run.batchId);
+      if(readerBatch?.reader) await releaseReaderBatch(readerBatch);
       if (['done','apply_failed'].includes(value?.phase)) {
         for (const key of runtimePages.keys()) if (key.startsWith(`${run.id}:`)) runtimePages.delete(key);
       }
@@ -545,6 +554,8 @@ export function createRepairCoordinator({
         await Promise.all([dispatchJournal.clearRun(run.id).catch(() => {}),
           preparedPages.clearRun(run.id).catch(() => {})]);
         for (const key of runtimePages.keys()) if (key.startsWith(`${run.id}:`)) runtimePages.delete(key);
+        const readerBatch=getBatch(run.batchId);
+        if(readerBatch?.reader) await releaseReaderBatch(readerBatch);
         batchRuns.delete(run.batchId);
         emit('repairOwnershipExpired', {runId:run.id, batchId:run.batchId, code:'repair_run_not_found'});
         return null;
@@ -563,6 +574,7 @@ export function createRepairCoordinator({
     if (!id) return false;
     const existing = await sessions.get(id).catch(() => null);
     if (!existing || existing.phase === 'unavailable') return false;
+    if(existing.reader && existing.phase==='apply_pending'){await releaseReaderBatch(batch);return true;}
     if (operations.has(id)) { await operations.get(id); return true; }
     const work = (async () => {
       let run = await sessions.get(id);
@@ -626,11 +638,54 @@ export function createRepairCoordinator({
     try { await work; } finally { operations.delete(id); }
     return true;
   }
+  // Completes an already generated repair patch; never calls execute/seal or
+  // mutates chat history. The saved revision is the authority, not a scroll event.
+  async function confirmDeferredPlacement(batch, message) {
+    const stamp=message.translationRun;
+    if(!stamp || stamp.phase!=='repair' || stamp.runId!==batchRuns.get(batch.id))return false;
+    let page=null,accepted=false;
+    const value=await sessions.update(stamp.runId,run=>{
+      if(!run || !live(run) || run.batchId!==batch.id)return run;
+      const target=run.pages?.[stamp.pageId],intent=target?.pendingPatch;
+      if(target?.generationId!==stamp.generationId || !intent || intent.revision!==stamp.revision ||
+        target.patchPending!==stamp.revision || target.ctx.generation?.readerRunId!==message.readerRunId)return run;
+      target.accepted=intent.accepted;
+      target.repaired=[...new Set([...target.repaired,...intent.repairedIds])];
+      target.delivered=true;target.patchPending='';delete target.pendingPatch;
+      page=target;accepted=true;
+      const pages=Object.values(run.pages),waiting=pages.filter(p=>p.patchPending).length;
+      const appliedRepairedUnits=pages.reduce((n,p)=>n+(p.repaired?.length || 0),0);
+      run.summary={...run.summary,applyPendingPages:waiting,appliedRepairedUnits,
+        unappliedRepairedUnits:Math.max(0,(run.summary?.repaired || 0)-appliedRepairedUnits)};
+      if(run.phase==='apply_pending'&&!waiting){
+        run.phase=pages.some(p=>p.patchError)?'apply_failed':'done';
+        if(run.phase==='done'){run.pages={};run.tasks={};}
+      }
+      return run;
+    });
+    if(!accepted || !value || !live(value))return false;
+    batchMark(batch.id,stamp.pageId,{deferredImageError:null});
+    presentPage(value,page,value.phase);
+    progress(value,{...value.summary,phase:value.phase});
+    if(value.phase==='done'){
+      for(const key of runtimePages.keys())if(key.startsWith(`${value.id}:`))runtimePages.delete(key);
+      await api(value,'',undefined,{method:'DELETE'}).catch(()=>{});
+    }
+    return true;
+  }
   async function cancelBatch(batchId, reason = 'cancelled') {
     const id = batchRuns.get(batchId); if (!id) return;
     cancelledRuns.add(id); controllers.get(id)?.abort();
     const batch = getBatch(batchId);
-    if (batch) { batch.cancelled = true; batch.cancelRequestedAt = now(); }
+    if (batch) { batch.cancelled = true; batch.cancelRequestedAt = now();
+      batch.lifecycle='cancelled';batch.completedAt=now();
+      batch.repair={...(batch.repair || {}),phase:'cancelled'};
+      for(const [key,item] of batch.items) if(item.presentation?.placementPending || !['done','error','aborted','skipped'].includes(item.status))
+        batchMark(batch.id,key,{phase:'cancelled',status:'aborted',lastError:reason,
+          presentation:{...(item.presentation || {}),placementPending:false}});
+      if(batch.reader)void requestFromTabExact(batch.tabId,{type:'TP_READER_CANCEL',readerRunId:batch.reader.runId,reason},batch.frameId);
+      batchUpdateToast(batch,'Cancelled',true);await batchStopKeepAlive(batch);
+    }
     abortBatchInFlight(batchId, 'repair_run_cancelled');
     const run = await sessions.get(id).catch(() => null);
     if (!run) { await Promise.all([dispatchJournal.clearRun(id).catch(() => {}), preparedPages.clearRun(id).catch(() => {})]); return; }
@@ -651,6 +706,21 @@ export function createRepairCoordinator({
         run = await sessions.update(run.id, old => ({ ...old, phase:old.resumePhase || 'repairing' }));
       }
       const b = getBatch(run.batchId) || ensureBatch(run.batchId, run.tabId, run.frameId);
+      for(const [index,id] of (run.manifest || []).entries()) {
+        if(b.items.has(id))continue;
+        const page=run.pages?.[id],ctx=page?.ctx || {};
+        const payload={src:ctx.imgUrl || '',generation:ctx.generation || null,
+          context:{page_index:index,tp_tab_session:run.sessionId},metadata:{image_id:id,batch_id:run.batchId}};
+        if(run.reader && ctx.generation?.readerPageId) payload.reader={...run.reader,pageId:ctx.generation.readerPageId};
+        registerBatchPayload(b,payload,id);
+        batchMark(b.id,id,{phase:page?.phase==='finished' ? 'done' : 'error',
+          status:page?.phase==='finished' ? 'done' : 'error',lastError:page ? '' : 'Interrupted before source checkpoint'});
+      }
+      if(run.reader)b.reader={...run.reader};
+      if(run.reader && run.phase==='apply_pending'){
+        b.repair={...run.summary,phase:'apply_pending'};
+        await releaseReaderBatch(b,{replayReceipts:true});continue;
+      }
       void finishInitial(b).catch(error => emit('repairResumeFailed', {runId:run.id, code:error.code || 'repair_resume_failed'})); // receipt recovery, never blind resend
     }
   }
@@ -669,7 +739,7 @@ export function createRepairCoordinator({
       await cancelBatch(run.batchId,'settings_changed');
     }
   }
-  return { registerBatch, capture:safeCapture, markDelivered, ownsInitialFailure, finishInitial, cancelBatch, cancelTab, cancelSettings, resume,
+  return { registerBatch, capture:safeCapture, markDelivered, confirmDeferredPlacement, ownsInitialFailure, finishInitial, cancelBatch, cancelTab, cancelSettings, resume,
     async summaries() { return (await sessions.list().catch(() => [])).map(r => ({...r.summary, batchId:r.batchId, phase:r.phase})); } };
 }
 export const repairCoordinator = createRepairCoordinator();

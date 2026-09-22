@@ -97,7 +97,7 @@ export function createBatchRetryCoordinator({
       let skip = false;
       try {
         const src = String(payload?.src || "").trim();
-        if (src && /^https?:/i.test(src) && !payload?.imageDataUri) {
+        if (src && !payload.reader && /^https?:/i.test(src) && !payload?.imageDataUri) {
           const key = normalizeImageKey(src);
           const dataUri =
             getCachedDataUri(key) ||

@@ -125,3 +125,16 @@ assert.match(batchHandler, /updateBatchProgress/,
 assert.doesNotMatch(batchHandler, /showToast/,
   "the live board must not also duplicate progress into a toast");
 console.log("Batch progress board contract tests passed.");
+
+// A failed translation can acknowledge that its error badge was shown; this
+// must never turn Insert=error into skipped or count as a placed translation.
+const badgeReceipt = ensureBatch('progress-error-badge',17,0);
+badgeReceipt.items.set('error-image',{attempt:1,status:'error',phase:'error',payload:{context:{page_index:0}}});
+updateImagePresentation(badgeReceipt.id,'error-image',{
+  placementPending:false,placementConfirmed:false,insertionAck:{present:false},
+  progressEvent:{lane:'insert',state:'error',resultState:'error',detail:'Image error shown'},
+});
+assert.equal(badgeReceipt.items.get('error-image').progress.insert.state,'error');
+assert.equal(badgeReceipt.items.get('error-image').progress.result.state,'error');
+assert.equal(batchPassStats(badgeReceipt).inserted,0);
+console.log('Error badge receipt preserves error status and zero inserted translations.');
