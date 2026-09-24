@@ -5,9 +5,10 @@ Leaf modules are declarations only.  Registration happens exclusively through
 depending on Python's module-import cache.
 """
 from backend.ai.provider_registry import ProviderRegistry, provider_registry
+from backend.paid_center import center_base_url
 from . import (
     cloud_anthropic, cloud_deepseek, cloud_featherless, cloud_gemini,
-    cloud_groq, cloud_huggingface, cloud_openai, cloud_openrouter,
+    cloud_groq, cloud_huggingface, cloud_openai, cloud_openrouter, cloud_paid,
     cloud_together, local_gpt4all, local_jan, local_koboldcpp,
     local_llamacpp, local_llamafile, local_lmstudio, local_localai,
     local_ollama, local_textgen, local_vllm,
@@ -19,6 +20,8 @@ _MODULES = (
     local_llamacpp, local_llamafile, local_lmstudio, local_localai,
     local_ollama, local_textgen, local_vllm,
 )
+if center_base_url():
+    _MODULES = (*_MODULES, cloud_paid)
 
 def compose_providers(registry: ProviderRegistry = provider_registry) -> ProviderRegistry:
     """Register every canonical declaration exactly once in ``registry``.

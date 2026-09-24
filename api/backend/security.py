@@ -59,7 +59,7 @@ def server_key_allowed_hosts() -> frozenset[str]:
     """
     hosts = {
         _host_of(str(d.get("base_url") or ""))
-        for d in ({"base_url": spec.default_base_url} for spec in provider_registry)
+        for d in ({"base_url": spec.default_base_url} for spec in provider_registry if spec.provider_id != "paid")
     }
     hosts.discard("")
     hosts.discard("localhost")
@@ -104,6 +104,12 @@ def assert_ai_base_url_allowed(
     no user-controlled switch and no wildcard/suffix allowlist matching.
     """
     url = (base_url or "").strip()
+    if provider == "paid":
+        from backend.paid_center import center_base_url
+        approved = center_base_url() + "/api/customer" if center_base_url() else ""
+        if not approved or url != approved:
+            raise UnsafeBaseUrl("Paid endpoint must be the operator-configured Center")
+        return
     if not url:
         spec = provider_registry.get(provider)
         # Native adapters with no configurable base (currently Gemini) own a
@@ -132,7 +138,7 @@ def assert_ai_base_url_allowed(
     if policy == "personal" and _is_keyless_local_endpoint(provider, url):
         return
     for spec in provider_registry:
-        if spec.local:
+        if spec.local or spec.provider_id == "paid":
             continue
         default = urlparse(str(spec.default_base_url or ""))
         default_port = default.port or (443 if default.scheme == "https" else 80)

@@ -320,6 +320,8 @@
   async function collectImagesForScan(mode, lang, sourceTag) {
     const seen = new Set();
     const out = [];
+    const diagnosing = TP.scanDiag?.active() === true;
+    const diagnosticRows = [];
     const stats = {
       candidates: 0,
       accepted: 0,
@@ -329,9 +331,21 @@
     };
     for (const img of Array.from(document.images || [])) {
       stats.candidates++;
+      let row = null;
+      if (diagnosing && diagnosticRows.length < 250) {
+        try {
+          const rect=img.getBoundingClientRect?.();
+          row={index:stats.candidates-1,
+            source:TP.scanDiag.describeSource(TP.getBestImgUrl(img) || img.currentSrc || img.src),
+            naturalWidth:Number(img.naturalWidth)||0,naturalHeight:Number(img.naturalHeight)||0,
+            complete:img.complete===true,boxWidth:Math.round(rect?.width || 0),
+            boxHeight:Math.round(rect?.height || 0)};
+        } catch {} // Diagnostic reads may never prevent an image from translating.
+      }
       const reason = imageSkipReason(img, mode);
       if (reason) {
         rememberScanSkip(stats, reason);
+        if (row) {row.decision='skip';row.reason=reason;diagnosticRows.push(row);}
         continue;
       }
       const payload = await buildPayloadFromImage(img, mode, lang, sourceTag);
@@ -339,18 +353,24 @@
         TP.normUrl(payload?.src) || String(payload?.metadata?.image_id || "");
       if (!key) {
         rememberScanSkip(stats, "no_payload");
+        if (row) {row.decision='skip';row.reason='no_payload';diagnosticRows.push(row);}
         continue;
       }
       if (seen.has(key)) {
         stats.duplicates++;
+        if (row) {row.decision='duplicate';diagnosticRows.push(row);}
         continue;
       }
       seen.add(key);
       if (img?.dataset && !img.dataset.tpOriginal) img.dataset.tpOriginal = key;
       out.push(payload);
+      if (row) {row.decision='accepted';row.hasInlineBytes=Boolean(payload?.imageDataUri);diagnosticRows.push(row);}
     }
     stats.accepted = out.length;
     TP.log.info("image scan filtered", stats);
+    if (diagnosing) TP.scanDiag.emit('normal.candidates', {
+      ...stats,rows:diagnosticRows,unreported:Math.max(0,stats.candidates-diagnosticRows.length),
+    });
     return { items: out.filter(Boolean), stats };
   }
 

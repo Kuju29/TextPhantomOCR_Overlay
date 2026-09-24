@@ -43,6 +43,22 @@ export async function makePageCheckpoint({ payload, result, plan, units, ctx, op
     repaired: [], sourceEvidence: [] };
 }
 
+// Once every translatable unit has an accepted answer and the page confirms
+// placement, neither repair nor a replay needs its OCR/render source. Retain
+// only the small report required by the chapter-wide repair seal.
+export function compactDeliveredPage(page) {
+  if (!page || page.compacted === true || page.phase !== 'finished' || page.delivered !== true ||
+      page.patchPending || page.patchError || (page.repaired || []).length ||
+      (page.failures || []).length || (page.blocked || []).length || (page.inFlight || []).length ||
+      !Array.isArray(page.units) || !Array.isArray(page.accepted)) return page;
+  const wanted = new Set(page.units.filter(unit => unit.translatable).map(unit => String(unit.id)));
+  const accepted = new Set(page.accepted.map(unit => String(unit.id)));
+  if (wanted.size !== accepted.size || [...wanted].some(id => !accepted.has(id))) return page;
+  return { pageId:page.pageId, generationId:page.generationId, groupKey:page.groupKey,
+    phase:'finished', delivered:true, compacted:true, initialAcceptedCount:accepted.size,
+    units:[], accepted:[], failures:[], blocked:[], inFlight:[], repaired:[] };
+}
+
 export function buildPatchedResult(page, accepted) {
   // Rebuild from the original checkpoint + immutable accepted map, never from
   // arbitrary provider IDs or a partially patched DOM.
@@ -80,7 +96,7 @@ export function buildPatchedResult(page, accepted) {
 export function pageInitialReport(page) {
   return { pageId: page.pageId, generationId: page.generationId, groupKey: page.groupKey,
     status: page.phase === 'interrupted' ? 'interrupted' : 'finished',
-    initialAccepted: page.accepted.length, unverified: page.blocked.length,
+    initialAccepted: page.compacted ? page.initialAcceptedCount : page.accepted.length, unverified: page.blocked.length,
     failed: page.failures.map(f => ({ ...f, text: page.units.find(u => u.id === f.id).text,
       sourceHash: page.units.find(u => u.id === f.id).sourceHash })) };
 }

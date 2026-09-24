@@ -55,6 +55,7 @@
     return root;
   }
   function detect() {
+    const kagane=TP.kagane?.detect(); if(kagane)return kagane;
     // Existing MangaDex ownership/mapping remains authoritative.
     if (TP.isMangaDexHost?.()) return null;
     let best = null;
@@ -95,8 +96,12 @@
     return best;
   }
   async function sources(plan, signal) {
+    if(plan.adapter==='kagane')return TP.kagane.sources(plan,signal);
     const urls = new Map();
     for (const [id, slot] of plan.slots) { const url = source(slot); if (url) urls.set(id,url); }
+    if (TP.scanDiag?.active()) TP.scanDiag.emit('reader.dom_pass',{total:plan.ids.length,resolved:urls.size,
+      rows:plan.ids.slice(0,250).map(id=>({pageId:id,
+        hasImage:Boolean(image(plan.slots.get(id))),source:TP.scanDiag.describeSource(urls.get(id))}))});
     const mergeReaderData = async (doc, pageWorld) => {
       const resolved = await TP.readerSources?.(plan, source,
         {document:doc, pageWorld, signal, knownSources:urls});
@@ -112,16 +117,22 @@
     // Only fetch HTML when known logical slots lack sources. Never execute its scripts.
     if (urls.size !== plan.ids.length && /^https?:/.test(location.href)) {
       try {
+        const htmlStart=Date.now();
         const response = await fetch(location.href, {credentials:'include', cache:'no-store', signal});
+        TP.scanDiag?.emit('reader.html_fetch',{ok:response.ok,status:response.status,
+          elapsedMs:Date.now()-htmlStart});
         if (response.ok) {
           const doc = new DOMParser().parseFromString(await response.text(), 'text/html');
           for (const slot of doc.querySelectorAll(plan.selector)) {
             const id = number(slot, plan.attr), url = source(slot);
             if (plan.slots.has(id) && !urls.has(id) && url) urls.set(id,url);
           }
+          TP.scanDiag?.emit('reader.html_dom_pass',{resolved:urls.size,total:plan.ids.length});
           if (urls.size !== plan.ids.length) await mergeReaderData(doc, false);
         }
-      } catch (error) { if (signal?.aborted) throw error; TP.log.info('reader manifest HTML unavailable', {profile:plan.profile}); }
+      } catch (error) { if (signal?.aborted) throw error;
+        TP.scanDiag?.emit('reader.html_fetch_error',{error:TP.scanDiag.error(error)});
+        TP.log.info('reader manifest HTML unavailable', {profile:plan.profile}); }
     }
     return urls;
   }

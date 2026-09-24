@@ -1,3 +1,4 @@
+import { noteSessionStorageFailure } from '../session-storage-diagnostics.js';
 let settingsEpoch = 0;
 let currentBatchId = null;
 const inFlight = new Map();
@@ -164,5 +165,5 @@ function persistSettingsEpoch() {
   epochWrites = epochWrites.catch(() => {}).then(async () => {
     await restoreSettingsEpoch();
     await globalThis.chrome?.storage?.session?.set({ [EPOCH_KEY]: settingsEpoch });
-  }).catch(() => {});
+  }).catch(error => { noteSessionStorageFailure('settings_epoch',error); });
 }

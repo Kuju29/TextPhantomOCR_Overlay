@@ -141,11 +141,18 @@
         Boolean(a.photo) !== Boolean(b.photo),
       );
     };
+function preservesKaganeChapter(before,after) {
+  try {
+    const a=new URL(before),b=new URL(after);
+    return a.origin===b.origin && /(^|\.)kagane\.to$/i.test(a.hostname) &&
+      /^\/series\/[a-f0-9-]{36}\/reader\/[a-f0-9-]{36}\/?$/i.test(a.pathname) && a.pathname===b.pathname;
+  }catch{return false;}
+}
     const notify = () => {
       if (location.href === lastHref) return;
       const previousHref = lastHref;
       lastHref = location.href;
-      const preserveTarget = preservesXPhotoTarget(previousHref, location.href);
+      const preserveTarget = preservesXPhotoTarget(previousHref, location.href) || preservesKaganeChapter(previousHref,location.href);
       if (!preserveTarget) {
         try {
           TP.resetForNavigation?.("spa_navigation");

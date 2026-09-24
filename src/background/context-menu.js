@@ -35,6 +35,7 @@ import { resolveJobAiProfile } from "./ai-profile-resolver.js";
 import { ensureLocalAiBatchReady } from "./local-ai-preflight.js";
 import { getTrace, note as traceNote } from "../shared/trace.js";
 import { chooseCanonicalImageSource } from "./right-click-target.js";
+import { startImageScanDiagnostics, reportImageScan } from './image-scan-diagnostics.js';
 import { ensureTabSession } from "./tab-sessions.js";
 import {
   contextOperationKey,
@@ -527,17 +528,24 @@ async function handleTranslateAll(menuInfo, tab, ctx) {
     tabSessionId,
     batchId,
     seriesKey,
+    diagnosticId,
+    diagnosticTrigger,
   } = ctx;
   const scanFrameId = 0;
 
   let images = [];
   let imagesFrameId = scanFrameId;
   let scanStats = null;
+  void reportImageScan(diagnosticId,'scan_request',{frameId:scanFrameId,route:'undecided'});
   const primaryResp = await requestFromTab(
     tab.id,
-    { type: "GET_IMAGES" },
+    { type: "GET_IMAGES",diagnosticId,diagnosticTrigger },
     scanFrameId,
+    attempt=>void reportImageScan(diagnosticId,'scan_delivery',attempt),
   );
+  void reportImageScan(diagnosticId,'scan_response',{frameId:scanFrameId,
+    received:primaryResp!=null,ok:primaryResp?.ok===true,code:primaryResp?.code || '',
+    itemCount:primaryResp?.items?.length || 0});
   if (primaryResp == null && !menuInfo.frameId) throw new Error("IMAGE_DISCOVERY_UNAVAILABLE");
   const primary = unpackImageScanResponse(primaryResp);
   images = primary.items;
@@ -545,9 +553,13 @@ async function handleTranslateAll(menuInfo, tab, ctx) {
   if (!images.length && menuInfo.frameId) {
     const altResp = await requestFromTab(
       tab.id,
-      { type: "GET_IMAGES" },
+      { type: "GET_IMAGES",diagnosticId,diagnosticTrigger },
       menuInfo.frameId,
+      attempt=>void reportImageScan(diagnosticId,'scan_delivery',attempt),
     );
+    void reportImageScan(diagnosticId,'scan_response',{frameId:menuInfo.frameId,
+      received:altResp!=null,ok:altResp?.ok===true,code:altResp?.code || '',
+      itemCount:altResp?.items?.length || 0});
     if (altResp == null && primaryResp == null) throw new Error("IMAGE_DISCOVERY_UNAVAILABLE");
     const alt = unpackImageScanResponse(altResp);
     scanStats = mergeScanStats(scanStats, alt.stats);
@@ -622,6 +634,14 @@ async function handleTranslateAll(menuInfo, tab, ctx) {
     return true;
   });
 
+  void reportImageScan(diagnosticId,'jobs_admitted',{frameId:imagesFrameId,
+    discovered:images.length,admitted:payloads.length,
+    dropped:images.length-payloads.length,
+    dynamic:payloads.filter(pl=>Boolean(pl.reader?.runId)).length,
+    normal:payloads.filter(pl=>!pl.reader?.runId).length,
+    hasInlineBytes:payloads.filter(pl=>Boolean(pl.imageDataUri)).length,
+    stats:scanStats || null});
+
   if (!payloads.length) return;
   await sendToTab(
     tab.id,
@@ -663,11 +683,18 @@ async function handleTranslateAll(menuInfo, tab, ctx) {
  */
 async function dispatchContextMenuClick(menuInfo, tab, options = {}) {
   let startingBatch = null;
+  const diagnosticId=menuInfo?.menuItemId==='img_all' ? crypto.randomUUID() : '';
+  const diagnosticTrigger=menuInfo?.diagnosticTrigger==='page_action'?'page_action':'context_menu';
   if (!tab?.id) return;
   await Promise.all([restoreSettingsEpoch(), restoreTabSessions()]);
   log.info("menu click", menuInfo.menuItemId);
   try {
-    await ensureContentScript(tab.id);
+    const contentReady=await ensureContentScript(tab.id);
+    if(diagnosticId){
+      startImageScanDiagnostics(diagnosticId,tab.id,0);
+      await reportImageScan(diagnosticId,'dispatch_start',{trigger:diagnosticTrigger});
+      void reportImageScan(diagnosticId,'content_ready',{reachable:contentReady});
+    }
     const tabSessionId = ensureTabSession(tab.id, tab?.url || "");
 
     const overrides =
@@ -771,7 +798,7 @@ async function dispatchContextMenuClick(menuInfo, tab, options = {}) {
 
     log.debug("batch concurrency", describeLimits());
 
-    const batchId = crypto.randomUUID();
+    const batchId = diagnosticId || crypto.randomUUID();
     setCurrentBatchId(batchId);
     startingBatch = ensureBatch(batchId,tab.id,menuInfo.menuItemId === "img_all" ? 0 : Number(menuInfo.frameId)||0);
     batchUpdateToast(startingBatch,"Discovering images",true);
@@ -791,6 +818,8 @@ async function dispatchContextMenuClick(menuInfo, tab, options = {}) {
       batchId,
       seriesKey,
       debug,
+      diagnosticId,
+      diagnosticTrigger,
     };
     sendToastToTab(
       tab.id,
@@ -832,6 +861,9 @@ async function dispatchContextMenuClick(menuInfo, tab, options = {}) {
     }
     return result;
   } catch (e) {
+    if(diagnosticId)void reportImageScan(diagnosticId,'dispatch_error',{
+      code:String(e?.code || e?.tpError?.code || e?.name || 'ERROR'),
+      message:String(e?.message || e || 'unknown')});
     if (startingBatch) {
       startingBatch.lifecycle="failed";startingBatch.completedAt=Date.now();
       batchUpdateToast(startingBatch,`Discovery failed: ${e?.message || String(e)}`,true);

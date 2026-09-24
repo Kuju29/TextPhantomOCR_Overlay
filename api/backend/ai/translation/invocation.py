@@ -290,6 +290,7 @@ def _translate_once_impl(
         response_schema=response_schema, unit_count=len(ids), expected_ids=tuple(ids),
         model_capabilities=discovered_capabilities, workload=ai.workload, cancel_check=cancel_check,
         cache_context={**{key: layout[key] for key in ("staticPrefixSha256", "targetLang", "sourceLang")},
+                       "operationId": getattr(ai, "paid_operation_id", ""),
                        "conversationSource": encoded_source if conversation_records else "",
                        "conversationRecordProtocol": "tp.translation.image-records/1" if conversation_records else ""},
     )

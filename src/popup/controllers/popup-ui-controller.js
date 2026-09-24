@@ -79,9 +79,11 @@ export function createPopupUiController({
   validateAiKey,
   validateLangSource,
   applyApiAvailabilityGate = null,
+  applyPaidMode = null,
 }) {
   const toggle = () => {
     toggleDom({ hasEnvKey: false });
+    applyPaidMode?.();
     const provider = String(els.aiProvider?.value || "")
       .trim()
       .toLowerCase();
@@ -113,13 +115,13 @@ export function createPopupUiController({
     const showAi =
       (els.mode.value || "lens_text") === "lens_text" &&
       (els.sources.value || "") === "ai";
-    const profileBlocked = Boolean(state.aiProfileBlocked || state.aiModelBlocked);
+    const profileBlocked = !state.paidActive && Boolean(state.aiProfileBlocked || state.aiModelBlocked);
     const canConfigure =
       local ||
       Boolean((els.aiKey?.value || "").trim());
     if (els.aiThinkingWrap) {
       els.aiThinkingWrap.style.display =
-        showAi && canConfigure ? "" : "none";
+        showAi && canConfigure && !state.paidActive ? "" : "none";
     }
     if (els.aiThinking) {
       // The profile owns the user's reasoning intent. Capability discovery is
@@ -164,7 +166,7 @@ export function createPopupUiController({
               ? "Lowest available is TextPhantom's default; the saved policy is kept."
               : "This model exposes no verified lower reasoning control. Your saved choice is kept; dispatch uses the model's required/default behavior when necessary.";
     }
-    if (els.aiPageImage) els.aiPageImage.disabled = visionSupport !== true;
+    if (els.aiPageImage) els.aiPageImage.disabled = state.paidActive || visionSupport !== true;
     const imageHint = els.aiPageImageWrap?.querySelector?.(".hint");
     if (imageHint) imageHint.textContent = visionSupport === true
       ? "The verified model will receive each page image."
@@ -175,9 +177,6 @@ export function createPopupUiController({
     validateAiKey();
     validateLangSource();
     // A broken profile blocks dispatch, not its own recovery controls.
-    if (els.translatePageBtn)
-      els.translatePageBtn.disabled =
-        state.providerTransitionPending || (profileBlocked && showAi);
     applyApiAvailabilityGate?.();
   };
 
@@ -198,8 +197,6 @@ export function createPopupUiController({
     state.providerTransitionPending = Boolean(pending);
     if (els.aiProvider)
       els.aiProvider.disabled = state.providerTransitionPending;
-    if (els.translatePageBtn)
-      els.translatePageBtn.disabled = state.providerTransitionPending;
   };
 
   return { toggle, traceProviderTransition, setProviderTransitionPending };

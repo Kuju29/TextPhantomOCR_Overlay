@@ -335,14 +335,13 @@ await check('repair-owned IMAGE_ERROR stays deferred until recovery is terminal'
 });
 await check('settings change during delivery invalidates the run before terminal cleanup', async () => {
   const r = await runCoordinator({ race:true });
-  assert.equal(r.final.phase, 'cancelled');
-  assert.deepEqual(r.final.pages, {});
+  assert.equal(r.final, null,'cancelled run checkpoint is removed for the next job');
   assert.ok(!r.events.some(e => e.ev === 'repairPatch' && e.d.applied === true));
   assert.equal(batchPassStats(r.batch).inserted,0,'stale repair does not add an insertion');
 });
 await check('settings change during final repair commit cannot emit stale done', async () => {
   const r=await runCoordinator({raceAtFinal:true});
-  assert.equal(r.final.phase,'cancelled');
+  assert.equal(r.final,null,'cancelled run checkpoint is removed for the next job');
   assert(!r.events.some(e=>e.ev==='repairProgress'&&e.d.phase==='done'));
 });
 await check('partial and grouping diagnostics are trace-only; render refusal retains warnings', async () => {

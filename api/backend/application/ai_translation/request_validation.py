@@ -56,6 +56,7 @@ def build_config(payload: dict) -> AiConfig:
         conversation["branch"] = "repair"
     config = AiConfig(
         translation_mode=selected_mode, conversation=conversation,
+        paid_operation_id=str(payload.get("operationId") or "")[:160],
         api_key=request_api_key(provider_id, base_url, user_key),
         user_key=bool(user_key) and not is_local_target(provider_id, base_url), provider=provider_id,
         model=str(provider.get("model") or "auto").strip() or "auto", base_url=base_url,

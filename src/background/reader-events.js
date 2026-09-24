@@ -4,6 +4,8 @@ import { getTabSessionId } from './tab-sessions.js';
 import { requestFromTabExact } from './tabs-messaging.js';
 import { forgetReaderAcquisition } from './reader-acquisition.js';
 import * as wf from './workflow-track.js';
+import { createLogger } from '../shared/logger.js';
+const log = createLogger('SW.reader');
 // Content is reporting only placement of a result already owned by this batch.
 // No path here schedules an image or calls AI.
 export async function handleReaderReceipt(message, sender, discardBatchResults) {
@@ -11,6 +13,8 @@ export async function handleReaderReceipt(message, sender, discardBatchResults) 
     b.frameId===(sender.frameId || 0) && !b.cancelled);
   if(!batch || (message.pageInstanceId && batch.reader.pageInstanceId!==message.pageInstanceId))return {ok:true,stale:true};
   if(message.type==='TP_READER_CANCELLED'){
+    log.warn('reader cancellation receipt', {tabId:batch.tabId,batchId:batch.id,
+      runId:batch.reader.runId,reason:String(message.reason || 'reader_cancelled').slice(0,80)});
     discardBatchResults(batch.id,message.reason || 'reader_cancelled');return {ok:true};
   }
   const entry=[...batch.items].find(([,item])=>String(item.payload?.reader?.pageId)===String(message.pageId));
@@ -28,6 +32,8 @@ export async function handleReaderReceipt(message, sender, discardBatchResults) 
       resultState:message.kind==='IMAGE_ERROR'?'error':message.drawn?'done':'skipped',detail:'Reader placement confirmed'}});
   if(!message.provisional && message.kind!=='IMAGE_ERROR'){
     await wf.confirmPlacement(item.workflowId);
+    if(message.translationRun?.phase==='initial')
+      await repairCoordinator.markDelivered({translationRun:message.translationRun},true);
     await repairCoordinator.confirmDeferredPlacement(batch,message);
   }
   batchUpdateToast(batch,message.kind==='IMAGE_ERROR'?'Image error':'Translation placed',true);

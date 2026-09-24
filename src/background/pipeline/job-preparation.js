@@ -28,6 +28,7 @@ export function createJobPreparation(dependencies) {
     onPermanentReadError,
     logInfo,
     logWarn,
+    reportDiagnostic = () => {},
   } = dependencies;
 
   async function stopIfBatchWasCancelled() {
@@ -48,30 +49,41 @@ export function createJobPreparation(dependencies) {
     const cached = getCached(key);
     if (cached) {
       payload.imageDataUri = cached;
+      reportDiagnostic(payload,'acquisition.cached',{encodedChars:cached.length});
       return { stopped: false, cached: true };
     }
 
     const startedAt = Date.now();
     const browserOnlySrc =
       /^(?:blob:|file:|chrome-extension:|moz-extension:)/i.test(src);
+    const diagnosticContext={diagnosticId:String(payload.metadata?.batch_id || ''),
+      pageId:String(payload.reader?.pageId || ''),pageIndex:Number(payload.context?.page_index ?? -1)};
+    reportDiagnostic(payload,'acquisition.start',{strategy:payload.reader?.runId ? 'DYNAMIC_READER' :
+      browserOnlySrc ? 'NORMAL_TAB' : /^data:/i.test(src) ? 'INLINE_DATA' : 'NORMAL_WORKER',
+      sourceScheme:/^([a-z][a-z0-9+.-]*):/i.exec(src)?.[1]?.toLowerCase() || 'unknown'});
     try {
       const dataUri = await (payload.reader?.runId && acquireReader
         ? acquireReader(payload,{tabId,frameId,pageUrl,signal})
         : src.startsWith("data:")
         ? src
         : browserOnlySrc
-          ? fetchFromTab(tabId, src, frameId, signal)
-          : fetchFromUrl(src, pageUrl, signal));
+          ? fetchFromTab(tabId, src, frameId, signal,diagnosticContext)
+          : fetchFromUrl(src, pageUrl, signal,{
+            onRoute:(event,detail)=>reportDiagnostic(payload,`acquisition.route_${event}`,detail)}));
       if (signal?.aborted) {
         return { stopped: true, cancelled: true };
       }
       if (dataUri) {
+        reportDiagnostic(payload,'acquisition.finished',{ok:true,elapsedMs:Date.now()-startedAt,
+          encodedChars:dataUri.length});
         applyPreparedDataUri(payload, dataUri, key, "prefetch_datauri", {
           ms: Date.now() - startedAt,
           acquisitionMs: Date.now() - startedAt,
           kb: Math.round(dataUri.length / 1024),
         });
       }
+      else reportDiagnostic(payload,'acquisition.finished',{ok:false,elapsedMs:Date.now()-startedAt,
+        reason:'empty_data_uri'});
       return { stopped: false };
     } catch (error) {
       if (error?.name === "AbortError")
@@ -80,7 +92,7 @@ export function createJobPreparation(dependencies) {
       if (!payload.reader && !browserOnlySrc && /\bHTTP 403\b/i.test(message) && tabId) {
         try {
           const fallbackAt = Date.now();
-          const dataUri = await fetchFromTab(tabId, src, frameId, signal);
+          const dataUri = await fetchFromTab(tabId, src, frameId, signal,diagnosticContext);
           if (signal?.aborted) {
             return { stopped: true, cancelled: true };
           }
@@ -105,6 +117,8 @@ export function createJobPreparation(dependencies) {
       const classification = browserOnlySrc || payload.reader?.runId
         ? { permanent: true }
         : classifyError(message);
+      reportDiagnostic(payload,'acquisition.finished',{ok:false,elapsedMs:Date.now()-startedAt,
+        reason:message,permanent:classification.permanent});
       logWarn("datauri prefetch failed", {
         err: message,
         permanent: classification.permanent,

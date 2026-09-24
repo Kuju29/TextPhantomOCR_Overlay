@@ -36,6 +36,8 @@ def is_local_target(provider: str, base_url: str = "") -> bool:
     still local regardless of its configured URL.
     """
     normalized_provider = str(provider or "").strip().lower()
+    if normalized_provider == "paid":
+        return False  # The Center may be loopback; the AI still runs in the cloud.
     spec = provider_registry.get(normalized_provider)
     if spec is None:
         # Classification is also used by lightweight consumers that do not

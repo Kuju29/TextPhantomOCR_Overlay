@@ -13,8 +13,8 @@ import {
 import { classifyLocalEndpointForTrace } from "./local-connection-controller.js";
 import { note } from "../../shared/trace.js";
 import { isLocalHostUrl } from "../../shared/ai/providers/local-spec.js";
-import { createTab, queryTabs } from "../../shared/browser-api.js";
-import { broadcast, sendRuntimeMessage } from "../../shared/messaging.js";
+import { createTab } from "../../shared/browser-api.js";
+import { broadcast } from "../../shared/messaging.js";
 import { isLocalAiProvider } from "../../shared/constants.js";
 import { normalizeReasoningPreference } from "../../shared/reasoning-preference.js";
 import {
@@ -602,22 +602,9 @@ export function bindPopupEvents(deps) {
     scheduleSaveAi();
   });
 
-  // Page actions (for sites that block right-click)
-  // "Translate all images on this page" = the img_all context-menu flow,
-  // triggered from the popup instead of a right-click.
-  els.translatePageBtn?.addEventListener("click", async () => {
-    if (state.providerTransitionPending) return;
-    els.translatePageBtn.disabled = true;
-    try {
-      const tabs = await queryTabs({ active: true, currentWindow: true });
-      const tab = tabs?.[0];
-      if (!tab?.id) return;
-      await sendRuntimeMessage({ type: "TP_RUN_TRANSLATE_ALL", tabId: tab.id });
-      // Close the popup so the user sees the on-page progress toast.
-      window.close();
-    } finally {
-      els.translatePageBtn.disabled = state.providerTransitionPending;
-    }
+  // The persistent on-page control uses the same img_all context-menu flow.
+  els.translateAllButtonToggle?.addEventListener("change", async () => {
+    await setStorage({translateAllButtonEnabled:Boolean(els.translateAllButtonToggle.checked)});
   });
 
   // Toggle the per-image 🔍 buttons. Content scripts on every page react to the

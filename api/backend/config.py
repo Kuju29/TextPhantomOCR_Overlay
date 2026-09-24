@@ -132,6 +132,9 @@ class Settings:
     # Compatibility field only. Requests/CLI must supply their own cloud key.
     # AI_API_KEY is intentionally not read or used as a fallback.
     ai_api_key: str = ""
+    # Only the API operator may configure Paid. The browser never supplies a
+    # Center endpoint or receives the operator's inference key.
+    center_url: str = field(default_factory=lambda: _env_str("TP_CENTER_URL"))
     # AI network authority is independent from ownership of the API key.
     # Shared defaults trust provider endpoints + explicit operator allowlist only.
     # Personal mode additionally permits server-owned Local AI on loopback.

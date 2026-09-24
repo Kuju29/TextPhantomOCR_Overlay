@@ -16,6 +16,7 @@ export function createApiHealthController({
   persist,
   toggleUi,
   availabilityGate = null,
+  paidAvailability = null,
 }) {
   const inFlight = new Map();
 
@@ -32,6 +33,7 @@ export function createApiHealthController({
       const data = await fetchJson(`${baseUrl}${paths.META}`, null, timeout);
       if (!data?.ok) return;
       state.metaCache = data;
+      paidAvailability?.(data.paid?.available === true, baseUrl);
       const availableLanguages =
         Array.isArray(data.languages) && data.languages.length
           ? data.languages
@@ -65,7 +67,7 @@ export function createApiHealthController({
       }
       if (Object.keys(patch).length) await persist(patch);
       toggleUi();
-    } catch {}
+    } catch { paidAvailability?.(false, baseUrl); }
   };
 
   const check = async (url, attempt = 0) => {

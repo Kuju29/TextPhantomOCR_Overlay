@@ -63,12 +63,16 @@ export async function sendToTab(tabId, message, frameId = 0) {
 }
 
 // Sends a message to a tab and returns its response, or null when there is none.
-export async function requestFromTab(tabId, message, frameId = 0) {
+export async function requestFromTab(tabId, message, frameId = 0, onAttempt = null) {
   const primary = { frameId: Number(frameId) || 0 };
   let r = await attemptSend(tabId, message, primary);
+  try {onAttempt?.({frameId:primary.frameId,delivered:r.ok,hasResponse:r.resp!=null,
+    error:r.err || ''});} catch {}
   if (r.ok && r.resp != null) return r.resp;
   if (primary.frameId) {
     r = await attemptSend(tabId, message, { frameId: 0 });
+    try {onAttempt?.({frameId:0,delivered:r.ok,hasResponse:r.resp!=null,
+      error:r.err || ''});} catch {}
     if (r.ok && r.resp != null) return r.resp;
   }
   return null;

@@ -9,10 +9,15 @@
     if (!obj || typeof obj !== 'object') return undefined;
     try { return Object.getOwnPropertyDescriptor(obj, key)?.value; } catch { return undefined; }
   };
-  const imageUrl = raw => {
+  const imageUrl = (raw, metric) => {
     if (typeof raw !== 'string' || !raw || raw.length > 8192) return '';
     try {
       const url = new URL(raw, location.href);
+      if(metric) {
+        const kind=url.protocol==='blob:'?'blob':/^https?:$/.test(url.protocol)?'http':
+          url.protocol==='data:'?'data':'other';
+        metric.fieldKinds[kind]=(metric.fieldKinds[kind]||0)+1;
+      }
       return /^https?:$/.test(url.protocol) && !/\.svg$/i.test(url.pathname) && url.href !== location.href ? url.href : '';
     } catch { return ''; }
   };
@@ -28,19 +33,25 @@
     if (!scope || own(scope)) return;
     const wanted = new Set(request.pages), rows = [], manifests = [], roots = [], seenRoots = new WeakSet();
     let visited = 0, propsFound = 0;
+    const diagnostics=request.diagnostics===true ? {pages:[],manifestArrays:0,
+      fullLengthArrays:0,fullLengthWithoutUrls:0,visited:0} : null;
+    const hintedKeys=['page_no','page_number','page_id','pageId','pageNumber',
+      'getPageBlobUrl','peekPageBlobUrl','blobUrl','src','url','imageUrl','manifest','pages'];
     function root(obj) {
       if (obj && typeof obj === 'object' && !seenRoots.has(obj)) { seenRoots.add(obj); roots.push(obj); }
     }
     // A slot's own component props retain its page even when the IMG child is
     // unmounted. Do not walk into sibling slots or arbitrary window objects.
-    function pageSources(props) {
+    function pageSources(props, metric) {
       const urls = new Set(), seen = new WeakSet(), queue = [[props, 0, false]];
       for (let i = 0; i < queue.length && i < 100; i++) {
         const [obj, depth, imageData] = queue[i];
         if (!obj || typeof obj !== 'object' || seen.has(obj) || obj instanceof Node) continue;
         seen.add(obj);
+        if(metric)for(const key of hintedKeys)if(value(obj,key)!==undefined)
+          metric.hints[key]=(metric.hints[key]||0)+1;
         for (const key of imageData ? ['src', 'url', 'imageUrl', 'image_url'] : ['src', 'imageUrl', 'image_url']) {
-          const url = imageUrl(value(obj, key)); if (url) urls.add(url);
+          const url = imageUrl(value(obj, key),metric); if (url) urls.add(url);
         }
         if (depth >= 4) continue;
         for (const key of ['page', 'image', 'data', 'props', 'children']) {
@@ -59,13 +70,17 @@
       const id = String(Number(digits));
       if (!wanted.has(id)) continue;
       const candidates = new Set();
+      const metric=diagnostics ? {pageId:id,props:0,fibers:0,
+        fieldKinds:{},hints:{},httpCandidates:0} : null;
       for (const key of Object.getOwnPropertyNames(slot)) {
         if (key.startsWith('__reactProps$')) {
           const props = value(slot, key); root(props); propsFound++;
-          for (const url of pageSources(props)) candidates.add(url);
+          if(metric)metric.props++;
+          for (const url of pageSources(props,metric)) candidates.add(url);
         }
         if (!key.startsWith('__reactFiber$') && !key.startsWith('__reactInternalInstance$')) continue;
         let fiber = value(slot, key), local = true;
+        if(metric)metric.fibers++;
         for (let depth = 0; fiber && depth < 24; depth++, fiber = value(fiber, 'return')) {
           const node = value(fiber, 'stateNode');
           if (node instanceof Element && node !== slot && !slot.contains(node)) local = false;
@@ -73,11 +88,13 @@
             const props = value(fiber, field); root(props);
             if (local && field === 'memoizedProps') {
               propsFound++;
-              for (const url of pageSources(props)) candidates.add(url);
+              if(metric)metric.props++;
+              for (const url of pageSources(props,metric)) candidates.add(url);
             }
           }
         }
       }
+      if(metric){metric.httpCandidates=candidates.size;diagnostics.pages.push(metric);}
       if (candidates.size === 1) rows.push({id, url: candidates.values().next().value});
     }
     // Read only bounded data/props branches. Full chapter manifests take priority
@@ -90,11 +107,16 @@
       seen.add(obj); visited++;
       const pages = value(obj, 'pages') || value(obj, 'images');
       const items = Array.isArray(pages) ? pages : value(pages, 'items');
+      if(diagnostics && Array.isArray(items)){
+        diagnostics.manifestArrays++;
+        if(items.length===request.pages.length)diagnostics.fullLengthArrays++;
+      }
       if (Array.isArray(items) && items.length === request.pages.length) {
         const copied = items.map(item => {
           const url = typeof item === 'string' ? item : value(item, 'url') || value(item, 'src');
           return typeof url === 'string' && url.length <= 8192 ? {url} : null;
         });
+        if(diagnostics && !copied.every(Boolean))diagnostics.fullLengthWithoutUrls++;
         if (copied.every(Boolean)) manifests.push({chapterId:String(value(obj, 'chapterId') || value(obj, 'chapter_id') || value(obj, 'id') || ''),
           baseUrl:String(value(pages, 'baseUrl') || value(obj, 'baseUrl') || ''), items:copied});
       }
@@ -107,7 +129,9 @@
         }
       }
     }
-    const reply = {id:request.id, href:location.href, rows, manifests, propsFound, visited};
+    if(diagnostics)diagnostics.visited=visited;
+    const reply = {id:request.id, href:location.href, rows, manifests, propsFound, visited,
+      ...(diagnostics ? {diagnostics:{...diagnostics,pages:diagnostics.pages.slice(0,250)}} : {})};
     const json = JSON.stringify(reply);
     if (json.length <= 4 * 1024 * 1024) document.dispatchEvent(new CustomEvent(RESPONSE, {detail:json}));
   });

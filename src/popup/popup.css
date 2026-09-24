@@ -599,10 +599,6 @@ textarea {
   cursor: pointer;
 }
 
-#translate-page-btn {
-  width: 100%;
-}
-
 /* ============ Inline API status dot (after "Custom API URL") ============ */
 .api-dot-inline {
   font-size: 11px;

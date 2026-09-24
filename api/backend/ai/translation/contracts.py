@@ -41,6 +41,7 @@ class AiConfig:
     # Low-level callers remain independent unless the UI/HTTP selects the new route.
     translation_mode: str = "independent"
     conversation: dict = field(default_factory=dict, repr=False)
+    paid_operation_id: str = ""
 
     def __post_init__(self) -> None:
         self.thinking = normalize_reasoning_preference(self.thinking, "off")

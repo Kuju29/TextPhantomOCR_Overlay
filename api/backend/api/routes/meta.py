@@ -10,6 +10,7 @@ from starlette.concurrency import run_in_threadpool
 import time
 
 from backend.config import settings
+from backend.paid_center import center_base_url
 from backend.lens.languages import UI_LANGUAGES
 from backend.warmup import warmup as run_warmup
 
@@ -31,6 +32,7 @@ async def meta() -> dict:
         "sources": _SOURCES,
         "has_env_ai_key": False,
         "credential_policy": "user_required",
+        "paid": {"available": bool(center_base_url()), "auth": "email_otp"} if center_base_url() else None,
     }
 
 @router.get("/warmup")

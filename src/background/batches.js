@@ -7,6 +7,7 @@ import { broadcast } from "../shared/messaging.js";
 import { sendToTab, sendToastToTab } from "./tabs-messaging.js";
 import { serverBackoffMs } from "./transports/polling.js";
 import { releaseActiveOperationForBatch } from "./active-operations.js";
+import { noteSessionStorageFailure } from "./session-storage-diagnostics.js";
 
 const TOAST_MIN_INTERVAL_MS = 350;
 const BATCH_TTL_MS = 20 * 60 * 1000;
@@ -195,13 +196,18 @@ function persistBatchesSoon() {
   persistTimer = setTimeout(() => {
     persistTimer = 0;
     const value = [...batches.values()]
+      .filter(b => !b.cancelled && (!b.completedAt || b.repair?.phase === 'apply_pending'))
       .map(serializeBatchSnapshot)
       .filter(Boolean);
     try {
-      area.set({ [SESSION_KEY]: value }, () => void chrome.runtime?.lastError);
-    } catch {}
+      area.set({ [SESSION_KEY]: value }, () => {
+        const error = chrome.runtime?.lastError;
+        if (error) noteSessionStorageFailure('batch_progress', error);
+      });
+    } catch (error) { noteSessionStorageFailure('batch_progress', error); }
   }, 80);
 }
+export const persistBatchProgressSoon = persistBatchesSoon;
 
 export async function restorePersistedBatches() {
   const area = sessionArea();
@@ -778,6 +784,7 @@ export function markBatchInitialAi(batchId, imageKey) {
 // Tells the batch's tab to stop its keep-alive connection.
 export async function batchStopKeepAlive(b) {
   if (!b?.tabId) return;
+  if (b.cancelled || b.completedAt) persistBatchesSoon();
   releaseActiveOperationForBatch(b.id);
   try {
     await sendToTab(

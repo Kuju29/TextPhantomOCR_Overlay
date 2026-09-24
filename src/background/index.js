@@ -65,6 +65,7 @@ import {
   dropTabSession,
   ensureTabSession,
   getTabSessionId,
+  getTabSession,
 } from "./tab-sessions.js";
 import { createSessionLifecycle } from "./session-lifecycle.js";
 import { createKeepalivePortLifecycle } from "./keepalive-port-lifecycle.js";
@@ -88,6 +89,13 @@ const sessionLifecycle = createSessionLifecycle({
 
 // Independently validate the content script's navigation claim. Only a
 // detail<->photo modal transition for the same X status may retain work.
+function preservesKaganeChapter(before,after) {
+  try {
+    const a=new URL(before),b=new URL(after);
+    return a.origin===b.origin && /(^|\.)kagane\.to$/i.test(a.hostname) &&
+      /^\/series\/[a-f0-9-]{36}\/reader\/[a-f0-9-]{36}\/?$/i.test(a.pathname) && a.pathname===b.pathname;
+  }catch{return false;}
+}
 function preservesXPhotoTarget(before, after) {
   const parse = (href) => {
     try {
@@ -156,9 +164,14 @@ chrome.runtime.onConnect.addListener((port) => {
   if (!port || port.name !== KEEPALIVE_PORT_NAME) return;
   const tabId = port.sender?.tab?.id;
   const frameId = port.sender?.frameId;
-  const lifecycle = createKeepalivePortLifecycle(() => {
-    if (Number.isFinite(tabId) && (!Number.isFinite(frameId) || frameId === 0))
+  const lifecycle = createKeepalivePortLifecycle((cause) => {
+    if (Number.isFinite(tabId) && (!Number.isFinite(frameId) || frameId === 0)) {
+      const active = batchesForTab(tabId).filter(batch => batch.reader && !batch.cancelled);
+      if (active.length) log.warn('reader cancellation trigger', {
+        source: 'keepalive', cause, tabId, runIds: active.map(batch => batch.reader.runId),
+      });
       sessionLifecycle.onKeepaliveDisconnect(tabId);
+    }
   });
   port.onMessage.addListener((message) => lifecycle.onMessage(message));
   port.onDisconnect.addListener(() => {
@@ -172,16 +185,30 @@ chrome.runtime.onConnect.addListener((port) => {
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (!Number.isFinite(tabId)) return;
   if (changeInfo.status !== "loading") {
-    if(changeInfo.url && batchesForTab(tabId).some(batch=>batch.reader && !batch.cancelled))
+    if(changeInfo.url && preservesKaganeChapter(getTabSession(tabId)?.href,changeInfo.url)){
+      ensureTabSession(tabId,changeInfo.url);return;
+    }
+    if(changeInfo.url && batchesForTab(tabId).some(batch=>batch.reader && !batch.cancelled)) {
+      log.warn('reader cancellation trigger', {source:'tab_url_update',tabId,
+        runIds:batchesForTab(tabId).filter(batch=>batch.reader && !batch.cancelled).map(batch=>batch.reader.runId)});
       sessionLifecycle.onTabLoading(tabId,changeInfo.url);
+    }
     return;
   }
   const href = changeInfo.url || tab?.url || "";
   if (isMangaDexPageUrl(href)) return;
+  const active = batchesForTab(tabId).filter(batch => batch.reader && !batch.cancelled);
+  if (active.length) log.warn('reader cancellation trigger', {
+    source:'tab_loading',tabId,runIds:active.map(batch=>batch.reader.runId),
+  });
   sessionLifecycle.onTabLoading(tabId, href);
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  const active = batchesForTab(tabId).filter(batch => batch.reader && !batch.cancelled);
+  if (active.length) log.warn('reader cancellation trigger', {
+    source:'tab_closed',tabId,runIds:active.map(batch=>batch.reader.runId),
+  });
   cancelTabWork(tabId, "tab_closed");
   dropTabSession(tabId);
 });
@@ -353,9 +380,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (isMangaDexPageUrl(msg?.href || sender?.tab?.url || "")) {
           // Only TP_MD_CHAPTER_CHANGED cancels MangaDex work; its URL also changes while scrolling one chapter.
           ensureTabSession(tabId, msg?.href);
-        } else if (preservesXPhotoTarget(msg?.previousHref, msg?.href)) {
+        } else if (preservesXPhotoTarget(msg?.previousHref, msg?.href) || preservesKaganeChapter(msg?.previousHref,msg?.href)) {
           ensureTabSession(tabId, msg?.href);
         } else {
+          const active = batchesForTab(tabId).filter(batch => batch.reader && !batch.cancelled);
+          if (active.length) log.warn('reader cancellation trigger', {
+            source:'location_changed',tabId,runIds:active.map(batch=>batch.reader.runId),
+          });
           sessionLifecycle.onLocationChanged(tabId, msg?.href);
         }
       }
@@ -420,7 +451,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     case "TP_RUN_TRANSLATE_ALL": {
       (async () => {
         let tab = null;
-        const tabId = Number(msg?.tabId);
+        const tabId = sender?.tab?.id || Number(msg?.tabId);
         if (Number.isFinite(tabId) && tabId > 0) {
           tab = await getTab(tabId).catch(() => null);
         }
@@ -429,7 +460,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           tab = tabs?.[0] || null;
         }
         if (!tab?.id) throw new Error("no active tab");
-        await onContextMenuClicked({ menuItemId: "img_all", frameId: 0 }, tab);
+        await onContextMenuClicked({ menuItemId: "img_all", frameId: 0,
+          diagnosticTrigger: 'page_action' }, tab);
       })()
         .then(() => sendResponse({ ok: true }))
         .catch((e) =>

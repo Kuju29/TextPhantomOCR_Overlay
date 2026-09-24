@@ -46,6 +46,7 @@ from backend.api.routes import (
     lens_v1,
     logs,
     meta,
+    paid,
     translate,
     translate_v1,
 )
@@ -442,6 +443,7 @@ app.middleware("http")(access_log_middleware)
 # Each router owns one concern; see the module docstrings for details.
 app.include_router(health.router)
 app.include_router(meta.router)
+app.include_router(paid.router)
 app.include_router(translate.router)
 app.include_router(translate_v1.router)
 app.include_router(ai.router)

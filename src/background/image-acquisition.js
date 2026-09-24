@@ -74,14 +74,26 @@ async function refererFetch(url,pageUrl,signal) {
 // Each admitted image fetches independently. Remember successful routes, but do
 // not make a whole chapter await a slow first image or add a probe request.
 export async function acquireImageDataUri(url, pageUrl = '', signal = null, {
-  scope = `page:${pageUrl}`, domFetch = null, timeoutMs = 0, traceId = '', pageId = '',
+  scope = `page:${pageUrl}`, domFetch = null, timeoutMs = 0, traceId = '', pageId = '', onRoute = null,
 } = {}) {
+  const report=(phase, detail)=>{try{onRoute?.(phase,detail);}catch{}};
   if (signal?.aborted) throw abortError();
   if (!String(url || '').trim()) return '';
   const source = new URL(url);
   // Blob/file/data acquisition keeps its existing ownership-specific path.
-  if (!/^https?:$/.test(source.protocol))
-    return fetchImageDataUriFromUrl(url, pageUrl, signal);
+  if (!/^https?:$/.test(source.protocol)) {
+    const startedAt=Date.now();
+    report('start',{route:'WORKER_NON_HTTP',protocol:source.protocol,domFallbackAvailable:false});
+    try {
+      const dataUri=await fetchImageDataUriFromUrl(url, pageUrl, signal);
+      report('success',{route:'WORKER_NON_HTTP',elapsedMs:Date.now()-startedAt,encodedChars:dataUri.length});
+      return dataUri;
+    } catch(error) {
+      report('failed',{route:'WORKER_NON_HTTP',elapsedMs:Date.now()-startedAt,
+        code:error?.code || error?.name || 'FETCH_FAILED',reason:error?.message || String(error)});
+      throw error;
+    }
+  }
   const host = source.origin;
   let policy = policies.get(scope);
   if (!policy) {
@@ -100,6 +112,7 @@ export async function acquireImageDataUri(url, pageUrl = '', signal = null, {
     for (const route of order) {
       if (signal?.aborted) throw abortError();
       const startedAt = Date.now();
+      report('start',{route,preferred:preferred || 'none',previousFailures:failures.length});
       try {
         const dataUri = await bounded(ownedSignal => {
           if (route === 'DEFAULT') return fetchImageDataUriFromUrl(url, pageUrl, ownedSignal);
@@ -112,6 +125,8 @@ export async function acquireImageDataUri(url, pageUrl = '', signal = null, {
         const valid = route === 'DOM' ? /^data:image\//i : /^data:(?:image\/|application\/octet-stream;)/i;
         if (!valid.test(String(dataUri || ''))) throw new Error('IMAGE_ACQUISITION_INVALID');
         entry.preferred = route;
+        report('success',{route,elapsedMs:Date.now()-startedAt,encodedChars:String(dataUri).length,
+          previousFailures:failures.length});
         traceNote('background/image-acquisition.js', `imageAcquisition_${route}_success`, {
           schema:'tp.audit/1',event:'route_capability',reason:'success',
           scope:{runId:scope,pageId:`p${pageId || 0}`},
@@ -122,6 +137,8 @@ export async function acquireImageDataUri(url, pageUrl = '', signal = null, {
         return dataUri;
       } catch (error) {
         if (signal?.aborted || error?.name === 'AbortError') throw abortError();
+        report('failed',{route,elapsedMs:Date.now()-startedAt,
+          code:error?.code || error?.name || 'FETCH_FAILED',reason:error?.message || String(error)});
         failures.push({ route, reason: error.message });
         traceNote('background/image-acquisition.js', `imageAcquisition_${route}_fallback`, {
           schema:'tp.audit/1',event:'route_capability',reason:'failed',
@@ -138,6 +155,6 @@ export async function acquireImageDataUri(url, pageUrl = '', signal = null, {
   }
 }
 
-export function fetchImageDataUriWithReferer(url, pageUrl = '', signal = null) {
-  return acquireImageDataUri(url, pageUrl, signal);
+export function fetchImageDataUriWithReferer(url, pageUrl = '', signal = null, options = {}) {
+  return acquireImageDataUri(url, pageUrl, signal, options);
 }

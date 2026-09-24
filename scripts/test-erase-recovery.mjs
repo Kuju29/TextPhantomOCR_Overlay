@@ -140,9 +140,9 @@ await test('one unsafe page cannot block other repaired pages, and terminates ap
  const r=await coordinatorCase();assert.equal(r.final.phase,'apply_failed');assert.equal(r.rendered.length,1);
  assert.equal(r.rendered[0].translationRun.pageId,'good');assert.equal(r.rendered[0].result.backgroundMode,'boxes');
  assert(!r.rendered[0].result.eraseBoxes.boxes.some(b=>b.p==='p0'));
- assert.equal(r.final.pages.good.delivered,true);assert.equal(r.final.pages.bad.delivered,false);
+ assert.deepEqual(r.final.pages,{},'terminal apply_failed releases full per-page checkpoints');
  assert.equal(r.final.summary.applyFailedPages,1);assert.equal(r.final.summary.appliedRepairedUnits,1);assert.equal(r.final.summary.unappliedRepairedUnits,1);
- assert.equal(r.final.pages.bad.patchError.code,'repair_erase_conflict');assert.equal(r.deletes.length,0,'unsafe saved results must not be deleted');
+ assert.equal(r.deletes.length,0,'unsafe repair still preserves server ownership until the user leaves');
  assert(r.events.some(e=>e.ev==='repairPatch'&&e.d.pageId==='bad'&&e.d.code==='repair_erase_conflict'));
  assert(r.events.some(e=>e.ev==='repairProgress'&&e.d.phase==='apply_failed'&&e.d.placement?.applyFailedPages===1));
  const m=toasts.filter(m=>m.type==='BATCH_STATUS_UPDATE').at(-1);
@@ -159,7 +159,7 @@ await test('fixed decoder allows both partially repaired images to finish and re
  assert.equal(r.final.summary.appliedRepairedUnits,2);assert.equal(r.final.summary.applyFailedPages,0);assert.deepEqual(r.final.pages,{});assert.equal(r.deletes.length,1);
 });
 await test('cancellation during delivery never commits saved patches or cleans up as success',async()=>{
- const r=await coordinatorCase({corrupt:false,cancel:true});assert.equal(r.final.phase,'cancelled');
+ const r=await coordinatorCase({corrupt:false,cancel:true});assert.equal(r.final,null,'cancelled run releases session storage');
  assert(!r.events.some(e=>e.ev==='repairPatch'&&e.d.applied===true));assert.equal(r.deletes.length,0);
 });
 

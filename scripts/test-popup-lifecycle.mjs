@@ -221,7 +221,7 @@ assert.match(hydrationSource, /else providerMetaController\.refresh\(\)/);
     aiKey: { ...option("key"), disabled: false }, aiModel: control(), aiBaseUrl: control(),
     aiLocalTest: control(), aiThinking: { ...control(), value: "off", options: [] },
     aiPrompt: control(), aiPromptMode: control(), aiPromptReset: control(),
-    aiPromptStudio: control(), translatePageBtn: control(),
+    aiPromptStudio: control(), translateAllButtonToggle: control(),
   };
   const state = { aiProfileBlocked: true, providerTransitionPending: false, metaCache: null, lastAiResolve: null };
   const ui = createPopupUiController({
@@ -235,11 +235,11 @@ assert.match(hydrationSource, /else providerMetaController\.refresh\(\)/);
     assert.equal(control.disabled, false, "profile recovery control must remain enabled");
   assert.equal(els.aiThinking.disabled, false,
     "unknown capability must not disable the user's saved reasoning policy");
-  assert.equal(els.translatePageBtn.disabled, true);
+  assert.equal(els.translateAllButtonToggle.disabled, false,
+    "the display preference can be saved while AI needs configuration");
   els.sources.value = "translated";
   ui.toggle();
-  assert.equal(els.translatePageBtn.disabled, false,
-    "corrupt AI profile disabled non-AI translation");
+  assert.equal(els.translateAllButtonToggle.disabled, false);
 }
 
 console.log("Popup lifecycle passed: cache-first rendering, strict fail-closed AI, deduped health, automatic Local discovery.");

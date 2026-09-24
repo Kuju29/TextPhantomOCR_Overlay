@@ -159,6 +159,10 @@ export async function readFullSettings(options = {}) {
     "aiLocalCapabilityHint",
     "apiLocalUnlimited",
     "engineMode",
+    "aiServiceMode",
+    "paidSessionToken",
+    "paidModel",
+    "paidApiBase",
   ]);
 
   // A caller such as Auto translate may choose a per-request language without
@@ -251,6 +255,10 @@ export async function readFullSettings(options = {}) {
           : "",
     aiModel,
     aiProvider,
+    aiServiceMode: it.aiServiceMode === "paid" ? "paid" : "manual",
+    paidSessionToken: typeof it.paidSessionToken === "string" ? it.paidSessionToken : "",
+    paidModel: typeof it.paidModel === "string" ? it.paidModel : "",
+    paidApiBase: typeof it.paidApiBase === "string" ? it.paidApiBase : "",
     aiBaseUrl: typeof it.aiBaseUrl === "string" ? it.aiBaseUrl : "",
     localAiAdapter,
     aiGlossary: Array.isArray(it.aiGlossary) ? it.aiGlossary : [],

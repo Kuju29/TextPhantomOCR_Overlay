@@ -1,4 +1,4 @@
-// Pins a translate button to every translate-worthy image on the page.
+// Reveal only the translate button belonging to the hovered image.
 
 (function () {
   const TP = window.__TP;
@@ -16,6 +16,18 @@
   let rafPending = false;
   let currentMode = "lens_text";
   const buttons = new Map();
+  let hovered=null,pointer=null;
+  function imageAt(target){
+    for(const [img,btn] of buttons)if(target===btn || btn.contains(target))return img;
+    return buttons.has(target)?target:null;
+  }
+  function trackPointer(event){
+    if(event.pointerType==='touch' && event.type==='pointermove')return;
+    pointer={x:event.clientX,y:event.clientY};
+    hovered=imageAt(event.target);scheduleReposition();
+  }
+  function leavePage(){pointer=null;hovered=null;scheduleReposition();}
+
 
   // Creates the fixed button layer and its stylesheet when missing.
   function ensureDom() {
@@ -119,12 +131,13 @@
   }
 
   function positionButton(img, btn) {
-    applyPlacement(btn, computePlacement(img));
+    applyPlacement(btn, img===hovered ? computePlacement(img) : null);
   }
 
   // Repositions every button in one read phase followed by one write phase.
   function repositionAll() {
     rafPending = false;
+    if(pointer)hovered=imageAt(document.elementFromPoint(pointer.x,pointer.y));
     const plans = [];
     for (const [img, btn] of buttons.entries()) {
       if (!img.isConnected) {
@@ -132,7 +145,7 @@
         buttons.delete(img);
         continue;
       }
-      plans.push([btn, computePlacement(img)]);
+      plans.push([btn, img===hovered ? computePlacement(img) : null]);
     }
     for (const [btn, p] of plans) applyPlacement(btn, p);
   }
@@ -176,6 +189,8 @@
   function makeButton(img) {
     const btn = document.createElement("button");
     btn.type = "button";
+    btn.style.display="none";
+    btn.setAttribute("aria-label","Translate this image");
     btn.className = "tp-img-btn";
     btn.textContent = "🔍";
     btn.title = "Translate this image (TextPhantom)";
@@ -221,6 +236,10 @@
       }
       if (!enabled) return;
       rescan();
+      document.addEventListener('pointermove',trackPointer,true);
+      document.addEventListener('pointerdown',trackPointer,true);
+      document.documentElement.addEventListener('pointerleave',leavePage);
+      window.addEventListener('blur',leavePage);
       window.addEventListener("scroll", scheduleReposition, {
         passive: true,
         capture: true,
@@ -248,6 +267,11 @@
     if (!enabled) return;
     enabled = false;
     clearTimeout(rescanTimer);
+    document.removeEventListener('pointermove',trackPointer,true);
+    document.removeEventListener('pointerdown',trackPointer,true);
+    document.documentElement.removeEventListener('pointerleave',leavePage);
+    window.removeEventListener('blur',leavePage);
+    hovered=null;pointer=null;
     observer?.disconnect();
     observer = null;
     window.removeEventListener("scroll", scheduleReposition, { capture: true });

@@ -66,6 +66,7 @@ import { createPopupUiController } from "./controllers/popup-ui-controller.js";
 import { createApiAvailabilityGate } from "./controllers/api-availability-gate.js";
 import { createResetDefaultsController } from "./controllers/reset-defaults-controller.js";
 import { createUpdateBannerController } from "./controllers/update-banner-controller.js";
+import { createPaidServiceController } from "./controllers/paid-service-controller.js";
 import {
   protocolLabel,
   providerFromKey,
@@ -105,6 +106,7 @@ const state = {
   providerTransitionRevision: 0,
   aiProfileBlocked: false, aiModelBlocked: false,
   aiProfileErrorCode: "",
+  paidActive: false, paidReady: false,
 };
 const usageViewController = createUsageViewController({
   els,
@@ -158,6 +160,7 @@ function isRemoteDefaultApiUrl(url) {
 }
 
 let apiAvailabilityGate = null;
+let paidServiceController = null;
 const popupUiController = createPopupUiController({
   els,
   state,
@@ -167,8 +170,12 @@ const popupUiController = createPopupUiController({
   validateAiKey: () => settingsPersistenceController.validateAiKey(),
   validateLangSource: () => settingsPersistenceController.validateLangSource(),
   applyApiAvailabilityGate: () => apiAvailabilityGate?.apply(),
+  applyPaidMode: () => paidServiceController?.applyVisibility(),
 });
 const toggleUi = popupUiController.toggle;
+paidServiceController = createPaidServiceController({
+  els, state, getStorage, setStorage, toggleUi,
+});
 const traceProviderTransition = popupUiController.traceProviderTransition;
 const setProviderTransitionPending =
   popupUiController.setProviderTransitionPending;
@@ -256,6 +263,7 @@ apiHealthController = createApiHealthController({
   persist: setStorage,
   toggleUi,
   availabilityGate: apiAvailabilityGate,
+  paidAvailability: (available, base) => paidServiceController.setAvailability(available, base),
 });
 
 const localConnectionController = createLocalConnectionController({
@@ -394,5 +402,6 @@ void loadPopupSettings({
   });
   setEmojiStatus("error", "Settings could not be loaded. Reopen the popup.");
 });
+void paidServiceController.initialize();
 
 void updateBannerController.refresh();

@@ -13,6 +13,7 @@ const MESSAGE_DISPLAY_SCRIPTS = [
   "content/payload.js",
   "content/overlay.js",
   "content/image-buttons.js",
+  "content/translate-all-button.js",
   "content/sites/mangadex/adapter.js",
   "content/sites/mangadex/collector.js",
   "content/mangadex.js",

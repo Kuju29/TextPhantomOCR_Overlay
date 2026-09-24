@@ -11,7 +11,7 @@ export const SETTINGS_RESET_KEYS = Object.freeze([
   "aiLocalCapacityMode", "aiLocalManualConcurrency", "aiLocalCapabilityHint",
   "aiLocalCapabilitySnapshotsV1", "aiConcurrencyLearningV1", "apiLocalUnlimited", "engineMode",
   "aiProfilesV1", "aiProfileStorageVersion", "aiProfileCredentialsV1",
-  "aiProfilePromptsV1", "fontScale", "imgButtonsEnabled",
+  "aiProfilePromptsV1", "fontScale", "imgButtonsEnabled", "translateAllButtonEnabled",
   "uploadFormat", "uploadQuality",
   "autoMode", "autoLang", "autoSource", "autoShowRaw", "autoRawTab", "autoWidth",
 ]);

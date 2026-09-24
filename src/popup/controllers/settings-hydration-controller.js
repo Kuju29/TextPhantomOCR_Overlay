@@ -141,6 +141,7 @@ export async function loadPopupSettings(deps) {
     "aiPromptByLang",
     "fontScale",
     "imgButtonsEnabled",
+    "translateAllButtonEnabled",
     "relayoutTranslated",
     "rateLimitEnabled",
     "rateProfile",
@@ -159,6 +160,8 @@ export async function loadPopupSettings(deps) {
 
   if (els.imgButtonsToggle)
     els.imgButtonsToggle.checked = Boolean(stored.imgButtonsEnabled);
+  if (els.translateAllButtonToggle)
+    els.translateAllButtonToggle.checked = Boolean(stored.translateAllButtonEnabled);
   if (els.apiLocalUnlimited)
     els.apiLocalUnlimited.checked = stored.apiLocalUnlimited !== false;
   // API execution is temporarily unavailable in the extension UI. Keep the

@@ -68,13 +68,15 @@ export async function fetchImageDataUriFromUrl(url, pageUrl, signal = null) {
 // Fetches an image in the page's context via the content script and returns it as a `data:` URI.
 // Abort abandons this worker-side message wait.  It cannot cancel an already
 // executing content-script fetch without a separate request-id/abort protocol.
-export async function fetchImageDataUriFromTab(tabId, url, frameId = 0, signal = null) {
+export async function fetchImageDataUriFromTab(tabId, url, frameId = 0, signal = null, diagnostics = null) {
   if (!tabId) throw new Error("no tabId for tab fetch");
   if (signal?.aborted)
     throw new DOMException("The operation was aborted", "AbortError");
   const request = requestFromTabEnsured(
     tabId,
-    { type: "TP_FETCH_IMAGE", url },
+    { type: "TP_FETCH_IMAGE", url,
+      ...(diagnostics?.diagnosticId ? {diagnosticId:diagnostics.diagnosticId,
+        pageId:diagnostics.pageId || '',pageIndex:diagnostics.pageIndex ?? -1} : {}) },
     frameId,
   );
   const resp = signal ? await new Promise((resolve, reject) => {

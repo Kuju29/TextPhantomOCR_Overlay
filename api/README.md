@@ -9,6 +9,34 @@ app_port: 7860
 
 TextPhantom OCR Overlay API
 
+## Optional Paid Center bridge (22.11 local pilot, based on 22.9)
+
+Set `TP_CENTER_URL=http://127.0.0.1:8787` in the **API server process** before
+starting this API. The value is the Control Center origin, not the extension's
+API URL. The bridge targets the Center's single records workspace at `/` and
+never sends the operator's OpenRouter key to the browser. The popup uses this
+API's `/meta` to show `Paid` / `Manual` only when the env is configured. Paid
+authenticates by email OTP and selects models/credits from the Center. The
+popup checks `/paid/auth/status` and shows when OTP is disabled or Resend is
+not ready before letting customers request a code; Manual
+preserves the existing Provider / API key / Model profile. With no env, this
+release retains the old popup and BYOK route.
+
+Example on Linux/macOS (run from this extension directory after installing
+`api/requirements.txt` in a project Python environment):
+
+```sh
+TP_CENTER_URL=http://127.0.0.1:8787 python -m uvicorn backend.main:app --app-dir api --host 127.0.0.1 --port 7860
+```
+
+Run Center on `127.0.0.1:8787` on the same machine, set the extension's API
+URL to `http://localhost:7860`, and configure the Center at `/`.
+Paid is paused there by default. This is a **local pilot**: the Center has no
+Stripe checkout/webhook or automatic top-up. Its operator must add credits
+after independent verification. If an inference outcome is unknown, the Center
+holds the reserved credits for review. See the Center's README and
+`docs/PILOT-VERIFICATION.md` in its archive before allowing customers to test.
+
 
 ## AI endpoint policy (19.19)
 

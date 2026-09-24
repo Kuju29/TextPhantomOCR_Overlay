@@ -1,4 +1,5 @@
 // Tracks a per-tab session id so results arriving for a navigated-away page can be discarded.
+import { noteSessionStorageFailure } from './session-storage-diagnostics.js';
 
 const tabSessionById = new Map();
 
@@ -63,5 +64,5 @@ function persistTabSessions(tabId) {
     await restoreTabSessions();
     await globalThis.chrome?.storage?.session?.set({ [SESSION_KEY]:
       [...tabSessionById].map(([tabId,row]) => ({tabId,...row})).slice(-256) });
-  }).catch(() => {});
+  }).catch(error => { noteSessionStorageFailure('tab_sessions',error); });
 }

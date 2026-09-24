@@ -8,11 +8,11 @@ export function createKeepalivePortLifecycle(onUnexpectedDisconnect) {
       if (type === "TP_KEEPALIVE_GRACEFUL_STOP") expected = true;
       if (type === "TP_KEEPALIVE_PAGE_UNLOAD" && !unloadHandled) {
         unloadHandled = true;
-        onUnexpectedDisconnect();
+        onUnexpectedDisconnect('page_unload_message');
       }
     },
     onDisconnect() {
-      if (!expected && !unloadHandled) onUnexpectedDisconnect();
+      if (!expected && !unloadHandled) onUnexpectedDisconnect('port_disconnect');
     },
   };
 }

@@ -5,7 +5,7 @@ import { translationSessions } from '../translation-session-store.js';
 import { conversationDispatchJournal } from './dispatch-journal.js';
 import { conversationPreparedPages } from './prepared-page-journal.js';
 import { repairRequest } from './client.js';
-import { makePageCheckpoint, digestText, buildPatchedResult, pageInitialReport } from './page-checkpoint.js';
+import { makePageCheckpoint, digestText, buildPatchedResult, pageInitialReport, compactDeliveredPage } from './page-checkpoint.js';
 import { executeRepairPool, repairUsageDiagnostic } from './executor.js';
 import { findContext } from '../job-registry.js';
 import { getBatch, ensureBatch, registerBatchPayload, batchMark, batchUpdateToast, batchStopKeepAlive, updateImagePresentation } from '../batches.js';
@@ -172,9 +172,9 @@ export function createRepairCoordinator({
       for (const prior of await sessions.list()) {
         if (prior.tabId === run.tabId && prior.frameId === run.frameId &&
             !['done','apply_failed','cancelled','unavailable'].includes(prior.phase) &&
-            (prior.targets || []).some(x => run.targets.includes(x))) {
+            (prior.sessionId !== run.sessionId || (prior.targets || []).some(x => run.targets.includes(x)))) {
           batchRuns.set(prior.batchId, prior.id);
-          await cancelBatch(prior.batchId, 'superseded_translation');
+          await cancelBatch(prior.batchId, prior.sessionId !== run.sessionId ? 'old_tab_session' : 'superseded_translation');
         }
       }
       await sessions.update(run.id, () => run);
@@ -240,6 +240,7 @@ export function createRepairCoordinator({
         const current = await sessions.get(runId);
         const page = current?.pages?.[pageId] || await preparedPages.get(runId, pageId);
         if (!page || !live(current) || current.phase !== 'collecting') return;
+        if (page.compacted) return; // A late duplicate cannot reopen a confirmed page.
         const receipt = await dispatchJournal.checkpointResult(runId, pageId, {
           stage:data.stage, accepted:data.accepted || [], failures:data.failures || [], blocked:data.blocked || [],
         });
@@ -250,6 +251,9 @@ export function createRepairCoordinator({
         preview.blocked = receipt.blocked || [];
         preview.inFlight = [];
         preview.phase = receipt.phase === 'finished' ? 'finished' : 'translating';
+        preview.delivered = receipt.delivered === true;
+        if (preview.phase === 'finished' && preview.delivered)
+          await preparedPages.compactDelivered?.(runId,pageId,preview).catch(() => {});
         captured = {...current,pages:{...(current.pages || {}),[pageId]:preview}};
       } else {
         captured = await sessions.update(runId, current => {
@@ -280,6 +284,7 @@ export function createRepairCoordinator({
               page.currentOperation = data.nextDispatch.operationId;
             }
           }
+          current.pages[pageId] = compactDeliveredPage(page);
           return current;
         });
       }
@@ -310,14 +315,28 @@ export function createRepairCoordinator({
       const page = await preparedPages.get(id,pageId).catch(() => null);
       if (!page) return;
       const receipt = await dispatchJournal.markDelivered(id,pageId,applied === true);
-      const preview = {...page,delivered:receipt.delivered === true};
+      const preview = {...page, accepted:receipt.accepted, failures:receipt.failures,
+        blocked:receipt.blocked,phase:receipt.phase === 'finished' ? 'finished' : page.phase,
+        delivered:receipt.delivered === true};
+      await preparedPages.compactDelivered?.(id,pageId,preview).catch(() => {});
       presentPage({...run,pages:{...(run.pages || {}),[pageId]:preview}},preview);
+      // A placement receipt can race a per-page journal transfer. Bring the
+      // canonical page up to date if the repair barrier moved it meanwhile.
+      if (operations.has(id) && (await sessions.get(id).catch(() => null))?.pages?.[pageId])
+        await sessions.update(id,current => {
+          const row=current?.pages?.[pageId];if (!row || !live(current)) return current;
+          row.delivered = row.delivered || applied === true;
+          current.pages[pageId]=compactDeliveredPage(row);
+          return current;
+        });
       return;
     }
     const updated = await sessions.update(id, current => {
       const page = current?.pages?.[pageId];
       if (!page || !live(current)) return current;
-      page.delivered = applied === true; return current;
+      page.delivered = page.delivered || applied === true;
+      current.pages[pageId]=compactDeliveredPage(page);
+      return current;
     });
     if (updated) presentPage(updated,updated.pages?.[pageId]);
   }
@@ -518,12 +537,12 @@ export function createRepairCoordinator({
         const finalSummary = {...summary, wrongLanguageCount, alignmentUncertainCount, applyPendingPages, applyFailedPages,
           appliedRepairedUnits,
           unappliedRepairedUnits: Math.max(0, (summary.repaired || 0) - appliedRepairedUnits)};
-        const retain = applyPendingPages || applyFailedPages;
+        const retain = applyPendingPages;
         return { ...current,
           phase:applyPendingPages ? 'apply_pending' : applyFailedPages ? 'apply_failed' : 'done',
           summary:finalSummary,
-          // Keep unconfirmed/unsafe saved answers until session TTL. apply_failed
-          // is terminal, not a blocked network job to retry on worker wake-up.
+          // Only unconfirmed repair placement needs its source checkpoint.
+          // An unsafe terminal refusal remains visible in the small summary.
           pages:retain ? current.pages : {}, tasks:retain ? current.tasks : {} };
       });
       if (!value || !live(value)) { await cancelBatch(run.batchId, 'stale_after_repair_commit'); return null; }
@@ -586,36 +605,47 @@ export function createRepairCoordinator({
           preparedPages.listRun(id).catch(() => []),
           dispatchJournal.listRun(id).catch(() => []),
         ]);
+        const receipts = new Map(dispatches.map(row => [String(row.pageId),row]));
+        const sourceByPage = new Map(sources.filter(row => row?.pageId && row?.page)
+          .map(row => [String(row.pageId),row.page]));
+        // Transfer one immutable page at a time. The old key is removed only
+        // after its canonical copy is durable, keeping quota headroom roughly
+        // constant even when most reader images have not mounted yet.
+        for (const pageId of new Set([...sourceByPage.keys(),...receipts.keys()])) {
+          const source = sourceByPage.get(pageId), receipt = receipts.get(pageId);
+          run = await sessions.update(id,current => {
+            if (!current || current.phase !== 'collecting') return current;
+            const page = current.pages[pageId] || source;
+            if (!page) return current;
+            if (receipt && !page.compacted) {
+              for (const evidence of receipt.dispatches || (receipt.evidence ? [receipt.evidence] : []))
+                applySourceEvidence(page,evidence);
+              const accepted = new Map(page.accepted.map(row => [String(row.id),row]));
+              for (const row of receipt.accepted || []) if (!accepted.has(String(row.id)))
+                accepted.set(String(row.id),{id:String(row.id),text:String(row.text || '')});
+              page.accepted=[...accepted.values()];
+              const failures=new Map(page.failures.map(row => [String(row.id),row]));
+              for (const row of receipt.failures || []) if (!accepted.has(String(row.id))) {
+                const prior=failures.get(String(row.id));
+                if (!prior || row.reason !== 'missing') failures.set(String(row.id),row);
+              }
+              for (const acceptedId of accepted.keys()) failures.delete(acceptedId);
+              page.failures=[...failures.values()];
+              page.blocked=[...new Set([...page.blocked,...(receipt.blocked || []).map(String)])];
+              const latest=(receipt.dispatches || []).at(-1) || receipt.evidence;
+              if (receipt.phase === 'finished') {page.phase='finished';page.inFlight=[];}
+              else if (latest) {page.phase='translating';page.inFlight=[...latest.targetIds];page.currentOperation=latest.operationId;}
+            }
+            if (receipt?.delivered === true) page.delivered=true;
+            current.pages[pageId]=compactDeliveredPage(page);
+            return current;
+          });
+          if (!run || !live(run)) return;
+          if (source) await preparedPages.remove(id,pageId).catch(() => {});
+          if (receipt) await dispatchJournal.remove(id,pageId).catch(() => {});
+        }
         run = await sessions.update(id, current => {
-          for (const source of sources) {
-            if (source?.pageId && source?.page && !current.pages?.[source.pageId])
-              current.pages[source.pageId] = source.page;
-          }
-          for (const receipt of dispatches) {
-            const page = current.pages?.[receipt.pageId];
-            if (!page) continue;
-            for (const evidence of receipt.dispatches || (receipt.evidence ? [receipt.evidence] : []))
-              applySourceEvidence(page,evidence);
-            const accepted = new Map(page.accepted.map(row => [String(row.id),row]));
-            for (const row of receipt.accepted || []) if (!accepted.has(String(row.id)))
-              accepted.set(String(row.id),{id:String(row.id),text:String(row.text || '')});
-            page.accepted=[...accepted.values()];
-            const failures=new Map(page.failures.map(row => [String(row.id),row]));
-            for (const row of receipt.failures || []) if (!accepted.has(String(row.id))) {
-              const prior=failures.get(String(row.id));
-              if (!prior || row.reason !== 'missing') failures.set(String(row.id),row);
-            }
-            for (const acceptedId of accepted.keys()) failures.delete(acceptedId);
-            page.failures=[...failures.values()];
-            page.blocked=[...new Set([...page.blocked,...(receipt.blocked || []).map(String)])];
-            if (receipt.delivered === true) page.delivered = true;
-            const latest=(receipt.dispatches || []).at(-1) || receipt.evidence;
-            if (receipt.phase === 'finished') {
-              page.phase='finished';page.inFlight=[];
-            } else if (latest) {
-              page.phase='translating';page.inFlight=[...latest.targetIds];page.currentOperation=latest.operationId;
-            }
-          }
+          if (!current || current.phase !== 'collecting') return current;
           for (const page of Object.values(current.pages)) {
             if (page.phase !== 'finished') {
               const known = new Set([...page.accepted.map(x=>x.id), ...page.failures.map(x=>x.id), ...page.blocked]);
@@ -627,6 +657,7 @@ export function createRepairCoordinator({
               page.blocked = [...new Set(page.blocked)];
               page.phase = page.blocked.length ? 'interrupted' : 'finished'; page.inFlight = [];
             }
+            current.pages[page.pageId]=compactDeliveredPage(page);
           }
           return current;
         });
@@ -688,11 +719,15 @@ export function createRepairCoordinator({
     }
     abortBatchInFlight(batchId, 'repair_run_cancelled');
     const run = await sessions.get(id).catch(() => null);
-    if (!run) { await Promise.all([dispatchJournal.clearRun(id).catch(() => {}), preparedPages.clearRun(id).catch(() => {})]); return; }
-    await sessions.update(id, value => value && ({...value, phase:'cancelled', pages:{}, tasks:{}, reason})).catch(() => {});
+    if (!run) { await Promise.all([dispatchJournal.clearRun(id).catch(() => {}), preparedPages.clearRun(id).catch(() => {})]);
+      batchRuns.delete(batchId);return; }
     await Promise.all([dispatchJournal.clearRun(id).catch(() => {}), preparedPages.clearRun(id).catch(() => {})]);
+    // A cancelled chapter is no longer recoverable work. Free its run row too;
+    // the already placed DOM stays under the content script's display policy.
+    await sessions.remove(id).catch(() => {});
     for (const key of runtimePages.keys()) if (key.startsWith(`${id}:`)) runtimePages.delete(key);
     await api(run, 'cancel', {}).catch(() => {});
+    batchRuns.delete(batchId);
     emit('repairCancelled', {runId:id, batchId, reason});
   }
   async function resume() {

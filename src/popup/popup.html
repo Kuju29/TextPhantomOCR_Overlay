@@ -109,13 +109,16 @@
         <div class="divider" role="separator"></div>
         <div class="section-title">Page actions</div>
         <div class="action-box">
-          <button type="button" id="translate-page-btn" class="action-btn primary">🔍 Translate all images on this
-            page</button>
+          <label class="label-row toggle-row">
+            <span>🔍 Translate all images on this page</span>
+            <input type="checkbox" id="translate-all-button-toggle" />
+          </label>
+          <div class="hint">Shows a slim handle at the middle-right edge. Hover or tap to reveal Translate all.</div>
           <label class="label-row toggle-row">
             <span>🔘 Translate buttons on images</span>
             <input type="checkbox" id="img-buttons-toggle" />
           </label>
-          <div class="hint">Shows a small 🔍 button on the top-right corner of every image so you can translate a single
+          <div class="hint">Shows a small 🔍 button only while hovering over an image so you can translate a single
             image without right-clicking.</div>
         </div>
       </section>
@@ -147,6 +150,35 @@
             </div>
             <div id="ai-usage-history-list" class="ai-usage-history-list"></div>
           </dialog>
+          <div class="field" id="ai-service-wrap" style="display: none">
+            <label for="ai-service">AI service</label>
+            <select id="ai-service" aria-label="AI service">
+              <option value="manual">Manual · use your own key</option>
+              <option value="paid">Paid · TextPhantom credits</option>
+            </select>
+          </div>
+          <div id="ai-paid-panel" style="display: none">
+            <div class="field" id="ai-paid-login">
+              <label for="ai-paid-email">Email</label>
+              <input id="ai-paid-email" type="email" autocomplete="email" placeholder="Your account email" />
+              <button type="button" id="ai-paid-send" class="secondary-btn">Send login code</button>
+              <button type="button" id="ai-paid-check" class="secondary-btn">Check login status</button>
+              <label for="ai-paid-code">Email code</label>
+              <input id="ai-paid-code" type="text" inputmode="numeric" pattern="[0-9]{6}"
+                     autocomplete="one-time-code" maxlength="6" placeholder="6 digits" />
+              <button type="button" id="ai-paid-verify" class="secondary-btn">Sign in</button>
+            </div>
+            <div class="field" id="ai-paid-account" style="display: none">
+              <div id="ai-paid-email-label"></div>
+              <div id="ai-paid-credits"></div>
+              <label for="ai-paid-model">Model</label>
+              <select id="ai-paid-model" aria-label="Paid model"></select>
+              <button type="button" id="ai-paid-refresh" class="secondary-btn">Refresh account</button>
+              <button type="button" id="ai-paid-logout" class="secondary-btn">Sign out</button>
+              <div class="hint">Credits are shared across devices on this account.</div>
+            </div>
+            <div class="hint" id="ai-paid-status" role="status"></div>
+          </div>
           <div class="field" id="ai-provider-wrap">
             <label for="ai-provider">Provider</label>
             <select id="ai-provider" aria-label="AI provider">

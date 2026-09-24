@@ -10,6 +10,9 @@ import {
   resolveEffectiveAiProfile,
 } from "../shared/ai-profile-activation.js";
 import { cloudProviderSpec } from "../shared/ai/providers/cloud-registry.js";
+import { resolveApiBase } from "../shared/api-defaults.js";
+import { normalizeUrl } from "../shared/url.js";
+import { BUNDLED_CANONICAL_PROMPT_PLANS } from "../generated/canonical-prompt-plans.js";
 
 function stableString(value) {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
@@ -72,7 +75,7 @@ async function validationStage(stage, action) {
  * Resolve the currently selected pair once. Unsupported profile fields are
  * reported but deliberately not projected into the established wire payload.
  */
-export async function resolveJobAiProfile(settings, { language = "en" } = {}) {
+async function resolveManualJobAiProfile(settings, { language = "en" } = {}) {
   const migration = await validationStage("storage_contract", () =>
     ensureAiProfileStorageV2(settings));
   const active = await validationStage("active_profile", () =>
@@ -168,4 +171,50 @@ export async function resolveJobAiProfile(settings, { language = "en" } = {}) {
     unsupported,
   };
   return immutableCopy({ settings: effective, audit });
+}
+
+export async function resolveJobAiProfile(settings, { language = "en" } = {}) {
+  if (settings.aiServiceMode !== "paid")
+    return resolveManualJobAiProfile(settings, { language });
+  const base = await resolveApiBase();
+  if (!base) {
+    const error = new Error("Paid requires the TextPhantom API URL");
+    error.code = "PAID_CENTER_UNAVAILABLE";
+    throw error;
+  }
+  let advertised;
+  try {
+    const response = await fetch(base.replace(/\/+$/, "") + "/meta", {
+      cache: "no-store", signal: AbortSignal.timeout(6000),
+    });
+    if (!response.ok) throw new Error("API metadata unavailable");
+    advertised = await response.json();
+  } catch {
+    const error = new Error("Cannot verify the Paid service on this API");
+    error.code = "PAID_CENTER_UNAVAILABLE";
+    throw error;
+  }
+  // If the operator removed TP_CENTER_URL, the extension resumes its normal
+  // Manual controls without altering the Manual profile or the stored choice.
+  if (advertised?.paid?.available !== true)
+    return resolveManualJobAiProfile(settings, { language });
+  const token = String(settings.paidSessionToken || "").trim();
+  const model = String(settings.paidModel || "").trim();
+  if (!token || !model || normalizeUrl(settings.paidApiBase) !== normalizeUrl(base)) {
+    const error = new Error("Sign in and select a Paid model in AI option");
+    error.code = "PAID_LOGIN_REQUIRED";
+    throw error;
+  }
+  let manual = null;
+  try { manual = await resolveManualJobAiProfile(settings, { language }); }
+  catch { /* Paid accounts can work before a Manual Provider is configured. */ }
+  const prompt = manual?.settings?.aiPrompt || settings.aiPrompt ||
+    BUNDLED_CANONICAL_PROMPT_PLANS?.[language]?.pieces?.editableStyle || "";
+  return immutableCopy({
+    settings: { ...(manual?.settings || settings), aiProvider: "paid", aiModel: model,
+      aiBaseUrl: "", aiKey: token, aiPrompt: prompt, aiPageImage: "off",
+      aiModelCapabilities: {}, aiThinking: "off", aiLocalThinking: "off" },
+    audit: { version: AI_PROFILES_SCHEMA_VERSION, source: "paid_customer_session",
+      provider: "paid", model, runtime: "cloud", configurationConflict: false },
+  });
 }

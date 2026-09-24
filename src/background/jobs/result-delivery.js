@@ -340,6 +340,15 @@ export function createResultDelivery(deps) {
     const batch = batchId
       ? ensureBatch(batchId, ctx?.tabId || 0, ctx?.frameId || 0)
       : null;
+    const safeCode = value => /^[A-Za-z0-9_-]{1,80}$/.test(String(value || '')) ? String(value) : '';
+    deps.log?.warn('image processing failure', {
+      batchId,readerPageId:String(ctx?.generation?.readerPageId || '').slice(0,32),
+      traceId:safeCode(ctx?.traceId),
+      code:safeCode(error?.tpError?.code || error?.code || 'PROCESSING_FAILED'),
+      stage:safeCode(error?.tpError?.stage || error?.stage),
+      storageQuota:/session storage quota bytes exceeded|QUOTA_BYTES exceeded/i.test(String(errMsg)),
+      stale:isStale,
+    });
     const item = batch && imageKey ? batch.items.get(imageKey) : null;
     if (
       item?.payload &&

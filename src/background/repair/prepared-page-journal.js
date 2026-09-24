@@ -2,6 +2,8 @@
 // Keeping each page under its own session-storage key avoids rewriting an
 // ever-growing chapter/run object before every provider request. The repair
 // barrier folds these durable page rows into the canonical run exactly once.
+import { noteSessionStorageFailure } from '../session-storage-diagnostics.js';
+import { compactDeliveredPage } from './page-checkpoint.js';
 export const TRANSLATION_PREPARED_PAGE_PREFIX = 'tpTranslationPreparedPageV1:';
 const enc = value => encodeURIComponent(String(value || ''));
 export const translationPreparedPageKey = (runId, pageId) =>
@@ -34,6 +36,7 @@ export function createPreparedPageJournal({area = () => globalThis.chrome?.stora
       await requireArea().set({[key]:{version:1,runId:String(runId),pageId:String(pageId),createdAt:now(),page:safe}});
     } catch (error) {
       cache.delete(key);
+      noteSessionStorageFailure('prepared_page',error);
       throw error;
     }
     return clone(safe);
@@ -56,6 +59,19 @@ export function createPreparedPageJournal({area = () => globalThis.chrome?.stora
     }
     return rows;
   }
+  async function compactDelivered(runId, pageId, state) {
+    if (compactDeliveredPage(state) === state) return false;
+    const key = translationPreparedPageKey(runId,pageId);
+    const stored = (await requireArea().get(key))?.[key];
+    if (!stored?.page) return false; // The repair barrier may have moved it already.
+    if (stored.page.compacted) return false;
+    const next = compactDeliveredPage({...stored.page,...state});
+    if (!next.compacted) return false;
+    try { await requireArea().set({[key]:{...stored,page:next}}); }
+    catch (error) {noteSessionStorageFailure('prepared_page',error);throw error;}
+    cache.set(key,next);
+    return true;
+  }
   async function remove(runId, pageId) {
     const key = translationPreparedPageKey(runId,pageId);
     cache.delete(key);
@@ -68,7 +84,7 @@ export function createPreparedPageJournal({area = () => globalThis.chrome?.stora
     for (const key of keys) cache.delete(key);
     if (keys.length) await requireArea().remove?.(keys);
   }
-  return {record,get,listRun,remove,clearRun};
+  return {record,get,listRun,compactDelivered,remove,clearRun};
 }
 
 export const conversationPreparedPages = createPreparedPageJournal();

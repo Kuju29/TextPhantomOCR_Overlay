@@ -13,8 +13,11 @@
     TP.normalizeLazyImages();
 
     if (!TP.isMangaDexHost()) {
+      TP.scanDiag?.emit('route.selected', {route:'NORMAL', reason:'no_dynamic_reader'});
       return TP.collectImagesForScan(mode, lang, "page_scan");
     }
+
+    TP.scanDiag?.emit('route.selected', {route:'MANGADEX', reason:'site_adapter'});
 
     TP.showToast("TextPhantom: loading MangaDex pages…", 2600);
 
@@ -96,6 +99,11 @@
       const type = String(msg?.type || "");
 
       if (type === "TP_PING") return sendResponse({ ok: true });
+      if (type === 'TP_IMAGE_SCAN_DIAGNOSTIC') {
+        if (TP.scanDiag?.has(msg.scanId) || TP.scanDiag?.begin(msg.scanId,msg.detail?.trigger))
+          TP.scanDiag.emit(`worker.${String(msg.phase || 'event')}`,msg.detail,msg.scanId);
+        return sendResponse({ok:true});
+      }
       if (type === "TP_DIAGNOSTICS_STATE") {
         const detail =
           msg?.detail === "full" ? "full" : msg?.enabled ? "compact" : "off";
@@ -137,16 +145,32 @@
         );
       }
 
-      if (type === "TP_READER_DOM_FETCH") return sendResponse(await TP.readReaderDomImage(msg));
+      if (type === "TP_READER_DOM_FETCH") {
+        if(msg?.diagnosticId)TP.scanDiag?.emit('content.dom_fetch_start',{
+          pageId:String(msg.pageId || ''),source:TP.scanDiag.describeSource(msg.url,msg.diagnosticId)},msg.diagnosticId);
+        const result=await TP.readReaderDomImage(msg);
+        if(msg?.diagnosticId)TP.scanDiag?.emit('content.dom_fetch_result',{
+          pageId:String(msg.pageId || ''),ok:result?.ok === true,
+          encodedChars:result?.dataUri?.length || 0,
+          error:result?.ok ? null : TP.scanDiag.error(result?.error)},msg.diagnosticId);
+        return sendResponse(result);
+      }
       if (type === "TP_READER_RELEASE") return sendResponse(await TP.releaseReaderPlacement(msg.readerRunId));
       if (type === "TP_READER_CANCEL") {
         if (!msg.readerRunId || TP.readerOwnsRun?.(msg.readerRunId)) TP.cancelReaderRun?.(msg.reason || "worker_cancel");
         return sendResponse({ok:true});
       }
 
+      if (type === 'GET_IMAGES') {
+        if(msg?.diagnosticId)TP.scanDiag?.begin(msg.diagnosticId,msg.diagnosticTrigger);
+        else TP.scanDiag?.deactivate();
+      }
+      if (type === 'GET_CONTEXT_IMAGE_PAYLOAD') TP.scanDiag?.deactivate();
       const { mode, lang } = await TP.getSettings();
 
       if (type === "GET_IMAGES") {
+        const startedAt=Date.now();
+        TP.scanDiag?.emit('content.scan_start', {mode,lang,frame:window.top===window?'top':'child'});
         const resp = await collectImages(mode, lang);
         const items = Array.isArray(resp)
           ? resp
@@ -159,6 +183,10 @@
           skipped: stats?.skipped || 0,
           host: location.host,
         });
+        TP.scanDiag?.emit('content.scan_result', {accepted:items.length,stats,
+          reader:items.some(item=>Boolean(item?.reader?.runId)),elapsedMs:Date.now()-startedAt});
+        TP.scanDiag?.snapshot('at_response');
+        TP.scanDiag?.followup();
         return sendResponse({ ok: true, items, stats });
       }
 
@@ -213,28 +241,36 @@
       }
 
       if (type === "TP_FETCH_IMAGE") {
+        const fail=error=>{
+          if(msg?.diagnosticId)TP.scanDiag?.emit('content.blob_fetch_result', {
+            ok:false,error:TP.scanDiag.error(error),pageId:String(msg?.pageId || ''),
+            pageIndex:Number(msg?.pageIndex ?? -1)},msg.diagnosticId);
+          return sendResponse({ok:false,error:String(error)});
+        };
         try {
           const url = String(msg?.url || "").trim();
-          if (!url) return sendResponse({ ok: false, error: "no url" });
+          if(msg?.diagnosticId) TP.scanDiag?.emit('content.blob_fetch_start', {
+            source:TP.scanDiag.describeSource(url,msg.diagnosticId),
+            pageId:String(msg?.pageId || ''),pageIndex:Number(msg?.pageIndex ?? -1)},msg.diagnosticId);
+          if (!url) return fail('no url');
           const res = await fetch(url, {
             credentials: "include",
             redirect: "follow",
           });
-          if (!res.ok)
-            return sendResponse({ ok: false, error: `HTTP ${res.status}` });
+          if (!res.ok) return fail(`HTTP ${res.status}`);
           const mime = String(res.headers.get("content-type") || "")
             .split(";")[0]
             .trim();
-          if (mime && !mime.toLowerCase().startsWith("image/")) {
-            return sendResponse({ ok: false, error: `Not an image: ${mime}` });
-          }
+          if (mime && !mime.toLowerCase().startsWith("image/")) return fail(`Not an image: ${mime}`);
           const ab = await res.arrayBuffer();
           const bytes = new Uint8Array(ab);
-          if (bytes.length < 64)
-            return sendResponse({ ok: false, error: "Image too small" });
+          if (bytes.length < 64) return fail('Image too small');
           if (bytes.length > 25 * 1024 * 1024) {
-            return sendResponse({ ok: false, error: "Image too large" });
+            return fail('Image too large');
           }
+          if(msg?.diagnosticId) TP.scanDiag?.emit('content.blob_fetch_result', {
+            ok:true,bytes:bytes.length,mime:/^image\/[a-z0-9.+-]{1,30}$/i.test(mime)?mime:'unknown',
+            pageId:String(msg?.pageId || ''),pageIndex:Number(msg?.pageIndex ?? -1)},msg.diagnosticId);
           let bin = "";
           const CHUNK = 0x8000;
           for (let i = 0; i < bytes.length; i += CHUNK)
@@ -244,12 +280,17 @@
             dataUri: `data:${mime || "image/jpeg"};base64,${btoa(bin)}`,
           });
         } catch (e) {
-          return sendResponse({ ok: false, error: e?.message || String(e) });
+          return fail(e?.message || String(e));
         }
       }
 
       sendResponse({ ok: true, ignored: true });
     })().catch(error => {
+      if(msg?.type==='GET_IMAGES' && msg?.diagnosticId){
+        TP.scanDiag?.emit('content.scan_error',{error:TP.scanDiag.error(error)},msg.diagnosticId);
+        TP.scanDiag?.snapshot('after_error',msg.diagnosticId);
+        TP.scanDiag?.followup(msg.diagnosticId);
+      }
       TP.log.warn("content request failed", {type:msg?.type,error:error?.message || String(error)});
       sendResponse({ok:false,error:error?.message || String(error),code:error?.code || ""});
     });

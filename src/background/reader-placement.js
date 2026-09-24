@@ -1,4 +1,4 @@
-import { batchUpdateToast, batchStopKeepAlive } from './batches.js';
+import { batchUpdateToast, batchStopKeepAlive, persistBatchProgressSoon } from './batches.js';
 import { requestFromTabExact } from './tabs-messaging.js';
 import { forgetReaderAcquisition } from './reader-acquisition.js';
 const releasing = new WeakMap();
@@ -33,6 +33,7 @@ export async function completeBatch(batch,label,repairCoordinator) {
   if(batch.reader)await releaseReaderBatch(batch);
   else if(!owned || ['done','apply_failed','unavailable'].includes(batch.repair?.phase)){
     batch.lifecycle='completed';batch.completedAt=Date.now();
+    persistBatchProgressSoon();
   }
   if(!owned){
     batchUpdateToast(batch,batch.repair?.phase==='unavailable'

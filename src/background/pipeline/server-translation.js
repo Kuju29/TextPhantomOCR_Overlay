@@ -61,6 +61,9 @@ export async function runServerTranslation(input, deps) {
     releaseJob,
     waitForRetry,
   } = deps;
+  // lens_images is processed entirely by the API even when the selected
+  // engine is Extension. Its Lens gate owns capacity; no second browser slot.
+  const serverOwnedImage = payload?.mode === "lens_images";
   let browserImageFallbackUsed = false;
   let serverRequestTracked = false;
   for (let attempt = 0; ; attempt++) {
@@ -84,9 +87,11 @@ export async function runServerTranslation(input, deps) {
       "background/pipeline/server-translation.js",
       "imageStage",
       {
-        stage: "ai",
+        stage: serverOwnedImage ? "lens" : "ai",
         state: "queued",
         route: "api",
+          engine: payload.engine || "extension",
+          admissionOwner: serverOwnedImage ? "api" : "extension",
         imageId,
       },
       traceId,
@@ -103,20 +108,24 @@ export async function runServerTranslation(input, deps) {
           ? { stage: "Server processing (Lens/AI)" }
           : {},
       );
-      const slot = await acquire(requestLane, ctrl.signal);
+      ctrl.signal.throwIfAborted();
+      const slot = serverOwnedImage ? {waitMs:0,window:0,maxWindow:0,unlimited:true}
+        : await acquire(requestLane, ctrl.signal);
       queueWaitMs = Number(slot?.waitMs) || 0;
       if (lensDone) markJobPhase(jobId, "ai_generating", {
         stage: "Preparing AI request", queueWaitMs,
       });
       requestStartedAt = Date.now();
-      slotHeld = true;
+      slotHeld = !serverOwnedImage;
       traceNote(
         "background/pipeline/server-translation.js",
         "imageStage",
         {
-          stage: "ai",
+          stage: serverOwnedImage ? "lens" : "ai",
           state: "started",
           route: "api",
+          engine: payload.engine || "extension",
+          admissionOwner: serverOwnedImage ? "api" : "extension",
           imageId,
           queueWaitMs,
           window: Number(slot?.window) || 0,
@@ -197,8 +206,8 @@ export async function runServerTranslation(input, deps) {
               ),
           },
         );
-      if (replayed) releaseReplay(requestLane);
-      else {
+      if (slotHeld && replayed) releaseReplay(requestLane);
+      else if (slotHeld) {
         const localProviderMs = aiMeta.provider_ms;
         const localSingleGeneration = Number(aiMeta.generation_attempts) === 1;
         const localSampleMs = localSingleGeneration && Number.isFinite(localProviderMs) && localProviderMs > 0
@@ -214,15 +223,17 @@ export async function runServerTranslation(input, deps) {
         "background/pipeline/server-translation.js",
         "imageStage",
         {
-          stage: "ai",
+          stage: serverOwnedImage ? "lens" : "ai",
           state: "finished",
           route: "api",
+          engine: payload.engine || "extension",
+          admissionOwner: serverOwnedImage ? "api" : "extension",
           imageId,
           queueWaitMs,
           requestMs,
           serverProcessingMs,
           totalElapsedMs: Date.now() - t0,
-          laneCeiling: Number(describeLane(requestLane)?.effectiveMax) || 0,
+          laneCeiling: serverOwnedImage ? 0 : Number(describeLane(requestLane)?.effectiveMax) || 0,
         },
         traceId,
       );
@@ -239,9 +250,11 @@ export async function runServerTranslation(input, deps) {
         "background/pipeline/server-translation.js",
         "imageStage",
         {
-          stage: "ai",
+          stage: serverOwnedImage ? "lens" : "ai",
           state: error?.name === "AbortError" ? "cancelled" : "failed",
           route: "api",
+          engine: payload.engine || "extension",
+          admissionOwner: serverOwnedImage ? "api" : "extension",
           imageId,
           queueWaitMs,
           status: Number(error?.status) || 0,
@@ -419,15 +432,17 @@ export async function runServerTranslation(input, deps) {
           "background/pipeline/server-translation.js",
           "imageStage",
           {
-            stage: "ai",
+            stage: serverOwnedImage ? "lens" : "ai",
             state: "requeued",
             route: "api",
+          engine: payload.engine || "extension",
+          admissionOwner: serverOwnedImage ? "api" : "extension",
             imageId,
             queueWaitMs,
             status,
             retryAfterMs,
             serverRetryMs,
-            retryScope: code === "lens_session_unavailable" ? "image" : "lane",
+            retryScope: serverOwnedImage || code === "lens_session_unavailable" ? "image" : "lane",
             code,
             generationAttempts,
             attempt: attempt + 1,

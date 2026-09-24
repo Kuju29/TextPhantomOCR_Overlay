@@ -2,6 +2,7 @@
 // source checkpoint lives under its own prepared-page key; this journal keeps
 // only dispatch IDs, provider-result deltas and delivery ACK state so those
 // transitions never rewrite the OCR/render payload.
+import { noteSessionStorageFailure } from '../session-storage-diagnostics.js';
 export const TRANSLATION_DISPATCH_PREFIX = 'tpTranslationDispatchV1:';
 const enc = value => encodeURIComponent(String(value || ''));
 export const translationDispatchKey = (runId, pageId) => `${TRANSLATION_DISPATCH_PREFIX}${enc(runId)}:${enc(pageId)}`;
@@ -39,6 +40,7 @@ export function createDispatchJournal({area = () => globalThis.chrome?.storage?.
       // cache forces the next read to recover the last durable receipt instead
       // of exposing a synthesized/half-written value.
       cache.delete(key);
+      noteSessionStorageFailure('dispatch_receipt',error);
       throw error;
     }
     return clone(next);
@@ -78,7 +80,7 @@ export function createDispatchJournal({area = () => globalThis.chrome?.storage?.
   async function markDelivered(runId, pageId, delivered = true) {
     const key = translationDispatchKey(runId, pageId);
     const previous = await read(key, runId, pageId);
-    return write(key,{...previous,version:2,delivered:delivered===true});
+    return write(key,{...previous,version:2,delivered:previous.delivered || delivered===true});
   }
   async function get(runId, pageId) {
     const key = translationDispatchKey(runId, pageId);

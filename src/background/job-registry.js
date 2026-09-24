@@ -1,6 +1,7 @@
 // Shared registry of in-flight jobs, indexed by job id and by image id, persisted across service-worker restarts.
 
 // Imports nothing so transport.js and jobs.js can both use it without a circular import.
+import { noteSessionStorageFailure } from './session-storage-diagnostics.js';
 
 const STORAGE_KEY = "tpPendingJobsV2";
 const PERSIST_DEBOUNCE_MS = 250;
@@ -38,7 +39,8 @@ export async function persistPendingJobs() {
   for (const [jobId, ctx] of pendingByJob.entries()) {
     records.push({ jobId, ctx: serializableContext(ctx) });
   }
-  await area.set({ [STORAGE_KEY]: records });
+  try { await area.set({ [STORAGE_KEY]: records }); }
+  catch(error){noteSessionStorageFailure('pending_jobs',error);throw error;}
 }
 
 // Reloads persisted job contexts into the registry and returns the restored job ids.

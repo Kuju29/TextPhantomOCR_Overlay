@@ -70,4 +70,70 @@ assert.equal(pageReports.length,1,'repair barrier must fold the durable journal 
 assert.equal(pageReports[0].initialAccepted,1);assert.equal(pageReports[0].failed[0].id,'g1');
 assert.equal(await dispatchJournal.get(run.id,'page'),null,'folded result receipt is cleared only at the repair barrier');
 assert.equal(await preparedPages.get(run.id,'page'),null,'folded source page is cleared only after the canonical barrier write');
+const healthyBatch=ensureBatch('conversation-healthy',tabId,0);
+healthyBatch.items.set('page',{attempt:1,status:'queued',phase:'waiting',payload});
+const healthyRun=await coordinator.registerBatch(healthyBatch,[payload]);
+const largeResult={...result,lensDocument:{...result.lensDocument,layoutFixture:'x'.repeat(240*1024)}};
+await coordinator.capture(healthyBatch.id,{stage:'prepared',payload,result:largeResult,plan,units,jobId:'job',operationId:'initial',imageId:'page'});
+await coordinator.capture(healthyBatch.id,{stage:'dispatch',payload,result:largeResult,plan,units,jobId:'job',operationId:'turn-1',imageId:'page',ids:['g0','g1']});
+await coordinator.capture(healthyBatch.id,{stage:'finished',payload,result:largeResult,plan,units,jobId:'job',operationId:'turn-1',imageId:'page',
+  accepted:[{id:'g0',text:'หนึ่ง'},{id:'g1',text:'สอง'}],failures:[]});
+await coordinator.markDelivered({...ctx,translationRun:{runId:healthyRun.id,pageId:'page'}},true);
+const small=await preparedPages.get(healthyRun.id,'page');
+assert.equal(small.compacted,true,'fully translated and placed page sheds its render/OCR source before the repair barrier');
+assert.equal(small.result,undefined);assert.equal(small.initialAcceptedCount,2);
+assert.equal(small.units.length,0);
+assert.equal((await dispatchJournal.get(healthyRun.id,'page')).delivered,true);
+await coordinator.finishInitial(healthyBatch);
+assert.equal(pageReports.at(-1).initialAccepted,2,'the small summary still reports accepted units');
+assert.equal((await sessions.get(healthyRun.id)).phase,'done');
+assert.equal(await preparedPages.get(healthyRun.id,'page'),null);
 console.log('PASS Conversation page journals: prepared source, dispatch/result and delivery durability stay per-page until the repair barrier');
+
+// The previous all-at-once fold temporarily doubled every unmounted page.
+// Emulate Chrome's shared 10 MiB quota: 18 * 300 KiB fits once, not twice.
+{
+  const quota=10*1024*1024,source={};let peak=0,reports=0;
+  const bytes=state=>Object.entries(state).reduce((total,[key,value])=>total+Buffer.byteLength(key)+Buffer.byteLength(JSON.stringify(value)),0);
+  const limited={
+    async get(key){return key==null?structuredClone(source):{[key]:structuredClone(source[key])}},
+    async set(patch){const next={...source,...structuredClone(patch)},used=bytes(next);
+      if(used>quota)throw new Error('Session storage quota bytes exceeded. Values were not stored.');
+      Object.assign(source,patch);peak=Math.max(peak,used);},
+    async remove(keys){for(const key of (Array.isArray(keys)?keys:[keys]))delete source[key];},
+    async setAccessLevel(){}
+  };
+  const durable=createTranslationSessionStore({area:()=>limited});
+  const pages=createPreparedPageJournal({area:()=>limited});
+  const receipts=createDispatchJournal({area:()=>limited});
+  const runBatch=ensureBatch('conversation-quota',552,0);
+  const payloads=Array.from({length:18},(_,i)=>({...payload,src:`https://fixture/${i}.png`,metadata:{image_id:`page-${i}`} }));
+  for(const p of payloads)runBatch.items.set(p.metadata.image_id,{attempt:1,status:'queued',phase:'waiting',payload:p});
+  let tabSession='tab-session';
+  const folding=createRepairCoordinator({sessions:durable,preparedPages:pages,dispatchJournal:receipts,
+    api:async(_run,path)=>{if(path==='pages')reports++;return path==='seal'?{phase:'done'}:{};},
+    getBase:async()=> 'https://fixture',currentEpoch:()=>1,currentSession:()=> tabSession,
+    insert:async()=>({ok:true}),emit:()=>{}});
+  const active=await folding.registerBatch(runBatch,payloads);
+  for(const p of payloads)await pages.record(active.id,p.metadata.image_id,{
+    pageId:p.metadata.image_id,generationId:'gen',groupKey:'group',phase:'prepared',delivered:false,
+    result:{render:'x'.repeat(300*1024)},units:[{id:'g0',text:'source',sourceHash:'h',translatable:true}],
+    accepted:[],failures:[],blocked:[],inFlight:[],repaired:[]});
+  assert(bytes(source)>5*1024*1024,'the fixture exercises a chapter large enough to exceed quota when doubled');
+  await folding.finishInitial(runBatch);
+  assert.equal(reports,18);assert(peak<quota,'journal transfer stays under the shared quota');
+  assert.equal((await durable.get(active.id)).phase,'done');
+  assert.equal((await pages.listRun(active.id)).length,0,'all large prepared keys are released after transfer');
+  const oldBatch=ensureBatch('conversation-old-tab',552,0),oldPayload={...payload,src:'https://fixture/old',metadata:{image_id:'old'}};
+  oldBatch.items.set('old',{attempt:1,status:'queued',phase:'waiting',payload:oldPayload});
+  const old=await folding.registerBatch(oldBatch,[oldPayload]);
+  await pages.record(old.id,'old',{pageId:'old',phase:'prepared',result:{render:'x'.repeat(300*1024)}});
+  tabSession='next-session';
+  const nextBatch=ensureBatch('conversation-new-tab',552,0),nextPayload={...payload,src:'https://fixture/new',metadata:{image_id:'new'}};
+  nextBatch.items.set('new',{attempt:1,status:'queued',phase:'waiting',payload:nextPayload});
+  const next=await folding.registerBatch(nextBatch,[nextPayload]);
+  assert(next?.id,'a new session can start with a different image source');
+  assert.equal(await durable.get(old.id),null,'the old tab session run is removed before the next job is registered');
+  assert.equal(await pages.get(old.id,'old'),null,'old large page source is released for the next job');
+  console.log('PASS quota-bound chapter: per-page transfer keeps prepared source and canonical run from doubling');
+}

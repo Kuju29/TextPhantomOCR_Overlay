@@ -1,6 +1,7 @@
 import { completeBatch } from "./reader-placement.js";
 import { cancelTrackedBatches, cancelBatchState } from "./reader-events.js";
 import { acquireReaderImage } from "./reader-acquisition.js";
+import { reportImageScanForJob } from './image-scan-diagnostics.js';
 import {requireConversationApi} from "../shared/ai/conversation/support.js";
 import {reserveConversationJob, finishConversationJob, enterConversationJob, cancelConversationJobs} from "./ai/translation-paths/order.js";
 import { applyRuntimeCapacityHints } from "./jobs/capacity-policy.js";
@@ -508,6 +509,7 @@ async function processJobInner(payload, tabId, frameId = 0) {
     },
     logInfo: (message, details) => log.info(message, details),
     logWarn: (message, details) => log.warn(message, details),
+    reportDiagnostic:reportImageScanForJob,
   });
   const { stopIfBatchWasCancelled } = preparation;
   if (await stopIfBatchWasCancelled()) return;
@@ -518,7 +520,12 @@ async function processJobInner(payload, tabId, frameId = 0) {
   // external prefetch and again later before registry/capability work.
   if (await stopIfBatchWasCancelled()) return;
 
-  if (shouldPrefetchDataUri(payload)) {
+  const needsPrefetch=shouldPrefetchDataUri(payload);
+  reportImageScanForJob(payload,'acquisition.decision',{prefetch:needsPrefetch,
+    reader:Boolean(payload.reader?.runId),inlineBytesAlreadyPresent:Boolean(payload.imageDataUri),
+    sourceScheme:/^([a-z][a-z0-9+.-]*):/i.exec(String(payload.src || ''))?.[1]?.toLowerCase() || 'none',
+    route:needsPrefetch ? 'EXTENSION_PREFETCH' : payload.imageDataUri ? 'INLINE_BYTES' : 'SERVER_URL'});
+  if (needsPrefetch) {
     const prefetchId = `prefetch:${crypto.randomUUID()}`;
     const prefetchCtrl = beginInFlight(prefetchId, tabId, batchId);
     try {

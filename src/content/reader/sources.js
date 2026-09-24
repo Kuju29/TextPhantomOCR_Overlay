@@ -48,32 +48,36 @@
     }
     return out;
   }
-  function validatedManifest(candidate, ids, known, plan) {
+  function validatedManifest(candidate, ids, known, plan, record = null) {
+    const reject = reason => {record?.(reason);return null;};
     if(!candidate || !Array.isArray(candidate.items) || candidate.items.length!==ids.length ||
-      ids.some((id,i)=>i && Number(id)!==Number(ids[i-1])+1))return null;
+      ids.some((id,i)=>i && Number(id)!==Number(ids[i-1])+1))return reject('missing_or_wrong_page_count');
     const chapter = plan.root?.closest?.('[data-chapter-id]');
     const expected=chapter?.getAttribute('data-chapter-id') || '', claimed=String(candidate.chapterId || '');
-    if(expected && claimed && claimed!==expected)return null;
+    if(expected && claimed && claimed!==expected)return reject('chapter_identity_mismatch');
     let base=String(candidate.baseUrl || ''), matches=0;
-    if(base){try{base=new URL(base,location.href).href.replace(/\/$/,'')+'/';}catch{return null;}}
+    if(base){try{base=new URL(base,location.href).href.replace(/\/$/,'')+'/';}catch{return reject('invalid_base_url');}}
     const urls=new Map();
     for(let i=0;i<ids.length;i++){
       const item=candidate.items[i], raw=typeof item==='string' ? item : item?.url || item?.src;
-      if(typeof raw!=='string' || !raw || raw.length>8192)return null;
+      if(typeof raw!=='string' || !raw || raw.length>8192)return reject('page_without_url_or_src');
       // Resolve relative paths by URL rules; preserve queries, signed URLs and // hosts.
       let url;
-      try { url=http(/^https?:\/\//i.test(raw) ? raw : new URL(raw,base || location.href).href); } catch { return null; }
-      if(!url)return null;
+      try { url=http(/^https?:\/\//i.test(raw) ? raw : new URL(raw,base || location.href).href); } catch { return reject('invalid_page_url'); }
+      if(!url)return reject('page_url_not_http_or_svg');
       const mounted=http(known.get(ids[i]));
-      if(mounted){if(!sameImage(mounted,url))return null;matches++;}
+      if(mounted){if(!sameImage(mounted,url))return reject('mounted_http_mismatch');matches++;}
       urls.set(ids[i],known.get(ids[i]) || url);
     }
     // Never bind a stale SPA manifest to this chapter using count alone.
-    return matches || (expected && claimed===expected) ? urls : null;
+    if (!matches && !(expected && claimed===expected)) return reject('no_http_anchor_or_chapter_identity');
+    record?.('accepted');
+    return urls;
   }
   function readPageWorld(plan, ids, signal) {
     if(signal?.aborted)return Promise.reject(signal.reason || new DOMException('Reader cancelled','AbortError'));
     return new Promise((resolve,reject)=>{
+      const startedAt=Date.now();
       const id=crypto.randomUUID(), href=location.href, root=plan.root;
       if (!root?.isConnected) return resolve({reason:'reader_scope_unavailable'});
       root.setAttribute(PROBE,id);
@@ -83,13 +87,15 @@
         if(typeof event.detail!=='string' || event.detail.length>4*1024*1024)return;
         let data;try{data=JSON.parse(event.detail);}catch{return;}
         if(data?.id!==id || data.href!==href)return;
-        cleanup();resolve(data);
+        cleanup();resolve({...data,elapsedMs:Date.now()-startedAt});
       };
       // An installed bridge replies synchronously. The timeout only protects a
       // pre-update tab or unsupported MAIN world, not a polling/waiting loop.
-      const timer=setTimeout(()=>{cleanup();resolve({rows:[],manifests:[],reason:'bridge_unavailable'});},250);
+      const timer=setTimeout(()=>{cleanup();resolve({rows:[],manifests:[],reason:'bridge_unavailable',
+        elapsedMs:Date.now()-startedAt});},250);
       document.addEventListener(RESPONSE,reply);signal?.addEventListener('abort',abort,{once:true});
-      document.dispatchEvent(new CustomEvent(REQUEST,{detail:JSON.stringify({id,href,pages:ids,attr:plan.attr})}));
+      document.dispatchEvent(new CustomEvent(REQUEST,{detail:JSON.stringify({id,href,pages:ids,
+        attr:plan.attr,diagnostics:TP.scanDiag?.active()===true})}));
     });
   }
   TP.readerSources = async (plan, sourceFor, options={}) => {
@@ -100,26 +106,41 @@
     for (const [id, slot] of plan.slots) {
       const url = sourceFor(slot); if (url) known.set(id, url);
     }
+    if (TP.scanDiag?.active()) TP.scanDiag.emit('reader.dom_sources', {logicalPages:ids.length,known:known.size,
+      sources:[...known].slice(0,250).map(([id,url])=>({pageId:id,source:TP.scanDiag.describeSource(url)}))});
     const detail={inline:'not_found',bridge:'not_needed'};
     const finish=(profile,urls)=>({profile,urls,detail});
-    const accept=candidates=>{
+    const accept=(candidates,stage)=>{
       if(!Array.isArray(candidates))return null;
-      const valid=candidates.map(c=>validatedManifest(c,ids,known,plan)).filter(Boolean);
+      const outcomes=[];
+      const valid=candidates.map(c=>validatedManifest(c,ids,known,plan,
+        TP.scanDiag?.active() ? reason=>outcomes.push(reason) : null)).filter(Boolean);
+      if(TP.scanDiag?.active()) TP.scanDiag.emit('reader.manifest_check',{
+        stage,candidates:candidates.length,accepted:valid.length,outcomes,
+        hasChapterIdentity:Boolean(plan.root?.closest?.('[data-chapter-id]')),
+        mountedHttpAnchors:[...known.values()].filter(url=>Boolean(http(url))).length,
+      });
       if(!valid.length)return null;
       // More than one manifest is fine only when all point to identical pages.
       const first=valid[0];
-      return valid.every(map=>ids.every(id=>map.get(id)===first.get(id))) ? first : null;
+      const consistent=valid.every(map=>ids.every(id=>map.get(id)===first.get(id)));
+      if(!consistent)TP.scanDiag?.emit('reader.manifest_conflict',{stage,accepted:valid.length});
+      return consistent ? first : null;
     };
     const inline=inlineManifests(options.document || document);
-    const initial=accept(inline);
+    const initial=accept(inline,options.pageWorld===false?'fetched_html':'inline');
     if(initial){detail.inline='matched';return finish('reader-manifest',initial);}
     if(inline.length)detail.inline='rejected';
     if(known.size===ids.length)return finish('reader-dom',known);
     if(options.pageWorld!==false){
       const response=await readPageWorld(plan,ids,options.signal);
+      TP.scanDiag?.emit('reader.page_world', {reason:response.reason || 'no_manifest',
+        propsFound:Number(response.propsFound)||0,rows:response.rows?.length || 0,
+        manifests:response.manifests?.length || 0,elapsedMs:response.elapsedMs || 0,
+        diagnostics:response.diagnostics || null});
       detail.bridge=response.reason || 'no_manifest';
       detail.propsFound=Number(response.propsFound)||0;
-      const actual=accept(response.manifests);
+      const actual=accept(response.manifests,'page_world');
       if(actual){detail.bridge='manifest_matched';return finish('reader-page-data',actual);}
       if(Array.isArray(response.rows) && response.rows.length<=ids.length){
         const wanted=new Set(ids), rows=new Map(), conflicts=new Set();
@@ -131,6 +152,9 @@
         }
         for(const [id,url] of rows)if(!conflicts.has(id)&&!known.has(id))known.set(id,url);
         detail.propsResolved=rows.size-conflicts.size;
+        if (TP.scanDiag?.active()) TP.scanDiag.emit('reader.page_world_rows',{acceptedRows:rows.size-conflicts.size,
+          conflicts:[...conflicts],httpSources:[...rows].map(([id,url])=>({pageId:id,
+            source:TP.scanDiag.describeSource(url)}))});
         if(known.size===ids.length){detail.bridge='slots_matched';return finish('reader-page-props',known);}
       }
     }

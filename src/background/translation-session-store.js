@@ -1,5 +1,6 @@
 // Checkpoints for this browser session, NOT settings and NOT a live stream.
 // Never falls back to disk/local storage for OCR, results or run access tokens.
+import { noteSessionStorageFailure } from './session-storage-diagnostics.js';
 export const TRANSLATION_SESSION_KEY = 'tpTranslationRunsV1'; // legacy aggregate key
 export const TRANSLATION_SESSION_RUN_PREFIX = 'tpTranslationRunV1:';
 export const translationSessionRunKey = id => `${TRANSLATION_SESSION_RUN_PREFIX}${encodeURIComponent(String(id || ''))}`;
@@ -58,7 +59,10 @@ export function createTranslationSessionStore({
         const migration = Object.fromEntries(Object.values(data).map(row => [
           translationSessionRunKey(row.id), { version: 1, row },
         ]));
-        if (Object.keys(migration).length) await storage.set(migration);
+        if (Object.keys(migration).length) {
+          try { await storage.set(migration); }
+          catch (error) {noteSessionStorageFailure('translation_run_migration',error);throw error;}
+        }
         try { await storage.remove?.(TRANSLATION_SESSION_KEY); } catch {}
       }
       if (staleKeys.length) { try { await storage.remove?.(staleKeys); } catch {} }
@@ -145,7 +149,10 @@ export function createTranslationSessionStore({
           candidate = candidateFor(before, id, working[id] || null);
           patch = storagePatch(before, candidate);
           affected = reserve(candidate);
-          if (Object.keys(patch).length) await area().set(patch);
+          if (Object.keys(patch).length) {
+            try { await area().set(patch); }
+            catch (error) {noteSessionStorageFailure('translation_run',error);throw error;}
+          }
           for (const { task, result } of results) task.resolve(result);
           // The current run cannot be recreated by another drain until this one
           // releases ownership, so its own tombstone can be cleaned safely.

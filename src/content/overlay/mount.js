@@ -12,6 +12,16 @@
     const parent = img.parentElement;
     if (!parent) return null;
 
+    // Kagane replaces the entire page-image component as pages enter and leave
+    // its viewport. Keep the display layer outside that React-owned subtree.
+    if (rec.kaganeReader) {
+      const portalParent = document.documentElement;
+      if (host.parentElement !== portalParent) portalParent.appendChild(host);
+      rec.fixedPortal = true;
+      host.style.setProperty("position", "fixed", "important");
+      return portalParent;
+    }
+
     if (
       TP.isXHost?.() &&
       TP.imageIdentity?.(TP.getBestImgUrl(img)) !==
@@ -56,6 +66,28 @@
       left: r.left - pr.left + (parent.scrollLeft || 0),
       top: r.top - pr.top + (parent.scrollTop || 0),
     };
+  }
+
+  function clipKaganePortal(host, img, rect) {
+    let left = Math.max(0, rect.left);
+    let top = Math.max(0, rect.top);
+    let right = Math.min(window.innerWidth, rect.right);
+    let bottom = Math.min(window.innerHeight, rect.bottom);
+    for (let parent = img.parentElement; parent && parent !== document.documentElement; parent = parent.parentElement) {
+      const style = getComputedStyle(parent);
+      const box = parent.getBoundingClientRect();
+      if (/(?:hidden|clip|auto|scroll)/.test(style.overflowX)) {
+        left = Math.max(left, box.left);
+        right = Math.min(right, box.right);
+      }
+      if (/(?:hidden|clip|auto|scroll)/.test(style.overflowY)) {
+        top = Math.max(top, box.top);
+        bottom = Math.min(bottom, box.bottom);
+      }
+    }
+    if (right <= left || bottom <= top) return false;
+    setOverlayStyleIfChanged(host, "clip-path", `inset(${Math.max(0, top - rect.top)}px ${Math.max(0, rect.right - right)}px ${Math.max(0, rect.bottom - bottom)}px ${Math.max(0, left - rect.left)}px)`, "important");
+    return true;
   }
 
   // Writes a style value only when it differs from the current one.
@@ -141,7 +173,12 @@
 
       const readerKey=key.startsWith('tp-reader:');
       let img = rec.img;
-      if (readerKey) img = TP.readerImageForKey?.(key);
+      if (readerKey && rec.retired) {
+        if (!img?.isConnected) {dropHtmlOverlay(key);continue;}
+        const actual=TP.normUrl(img.currentSrc || img.src || TP.getBestImgUrl(img));
+        if (actual && rec.retiredSource && actual!==rec.retiredSource &&
+            !TP.isReaderEquivalentSource?.(actual,rec.retiredSource)) {dropHtmlOverlay(key);continue;}
+      } else if (readerKey) img = TP.readerImageForKey?.(key);
       else {
         if (!img || !img.isConnected) img = TP.findTargetImage(key);
       }
@@ -152,7 +189,7 @@
         continue;
       }
 
-      const expectedKey = TP.readerOriginalFor?.(key) || key;
+      const expectedKey = rec.retired ? rec.retiredSource : TP.readerOriginalFor?.(key) || key;
       const curKey = TP.normUrl(TP.getBestImgUrl(img));
       const sameIdentity =
         TP.imageIdentity?.(curKey) === TP.imageIdentity?.(expectedKey);
@@ -165,6 +202,8 @@
 
       if (img !== rec.img) {
         if (img?.dataset && !key.startsWith('tp-reader:')) img.dataset.tpOriginal = key;
+        if (readerKey && !rec.retired)
+          rec.displaySource=TP.normUrl(img.currentSrc || img.src || TP.getBestImgUrl(img));
       }
       bindOverlayResizeObserver(rec, img, key);
 
@@ -178,6 +217,12 @@
       const { r, left, top } = getOverlayBoxFromParent(img, parent);
       if (r.width < 2 || r.height < 2) {
         setOverlayStyleIfChanged(host, "display", "none", readerKey ? "important" : "");
+        rec.img = img;
+        continue;
+      }
+
+      if (rec.kaganeReader && !clipKaganePortal(host, img, r)) {
+        setOverlayStyleIfChanged(host, "display", "none", "important");
         rec.img = img;
         continue;
       }
@@ -276,6 +321,8 @@
 
   // Returns the overlay record for a non-MangaDex image key, creating it if needed.
   function upsertHtmlOverlay(key, img, baseW, baseH, kind) {
+    if (img) for (const [oldKey,old] of htmlOverlaysByKey)
+      if (oldKey!==key && old.retired && old.img===img) dropHtmlOverlay(oldKey);
     let rec = htmlOverlaysByKey.get(key);
     if (!rec) {
       const host = document.createElement("div");
@@ -307,8 +354,13 @@
       ensureHtmlOverlayListeners();
     }
 
+    rec.kaganeReader = key.startsWith('tp-reader:') && /(^|\.)kagane\.to$/i.test(location.hostname);
+    rec.retired=false;
+    rec.retiredSource='';
+
     if (img) ensureOverlayHostMountedNearImage(rec, img);
     rec.img = img;
+    rec.displaySource=img ? TP.normUrl(img.currentSrc || img.src || TP.getBestImgUrl(img)) : '';
     rec.baseW = Number.isFinite(baseW) && baseW > 0 ? baseW : 1;
     rec.baseH = Number.isFinite(baseH) && baseH > 0 ? baseH : 1;
     rec.kind = kind || "html";
@@ -369,7 +421,10 @@
   function hasHtmlOverlay(key,img) {
     const rec = htmlOverlaysByKey.get(key);
     return !!rec && rec.img === img && rec.host?.isConnected === true && rec.scope?.isConnected === true &&
-      (!key.startsWith('tp-reader:') || (rec.host.parentElement===img?.parentElement &&
+      rec.host.style.display !== 'none' &&
+      (!key.startsWith('tp-reader:') || ((rec.kaganeReader
+        ? rec.host.parentElement === document.documentElement
+        : rec.host.parentElement === img?.parentElement) &&
         rec.scope.parentElement===rec.host && (!rec.cleanImg?.getAttribute('src') ||
           (rec.cleanImg.isConnected && rec.cleanImg.parentElement===rec.host))));
   }
@@ -385,6 +440,16 @@
     rec.cleanImg?.remove(); rec.host?.remove();
     htmlOverlaysByKey.delete(key);
     htmlOverlayPendingKeys.delete(key);
+  }
+
+  function retireReaderOverlays(pages) {
+    for (const {key,source} of pages || []) {
+      const rec=htmlOverlaysByKey.get(key);
+      if (!rec?.img?.isConnected || !rec.host?.isConnected) continue;
+      rec.retired=true;
+      rec.retiredSource=rec.displaySource || TP.normUrl(source || '');
+      scheduleHtmlOverlayUpdate(key);
+    }
   }
 
   function hideHtmlOverlay(key) {
@@ -407,6 +472,7 @@
         rec.cleanImg.src===rec.rasterSource && rec.cleanImg.style.display!=='none';
     },
     dropHtmlOverlay,
+    retireReaderOverlays,
     overlayMutationsNeedUpdate,
     resetForNavigation,
     scheduleHtmlOverlayUpdate,
