@@ -328,9 +328,9 @@ assert.ok(popupHtml.indexOf('id="ai-usage-reset"') < popupHtml.indexOf('id="ai-u
   "History is immediately beside Reset");
 assert.match(popupHtml, /<dialog[^>]+id="ai-usage-history-dialog"[^>]+aria-labelledby="ai-usage-history-title"/,
   "History uses an accessible native dialog");
-assert.match(usageViewSource, /const openHistory = async \(\)[\s\S]*?await renderHistory\(\)[\s\S]*?showModal/,
+assert.match(usageViewSource, /async function openHistory\(\)[\s\S]*?await load\(\)[\s\S]*?show\(els\.aiUsageHistoryDialog\)/,
   "History renders before opening");
-assert.match(usageViewSource, /typeof dialog\.showModal === "function"[\s\S]*?dialog\.setAttribute\("open", ""\)/,
+assert.match(usageViewSource, /typeof dialog\.showModal==="function"[\s\S]*?dialog\.setAttribute\("open",""\)/,
   "History has a compatible fallback when showModal is unavailable");
 assert.doesNotMatch(usageViewSource, /openHistory[\s\S]{0,800}(?:persistUsageReset|persistUsageSelectionBoundary)/,
   "opening History does not reset usage or create a selection boundary");

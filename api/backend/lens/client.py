@@ -194,7 +194,11 @@ def _fetch_lens_once(img_bytes: bytes, lang: str, ck: dict) -> dict[str, Any]:
     for a new connection twice. Both go through the pooled client.
     """
     c = _session(ck)
-    r = c.post(_UPLOAD_URL, files={"encoded_image": ("file.jpg", img_bytes, "image/jpeg")})
+    # Decoded reader pages may be PNG. Match the encoded bytes instead of
+    # declaring every upload JPEG; Lens can reject a mismatched upload as a
+    # redirect without session parameters.
+    filename, mime = ("file.png", "image/png") if img_bytes.startswith(b"\x89PNG\r\n\x1a\n") else ("file.jpg", "image/jpeg")
+    r = c.post(_UPLOAD_URL, files={"encoded_image": (filename, img_bytes, mime)})
     if r.status_code not in (302, 303):
         # Never include the raw upstream body: gateways can echo request data
         # and HTML error pages only make the public/log message noisy.
@@ -253,7 +257,19 @@ def fetch_lens_data(image_path: str, lang: str, firebase_url: str | None = None)
         try:
             initial = cookie.state(firebase_url)
             _cookie_trace("initial", generation=initial.generation)
-            data = _fetch_lens_once(img_bytes, lang, initial.data)
+            try:
+                data = _fetch_lens_once(img_bytes, lang, initial.data)
+            except RuntimeError as exc:
+                # The upstream occasionally returns a transient gateway error
+                # after the image has already been acquired. Retry this Lens
+                # stage once inside the same job; AI has not run yet. Auth,
+                # malformed input and other statuses must retain their error.
+                import re
+                if not re.fullmatch(r'Lens HTTP (?:502|503|504) \(operation=(?:upload|result)\)',str(exc)):
+                    raise
+                _cookie_trace('transient_gateway_retry', upstreamStatus=str(exc).split()[2])
+                time.sleep(.25)
+                data = _fetch_lens_once(img_bytes, lang, initial.data)
         except LensSessionError as initial_error:
             # Refresh is global across image keys, while result singleflight is
             # per image. Generation/epoch prevents every image in one stale

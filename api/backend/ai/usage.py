@@ -9,7 +9,8 @@ from decimal import Decimal, InvalidOperation, localcontext
 from typing import Any
 
 TOKEN_FIELDS = ("inputTokens", "outputTokens", "totalTokens", "cachedInputTokens",
-                "cacheWriteInputTokens", "uncachedInputTokens", "ordinaryInputTokens",
+                "cacheWriteInputTokens", "cacheWrite5mInputTokens", "cacheWrite1hInputTokens",
+                "uncachedInputTokens", "ordinaryInputTokens",
                 "thinkingTokens", "visibleOutputTokens")
 MAX_SAFE_INTEGER = 2**53 - 1
 
@@ -87,7 +88,9 @@ def normalize_usage(raw: Any, dialect: str = 'openai', *, complete: bool = True,
         write = 0 if 'cache_creation_input_tokens' not in data and fresh is not None else write
         v.update(inputTokens=(fresh + read + write if all(x is not None for x in (fresh, read, write)) else None),
                  outputTokens=_pick(data, 'output_tokens'), totalTokens=_pick(data, 'total_tokens'),
-                 cachedInputTokens=read, cacheWriteInputTokens=write)
+                 cachedInputTokens=read, cacheWriteInputTokens=write,
+                 cacheWrite5mInputTokens=_pick(_dict(data.get('cache_creation')), 'ephemeral_5m_input_tokens'),
+                 cacheWrite1hInputTokens=_pick(_dict(data.get('cache_creation')), 'ephemeral_1h_input_tokens'))
     elif dialect == 'gemini':
         visible = _pick(data, 'candidatesTokenCount')
         thought = _pick(data, 'thoughtsTokenCount')
@@ -111,7 +114,7 @@ def normalize_usage(raw: Any, dialect: str = 'openai', *, complete: bool = True,
                  cacheWriteInputTokens=_pick(details, 'cache_write_tokens'),
                  thinkingTokens=_pick(outputs, 'reasoning_tokens'))
         if v['cachedInputTokens'] is None:
-            v['cachedInputTokens'] = _pick(data, 'prompt_cache_hit_tokens')
+            v['cachedInputTokens'] = _pick(data, 'cached_tokens', 'prompt_cache_hit_tokens')
         if cost_authoritative:
             v['providerCostUsd'] = money(data.get('cost'))
             v['cacheSavingsUsd'] = money(data.get('cache_discount'), signed=True)

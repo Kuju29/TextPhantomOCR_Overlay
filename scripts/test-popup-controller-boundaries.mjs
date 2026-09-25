@@ -41,7 +41,7 @@ assert.match(events, /\brefreshSeriesMemory,/, "popup events must receive refres
 assert.doesNotMatch(events, /seriesMemoryController\./, "popup events must not reach into the composition root's controller instance");
 assert.match(popup, /\bcanUseAiUi,\s*\n\s*validateAiKey:/, "popup composition must inject canUseAiUi into popup events");
 assert.match(popup, /refreshSeriesMemory:\s*seriesMemoryController\.refresh/, "popup composition must inject the series-memory refresh callback");
-assert.match(usageView, /const renderHistory/);
+assert.match(usageView, /async function openHistory\(\)/);
 assert.match(capacity, /aiLocalCapabilityHint/);
 assert.match(popupUi, /ai\.provider_transition/);
 assert.doesNotMatch(popup, /function renderLocalCapacityHint|function traceProviderTransition/);

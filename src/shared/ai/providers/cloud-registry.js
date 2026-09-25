@@ -24,7 +24,10 @@ export const cloudKeyPrefixes = () => [...new Set(cloudProviderCatalog().flatMap
 export function cloudProviderFromKey(key) {
   const value = String(key || "");
   return cloudProviderCatalog()
-    .flatMap((spec) => spec.keyPrefixes.map((prefix) => ({ spec, prefix })))
+    // sk- is shared by OpenAI, DeepSeek and several OpenAI-compatible services.
+    // Only provider-specific prefixes can prove a key/provider mismatch.
+    .flatMap((spec) => spec.keyPrefixes.filter((prefix) => prefix !== "sk-")
+      .map((prefix) => ({ spec, prefix })))
     .sort((a, b) => b.prefix.length - a.prefix.length)
     .find(({ prefix }) => value.startsWith(prefix))?.spec.id || "";
 }

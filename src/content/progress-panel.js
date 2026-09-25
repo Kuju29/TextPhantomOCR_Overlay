@@ -3,8 +3,9 @@
   let root=null,main=null,textEl=null,body=null,toggleBtn=null,timer=0,hideTimer=0,paintTimer=0,latest=null,pending=null,collapsed=true,pageStarted=Date.now();
   const versions=new Map(),batchStates=new Map(),terminalDeadlines=new Map();
   const TERMINAL=new Set(['done','skipped','error','cancelled']);
+  const processingDone=batch=>batch?.processingComplete===true && batch?.lifecycle==='completed';
   const repairActive=batch=>!batch?.processingComplete && !['cancelled','failed','empty'].includes(batch?.lifecycle) && ['collecting','repairing','repair_request','repair_wave','repair_circuit_open','applying','apply_pending','blocked'].includes(String(batch?.repair?.phase||''));
-  const batchActive=batch=>!['cancelled','failed','empty'].includes(batch?.lifecycle) && (batch?.lifecycle==='discovering'||repairActive(batch)||Number(batch?.terminal||0)<Number(batch?.total||0));
+  const batchActive=batch=>!['cancelled','failed','empty'].includes(batch?.lifecycle) && (batch?.lifecycle==='discovering'||(!processingDone(batch)&&(repairActive(batch)||Number(batch?.terminal||0)<Number(batch?.total||0))));
   const chooseVisible=()=>{const all=[...batchStates.values()];const active=all.filter(batchActive).sort((a,b)=>(Number(b.startedAt)||0)-(Number(a.startedAt)||0));if(active.length)return active[0];return all.sort((a,b)=>(Number(b.ts)||0)-(Number(a.ts)||0))[0]||null;};
   const fmtMs=ms=>{ms=Math.max(0,Number(ms)||0);if(ms<1000)return `${Math.round(ms)}ms`;const sec=ms/1000;return `${sec>=10?sec.toFixed(0):sec.toFixed(1)}s`;};
   const nowMs=lane=>{const start=Number(lane?.startedAt)||Number(lane?.queuedAt)||0;if(!start)return 0;return Math.max(0,(Number(lane?.finishedAt)||Date.now())-start);};
@@ -79,7 +80,7 @@
     const parts=[];if(counts.skipped)parts.push(`skip ${counts.skipped}`);if(counts.error)parts.push(`error ${counts.error}`);if(counts.cancelled)parts.push(`cancel ${counts.cancelled}`);return parts;
   };
   const batchElapsed=batch=>{
-    const start=Number(batch?.startedAt)||Date.now(),end=batchActive(batch)?Date.now():(Number(batch?.ts)||Date.now());return fmtMs(Math.max(0,end-start));
+    const start=Number(batch?.startedAt)||Date.now(),end=batchActive(batch)?Date.now():(Number(batch?.completedAt)||Number(batch?.ts)||Date.now());return fmtMs(Math.max(0,end-start));
   };
   const compactText=batch=>{
     const items=itemsOf(batch),total=Math.max(Number(batch?.total)||0,items.length),terminal=items.filter(item=>item?.terminal||TERMINAL.has(String(item?.progress?.overall?.state||''))).length;
@@ -88,19 +89,22 @@
       : `TextPhantom: ${batch?.stage || (batch?.lifecycle==='cancelled' ? 'Cancelled' : 'No eligible images')}`;
     const parts=[`TextPhantom: inserted ${inserted}/${total}`];
     if(batch?.lifecycle==='cancelled')parts.push('cancelled');
-    else if(batch?.processingComplete)parts.push(`processed ${terminal}/${total}${batch?.placement?.waiting ? ` · waiting to place ${batch.placement.waiting}` : ''}`);
+    else if(batch?.processingComplete)parts.push(`processing complete · ${terminal}/${total} pages processed${batch?.placement?.waiting ? ` · ${batch.placement.waiting} saved for display` : ''}`);
     const lens=simpleLaneSummary(batch,'lens','Lens','reading text');if(lens)parts.push(lens);
     const group=simpleLaneSummary(batch,'grouping','Group','grouping text');if(group)parts.push(group);
     const repair=batch?.repair||{};
     if(Number(repair.failedUnits)>0) {
       const remaining=Number(repair.unresolved)||0;
       if(repair.phase==='done')parts.push(`Repair complete ${Number(repair.repaired)||0}/${repair.failedUnits}${remaining?` · unresolved ${remaining}`:''}`);
+      else if(repair.phase==='apply_pending' && batch?.processingComplete)parts.push(`Repair translated ${Number(repair.repaired)||0}/${repair.failedUnits}${Number(repair.unappliedRepairedUnits)>0?` · ${repair.unappliedRepairedUnits} unit(s) ready when displayed`:''}`);
       else if(repairActive(batch))parts.push(`Repair ${repair.phase==='collecting'?'waiting':'active'} · ${Number(repair.repaired)||0}/${repair.failedUnits} fixed`);
     }
-    const ai=aiSummary(batch);if(ai)parts.push(ai);
-    const insert=insertSummary(batch);if(insert)parts.push(insert);
+    if(!processingDone(batch)){
+      const ai=aiSummary(batch);if(ai)parts.push(ai);
+      const insert=insertSummary(batch);if(insert)parts.push(insert);
+    }
     parts.push(...resultAlerts(batch));
-    if(total>0&&terminal>=total&&!repairActive(batch)&&!batch?.placement?.waiting&&batch?.lifecycle!=="cancelled")parts.splice(1,0,`done ${batchElapsed(batch)}`);
+    if(total>0&&batch?.lifecycle!=="cancelled"&&(processingDone(batch)||(terminal>=total&&!repairActive(batch)&&!batch?.placement?.waiting)))parts.splice(1,0,`done ${batchElapsed(batch)}`);
     return parts.join(' · ');
   };
 
@@ -171,7 +175,7 @@
   function render(batch){
     latest=batch;if(!batch||!ensure())return;if(hideTimer){clearTimeout(hideTimer);hideTimer=0;}
     updateCompact(batch);renderDetails(batch);setCollapsed(collapsed);
-    if(!batchActive(batch) && (!batch?.placement?.waiting || batch?.lifecycle==='cancelled')) {
+    if(!batchActive(batch) && (processingDone(batch) || !batch?.placement?.waiting || batch?.lifecycle==='cancelled')) {
       const deadline=terminalDeadlines.get(batch.id) || Date.now()+6000;
       terminalDeadlines.set(batch.id,deadline);
       while(terminalDeadlines.size>128)terminalDeadlines.delete(terminalDeadlines.keys().next().value);

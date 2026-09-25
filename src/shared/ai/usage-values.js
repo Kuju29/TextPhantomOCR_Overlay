@@ -1,6 +1,7 @@
 // Exact provider observations only. No token estimator or price table here.
 export const TOKEN_FIELDS = ["inputTokens", "outputTokens", "totalTokens", "cachedInputTokens",
-  "cacheWriteInputTokens", "uncachedInputTokens", "ordinaryInputTokens", "thinkingTokens", "visibleOutputTokens"];
+  "cacheWriteInputTokens", "cacheWrite5mInputTokens", "cacheWrite1hInputTokens",
+  "uncachedInputTokens", "ordinaryInputTokens", "thinkingTokens", "visibleOutputTokens"];
 export const token = (v) => Number.isSafeInteger(v) && v >= 0 ? v : null;
 const object = (v) => v && typeof v === "object" && !Array.isArray(v) ? v : {};
 export const decimal = (v) => typeof v === "string" && v.length <= 128 && /^\d+(?:\.\d+)?$/.test(v) ? v : null;

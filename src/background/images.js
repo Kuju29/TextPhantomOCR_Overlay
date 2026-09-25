@@ -106,6 +106,10 @@ export function classifyJobError(msg, context = {}) {
     (msg && typeof msg === "object" && msg.schema === "tp.error/1"
       ? msg
       : null);
+  // The server has already refreshed and retried the cookie. End this batch
+  // for the affected image; a new user request can try Lens again later.
+  if (String(structured?.code || msg?.code || "").toLowerCase() === "lens_session_unavailable")
+    return { permanent: true, manualRetry: true };
   if (structured && typeof structured.retryable === "boolean") {
     return { permanent: !structured.retryable };
   }

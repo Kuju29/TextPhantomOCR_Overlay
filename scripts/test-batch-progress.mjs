@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import vm from "node:vm";
 
 const tabMessages = [];
 globalThis.chrome = {
@@ -138,3 +139,27 @@ assert.equal(badgeReceipt.items.get('error-image').progress.insert.state,'error'
 assert.equal(badgeReceipt.items.get('error-image').progress.result.state,'error');
 assert.equal(batchPassStats(badgeReceipt).inserted,0);
 console.log('Error badge receipt preserves error status and zero inserted translations.');
+
+// The reader can finish translating while an unmounted page stays in its
+// existing placement queue. Waiting for that page must not hold the board open
+// as if a provider request or repair generation were still running.
+const fakeNode=()=>({style:{},dataset:{},textContent:'',isConnected:true,
+  appendChild(){},addEventListener(){},setAttribute(){},contains(){return false;},querySelectorAll(){return []}});
+const nodes={root:fakeNode(),main:fakeNode(),text:fakeNode(),toggle:fakeNode(),details:fakeNode()};
+const page={__TP:{bail:false,getToastProgressHost:()=>nodes,setToastProgressMode(){}},addEventListener(){}};
+vm.runInNewContext(progressPanel,{window:page,document:{addEventListener(){},createElement:fakeNode},
+  setInterval:()=>1,clearInterval(){},setTimeout:(fn,delay)=>setTimeout(fn,delay>=1000?30:delay),clearTimeout});
+const current=Date.now();
+page.__TP.updateBatchProgress({id:'reader-finished-with-unmounted-page',startedAt:current+100,
+  completedAt:current+200,ts:current+200,sequence:1,total:2,terminal:1,lifecycle:'completed',
+  processingComplete:true,placement:{waiting:1,placed:1},repair:{phase:'apply_pending',failedUnits:1,
+    repaired:1,unappliedRepairedUnits:1},items:[{label:'Image 1',terminal:true,inserted:true},
+    {label:'Image 2',terminal:false,inserted:false,progress:{insert:{state:'queued'},ai:{state:'done'}}}]});
+await new Promise(resolve=>setTimeout(resolve,180));
+assert.match(nodes.text.textContent,/done .*processing complete.*1 saved for display/);
+assert.match(nodes.text.textContent,/Repair translated 1\/1/);
+assert.doesNotMatch(nodes.text.textContent,/Insert waiting|AI waiting/,
+  'saved placement must not be displayed as live processing');
+assert.equal(nodes.root.style.display,'none','finished processing hides even while saved placements await a scroll');
+page.__TP.clearBatchProgress();
+console.log('Reader processing completion no longer waits for an unmounted image.');

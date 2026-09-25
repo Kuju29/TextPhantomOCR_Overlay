@@ -1,10 +1,11 @@
-import { completeBatch } from "./reader-placement.js";
+import { completeBatch } from './reader-placement.js';
 import { cancelTrackedBatches, cancelBatchState } from "./reader-events.js";
 import { acquireReaderImage } from "./reader-acquisition.js";
 import { reportImageScanForJob } from './image-scan-diagnostics.js';
 import {requireConversationApi} from "../shared/ai/conversation/support.js";
 import {reserveConversationJob, finishConversationJob, enterConversationJob, cancelConversationJobs} from "./ai/translation-paths/order.js";
 import { applyRuntimeCapacityHints } from "./jobs/capacity-policy.js";
+import { isStageBackpressure } from "./jobs/stage-backpressure.js";
 import { reportTranslationFailure } from "../shared/diagnostic-policy.js";
 import { normalizeReasoningPreference } from "../shared/reasoning-preference.js";
 import { repairCoordinator } from "./repair/coordinator.js";
@@ -220,24 +221,6 @@ function markJobPhase(jobId, phase, details = {}) {
   ).trim();
   if (!batchId || !imageKey) return null;
   return markImagePhase(batchId, imageKey, phase, details);
-}
-
-// Lens/grouping admission failures are safe to retry because the rejected request
-// never entered the stage. Keep that backlog in the browser that owns the page
-// instead of turning another user's burst into a permanent image error.
-function isStageBackpressure(error) {
-  const status = Number(error?.status) || 0;
-  if (status !== 429 && status !== 503) return false;
-  if (error?.permanent === true) return false;
-  const code = String(error?.code || "");
-  return (
-    error?.retryable === true ||
-    code === "server_busy" ||
-    code === "lens_session_unavailable" ||
-    code === "API_5XX" ||
-    code === "API_BAD_RESPONSE" ||
-    !code
-  );
 }
 
 // Runs one extension-owned server stage in its own lane. A rejected admission
@@ -505,6 +488,7 @@ async function processJobInner(payload, tabId, frameId = 0) {
         }),
         frameId,
         traceId,
+        payload?.generation || null,
       );
     },
     logInfo: (message, details) => log.info(message, details),
@@ -1185,10 +1169,11 @@ export function cancelTabWork(tabId, reason = "navigation", sessionId = "") {
 export function discardBatchResults(batchId, reason = "user_cancelled") {
   const bid = String(batchId || "").trim();
   if (!bid) return;
+  const batch = getBatch(bid);
+  if (batch?.cancelled) return;
   cancelBatchProviderViaRest(bid);
   void repairCoordinator.cancelBatch(bid, reason);
   releaseBatchImageJobs(bid);
-  const batch = getBatch(bid);
   if (!batch) return;
   cancelBatchState(batch,reason);
   abortBatchInFlight(bid, "tp:cancelled");

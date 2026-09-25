@@ -365,8 +365,15 @@ export function createRepairCoordinator({
       if (!byPage.has(row.pageId)) byPage.set(row.pageId, []);
       byPage.get(row.pageId).push(row);
     }
+    const batch = getBatch(run.batchId);
     for (const page of Object.values(current.pages)) {
-      if (!page.delivered && page.accepted.length && !byPage.has(page.pageId)) byPage.set(page.pageId, []);
+      if (page.delivered || !page.accepted.length || byPage.has(page.pageId)) continue;
+      // The reader already owns this initial result and will place it when its
+      // image mounts. An unmounted, healthy page is not a repair patch. Keep
+      // the fallback below when the initial result was never staged.
+      const initialStaged = page.ctx.generation?.readerRunId &&
+        batch?.items?.get(page.pageId)?.presentation?.placementPending === true;
+      if (!initialStaged) byPage.set(page.pageId, []);
     }
     const preparedPages = await Promise.all([...byPage].map(async ([pageId, repaired]) => {
       const page = current.pages[pageId];
@@ -726,7 +733,10 @@ export function createRepairCoordinator({
     // the already placed DOM stays under the content script's display policy.
     await sessions.remove(id).catch(() => {});
     for (const key of runtimePages.keys()) if (key.startsWith(`${id}:`)) runtimePages.delete(key);
-    await api(run, 'cancel', {}).catch(() => {});
+    // A completed run has already been deleted on confirmed repair delivery.
+    // Navigating away still retires reader placement, but must not POST cancel
+    // to that deleted server run (which only produces repair_run_not_found).
+    if (run.phase !== 'done') await api(run, 'cancel', {}).catch(() => {});
     batchRuns.delete(batchId);
     emit('repairCancelled', {runId:id, batchId, reason});
   }
@@ -754,7 +764,8 @@ export function createRepairCoordinator({
       if(run.reader)b.reader={...run.reader};
       if(run.reader && run.phase==='apply_pending'){
         b.repair={...run.summary,phase:'apply_pending'};
-        await releaseReaderBatch(b,{replayReceipts:true});continue;
+        await releaseReaderBatch(b,{replayReceipts:true});
+        continue;
       }
       void finishInitial(b).catch(error => emit('repairResumeFailed', {runId:run.id, code:error.code || 'repair_resume_failed'})); // receipt recovery, never blind resend
     }

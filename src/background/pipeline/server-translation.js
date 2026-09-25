@@ -391,7 +391,6 @@ export async function runServerTranslation(input, deps) {
         [
           "server_busy",
           "local_rate_gate_busy",
-          "lens_session_unavailable",
           "provider_rate_limited",
         ].includes(code);
       if (isBusy && safeDeferred) {
@@ -403,10 +402,7 @@ export async function runServerTranslation(input, deps) {
               )
             : retryAfterMs;
         if (slotHeld) {
-          // A Lens session rejection delays this request, not every image on
-          // the lane. Other pages can succeed with the same refreshed session.
-          if (code === "lens_session_unavailable") releaseFailed(requestLane);
-          else if (gated) releaseGated(requestLane, retryAfterMs);
+          if (gated) releaseGated(requestLane, retryAfterMs);
           else if (localRequest)
             releaseLocalFailure(requestLane, error, retryAfterMs);
           else if (code === "provider_rate_limited")
@@ -442,7 +438,7 @@ export async function runServerTranslation(input, deps) {
             status,
             retryAfterMs,
             serverRetryMs,
-            retryScope: serverOwnedImage || code === "lens_session_unavailable" ? "image" : "lane",
+            retryScope: serverOwnedImage ? "image" : "lane",
             code,
             generationAttempts,
             attempt: attempt + 1,

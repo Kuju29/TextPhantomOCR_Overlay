@@ -10,7 +10,7 @@ from .origins import current_origins, branch_history, boundaries
 from .store import current, execution_scope, MAX_HISTORY_CHARS, cancelled
 from .messages import history_parts
 from backend.ai import wire_trace, trace_preview
-from backend.ai.workload import estimate_provider_input, positive
+from backend.ai.workload import estimate_provider_input, observed_input_scale, positive
 
 INTRO = {
     "th": "นี่คือการแปลต่อเนื่องในเอกสารเดียวกัน ตอบเฉพาะ ID ในข้อความผู้ใช้ล่าสุด หากมีคำแปลก่อนหน้าที่สำเร็จอยู่ในประวัตินี้ ให้ใช้เป็นหลักเพื่อคงศัพท์ น้ำเสียง และรูปแบบให้ต่อเนื่อง แต่ต้นฉบับปัจจุบันที่ชัดเจนมีน้ำหนักเหนือกว่าเสมอ",
@@ -125,6 +125,16 @@ def prepare(request, layout, ai):
     # context limit. The normal adapter's guard remains authoritative afterwards.
     max_input = min(positive(bounds.get("maxInputTokens")) or math.inf,
                     context-reserve-128 if context else 32768)
+    # A small context window with Thai text can be overestimated severalfold.
+    # Calibrate only after this exact private model scope reports actual input.
+    # The floor leaves ample headroom and unknown/image/schema traffic keeps the
+    # original conservative estimate. The provider adapter uses the same lease
+    # when checking the composed request immediately before network dispatch.
+    samples = [(turn.get('inputTokens'), turn.get('rawEstimatedInput')) for turn in history]
+    can_calibrate = (request.provider in ('openrouter', 'openai') and context and
+                     context <= 16384 and not request.image_b64 and not request.response_schema)
+    scale = observed_input_scale(samples) if can_calibrate else 1.0
+    lease.input_estimate_scale = scale
     trimmed = start_count-len(history)
     def compose(turns):
         # Normal continuation is immutable append-only replay. If context trimming
@@ -163,6 +173,7 @@ def prepare(request, layout, ai):
         "historyRevision": lease.revision, "turnIndex": lease.revision+1,
         "historyTurns": len(history), "historyMessages": len(messages),
         "historyChars": sum(len(m["text"]) for m in messages),
+        "rawEstimatedInput": math.ceil(estimate / scale), "inputEstimateScale": scale,
         "historyEstimatedTokens": max(0, estimate-base_estimate), "estimatedInput": estimate,
         "currentUserChars": len(user), "staticUserRepeated": not bool(history),
         "bootstrapExamplesIncluded": bool(bootstrap_examples),
@@ -289,7 +300,8 @@ def finish(result, decoded, ai, source_texts, target_lang, cancel_check=None):
                 "image": prepared["image"], "mime": prepared["mime"],
                 "pageId": (ai.conversation or {}).get("pageId", ""),
                 "pageIndex": (ai.conversation or {}).get("pageIndex"),
-                "inputTokens": usage.get("inputTokens"), "outputTokens": usage.get("outputTokens"),
+                "inputTokens": usage.get("inputTokens"), "rawEstimatedInput": ev["rawEstimatedInput"],
+                "outputTokens": usage.get("outputTokens"),
                 "upstreamProvider": resolved_upstream}
         lease.history = prepared["history"] + [turn]
         lease.prefix = prepared["prefix"]

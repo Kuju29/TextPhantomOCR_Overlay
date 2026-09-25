@@ -19,7 +19,7 @@ import { publicTpError } from "../shared/error-contract.js";
 import { resetAdaptiveLearning } from "./scheduler.js";
 
 import { apiHealthSnapshot, getApiBase, healthCache, warmupApi } from "./api.js";
-import { getLastBatchStatus, noteQueueStatus, batchesForTab } from "./batches.js";
+import { getLastBatchStatus, noteQueueStatus, batchesForTab, restorePersistedBatches } from "./batches.js";
 import { blobToDataUri } from "./images.js";
 import {
   setMaxConcurrency,
@@ -604,7 +604,7 @@ bootstrap();
 getStorage({ maxConcurrency: 0 }).then(({ maxConcurrency }) => {
   setMaxConcurrency(maxConcurrency);
   log.info("concurrency limits", describeLimits());
-  Promise.all([restoreSettingsEpoch(), restoreTabSessions()]).then(async () => {
+  Promise.all([restoreSettingsEpoch(), restoreTabSessions(), restorePersistedBatches()]).then(async () => {
     await resumePendingRestJobs();
     await repairCoordinator.resume();
   }).catch(e => log.warn("resume pending jobs failed", e?.message || String(e)));

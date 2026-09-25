@@ -67,6 +67,8 @@ export function bindPopupEvents(deps) {
     refreshSeriesMemory,
     openAiUsageHistory,
     closeAiUsageHistory,
+    openAiUsageDetailed,
+    closeAiUsageDetailed,
     isRemoteDefaultApiUrl,
     traceProviderTransition,
     setProviderTransitionPending,
@@ -550,6 +552,11 @@ export function bindPopupEvents(deps) {
     () => void openAiUsageHistory(),
   );
   els.aiUsageHistoryClose?.addEventListener("click", closeAiUsageHistory);
+  els.aiUsageDetailed?.addEventListener("click", () => void openAiUsageDetailed());
+  els.aiUsageDetailedClose?.addEventListener("click", closeAiUsageDetailed);
+  els.aiUsageDetailedDialog?.addEventListener("click", (event) => {
+    if (event.target === els.aiUsageDetailedDialog) closeAiUsageDetailed();
+  });
   els.aiUsageHistoryDialog?.addEventListener("click", (event) => {
     if (event.target === els.aiUsageHistoryDialog) closeAiUsageHistory();
   });

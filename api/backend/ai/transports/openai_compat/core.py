@@ -272,6 +272,10 @@ def execute_openai_compatible_request(
                     request_payload["stream"] = False
                     request_payload.pop("stream_options", None)
                     response = client.post(url, json=request_payload, headers=headers)
+                    try:
+                        upstream_provider = str(response.headers.get("x-inference-provider") or "")[:160]
+                    except Exception:
+                        upstream_provider = ""
                     if cancelled_by_owner.is_set():
                         raise ProviderGenerationCancelled("AI generation was cancelled")
                     if total_timeout_hit.is_set():
@@ -341,6 +345,10 @@ def execute_openai_compatible_request(
         usage = accounting.observe(data.get("usage"), complete=terminal_completed,
             cost_authoritative=cost_authoritative,
             response_id=str(data.get("id") or ""), http_status=response.status_code)
+        if provider_id == "huggingface":
+            upstream = str(data.get("provider") or upstream_provider or "")[:160]
+            if upstream:
+                usage["upstreamProvider"] = upstream
         inp, out, total = (usage[key] for key in ("inputTokens", "outputTokens", "totalTokens"))
         details = (data.get("usage") or {}).get("completion_tokens_details") or {}
         reasoning_tokens = details.get("reasoning_tokens")
@@ -399,7 +407,7 @@ def execute_openai_compatible_request(
                            else json_detector.first_all_ids_ms), early_completion_ms,
             provider_ms if terminal_completed else None,
             requested_output_tokens=request_payload.get("max_completion_tokens", request_payload.get("max_tokens")),
-            upstream_provider=str(data.get("provider") or "")[:160],
+            upstream_provider=str(data.get("provider") or upstream_provider or "")[:160],
             cached_input_tokens=usage.get("cachedInputTokens"), usage_details=usage, cache_policy=cache_policy,
             first_content_ms=first_content_ms)
     except httpx.HTTPStatusError as exc:

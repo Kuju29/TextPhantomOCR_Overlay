@@ -199,7 +199,7 @@ await check('running cloud receipt pauses quickly and remains durable instead of
   assert.ok(Date.now() - started < 500, 'foreground recovery must not wait for the old 12-minute deadline');
   assert.ok(!actions.some(action => action.includes('/fail')), 'running paid receipt must remain resumable');
 });
-async function runCoordinator({ acknowledge = true, race = false, testProgress = false, partial = false, noSource = false, raceAtFinal = false, deferred = false } = {}) {
+async function runCoordinator({ acknowledge = true, race = false, testProgress = false, partial = false, noSource = false, raceAtFinal = false, deferred = false, stagedHealthy = false, lostInitial = false } = {}) {
   let value = {}, writes = 0, epoch = 7, transientWrites = 0, firstAckSaw = 0;
   const area = { async get(k) { return { [k]: structuredClone(value[k]) }; }, async set(v) {
     writes++; Object.assign(value, structuredClone(v));
@@ -208,11 +208,12 @@ async function runCoordinator({ acknowledge = true, race = false, testProgress =
   } };
   const sessions = createTranslationSessionStore({ area: () => area });
   const tabId = 77000 + Math.floor(Math.random() * 100000), batch = ensureBatch(crypto.randomUUID(), tabId, 0);
-  const ctxs = new Map(), queue = [], rendered = [], terminalErrors = [], events = [];
+  const ctxs = new Map(), queue = [], rendered = [], terminalErrors = [], events = [], apiActions = [];
   const payloads = (noSource ? [0,1,2,3] : [0,1,2]).map(i => ({ engine:'extension', mode:'lens_text', source:'ai', lang:'th', src:`https://fixture.invalid/${i}`, metadata:{ image_id:`p${i}` } }));
   for (const p of payloads) batch.items.set(p.metadata.image_id, { attempt:1, status:'queued', phase:'waiting', payload:p });
   const reports = [];
   const api = async (_r, action, body) => {
+    apiActions.push(action);
     if(action === 'pages') reports.push(body);
     return action === 'seal' ? { phase:'repairing', pending:[] } : {};
   };
@@ -228,7 +229,7 @@ async function runCoordinator({ acknowledge = true, race = false, testProgress =
       return new Promise((resolve,reject) => {
         const timer = setTimeout(() => reject(new Error('repair delivery serialized before the other pages were enqueued')), 120);
         queue.push({ resolve, timer });
-        if (queue.length === (partial ? 2 : 3)) {
+        if (queue.length === (partial || (stagedHealthy && !lostInitial) ? 2 : 3)) {
           firstAckSaw = rendered.length;
           for (const entry of queue) { clearTimeout(entry.timer); entry.resolve({ ok:true, applied:true }); }
         }
@@ -239,6 +240,7 @@ async function runCoordinator({ acknowledge = true, race = false, testProgress =
       for (const p of payloads) {
         const saved = await options.getPage(p.metadata.image_id);
         if (!saved) continue;
+        if (stagedHealthy && saved.pageId === 'p2') continue;
         rows.push({ id:`R${rows.length}`, pageId:saved.pageId, unitId:'g1', generationId:saved.generationId, sourceHash:saved.units[1].sourceHash, translation:'ซ่อมแล้ว' });
       }
       if (testProgress) {
@@ -263,18 +265,22 @@ async function runCoordinator({ acknowledge = true, race = false, testProgress =
   for (const p of payloads) {
     if (noSource && p.metadata.image_id === 'p3') continue;
     const id = `gen:${p.metadata.image_id}`;
-    const ctx = { jobId:id, imageKey:p.metadata.image_id, tabId, frameId:0, imgUrl:p.src, mode:'lens_text', source:'ai', lang:'th', sessionId:'session', settingsEpoch:7, generation:{ pageInstanceId:'instance' } };
+    const ctx = { jobId:id, imageKey:p.metadata.image_id, tabId, frameId:0, imgUrl:p.src, mode:'lens_text', source:'ai', lang:'th', sessionId:'session', settingsEpoch:7, generation:{ pageInstanceId:'instance', ...(stagedHealthy && p.metadata.image_id === 'p2' ? {readerRunId:'reader-fixture'} : {}) } };
     ctxs.set(id,ctx); const r = result();
     await co.capture(batch.id,{ stage:'prepared', payload:p, result:r, plan:{ route:'direct-local', ai:{ provider:'ollama',model:'fixture',thinking:'off' } }, units:translationUnits(r.lensDocument), jobId:id, operationId:`op:${id}` });
-    await co.capture(batch.id,{ stage:'finished', payload:p, jobId:id, accepted:[{ id:'g0',text:'ของดีเดิม' }], failures:[{ id:'g1',reason:'wrong_language' }] });
-    await co.markDelivered(ctx,!deferred);
+    const healthy = stagedHealthy && p.metadata.image_id === 'p2';
+    await co.capture(batch.id,{ stage:'finished', payload:p, jobId:id,
+      accepted:healthy ? [{ id:'g0',text:'ของดีเดิม' },{ id:'g1',text:'แปลสมบูรณ์' }] : [{ id:'g0',text:'ของดีเดิม' }],
+      failures:healthy ? [] : [{ id:'g1',reason:'wrong_language' }] });
+    if(healthy && !lostInitial)batch.items.get(p.metadata.image_id).presentation={placementPending:true};
+    await co.markDelivered(ctx,healthy ? false : !deferred);
     if (deferred) batch.items.get(p.metadata.image_id).deferredImageError = {
       type:'IMAGE_ERROR', original:p.src, message:'deferred repair-owned failure', generation:ctx.generation,
     };
   }
   const initialPresentations=[...batch.items.values()].map(item=>({...item.presentation}));
   await co.finishInitial(batch); await sessions.flush();
-  return { final:await sessions.get(run.id), rendered, terminalErrors, firstAckSaw, transientWrites, events, batch, reports, initialPresentations };
+  return { final:await sessions.get(run.id), rendered, terminalErrors, firstAckSaw, transientWrites, events, batch, reports, initialPresentations, apiActions, coordinator:co };
 }
 await check('all repaired pages enter the bulk queue before waiting for the first DOM ACK', async () => {
   const r = await runCoordinator();
@@ -283,6 +289,25 @@ await check('all repaired pages enter the bulk queue before waiting for the firs
   assert.equal(r.rendered.length, 3);
   assert.equal(batchPassStats(r.batch).inserted,3,'repair ACKs count once, separately from accepted unit totals');
   for (const msg of r.rendered) assert.equal(msg.result.backgroundMode, 'boxes');
+});
+await check('unmounted healthy reader pages remain in their initial placement queue, not the repair run', async () => {
+  const r=await runCoordinator({stagedHealthy:true});
+  assert.equal(r.final.phase,'done','repair must finish when its actual repaired pages are placed');
+  assert.equal(r.rendered.length,2,'healthy staged page must not receive a duplicate repair overlay');
+  assert.equal(r.final.summary.applyPendingPages,0);
+  assert.equal(r.batch.items.get('p2').presentation.placementPending,true,
+    'the existing reader placement queue still owns the unmounted page');
+});
+await check('a reader result that was never staged can still be recovered by the repair delivery fallback', async () => {
+  const r=await runCoordinator({stagedHealthy:true,lostInitial:true});
+  assert.equal(r.final.phase,'done');
+  assert.equal(r.rendered.length,3);
+});
+await check('navigation after confirmed repair does not cancel the already deleted API run', async () => {
+  const r=await runCoordinator({stagedHealthy:true});
+  assert.equal(r.final.phase,'done');
+  await r.coordinator.cancelBatch(r.batch.id,'navigation');
+  assert.equal(r.apiActions.includes('cancel'),false);
 });
 await check('provider delta telemetry never rewrites the whole session checkpoint', async () => {
   const r = await runCoordinator({ acknowledge:false, testProgress:true });

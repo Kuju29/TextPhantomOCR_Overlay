@@ -60,7 +60,7 @@ export function observeWorkload({ units, answer, error, defects = {}, plan, ai =
   const isolatedShortIncomplete = !structural && missing.size === 1 && units.some(u =>
     missing.has(String(u.id)) && Array.from(String(u.text || '').trim()).length <= 3);
   return { outcome, isolatedShortIncomplete, structureEligible: !isolatedShortIncomplete && units.length > 1 && plan?.phase !== 'repair', visibleTokens: visible, calibrationTokens: calibration, reasoningTokens: reasoning, actualIdentity: identity,
-    providerInputTokens: count(usage.inputTokens), providerOutputTokens: output,
+    providerInputTokens: count(usage.inputTokens), providerUsageReported:usage.source==='provider',providerOutputTokens: output,
     cachedInputTokens: count(usage.cachedInputTokens),
     requestedOutputTokens: positive(meta.requestedOutputTokens), finishReason: finish,
     missingCount: missing.size, wrongLanguageCount: array(defects.wrongLanguage).length,
@@ -79,6 +79,9 @@ export function learnWorkload(profile, observation, now = Date.now()) {
   p.actualIdentity = o.actualIdentity || p.actualIdentity;
   p.updatedAt = now; p.samples += 1;
   p.limits = { ...p.limits, ...o.limits };
+  if(o.providerUsageReported && ['ok','structure','language','complete_at_limit'].includes(o.outcome) &&
+     count(o.providerInputTokens)>=256 && positive(o.plan.rawEstimatedInput))
+    p.inputSamples=[...(p.inputSamples||[]),{actual:o.providerInputTokens,raw:o.plan.rawEstimatedInput}].slice(-8);
   p.outcomes = [...p.outcomes, o.outcome].slice(-WORKLOAD_POLICY.window);
   // Hidden-reasoning telemetry is useful even when the visible answer is
   // truncated or structurally incomplete. It is not response-size calibration,

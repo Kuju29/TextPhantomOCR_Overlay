@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { access, readFile, readdir } from "node:fs/promises";
 import { cloudProviderCatalog, cloudProviderFromKey, cloudProviderSpec } from "../src/shared/ai/providers/cloud-registry.js";
+import { providerFromKey, SK_STYLE_PROVIDERS } from "../src/popup/controllers/provider-model-display.js";
 
 const expected = ["gemini", "openai", "openrouter", "anthropic", "groq", "deepseek", "together", "huggingface", "featherless"];
 const catalog = cloudProviderCatalog();
@@ -14,7 +15,12 @@ for (const spec of catalog) {
 }
 assert.equal(cloudProviderFromKey("sk-or-example"), "openrouter");
 assert.equal(cloudProviderFromKey("sk-ant-example"), "anthropic");
-assert.equal(cloudProviderFromKey("sk-example"), "openai");
+assert.equal(cloudProviderFromKey("sk-example"), "", "generic sk- cannot identify a provider");
+for (const provider of ["openai", "deepseek", "together", "featherless"]) {
+  assert.equal(providerFromKey("sk-shared-format"), "", `${provider} may issue a generic sk- key`);
+  assert.equal(SK_STYLE_PROVIDERS.has(provider), true);
+}
+assert.equal(providerFromKey("sk-or-specific"), "openrouter", "unique prefixes can identify a mismatch");
 assert.equal(cloudProviderSpec("gemini").thinkingControl, true);
 for (const id of expected.filter((id) => id !== "gemini")) assert.equal(cloudProviderSpec(id).thinkingControl, false);
 

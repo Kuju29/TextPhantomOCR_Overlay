@@ -189,6 +189,9 @@ export function createWorkloadController({ read = getStorage, write = setStorage
         effective:{contract:selection.contract || 'unconfirmed'}});
       prune(key);
       const context = { contract, limits, configureContext: nativeOllama ? planOllamaContext : null, reasoningActive: reasoningIsActive(ai, caps),
+        allowInputCalibration:['openrouter','openai'].includes(ai.provider) &&
+          Number.isSafeInteger(limits.contextTokens) && limits.contextTokens<=16384 &&
+          !image && !/schema|json/i.test(String(contract)),
         reasoningSupported: caps?.reasoning?.supported, singleRequest: singleRequest === true, wholePageFirst: wholePageFirst === true, phase,
         userMaxOutput: Number.isSafeInteger(ai.max_output_tokens) && ai.max_output_tokens > 0 ? ai.max_output_tokens : null,
         fixedInput: 0 };

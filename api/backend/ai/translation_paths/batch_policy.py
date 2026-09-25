@@ -2,7 +2,7 @@
 from __future__ import annotations
 import math
 from backend.ai import markers, prompts
-from backend.ai.workload import text_weight, estimate_provider_input, WorkloadBudgetError
+from backend.ai.workload import text_weight, estimate_provider_input, observed_input_scale, WorkloadBudgetError
 from backend.ai.reasoning_preference import reasoning_is_active
 
 
@@ -52,11 +52,15 @@ def _estimate(candidate_rows, ai, target, profile, target_output, records):
         prev_context=ai.prev_context, page_context=ai.page_context, source_context=ai.source_context,
         source_lang=ai.source_lang, style_examples=True, memory_mode=ai.memory_mode)
     schema = markers.translation_schema(markers.apply(texts)) if structured else None
-    estimated_input = estimate_provider_input(system=system, parts=[user], schema=schema,
+    raw_input = estimate_provider_input(system=system, parts=[user], schema=schema,
         image=bool(ai.image_b64)) + len(texts)*30 + 128
+    ctx = bounds.get('contextTokens')
+    can_calibrate = (ai.provider in ('openrouter', 'openai') and isinstance(ctx, int) and
+                     0 < ctx <= 16384 and not ai.image_b64 and not schema)
+    scale = observed_input_scale(profile.get('inputSamples', [])) if can_calibrate else 1.0
+    estimated_input = math.ceil(raw_input * scale)
     base = sum(text_weight(t) for t in texts) + len(texts)*(8 if structured else 12) + 4
     output = math.ceil(base*ratio*1.25)
-    ctx = bounds.get('contextTokens')
     if ai.provider == 'ollama':
         from backend.ai.providers.ollama_context import plan_ollama_context
         cp = plan_ollama_context(bounds, {'estimatedInput':estimated_input,
@@ -69,7 +73,8 @@ def _estimate(candidate_rows, ai, target, profile, target_output, records):
         'context_window' if ctx and output+reasoning > ctx-estimated_input-128 else \
         'output_budget' if output+reasoning > cap else None
     return {
-        'version': 1, 'estimatedInput': estimated_input, 'predictedOutput': output,
+        'version': 1, 'estimatedInput': estimated_input, 'rawEstimatedInput': raw_input,
+        'inputEstimateScale':scale, 'predictedOutput': output,
         'reasoningReserve': reasoning, 'completionAvailable': max(0, math.floor(available)),
         'baseOutput': base, 'hard': hard, 'soft': soft, 'hardReason': reason,
         'target': target_output, 'recordTarget': records,
@@ -164,6 +169,9 @@ def learn(profile, result, estimate):
         if value is not None and estimate.get('baseOutput'):
             profile['ratios'] = (profile.get('ratios',[])+[max(.05,min(32,value/estimate['baseOutput']))])[-64:]
     cached, actual = u.get('cachedInputTokens'), u.get('inputTokens')
+    raw = ev.get('rawEstimatedInput')
+    if valid and isinstance(actual, int) and actual >= 256 and isinstance(raw, int) and raw > 0:
+        profile['inputSamples'] = (profile.get('inputSamples', []) + [(actual, raw)])[-8:]
     if isinstance(cached, int) and cached > 0 and isinstance(actual, int) and actual > 0:
         profile['cacheConfirmed'] = True
         profile['cacheRatio'] = max(0.0, min(1.0, cached/actual))

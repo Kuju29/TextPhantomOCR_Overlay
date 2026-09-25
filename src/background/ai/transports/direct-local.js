@@ -192,6 +192,7 @@ export async function translateDirectLocal(
             (sum, unit) => sum + String(unit?.text || "").length,
             0,
           ),
+          jobId, batchId, imageCount: imageId || imageDataUri ? 1 : 0,
           providerMs: Number.isFinite(charged.providerMs)
             ? charged.providerMs
             : error?.diagnostics?.providerMs,
@@ -264,6 +265,7 @@ export async function translateDirectLocal(
         (sum, unit) => sum + String(unit?.text || "").length,
         0,
       ),
+      jobId, batchId, imageCount: imageId || imageDataUri ? 1 : 0,
       translatedUnits: result.translations.length,
       providerMs: result?.meta?.providerMs,
       totalMs: result?.meta?.totalMs,

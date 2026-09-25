@@ -464,6 +464,7 @@ export async function translateViaServer(
           outputTokens: charged.outputTokens,
           totalTokens: charged.totalTokens,
           sourceChars: sourceChars(units),
+          jobId, batchId, imageCount: imageId || imageDataUri ? 1 : 0,
           providerMs: charged.providerMs,
           totalMs: Number.isFinite(charged.totalMs)
             ? charged.totalMs
@@ -534,6 +535,7 @@ export async function translateViaServer(
         outputTokens: charged.outputTokens,
         totalTokens: charged.totalTokens,
         sourceChars: sourceChars(units),
+        jobId, batchId, imageCount: imageId || imageDataUri ? 1 : 0,
         providerMs: charged.providerMs,
         totalMs: Number.isFinite(charged.totalMs)
           ? charged.totalMs
@@ -656,6 +658,7 @@ export async function translateViaServer(
       outputTokens: result?.meta?.usage?.outputTokens,
       totalTokens: result?.meta?.usage?.totalTokens,
       sourceChars: sourceChars(units),
+      jobId, batchId, imageCount: imageId || imageDataUri ? 1 : 0,
       translatedUnits: result.translations.length,
       providerMs: result?.meta?.providerMs,
       totalMs: result?.meta?.dt_ms,

@@ -132,16 +132,36 @@
         </div>
         <section id="ai-group" class="ai-group" style="display: none">
           <details class="ai-compact-panel" id="ai-usage-wrap" style="display: none">
-            <summary title="Current model · since reset · input + output, including cached input"><span id="ai-usage-label">Tokens used</span> <span id="ai-usage-total" class="ai-summary-value" aria-live="polite">—</span></summary>
+            <summary title="Selected provider and model · since the last switch or reset"><span id="ai-usage-label">Tokens used</span> <span id="ai-usage-total" class="ai-summary-value" aria-live="polite">—</span></summary>
             <div class="ai-compact-content">
               <div class="ai-usage-model-line"><span id="ai-usage-kind">Cloud</span> · <span id="ai-usage-model">Provider / Model</span></div>
               <span id="ai-usage-counts" class="ai-metric-lines">Requests: 0</span>
               <div class="ai-usage-actions">
                 <button type="button" id="ai-usage-reset" class="secondary-btn ai-usage-reset">Reset</button>
+                <button type="button" id="ai-usage-detailed" class="secondary-btn ai-usage-reset" aria-haspopup="dialog">Detailed</button>
                 <button type="button" id="ai-usage-history" class="secondary-btn ai-usage-reset" aria-haspopup="dialog">History</button>
               </div>
             </div>
           </details>
+          <dialog id="ai-usage-detailed-dialog" class="ai-usage-history-dialog" aria-labelledby="ai-usage-detailed-title">
+            <div class="ai-usage-history-head"><h2 id="ai-usage-detailed-title">Current session requests</h2><button type="button" id="ai-usage-detailed-close" class="secondary-btn ai-usage-history-close">Close</button></div>
+            <div class="ai-usage-history-list">
+              <div id="ai-usage-detailed-list"></div>
+              <details class="ai-price-settings"><summary>Rates &amp; THB conversion</summary>
+                <p>New requests use the rates below. Existing requests keep their original price. Estimates can exclude cache storage, plan fees, and conversion fees.</p>
+                <div id="ai-price-provider-rates">
+                  <label>Input $/1M <input id="ai-price-input" type="number" min="0" step="any" /></label>
+                  <label>Cache read $/1M <input id="ai-price-cached" type="number" min="0" step="any" /></label>
+                  <label>Cache write $/1M <input id="ai-price-write" type="number" min="0" step="any" /></label>
+                  <label>Output $/1M <input id="ai-price-output" type="number" min="0" step="any" /></label>
+                  <button type="button" id="ai-price-restore" class="secondary-btn">Use provider rate</button>
+                </div>
+                <label>USD → THB (empty: reference rate) <input id="ai-price-fx" type="number" min="0" step="any" /></label>
+                <button type="button" id="ai-price-save" class="secondary-btn">Save rates</button>
+                <div id="ai-price-status" role="status" class="hint"></div>
+              </details>
+            </div>
+          </dialog>
           <dialog id="ai-usage-history-dialog" class="ai-usage-history-dialog" aria-labelledby="ai-usage-history-title">
             <div class="ai-usage-history-head">
               <h2 id="ai-usage-history-title">AI usage history</h2>

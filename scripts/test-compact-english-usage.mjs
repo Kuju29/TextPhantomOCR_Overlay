@@ -12,6 +12,6 @@ const html=await readFile(new URL('../src/popup/popup.html',import.meta.url),'ut
 const field=(value='')=>({value,style:{},textContent:'',title:'',addEventListener(){}});
 const els={aiProvider:field('fixture'),aiModel:field('test'),lang:field('th'),aiUsageWrap:field(),aiUsageKind:field(),aiUsageModel:field(),aiUsageCounts:field(),aiUsageTotal:field()};
 const controller=createUsageViewController({els,state:{desiredLang:'ja'},isLocalProvider:()=>false,currentUsage:()=>row,getStorage:async()=>({}),historyRows:()=>[],storageKey:'usage'});
-controller.render(row);assert.equal(els.aiUsageTotal.textContent,'140,296 · incomplete');assert.match(els.aiUsageCounts.textContent,/Requests: 46/);assert.doesNotMatch(els.aiUsageCounts.textContent,/[\u0e00-\u0e7f]/);
+controller.render(row);assert.equal(els.aiUsageTotal.textContent,'140,296 · incomplete  ≈ — · partial');assert.match(els.aiUsageCounts.textContent,/Requests: 46/);assert.doesNotMatch(els.aiUsageCounts.textContent,/[\u0e00-\u0e7f]/);
 assert.equal(formatUsageSummary({totalTokens:null}), '—');assert.match(formatUsageLines({requests:2,thinkingTokens:null,cachedInputTokens:null}),/Cached input \(included\): —/);
 console.log('PASS collapsed English usage UI; diagnostics panel removed; exact totals/partial/unknown/subsets preserved.');

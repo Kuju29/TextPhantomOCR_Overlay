@@ -1,6 +1,10 @@
 import { createUsageCommitQueue } from "./ai/usage-commit-queue.js";
 import { getStorage, removeStorage, setStorage } from "./storage.js";
 import { TOKEN_FIELDS, token, decimal, addDecimal, aggregateUsage, usageIsComplete } from "./ai/usage-values.js";
+import { priceGeneration } from "./ai/pricing/calculate.js";
+import { routeRateKey } from "./ai/pricing/providers.js";
+import { money, sumMoney, lessMoney } from "./ai/pricing/money.js";
+import { bangkokDate, convertThb } from "./ai/pricing/fx.js";
 
 export const AI_USAGE_STORAGE_KEY = "aiUsageV1";
 export const AI_USAGE_RECEIPT_PREFIX = "aiUsageReceiptV1:";
@@ -15,6 +19,9 @@ const blankLedger = () => ({
   seen: {},
   pending: {},
   pendingOverflow: 0,
+  days: {},
+  dailyInitialized: true,
+  pricing: { overrides: {}, liveRates: {}, fx: null },
 });
 const nullableToken = (value) =>
   Number.isSafeInteger(value) && value >= 0 ? value : null;
@@ -276,9 +283,73 @@ export function normalizeUsageLedger(raw) {
     for (const session of model.sessions)
       for (const delta of session.deltas || [])
         if (delta?.dedupeKey) delete seen[delta.dedupeKey];
-  return { version: AI_USAGE_VERSION, active, selection, models,
+  const days = raw.days && typeof raw.days === "object" && !Array.isArray(raw.days)
+    ? Object.fromEntries(Object.entries(raw.days).filter(([date, day]) => /^\d{4}-\d{2}-\d{2}$/.test(date) && day && typeof day === "object").sort(([a],[b]) => a.localeCompare(b)).slice(-400)) : {};
+  const pricing = raw.pricing && typeof raw.pricing === "object" ? raw.pricing : {};
+  const normalized = { version: AI_USAGE_VERSION, active, selection, models,
     pending: { ...(raw.pending || {}) }, pendingOverflow: Number(raw.pendingOverflow) || 0,
-    seen };
+    seen, days, dailyInitialized: true,
+    pricing: { overrides: { ...(pricing.overrides || {}) },
+      liveRates: Object.fromEntries(Object.entries(pricing.liveRates || {}).slice(-128)),
+      fx: pricing.fx || null } };
+  if (raw.dailyInitialized !== true) {
+    // Upgrade older ledgers from retained individual observations only. Old
+    // evicted requests cannot be reconstructed and are explicitly marked.
+    for (const model of Object.values(models)) for (const session of model.sessions)
+      for (const delta of session.deltas || []) applyDay(normalized, delta, 1, true);
+  }
+  return normalized;
+}
+
+function applyDay(ledger, delta, direction = 1, migrated = false) {
+  const date = bangkokDate(delta.timestamp || Date.now());
+  const day = (ledger.days[date] ||= { date, requests:0, failures:0, incompleteRequests:0,
+    inputTokens:0, outputTokens:0, totalTokens:0, cachedInputTokens:0,
+    tokenCoverage:{}, pricedRequests:0, unpricedRequests:0, cacheUnknownRequests:0,
+    reportedUsd:"0", estimatedUsd:"0", usd:"0", thb:"0", thbCoveredRequests:0, migratedPartial:false });
+  const requests = delta.requests || 1;
+  day.requests += direction * requests;
+  day.failures += direction * (delta.failures || 0);
+  if (["upper_bound_cache_unreported", "estimated_posthoc_cache_unknown"].includes(delta.price?.status))
+    day.cacheUnknownRequests = (day.cacheUnknownRequests || 0) + direction * requests;
+  if (!usageIsComplete(delta)) day.incompleteRequests += direction * requests;
+  for (const field of TOKEN_FIELDS) if (token(delta[field]) !== null) {
+    day[field] = (day[field] || 0) + direction * delta[field];
+    day.tokenCoverage[field] = (day.tokenCoverage[field] || 0) + direction * requests;
+  }
+  const usd = money(delta.price?.usd);
+  if (usd === null) day.unpricedRequests += direction * requests;
+  else {
+    day.pricedRequests += direction * requests;
+    const bucket = delta.price.source === "provider" ? "reportedUsd" : "estimatedUsd";
+    day[bucket] = direction > 0 ? sumMoney(day[bucket], usd) : lessMoney(day[bucket], usd);
+    day.usd = direction > 0 ? sumMoney(day.usd, usd) : lessMoney(day.usd, usd);
+    const thb = money(delta.price?.thb);
+    if (thb !== null) {
+      day.thb = direction > 0 ? sumMoney(day.thb, thb) : lessMoney(day.thb, thb);
+      day.thbCoveredRequests += direction * requests;
+    }
+  }
+  if (migrated) day.migratedPartial = true;
+  const keys = Object.keys(ledger.days).sort();
+  for (const stale of keys.slice(0, Math.max(0, keys.length - 400))) delete ledger.days[stale];
+}
+
+function applySessionPrice(session, delta, direction) {
+  const totals = (session.priceTotals ||= { usd:"0", reportedUsd:"0", estimatedUsd:"0", thb:"0", thbCoveredRequests:0, pricedRequests:0, unpricedRequests:0 });
+  const usd = money(delta.price?.usd), requests = delta.requests || 1;
+  if (usd === null) totals.unpricedRequests += direction * requests;
+  else {
+    totals.pricedRequests += direction * requests;
+    const bucket = delta.price.source === "provider" ? "reportedUsd" : "estimatedUsd";
+    totals[bucket] = direction > 0 ? sumMoney(totals[bucket], usd) : lessMoney(totals[bucket], usd);
+    totals.usd = direction > 0 ? sumMoney(totals.usd, usd) : lessMoney(totals.usd, usd);
+    const thb = money(delta.price?.thb);
+    if (thb !== null) {
+      totals.thb = direction > 0 ? sumMoney(totals.thb, thb) : lessMoney(totals.thb, thb);
+      totals.thbCoveredRequests = (totals.thbCoveredRequests || 0) + direction * requests;
+    }
+  }
 }
 
 const newSession = (now, id) => ({
@@ -304,6 +375,7 @@ const newSession = (now, id) => ({
   totalMs: 0,
   engines: { runsextension: 0, runsapi: 0 },
   deltas: [],
+  priceTotals: { usd:"0", reportedUsd:"0", estimatedUsd:"0", thb:"0", thbCoveredRequests:0, pricedRequests:0, unpricedRequests:0 },
 });
 
 function closeActive(ledger, now, reason) {
@@ -489,6 +561,24 @@ export function recordProviderGeneration(
             saved.reportedRequests += isComplete ? previous.requests : -previous.requests;
             saved.incompleteRequests += isComplete ? -previous.requests : previous.requests;
           }
+          // An arriving final usage or charge may enrich an earlier incomplete
+          // receipt. Replace exactly one old contribution in both aggregates.
+          if (changed) {
+            const previousCopy = { ...previous };
+            const newPrice = priceGeneration({ ...next, runtime: next.runtime,
+              provider: next.provider, resolvedModel: next.resolvedModel || next.model }, ledger.pricing);
+            if (newPrice.source === "provider" || money(previous.price?.usd) === null) {
+              next.price = newPrice;
+              if (ledger.pricing?.fx?.rate) {
+                next.price.fx = ledger.pricing.fx;
+                next.price.thb = convertThb(next.price.usd, ledger.pricing.fx);
+              }
+            }
+            applyDay(ledger, previousCopy, -1);
+            applySessionPrice(saved, previousCopy, -1);
+            applyDay(ledger, next);
+            applySessionPrice(saved, next, 1);
+          }
           Object.assign(previous, next);
           return ledger;
         }
@@ -612,13 +702,15 @@ export function recordProviderGeneration(
     : failures > 0
       ? "provider_charged_failure"
       : "translation_success";
-  session.deltas.push(compactStoredRecord({
+  const delta = compactStoredRecord({
     id: cleanId(event?.deltaId) || id(),
     dedupeKey,
     sessionId: session.id,
     traceId: cleanId(event?.traceId),
     requestId: cleanId(event?.requestId),
     operationId: cleanId(event?.operationId),
+    jobId: cleanId(event?.jobId),
+    batchId: cleanId(event?.batchId),
     provider,
     model: modelName,
     resolvedModel,
@@ -627,6 +719,7 @@ export function recordProviderGeneration(
     ...Object.fromEntries(TOKEN_FIELDS.map(k => [k, token(event?.[k])])),
     usageStatus: event?.usageStatus || (complete ? "reported" : "incomplete"),
     providerCostUsd: decimal(event?.providerCostUsd),
+    upstreamProvider: String(event?.upstreamProvider || "").slice(0, 80),
     receiptId: cleanId(event?.usage?.receiptId || event?.receiptId),
     inputTokens: nullableToken(event?.inputTokens),
     outputTokens: nullableToken(event?.outputTokens),
@@ -641,8 +734,19 @@ export function recordProviderGeneration(
     replayed: false,
     idempotent: Boolean(dedupeKey),
     idempotencyKey: cleanId(event?.idempotencyKey),
-    timestamp: now,
-  }));
+    timestamp: Number.isFinite(Number(event?.observedAt)) && Number(event.observedAt) > 0
+      ? Number(event.observedAt) : now,
+    imageCount: Number.isSafeInteger(event?.imageCount) ? Math.max(0, event.imageCount) : null,
+    pageNumbers: Array.isArray(event?.pageNumbers) ? event.pageNumbers.filter(v => Number.isSafeInteger(v) && v >= 0).slice(0, 60) : null,
+  });
+  delta.price = priceGeneration(delta, ledger.pricing);
+  if (ledger.pricing?.fx?.rate) {
+    delta.price.fx = ledger.pricing.fx;
+    delta.price.thb = convertThb(delta.price.usd, ledger.pricing.fx);
+  }
+  session.deltas.push(delta);
+  applyDay(ledger, delta);
+  applySessionPrice(session, delta, 1);
   if (session.deltas.length > AI_USAGE_DELTA_LIMIT) {
     const evicted = session.deltas.splice(
       0,
@@ -744,9 +848,78 @@ export function usageHistoryRows(raw) {
         totalTokens: nullableToken(session.totalTokens),
         extensionRequests: count(session.engines?.runsextension),
         apiRequests: count(session.engines?.runsapi),
+        priceTotals: session.priceTotals || null,
       })),
     )
     .sort((left, right) => right.startedAt - left.startedAt);
+}
+
+// The public History rows remain counters only. The opt-in request view exposes
+// a small allowlist for Detailed and for expandable History, without trace IDs,
+// URLs, source text, operation IDs or receipt IDs.
+export function usageDetailedRows(raw) {
+  const ledger = normalizeUsageLedger(raw);
+  const visible = usageHistoryRows(ledger);
+  const groupToken = value => {
+    let hash = 2166136261;
+    for (const char of String(value || "")) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619);
+    return String(hash >>> 0);
+  };
+  return visible.map(row => {
+    const session = ledger.models[row.selectionKey]?.sessions.find(s => s.id === row.id);
+    return { ...row, deltas: [...(session?.deltas || [])].reverse().map(d => ({
+      timestamp: d.timestamp, failures: d.failures, requests: d.requests,
+      inputTokens: d.inputTokens, cachedInputTokens: d.cachedInputTokens,
+      cacheWriteInputTokens: d.cacheWriteInputTokens, outputTokens: d.outputTokens,
+      thinkingTokens: d.thinkingTokens, totalTokens: d.totalTokens,
+      imageCount: d.imageCount,
+      groupKey: groupToken(d.jobId || d.batchId || d.operationId || d.requestId || d.id),
+      price: d.price ? structuredClone(d.price) : null,
+    })) };
+  });
+}
+
+export function usageToday(raw, at = Date.now()) {
+  const ledger = normalizeUsageLedger(raw);
+  const date = bangkokDate(at);
+  const day = ledger.days[date];
+  return {date, ...(day || { requests:0, failures:0, incompleteRequests:0,
+    inputTokens:0, outputTokens:0, totalTokens:0, cachedInputTokens:0,
+    pricedRequests:0, unpricedRequests:0, cacheUnknownRequests:0,
+    reportedUsd:"0", estimatedUsd:"0", usd:"0", thb:"0", thbCoveredRequests:0, tokenCoverage:{} }),
+    fx: ledger.pricing?.fx || null, pendingOperations: Object.keys(ledger.pending || {}).length,
+    pendingOverflow: ledger.pendingOverflow || 0 };
+}
+
+export async function persistPricingSettings(update) {
+  return commitUsage(before => {
+    const next = normalizeUsageLedger(before);
+    const proposal = update(next.pricing);
+    const priorRates = next.pricing.liveRates;
+    next.pricing = { overrides: {...(proposal?.overrides || {})},
+      liveRates: Object.fromEntries(Object.entries(proposal?.liveRates || {}).slice(-128)),
+      fx: proposal?.fx || null };
+    const newRates = Object.keys(next.pricing.liveRates).filter(key =>
+      JSON.stringify(next.pricing.liveRates[key]) !== JSON.stringify(priorRates[key]));
+    if (newRates.length) for (const model of Object.values(next.models)) for (const session of model.sessions) {
+      if (!session.priceTotals) continue;
+      for (const delta of session.deltas || []) {
+        if (money(delta.price?.usd) !== null ||
+          !newRates.includes(routeRateKey(model.provider,delta.resolvedModel || delta.model,delta.upstreamProvider))) continue;
+        const live = next.pricing.liveRates[routeRateKey(model.provider,delta.resolvedModel || delta.model,delta.upstreamProvider)];
+        if (bangkokDate(delta.timestamp) !== bangkokDate(live.fetchedAt)) continue;
+        const recalculated = priceGeneration(delta,next.pricing);
+        if (money(recalculated.usd) === null) continue;
+        const previous = {...delta};
+        delta.price = {...recalculated,source:"catalogue_after_request",status:recalculated.status === "upper_bound_cache_unreported"
+          ? "estimated_posthoc_cache_unknown" : "estimated_posthoc"};
+        if (next.pricing.fx?.rate) {delta.price.fx=next.pricing.fx;delta.price.thb=convertThb(delta.price.usd,next.pricing.fx);}
+        applyDay(next,previous,-1);applySessionPrice(session,previous,-1);
+        applyDay(next,delta);applySessionPrice(session,delta,1);
+      }
+    }
+    return next;
+  });
 }
 
 export function currentUsage(raw, target = null) {
@@ -784,10 +957,15 @@ export function currentUsage(raw, target = null) {
     provider: model?.provider || selected.provider,
     model: model?.model || selected.model,
     ...usageDisplay(active),
+    sessionId: active?.id || null,
+    startedAt: active?.startedAt || null,
+    successes: active?.successes || 0,
+    failures: active?.failures || 0,
+    priceTotals: active?.priceTotals || null,
     requests: active?.requests || 0,
     inputTokens: active ? active.inputTokens : null,
     outputTokens: active ? active.outputTokens : null,
-    totalTokens: active ? active.totalTokens : 0,
+    totalTokens: active?.requests ? active.totalTokens : 0,
     tokensReported: Boolean(
       active && !pendingOperations && !ledger.pendingOverflow && active.incompleteRequests === 0 &&
         active.inputTokens != null &&
@@ -890,7 +1068,7 @@ export async function flushUsageReceiptJournal({ recover = false } = {}) {
       const before = next;
       const observer = usageReceiptObservers.get(record.value.nonce);
       const beforeEncoded = observer ? JSON.stringify(before) : null;
-      next = recordProviderGeneration(next, record.value.event);
+      next = recordProviderGeneration(next, record.value.event, {now: record.value.storedAt || Date.now()});
       const unchanged = observer ? beforeEncoded === JSON.stringify(next) : undefined;
       if (observer) observations.push({ observer, event: record.value.event, before, next, unchanged });
     }
@@ -924,6 +1102,7 @@ function scheduleUsageReceiptFlush() {
 async function persistUsageReceipt(event, { emitTrace = null, onTiming = null } = {}) {
   const started = usageReceiptClock();
   const immutable = structuredClone(event);
+  immutable.observedAt ||= Date.now();
   const nonce = usageReceiptId();
   const key = `${AI_USAGE_RECEIPT_PREFIX}${nonce}`;
   const record = { version: 1, nonce, storedAt: Date.now(), sequence: ++usageReceiptSequence, event: immutable };

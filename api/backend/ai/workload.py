@@ -44,6 +44,17 @@ def text_weight(value):
     return max(1, math.ceil(total))
 
 
+def observed_input_scale(samples):
+    """Two times the largest observed actual/raw ratio, with a 45% floor.
+
+    Samples are provider-reported input counts for this model and private
+    conversation.  Never infer a smaller request from a cache read count.
+    """
+    valid = [actual / raw for actual, raw in samples[-8:]
+             if isinstance(actual, int) and actual >= 256 and isinstance(raw, int) and raw > 0]
+    return min(1.0, max(.45, 2 * max(valid))) if valid else 1.0
+
+
 class WorkloadBudgetError(ValueError):
     code = 'ai_workload_budget_insufficient'
     requestDispatched = False
@@ -52,15 +63,19 @@ class WorkloadBudgetError(ValueError):
 
 
 def estimate_provider_input(*, system='', parts=(), schema=None, image=False, history=()):
+    # Only conversation.prepare can populate this process-local lease. A client
+    # workload hint must never reduce the server's context-window guard.
+    from backend.ai.translation_paths.store import current
+    scale = getattr(current(), 'input_estimate_scale', 1.0)
     if history:
         from backend.ai.translation_paths.messages import history_parts
         extra = sum(bool(m.get('image_b64')) for m in history) * 2048 + len(history) * 8
         return math.ceil((text_weight(system) + text_weight('\n\n'.join(history_parts(history) + list(parts))) +
             (text_weight(json.dumps(schema, ensure_ascii=False)) if schema else 0) + 64 +
-            (2048 if image else 0) + extra) * 1.25)
+            (2048 if image else 0) + extra) * 1.25 * scale)
     return math.ceil((text_weight(system) + text_weight('\n\n'.join(parts)) +
                      (text_weight(json.dumps(schema, ensure_ascii=False)) if schema else 0) +
-                     64 + (2048 if image else 0)) * 1.25)
+                     64 + (2048 if image else 0)) * 1.25 * scale)
 
 
 def guard_output_budget(standard, *, workload=None, limits=None, system='', parts=(), schema=None, image=False, history=()):

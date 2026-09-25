@@ -1,6 +1,6 @@
 import { reasoningPreferenceIsActive } from "../../reasoning-preference.js";
 /** Estimates, not tokenizer counts. Billing always uses provider telemetry. */
-export const WORKLOAD_VERSION = 11;
+export const WORKLOAD_VERSION = 12;
 export const WORKLOAD_POLICY = Object.freeze({
   initialOutputTarget: 160, minimumOutputTarget: 48, maximumOutputTarget: 4096,
   initialRecords: 10, maximumRecords: 200, growthSamples: 8,
@@ -27,6 +27,13 @@ export const quantile = (values, q, fallback) => {
   const sorted = (values || []).filter(Number.isFinite).sort((a, b) => a - b);
   return sorted.length ? sorted[Math.min(sorted.length - 1, Math.ceil(q * sorted.length) - 1)] : fallback;
 };
+export function observedInputScale(samples = []) {
+  const ratios=(Array.isArray(samples)?samples:[]).slice(-8)
+    .filter(row=>Number.isSafeInteger(row?.actual)&&row.actual>=256&&
+      Number.isSafeInteger(row?.raw)&&row.raw>0)
+    .map(row=>row.actual/row.raw);
+  return ratios.length ? Math.min(1,Math.max(.45,2*Math.max(...ratios))) : 1;
+}
 /** Telemetry only, never a batching target. */
 export const sourceCharacters = value => Array.from(String(value ?? "")).length;
 export function textWeight(value) {
@@ -51,7 +58,7 @@ export function normalizeLimits(value = {}) {
 export function initialProfile(now = Date.now()) {
   return { version: WORKLOAD_VERSION, updatedAt: now, epoch: 0, revision: 0, samples: 0, successes: 0,
     target: WORKLOAD_POLICY.initialOutputTarget, records: WORKLOAD_POLICY.initialRecords,
-    ratios: [], reasoning: [], outcomes: [], fillSuccesses: 0, recordSuccesses: 0,
+    ratios: [], inputSamples: [], reasoning: [], outcomes: [], fillSuccesses: 0, recordSuccesses: 0,
     languageStreak: 0, structureStreak: 0, reliabilityRestricted: false, zeroReasoningSamples: 0, actualIdentity: '', limits: {},
     latencyOutputTarget: null, latencyFastStreak: 0, lastProviderMs: null,
     lastFirstContentMs: null, lastGenerationMs: null, lastLatencyDecision: '',
@@ -67,6 +74,10 @@ export function validProfile(raw, now = Date.now()) {
   clean.target = Math.max(48, Math.min(4096, positive(raw.target) || clean.target));
   clean.records = Math.max(1, Math.min(200, positive(raw.records) || clean.records));
   clean.ratios = (Array.isArray(raw.ratios) ? raw.ratios : []).filter(x => Number.isFinite(x) && x >= .05 && x <= 32).slice(-64);
+  clean.inputSamples=(Array.isArray(raw.inputSamples)?raw.inputSamples:[])
+    .filter(row=>Number.isSafeInteger(row?.actual)&&row.actual>=256&&
+      Number.isSafeInteger(row?.raw)&&row.raw>0).slice(-8)
+    .map(row=>({actual:row.actual,raw:row.raw}));
   clean.reasoning = (Array.isArray(raw.reasoning) ? raw.reasoning : []).filter(x => Number.isSafeInteger(x) && x >= 0 && x <= 1_000_000).slice(-64);
   clean.outcomes = (Array.isArray(raw.outcomes) ? raw.outcomes : []).filter(x => ['ok','length','structure','language','complete_at_limit'].includes(x)).slice(-64);
   clean.latencyOutputTarget = positive(raw.latencyOutputTarget)
@@ -125,7 +136,9 @@ export function estimateRequest(units, profile, context) {
   // Includes style, context, task, input keys, output schema, and role overhead.
   // Exact provider prompt count is retained separately, never reported as this estimate.
   const fixedInput = context.estimateFixedInput ? context.estimateFixedInput(units) : context.fixedInput;
-  const estimatedInput = Math.ceil((fixedInput + features.sourceWeight + units.length * 30) * 1.25);
+  const rawEstimatedInput = Math.ceil((fixedInput + features.sourceWeight + units.length * 30) * 1.25);
+  const inputEstimateScale = context.allowInputCalibration ? observedInputScale(profile.inputSamples) : 1;
+  const estimatedInput = Math.ceil(rawEstimatedInput * inputEstimateScale);
   // A live native context allocation outranks a persisted old runtime window.
   const discovered = normalizeLimits(context.limits);
   const baseLimits = context.configureContext ? { ...profile.limits, ...discovered }
@@ -158,7 +171,7 @@ export function estimateRequest(units, profile, context) {
     ? Math.max(profile.records, WORKLOAD_POLICY.largeCompletionRecords) : profile.records;
   const fitsHard = Number.isFinite(estimatedInput) && estimatedInput <= (limits.maxInputTokens || Infinity) &&
     predictedOutput + reasoningReserve <= completionAvailable;
-  return { ...features, predictedOutput, reasoningReserve, estimatedInput,
+  return { ...features, predictedOutput, reasoningReserve, estimatedInput,rawEstimatedInput,inputEstimateScale,
     totalReserve: predictedOutput + reasoningReserve,
     completionAvailable: Number.isFinite(completionAvailable) ? Math.max(0, completionAvailable) : null,
     hardReason: estimatedInput > (limits.maxInputTokens || Infinity) ? 'input_limit'

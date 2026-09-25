@@ -262,6 +262,9 @@ export function createResultDelivery(deps) {
       runtime: isLocalAiTarget(charged.provider, charged.baseUrl) ? "local" : "cloud",
       provider: charged.provider, model: charged.model, engine: "runsapi",
       operationId: String(ctx.idempotencyKey || ctx.metadata?.operation_id || ""),
+      batchId: String(ctx.batchId || ctx.metadata?.batch_id || ""),
+      imageCount: ctx.imageKey || ctx.metadata?.image_id ? 1 : 0,
+      pageNumbers: Number.isSafeInteger(ctx.metadata?.page_index) ? [ctx.metadata.page_index] : [],
       traceId: String(ctx.traceId || ""), startedAt: ctx.usageStartedAt ?? ctx.startedAt,
       usage: charged.usage, success,
       requests: Math.max(1, Number(charged.generation_attempts || charged.generationAttempts) || 1),
@@ -276,11 +279,12 @@ export function createResultDelivery(deps) {
     message,
     frameId = 0,
     traceId = "",
+    generation = null,
   ) {
     if (tabId)
       sendToTab(
         tabId,
-        imageErrorMessage({ imgUrl, traceId }, message),
+        imageErrorMessage({ imgUrl, traceId, generation }, message),
         frameId,
       );
   }
@@ -378,7 +382,7 @@ export function createResultDelivery(deps) {
         suppressToast: deferred,
       });
       if (!deferred)
-        batchUpdateToast(batch, cls.permanent ? "Error (permanent)" : "Error");
+        batchUpdateToast(batch, cls.permanent && !cls.manualRetry ? "Error (permanent)" : "Error");
       finalizeBatch(batch);
     }
   }

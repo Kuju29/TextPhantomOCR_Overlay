@@ -7,6 +7,9 @@ import {
   flushUsageReceiptJournal,
   persistUsageSelectionBoundary,
   usageHistoryRows,
+  usageDetailedRows,
+  usageToday,
+  persistPricingSettings,
 } from "../shared/ai-usage.js";
 import {
   localAiPreset,
@@ -116,6 +119,9 @@ const usageViewController = createUsageViewController({
   storageKey: AI_USAGE_STORAGE_KEY, sendMessage: sendRuntimeMessage,
   currentUsage,
   historyRows: usageHistoryRows,
+  detailedRows: usageDetailedRows,
+  todayUsage: usageToday,
+  persistPricingSettings,
   flushUsage: flushUsageReceiptJournal,
 });
 const selectedUsageTarget = usageViewController.target;
@@ -149,6 +155,7 @@ const resetDefaultsController = createResetDefaultsController({ els, remove: rem
 const updateBannerController = createUpdateBannerController({ els, getDefaults: ensureApiDefaults,
   getCurrentVersion: () => chrome.runtime.getManifest().version });
 const openAiUsageHistory = usageViewController.openHistory, closeAiUsageHistory = usageViewController.closeHistory;
+const openAiUsageDetailed = usageViewController.openDetailed, closeAiUsageDetailed = usageViewController.closeDetailed;
 
 function isRemoteDefaultApiUrl(url) {
   const normalized = normalizeUrl(url);
@@ -376,6 +383,8 @@ bindPopupEvents({
   refreshSeriesMemory: seriesMemoryController.refresh,
   openAiUsageHistory,
   closeAiUsageHistory,
+  openAiUsageDetailed,
+  closeAiUsageDetailed,
   isRemoteDefaultApiUrl,
   traceProviderTransition,
   setProviderTransitionPending,
