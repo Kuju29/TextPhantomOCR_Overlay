@@ -58,7 +58,13 @@
       .filter(Boolean)
       .map(TP.normUrl)
       .filter(Boolean);
-    if (urls[0] && img?.dataset) img.dataset.tpOriginal = urls[0];
+    if (urls[0] && img?.dataset) {
+      // A publisher may put its scramble key in chapter data instead of IMG.src.
+      // Keep that verified key for the single-image context-menu path as well.
+      const prepared=TP.alphaManga?.keyedUrl(urls[0]) ||
+        TP.mangaMirai?.keyedUrl(urls[0],img) || TP.kManga?.keyedUrl(urls[0]) || urls[0];
+      img.dataset.tpOriginal=TP.normUrl(prepared) || urls[0];
+    }
     lastRightClick = { img, ts: Date.now(), urls };
     rememberImgUrls(img, urls);
   }

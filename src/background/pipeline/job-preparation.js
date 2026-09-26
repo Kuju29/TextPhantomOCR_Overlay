@@ -16,6 +16,7 @@ export function createJobPreparation(dependencies) {
     batchIsCancelled,
     failWorkflow,
     shouldPrefetch,
+    requiresVerifiedImage = () => false,
     fetchFromTab,
     fetchFromUrl,
     acquireReader,
@@ -89,7 +90,8 @@ export function createJobPreparation(dependencies) {
       if (error?.name === "AbortError")
         return { stopped: true, cancelled: true };
       let message = error?.message || String(error);
-      if (!payload.reader && !browserOnlySrc && /\bHTTP 403\b/i.test(message) && tabId) {
+      if (!payload.reader && !browserOnlySrc && !requiresVerifiedImage(src,pageUrl) &&
+          /\bHTTP 403\b/i.test(message) && tabId) {
         try {
           const fallbackAt = Date.now();
           const dataUri = await fetchFromTab(tabId, src, frameId, signal,diagnosticContext);
@@ -114,7 +116,7 @@ export function createJobPreparation(dependencies) {
       }
 
       if (!message) return { stopped: false };
-      const classification = browserOnlySrc || payload.reader?.runId
+      const classification = browserOnlySrc || payload.reader?.runId || requiresVerifiedImage(src,pageUrl)
         ? { permanent: true }
         : classifyError(message);
       reportDiagnostic(payload,'acquisition.finished',{ok:false,elapsedMs:Date.now()-startedAt,

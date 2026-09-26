@@ -136,7 +136,7 @@ const sourceTP={bail:false,scanDiag:{active:()=>true,emit:(phase,details)=>manif
 const manifestDoc={querySelectorAll:()=>[{textContent:JSON.stringify({
   pages:['https://cdn.test/1.jpg','https://cdn.test/2.jpg','https://cdn.test/3.jpg']})}]};
 vm.runInNewContext(script('reader/sources.js'),{
-  window:{__TP:sourceTP},location:{href:'https://reader.test/chapter'},document:manifestDoc,
+  window:{__TP:sourceTP},location:{hostname:'reader.test',href:'https://reader.test/chapter'},document:manifestDoc,
   URL,Map,Set,WeakSet,DOMException,
 });
 const manifestResult=await sourceTP.readerSources({ids:['1','2','3'],slots:new Map(slots.map((slot,i)=>[

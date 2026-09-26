@@ -65,5 +65,5 @@
     "test:kagane-image-admission": "node scripts/test-kagane-image-admission.mjs && node scripts/test-kagane-route-contract.mjs",
     "test:kagane-session-cache": "node scripts/test-kagane-session-cache.mjs"
   },
-  "version": "2026.9.25-9"
+  "version": "2026.9.26-4"
 }

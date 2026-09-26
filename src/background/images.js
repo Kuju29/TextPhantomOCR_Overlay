@@ -32,11 +32,11 @@ export async function readLimitedText(res, limit = 1600) {
 }
 
 // Fetches a remote image from the worker and returns it as a `data:` URI, sending the page URL as the referrer.
-export async function fetchImageDataUriFromUrl(url, pageUrl, signal = null) {
+export async function fetchImageDataUriFromUrl(url, pageUrl, signal = null, options = {}) {
   const u = String(url || "").trim();
   if (!u) return "";
 
-  const res = await fetch(u, {
+  const res = await fetch(options.requestUrl || u, {
     credentials: "include",
     redirect: "follow",
     cache: "force-cache",
@@ -54,7 +54,9 @@ export async function fetchImageDataUriFromUrl(url, pageUrl, signal = null) {
   const mime = String(res.headers.get("content-type") || "")
     .split(";")[0]
     .trim();
-  if (mime && !mime.toLowerCase().startsWith("image/")) {
+  const verifiedBinary=options.allowBinaryImage === true &&
+    /^(?:application|binary)\/octet-stream$/i.test(mime);
+  if (mime && !mime.toLowerCase().startsWith("image/") && !verifiedBinary) {
     const body = await readLimitedText(res);
     throw new Error(`Not an image: ${mime}${body ? ` - ${body}` : ""}`);
   }
@@ -62,7 +64,10 @@ export async function fetchImageDataUriFromUrl(url, pageUrl, signal = null) {
   const blob = await res.blob();
   if (blob.size < 64) throw new Error("Image too small");
   if (blob.size > 25 * 1024 * 1024) throw new Error("Image too large");
-  return blobToDataUri(blob, mime || blob.type);
+  const prepared=options.onResponse ? await options.onResponse(blob,res) : blob;
+  if(verifiedBinary&&!/^image\//i.test(prepared.type))
+    throw new Error('Encoded source did not decode to an image');
+  return blobToDataUri(prepared, prepared === blob ? mime || blob.type : prepared.type);
 }
 
 // Fetches an image in the page's context via the content script and returns it as a `data:` URI.

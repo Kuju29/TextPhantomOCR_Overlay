@@ -32,7 +32,7 @@
     return new Promise((resolve) => onNextFrame(() => resolve()));
   }
 
-  // Normalises a URL against the page origin, dropping the hash.
+  // Keep only site-owned image key fragments; ordinary URL hashes are not image identity.
   function normUrl(u) {
     if (!u) return "";
     try {
@@ -43,7 +43,16 @@
     if (!u) return "";
     try {
       const x = new URL(u, location.href);
-      x.hash = "";
+      const host=location.hostname.toLowerCase();
+      const mangaKey=/^(?:www\.)?mangago\.(?:me|zone)$/.test(host) &&
+        /^#desckey=(?:\d{1,3}a){3,399}\d{1,3}&cols=(?:[2-9]|1\d|20)$/.test(x.hash);
+      const kKey=host==='kmanga.kodansha.com' &&
+        /^#[a-z0-9]{1,100}:\d{1,12}:\d{1,12}$/.test(x.hash);
+      const alphaKey=/^(?:www\.)?alpha-manga\.com$/.test(host) &&
+        /^#key=(?:[0-9a-f]{16}){1,400}$/i.test(x.hash);
+      const miraiKey=/^(?:www\.)?mangamirai\.com$/.test(host) &&
+        /^#tp-mirai=[A-Za-z0-9+/]{8,4096}={0,2}$/.test(x.hash);
+      if(!mangaKey&&!kKey&&!alphaKey&&!miraiKey)x.hash = "";
       return x.toString();
     } catch {
       return u.split("#")[0].split("?")[0];
@@ -69,8 +78,10 @@
       (typeof img?.getAttribute === "function"
         ? img.getAttribute("data-tp-original")
         : "");
-    if (tp && /^https?:/i.test(tp)) return tp;
-    return (
+    if (tp && /^https?:/i.test(tp))
+      return TP.alphaManga?.keyedUrl(tp) || TP.mangaMirai?.keyedUrl(tp,img) ||
+        TP.kManga?.keyedUrl(tp) || tp;
+    const source=(
       img.currentSrc ||
       img.src ||
       img.getAttribute("data-src") ||
@@ -78,6 +89,8 @@
       img.getAttribute("data-lazy-src") ||
       ""
     );
+    return TP.alphaManga?.keyedUrl(source) || TP.mangaMirai?.keyedUrl(source,img) ||
+      TP.kManga?.keyedUrl(source) || source;
   }
 
   // Reads a Blob as a data URI, resolving to "" on failure.

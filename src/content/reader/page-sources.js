@@ -43,11 +43,16 @@
     // A slot's own component props retain its page even when the IMG child is
     // unmounted. Do not walk into sibling slots or arbitrary window objects.
     function pageSources(props, metric) {
-      const urls = new Set(), seen = new WeakSet(), queue = [[props, 0, false]];
+      const urls = new Set(), flags = new Set(), seen = new WeakSet(), queue = [[props, 0, false]];
       for (let i = 0; i < queue.length && i < 100; i++) {
         const [obj, depth, imageData] = queue[i];
         if (!obj || typeof obj !== 'object' || seen.has(obj) || obj instanceof Node) continue;
         seen.add(obj);
+        const imageObject = imageUrl(value(obj,'url')) || imageUrl(value(obj,'src')) ||
+          imageUrl(value(obj,'imageUrl'));
+        const marker = value(obj, 'scramble') ?? (imageObject ? value(obj, 's') : null);
+        if (marker === true || marker === 1) flags.add('scrambled');
+        if (marker === false || marker === 0) flags.add('plain');
         if(metric)for(const key of hintedKeys)if(value(obj,key)!==undefined)
           metric.hints[key]=(metric.hints[key]||0)+1;
         for (const key of imageData ? ['src', 'url', 'imageUrl', 'image_url'] : ['src', 'imageUrl', 'image_url']) {
@@ -60,7 +65,7 @@
           else if (child && typeof child === 'object') queue.push([child, depth + 1, key === 'page' || key === 'image']);
         }
       }
-      return urls;
+      return {urls, flag: flags.size === 1 ? flags.values().next().value : null};
     }
     for (const slot of scope.querySelectorAll(`[${request.attr}]`)) {
       if (own(slot)) continue;
@@ -69,14 +74,16 @@
       if (!/^\d+$/.test(digits || '')) continue;
       const id = String(Number(digits));
       if (!wanted.has(id)) continue;
-      const candidates = new Set();
+      const candidates = new Set(), flags = new Set();
       const metric=diagnostics ? {pageId:id,props:0,fibers:0,
         fieldKinds:{},hints:{},httpCandidates:0} : null;
       for (const key of Object.getOwnPropertyNames(slot)) {
         if (key.startsWith('__reactProps$')) {
           const props = value(slot, key); root(props); propsFound++;
           if(metric)metric.props++;
-          for (const url of pageSources(props,metric)) candidates.add(url);
+          const found = pageSources(props,metric);
+          for (const url of found.urls) candidates.add(url);
+          if (found.flag) flags.add(found.flag);
         }
         if (!key.startsWith('__reactFiber$') && !key.startsWith('__reactInternalInstance$')) continue;
         let fiber = value(slot, key), local = true;
@@ -89,13 +96,16 @@
             if (local && field === 'memoizedProps') {
               propsFound++;
               if(metric)metric.props++;
-              for (const url of pageSources(props,metric)) candidates.add(url);
+              const found = pageSources(props,metric);
+              for (const url of found.urls) candidates.add(url);
+              if (found.flag) flags.add(found.flag);
             }
           }
         }
       }
       if(metric){metric.httpCandidates=candidates.size;diagnostics.pages.push(metric);}
-      if (candidates.size === 1) rows.push({id, url: candidates.values().next().value});
+      if (candidates.size === 1) rows.push({id, url: candidates.values().next().value,
+        ...(flags.size === 1 ? {compositionHint:flags.values().next().value} : {})});
     }
     // Read only bounded data/props branches. Full chapter manifests take priority
     // in the isolated-world validator; unrelated query/previous-chapter data is
@@ -114,7 +124,10 @@
       if (Array.isArray(items) && items.length === request.pages.length) {
         const copied = items.map(item => {
           const url = typeof item === 'string' ? item : value(item, 'url') || value(item, 'src');
-          return typeof url === 'string' && url.length <= 8192 ? {url} : null;
+          const flag = typeof item === 'string' ? null : value(item, 'scramble') ?? value(item, 's');
+          return typeof url === 'string' && url.length <= 8192 ? {url,
+            ...(flag === 1 || flag === true ? {compositionHint:'scrambled'} :
+              flag === 0 || flag === false ? {compositionHint:'plain'} : {})} : null;
         });
         if(diagnostics && !copied.every(Boolean))diagnostics.fullLengthWithoutUrls++;
         if (copied.every(Boolean)) manifests.push({chapterId:String(value(obj, 'chapterId') || value(obj, 'chapter_id') || value(obj, 'id') || ''),

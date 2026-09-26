@@ -141,8 +141,8 @@ assert.equal(batchPassStats(badgeReceipt).inserted,0);
 console.log('Error badge receipt preserves error status and zero inserted translations.');
 
 // The reader can finish translating while an unmounted page stays in its
-// existing placement queue. Waiting for that page must not hold the board open
-// as if a provider request or repair generation were still running.
+// existing placement queue. Keep the board visible until that page appears,
+// while reporting that processing and repair generation have finished.
 const fakeNode=()=>({style:{},dataset:{},textContent:'',isConnected:true,
   appendChild(){},addEventListener(){},setAttribute(){},contains(){return false;},querySelectorAll(){return []}});
 const nodes={root:fakeNode(),main:fakeNode(),text:fakeNode(),toggle:fakeNode(),details:fakeNode()};
@@ -152,7 +152,7 @@ vm.runInNewContext(progressPanel,{window:page,document:{addEventListener(){},cre
 const current=Date.now();
 page.__TP.updateBatchProgress({id:'reader-finished-with-unmounted-page',startedAt:current+100,
   completedAt:current+200,ts:current+200,sequence:1,total:2,terminal:1,lifecycle:'completed',
-  processingComplete:true,placement:{waiting:1,placed:1},repair:{phase:'apply_pending',failedUnits:1,
+  processingComplete:true,placement:{released:true,waiting:1,placed:1},repair:{phase:'apply_pending',failedUnits:1,
     repaired:1,unappliedRepairedUnits:1},items:[{label:'Image 1',terminal:true,inserted:true},
     {label:'Image 2',terminal:false,inserted:false,progress:{insert:{state:'queued'},ai:{state:'done'}}}]});
 await new Promise(resolve=>setTimeout(resolve,180));
@@ -160,6 +160,13 @@ assert.match(nodes.text.textContent,/done .*processing complete.*1 saved for dis
 assert.match(nodes.text.textContent,/Repair translated 1\/1/);
 assert.doesNotMatch(nodes.text.textContent,/Insert waiting|AI waiting/,
   'saved placement must not be displayed as live processing');
-assert.equal(nodes.root.style.display,'none','finished processing hides even while saved placements await a scroll');
+assert.equal(nodes.root.style.display,'block','a released reader stays visible while a saved result awaits its page');
+page.__TP.updateBatchProgress({id:'reader-finished-with-unmounted-page',startedAt:current+100,
+  completedAt:current+200,ts:current+201,sequence:2,total:2,terminal:2,lifecycle:'completed',
+  processingComplete:true,placement:{released:true,waiting:0,placed:2},repair:{phase:'done',failedUnits:1,
+    repaired:1},items:[{label:'Image 1',terminal:true,inserted:true},
+    {label:'Image 2',terminal:true,inserted:true}]});
+await new Promise(resolve=>setTimeout(resolve,180));
+assert.equal(nodes.root.style.display,'none','the board hides after the last saved placement is acknowledged');
 page.__TP.clearBatchProgress();
-console.log('Reader processing completion no longer waits for an unmounted image.');
+console.log('Reader status stays visible for lazy placement and hides after every saved page appears.');

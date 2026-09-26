@@ -2,7 +2,7 @@
 // Only system-defined enums, generated IDs and finite numbers survive this path.
 (function (root) {
   const events = new Set(['render_timing','page_visibility','stream_timing','page_stream_timing','usage_ledger','local_context','local_discovery','workload_observed','workload_profile','workload_persisted','capacity_changed','capacity_selected','route_capability','barrier_recovery',
-    'unknown','translation_budget','translation_result','pre_provider_timing','checkpoint_timing','usage_commit_timing','request_timing','settings_effective','image_status','geometry_snapshot','group_membership','geometry_overlap','ruby_filter','orientation_fallback']);
+    'unknown','translation_budget','translation_result','pre_provider_timing','checkpoint_timing','usage_commit_timing','request_timing','settings_effective','image_status','image_source','image_composition','route_retry','geometry_snapshot','group_membership','geometry_overlap','ruby_filter','orientation_fallback']);
   const reasons = new Set(['stream_observed','records_complete','dom_enqueued','dom_acknowledged','page_validated','translation_success','provider_charged_failure','repair','discovery_joined','models_loaded','verification_started','verification_reused','metadata_check_started','ui_applied','stale_discard','whole_page_fits','remaining_page_fits','per_request_input_limit','per_request_context_window','per_request_output_budget','learned_record_target','learned_output_target','end_of_page','oversize_single_unit','storage_write_unconfirmed','storage_retry_scheduled','storage_recovered','repair_structure_no_capacity_claim','isolated_short_incomplete_no_capacity_claim','structure_observed_no_capacity_claim','reduce_records_after_repeated_structure_failures','unchanged','changed','initial','success','failed','cancelled','unknown','not_applicable','deadline',
     'sync_supported','legacy_supported','capability_unavailable','loaded','cold_start','version_mismatch','invalid_profile','expired_profile','storage_unavailable','snapshot_written',
     'profile_matches_execution','unconfirmed_contract_cold_start','execution_identity_reset_before_dispatch',
@@ -38,6 +38,12 @@
       else if(k==='boundary')out[k]=['transport_reader','decoded_transport_reader'].includes(x)?x:'unknown';
       else if(k==='terminalKind')out[k]=['none','protocol_done','provider_done','provider_terminal','finish_reason'].includes(x)?x:'none';
       else if(k==='reason')out[k]=reasons.has(x)?x:'unknown';
+      else if(k==='imageHint')out[k]=['scrambled','plain','unknown'].includes(x)?x:'unknown';
+      else if(k==='sourceRoute')out[k]=['url_with_referer','kagane_page'].includes(x)?x:'unknown';
+      else if(k==='compositionState')out[k]=['plain','detected','complete','failed'].includes(x)?x:'unknown';
+      else if(k==='compositionKind')out[k]=['plain','tiles','bytes','site','unknown'].includes(x)?x:'unknown';
+      else if(k==='compositionGrid')out[k]=['5x5','none','unknown'].includes(x)?x:'unknown';
+      else if(k==='compositionCode')out[k]=['metadata_missing','grid_unsupported','algo_unsupported','decode_failed','unavailable','size_invalid','encode_failed','failed','unknown'].includes(x)?x:'unknown';
       else if(k==='connectionStage')out[k]=['list_models','verify_model','model_metadata','save_snapshot','result','ui_apply'].includes(x)?x:'unknown';
       else if(k==='verificationStatus')out[k]=['passed','timeout','rejected','invalid_output','unreachable','thinking_required','not_tested','model_unavailable','unsupported_model','not_selected'].includes(x)?x:'unknown';
       else if(k==='errorCode')out[k]=['local_ai_unreachable','local_ai_timeout','local_ai_discovery_failed','local_ai_invalid_response','local_ai_http_error','local_ai_invalid_adapter','local_ai_empty_models','local_models_empty','local_models_http_error','invalid_local_endpoint','local_provider_response_contract','ai_endpoint_missing','cancelled'].includes(x)?x:'unknown';

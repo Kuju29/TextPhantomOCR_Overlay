@@ -175,7 +175,10 @@
       let img = rec.img;
       if (readerKey && rec.retired) {
         if (!img?.isConnected) {dropHtmlOverlay(key);continue;}
-        const actual=TP.normUrl(img.currentSrc || img.src || TP.getBestImgUrl(img));
+        const displaySource=img.currentSrc || img.src || TP.getBestImgUrl(img);
+        const actual=TP.normUrl(TP.alphaManga?.keyedUrl(displaySource) ||
+          TP.mangaMirai?.keyedUrl(displaySource,img) ||
+          TP.kManga?.keyedUrl(displaySource) || displaySource);
         if (actual && rec.retiredSource && actual!==rec.retiredSource &&
             !TP.isReaderEquivalentSource?.(actual,rec.retiredSource)) {dropHtmlOverlay(key);continue;}
       } else if (readerKey) img = TP.readerImageForKey?.(key);

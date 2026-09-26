@@ -430,6 +430,8 @@ for (const filename of [
   "STORE-CHECKLIST-TH.md",
   "PROJECT_CONTEXT.md",
   "RELEASE_NOTES.md",
+  "docs/IMAGE_DECODER_SUPPORT.md",
+  "docs/E2E_AUDIT_2026_9_26.md",
   "STREAMING_CONTRACT.md",
   "docs/diagnostics-12.5.md",
   "ENGINE_MODES.md",

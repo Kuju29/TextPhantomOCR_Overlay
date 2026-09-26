@@ -19,6 +19,16 @@ def _part(v, depth=0):
         elif k=='boundary': out[k]=x if isinstance(x,str) and x in ('transport_reader','decoded_transport_reader') else 'unknown'
         elif k=='terminalKind': out[k]=x if isinstance(x,str) and x in ('none','protocol_done','provider_done','provider_terminal','finish_reason') else 'none'
         elif k=='reason': out[k]=x if isinstance(x,str) and x in _TABLE['reasons'] else 'unknown'
+        elif k in ('imageHint','sourceRoute','compositionState','compositionKind','compositionGrid','compositionCode'):
+            allowed={
+                'imageHint':('scrambled','plain','unknown'),
+                'sourceRoute':('url_with_referer','kagane_page'),
+                'compositionState':('plain','detected','complete','failed'),
+                'compositionKind':('plain','tiles','bytes','site','unknown'),
+                'compositionGrid':('5x5','none','unknown'),
+                'compositionCode':('metadata_missing','grid_unsupported','algo_unsupported','decode_failed','unavailable','size_invalid','encode_failed','failed','unknown'),
+            }
+            out[k]=x if isinstance(x,str) and x in allowed[k] else 'unknown'
         elif k in ('contextPolicy','contextReason','connectionStage','verificationStatus','errorCode','constraintScope','instructionLocale','memoryMode','estimateKind','cacheStatus','resultStatus','attemptKind'):
             allowed={
                 'connectionStage':('list_models','verify_model','model_metadata','save_snapshot','result','ui_apply'),

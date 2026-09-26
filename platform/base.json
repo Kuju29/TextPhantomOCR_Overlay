@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TextPhantom — แปลข้อความในภาพมังงะ มังฮวา",
-  "version": "2026.9.25.9",
+  "version": "2026.9.26.4",
   "description": "🧠 Right-click any image → translate images",
   "host_permissions": [
     "<all_urls>"
@@ -21,6 +21,9 @@
         "content/image-scan-diagnostics.js",
         "content/keepalive.js",
         "content/dom-utils.js",
+        "content/sites/alpha-manga/adapter.js",
+        "content/sites/manga-mirai/adapter.js",
+        "content/sites/kmanga/adapter.js",
         "content/progress-panel.js",
         "content/image-finder.js",
         "content/target-key.js",

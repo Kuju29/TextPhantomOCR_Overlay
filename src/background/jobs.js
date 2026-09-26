@@ -1,6 +1,8 @@
 import { completeBatch } from './reader-placement.js';
 import { cancelTrackedBatches, cancelBatchState } from "./reader-events.js";
 import { acquireReaderImage } from "./reader-acquisition.js";
+import { comixCandidate } from "./image-composition.js";
+import { siteImageCandidate } from "./image-composition/site-adapters.js";
 import { reportImageScanForJob } from './image-scan-diagnostics.js';
 import {requireConversationApi} from "../shared/ai/conversation/support.js";
 import {reserveConversationJob, finishConversationJob, enterConversationJob, cancelConversationJobs} from "./ai/translation-paths/order.js";
@@ -372,7 +374,10 @@ const { planLocalAi, runLocalAiInLane, waitForRetry } = createAiExecution({
 });
 
 function shouldPrefetchDataUri(payload) {
-  return Boolean(payload?.reader?.runId && !payload.imageDataUri) || applyImageSourcePolicy(payload, evaluateDataUriPrefetch);
+  return Boolean(payload?.reader?.runId && !payload.imageDataUri) ||
+    (!payload?.imageDataUri && (comixCandidate(payload?.src, payload?.context?.page_url) ||
+      siteImageCandidate(payload?.src,payload?.context?.page_url))) ||
+    applyImageSourcePolicy(payload, evaluateDataUriPrefetch);
 }
 
 // Processes one image payload end to end, from data-URI prefetch to the translate call.
@@ -450,6 +455,7 @@ async function processJobInner(payload, tabId, frameId = 0) {
     batchIsCancelled: () => Boolean(batchId && getBatch(batchId)?.cancelled),
     failWorkflow: (reason) => wf.failed(workflowId, reason),
     shouldPrefetch: shouldPrefetchDataUri,
+    requiresVerifiedImage: (src,pageUrl)=>comixCandidate(src,pageUrl) || siteImageCandidate(src,pageUrl),
     fetchFromTab: fetchImageDataUriFromTab,
     fetchFromUrl: fetchImageDataUriFromUrl,
     acquireReader: acquireReaderImage,

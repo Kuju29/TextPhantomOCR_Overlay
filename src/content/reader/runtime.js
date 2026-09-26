@@ -89,7 +89,10 @@
     if (!img?.isConnected || target(run,stamp.readerPageId) !== img)
       return {ok:false,reason:'logical page is not mounted'};
     const expected = run.sources.get(String(stamp.readerPageId));
-    const actual = img.matches('canvas') ? classify.source(owner(run,stamp.readerPageId)) : TP.normUrl(img.currentSrc || img.src || '');
+    const actual = img.matches('canvas') ? classify.source(owner(run,stamp.readerPageId)) :
+      TP.normUrl(TP.alphaManga?.keyedUrl(img.currentSrc || img.src || '') ||
+        TP.mangaMirai?.keyedUrl(img.currentSrc || img.src || '',img) ||
+        TP.kManga?.keyedUrl(img.currentSrc || img.src || '') || img.currentSrc || img.src || '');
     const row = run.results.get(String(stamp.readerPageId));
     if (actual && expected && actual !== expected && actual !== row?.appliedSource &&
         !TP.isReaderEquivalentSource?.(actual,expected) &&
@@ -462,6 +465,9 @@
       background:mode === 'lens_text' && TP.clientBackgroundEnabled ? 'boxes' : 'image'},mode,lang,menu,'logical_reader');
     p.context.page_index = run.plan.ids.indexOf(id);
     p.reader = {runId:run.id,pageId:id,profile:run.plan.profile,barrier:false,
+      compositionHint:/^(?:www\.)?comix\.to$/i.test(location.hostname) ?
+        (/[?&]v3(?:[=&]|$)/i.test(String(run.sources.get(id) || '')) ? 'scrambled' :
+          run.plan.compositionHints?.get(id) || (img?.matches?.('canvas') ? 'scrambled' : 'unknown')) : 'unknown',
       ...(run.plan.adapter ? {adapter:run.plan.adapter} : {}),
       total:run.ids.length,acquisition:run.plan.adapter==='kagane'?['KAGANE_PAGE']:['DEFAULT','REFERER','DOM']};
     return p;
@@ -676,6 +682,33 @@
         const result=await TP.kagane.read(run.plan,String(msg.pageId),run.controller.signal);
         return live(run)?result:{ok:false,error:'READER_SOURCE_STALE'};
       }
+      const slot=owner(run,String(msg.pageId));
+      const surface=classify.surface(slot);
+      const canvases=msg.compositionHint==='scrambled' && /^(?:www\.)?comix\.to$/i.test(location.hostname)
+        ? [...(slot?.matches?.('canvas') ? [slot] : slot?.querySelectorAll?.('canvas') || [])]
+          .filter(el=>!classify.own(el) && el.width>=140 && el.height>=140) : [];
+      const painted=surface?.matches?.('canvas') ? surface : canvases.length===1 ? canvases[0] : null;
+      if(painted?.width>=140 && painted.height>=140){
+        // The site already assembled this page. Read its own displayed canvas
+        // in the isolated content world instead of fetching scrambled bytes.
+        try {
+          const dataUri=painted.toDataURL('image/png');
+          const prefix='data:image/png;base64,';
+          if(!dataUri.startsWith(prefix)||dataUri.length<256)throw Error('DOM_COMPOSITE_EMPTY');
+          const png=atob(dataUri.slice(prefix.length,prefix.length+36));
+          const size=(offset)=>((png.charCodeAt(offset)<<24)|(png.charCodeAt(offset+1)<<16)|
+            (png.charCodeAt(offset+2)<<8)|png.charCodeAt(offset+3))>>>0;
+          if(size(16)!==painted.width||size(20)!==painted.height)throw Error('DOM_COMPOSITE_SIZE_MISMATCH');
+          if(dataUri.length>36*1024*1024)throw Error('DOM_IMAGE_TOO_LARGE');
+          if(!live(run))throw new DOMException('Reader cancelled','AbortError');
+          return {ok:true,dataUri,composition:'rendered_canvas'};
+        }catch(error){
+          if(msg.compositionHint==='scrambled')throw error;
+        }
+      }
+      if(msg.compositionHint==='scrambled' ||
+          (/^(?:www\.)?comix\.to$/i.test(location.hostname) && !surface?.matches?.('img')))
+        throw Error('DOM_COMPOSITE_NOT_MOUNTED');
       // Do not read the displayed cross-origin IMG: it may taint a canvas.
       const fresh=new Image();fresh.crossOrigin='anonymous';fresh.decoding='async';
       await new Promise((resolve,reject)=>{

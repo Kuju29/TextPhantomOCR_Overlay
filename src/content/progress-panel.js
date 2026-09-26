@@ -5,7 +5,7 @@
   const TERMINAL=new Set(['done','skipped','error','cancelled']);
   const processingDone=batch=>batch?.processingComplete===true && batch?.lifecycle==='completed';
   const repairActive=batch=>!batch?.processingComplete && !['cancelled','failed','empty'].includes(batch?.lifecycle) && ['collecting','repairing','repair_request','repair_wave','repair_circuit_open','applying','apply_pending','blocked'].includes(String(batch?.repair?.phase||''));
-  const batchActive=batch=>!['cancelled','failed','empty'].includes(batch?.lifecycle) && (batch?.lifecycle==='discovering'||(!processingDone(batch)&&(repairActive(batch)||Number(batch?.terminal||0)<Number(batch?.total||0))));
+  const batchActive=batch=>!['cancelled','failed','empty'].includes(batch?.lifecycle) && (batch?.lifecycle==='discovering'||(batch?.placement?.released===true&&Number(batch?.placement?.waiting)>0)||(!processingDone(batch)&&(repairActive(batch)||Number(batch?.terminal||0)<Number(batch?.total||0))));
   const chooseVisible=()=>{const all=[...batchStates.values()];const active=all.filter(batchActive).sort((a,b)=>(Number(b.startedAt)||0)-(Number(a.startedAt)||0));if(active.length)return active[0];return all.sort((a,b)=>(Number(b.ts)||0)-(Number(a.ts)||0))[0]||null;};
   const fmtMs=ms=>{ms=Math.max(0,Number(ms)||0);if(ms<1000)return `${Math.round(ms)}ms`;const sec=ms/1000;return `${sec>=10?sec.toFixed(0):sec.toFixed(1)}s`;};
   const nowMs=lane=>{const start=Number(lane?.startedAt)||Number(lane?.queuedAt)||0;if(!start)return 0;return Math.max(0,(Number(lane?.finishedAt)||Date.now())-start);};
@@ -80,7 +80,10 @@
     const parts=[];if(counts.skipped)parts.push(`skip ${counts.skipped}`);if(counts.error)parts.push(`error ${counts.error}`);if(counts.cancelled)parts.push(`cancel ${counts.cancelled}`);return parts;
   };
   const batchElapsed=batch=>{
-    const start=Number(batch?.startedAt)||Date.now(),end=batchActive(batch)?Date.now():(Number(batch?.completedAt)||Number(batch?.ts)||Date.now());return fmtMs(Math.max(0,end-start));
+    const start=Number(batch?.startedAt)||Date.now(),end=processingDone(batch)
+      ? (Number(batch?.completedAt)||Number(batch?.ts)||Date.now())
+      : batchActive(batch)?Date.now():(Number(batch?.completedAt)||Number(batch?.ts)||Date.now());
+    return fmtMs(Math.max(0,end-start));
   };
   const compactText=batch=>{
     const items=itemsOf(batch),total=Math.max(Number(batch?.total)||0,items.length),terminal=items.filter(item=>item?.terminal||TERMINAL.has(String(item?.progress?.overall?.state||''))).length;
@@ -175,7 +178,7 @@
   function render(batch){
     latest=batch;if(!batch||!ensure())return;if(hideTimer){clearTimeout(hideTimer);hideTimer=0;}
     updateCompact(batch);renderDetails(batch);setCollapsed(collapsed);
-    if(!batchActive(batch) && (processingDone(batch) || !batch?.placement?.waiting || batch?.lifecycle==='cancelled')) {
+    if(!batchActive(batch)) {
       const deadline=terminalDeadlines.get(batch.id) || Date.now()+6000;
       terminalDeadlines.set(batch.id,deadline);
       while(terminalDeadlines.size>128)terminalDeadlines.delete(terminalDeadlines.keys().next().value);

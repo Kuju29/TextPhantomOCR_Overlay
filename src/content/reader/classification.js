@@ -107,13 +107,16 @@
         {document:doc, pageWorld, signal, knownSources:urls});
       if (resolved) {
         plan.profile = resolved.profile;
+        if(resolved.compositionHints?.size)
+          plan.compositionHints=new Map([...(plan.compositionHints || []),...resolved.compositionHints]);
         const previous = plan.sourceDiagnostics;
         plan.sourceDiagnostics = !pageWorld && previous ? {...resolved.detail,
           bridge:previous.bridge, propsFound:previous.propsFound, propsResolved:previous.propsResolved} : resolved.detail;
         for (const [id,url] of resolved.urls) if (plan.slots.has(id)) urls.set(id,url);
       }
     };
-    if (urls.size !== plan.ids.length) await mergeReaderData(document, true);
+    if (urls.size !== plan.ids.length || /^(?:www\.)?comix\.to$/i.test(location.hostname))
+      await mergeReaderData(document, true);
     // Only fetch HTML when known logical slots lack sources. Never execute its scripts.
     if (urls.size !== plan.ids.length && /^https?:/.test(location.href)) {
       try {
