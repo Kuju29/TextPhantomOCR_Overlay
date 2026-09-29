@@ -62,11 +62,11 @@ export function observeWorkload({ units, answer, error, defects = {}, plan, ai =
   return { outcome, isolatedShortIncomplete, structureEligible: !isolatedShortIncomplete && units.length > 1 && plan?.phase !== 'repair', visibleTokens: visible, calibrationTokens: calibration, reasoningTokens: reasoning, actualIdentity: identity,
     providerInputTokens: count(usage.inputTokens), providerUsageReported:usage.source==='provider',providerOutputTokens: output,
     cachedInputTokens: count(usage.cachedInputTokens),
-    requestedOutputTokens: positive(meta.requestedOutputTokens), finishReason: finish,
+    requestedOutputTokens: positive(meta.requestedOutputTokens) || positive(meta.requested_output_tokens), finishReason: finish,
     missingCount: missing.size, wrongLanguageCount: array(defects.wrongLanguage).length,
     providerMs: milliseconds(meta.providerMs ?? meta.provider_ms),
     firstContentMs: milliseconds(meta.firstContentMs ?? meta.first_content_ms),
-    executionObserved, limits: normalizeLimits(meta.modelLimits), plan };
+    executionObserved, limits: normalizeLimits(meta.modelLimits || meta.model_limits), plan };
 }
 export function learnWorkload(profile, observation, now = Date.now()) {
   const o = observation; if (o.outcome === 'ignored' || !o.plan) return profile;
@@ -79,7 +79,9 @@ export function learnWorkload(profile, observation, now = Date.now()) {
   p.actualIdentity = o.actualIdentity || p.actualIdentity;
   p.updatedAt = now; p.samples += 1;
   p.limits = { ...p.limits, ...o.limits };
-  if(o.providerUsageReported && ['ok','structure','language','complete_at_limit'].includes(o.outcome) &&
+  // A length-truncated answer is unusable translation, but the provider's
+  // prompt token count is still a completed measurement of that prompt.
+  if(o.providerUsageReported && ['ok','structure','language','complete_at_limit','length'].includes(o.outcome) &&
      count(o.providerInputTokens)>=256 && positive(o.plan.rawEstimatedInput))
     p.inputSamples=[...(p.inputSamples||[]),{actual:o.providerInputTokens,raw:o.plan.rawEstimatedInput}].slice(-8);
   p.outcomes = [...p.outcomes, o.outcome].slice(-WORKLOAD_POLICY.window);
@@ -112,6 +114,11 @@ export function learnWorkload(profile, observation, now = Date.now()) {
   }
   if (o.outcome === 'ok') {
     p.successes += 1; p.languageStreak = 0; p.structureStreak = 0;
+    if (p.reliabilityRestricted && o.plan?.phase !== 'repair' &&
+        p.outcomes.length >= 8 && p.outcomes.slice(-8).every(value => value === 'ok')) {
+      p.reliabilityRestricted = false;
+      p.lastDecision = 'reliability_recovered_after_eight_clean_answers';
+    }
     if (positive(o.calibrationTokens)) {
       const ratio = o.calibrationTokens / o.plan.baseOutput;
       if (ratio >= .05 && ratio <= 32) p.ratios = [...p.ratios, ratio].slice(-64);

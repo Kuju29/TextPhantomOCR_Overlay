@@ -5,6 +5,7 @@ import { translationSessions } from '../translation-session-store.js';
 import { conversationDispatchJournal } from './dispatch-journal.js';
 import { conversationPreparedPages } from './prepared-page-journal.js';
 import { repairRequest } from './client.js';
+import { initialReportBatches } from './initial-report-batches.js';
 import { makePageCheckpoint, digestText, buildPatchedResult, pageInitialReport, compactDeliveredPage } from './page-checkpoint.js';
 import { executeRepairPool, repairUsageDiagnostic } from './executor.js';
 import { findContext } from '../job-registry.js';
@@ -22,6 +23,7 @@ import { getCachedDataUri, setCachedResult, mdCacheKey, mdKeyFromUrl, stripImage
 import { fetchImageDataUriFromTab } from '../images.js';
 import { normImgSrc } from '../job-keys.js';
 import { note as traceNote } from '../../shared/trace.js';
+import { refreshLocalAiCapabilities as defaultRefreshLocalAiCapabilities } from '../local-ai-preflight.js';
 
 const trace = (event, data) => traceNote('background/repair/coordinator.js', event, data);
 const publicProgress = value => Object.fromEntries(['phase','repaired','unresolved','failedUnits',
@@ -37,11 +39,18 @@ export function createRepairCoordinator({
   getCapabilitiesFor = getCapabilities, insert = enqueueDomInsert,
   readSettings = getStorage, emit = trace, dispatchJournal = conversationDispatchJournal,
   preparedPages = conversationPreparedPages,
+  refreshLocalAiCapabilities = defaultRefreshLocalAiCapabilities,
 } = {}) {
   const batchRuns = new Map(), runtimePages = new Map(), operations = new Map(), controllers = new Map();
   const cancelledRuns = new Set();
   let executor;
   const workerId = () => executor ||= crypto.randomUUID();
+  function lifecycle(run, reason, started, complete = false, failed = false, counts = {}) {
+    emit('repairLifecycle', {schema:'tp.audit/1', event:'repair_lifecycle', reason,
+      scope:{runId:run.id, batchId:run.batchId}, phase:failed ? 'error' : 'repair_wait',
+      complete, persistence:failed ? 'failed' : complete ? 'persisted' : 'pending',
+      timing:{elapsedMs:Math.max(0, now()-started)}, counts});
+  }
   function live(run) {
     return !cancelledRuns.has(run.id) && run.phase !== 'cancelled' && !getBatch(run.batchId)?.cancelled &&
       run.settingsEpoch === currentEpoch() && currentSession(run.tabId) === run.sessionId;
@@ -83,13 +92,17 @@ export function createRepairCoordinator({
         continue;
       }
       try {
-        await insert(page.ctx.tabId, message, page.ctx.frameId || 0);
+        const ack=await insert(page.ctx.tabId, message, page.ctx.frameId || 0);
+        const visible=ack?.ok===true && !ack.stale && (ack.applied===true || ack.errorDisplayed===true || ack.toastDisplayed===true);
+        if(!visible)throw Object.assign(new Error('Error notice was not acknowledged by the page'),{code:ack?.stale?'stale_error_notice':'error_notice_unacknowledged'});
         batchMark(run.batchId, page.pageId, { deferredImageError:null });
         emit('repairTerminalImageError', {runId:run.id, batchId:run.batchId,
-          pageId:page.pageId, phase, delivered:true});
+          pageId:page.pageId, phase, delivered:true, errorNoticeDelivered:true,
+          owner:'extension', outcome:'failed', severity:'warning', translationOutcome:'failed'});
       } catch (error) {
         emit('repairTerminalImageError', {runId:run.id, batchId:run.batchId,
-          pageId:page.pageId, phase, delivered:false, code:error.code || 'delivery_failed'});
+          pageId:page.pageId, phase, delivered:false, errorNoticeDelivered:false,
+          owner:'extension', outcome:'failed', severity:'warning', translationOutcome:'failed', code:error.code || 'delivery_failed'});
       }
     }
   }
@@ -355,7 +368,7 @@ export function createRepairCoordinator({
       if (!image) throw Object.assign(new Error('Repair image context unavailable; no text-only fallback was used'), {code:'repair_image_unavailable'});
       ai._repairImageDataUri = image;
     }
-    return ai;
+    return refreshLocalAiCapabilities(ai, page.route, {signal:controllers.get(run.id)?.signal, traceId:run.id});
   }
   async function applyResults(run, rows) {
     const current = await sessions.get(run.id);
@@ -478,20 +491,42 @@ export function createRepairCoordinator({
   async function runRepair(run) {
     if (!live(run)) { await cancelBatch(run.batchId, 'stale_generation'); return null; }
     const ctrl = new AbortController(); controllers.set(run.id, ctrl);
+    let stageReason = 'repair_ledger_reports', stageStarted = now(), stageComplete = false;
+    lifecycle(run, stageReason, stageStarted);
     try {
       // Only registerBatch creates API ownership. A browser checkpoint cannot
       // recreate expired work after the temporary API process state is lost.
       await api(run, '', undefined, {signal:ctrl.signal});
+      const syncStarted = now();
+      let reportRequests = 0, reportedPages = 0;
       if (run.phase === 'collecting') {
-        for (const pageId of run.manifest) {
-          const page = run.pages[pageId];
-          const report = page ? pageInitialReport(page) : {
-            pageId, generationId:run.id, groupKey:'', status:'no_source', failed:[], initialAccepted:0, unverified:0,
-          };
-          await api(run, 'pages', report, {signal:ctrl.signal});
+        // Keep manifest order and page source hashes. One 28-page job needs
+        // one request, not 28 serial RTTs; longer jobs remain bounded and
+        // sequential so one user cannot flood the shared API with reports.
+        function* reports() {
+          for (const pageId of run.manifest) {
+            const page = run.pages[pageId];
+            yield page ? pageInitialReport(page) : {
+              pageId, generationId:run.id, groupKey:'', status:'no_source', failed:[], initialAccepted:0, unverified:0,
+            };
+          }
+        }
+        for (const body of initialReportBatches(reports())) {
+          if (!live(run) || ctrl.signal.aborted) throw new DOMException('Stale repair', 'AbortError');
+          await api(run, 'pages', body, {signal:ctrl.signal});
+          reportRequests++; reportedPages += body.pages.length;
         }
       }
+      const syncMs = Math.max(0, now() - syncStarted), sealStarted = now();
+      lifecycle(run, stageReason, stageStarted, true, false, {requests:reportRequests,count:reportedPages});
+      stageReason = 'repair_ledger_seal'; stageStarted = sealStarted;
+      lifecycle(run, stageReason, stageStarted);
       let snapshot = await api(run, 'seal', {}, {signal:ctrl.signal});
+      lifecycle(run, stageReason, stageStarted, true, false, {pending:(snapshot.pending || []).length});
+      stageComplete = true;
+      emit('repairLedgerSync', {runId:run.id, batchId:run.batchId, reportRequests, reportedPages,
+        syncMs, sealMs:Math.max(0, now() - sealStarted), pendingUnits:(snapshot.pending || []).length,
+        phase:snapshot.phase});
       // Empty pools are already terminal: no planner, capabilities or repair UI.
       if (snapshot.phase !== 'done' || (snapshot.tasks || []).length || (snapshot.results || []).length) {
         await sessions.update(run.id, value => value && ({ ...value, phase:'repairing' }));
@@ -567,6 +602,7 @@ export function createRepairCoordinator({
       }
       return value?.summary || summary;
     } catch (error) {
+      if (!stageComplete) lifecycle(run, stageReason, stageStarted, false, true);
       if (ctrl.signal.aborted || cancelledRuns.has(run.id)) return null;
       if (error.code === 'repair_run_not_found') {
         const current = await sessions.get(run.id).catch(() => null);
@@ -602,9 +638,12 @@ export function createRepairCoordinator({
     if (!existing || existing.phase === 'unavailable') return false;
     if(existing.reader && existing.phase==='apply_pending'){await releaseReaderBatch(batch);return true;}
     if (operations.has(id)) { await operations.get(id); return true; }
+    const mergeStarted = now();
+    let mergeComplete = false;
     const work = (async () => {
       let run = await sessions.get(id);
       if (!run || ['done','apply_failed','cancelled','unavailable'].includes(run.phase)) return;
+      lifecycle(run, 'repair_checkpoint_merge', mergeStarted);
       // An interrupted generation cannot be repaired blindly: save unknown IDs
       // separately and only pool failures whose response was actually observed.
       if (run.phase === 'collecting') {
@@ -655,7 +694,17 @@ export function createRepairCoordinator({
           if (!current || current.phase !== 'collecting') return current;
           for (const page of Object.values(current.pages)) {
             if (page.phase !== 'finished') {
-              const known = new Set([...page.accepted.map(x=>x.id), ...page.failures.map(x=>x.id), ...page.blocked]);
+              const accepted = new Set(page.accepted.map(x=>x.id));
+              const blocked = new Set(page.blocked);
+              // A terminal page checkpoint blocks every unresolved ID. Only
+              // then let blocked receipts supersede earlier failed chunks;
+              // ordinary interrupted/gateway pages keep their repairable IDs.
+              if (page.units.filter(unit => unit.translatable)
+                .every(unit => accepted.has(unit.id) || blocked.has(unit.id))) {
+                page.blocked = [...blocked].filter(id => !accepted.has(id));
+                page.failures = page.failures.filter(row => !blocked.has(row.id));
+              }
+              const known = new Set([...accepted, ...page.failures.map(x=>x.id), ...page.blocked]);
               const unknown = new Set(page.inFlight);
               for (const unit of page.units.filter(u => u.translatable && !known.has(u.id))) {
                 if (unknown.has(unit.id)) page.blocked.push(unit.id);
@@ -670,10 +719,19 @@ export function createRepairCoordinator({
         });
         await Promise.all([dispatchJournal.clearRun(id).catch(() => {}), preparedPages.clearRun(id).catch(() => {})]);
       }
+      lifecycle(run, 'repair_checkpoint_merge', mergeStarted, true, false, {count:run.manifest.length});
+      mergeComplete = true;
+      // Initial requests are terminal now: remaining rows are awaiting ledger
+      // sync, not still receiving the original AI response. Healthy pages stay done.
+      if (run.phase === 'collecting') progress(run, {phase:'collecting'});
       return runRepair(run);
     })();
     operations.set(id, work);
-    try { await work; } finally { operations.delete(id); }
+    try { await work; }
+    catch (error) {
+      if (!mergeComplete) lifecycle(existing, 'repair_checkpoint_merge', mergeStarted, false, true);
+      throw error; // Preserve existing checkpoint ownership/recovery; do not dispatch blind repairs.
+    } finally { operations.delete(id); }
     return true;
   }
   // Completes an already generated repair patch; never calls execute/seal or

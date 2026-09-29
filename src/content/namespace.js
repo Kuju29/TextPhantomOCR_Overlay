@@ -16,6 +16,15 @@
 
   const RUN_ID = Math.random().toString(36).slice(2, 10);
   let lineNo = 0;
+  // Log only the origin: page paths, credentials and query strings can contain secrets.
+  const logOrigin = (() => {
+    try {
+      const url = new URL(location.href);
+      return url.origin === "null" ? "" : url.origin;
+    } catch {
+      return "";
+    }
+  })();
 
   // Forwards a log line to the service worker, which writes it to the log file.
   function relay(level, args) {
@@ -29,7 +38,7 @@
             level,
             msg: typeof message === "string" ? message : String(message),
             data: rest.length === 1 ? rest[0] : rest,
-            href: location.href,
+            href: logOrigin,
             run: RUN_ID,
             n: ++lineNo,
             t: Date.now(),

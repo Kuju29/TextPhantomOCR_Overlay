@@ -125,7 +125,7 @@ export async function translateViaServer(
     },
     memory: {
       ...(["off", "terms", "full"].includes(ai?.memory_mode) ? { mode: ai.memory_mode } : {}),
-      styleExamples: ai?.translation_mode === "conversation" ? false : ai?.style_examples !== false,
+      styleExamples: ai?.style_examples !== false,
       enabled: ai?.char_memory === true,
       glossary: Array.isArray(ai?.glossary) ? ai.glossary : [],
       characters: Array.isArray(ai?.characters) ? ai.characters : [],
@@ -308,10 +308,15 @@ export async function translateViaServer(
   }
 
   if (res.ok && res.headers.get("content-type")?.includes("application/x-ndjson")) {
-    let terminal, receivedDelta = false;
+    let terminal, receivedDelta = false, contentProgressAt = -Infinity;
     try {
       terminal = await readAiStream(res, text => {
         receivedDelta = true;
+        const now = performance.now();
+        if (text && now - contentProgressAt >= 350) {
+          contentProgressAt = now;
+          progress("receiving_content");
+        }
         try { onProgress?.({state:"translation_delta", text}); } catch {}
       });
     } catch (error) {
@@ -422,6 +427,14 @@ export async function translateViaServer(
         error.validation = {field: String(v.field).slice(0,120), reason: String(v.reason || "invalid").slice(0,80)};
     }
     error.code = code;
+    // Keep only the typed finding needed to avoid a pointless same-model
+    // repair when the completion reached its limit without a visible answer.
+    // Never forward raw structural details, response text, or reasoning.
+    if (code === "output_budget_exhausted" &&
+        ["reasoning_only_exhausted", "empty_output"].includes(
+          detailObject?.structuralDetails?.validatorSubtype))
+      error.diagnostics = { validatorSubtype: detailObject.structuralDetails.validatorSubtype,
+        providerOutputTruncated: true };
     error.retryAfterMs = retryAfterMs;
     error.providerAttempts = providerAttempts;
     error.generationAttempts = generationAttempts;

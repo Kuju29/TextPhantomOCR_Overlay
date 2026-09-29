@@ -13,22 +13,33 @@ function fixture(units, options={}) {
   const result={lensDocument:{languages:{source:'ja'}},eraseBoxes:[]};
   const args={base:'http://fixture.invalid',payload:{lang:'th',context:{},metadata:{image_id:'image-A'}},result,
     plan:{route:options.route||'direct-local',ai},signal:ac.signal,trace:(name,data)=>events.push({name,data}),
-    dependencies:{workloadController:controller,requireAiLensDocument:v=>v.lensDocument,translationUnits:()=>units,
+    dependencies:{workloadController:controller,refreshLocalAiCapabilities:async ai=>ai,
+      requireAiLensDocument:v=>v.lensDocument,translationUnits:()=>units,
       requireTranslationConservation:()=>({ok:true,eligibleParagraphCount:units.length,excludedBlankParagraphCount:0,unitCount:units.length}),
       translateUnits:async(selected,request)=>{
         calls.push({selected:structuredClone(selected),request});
         if(options.providerWait) await options.providerWait(calls.length,selected);
         if(options.fail && calls.length===1) throw Object.assign(new Error('transport failed'),{code:'local_ai_network_error',providerResponded:false,diagnostics:{providerMs:900,providerTerminalComplete:false}});
-        if(options.capacityFail) throw Object.assign(new Error('completion exhausted'),{
+        if(options.emptyOutputAtLimit) throw Object.assign(new Error('completion exhausted with no visible answer'),{
           code:'output_budget_exhausted',requestDispatched:true,providerResponded:true,
           generationAttempts:1,providerAttempts:1,
+          diagnostics:{validatorSubtype:'empty_output',providerOutputTruncated:true},
+          generationMeta:{model:'fixture-model',selectedContract:'tp.translation.schema-object/1',
+            finishReason:'length',requestedOutputTokens:529,
+            usage:{source:'provider',inputTokens:2105,outputTokens:529,totalTokens:2634,thinkingTokens:null}},
+        });
+        if(options.capacityFail || options.reasoningOnlyFail) throw Object.assign(new Error('completion exhausted'),{
+          code:'output_budget_exhausted',requestDispatched:true,providerResponded:true,
+          generationAttempts:1,providerAttempts:1,
+          ...(options.reasoningOnlyFail ? {diagnostics:{validatorSubtype:'reasoning_only_exhausted',
+            providerOutputTruncated:true}} : {}),
           generationMeta:{model:'fixture-model',selectedContract:'tp.translation.schema-object/1',finishReason:'length',
             usage:{source:'provider',inputTokens:950,outputTokens:4096,thinkingTokens:3900}},
         });
         const translations=selected.filter((u,i)=>!(options.partial && i===0)).map(u=>({id:u.id,text:'คำแปล'}));
         if(options.cancel) ac.abort();
         return {translations,missing:selected.filter(u=>!translations.some(x=>x.id===u.id)).map(u=>u.id),
-          meta:{generationAttempts:1,providerAttempts:1,finishReason:'stop',model:'fixture-model',selectedContract:'tp.translation.schema-object/1',
+          meta:{generationAttempts:1,providerAttempts:1,finishReason:options.partialAtLimit?'length':'stop',model:'fixture-model',selectedContract:'tp.translation.schema-object/1',
             usage:{source:'provider',inputTokens:950,outputTokens:20+selected.length*10,thinkingTokens:0},requestedOutputTokens:2048}};
       },diagnoseTargetScripts:()=>[],summarizeUnitScripts:()=>[],
       applyTranslations:(doc,translations)=>{const ids=new Set(translations.map(t=>t.id)); const missing=units.filter(u=>!ids.has(u.id)).map(u=>u.id);
@@ -75,6 +86,46 @@ for(const route of ['direct-local','server']) {
   assert.equal(terminal.length,2);assert.ok(terminal.every(e=>e.data.outcome==='length'));
   assert.ok(f.calls[1].selected.length<=f.calls[0].selected.length,'second request must use the reduced learned workload');
   console.log('PASS capacity circuit: adapt once, then stop unsent provider work without retrying IDs');
+}
+{
+  const f=fixture(rows(3),{reasoningOnlyFail:true});
+  await assert.rejects(translateLensPage(f.args),e=>e.code==='output_budget_exhausted');
+  assert.equal(f.calls.length,1,
+    'reasoning-only output exhaustion must remain a visible error without a smaller same-model generation');
+  assert.equal(f.result.lensDocument.applied,undefined);
+  console.log('PASS reasoning-only exhaustion: visible terminal error with no same-model repair');
+}
+{
+  const f=fixture(rows(3),{emptyOutputAtLimit:true});
+  await assert.rejects(translateLensPage(f.args),e=>e.code==='output_budget_exhausted' &&
+    e.diagnostics?.validatorSubtype==='empty_output' &&
+    e.generationMeta?.usage?.outputTokens===529);
+  assert.equal(f.calls.length,1,
+    'a truncated answer with zero visible content must not generate a smaller same-model repair');
+  assert.equal(f.result.lensDocument.applied,undefined);
+  const receipt=f.events.find(e=>e.name==='translationResult'&&e.data.event==='translation_result');
+  assert.equal(receipt?.data?.actualInput,2105);
+  assert.equal(receipt?.data?.actualOutput,529,
+    'the terminal failure must retain provider-reported consumed output tokens');
+  console.log('PASS zero-visible exhaustion: one failed call, typed error and usage preserved');
+}
+{
+  const f=fixture(rows(3),{partial:true,partialAtLimit:true});
+  const answer=await translateLensPage(f.args);
+  assert.equal(answer.complete,false);
+  assert.equal(f.calls.length,1);
+  assert.equal(f.result.lensDocument.applied.length,2,
+    'visible records must still be accepted when the provider hits its output limit');
+  assert.equal(answer.missing.length,1,'only the missing record remains eligible for normal repair');
+  console.log('PASS partial-visible exhaustion: valid records accepted and missing record retained');
+}
+{
+  const f=fixture(rows(3),{ai:{translation_mode:'conversation',style_examples:false}});
+  await translateLensPage(f.args);
+  const settings=f.events.find(e=>e.name==='effectiveSettings');
+  assert.equal(settings?.data?.planned?.examplesEnabled,false);
+  assert.equal(settings?.data?.planned?.bootstrapExamplePairs,0);
+  console.log('PASS Conversation example preference: effective settings report false and zero bootstrap pairs');
 }
 {
   const f=fixture(rows(35),{cancel:true});await assert.rejects(translateLensPage(f.args));
@@ -167,6 +218,27 @@ for (const route of ['direct-local', 'server']) {
   }
   console.log(`PASS ${route}: split page gets bounded source context without extra target IDs or retries`);
 }
+{
+  const all=rows(20).map(unit=>({...unit,text:unit.text.repeat(20)}));
+  const f=fixture(all,{route:'direct-local',ai:{model_capabilities:{reasoning:{supported:false},
+    structuredOutput:{supported:true,contract:'tp.translation.schema-object/1'},
+    limits:{contextTokens:16384,maxOutputTokens:1024}}}});
+  let metadataReads=0;
+  f.args.dependencies.refreshLocalAiCapabilities=async ai=>{
+    metadataReads++;
+    const contextTokens=metadataReads===1?16384:32768;
+    return {...ai,model_capabilities:{...ai.model_capabilities,
+      limits:{...ai.model_capabilities.limits,contextTokens}}};
+  };
+  const answer=await translateLensPage(f.args);
+  assert.equal(answer.complete,true);
+  assert.ok(f.calls.length>1);
+  assert.equal(metadataReads,f.calls.length,'a fresh Local window is read before each unsent subrequest');
+  assert.equal(f.calls[0].request.ai.model_capabilities.limits.contextTokens,16384);
+  assert.equal(f.calls[1].request.ai.model_capabilities.limits.contextTokens,32768);
+  assert.deepEqual(f.calls.flatMap(call=>call.selected),all);
+  console.log('PASS Local context resize during a page is used by the next request, with every unit sent once');
+}
 // Actual page owner + child recorder -> real HTTP ingest -> scoped disk evidence.
 {
   const oldFetch=globalThis.fetch, packets=[];
@@ -215,7 +287,7 @@ with tempfile.TemporaryDirectory() as temp:
   if ident['recordKind']=='page_summary':
    assert req['status']=='not_applicable',req
    terminal=json.loads(p.with_name('11_terminal.json').read_text())
-   assert len(terminal['children'])==1,terminal
+   assert terminal['terminal'] is True and terminal['state']=='succeeded',terminal
    owners.append(ident)
   else:
    assert req['body']['model']=='fixture',req

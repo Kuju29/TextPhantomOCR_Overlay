@@ -37,7 +37,8 @@ const capability = {
   models: {
     [model]: {
       recommendedMax: 1,
-      reasoning: { supported: true, control: "boolean", source: "ollama-api-show" },
+      reasoning: { supported: true, mandatory: false, can_disable: true,
+        control: "boolean", supported_efforts: ["off", "on"], source: "ollama-api-show" },
       structuredOutput: {
         supported: true,
         contract: "tp.translation.schema-object/1",
@@ -154,18 +155,19 @@ function storageHarness(initial = {}) {
     globalThis.fetch = originalFetch;
   }
 
-  const cached = await ensureLocalAiBatchReady(baseSettings, {
+  const refreshed = await ensureLocalAiBatchReady(baseSettings, {
     get: store.get,
     set: store.set,
     emitTrace: () => {},
     discover: async () => {
       discoverCalls += 1;
-      throw new Error("fresh exact metadata snapshot should avoid another discovery");
+      return { models: [model], capability,
+        selectedModelVerification: { model, status: "passed" } };
     },
   });
-  assert.equal(discoverCalls, 1);
-  assert.equal(cached.audit.source, "fresh_snapshot");
-  assert.equal(cached.settings.aiModelCapabilities.reasoning.supported, true);
+  assert.equal(discoverCalls, 2, "each Local runtime batch checks its live token window");
+  assert.equal(refreshed.audit.source, "live_metadata");
+  assert.equal(refreshed.settings.aiModelCapabilities.reasoning.supported, true);
 
   delete store.state[LOCAL_CAPABILITY_SNAPSHOTS_KEY][identity].verificationVersion;
   const upgraded = await ensureLocalAiBatchReady(baseSettings, {
@@ -176,14 +178,14 @@ function storageHarness(initial = {}) {
         selectedModelVerification: { model, status: "passed" } };
     },
   });
-  assert.equal(discoverCalls, 2, "an older metadata schema requires a fresh metadata check");
+  assert.equal(discoverCalls, 3, "an older metadata schema requires a fresh metadata check");
   assert.equal(upgraded.audit.source, "live_metadata");
   assert.equal(store.state[LOCAL_CAPABILITY_SNAPSHOTS_KEY][identity].verificationVersion,
     LOCAL_MODEL_VERIFICATION_VERSION);
 }
 
 // Availability metadata is independent from the user's reasoning preference.
-// Changing Off/On/Lowest must not repeat Local discovery or load the model.
+// A new batch still refreshes the Local runtime window when Off/On changes.
 {
   clearLocalAiPreflightInflightForTest();
   const identity = normalizeLocalConnectionIdentity("ollama", endpoint);
@@ -212,11 +214,12 @@ function storageHarness(initial = {}) {
     emitTrace: () => {},
     discover: async () => {
       calls += 1;
-      throw new Error("reasoning preference must not invalidate model availability");
+      return { models: [model], capability,
+        selectedModelVerification: { model, status: "passed" } };
     },
   });
-  assert.equal(calls, 0);
-  assert.equal(result.audit.source, "fresh_snapshot");
+  assert.equal(calls, 1);
+  assert.equal(result.audit.source, "live_metadata");
   assert.equal(result.settings.aiModelCapabilities.reasoning.control, "boolean");
 }
 
@@ -300,7 +303,7 @@ const contextMenu = await readFile(
 assert.match(contextMenu, /ensureLocalAiBatchReady\(settings/);
 assert.ok(
   contextMenu.indexOf("ensureLocalAiBatchReady(settings") <
-    contextMenu.indexOf("const batchId = crypto.randomUUID()"),
+    contextMenu.indexOf("const batchId = diagnosticId || crypto.randomUUID()"),
   "Local verification must complete before the batch and per-image jobs exist",
 );
 

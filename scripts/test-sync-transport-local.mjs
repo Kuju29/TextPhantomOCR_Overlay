@@ -91,4 +91,23 @@ assert.doesNotMatch(JSON.stringify({
 assert.equal(chargedError.structuralDetails?.src, undefined);
 assert.equal(chargedError.generationMeta?.rawResponse, undefined);
 
+globalThis.fetch = async () => new Response(JSON.stringify({detail:{
+  code:"output_budget_exhausted",generationAttempts:1,
+  structuralDetails:{validatorSubtype:"reasoning_only_exhausted",
+    rawResponse:`https://images.example/page.jpg?token=${secret}`},
+}}),{status:502,headers:{"content-type":"application/json"}});
+await assert.rejects(translateViaSyncRest("https://api.example.test",localPayload),error=>
+  error.code==="output_budget_exhausted" &&
+  error.diagnostics?.validatorSubtype==="reasoning_only_exhausted" &&
+  !JSON.stringify(error.diagnostics).includes(secret));
+globalThis.fetch = async () => new Response(JSON.stringify({detail:{
+  code:"output_budget_exhausted",generationAttempts:1,
+  structuralDetails:{validatorSubtype:"empty_output",
+    rawResponse:`https://images.example/page.jpg?token=${secret}`},
+}}),{status:502,headers:{"content-type":"application/json"}});
+await assert.rejects(translateViaSyncRest("https://api.example.test",localPayload),error=>
+  error.code==="output_budget_exhausted" &&
+  error.diagnostics?.validatorSubtype==="empty_output" &&
+  !JSON.stringify(error.diagnostics).includes(secret));
+
 console.log("Sync transport test passed: Local waits, Cloud times out, charged telemetry is safe.");

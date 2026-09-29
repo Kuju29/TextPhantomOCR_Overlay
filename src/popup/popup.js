@@ -1,5 +1,7 @@
 import { normalizeUrl } from "../shared/url.js";
-import { getStorage, removeStorage, setStorage } from "../shared/storage.js";
+import { getStorage, removeStorage, setStorage as writeStorage } from "../shared/storage.js";
+import { createAiProfileStorageWriter } from "./controllers/ai-profile-storage-writer.js";
+const setStorage = createAiProfileStorageWriter(writeStorage);
 import { ensureApiDefaults } from "../shared/api-defaults.js";
 import {
   AI_USAGE_STORAGE_KEY,
@@ -150,7 +152,8 @@ const seriesMemoryController = createSeriesMemoryController({
   setStorage,
   queryTabs,
 });
-const resetDefaultsController = createResetDefaultsController({ els, remove: removeStorage,
+const resetDefaultsController = createResetDefaultsController({ els,
+  remove: async keys => { await setStorage.whenIdle(); await removeStorage(keys); },
   resetLive: () => sendRuntimeMessage({ type: "TP_RESET_ADAPTIVE_SCHEDULER" }) });
 const updateBannerController = createUpdateBannerController({ els, getDefaults: ensureApiDefaults,
   getCurrentVersion: () => chrome.runtime.getManifest().version });
@@ -406,9 +409,9 @@ void loadPopupSettings({
   canUseAiUi,
   applyPromptForLang,
 }).catch((error) => {
-  console.error("[TextPhantom][popup] settings hydration failed", {
-    errorType: String(error?.name || "Error"),
-  });
+  console.error("[TextPhantom][popup] settings hydration failed:",
+    String(error?.name || "Error"), String(error?.code || ""),
+    String(error?.message || "Unknown settings error"));
   setEmojiStatus("error", "Settings could not be loaded. Reopen the popup.");
 });
 void paidServiceController.initialize();

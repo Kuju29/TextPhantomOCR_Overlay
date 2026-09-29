@@ -2,6 +2,7 @@ import { createOpenAiCompatibleAdapter } from "./local-openai-compatible.js";
 import { defineLocalProvider } from "./local-spec.js";
 export const localProvider = defineLocalProvider({
   id: "textgen",
+  continuationStrategy: "message_replay",
   displayName: "text-generation-webui",
   protocol: "openai",
   baseUrl: "http://localhost:5000/v1",

@@ -6,6 +6,8 @@ export function budgetDiagnostic(chunk, {operationId, imageId, profileId, pageUn
     attemptKind, constraintScope:!full.fitsHard?'per_request':!full.fitsTarget?'reliability':'per_request',
     wholePage:attemptKind === "initial" && chunk.units.length===pageUnits,pageUnits,requestUnits:chunk.units.length,estimateKind:e.estimateKind,
     planned:{estimatedInput:e.estimatedInput,estimatedOutput:e.predictedOutput,reasoningReserve:e.reasoningReserve,
+      inputCountStatus:e.inputUnverified?'runtime_count_pending':e.inputSampleCount>0?'provider_usage_calibrated':'script_estimate',
+      inputSampleCount:e.inputSampleCount||0,
       completionAvailable:e.completionAvailable,contextLimit:e.limits?.contextTokens??null,
       outputLimit:e.limits?.maxOutputTokens??null,inputLimit:e.limits?.maxInputTokens??null,
       outputTarget:e.target,recordTarget:e.recordTarget,...(e.contextPlan || {})},

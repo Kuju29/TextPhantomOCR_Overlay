@@ -441,10 +441,8 @@ function mergedProfile(defaults, stored, patch = null) {
   )
     delete output.temperature;
   output.styleExamples = output.styleExamples !== false;
-  // Preserve the user's stored mode as a dormant preference. Conversation is
-  // the only executable Extension path in this release, but Independent is a
-  // frozen reference path that will be re-enabled later; normalization must not
-  // destroy an existing Independent selection.
+  // Keep existing saved values for compatibility. The provider-owned picker
+  // policy resolves the actual mode for each new job without rewriting history.
   output.translationMode = output.translationMode === "independent"
     ? "independent" : "conversation";
   output.conversationReset = String(output.conversationReset || "0").slice(0, 80);

@@ -1,6 +1,7 @@
 import {submitConversationPage} from "../ai/translation-paths/batch-dispatch.js";
 import {selectedMode} from "../ai/translation-paths/order.js";
 import { enterConversationJob, finishConversationJob } from "../ai/translation-paths/order.js";
+import {enterLocalIndependentJob,finishLocalIndependentJob} from '../ai/translation-paths/independent-order.js';
 import { providerLearningSample } from "../../shared/ai/execution-timing.js";
 import { updateImagePresentation } from "../batches.js";
 import { attachTpError } from "../../shared/error-contract.js";
@@ -79,7 +80,7 @@ export function createAiExecution({ log, markJobPhase, traceUnitLayout, onCheckp
     if (classification.conflict) {
       throw attachTpError(
         new Error(
-          "The selected Cloud AI provider has a Local AI endpoint. Save the Provider's Cloud endpoint before translating.",
+          "The selected Cloud AI provider has a Local AI endpoint. Re-select the Provider before translating.",
         ),
         {
           code: "ai_provider_endpoint_conflict",
@@ -127,6 +128,7 @@ export function createAiExecution({ log, markJobPhase, traceUnitLayout, onCheckp
     beforeRepair = async () => {},
     capabilities = null,
     conversationSubmit = null,
+    onLocalDispatch = null,
   ) {
     const traceId = String(payload?.context?.tp_trace || getTrace() || "");
     return translateLensPage({
@@ -142,6 +144,7 @@ export function createAiExecution({ log, markJobPhase, traceUnitLayout, onCheckp
       beforeRepair,
       capabilities,
       conversationSubmit,
+      onLocalDispatch,
       onCheckpoint: data => onCheckpoint(cancelBatchId, data),
       onProvisionalResult: (snapshot,state) => onProvisionalResult?.(jobId,snapshot,state),
       onStatus: patch => updateImagePresentation(cancelBatchId, imageKeyFromPayload(payload), patch),
@@ -149,7 +152,7 @@ export function createAiExecution({ log, markJobPhase, traceUnitLayout, onCheckp
         signal?.aborted === true ||
         Boolean(cancelBatchId && getBatch(cancelBatchId)?.cancelled),
       onStreamProgress: ({state}) => {
-        if (["usage_pending", "sending_request", "http_wait", "response_headers", "validating"].includes(state))
+        if (["usage_pending", "sending_request", "http_wait", "response_headers", "receiving_content", "validating"].includes(state))
           updateImagePresentation(cancelBatchId, imageKeyFromPayload(payload), {phase:state});
         else if (plan.route === "direct-local") markLocalAiStreamProgress(cancelBatchId, imageKeyFromPayload(payload), state);
       },
@@ -232,9 +235,12 @@ export function createAiExecution({ log, markJobPhase, traceUnitLayout, onCheckp
       } finally {
         markBatchInitialAi(batchId,imageKeyFromPayload(payload));
         finishConversationJob(payload);
+        finishLocalIndependentJob(payload);
       }
     }
     await enterConversationJob(payload, signal, (event,data)=>traceNote("background/pipeline/ai-execution.js",event,data,String(payload?.context?.tp_trace || "")));
+    if (payload?.ai?.translation_mode === "independent") markJobPhase(jobId, "ai_queued");
+    await enterLocalIndependentJob(payload,signal,data=>traceNote('background/pipeline/ai-execution.js','independentOrder',data,String(payload?.context?.tp_trace||'')));
     const key = laneKeyFor(payload);
     // Removing RPM/time pacing is independent from generation concurrency.
     // Capacity is selected per runtime endpoint + model, never globally.
@@ -319,6 +325,7 @@ export function createAiExecution({ log, markJobPhase, traceUnitLayout, onCheckp
           // The initial turn is complete. Do not hold document ordering while
           // waiting for the batch's later images at the repair barrier.
           finishConversationJob(payload);
+          finishLocalIndependentJob(payload);
           // A repair must not occupy scarce provider capacity while sibling
           // images are still making their first attempt. Release, join the
           // current batch-pass barrier, then reacquire for the single repair.
@@ -374,6 +381,7 @@ export function createAiExecution({ log, markJobPhase, traceUnitLayout, onCheckp
         // their initial terminal boundary before the caller starts rendering.
         markBatchInitialAi(batchId, barrierImageKey);
         finishConversationJob(payload);
+        finishLocalIndependentJob(payload);
         const roundTripMs = Math.max(0, performance.now() - started);
         const serverWaitMs = Number.isFinite(telemetry.rateWaitMs) && Number.isFinite(telemetry.admissionWaitMs)
           ? telemetry.rateWaitMs + telemetry.admissionWaitMs : null;

@@ -56,6 +56,23 @@ try {
   assert.equal(captured.body.memory.styleExamples, true);
   assert.equal(captured.body.image.dataUri, "data:image/png;base64,AQ==");
 
+  globalThis.fetch = async (url, init) => {
+    captured = { url: String(url), init, body: JSON.parse(init.body) };
+    const response = { schema: "tp.ai.result/1", translations: [{ id: "P0", text: "แปลแล้ว" }],
+      missing: [], meta: { resolvedProvider: "lmstudio", resolvedModel: "model-a", generationAttempts: 1,
+        providerAttempts: 1, usage: { inputTokens: 7, outputTokens: 3, totalTokens: 10 } } };
+    return new Response(JSON.stringify({ schema: "tp.ai.stream/1", sequence: 1, type: "result", body: response }) + "\n",
+      { status: 200, headers: { "content-type": "application/x-ndjson" } });
+  };
+  await translateViaServer([{ id: "P0", text: "source" }], {
+    base: "https://api.test/", targetLang: "th", sourceLang: "en", operationId: "examples-off",
+    ai: { provider: "lmstudio", model: "model-a", base_url: "http://localhost:1234",
+      translation_mode: "conversation", style_examples: false },
+    capabilities: { aiConversation: "tp.conversation/1" },
+  });
+  assert.equal(captured.body.memory.styleExamples, false,
+    "Conversation must preserve the user's disabled example setting on the API wire");
+
   let emptyPromptDispatches = 0;
   let emptyPromptBody = null;
   globalThis.fetch = async (_url, init) => {
@@ -113,6 +130,30 @@ try {
   assert.equal(afterFailure.requests, beforeFailure.requests + 1);
   assert.equal(afterFailure.totalTokens, beforeFailure.totalTokens, "unknown gateway usage must not invent tokens");
   assert.equal(afterFailure.incompleteRequests, beforeFailure.incompleteRequests + 1);
+  globalThis.fetch = async () => new Response(JSON.stringify({detail:{
+    code:"output_budget_exhausted",origin:"upstream_ai",requestDispatched:true,
+    generationAttempts:1,providerAttempts:1,
+    structuralDetails:{validatorSubtype:"reasoning_only_exhausted",
+      rawResponse:"PRIVATE_MODEL_CONTENT_MUST_NOT_CROSS_THE_ERROR_BOUNDARY"},
+  }}),{status:502,headers:{"content-type":"application/json"}});
+  await assert.rejects(translateViaServer([{id:"P0",text:"source"}],{
+    base:"https://api.test",targetLang:"th",operationId:"thinking-only-failure",
+    ai:{provider:"ollama",model:"fixture"},
+  }),error=>error.code==="output_budget_exhausted" &&
+    error.diagnostics?.validatorSubtype==="reasoning_only_exhausted" &&
+    !JSON.stringify(error.diagnostics).includes("PRIVATE_MODEL_CONTENT"));
+  globalThis.fetch = async () => new Response(JSON.stringify({detail:{
+    code:"output_budget_exhausted",origin:"upstream_ai",requestDispatched:true,
+    generationAttempts:1,providerAttempts:1,
+    structuralDetails:{validatorSubtype:"empty_output",
+      rawResponse:"PRIVATE_MODEL_CONTENT_MUST_NOT_CROSS_THE_ERROR_BOUNDARY"},
+  }}),{status:502,headers:{"content-type":"application/json"}});
+  await assert.rejects(translateViaServer([{id:"P0",text:"source"}],{
+    base:"https://api.test",targetLang:"th",operationId:"zero-visible-failure",
+    ai:{provider:"ollama",model:"fixture"},
+  }),error=>error.code==="output_budget_exhausted" &&
+    error.diagnostics?.validatorSubtype==="empty_output" &&
+    !JSON.stringify(error.diagnostics).includes("PRIVATE_MODEL_CONTENT"));
   const replay = recordProviderGeneration(stored.aiUsageV1, {...target,engine:"runsextension",
     operationId:"gateway-failure",replayed:true,requests:1,usage:{receiptId:"gateway-failure-receipt",
       usageStatus:"unconfirmed_transport",accountingOrigin:"server_provider_boundary"}});

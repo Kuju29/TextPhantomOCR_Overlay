@@ -51,9 +51,15 @@ class GenerationRequest:
     expected_ids: tuple[str, ...] = ()
     model_capabilities: Mapping[str, Any] = field(default_factory=dict)
     workload: Mapping[str, Any] = field(default_factory=dict)
+    # Decoded, validated source units from the server marker parser. The
+    # workload hint alone must not authorize an arbitrarily large completion.
+    source_unit_texts: tuple[str, ...] = field(default=(), repr=False)
     cache_context: Mapping[str, Any] = field(default_factory=dict, repr=False)
     history_messages: tuple[Mapping[str, Any], ...] = field(default=(), repr=False)
     cancel_check: CancelCheck | None = field(default=None, repr=False, compare=False)
+    # Internal provider-owned continuation cursor. Never accepted from the
+    # browser or included in diagnostics; the conversation lease owns it.
+    previous_response_id: str = field(default="", repr=False)
 
     def __post_init__(self) -> None:
         provider = self.provider.strip().lower()
@@ -69,6 +75,7 @@ class GenerationRequest:
         object.__setattr__(self, "model", model)
         object.__setattr__(self, "thinking", thinking)
         object.__setattr__(self, "workload", _frozen_mapping(self.workload))
+        object.__setattr__(self, "source_unit_texts", tuple(self.source_unit_texts))
         object.__setattr__(self, "cache_context", _frozen_mapping(self.cache_context))
         object.__setattr__(self, "user_parts", tuple(self.user_parts))
         object.__setattr__(self, "history_messages", tuple(_frozen_mapping(m) for m in self.history_messages))
@@ -177,6 +184,10 @@ class ProviderSpec:
     # None follows the provider locality default. A cloud provider that owns
     # an independent throttle may explicitly opt out of the shared batch gate.
     proactive_rate_gate: bool | None = None
+    # Each leaf declares how its *selected generation endpoint* continues a
+    # conversation. A cache hint or a `store` field on another endpoint is not
+    # sufficient evidence for a provider-held response cursor.
+    conversation_transport: str | None = None
     adapter: ProviderAdapter | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -201,6 +212,8 @@ class ProviderSpec:
             raise ValueError("rate_rpm_min must be positive")
         if self.rate_rpm_max is not None and self.rate_rpm_max <= 0:
             raise ValueError("rate_rpm_max must be positive")
+        if self.conversation_transport not in (None, "message_replay", "native_response_cursor"):
+            raise ValueError("conversation_transport must identify a supported endpoint contract")
         if (
             self.rate_rpm_min is not None
             and self.rate_rpm_max is not None

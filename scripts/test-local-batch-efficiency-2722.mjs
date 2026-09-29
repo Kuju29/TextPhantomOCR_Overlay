@@ -1,0 +1,15 @@
+import assert from 'node:assert/strict';
+import {initialProfile,takeWorkloadBatch} from '../src/shared/ai/workload/model.js';
+const rows=Array.from({length:24},(_,i)=>({id:`P${i}`,text:'Hello there.'}));
+const measured={...initialProfile(),successes:2,samples:2,zeroReasoningSamples:2,reasoning:[0,0]};
+const context={provider:'ollama',localIndependent:true,contract:'compact_records',reasoningSupported:true,reasoningActive:false,wholePageFirst:true,limits:{contextTokens:8192,source:'runtime'},fixedInput:1300};
+const batch=takeWorkloadBatch(rows,0,measured,context);
+assert.equal(batch.units.length,24);
+assert.equal(takeWorkloadBatch(rows,0,measured,{...context,localIndependent:false}).units.length<24,true,'old conservative target fragments this exact fixture');
+assert.equal(takeWorkloadBatch(rows,0,initialProfile(),context).units.length<24,true,'cold/unverified runtime unchanged');
+assert.equal(takeWorkloadBatch(rows,0,measured,{...context,limits:{}}).units.length<24,true,'unknown context is not enlarged');
+assert.equal(takeWorkloadBatch(rows,0,{...measured,reliabilityRestricted:true},context).units.length<24,true,'known structure trouble does not upscale');
+assert.equal(takeWorkloadBatch(rows,0,{...measured,latencyOutputTarget:160},context).units.length<24,true,'latency cap still wins');
+assert.equal(takeWorkloadBatch(rows,0,{...measured,reasoning:[0,500]},context).units.length<24,true,'hidden reasoning remains conservative');
+assert.equal(batch.estimate.fitsHard,true);assert.ok(batch.estimate.target<=2048);
+console.log('PASS measured Local context-only batching: 24 same-page units fit after 2 zero-reasoning successes; cold/unknown/latency/reliability/hidden-reasoning guards preserved');

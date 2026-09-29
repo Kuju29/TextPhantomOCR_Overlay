@@ -391,6 +391,7 @@ export async function runServerTranslation(input, deps) {
         [
           "server_busy",
           "local_rate_gate_busy",
+          "rate_gate_busy",
           "provider_rate_limited",
         ].includes(code);
       if (isBusy && safeDeferred) {

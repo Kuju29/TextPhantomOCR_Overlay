@@ -12,6 +12,7 @@ from backend.ai import provider_resolution as cache, resolve as resolver, probe 
 from backend.ai.providers import cloud_huggingface as hf
 from backend.ai.provider_contract import GenerationRequest, ModelListResult, ProbeResponse
 from backend.ai.clients.base import ChatResult
+from backend.ai.cloud_reasoning import CloudReasoningPreferenceUnavailable, ensure_cloud_reasoning_preflight
 
 MODEL = 'deepseek-ai/DeepSeek-V4-Flash-0731'
 KEY = 'hf_fixture_no_network'
@@ -21,6 +22,8 @@ CAP = {'reasoning': {'supported': True, 'mandatory': False, 'control': 'levels',
 class EvidenceRefresh(unittest.TestCase):
     def setUp(self):
         cache._MODEL_CAPABILITIES.clear()
+        cache._OFF_CONTRADICTIONS.clear()
+        cache._OFF_CONTRADICTIONS_NEXT_SWEEP = 0.0
         cache._MODEL_PROMOTIONS.clear()
         probing._PROBE_CACHE.clear()
         self.clock = patch.object(cache.time, 'monotonic', return_value=1000.)
@@ -96,6 +99,61 @@ class EvidenceRefresh(unittest.TestCase):
         caps = self.evidence()[1]
         self.assertTrue(caps['vision']['supported'])
         self.assertIn('none',caps['reasoning']['supported_efforts'])
+
+    def test_reasoning_content_revokes_exact_off_proof_even_with_zero_usage(self):
+        self.refresh(models=[MODEL, 'other/model'], caps={
+            MODEL: {'vision': {'supported': True}},
+            'other/model': {'vision': {'supported': True}},
+        })
+        self.selected()
+        cache.remember_selected_model_capability('huggingface', BASE, KEY,
+            'other/model', CAP)
+        initial = self.evidence()[1]
+        ensure_cloud_reasoning_preflight('huggingface', MODEL, 'off', 'off',
+            initial['reasoning'], capability_verified=True)
+        old_revision = cache.capture_capability_cache_revision('huggingface', BASE, KEY)
+        request = GenerationRequest(provider='huggingface', model=MODEL, api_key=KEY,
+            base_url=BASE, system_text='system', user_parts=('<<TP_P0:new>>',),
+            expected_ids=('P0',), thinking='off', model_capabilities=initial)
+        with patch.object(hf, 'execute_huggingface_chat', return_value=ChatResult(
+                '<<TP_P0:translated>>', MODEL, thinking_tokens=0,
+                reasoning_observed=True)):
+            output = hf.ADAPTER.generate(request)
+        self.assertEqual(output.thinking_applied, 'provider_ignored_off')
+        fresh, current = self.evidence()
+        self.assertTrue(fresh)
+        self.assertTrue(current['vision']['supported'])
+        self.assertEqual(current['reasoning']['control'], 'provider')
+        with self.assertRaises(CloudReasoningPreferenceUnavailable):
+            ensure_cloud_reasoning_preflight('huggingface', MODEL, 'off', 'off',
+                current['reasoning'], capability_verified=fresh)
+        self.assertIn('none', self.evidence(model='other/model')[1]['reasoning']['supported_efforts'])
+        self.assertFalse(cache.retain_observed_off_control('huggingface', BASE, KEY,
+            MODEL, dispatch_revision=old_revision))
+        self.refresh()
+        self.assertEqual(self.evidence()[1]['reasoning']['control'], 'provider')
+        self.selected()  # New accepted control alone cannot undo the observed violation.
+        self.assertEqual(self.evidence()[1]['reasoning']['control'], 'provider')
+        # A transient /models error clears the positive catalogue cache. The
+        # observed violation must outlive it and a later control-only probe.
+        with patch.object(hf.ADAPTER, 'list_models', return_value=ModelListResult(status='unreachable')):
+            resolver._enumerate_models_detailed('huggingface', KEY, BASE)
+        self.assertEqual(self.evidence()[1]['reasoning']['control'], 'provider')
+        with patch.object(hf.ADAPTER, 'probe', return_value=ProbeResponse(True, 200, capabilities=CAP)):
+            probed = probing.probe({'provider': 'huggingface', 'model': MODEL, 'api_key': KEY})
+        self.assertTrue(probed['ok'])
+        self.assertEqual(self.evidence()[1]['reasoning']['control'], 'provider')
+        with self.assertRaises(CloudReasoningPreferenceUnavailable):
+            ensure_cloud_reasoning_preflight('huggingface', MODEL, 'off', 'off',
+                self.evidence()[1]['reasoning'], capability_verified=True)
+
+    def test_abandoned_account_contradictions_expire_on_other_account_lookup(self):
+        cache.invalidate_observed_off_control('huggingface', BASE, KEY, MODEL)
+        cache.invalidate_observed_off_control('huggingface', BASE, 'other-key', 'other-model')
+        self.assertEqual(len(cache._OFF_CONTRADICTIONS), 2)
+        self.clock_mock.return_value = 1901.0
+        self.evidence(key='unrelated-key')
+        self.assertEqual(cache._OFF_CONTRADICTIONS, {})
 
     def test_cached_probe_returns_current_merged_evidence(self):
         payload = {'provider': 'huggingface', 'model': MODEL, 'api_key': KEY}

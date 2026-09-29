@@ -1,4 +1,5 @@
 import { laneKeyFor, setLaneCapacityHint } from "../scheduler.js";
+import { isLocalAiPayload } from "../local-capacity.js";
 
 export function applyRuntimeCapacityHints(caps, payload) {
   // The API reports the slots each of its lanes currently holds. Matching the
@@ -18,11 +19,13 @@ export function applyRuntimeCapacityHints(caps, payload) {
   if (
     aiSlots > 0 &&
     payload?.mode === "lens_text" &&
-    payload?.source === "ai"
+    payload?.source === "ai" &&
+    !isLocalAiPayload(payload)
   ) {
+    // Server AI slots belong to Cloud requests. A Direct Local generation
+    // runs on the user's machine, where Safe/Manual/Auto owns this lane.
     const activeBurst =
       payload?.rate?.enabled === true ? Number(payload?.rate?.burst) || 0 : 0;
     setLaneCapacityHint(laneKeyFor(payload), aiSlots, activeBurst);
   }
 }
-

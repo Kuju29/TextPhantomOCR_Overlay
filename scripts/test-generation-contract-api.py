@@ -31,6 +31,11 @@ class CapabilityForwardingAPI(unittest.TestCase):
     def setUpClass(cls):
         script = Path(__file__).with_name('test-generation-contract.mjs')
         cls.rows = json.loads(subprocess.check_output(['node', str(script), '--capture'], cwd=ROOT, text=True))
+        # This fixture tests output-contract forwarding with an invented model.
+        # It explicitly selects provider-managed thinking for the fixture only;
+        # the real Lowest preference requires current model-specific proof.
+        for row in cls.rows:
+            row['body']['provider']['thinking'] = 'default'
 
     def invoke(self, body):
         calls = []
@@ -51,6 +56,7 @@ class CapabilityForwardingAPI(unittest.TestCase):
         bodies=json.loads(subprocess.check_output(['node',str(Path(__file__).with_name('test-execution-plan-pipeline.mjs')),'--capture'],cwd=ROOT,text=True))
         self.assertEqual(len(bodies),2)
         for body in bodies:
+            body['provider']['thinking'] = 'default'
             resolution._MODEL_CAPABILITIES.clear()
             self.assertEqual(body['provider']['outputContract'],'json_schema_object_v1')
             self.assertIsNotNone(self.invoke(body).response_schema)

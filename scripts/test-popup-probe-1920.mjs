@@ -57,10 +57,11 @@ async function fixture({stored=null, fetchJson=async()=>pass}={}) {
 }
 
 // New and reset profiles store a policy, never the lowest concrete option.
-for (const input of [undefined,null,'','invalid','auto','default'])
+for (const input of [undefined,null,'','invalid'])
   eq(normalizeUserReasoningPreference(input),'minimum','missing/invalid policy');
-for (const explicit of ['minimum','off','on','minimal','low','medium','high'])
-  eq(normalizeUserReasoningPreference(explicit),explicit,'explicit user preference preserved');
+for (const explicit of ['minimum','off','on','minimal','low','medium','high','default','auto'])
+  eq(normalizeUserReasoningPreference(explicit),['auto','default'].includes(explicit)?'minimum':explicit,
+    'old provider-default aliases migrate to Lowest available');
 eq(resolveAiProfile(createAiProfiles(),{provider:'openrouter',model:'fixture'}).profile.thinking,'minimum');
 {
   const f=await fixture();

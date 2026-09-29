@@ -12,7 +12,7 @@ from backend.log import event
 def finalize(result: dict[str, Any], *, prepared, api_version: str,
              rate: dict[str, Any], paced: bool, rate_wait_ms: float,
              admission_wait_ms: float, rate_provider: str,
-             rate_model: str, api_key: str) -> dict[str, Any]:
+             rate_model: str, rate_key: str) -> dict[str, Any]:
     result["apiVersion"] = api_version
     perf = result.get("perf") if isinstance(result.get("perf"), dict) else {}
     ai_meta = ((result.get("Ai") or {}).get("meta") or {})
@@ -29,7 +29,8 @@ def finalize(result: dict[str, Any], *, prepared, api_version: str,
         "admissionWaitMs": admission_wait_ms, "providerMs": perf.get("ai_ms", 0.0),
         "parseMs": perf.get("ai_parse_ms", 0.0), "dominantWait": dominant,
         "paced": paced,
-        "rate": rate_gate.snapshot(rate_provider, rate_model, api_key) if paced else None,
+        "rate": rate_gate.snapshot(rate_provider, rate_model, rate_key,
+            manual_local=rate.get("local", False), manual_override=True) if paced else None,
         "aiMeta": {key: value for key, value in ai_meta.items() if key in (
             "units", "missing_units", "passthrough_units", "skipped_reason", "usage",
             "finish_reason", "timeout_policy", "generation_attempts")},

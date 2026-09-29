@@ -42,7 +42,7 @@ try{
  a.els.aiProvider.value='openrouter';a.els.aiModel.value='cloud-fixture';
  pending.resolve();await Promise.all([first,second]);await worker.flush();
  assert.equal(a.els.aiModel.value,'cloud-fixture','late local result cannot select over cloud');
- assert.equal(b.state.aiModelBlocked,false);assert.equal(b.state.lastAiResolve.models_verified,true);assert.match(b.els.aiLocalStatus.textContent,/Ready/);
+ assert.equal(b.state.aiModelBlocked,false);assert.equal(b.state.lastAiResolve.models_verified,true);assert.match(b.els.aiLocalStatus.textContent,/Model selected/);
  assert.equal(b.els.aiLocalTest.disabled,false);assert.equal(listeners.size,0,'progress listeners are removed on completion');
  assert.ok(events.some(e=>e.reason==='stale_discard'));
  assert.ok(events.some(e=>e.reason==='ui_applied'&&e.ready));

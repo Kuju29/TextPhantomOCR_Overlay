@@ -16,7 +16,8 @@ function database(){return {
         q.result=structuredClone(work());q.onsuccess?.();waiting--;complete();
       },0);return q;
     };
-    tx.objectStore=()=>({get:k=>request(()=>rows.get(k)),getAll:()=>request(()=>[...rows.values()]),
+    tx.objectStore=()=>({get:k=>request(()=>rows.get(k)),count:()=>request(()=>rows.size),
+      getAll:()=>{throw new Error('bulk history scan is forbidden');},
       put:v=>request(()=>{rows.set(v.scope,structuredClone(v));}),delete:k=>request(()=>rows.delete(k))});
     return tx;
   }
@@ -37,16 +38,55 @@ for(const conversation of [{owner:'b',documentId:'doc',reset:'0'},{owner:'a',doc
 }
 await fresh.withLocalHistory({...ai,conversation:{...ai.conversation,reset:'obsolete'}},'th','en',null,s=>assert.equal(s.history.length,1,'manual reset no longer changes the dynamic scope'));
 fail=true;
-await fresh.withLocalHistory(ai,'th','en',null,async s=>{
-  assert.equal(s.storage,'local_memory');assert.equal(s.history.length,1);
-  assert.equal(await s.save({history:[{user:'Changed',assistant:'แก้ไข'}],prefix:'p',revision:2}),'local_memory');
-});
+await assert.rejects(()=>fresh.withLocalHistory(ai,'th','en',null,()=>{}),
+  error=>error.code==='ai_conversation_storage_unavailable');
 fail=false;
 await fresh.withLocalHistory(ai,'th','en',null,async s=>{
-  assert.equal(s.history[0].user,'Changed','storage recovery must not overwrite newer in-memory history');
-  assert.equal(s.storage,'local_memory');
-  assert.equal(await s.save({history:s.history,prefix:'p',revision:s.revision}),'local_indexeddb');
+  s.history.push({user:'Only in worker memory'});
+  fail=true;
+  try {
+    await assert.rejects(()=>s.save({history:[{user:'Not durable',assistant:'ไม่บันทึก'}],prefix:'p',revision:2}),
+      error=>error.code==='ai_conversation_storage_unavailable');
+  } finally {fail=false;}
 });
+await assert.rejects(()=>fresh.withLocalHistory(ai,'th','en',null,()=>{}),
+  error=>error.code==='ai_conversation_storage_unavailable',
+  'A failed history commit must fence subsequent turns in this worker');
 const recovered=await import('../src/background/ai/translation-paths/local-history.js?recovered-worker');
-await recovered.withLocalHistory(ai,'th','en',null,s=>assert.equal(s.history[0].user,'Changed'));
-console.log('PASS IndexedDB callback fixtures: write/read across module reload, owner/document isolation and obsolete reset ignored, explicit memory fallback; browser engine not exercised');
+await recovered.withLocalHistory(ai,'th','en',null,s=>{
+  assert.equal(s.history.length,1,'failed commit and mutated worker memory must not publish another turn');
+  assert.equal(s.history[0].user,'Hello');
+});
+const changed={...ai,conversation:{owner:'changed',documentId:'doc'}};
+await recovered.withLocalHistory(changed,'th','en',null,s=>s.save({history:[{user:'Durable'}],prefix:'p',revision:1}));
+const changedScope=await recovered.localScope(changed,'th','en');
+const durable=structuredClone(rows.get(changedScope));
+rows.set(changedScope,{...durable,history:[],revision:0});
+await assert.rejects(()=>recovered.withLocalHistory(changed,'th','en',null,()=>{}),
+  error=>error.code==='ai_conversation_storage_unavailable',
+  'A rolled-back IDB record must never be replaced by a newer worker-memory record');
+rows.delete(changedScope);
+await assert.rejects(()=>recovered.withLocalHistory(changed,'th','en',null,()=>{}),
+  error=>error.code==='ai_conversation_storage_unavailable',
+  'A deleted IDB record must never be resurrected from worker memory');
+rows.set(changedScope,durable);
+const previousIndexedDB=globalThis.indexedDB;
+const vanished={...ai,conversation:{owner:'vanished',documentId:'doc'}};
+globalThis.chrome={runtime:{id:'fixture-extension'}};
+await recovered.withLocalHistory(vanished,'th','en',null,async s=>{
+  globalThis.indexedDB=undefined;
+  try {
+    await assert.rejects(()=>s.save({history:[{user:'No database'}],prefix:'p',revision:1}),
+      error=>error.code==='ai_conversation_storage_unavailable');
+  } finally {globalThis.indexedDB=previousIndexedDB;}
+});
+await assert.rejects(()=>recovered.withLocalHistory(vanished,'th','en',null,()=>{}),
+  error=>error.code==='ai_conversation_storage_unavailable',
+  'A vanished IDB during commit must not restart the same conversation');
+globalThis.indexedDB=undefined;
+const missing=await import('../src/background/ai/translation-paths/local-history.js?missing-browser-idb');
+await assert.rejects(()=>missing.withLocalHistory(ai,'th','en',null,()=>{}),
+  error=>error.code==='ai_conversation_storage_unavailable');
+globalThis.indexedDB=previousIndexedDB;
+delete globalThis.chrome;
+console.log('PASS IndexedDB callback fixtures: worker reload, isolation, obsolete reset, fail-closed storage; browser engine not exercised');

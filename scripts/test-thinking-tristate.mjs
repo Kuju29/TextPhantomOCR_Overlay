@@ -19,6 +19,19 @@ for (const [legacy, expected] of [[true,"on"],[false,"off"],["on","on"],["off","
 const effective = resolveEffectiveAiProfile({version:1,target:{runtime:"local",provider:"ollama",model:"qwen"},
   providerIdentity:state.active.providerIdentity,profile:defaults,credential:"",prompt:"STYLE",promptMode:"replace"});
 assert.equal(buildEffectiveAiPayload(effective).ai.thinking, "off");
+const opted = updateAiProfile(state, { provider:"ollama", endpoint:"http://localhost:11434",
+  model:"qwen", defaults, patch:{thinking:"default"}, select:true, now:2 });
+const chosen = opted.providers[opted.active.providerIdentity].models.qwen.profile;
+assert.equal(chosen.thinking,"minimum","an old Provider default profile must migrate to Lowest available");
+assert.equal(buildEffectiveAiPayload(resolveEffectiveAiProfile({version:1,
+  target:{runtime:"local",provider:"ollama",model:"qwen"},
+  providerIdentity:opted.active.providerIdentity,profile:chosen,credential:"",prompt:"STYLE",promptMode:"replace"})).ai.thinking,
+  "minimum","Local profile transport must keep the Lowest available policy");
+assert.equal(buildEffectiveAiPayload(resolveEffectiveAiProfile({version:1,
+  target:{runtime:"cloud",provider:"groq",model:"fixture"},
+  providerIdentity:"cloud:groq",profile:{...chosen,thinking:"default"},
+  credential:"test-key",prompt:"STYLE",promptMode:"replace"})).ai.thinking,
+  "minimum","Cloud profile transport must keep the Lowest available policy");
 assert.equal(Object.hasOwn(buildOllamaGeneration({model:"q",messages:[],outputTokens:8,thinkingMode:"default"}), "think"), false);
 
 const mkSelect = (value="minimum") => ({
@@ -38,7 +51,18 @@ try {
   assert.equal(select.value,"off");
   assert.equal(select.disabled,false);
   assert.deepEqual(select.options.map(x=>x.value), ["minimum","off"]);
-  assert.match(els.aiThinkingHint.textContent,/not verified/i);
+
+  const localCompatible = mkSelect("off");
+  const compatibleEls = {...els, aiProvider:{value:"lmstudio"},
+    aiBaseUrl:{value:"http://localhost:1234/v1"}, aiThinking:localCompatible,
+    aiThinkingHint:{}};
+  createPopupUiController({els:compatibleEls,state:{localAiCapability:{provider:"lmstudio",
+    baseUrl:"http://localhost:1234/v1",models:{unknown:{generation:{supported:null}}}}},
+    isLocalProvider:()=>true,toggleDom:()=>{},updatePromptWarning:()=>{},
+    validateAiKey:()=>{},validateLangSource:()=>{}}).toggle();
+  assert.equal(localCompatible.value, "off", "do not rewrite the user's Thinking intent");
+  assert.match(compatibleEls.aiThinkingHint.textContent,/cannot verify or set.*reasoning mode/i);
+  assert.match(compatibleEls.aiThinkingHint.textContent,/Off requires verified control/i);
 
   const unsupported = mkSelect("off");
   const unsupportedEls = {...els, aiModel:{value:"plain"}, aiThinking:unsupported, aiThinkingHint:{}};

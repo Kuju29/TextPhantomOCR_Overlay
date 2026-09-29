@@ -31,7 +31,7 @@ from backend.ai.provider_resolution import (
     resolve_base_url,
     resolve_model,
 )
-from backend.ai.rate_policy import is_local_target
+from backend.ai.rate_policy import cloud_local_endpoint_conflict, is_local_target
 from backend.lens.languages import normalize as normalize_lang
 from backend.security import assert_ai_base_url_allowed
 
@@ -187,8 +187,12 @@ def resolve(payload: dict[str, Any]) -> ResolveResult:
                 model_status="unverified",
             )
 
-    if not candidate_key and looks_local and provider not in provider_registry:
-        provider = default_local_provider()
+    if cloud_local_endpoint_conflict(provider, base_hint):
+        return ResolveResult(ok=False, error="ai_provider_endpoint_conflict",
+            provider=provider, model="", models=[], lang=lang,
+            prompt_editable_default=style_default, backend_supported=True,
+            key_status="conflict", key_verified=False, models_verified=False,
+            models_source="none", model_status="unverified")
 
     # Never send a cloud key to a local/self-hosted endpoint.
     # Local providers use no credential (the model-list helper supplies only a

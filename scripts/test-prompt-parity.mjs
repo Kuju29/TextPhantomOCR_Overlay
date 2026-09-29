@@ -34,7 +34,7 @@ async function run(ai = {}, options = {}) {
   const result = await translateWithLocalOpenAi([{ id: "real-unit", text: "原文" }], { ai: {
     model: "qwen3.5:9b", base_url: "http://localhost:11434",
     local_adapter: { protocol: "ollama", baseUrl: "http://localhost:11434" },
-    prompt: "Target language: Thai\nBUILT-IN STYLE SENTINEL", promptMode: "replace", style_examples: false, ...ai,
+    prompt: "Target language: Thai\nBUILT-IN STYLE SENTINEL", promptMode: "replace", style_examples: false, thinking: "default", ...ai,
   }, canonicalPrompt: plan, promptAudit: { promptVersion: "th-test", canonicalPromptHash: "safe-hash" },
   targetLang: "th", ...options });
   return { ...calls[0], result };
@@ -110,7 +110,7 @@ try {
   const thirteen = Array.from({ length: 13 }, (_, index) => ({ id: `g${index}`, text: `原文${index}` }));
   const oneImage = await translateWithLocalOpenAi(thirteen, {
     ai: { model: "qwen3.5:9b", base_url: "http://localhost:11434",
-      local_adapter: { protocol: "ollama", baseUrl: "http://localhost:11434" }, prompt: "FULL STYLE", promptMode: "replace", style_examples: false },
+      local_adapter: { protocol: "ollama", baseUrl: "http://localhost:11434" }, prompt: "FULL STYLE", promptMode: "replace", style_examples: false, thinking: "default" },
     canonicalPrompt: plan, targetLang: "th",
   });
   assert.equal(calls.length, 1, "all 13 units in one image must use one provider request");
@@ -122,12 +122,13 @@ try {
   );
   assert.match(calls[0].body.messages[1].content, /รูปแบบคำตอบ — tp\.translation\.compact-records\/1/);
 
-  const off = await run({ thinking: "off" });
-  const on = await run({ thinking: "on" });
+  const verifiedThinking = {reasoning:{supported:true,mandatory:false,control:'boolean',source:'ollama-api-show'}};
+  const off = await run({ thinking: "off", model_capabilities: verifiedThinking });
+  const on = await run({ thinking: "on", model_capabilities: verifiedThinking });
   assert.equal(off.body.messages[0].content, on.body.messages[0].content);
   assert.equal(off.body.messages[1].content, on.body.messages[1].content);
-  assert.equal("think" in off.body, false, "unknown capability must omit native think");
-  assert.equal("think" in on.body, false, "unknown capability must omit native think");
+  assert.equal(off.body.think, false, "verified Ollama Off must send native think:false");
+  assert.equal(on.body.think, true, "verified Ollama On must send native think:true");
 
   const verifiedReasoning = { reasoning: { supported: true, control: "boolean" } };
   const verifiedOff = await run({ thinking: "off", model_capabilities: verifiedReasoning });
@@ -277,7 +278,7 @@ try {
     }), { status: 200 });
   };
   const legacyDirect = await translateWithLocalOpenAi([{ id: "P0", text: "原文" }], {
-    ai: { model: "qwen", prompt: "FULL STYLE", promptMode: "replace", local_adapter: { protocol: "ollama", baseUrl: "http://localhost:11434" } },
+    ai: { model: "qwen", prompt: "FULL STYLE", promptMode: "replace", thinking: "default", local_adapter: { protocol: "ollama", baseUrl: "http://localhost:11434" } },
     canonicalPrompt: { ...plan, version: "translation-plan-0" }, targetLang: "th",
   });
   assert.equal(legacyDirect.translations[0].text, "แปลแล้ว");
@@ -286,7 +287,7 @@ try {
   const missingPiece = structuredClone(plan); delete missingPiece.pieces.systemPolicy;
   await assert.rejects(
     translateWithLocalOpenAi([{ id: "P0", text: "原文" }], {
-      ai: { model: "qwen", prompt: "FULL STYLE", promptMode: "replace", local_adapter: { protocol: "ollama", baseUrl: "http://localhost:11434" } },
+      ai: { model: "qwen", prompt: "FULL STYLE", promptMode: "replace", thinking: "default", local_adapter: { protocol: "ollama", baseUrl: "http://localhost:11434" } },
       canonicalPrompt: missingPiece, targetLang: "th",
     }),
     (error) => error?.code === "canonical_prompt_contract_invalid" && /systemPolicy/.test(error.message),
@@ -294,7 +295,7 @@ try {
   assert.equal(providerDispatches, 1, "an incomplete prompt contract must fail before provider dispatch");
 
   const builtInDefault = await translateWithLocalOpenAi([{ id: "P0", text: "原文" }], {
-    ai: { model: "qwen", prompt: "", promptMode: "fallback", local_adapter: { protocol: "ollama", baseUrl: "http://localhost:11434" } },
+    ai: { model: "qwen", prompt: "", promptMode: "fallback", thinking: "default", local_adapter: { protocol: "ollama", baseUrl: "http://localhost:11434" } },
     canonicalPrompt: plan, targetLang: "th",
   });
   assert.equal(builtInDefault.meta.promptAudit.promptSource, "built_in_default");

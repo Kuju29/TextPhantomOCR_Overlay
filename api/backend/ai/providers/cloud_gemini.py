@@ -45,6 +45,17 @@ _MODEL_EXCLUDE_FRAGMENTS = (
     "embedding", "imagen", "veo", "aqa", "-live-", "learnlm", "gemini-1.0", "gemini-1.5",
     "gemini-2.0",
 )
+# The Gemini /models response exposes generation methods and limits, but no
+# input modality field. Only advertise image support for model IDs whose Google
+# model card names image input, and only after /models lists that exact ID for
+# this account. New aliases/snapshots remain unverified until documented.
+_DOCUMENTED_VISION_MODELS = frozenset({
+    "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite",
+    "gemini-3-flash-preview", "gemini-3.1-pro-preview",
+    "gemini-3.1-pro-preview-customtools", "gemini-3.1-flash-lite",
+    "gemini-3.5-flash", "gemini-3.5-flash-lite",
+    "gemini-3.6-flash", "gemini-3.7-flash", "gemini-3.8-flash",
+})
 
 class ModelListResult(TypedDict):
     models: list[str]
@@ -71,18 +82,18 @@ def model_usable(model_id: str) -> bool:
                 and model not in MODEL_ALIASES)
 
 def _reasoning_capability(model_id: str) -> dict:
-    """Verified Gemini reasoning controls for exact documented model families."""
+    """Verified Gemini reasoning controls for exact documented model IDs."""
     model = (model_id or "").strip().lower()
-    if re.match(r"^gemini-2\.5-pro(?:-|$)", model):
+    if model == "gemini-2.5-pro":
         return {"supported": True, "mandatory": True, "default_enabled": True,
                 "control": "levels", "dynamic": True,
                 "supported_efforts": ["low", "medium", "high"]}
-    if re.match(r"^gemini-2\.5-flash-lite(?:-|$)", model):
+    if model == "gemini-2.5-flash-lite":
         return {"supported": True, "mandatory": False, "default_enabled": False,
                 "control": "levels", "dynamic": True,
                 "supported_efforts": ["none", "low", "medium", "high"],
                 "default_effort": "none"}
-    if re.match(r"^gemini-2\.5-flash(?:-|$)", model):
+    if model == "gemini-2.5-flash":
         return {"supported": True, "mandatory": False, "default_enabled": True,
                 "control": "levels", "dynamic": True,
                 "supported_efforts": ["none", "low", "medium", "high"]}
@@ -90,20 +101,19 @@ def _reasoning_capability(model_id: str) -> dict:
     # Gemini 3+ uses model-specific thinking levels and cannot be represented
     # as a universal boolean Off/On switch. Keep the exact documented levels.
     level_sets = (
-        (r"^gemini-3\.(?:8|7)-flash(?:-|$)", ["low", "medium", "high"], "medium"),
-        (r"^gemini-3\.(?:6|5)-flash(?:-|$)", ["minimal", "low", "medium", "high"], "medium"),
-        (r"^gemini-3\.1-pro(?:-|$)", ["low", "medium", "high"], "high"),
-        (r"^gemini-3\.(?:5|1)-flash-lite(?:-|$)", ["minimal", "low", "medium", "high"], "minimal"),
-        (r"^gemini-3-flash(?:-|$)", ["minimal", "low", "medium", "high"], "high"),
+        ({"gemini-3.8-flash", "gemini-3.7-flash"}, ["low", "medium", "high"], "medium"),
+        ({"gemini-3.6-flash", "gemini-3.5-flash"}, ["minimal", "low", "medium", "high"], "medium"),
+        ({"gemini-3.1-pro-preview", "gemini-3.1-pro-preview-customtools"},
+         ["low", "medium", "high"], "high"),
+        ({"gemini-3.5-flash-lite", "gemini-3.1-flash-lite"},
+         ["minimal", "low", "medium", "high"], "minimal"),
+        ({"gemini-3-flash-preview"}, ["minimal", "low", "medium", "high"], "high"),
     )
-    for pattern, efforts, default_effort in level_sets:
-        if re.match(pattern, model):
+    for model_ids, efforts, default_effort in level_sets:
+        if model in model_ids:
             return {"supported": True, "mandatory": True, "default_enabled": True,
                     "control": "levels", "dynamic": True,
                     "supported_efforts": efforts, "default_effort": default_effort}
-    if model.startswith("gemini-3"):
-        return {"supported": True, "mandatory": True, "default_enabled": True,
-                "control": "levels", "dynamic": True}
     return {}
 
 def models_status(api_key: str, *, timeout_sec: float = 10.0) -> ModelListResult:
@@ -144,6 +154,10 @@ def models_status(api_key: str, *, timeout_sec: float = 10.0) -> ModelListResult
                 "maxOutputTokens": item.get("outputTokenLimit"), "modelRevision": str(item.get("version") or ""),
                 "source": "gemini-models-api", "scope": "model"})
             capability = {}
+            if model_id in _DOCUMENTED_VISION_MODELS:
+                capability["vision"] = {
+                    "supported": True, "source": "gemini_documented_image_input",
+                }
             if limits.get("maxInputTokens") or limits.get("maxOutputTokens"):
                 capability["limits"] = limits
             provider_thinking = item.get("thinking")
@@ -156,6 +170,12 @@ def models_status(api_key: str, *, timeout_sec: float = 10.0) -> ModelListResult
                 capability["reasoning"] = reasoning
             if capability:
                 capabilities[model_id] = capability
+    # The selected ID must resolve to one catalogue row. If the service ever
+    # returns conflicting duplicates, retain eligibility but no numeric cap.
+    from collections import Counter
+    for model, count in Counter(models).items():
+        if count > 1 and isinstance(capabilities.get(model), dict):
+            capabilities[model].pop("limits", None)
     return {**model_status(models=models, status="valid", http_status=status),
             "capabilities": capabilities, "candidates": candidates}
 
@@ -212,7 +232,7 @@ SPEC = ProviderSpec(
     default_model=DEFAULT_MODEL, default_base_url=DEFAULT_BASE_URL, aliases=ALIASES,
     model_aliases=MODEL_ALIASES, key_prefixes=KEY_PREFIXES,
     rate_rpm=12.0, rate_burst=4, rate_rpm_min=4.0, rate_rpm_max=300.0,
-    adapter=ADAPTER,
+    conversation_transport="message_replay", adapter=ADAPTER,
 )
 
 # Gemini 2.5 uses thinkingBudget; Gemini 3 uses thinkingLevel. Pro and unknown
@@ -243,7 +263,14 @@ def _thinking_state(model: str, mode: str = "", model_capabilities=None) -> tupl
             # remains provider-neutral.
             if mode == "off" and cap.get("mandatory") is not True and "none" in efforts:
                 return False, {"thinkingBudget": 0}, "requested_off"
-            effort_budgets = {"low": 1024, "medium": 8192, "high": 24576}
+            # Google's 2.5-family numeric ranges differ: Pro starts at 128,
+            # Flash-Lite at 512, while Flash accepts 0 for Off. A saved
+            # "Lowest available" on Pro/Lite must not silently spend 1024
+            # thinking tokens when the documented lower budget exists.
+            lowest_positive = (128 if m.startswith("gemini-2.5-pro")
+                               else 512 if m.startswith("gemini-2.5-flash-lite")
+                               else 1024)
+            effort_budgets = {"low": lowest_positive, "medium": 8192, "high": 24576}
             if mode in efforts and mode in effort_budgets:
                 return True, {"thinkingBudget": effort_budgets[mode]}, f"requested_effort_{mode}"
             active = cap.get("mandatory") is True or cap.get("default_enabled") is True
@@ -482,6 +509,15 @@ def generate(
     text = "".join(str(p.get("text") or "") for p in out_parts if not p.get("thought")).strip()
     if not text:
         output_error("Gemini returned empty text", finish or None)
+    if thinking_applied == "requested_off":
+        observed = usage_details.get("thinkingTokens")
+        thought_part = any(isinstance(part, dict) and part.get("thought") is True
+                           for part in out_parts)
+        thinking_applied = (
+            "provider_ignored_off" if thought_part or (type(observed) is int and observed > 0)
+            else "requested_off_observed_zero_reasoning" if type(observed) is int and observed == 0
+            else "requested_off_unverified_effect"
+        )
     wire_trace.assembled_response(text)
     parse_ms = round((time.perf_counter() - parse_started) * 1000, 1)
     return ChatResult(

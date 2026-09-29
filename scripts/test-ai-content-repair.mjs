@@ -654,8 +654,8 @@ assert.equal((jobs.match(/runContentValidatedTranslation\(\{/g) || []).length, 0
   await waitForBatchInitialAi(batch.id, "a");
 }
 
-// TTL cleanup wakes waiters only to let their caller terminate. It must not
-// make an orphaned image eligible to reacquire a repair slot.
+// TTL cleanup wakes waiters for expired cancelled runs only; a slow active
+// reader is intentionally retained regardless of its age.
 {
   const batch = ensureBatch("repair-barrier-pruned", 0, 0);
   batch.total1 = 2;
@@ -664,6 +664,8 @@ assert.equal((jobs.match(/runContentValidatedTranslation\(\{/g) || []).length, 0
   const originalBatch = getBatch(batch.id);
   const originalPass = originalBatch.pass;
   const waiting = waitForBatchInitialAi(batch.id, "a");
+  batch.cancelled = true;
+  batch.cancelRequestedAt = batch.createdAt;
   pruneBatches(batch.createdAt + (21 * 60 * 1000));
   await waiting;
   const currentBatch = getBatch(batch.id);
@@ -679,6 +681,8 @@ assert.equal((jobs.match(/runContentValidatedTranslation\(\{/g) || []).length, 0
   const batch = ensureBatch(batchId, 0, 0);
   batch.total1 = 1;
   batch.items.set("a", { attempt: 1, phase: "ai_generating", status: "processing" });
+  batch.cancelled = true;
+  batch.cancelRequestedAt = batch.createdAt;
   pruneBatches(batch.createdAt + (21 * 60 * 1000));
   const barrierRequired = Boolean(batchId.trim());
   const barrierBatch = getBatch(batchId);

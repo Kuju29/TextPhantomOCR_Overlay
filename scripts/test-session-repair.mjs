@@ -64,7 +64,9 @@ function erase(count=3){return {schema:'tp.erase-boxes/1',boxes:Array.from({leng
  {id:'R2',unitId:'g2',translation:'ผิดรุ่น',sourceHash:page.units[2].sourceHash,generationId:'old'}];
  const patch=buildPatchedResult(page,repaired);
  assert.equal(patch.result.lensDocument.paragraphs[0].aiText,'ของดีเดิม');assert.equal(patch.result.lensDocument.paragraphs[1].aiText,'ซ่อมแล้ว');
- assert.deepEqual(patch.missing,['g2']);assert.deepEqual(patch.result.eraseBoxes.boxes.map(x=>x.p),['p0','p1']);checks+=4;
+ assert.deepEqual(patch.missing,['g2']);assert.deepEqual(patch.result.aiPartial.missing,['g2']);
+ assert.deepEqual(patch.result.warnings,[],'an applied repair keeps missing-unit diagnostics without a new image warning');
+ assert.deepEqual(patch.result.eraseBoxes.boxes.map(x=>x.p),['p0','p1']);checks+=6;
 }
 {
  const b=bridge(),previousFetch=globalThis.fetch,wirePackets=[];try{
@@ -103,6 +105,37 @@ function erase(count=3){return {schema:'tp.erase-boxes/1',boxes:Array.from({leng
 }
 {
  const b=bridge();try{
+  const run={id:'independent-example-store-failed',token:'a'.repeat(64),base:'http://fixture.invalid'};
+  await b.api(run,'register',{manifest:['p']});
+  const ai={provider:'ollama',model:'fixture',prompt:'KEEP STYLE',thinking:'off',
+    translation_mode:'independent',style_examples:true,
+    independent_scope:{key:'a'.repeat(64),scopeStatus:'document'}};
+  const p=await makePageCheckpoint({payload:{metadata:{image_id:'p'},lang:'th'},
+    result:{lensDocument:doc(1),eraseBoxes:erase(1)},plan:{route:'direct-local',ai},
+    units:translationUnits(doc(1)),ctx:{jobId:'generation'},operationId:'op'});
+  await b.api(run,'pages',{pageId:'p',generationId:p.generationId,groupKey:p.groupKey,status:'finished',
+    failed:[{id:'g0',text:p.units[0].text,sourceHash:p.units[0].sourceHash}]});
+  const snapshot=await b.api(run,'seal',{}),progress=[];let applied=0,providerCalls=0;
+  const examples={select:async()=>({source:'story',pairs:[{src:'Previous',tgt:'ก่อนหน้า'}],
+    acceptedPairs:1,scopeStatus:'document',storageStatus:'ready'}),
+    append:async()=>{throw Object.assign(Error('quota'),{code:'independent_examples_storage_unavailable'});}};
+  const result=await executeRepairPool({run,snapshot,executor:'worker',api:b.api,
+    signal:new AbortController().signal,getPage:async()=>p,resolveAi:async()=>p.ai,
+    checkpointTask:async()=>{},onProgress:data=>progress.push(data),
+    applyResults:async rows=>{applied++;assert.equal(rows.length,1);},
+    withCapacity:async(_p,_a,_s,fn)=>fn(),independentExamples:examples,
+    planner:createWorkloadController({read:async()=>({}),write:async()=>{}}),
+    translate:async units=>{providerCalls++;return {translations:units.map(unit=>({id:unit.id,text:'คำแปล'})),
+      meta:{generationAttempts:1}};}});
+  assert.equal(result.phase,'done');assert.equal(result.repaired,1);
+  assert.equal(applied,1,'repair must still apply its accepted result after optional memory write failed');
+  assert.equal(providerCalls,1,'failed memory write must not retry provider');
+  assert(progress.some(row=>row.event==='example_store_failed'));
+  checks+=5;
+ }finally{b.close()}
+}
+{
+ const b=bridge();try{
   const run={id:'local-recovery',token:'a'.repeat(64)};
   await b.api(run,'register',{manifest:['p']});
   const p=await makePageCheckpoint({payload:{metadata:{image_id:'p'},lang:'th'},result:{lensDocument:doc(),eraseBoxes:erase()},plan:{route:'direct-local',ai:{}},units:translationUnits(doc()),ctx:{jobId:'gen'},operationId:'op'});
@@ -133,6 +166,7 @@ function erase(count=3){return {schema:'tp.erase-boxes/1',boxes:Array.from({leng
   const payloads=Array.from({length:4},(_,i)=>({engine:'extension',mode:'lens_text',source:'ai',lang:'th',src:`http://fixture/${i}.png`,metadata:{image_id:`page${i}`},context:{},ai:{}}));
   for(const p of payloads)batch.items.set(p.metadata.image_id,{attempt:1,status:'queued',phase:'waiting',payload:p});
   const coordinator=createRepairCoordinator({sessions,api:b.api,getBase:async()=> 'http://fixture',
+   refreshLocalAiCapabilities:async ai=>ai,
    currentEpoch:()=>7,currentSession:()=> 'tab-session',getContext:id=>contexts.get(id),getCapabilitiesFor:async()=>({}),
    insert:async(_tab,msg)=>{if(msg.type==='OVERLAY_HTML')rendered.push(msg);return {ok:true,applied:true}},emit:(ev,data)=>trace.push({ev,data}),
    execute:options=>executeRepairPool({...options,withCapacity:async(_p,_a,_s,fn)=>fn(),
@@ -145,7 +179,7 @@ function erase(count=3){return {schema:'tp.erase-boxes/1',boxes:Array.from({leng
    await translateLensPage({base:'http://fixture',payload:p,result,jobId:id,cancelBatchId:batch.id,
     plan:{route:'direct-local',ai:{provider:'ollama',model:'fixture',prompt:'STYLE',thinking:'off'}},
     onCheckpoint:data=>coordinator.capture(batch.id,data),
-    dependencies:{translateUnits:async(units)=>({translations:units.map(u=>({id:u.id,text:u.id==='g0'?'ของดีเดิม':'原文'})),meta:{generationAttempts:1}})}});
+   dependencies:{refreshLocalAiCapabilities:async ai=>ai,translateUnits:async(units)=>({translations:units.map(u=>({id:u.id,text:u.id==='g0'?'ของดีเดิม':'原文'})),meta:{generationAttempts:1}})}});
    await coordinator.markDelivered(contexts.get(id),true);
    assert.equal(providerCalls.length,0,'no pooled repair until the initial batch barrier');
   }
@@ -167,6 +201,7 @@ function erase(count=3){return {schema:'tp.erase-boxes/1',boxes:Array.from({leng
   batch.items.set('gateway-page',{attempt:1,status:'queued',phase:'waiting',payload});
   let run;
   const coordinator=createRepairCoordinator({sessions,api:b.api,getBase:async()=> 'http://fixture',
+   refreshLocalAiCapabilities:async ai=>ai,
    currentEpoch:()=>7,currentSession:()=> 'tab-session',getContext:id=>contexts.get(id),getCapabilitiesFor:async()=>({}),
    insert:async(_tab,msg)=>{if(msg.type==='OVERLAY_HTML')rendered.push(msg);return {ok:true,applied:true}},
    execute:options=>executeRepairPool({...options,withCapacity:async(_p,_a,_s,fn)=>fn(),

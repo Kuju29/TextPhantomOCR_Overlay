@@ -11,7 +11,8 @@ export function normalizeReasoningPreference(value, fallback = "minimum") {
   if (value === true) return "on";
   if (value === false) return "off";
   const raw = String(value ?? "").trim().toLowerCase();
-  if (raw === "auto" || raw === "provider" || raw === "provider_default") return "default";
+  if (raw === "auto") return "minimum";
+  if (raw === "provider" || raw === "provider_default") return "default";
   if (raw === "lowest" || raw === "lowest_available" || raw === "min") return "minimum";
   if (raw === "none") return "off";
   if (PREFERENCE_SET.has(raw)) return raw;
@@ -21,11 +22,10 @@ export function normalizeReasoningPreference(value, fallback = "minimum") {
 
 export function normalizeUserReasoningPreference(value) {
   // Persist the policy, not its current model-specific result. New/reset
-  // profiles choose Lowest available; explicit Off/Low/etc. remain untouched.
+  // profiles choose Lowest available. Earlier builds stored "default" or
+  // "auto"; keep those profiles on their former Lowest available policy.
   // The leaf adapter resolves this intent only when building a request.
   const normalized = normalizeReasoningPreference(value, "minimum");
-  // Provider default remains an internal transport fallback only. Older saved
-  // Provider-default/Auto choices migrate to the user-facing Lowest available intent.
   return normalized === "default" ? "minimum" : normalized;
 }
 
@@ -49,7 +49,7 @@ export function concreteReasoningPreferences(reasoning) {
   if (!mandatory && (cap.mandatory === false || cap.can_disable === true || control === "toggle" || control === "boolean" || supported.has("none")))
     options.push("off");
   if (control === "toggle" || control === "boolean") {
-    options.push("on");
+    if (!Array.isArray(cap.supported_efforts) || supported.has("on")) options.push("on");
     return options;
   }
   if (control === "levels")
@@ -59,7 +59,17 @@ export function concreteReasoningPreferences(reasoning) {
 
 /** Lowest available is an alias for the first concrete option, never a fixed effort. */
 export function minimumReasoningPreference(reasoning) {
-  return concreteReasoningPreferences(reasoning)[0] || "default";
+  const concrete = concreteReasoningPreferences(reasoning);
+  // A verified disable control is lower than any named reasoning level.
+  if (concrete[0] === "off") return "off";
+  // A provider may advertise an unfamiliar named level that could rank below
+  // every level we recognize. Do not assert a known level is its minimum.
+  const unknownLevel = Array.isArray(reasoning?.supported_efforts) &&
+    reasoning.supported_efforts.some(value =>
+      !EFFORT_SET.has(String(value).trim().toLowerCase()) &&
+      !["off", "none", "on"].includes(String(value).trim().toLowerCase()));
+  if (reasoning?.minimum_unresolved === true || unknownLevel) return "default";
+  return concrete[0] || "default";
 }
 
 export function reasoningOptionsForCapability(reasoning) {
@@ -77,8 +87,6 @@ export function reasoningOptionsForCapability(reasoning) {
     { value: "off", label: "Thinking off" },
   ];
 
-  // Provider default is deliberately not user-selectable. "minimum" is only
-  // an alias for the first concrete capability option.
   const options = [{ value: "minimum", label: "Lowest available" }];
   const labels = {
     off: "Thinking off", on: "Thinking on",
@@ -96,13 +104,10 @@ export function resolveReasoningPreference(value, reasoning) {
   const cap = reasoning && typeof reasoning === "object" ? reasoning : {};
   const minimum = minimumReasoningPreference(cap);
   if (requested === "minimum") return minimum;
-  // Off belongs to the user profile, not capability discovery. Unknown or
-  // explicitly non-reasoning models keep Off. Only a model that explicitly
-  // requires reasoning may clamp it to its verified minimum at dispatch time.
-  if (requested === "off") {
-    if (cap.mandatory === true) return minimum !== "default" ? minimum : "default";
-    return "off";
-  }
+  // Off is a user constraint, not a hint. A provider that cannot prove it can
+  // honor Off must reject the request before dispatch instead of silently
+  // converting it to its lowest enabled reasoning level.
+  if (requested === "off") return "off";
   const options = reasoningOptionsForCapability(cap);
   if (!options.length) return "default";
   if (options.some(option => option.value === requested)) return requested;

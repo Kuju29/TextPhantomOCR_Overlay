@@ -22,6 +22,7 @@ import json
 from unittest.mock import patch
 from backend.ai import markers
 from backend.ai.clients.base import ChatResult
+from backend.ai.provider_contract import ModelListResult
 from backend.ai.translation import invocation
 from backend.ai.translation.contracts import AiConfig
 calls=[]
@@ -30,10 +31,12 @@ def generate(request):
     return ChatResult("<<TP_P0:คำแปล>>", "test-model", finish_reason="stop",
                       terminal_completed=True, terminal_evidence="stop")
 adapter=invocation.provider_registry.require("lmstudio").adapter
-with patch.object(type(adapter), "generate", side_effect=generate), patch.object(invocation, "assert_ai_base_url_allowed"):
+with patch.object(type(adapter), "generate", side_effect=generate), patch.object(adapter, "list_models", return_value=ModelListResult(
+        status="valid",models=("test-model",),capabilities={"test-model":{
+            "limits":{"contextTokens":8192,"source":"lmstudio_native_loaded_instance"}}})), patch.object(invocation, "assert_ai_base_url_allowed"):
     invocation._translate_once(markers.apply([${JSON.stringify(source)}]), "th", AiConfig(
         api_key="", provider="lmstudio", model="test-model", base_url="http://localhost:1234/v1",
-        prompt_editable=${JSON.stringify(style)}, prompt_mode="replace", char_memory=False))
+        prompt_editable=${JSON.stringify(style)}, prompt_mode="replace", thinking="default", char_memory=False))
 assert len(calls)==1
 print(json.dumps({"system": calls[0].system_text, "user": calls[0].user_parts[0],
                   "schema": calls[0].response_schema}, ensure_ascii=False))
@@ -47,6 +50,8 @@ const expectedUser = api.user;
 assert.match(expectedUser, /^งานแปล\nแปลข้อความต้นฉบับทุกหน่วยเป็นภาษาไทย/);
 assert.equal(expectedUser.split("ข้อความต้นฉบับ\n")[1], `<<TP_P0:${source}>>`);
 assert.match(expectedUser, /รายการ ID ที่ต้องตอบ: P0/);
+assert.match(expectedUser, /\bH04\b/, "API Local Independent includes four human examples");
+assert.doesNotMatch(expectedUser, /\bH05\b/, "API Local Independent does not send the remaining sixteen");
 function verifySections(messages, name) {
   assert.equal(messages[0].content, expectedSystem, `${name}: translator identity + exact style`);
   assert.equal(messages[1].content, expectedUser, `${name}: live API and Local task/source/ID parity`);
@@ -61,7 +66,9 @@ function verifySections(messages, name) {
 
 const originalFetch = globalThis.fetch;
 try {
-  for (const spec of localProviderCatalog()) {
+  for (const spec of localProviderCatalog().filter(item => item.id !== "lmstudio")) {
+    // LM Studio has a native System/input/response_id contract, covered by
+    // test-local-lmstudio-conversation.mjs rather than generic messages.
     const calls = [];
     const wire = new Map();
     globalThis.fetch = async (url, init) => {
@@ -83,7 +90,7 @@ try {
         local_adapter: localAiPreset(spec.id),
         prompt: style,
         promptMode: "replace",
-        thinking: "off",
+        thinking: "default",
       },
       canonicalPrompt: plan,
       targetLang: "th",
@@ -144,7 +151,7 @@ try {
     await translateWithLocalOpenAi([{ id: "unit", text: source }], {
       ai: { provider: variant.provider, model: "custom-model",
         base_url: variant.adapter.baseUrl, local_adapter: variant.adapter,
-        prompt: style, promptMode: "replace", thinking: "off" },
+        prompt: style, promptMode: "replace", thinking: "default" },
       canonicalPrompt: plan, targetLang: "th",
     });
     assert.equal(calls.length, 1, `${variant.name} dispatches exactly once`);
@@ -157,4 +164,4 @@ try {
   globalThis.fetch = originalFetch;
 }
 
-console.log("Provider prompt matrix passed: every Direct Local identity preserves one exact system/style contract and the same live API task/source/ID user payload (with documented style-header normalization).");
+console.log("Provider prompt matrix passed: API Local Independent and generic Direct Local send the same four human examples and exact System/style, User task/source/IDs; native LM Studio Conversation has a separate suite.");

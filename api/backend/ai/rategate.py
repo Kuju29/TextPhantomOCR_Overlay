@@ -256,6 +256,7 @@ class RateGate:
         max_waiters: int,
         rpm_override: float | None = None,
         burst_override: int | None = None,
+        manual_local: bool = False,
         cancel_check: Callable[[], bool] | None = None,
     ) -> None:
         """Block until this request may call the provider.
@@ -272,10 +273,10 @@ class RateGate:
         rather than being read as "no requests allowed".
         """
         provider = canonical_provider(provider or "auto")
-        if not self.enabled() or not self._gated(provider):
+        pinned = rpm_override is not None and float(rpm_override) > 0
+        if not pinned and (not self.enabled() or (not self._gated(provider) and not manual_local)):
             return
         start_rpm, burst, rpm_min, rpm_max = self._policy(provider)
-        pinned = rpm_override is not None and float(rpm_override) > 0
         if pinned:
             start_rpm = float(rpm_override)
             rpm_min = rpm_max = start_rpm
@@ -442,15 +443,22 @@ class RateGate:
             bucket.tokens = min(bucket.tokens, 0.0) - wait * bucket.rate
 
     # What this key is allowed right now, for the response body and the logs.
-    def snapshot(self, provider: str, model: str, api_key: str) -> dict:
+    def snapshot(self, provider: str, model: str, api_key: str, *, manual_local: bool = False,
+                 manual_override: bool = False, rpm_override: float | None = None,
+                 burst_override: int | None = None) -> dict:
         provider = canonical_provider(provider or "auto")
-        if not self.enabled() or not self._gated(provider):
+        if not manual_override and (not self.enabled() or (not self._gated(provider) and not manual_local)):
             return {"gated": False, "adaptive": False, "rpm": 0.0, "burst": 0, "waiting": 0}
         bucket = self._lookup(provider, model, api_key)
         if bucket is None:
             start_rpm, burst, rpm_min, rpm_max = self._policy(provider)
+            pinned = manual_override and rpm_override is not None and rpm_override > 0
+            if pinned:
+                start_rpm = rpm_min = rpm_max = float(rpm_override)
+                if burst_override is not None and burst_override > 0:
+                    burst = int(burst_override)
             return {
-                "gated": True, "adaptive": self.adaptive_enabled(), "pinned": False,
+                "gated": True, "adaptive": self.adaptive_enabled() and not pinned, "pinned": pinned,
                 "rpm": start_rpm, "burst": burst,
                 "rpmMin": rpm_min, "rpmMax": rpm_max, "waiting": 0,
             }

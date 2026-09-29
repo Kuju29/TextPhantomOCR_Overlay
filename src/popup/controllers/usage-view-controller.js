@@ -1,3 +1,4 @@
+import {pricingModel} from "../../shared/ai/pricing/provider-identity.js";
 import { formatUsageLabel, formatUsageLines, formatUsageSummary } from "../../shared/ai/usage-view.js";
 import { normalizeUsageLedger } from "../../shared/ai-usage.js";
 import { requestGroups } from "../../shared/ai/pricing/details.js";
@@ -8,9 +9,14 @@ import { fetchLiveRate } from "../../shared/ai/pricing/live.js";
 
 const number = value => value == null ? "—" : Number(value).toLocaleString("en-US");
 const time = value => value ? new Date(value).toLocaleString("en-GB", {timeZone:"Asia/Bangkok",hour12:false}) : "Unknown";
-const costStatus = price => price?.source === "provider" ? "Provider reported" :
+const costStatus = price => price?.status === "byok_upstream_separate" ? "OpenRouter fee only; upstream billed separately" :
+  price?.source === "provider" ? "Provider reported" :
   price?.source === "local_api_free" ? "Local API fee (hardware excluded)" :
   price?.source === "paid_credits" ? "TextPhantom credits (separate)" :
+  price?.status === "unpriced" ? "No verified price for this model/route (not free)" :
+  price?.status === "missing_cache_rate" ? "Cache-read price unavailable (not free)" :
+  price?.status === "missing_usage" ? "Provider usage is incomplete; cost cannot be calculated" :
+  price?.status === "upper_bound_tariff_calendar_unverified" ? "Upper bound: weekday peak tariff; China holiday calendar unavailable" :
   price?.status === "estimate_excludes_extras" ? "Estimated tokens; provider may add request/image fees" :
   price?.status === "cache_write_duration_unknown" ? "Estimate uses 5-minute cache write rate; 1-hour writes may cost more" :
   price?.status === "estimated_posthoc" ? "Estimated using catalogue price fetched later the same day" :
@@ -35,7 +41,7 @@ export function createUsageViewController({els,state,isLocalProvider,getStorage,
   const routeFor = (ledger,selected,model=selected.model) => {
     const entries = normalizeUsageLedger(ledger).models;
     const matching = Object.values(entries).filter(v => v.provider?.toLowerCase() === selected.provider.toLowerCase() &&
-      v.model?.toLowerCase() === String(model || "").toLowerCase());
+      pricingModel(v).toLowerCase() === pricingModel({...selected,model}).toLowerCase());
     return matching.flatMap(v => v.sessions || []).flatMap(s => s.deltas || [])
       .sort((a,b) => (b.timestamp||0)-(a.timestamp||0)).find(d => d.upstreamProvider)?.upstreamProvider || "";
   };
@@ -52,7 +58,8 @@ export function createUsageViewController({els,state,isLocalProvider,getStorage,
   const costLine = (row, fx) => {
     const cost = charge(row, fx);
     return `API cost ${displayMoney(cost.usd,"USD")} · ≈ ${displayMoney(cost.thb,"THB")}` +
-      (cost.unpriced ? ` · ${number(cost.unpriced)} unpriced call${cost.unpriced === 1 ? "" : "s"}` : "");
+      (cost.unpriced ? ` · ${number(cost.unpriced)} unpriced call${cost.unpriced === 1 ? "" : "s"}` : "") +
+      (row?.byokRequests > 0 ? " · BYOK OpenRouter fee and upstream bill excluded from total" : "");
   };
   const render = (row, ledger=null) => {
     if (!els.aiUsageWrap || !els.aiUsageCounts) return;
@@ -71,7 +78,8 @@ export function createUsageViewController({els,state,isLocalProvider,getStorage,
     if (els.aiUsageLabel) els.aiUsageLabel.textContent = formatUsageLabel(row);
     if (els.aiUsageTotal) {
       const amount = cost.thb == null ? displayMoney(cost.usd,"USD") : displayMoney(cost.thb,"THB");
-      els.aiUsageTotal.textContent = `${formatUsageSummary(row)}  ≈ ${amount}${cost.unpriced ? " · partial" : ""}`;
+      const amountLabel = cost.unpriced && cost.usd == null ? "unpriced" : `${amount}${cost.unpriced ? " · partial" : ""}`;
+      els.aiUsageTotal.textContent = `${formatUsageSummary(row)}  ≈ ${amountLabel}`;
       els.aiUsageTotal.title = `${costLine(row, fx)}. ${fx ? `Reference rate ${fx.rate} THB/USD (${fx.source}).` : "THB conversion unavailable."}`;
     }
   };
@@ -88,7 +96,7 @@ export function createUsageViewController({els,state,isLocalProvider,getStorage,
   const maybeRefreshRate = (ledger,selected) => {
     if (!persistPricingSettings || rateTask || !["featherless","huggingface"].includes(selected.provider.toLowerCase())) return;
     const actual = currentUsage(ledger,selected);
-    const model = selected.model === "auto" ? actual?.model : selected.model;
+    const model = pricingModel({...selected, model:selected.model === "auto" ? actual?.model : selected.model});
     const upstream = selected.provider.toLowerCase() === "huggingface" ? routeFor(ledger,selected,model) : "";
     if (!model || model === "auto" || (selected.provider.toLowerCase() === "huggingface" && !upstream)) return;
     const key = routeRateKey(selected.provider,model,upstream);
@@ -126,6 +134,8 @@ export function createUsageViewController({els,state,isLocalProvider,getStorage,
     box.appendChild(summary);
     const p = delta.price || {};
     paragraph(box,`Input ${number(delta.inputTokens)} (cached read ${number(delta.cachedInputTokens)}, cache write ${number(delta.cacheWriteInputTokens)})\nOutput ${number(delta.outputTokens)} (reasoning ${number(delta.thinkingTokens)})\n${costStatus(p)} · ${displayMoney(p.usd,"USD")} · ≈ ${displayMoney(thb(p.usd,p,fx),"THB")}`);
+    if (p.status === "byok_upstream_separate")
+      paragraph(box,`OpenRouter fee ${displayMoney(p.providerFeeUsd,"USD")} · upstream inference ${displayMoney(p.upstreamInferenceCostUsd,"USD")} (separate bill); total is not verified`);
     if (p.parts) paragraph(box,`Input ${displayMoney(p.parts.ordinaryUsd,"USD")} + cache read ${displayMoney(p.parts.cacheReadUsd,"USD")} + cache write ${displayMoney(p.parts.cacheWriteUsd,"USD")} + output ${displayMoney(p.parts.outputUsd,"USD")}`);
     if (p.rate) paragraph(box,`Saved $/1M: input ${p.rate.input}, cache read ${p.rate.cached ?? "—"}, cache write ${p.rate.cacheWrite ?? "—"}, output ${p.rate.output} · ${p.rate.origin || ""} ${p.rate.asOf || ""}`);
     if (p.savingsUsd != null) paragraph(box,`Cache read savings vs full input price: ≈ ${displayMoney(p.savingsUsd,"USD")}`);
@@ -198,7 +208,10 @@ export function createUsageViewController({els,state,isLocalProvider,getStorage,
     if(!groups.length) paragraph(list,"No calls in this session yet.");
     for(const group of groups) {
       const item=document.createElement("article");item.className="ai-usage-history-item";
-      paragraph(item,`${time(group.startedAt)}\n${number(group.imageRequests)} image requests · ${number(group.requests)} AI calls · ${number(group.failures)} failed · ${number(group.totalTokens)} tokens · ${displayMoney(group.usd,"USD")}${group.unpricedRequests?` + ${group.unpricedRequests} unpriced`:""}`);
+      paragraph(item,`${time(group.startedAt)}\n${number(group.imageRequests)} image requests · ${number(group.requests)} AI calls · ${number(group.failures)} failed · ${number(group.totalTokens)} tokens · `+
+        `${group.unpricedRequests===group.requests?"Price unavailable":`Priced subtotal ${displayMoney(group.usd,"USD")}`}`+
+        `${group.unpricedRequests?` · ${group.unpricedRequests} unpriced`:""}`+
+        `${group.byokRequests?" · BYOK OpenRouter fee/upstream excluded; see individual requests":""}`);
       for(const delta of group.deltas) renderRequest(item,delta,fx);
       list.appendChild(item);
     }

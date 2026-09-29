@@ -120,6 +120,11 @@
           </label>
           <div class="hint">Shows a small 🔍 button only while hovering over an image so you can translate a single
             image without right-clicking.</div>
+          <label class="label-row toggle-row">
+            <span>⬇ Download images</span>
+            <input type="checkbox" id="download-images-toggle" />
+          </label>
+          <div class="hint">Shows a small button at the bottom-right. Save all matching images as one ZIP, or save individual images. Remembers your image format. No new translation.</div>
         </div>
       </section>
 
@@ -177,6 +182,7 @@
               <option value="paid">Paid · TextPhantom credits</option>
             </select>
           </div>
+          <div class="hint" id="ai-paid-unavailable" role="status" style="display: none"></div>
           <div id="ai-paid-panel" style="display: none">
             <div class="field" id="ai-paid-login">
               <label for="ai-paid-email">Email</label>
@@ -212,7 +218,10 @@
 
           <!-- Local endpoint: shown only for local providers -->
           <div class="field" id="ai-endpoint-wrap" style="display: none">
-            <label for="ai-base-url">Local server URL</label>
+            <div class="label-row label-row--inline">
+              <label for="ai-base-url">Local server URL</label>
+              <a id="ai-local-website" href="#" target="_blank" rel="noopener noreferrer" hidden>(website)</a>
+            </div>
             <input type="text" id="ai-base-url" placeholder="http://localhost:11434" />
             <div class="hint">Local server address. No API key.</div>
             <button type="button" id="ai-local-test" class="secondary-btn">Refresh models</button>
@@ -349,13 +358,31 @@
             <div id="rate-preset-hint" class="hint rate-preset" aria-live="polite"></div>
             <div class="hint">Optional Cloud-only request-rate cap, separate from per-request token limits. Off means provider managed. Unknown token/minute limits are not guessed.</div>
           </div>
+          <div class="field" id="ai-local-rate-wrap" style="display: none">
+            <label class="label-row" style="cursor: pointer">
+              <span>Use a manual AI request-rate cap</span>
+              <input type="checkbox" id="ai-local-rate-enabled" />
+            </label>
+            <div class="inline-row rate-row">
+              <label class="rate-field">
+                <span>Local AI requests / minute (including repair)</span>
+                <input type="number" id="ai-local-rate-rpm" min="1" max="600" step="1" value="6" />
+              </label>
+              <label class="rate-field">
+                <span>Requests allowed back-to-back</span>
+                <input type="number" id="ai-local-rate-burst" min="1" max="60" step="1" value="1" />
+              </label>
+            </div>
+            <div id="ai-local-rate-hint" class="hint" aria-live="polite"></div>
+            <div class="hint">Optional pacing between Local AI requests. For a slow PC, also use Local AI capacity → Safe. Cloud settings remain separate.</div>
+          </div>
           <div class="field" id="ai-translation-mode-wrap">
             <label class="label-row" for="ai-translation-mode">Translation mode</label>
-            <select id="ai-translation-mode">
+            <select id="ai-translation-mode" disabled aria-label="Assigned translation mode">
               <option value="conversation" selected>Conversation</option>
-              <option value="independent" disabled>Independent (original)</option>
+              <option value="independent">Independent</option>
             </select>
-            <div class="hint">Conversation is used for all extension translations. Independent (original) is temporarily unavailable.</div>
+            <div class="hint">Cloud uses Conversation. All Local AI providers, including LM Studio, use Independent. The mode follows the provider automatically.</div>
           </div>
         </section>
       </section>

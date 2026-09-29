@@ -16,12 +16,13 @@ from backend.ai.clients.base import (
     ChatResult, LineCompletionDetector, ProviderGenerationCancelled,
     provider_output_error, token_usage,
 )
-from backend.ai.clients.provider_error import safe_http_error
+from backend.ai.clients.provider_error import safe_http_error, http_error_evidence
 from backend.ai import wire_trace, accounting, content_stream
+from backend.ai.usage import llama_cached_usage, token
 from backend.ai.transports.stream_timing import StreamTiming
 
 from backend.ai.transports.openai_compat.streaming import (
-    JsonObjectCompletionDetector, JsonClosureGate, WireStreamCapture, merge_usage,
+    JsonObjectCompletionDetector, JsonClosureGate, merge_usage,
 )
 from backend.ai.transports.openai_compat.response import json_response, response_text
 
@@ -34,6 +35,7 @@ def execute_openai_compatible_request(
     trace_fields: dict[str, Any] | None = None,
     cache_policy: dict[str, Any] | None = None,
     cost_authoritative: bool = False,
+    local_provider: bool = False,
 ) -> ChatResult:
     """Execute one prepared request; never retry, probe or mutate policy.
 
@@ -132,6 +134,7 @@ def execute_openai_compatible_request(
                     or getattr(client, "_textphantom_streaming", False) is True
                 )
                 upstream_provider = ""
+                llama_cache_n = None
                 if can_stream:
                     pieces: list[str] = []
                     usage_data: dict[str, Any] = {}
@@ -143,13 +146,17 @@ def execute_openai_compatible_request(
                     reasoning_chunk_count = 0
                     protocol_done = False
                     timing = StreamTiming(started)
-                    wire_capture = WireStreamCapture()
                     try:
                         with stream_method("POST", url, json=request_payload, headers=headers) as response:
+                            wire_trace.provider_response_omitted(response, streamed=True)
                             if not response.is_success:
                                 response.read()
-                                wire_trace.http_response(response)
-                            response.raise_for_status()
+                            try:
+                                response.raise_for_status()
+                            except httpx.HTTPStatusError as exc:
+                                failure = safe_http_error(provider_id, response, model)
+                                wire_trace.write_json("05_provider_response.meta.json", http_error_evidence(failure, streamed=True))
+                                raise failure from exc
                             try:
                                 header_upstream = str(response.headers.get("x-inference-provider") or "").strip()
                             except Exception:
@@ -171,8 +178,6 @@ def execute_openai_compatible_request(
                                             f"AI provider total timeout after {hard_total_sec:g}s (model={model}, attempts=1)"
                                         )
                                     line = raw_line.decode() if isinstance(raw_line, bytes) else str(raw_line or "")
-                                    with timing.measure("wireWrite"):
-                                        wire_capture.raw(line + "\n")
                                     line = line.strip()
                                     if not line or line.startswith(":"): continue
                                     if line.startswith("data:"): line = line[5:].strip()
@@ -182,6 +187,10 @@ def execute_openai_compatible_request(
                                         break
                                     try: item = json.loads(line, parse_float=Decimal)
                                     except ValueError as exc: raise RuntimeError(f"AI returned invalid SSE (model={model})") from exc
+                                    if provider_id in {"llamacpp", "llamafile"}:
+                                        timings = item.get("timings")
+                                        if isinstance(timings, dict) and "cache_n" in timings:
+                                            llama_cache_n = token(timings["cache_n"])
                                     if isinstance(item.get("id"), str): response_id = item["id"]
                                     if isinstance(item.get("usage"), dict):
                                         merge_usage(usage_data, item["usage"])
@@ -251,13 +260,13 @@ def execute_openai_compatible_request(
                         # usage collection or provider-drain semantics.
                         timing.finish()
                         with timing.measure("wireWrite"):
-                            wire_capture.finish("".join(pieces))
+                            wire_trace.assembled_response("".join(pieces))
                         stream_timing = timing.snapshot()
                         wire_trace.write_json("09_stream_timing.json", stream_timing)
                         trace.note(trace_event + ".stream_timing", timing.audit(), file=trace_file)
                     data = {"choices": [{"finish_reason": finish, "message": {"content": "".join(pieces)}}], "usage": usage_data, "provider": upstream_provider, "model": actual_model, "id": response_id}
-                    # Raw SSE was appended before parsing each frame so a broken
-                    # or interrupted stream still leaves the received prefix.
+                    # The raw SSE is deliberately omitted even on malformed or
+                    # interrupted streams; the decoded visible prefix remains.
                     streamed = True
                     normal_finish = str(finish or "").lower() in {"stop", "end_turn", "completed", "complete"}
                     # Complete marker records are latency evidence only. They do
@@ -272,6 +281,7 @@ def execute_openai_compatible_request(
                     request_payload["stream"] = False
                     request_payload.pop("stream_options", None)
                     response = client.post(url, json=request_payload, headers=headers)
+                    wire_trace.provider_response_omitted(response, streamed=False)
                     try:
                         upstream_provider = str(response.headers.get("x-inference-provider") or "")[:160]
                     except Exception:
@@ -282,7 +292,6 @@ def execute_openai_compatible_request(
                         raise TimeoutError(
                             f"AI provider total timeout after {hard_total_sec:g}s (model={model}, attempts=1)"
                         )
-                    wire_trace.http_response(response)
                     body_ms = round((time.perf_counter() - started) * 1000, 1)
                     trace.note(trace_event + ".response_body", {
                         "stage": "provider_response_body",
@@ -342,18 +351,41 @@ def execute_openai_compatible_request(
             raise ValueError("invalid response shape")
         choices = data.get("choices") or []
         finish = str((choices[0] if choices else {}).get("finish_reason") or "").strip() or None
-        usage = accounting.observe(data.get("usage"), complete=terminal_completed,
+        raw_usage = data.get("usage")
+        if provider_id in {"llamacpp", "llamafile"}:
+            if not streamed:
+                timings = data.get("timings")
+                llama_cache_n = token(timings.get("cache_n")) if isinstance(timings, dict) else None
+            raw_usage = llama_cached_usage(raw_usage, llama_cache_n)
+        usage = accounting.observe(raw_usage, complete=terminal_completed,
             cost_authoritative=cost_authoritative,
             response_id=str(data.get("id") or ""), http_status=response.status_code)
-        if provider_id == "huggingface":
-            upstream = str(data.get("provider") or upstream_provider or "")[:160]
-            if upstream:
-                usage["upstreamProvider"] = upstream
+        upstream = str(data.get("provider") or upstream_provider or "").strip()
+        if upstream:
+            usage["upstreamProvider"] = str(upstream)[:160]
         inp, out, total = (usage[key] for key in ("inputTokens", "outputTokens", "totalTokens"))
         details = (data.get("usage") or {}).get("completion_tokens_details") or {}
         reasoning_tokens = details.get("reasoning_tokens")
         if not isinstance(reasoning_tokens, int) or isinstance(reasoning_tokens, bool):
             reasoning_tokens = None
+        message = (choices[0].get("message") or {}) if choices and isinstance(choices[0], dict) else {}
+        reasoning_observed = reasoning_chunk_count > 0 or any(
+            bool(message.get(field)) for field in ("reasoning_content", "reasoning")
+        )
+        # This replaces the status-only provisional response metadata after
+        # parsing. Each value is a validated count; vendor text and arbitrary
+        # response fields remain outside the wire artifacts.
+        safe_count = lambda value: value if type(value) is int and value >= 0 else None
+        wire_trace.write_json("05_provider_response.meta.json", {
+            "status": response.status_code if type(response.status_code) is int else None,
+            "streamed": streamed, "bodyStored": False,
+            "streamChunkCount": chunk_count if streamed else None,
+            "reasoningChunkCount": reasoning_chunk_count if streamed else None,
+            "inputTokens": safe_count(inp), "outputTokens": safe_count(out),
+            "totalTokens": safe_count(total),
+            "cachedInputTokens": safe_count(usage.get("cachedInputTokens")),
+            "reasoningTokens": safe_count(reasoning_tokens),
+        })
         try:
             content = response_text(data)
         except RuntimeError as exc:
@@ -368,10 +400,20 @@ def execute_openai_compatible_request(
                 "finishReason": finish,
                 "providerMs": provider_ms,
             }, file=trace_file)
-            raise provider_output_error(str(exc), provider=provider_id, model=model,
+            error = provider_output_error(str(exc), provider=provider_id, model=model,
                 input_tokens=inp, output_tokens=out, total_tokens=total,
                 finish_reason=finish, provider_ms=provider_ms, parse_ms=parse_ms,
-                timeout_policy=timeout_policy, usage_details=usage) from exc
+                timeout_policy=timeout_policy, usage_details=usage)
+            if (local_provider and finish in {"length", "max_tokens", "max_output_tokens"}
+                    and not raw_content.strip()):
+                if reasoning_observed or reasoning_tokens is not None and reasoning_tokens > 0:
+                    error.structural_details["reasoningOnlyExhausted"] = True
+                error.structural_details["validatorSubtype"] = (
+                    "reasoning_only_exhausted" if reasoning_observed or reasoning_tokens is not None and reasoning_tokens > 0
+                    else "empty_output")
+                if type(request_payload.get("max_tokens")) is int:
+                    error.structural_details["requestedOutputTokens"] = request_payload["max_tokens"]
+            raise error from exc
         parse_ms = round((time.perf_counter() - parse_started) * 1000, 1)
         fields = {
             "stream": streamed, "streamChunkCount": chunk_count,
@@ -409,8 +451,10 @@ def execute_openai_compatible_request(
             requested_output_tokens=request_payload.get("max_completion_tokens", request_payload.get("max_tokens")),
             upstream_provider=str(data.get("provider") or upstream_provider or "")[:160],
             cached_input_tokens=usage.get("cachedInputTokens"), usage_details=usage, cache_policy=cache_policy,
-            first_content_ms=first_content_ms)
+            first_content_ms=first_content_ms, reasoning_observed=reasoning_observed)
     except httpx.HTTPStatusError as exc:
-        raise safe_http_error("AI", response, model) from exc
+        failure = safe_http_error(provider_id, response, model)
+        wire_trace.write_json("05_provider_response.meta.json", http_error_evidence(failure, streamed=False))
+        raise failure from exc
 
 __all__ = ["execute_openai_compatible_request"]

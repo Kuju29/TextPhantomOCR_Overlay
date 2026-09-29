@@ -15,6 +15,9 @@ export async function digestText(text) {
 export async function makePageCheckpoint({ payload, result, plan, units, ctx, operationId }) {
   const reserved = reservedConversation(payload);
   const cleanAi = sessionSafe({...plan.ai, ...(reserved ? {conversation:reserved} : {})});
+  // Example pairs live once in bounded local storage. Repeating them in every
+  // page checkpoint would waste session quota and fragment repair grouping.
+  if (cleanAi.translation_mode === 'independent') delete cleanAi.independent_examples;
   const sourceLang = String(result?.lensDocument?.languages?.source || '');
   const imageId = String(payload.metadata?.image_id || ctx.imageKey || '');
   const groupingAi = {...cleanAi};
@@ -89,7 +92,6 @@ export function buildPatchedResult(page, accepted) {
     delete result.aiPartial;
   }
   result.warnings = (result.warnings || []).filter(x => !String(x).startsWith('AI left '));
-  if (missing.length) result.warnings.push(`AI repair finished; ${missing.length} unit(s) remain unresolved: ${missing.join(', ')}`);
   return { result, missing, accepted: [...safe].map(([id,text]) => ({id,text})) };
 }
 

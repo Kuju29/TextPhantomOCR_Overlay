@@ -102,6 +102,16 @@ def run(chunks, *, after=(), terminal=True, expected_ids=("P0", "P1"), cancel_ch
 
 
 class ProviderHeaderTests(unittest.TestCase):
+    def test_reasoning_delta_survives_as_redacted_boolean_without_token_count(self):
+        thought = "private reason fragment sentinel"
+        result = run(["<<TP_P0:ok>>"], expected_ids=("P0",), after=(
+            "data: " + json.dumps({"choices": [{"delta": {"reasoning_content": thought},
+                                          "finish_reason": None}]}),
+        ))
+        self.assertTrue(result.reasoning_observed)
+        self.assertIsNone(result.thinking_tokens)
+        self.assertNotIn(thought, repr(result))
+
     def test_hf_inference_provider_header_is_retained(self):
         Client.lines = [
             "data: " + json.dumps({"id":"r","model":"actual-model","choices":[{"delta":{"content":"<<TP_P0:ok>>"},"finish_reason":None}]}),
@@ -204,7 +214,7 @@ class StreamTests(unittest.TestCase):
                 )
         self.assertLess(time.perf_counter() - started, .8)
 
-    def test_wire_trace_on_persists_exact_raw_assembled_and_terminal(self):
+    def test_wire_trace_omits_raw_but_keeps_visible_text_and_terminal(self):
         lines = sse(["<<TP_P0:one>>"], terminal=True)
         Client.lines = lines
         previous = {key: os.environ.get(key) for key in
@@ -229,7 +239,12 @@ class StreamTests(unittest.TestCase):
                     else: os.environ[key] = value
             self.assertIsNotNone(folder)
             self.assertEqual((folder / "05_provider_response.raw").read_text("utf-8"),
-                             "\n".join(lines) + "\n")
+                             "[raw provider response omitted]\n")
+            response_meta = json.loads((folder / "05_provider_response.meta.json").read_text("utf-8"))
+            self.assertEqual((response_meta["status"], response_meta["streamed"],
+                              response_meta["bodyStored"], response_meta["inputTokens"],
+                              response_meta["outputTokens"]),
+                             (200, True, False, 11, 7))
             self.assertEqual((folder / "05_provider_response.assembled.txt").read_text("utf-8"),
                              result.text)
             terminal = json.loads((folder / "11_terminal.json").read_text("utf-8"))
@@ -255,11 +270,9 @@ class StreamTests(unittest.TestCase):
         self.assertIsNotNone(result.first_all_ids_ms)
         self.assertIsNotNone(result.early_completion_ms)
         self.assertEqual(assembled, [result.text])
-        # Raw capture includes content, the post-contract usage frame, terminal
-        # finish/usage, and [DONE]; completion evidence never truncates it.
-        self.assertEqual(len(raw), 1)
-        self.assertEqual(raw[0][0], "05_provider_response.raw")
-        self.assertTrue(raw[0][1].strip().endswith("[DONE]"))
+        # Visible answer, usage and terminal evidence still survive; raw
+        # provider frames may contain private reasoning fields.
+        self.assertEqual(raw, [])
 
     def test_wire_buffer_preserves_exact_order_and_bounds_pending_memory(self):
         writes = []
@@ -274,7 +287,7 @@ class StreamTests(unittest.TestCase):
         self.assertEqual(len(writes), 2)
         assembled.assert_called_once_with("visible")
 
-    def test_malformed_sse_flushes_exact_received_prefix_once(self):
+    def test_malformed_sse_keeps_visible_prefix_without_raw_frames(self):
         Client.lines = sse(["partial"], after=("data: not-json",), terminal=False)
         raw, assembled = [], []
         with patch.object(httpx, "Client", Client), \
@@ -288,7 +301,7 @@ class StreamTests(unittest.TestCase):
                     model="m", provider_id="openrouter", timeout=1,
                     timeout_policy="test", expected_ids=["P0"],
                 )
-        self.assertEqual("".join(raw), "\n".join(Client.lines) + "\n")
+        self.assertEqual(raw, [])
         self.assertEqual(assembled, ["partial"])
 
     def test_marker_delimiter_split_at_both_record_boundaries(self):
@@ -369,7 +382,7 @@ class StreamTests(unittest.TestCase):
                     cancel_check=cancel,
                 )
 
-    def test_in_stream_cancellation_flushes_received_partial_trace(self):
+    def test_in_stream_cancellation_keeps_visible_prefix_without_raw_frames(self):
         Client.lines = sse(["first", "second"])
         calls, raw, assembled = 0, [], []
         def cancel():
@@ -389,7 +402,7 @@ class StreamTests(unittest.TestCase):
                     timeout_policy="test", expected_ids=["P0"],
                     cancel_check=cancel,
                 )
-        self.assertEqual("".join(raw), Client.lines[0] + "\n")
+        self.assertEqual(raw, [])
         self.assertEqual(assembled, ["first"])
 
 

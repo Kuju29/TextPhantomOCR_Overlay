@@ -25,6 +25,8 @@ async function withRelaySlot(work) {
   finally { releaseRelaySlot(); }
 }
 const secretKey = /^(?:authorization|proxy-authorization|api[-_]?key|x-api-key|cookie|set-cookie|token|access_token|x-tp-run-token|secret)$/i;
+const providerCursorKey=/^(?:response_id|previous_response_id)$/i;
+const providerCursorJson=/("(?:response_id|previous_response_id)"\s*:\s*")(resp_[A-Za-z0-9_-]{1,256})(")/g;
 
 function redactUrl(raw) {
   try {
@@ -35,7 +37,7 @@ function redactUrl(raw) {
   } catch { return raw; }
 }
 export function redactAiWireValue(value, key = "") {
-  if (secretKey.test(String(key))) return value ? "<redacted>" : value;
+  if (secretKey.test(String(key))||providerCursorKey.test(String(key))) return value ? "<redacted>" : value;
   if (Array.isArray(value)) return value.map((item) => redactAiWireValue(item));
   if (value && typeof value === "object") {
     const out = {};
@@ -45,8 +47,25 @@ export function redactAiWireValue(value, key = "") {
   if (typeof value === "string" && /(?:url|endpoint)$/i.test(String(key))) return redactUrl(value);
   return value;
 }
+function redactProviderResponse(value, provider){
+  if(!value||typeof value!=="object")return value;
+  // Hidden reasoning, provider cursors, and other sensitive response fields
+  // can be split at any byte boundary. Never relay an unparsed provider body
+  // for any Direct Local runtime. Decoded visible translation is recorded by
+  // providerAssembled separately after the provider adapter has parsed it.
+  const native=provider==="lmstudio";
+  return {...value,
+    ...(typeof value.raw==="string"?{raw:native?"<omitted-native-provider-body>":"<omitted-provider-body>"}:{}),
+    ...(typeof value.reconstructedEnvelope==="string"?{reconstructedEnvelope:native?"<omitted-native-provider-envelope>":"<omitted-provider-envelope>"}:{}),
+    ...(Array.isArray(value.chunks)?{chunkCount:value.chunks.length,chunks:[]}:{})};
+}
+function collectNativeResponseCursors(value,secrets){
+  if(!value||typeof value!=="object")return;
+  for(const raw of [value.raw,value.reconstructedEnvelope,...(Array.isArray(value.chunks)?value.chunks:[])])
+    if(typeof raw==="string")for(const match of raw.matchAll(providerCursorJson))secrets.add(match[2]);
+}
 function collectSecrets(value, key = "", out = new Set()) {
-  if (typeof value === "string" && secretKey.test(String(key))) {
+  if (typeof value === "string" && (secretKey.test(String(key))||providerCursorKey.test(String(key)))) {
     if (value.length >= 4) out.add(value);
     const bearer = value.match(/^Bearer\s+(.+)$/i)?.[1];
     if (bearer?.length >= 4) out.add(bearer);
@@ -135,7 +154,11 @@ export function createAiWireRecorder({ enabled = false, operationId = "", traceI
   const recorder = (stage, value) => {
     if (disabled) return Promise.resolve(false);
     if (stage === "providerRequest") collectSecrets(value, "", secrets);
+    if(identity?.provider==="lmstudio"&&stage==="providerResponse") collectNativeResponseCursors(value,secrets);
     value = redactAiWireValue(scrub(value, secrets));
+    if(stage==="providerResponse") value=redactProviderResponse(value,identity?.provider);
+    if(stage==="providerAssembled"&&value?.source==="non_stream_http_body")
+      value={...value,text:identity?.provider==="lmstudio"?"<omitted-native-provider-body>":"<omitted-provider-body>"};
     const bytes = new TextEncoder().encode(JSON.stringify({ stage, value })).length;
     if (queue.length >= maxQueuedEvents || queuedBytes + bytes > maxQueuedBytes) {
       disabled = true; queue.length = 0; queuedBytes = 0;

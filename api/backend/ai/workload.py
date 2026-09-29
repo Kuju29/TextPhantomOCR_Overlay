@@ -44,6 +44,30 @@ def text_weight(value):
     return max(1, math.ceil(total))
 
 
+def source_output_allowance(parts):
+    """Bound a public estimate by source content, not padding or client hints."""
+    texts = tuple(str(part or '') for part in parts)
+    substantive = tuple(''.join(char for char in part if not char.isspace())
+                        for part in texts)
+    chars = sum(len(part) for part in substantive)
+    weight = sum(text_weight(part) for part in substantive)
+    return max(1024, math.ceil(max(chars, weight) * 3 + len(texts) * 112 + 384))
+
+
+def bounded_source_workload(workload, source_unit_texts):
+    """A translated, validated source bounds numerical browser predictions."""
+    hint = normalize_workload(workload)
+    if not hint:
+        return hint
+    result = dict(hint)
+    if 'predictedOutput' in result:
+        result['predictedOutput'] = min(result['predictedOutput'],
+                                        source_output_allowance(source_unit_texts))
+    if 'reasoningReserve' in result:
+        result['reasoningReserve'] = min(result['reasoningReserve'], 8192)
+    return result
+
+
 def observed_input_scale(samples):
     """Two times the largest observed actual/raw ratio, with a 45% floor.
 
@@ -78,19 +102,19 @@ def estimate_provider_input(*, system='', parts=(), schema=None, image=False, hi
                      64 + (2048 if image else 0)) * 1.25 * scale)
 
 
-def guard_output_budget(standard, *, workload=None, limits=None, system='', parts=(), schema=None, image=False, history=()):
+def guard_output_budget(standard, *, workload=None, limits=None, system='', parts=(), source_unit_texts=(), schema=None, image=False, history=()):
     hint = normalize_workload(workload)
-    if not hint:
-        return standard
     bounds = normalize_limits(limits)
     inp = estimate_provider_input(system=system, parts=parts, schema=schema, image=image, history=history)
-    expected = hint.get('predictedOutput', 1)
-    reasoning = hint.get('reasoningReserve', 0)
-    application_ceiling = max(8192, hint.get('completionAvailable', 0) or 8192)
-    available = min(application_ceiling, bounds.get('maxOutputTokens', math.inf), bounds.get('outputHintTokens', math.inf),
-                    bounds['contextTokens'] - inp - 128 if bounds.get('contextTokens') else math.inf,
-                    hint.get('completionAvailable', math.inf))
-    if inp > bounds.get('maxInputTokens', math.inf) or available < expected + reasoning:
+    source_allowance = source_output_allowance(source_unit_texts or parts)
+    expected = min(hint.get('predictedOutput', 1), source_allowance)
+    reasoning = min(hint.get('reasoningReserve', 0), 8192)
+    # The model window is physical evidence; an 8K ordinary request is a
+    # generation policy. Neither an unverified routing hint nor a browser's
+    # completionAvailable may become a physical provider ceiling.
+    available = min(bounds.get('maxOutputTokens') or math.inf,
+                    bounds['contextTokens'] - inp - 128 if bounds.get('contextTokens') else math.inf)
+    if inp > bounds.get('maxInputTokens', math.inf) or available < expected + reasoning or available < 1:
         error = WorkloadBudgetError('The composed prompt and estimated response exceed the available model budget')
         error.diagnostics = {"constraintScope":"per_request", "estimatedInput":inp,
             "estimatedOutput":expected, "reasoningReserve":reasoning,
@@ -99,12 +123,21 @@ def guard_output_budget(standard, *, workload=None, limits=None, system='', part
             "constraint":"input_limit" if inp > bounds.get('maxInputTokens', math.inf) else
                 "context_window" if bounds.get('contextTokens') and inp+expected+reasoning+128 > bounds['contextTokens'] else "output_budget"}
         raise error
-    requested = max(standard, min(application_ceiling, expected + reasoning + max(128, math.ceil(expected * .5))))
-    return max(1, math.floor(min(available, requested)))
+    requested = max(standard, expected + reasoning + max(128, math.ceil(expected * .5))) if hint else standard
+    return max(1, math.floor(min(available, requested,
+        max(standard, source_allowance + reasoning))))
 
 
 def guard_request_budget(request, standard):
-    return guard_output_budget(standard, workload=request.workload,
+    workload = request.workload
+    reasoning = request.model_capabilities.get('reasoning') or {}
+    if (request.cache_context.get('reasoningCapabilityVerified') is True and
+            isinstance(reasoning, Mapping) and reasoning.get('supported') is False):
+        # A browser estimate from an earlier, reasoning-capable instance is
+        # not required output space after this exact model was verified plain.
+        workload = {**workload, 'reasoningReserve': 0}
+    return guard_output_budget(standard, workload=workload,
         limits=request.model_capabilities.get('limits'), system=request.system_text,
-        parts=request.user_parts, schema=dict(request.response_schema) if request.response_schema else None,
+        parts=request.user_parts, source_unit_texts=request.source_unit_texts,
+        schema=dict(request.response_schema) if request.response_schema else None,
         image=bool(request.image_b64), history=request.history_messages)

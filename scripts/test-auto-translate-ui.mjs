@@ -154,7 +154,7 @@ for (const [provider, url] of Object.entries(officialKeyUrls)) {
   assert.equal(mockKeyLink.href, url, `${provider} link href`);
   assert.equal(mockKeyLink.hidden, false, `${provider} link remains visible`);
 }
-for (const provider of ["ollama", "lmstudio", "localai", "jan", "text-generation-webui", "koboldcpp", "vllm", "llamafile", ""]) {
+for (const provider of ["ollama", "lmstudio", "jan", "text-generation-webui", "koboldcpp", "vllm", "llamafile", ""]) {
   assert.equal(links.applyProviderKeyLink(mockKeyLink, provider), "", `${provider || "empty"} has no key URL`);
   assert.equal(mockKeyLink.href, "#", `${provider || "empty"} safe fallback href`);
   assert.equal(mockKeyLink.hidden, true, `${provider || "empty"} key link hidden`);

@@ -1,3 +1,4 @@
+import {pricingModel} from "./ai/pricing/provider-identity.js";
 import { createUsageCommitQueue } from "./ai/usage-commit-queue.js";
 import { getStorage, removeStorage, setStorage } from "./storage.js";
 import { TOKEN_FIELDS, token, decimal, addDecimal, aggregateUsage, usageIsComplete } from "./ai/usage-values.js";
@@ -364,6 +365,7 @@ const newSession = (now, id) => ({
   tokenCoverage: {},
   providerCostUsd: null,
   costReportedRequests: 0,
+  byokRequests: 0,
   successes: 0,
   failures: 0,
   inputTokens: null,
@@ -538,6 +540,22 @@ export function recordProviderGeneration(
             saved.costReportedRequests += previous.requests;
             changed = true;
           }
+          if (event.isByok === true && next.isByok !== true) {
+            next.isByok = true;
+            saved.byokRequests = (saved.byokRequests || 0) + previous.requests;
+            changed = true;
+          }
+          const upstreamCost = decimal(event.upstreamInferenceCostUsd);
+          if (next.upstreamInferenceCostUsd == null && upstreamCost != null && !next.upstreamCostConflict) {
+            next.upstreamInferenceCostUsd = upstreamCost;
+            changed = true;
+          } else if (upstreamCost != null && next.upstreamInferenceCostUsd != null &&
+                     normalizeDecimal(upstreamCost) !== normalizeDecimal(next.upstreamInferenceCostUsd)) {
+            next.upstreamInferenceCostUsd = null;
+            next.upstreamCostConflict = true;
+            next.usageStatus = "inconsistent";
+            changed = true;
+          }
           if (event.usageStatus === "reported" && next.usageStatus !== "inconsistent" && next.usageStatus !== "reported") {
             next.usageStatus = "reported"; changed = true;
           }
@@ -670,6 +688,7 @@ export function recordProviderGeneration(
     ),
   );
   session.requests += requests;
+  if (event?.isByok === true) session.byokRequests = (session.byokRequests || 0) + requests;
   session.failures += failures;
   session.successes += requests - failures;
   const complete = usageIsComplete(event);
@@ -719,6 +738,8 @@ export function recordProviderGeneration(
     ...Object.fromEntries(TOKEN_FIELDS.map(k => [k, token(event?.[k])])),
     usageStatus: event?.usageStatus || (complete ? "reported" : "incomplete"),
     providerCostUsd: decimal(event?.providerCostUsd),
+    upstreamInferenceCostUsd: decimal(event?.upstreamInferenceCostUsd),
+    isByok: event?.isByok === true ? true : null,
     upstreamProvider: String(event?.upstreamProvider || "").slice(0, 80),
     receiptId: cleanId(event?.usage?.receiptId || event?.receiptId),
     inputTokens: nullableToken(event?.inputTokens),
@@ -872,6 +893,7 @@ export function usageDetailedRows(raw) {
       inputTokens: d.inputTokens, cachedInputTokens: d.cachedInputTokens,
       cacheWriteInputTokens: d.cacheWriteInputTokens, outputTokens: d.outputTokens,
       thinkingTokens: d.thinkingTokens, totalTokens: d.totalTokens,
+      isByok: d.isByok === true, upstreamInferenceCostUsd: decimal(d.upstreamInferenceCostUsd),
       imageCount: d.imageCount,
       groupKey: groupToken(d.jobId || d.batchId || d.operationId || d.requestId || d.id),
       price: d.price ? structuredClone(d.price) : null,
@@ -905,8 +927,8 @@ export async function persistPricingSettings(update) {
       if (!session.priceTotals) continue;
       for (const delta of session.deltas || []) {
         if (money(delta.price?.usd) !== null ||
-          !newRates.includes(routeRateKey(model.provider,delta.resolvedModel || delta.model,delta.upstreamProvider))) continue;
-        const live = next.pricing.liveRates[routeRateKey(model.provider,delta.resolvedModel || delta.model,delta.upstreamProvider)];
+          !newRates.includes(routeRateKey(model.provider,pricingModel(delta),delta.upstreamProvider))) continue;
+        const live = next.pricing.liveRates[routeRateKey(model.provider,pricingModel(delta),delta.upstreamProvider)];
         if (bangkokDate(delta.timestamp) !== bangkokDate(live.fetchedAt)) continue;
         const recalculated = priceGeneration(delta,next.pricing);
         if (money(recalculated.usd) === null) continue;
@@ -1169,7 +1191,8 @@ function usageDisplay(session) {
   return { ...Object.fromEntries(TOKEN_FIELDS.slice(3).map(k => [k, token(s[k])])),
     reportedRequests: s.reportedRequests || 0, incompleteRequests: s.incompleteRequests || 0,
     tokenCoverage: { ...(s.tokenCoverage || {}) }, providerCostUsd: decimal(s.providerCostUsd),
-    costReportedRequests: s.costReportedRequests || 0, accountingScope: "translation_usage_not_customer_balance" };
+    costReportedRequests: s.costReportedRequests || 0, byokRequests: s.byokRequests || 0,
+    accountingScope: "translation_usage_not_customer_balance" };
 }
 async function usageStorageLock(fn) {
   if (globalThis.navigator?.locks?.request) return navigator.locks.request("textphantom-ai-usage-v2", fn);

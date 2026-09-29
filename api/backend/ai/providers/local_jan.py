@@ -11,7 +11,7 @@ POLICY = LocalOpenAIChatPolicy(
     provider_id="jan", aliases=ALIASES,
     default_model=DEFAULT_MODEL, default_base_url=DEFAULT_BASE_URL,
     model_aliases=MODEL_ALIASES, key_prefixes=KEY_PREFIXES,
-    auth_optional=False, thinking_field=None,
+    auth_optional=True, thinking_field=None,
     temperature=None, output_token_ceiling=8192,
     append_path="/v1", completion_path="/chat/completions",
     discovery_path="/models", strip_paths=("/chat/completions",),
@@ -21,7 +21,7 @@ ADAPTER = LocalOpenAIChatAdapter(POLICY)
 SPEC = ProviderSpec(POLICY.provider_id, "openai_chat_completions",
                     POLICY.default_model, POLICY.default_base_url,
                     aliases=POLICY.aliases, model_aliases=POLICY.model_aliases,
-                    key_prefixes=POLICY.key_prefixes, local=True, adapter=ADAPTER)
+                    key_prefixes=POLICY.key_prefixes, local=True, conversation_transport="message_replay", adapter=ADAPTER)
 
 normalize_base_url = ADAPTER.normalize_base_url
 normalize_model = ADAPTER.normalize_model

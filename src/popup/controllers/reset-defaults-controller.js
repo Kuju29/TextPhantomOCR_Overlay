@@ -8,10 +8,11 @@ export const SETTINGS_RESET_KEYS = Object.freeze([
   "aiSendImage", "aiPageImage", "aiOnDevice", "aiThinking", "aiLocalThinking",
   "aiPrompt", "aiPromptByLang", "relayoutTranslated",
   "rateLimitEnabled", "rateProfile", "rateRpm", "rateBurst",
+  "aiLocalRateLimitEnabled", "aiLocalRateRpm", "aiLocalRateBurst",
   "aiLocalCapacityMode", "aiLocalManualConcurrency", "aiLocalCapabilityHint",
   "aiLocalCapabilitySnapshotsV1", "aiConcurrencyLearningV1", "apiLocalUnlimited", "engineMode",
   "aiProfilesV1", "aiProfileStorageVersion", "aiProfileCredentialsV1",
-  "aiProfilePromptsV1", "fontScale", "imgButtonsEnabled", "translateAllButtonEnabled",
+  "aiProfilePromptsV1", "fontScale", "imgButtonsEnabled", "translateAllButtonEnabled", "downloadImagesEnabled", "downloadImageFormat", "downloadImageQuality", "downloadSelectedTab", "downloadIndividualExpanded",
   "uploadFormat", "uploadQuality",
   "autoMode", "autoLang", "autoSource", "autoShowRaw", "autoRawTab", "autoWidth",
 ]);

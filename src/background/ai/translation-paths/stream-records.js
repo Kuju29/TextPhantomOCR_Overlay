@@ -28,7 +28,22 @@ export function createStreamRecords(units) {
         const ch=pending[at];
         if(at===pending.length-1&&(ch==='<'||ch==='>'))break;
         const token=pending.slice(at,at+2);
-        if(token==='<<'){if(depth)nested=true;depth++;island+=token;at+=2;}
+        if(token==='<<'){
+          // The terminal grammar recovers at a valid marker on a new physical
+          // line. Match it here: one missing >> must not poison every later
+          // page and override an otherwise valid terminal response.
+          if(depth && /[\r\n]$/u.test(island)){
+            const tail=pending.slice(at);
+            const header=/^<<(?:TP_P\d+|I[1-9][0-9]{0,6}_P[0-9]{1,6})(?::|\s)/u.test(tail);
+            if(!header && tail.length<40 && !/[\s:>]/u.test(tail.slice(2)))break;
+            if(header){
+              const claims=[...island.matchAll(/<<(?:TP_(P\d+)|(I[1-9][0-9]{0,6}_P[0-9]{1,6}))(?=:|\s|>|$)/gu)].map(m=>m[1]||m[2]);
+              for(const id of claims){invalid.add(id);seen.add(id);accepted.delete(id);}
+              island='';depth=0;nested=false;revision++;
+            }
+          }
+          if(depth)nested=true;depth++;island+=token;at+=2;
+        }
         else if(token==='>>'&&depth){island+=token;at+=2;if(--depth===0)close();}
         else {if(depth)island+=ch;at++;}
       }

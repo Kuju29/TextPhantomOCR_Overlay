@@ -112,6 +112,8 @@ function safeUsage(value, depth = 0) {
   for (const key of ["usageStatus", "source", "receiptId", "providerGenerationId", "accountingOrigin", "phase", "provider", "model"])
     if (typeof value[key] === "string") result[key] = value[key].slice(0,256);
   result.providerCostUsd = decimal(value.providerCostUsd);
+  result.upstreamInferenceCostUsd = decimal(value.upstreamInferenceCostUsd);
+  if (value.isByok === true) result.isByok = true;
   if (Array.isArray(value.generations)) result.generations = value.generations.slice(0,100).map(v => safeUsage(v, depth+1) || {});
   return result;
 }
@@ -179,6 +181,10 @@ function copySafeFailureTelemetry(error, detail) {
   }
   if (usage) error.usage = usage;
   if (generation) error.generationMeta = generation;
+  if (error.code === "output_budget_exhausted" &&
+      ["reasoning_only_exhausted", "empty_output"].includes(structural.validatorSubtype))
+    error.diagnostics = { validatorSubtype: structural.validatorSubtype,
+      providerOutputTruncated: true };
   if (Object.keys(structural).length) {
     error.structuralDetails = {
       ...(generation ? { generationMeta: generation } : {}),

@@ -1,6 +1,7 @@
 import { uncertainRepairIds } from "../repair-alignment.js";
 import { promptLayout } from "../prompt-layout.js";
 import { planOllamaContext } from "../providers/ollama-context.js";
+import { LOCAL_CONTEXT_METADATA_MAX } from "../providers/local-openai-compatible.js";
 import { guardOutputBudget, estimateProviderInput } from "../workload/budget.js";
 import { emitPreviewChunks, tracePreviewUnits } from "../../trace-preview.js";
 import { diagnosticPreviewsEnabled } from "../../trace.js";
@@ -186,6 +187,8 @@ async function translateSingle(
     wireTrace = null,
     operationId = "",
     onProgress = null,
+    beforeDispatch = null,
+    onDispatched = null,
   } = {},
 ) {
   const started = performance.now();
@@ -209,27 +212,42 @@ async function translateSingle(
     ai?.provider,
   );
   const conversationRecords = Boolean(conversationContext) && units.length > 0 && units.every(unit=>/^I[1-9][0-9]{0,6}_P[0-9]{1,6}$/.test(String(unit?.id||"")));
+  const conversationMarkers=conversationRecords || Boolean(conversationContext) && adapter.id==="lmstudio_native";
   const capabilityContract = selectLocalOutputContract({
     provider: ai?.provider || adapter.id,
     model,
     modelCapabilities: ai?.model_capabilities,
   });
+  const nativeMarkerContract = adapter.id === "lmstudio_native";
   // Keep Conversation on one marker protocol. Per-turn exact-key JSON schemas
   // change provider-visible request metadata and can destroy prefix-cache reuse.
-  const outputContract = conversationRecords ? {
+  // LM Studio's native chat endpoint does not accept responseSchema in either
+  // mode. A stale model capability must not select a wire field this endpoint
+  // rejects; report the claimed and selected contracts separately in traces.
+  const outputContract = conversationMarkers || nativeMarkerContract ? {
     kind:"compact_records", version:COMPACT_RECORDS_CONTRACT,
-    reason:"conversation_image_records_cache_stable", capabilitySource:capabilityContract.capabilitySource,
+    reason:conversationRecords?"conversation_image_records_cache_stable":
+      conversationMarkers?"conversation_native_marker_contract":"lmstudio_native_marker_contract",
+    capabilitySource:capabilityContract.capabilitySource,
   } : capabilityContract;
   const formatDiagnostics = {
-    plannedOutputContract: outputContract.version,
+    plannedOutputContract: capabilityContract.version,
     selectedOutputContract: outputContract.version,
-    selectionReason: conversationRecords ? "conversation_marker_contract" : outputContract.reason,
+    selectionReason: outputContract.reason,
     parserId: outputContract.kind,
     decodedResponseShape: null,
     formatSwitch: false,
   };
-  const effectiveStyleExamples = conversationContext ? false : ai?.style_examples !== false;
-  const promptAi = effectiveStyleExamples === (ai?.style_examples !== false) ? ai : {...ai, style_examples:false};
+  if (!conversationContext && ai?.translation_mode === 'independent' &&
+      ai?.style_examples !== false && !ai?.independent_examples)
+    throw new LocalAiError('Independent example selection is missing', {
+      code:'independent_example_selection_missing',attempted:false,retryable:false});
+  const independentExamples = conversationContext || ai?.translation_mode === 'conversation'
+    ? null : ai?.independent_examples || {source:ai?.style_examples === false?'none':'human',
+        pairs:[],scopeStatus:'legacy_unscoped'};
+  const effectiveStyleExamples = ai?.style_examples !== false &&
+    (Boolean(conversationContext) || independentExamples?.source !== 'none');
+  const promptAi = effectiveStyleExamples === (ai?.style_examples !== false) ? ai : {...ai, style_examples:effectiveStyleExamples};
   const wireUnits = units.map((unit, index) => ({
     id: conversationRecords ? String(unit?.id||"") : `P${index}`,
     text: String(unit?.text || ""),
@@ -301,44 +319,77 @@ async function translateSingle(
     expectedIds: wireUnits.map(unit => unit.id),
     structuredOutput: outputContract.kind === "schema_object",
     conversationRecords,
+    independentExamples,
   });
   audit.promptLayout = await promptLayout(effectiveSystemPrompt, userText, {targetLang,sourceLang,
     structured:outputContract.kind === "schema_object",examples:effectiveStyleExamples,
-    memoryMode:ai?.memory_mode,selectedStyle,conversationRecords});
+    memoryMode:ai?.memory_mode,selectedStyle,conversationRecords,independentExamples});
   for (const key of ["styleRole", "systemStyleCopies", "userStyleCopies", "userStaticChars"])
     audit[key] = audit.promptLayout[key];
   const reasoning = ai?.model_capabilities?.reasoning;
   const thinkingRequested = normalizeReasoningPreference(ai?.thinking, "minimum");
-  const thinkingSelected = resolveReasoningPreference(thinkingRequested, reasoning);
+  let thinkingSelected = resolveReasoningPreference(thinkingRequested, reasoning);
+  // Missing Ollama thinking.values is not proof that the model cannot switch
+  // thinking off. Lowest may request the native boolean Off and then verify
+  // the response; an advertised mandatory mode is handled by the resolver.
+  if (adapter.id === "ollama" && thinkingRequested === "minimum" &&
+      thinkingSelected === "default" && typeof reasoning?.supported !== "boolean")
+    thinkingSelected = "off";
+  const minimumAtProviderDefault = thinkingRequested === "minimum" && thinkingSelected === "default";
+  const verifiedNonReasoning = reasoning?.supported === false &&
+    Array.isArray(reasoning.supported_efforts) && reasoning.supported_efforts.length === 0 &&
+    (adapter.id === "lmstudio_native" && reasoning.source === "lmstudio_native_loaded_instance" ||
+      adapter.id === "ollama" && reasoning.source === "ollama-api-show");
+  const thinkingAudit = {
+    thinkingRequested,
+    thinkingSelected,
+    ...(minimumAtProviderDefault ? {thinkingApplied: verifiedNonReasoning
+      ? "not_applicable_non_reasoning_model" : "provider_managed_unverified"} : {}),
+  };
+  if (!["minimum", "default", "off"].includes(thinkingRequested) &&
+      thinkingSelected !== thinkingRequested)
+    throw new LocalAiError("Local AI cannot verify the selected Thinking mode for this model", {
+      code: "local_model_thinking_unsupported", attempted: false, retryable: false,
+      diagnostics: { thinkingRequested, thinkingSelected },
+    });
   // Resolve provider-neutral user intent once against exact model capability.
   // Local provider leaves only map the concrete result to their native wire.
   const thinkingMode = typeof adapter.resolveThinkingMode === "function"
     ? adapter.resolveThinkingMode(thinkingSelected, { model, reasoning })
     : thinkingSelected;
+  // Some runtimes do not expose a per-model Thinking switch. Lowest then uses
+  // the runtime default, with an explicit unverified audit; Off stays strict.
+  if (adapter.id==="lmstudio_native" && thinkingRequested==="off" && thinkingMode!=="off")
+    throw new LocalAiError("LM Studio cannot honor the selected Thinking off setting",{
+      code:"local_model_thinking_unsupported",attempted:false,retryable:false});
   const standardOutputTokens = adapter.outputTokens({
     standard: dynamicOutputTokens(units, effectiveSystemPrompt, ai?.workload),
     thinkingMode,
   });
+  const sourceTexts = wireUnits.map(unit => String(unit.text));
+  const userMaxOutput = ai?.max_output_tokens;
+  const localReasoningRisk = thinkingMode !== "off" && !verifiedNonReasoning;
+  const budgetOptions = { sourceTexts, userMaxOutput, localReasoningRisk };
   const responseSchema = outputContract.kind === "schema_object"
     ? translationObjectSchema(wireUnits.map(u => u.id)) : null;
   let conversationOutputReserve = standardOutputTokens;
   if (conversationContext) {
     const baseBudgetInput = { history: [], system: effectiveSystemPrompt, user: userText,
       schema: responseSchema, image: Boolean(imageDataUri) };
-    // Conversation trimming and the provider request must reserve the same
-    // completion budget. Native Ollama may grow only to its bounded request
-    // ceiling, so use that exact ceiling here rather than an inflated
-    // pre-guard heuristic that can discard otherwise valid history.
-    const ceilingPlan = adapter.id === "ollama"
-      ? planOllamaContext(ai?.model_capabilities?.limits, { estimatedInput: 1e9 }) : null;
-    const reserveLimits = ceilingPlan?.limits || ai?.model_capabilities?.limits;
-    const reserveWorkload = ai?.workload || (ceilingPlan
+    // Conversation trimming reserves against the proven model maximum, never
+    // an old loaded allocation. Ollama can request a larger native num_ctx
+    // for the real generation; an unknown model maximum stays unknown.
+    const discovered = ai?.model_capabilities?.limits;
+    const nativeOllama = adapter.id === "ollama" && discovered?.scope === "runtime" &&
+      String(discovered.source || "").startsWith("ollama-api");
+    const reserveLimits = nativeOllama ? { ...discovered,
+      contextTokens: discovered.modelContextTokens || undefined } : discovered;
+    const reserveWorkload = ai?.workload || (nativeOllama
       ? { version: 1, predictedOutput: standardOutputTokens } : null);
     try {
       conversationOutputReserve = guardOutputBudget({ standard: standardOutputTokens,
-        workload: reserveWorkload, limits: reserveLimits, ...baseBudgetInput });
+        workload: reserveWorkload, limits: reserveLimits, ...baseBudgetInput, ...budgetOptions });
     } catch (error) {
-      error.diagnostics = { ...error.diagnostics, ...(ceilingPlan?.evidence || {}) };
       throw error;
     }
   }
@@ -358,7 +409,7 @@ async function translateSingle(
     systemStyleCopies: audit.systemStyleCopies,
     userStyleCopies: audit.userStyleCopies,
     policyVersion: audit.promptLayout.policyVersion,
-    requestedContract: outputContract.version,
+    requestedContract: capabilityContract.version,
     selectedContract: outputContract.version,
     ...formatDiagnostics,
     selectedContractKind: outputContract.kind,
@@ -377,17 +428,54 @@ async function translateSingle(
     userMessageFingerprint: userTextFingerprint,
     historyMessages: conversation?.history?.length || 0,
     streamRequested: true,
+    ...thinkingAudit,
   });
   const budgetInput = {history:conversation?.history || [],system: effectiveSystemPrompt, user: conversation?.current ?? userText,
     schema: responseSchema, image: Boolean(imageDataUri)};
+  const jitLimits = ai?.model_capabilities?.limits;
+  const jitRequestedContext = adapter.id === "lmstudio_native" &&
+    jitLimits?.source === "lmstudio_native_jit_request" && jitLimits?.scope === "request"
+    ? jitLimits.contextTokens : null;
+  if (jitRequestedContext !== null && (!Number.isSafeInteger(jitRequestedContext) ||
+      jitRequestedContext <= 0 || jitRequestedContext > LOCAL_CONTEXT_METADATA_MAX ||
+      !Number.isSafeInteger(jitLimits.modelContextTokens) ||
+      jitRequestedContext !== jitLimits.modelContextTokens))
+    throw new LocalAiError("LM Studio JIT context metadata is invalid", {
+      code: "local_model_context_unverified", attempted: false, retryable: false,
+    });
+  const budgetHint = ai?.workload || (adapter.id === "ollama" || jitRequestedContext !== null
+    ? {version:1, predictedOutput:standardOutputTokens} : null);
+  const ollamaLimits = ai?.model_capabilities?.limits;
+  const ollamaPlanningLimits = adapter.id === "ollama" && ollamaLimits?.scope === "runtime" &&
+    String(ollamaLimits.source || "").startsWith("ollama-api")
+    ? { ...ollamaLimits, contextTokens:ollamaLimits.modelContextTokens || undefined }
+    : ollamaLimits;
+  const plannedOllamaOutput = adapter.id === "ollama" ? guardOutputBudget({
+    standard:standardOutputTokens, workload:budgetHint, limits:ollamaPlanningLimits,
+    ...budgetInput, ...budgetOptions,
+    ...(conversation ? {requestOutputReserve:conversationOutputReserve} : {}),
+  }) : null;
+  const plannedOutput = jitRequestedContext !== null ? guardOutputBudget({
+    standard:standardOutputTokens, workload:budgetHint, limits:jitLimits,
+    ...budgetInput, ...budgetOptions,
+    ...(conversation ? {requestOutputReserve:conversationOutputReserve} : {}),
+  }) : null;
+  const neededJitContext = jitRequestedContext !== null ? Math.ceil(
+    estimateProviderInput(budgetInput) + plannedOutput + 128 + Math.max(256, plannedOutput * .5)) : null;
+  const chosenJitContext = neededJitContext !== null ? Math.min(jitRequestedContext,
+    Math.max(4096, Math.ceil(neededJitContext / 4096) * 4096)) : null;
   const contextPlan = adapter.id === "ollama" ? planOllamaContext(ai?.model_capabilities?.limits, {
     estimatedInput: estimateProviderInput(budgetInput),
-    predictedOutput: conversation ? conversationOutputReserve : (ai?.workload?.predictedOutput || standardOutputTokens),
-    reasoningReserve: ai?.workload?.reasoningReserve || 0,
-    minimumContextTokens: ai?.workload?.limits?.contextTokens,
-  }) : null;
+    predictedOutput: plannedOllamaOutput,
+    reasoningReserve: Math.min(8192, ai?.workload?.reasoningReserve || 0),
+  }) : jitRequestedContext !== null ? {
+    limits: { ...jitLimits, contextTokens:chosenJitContext },
+    evidence: { requestedContext: chosenJitContext, contextRequired:neededJitContext,
+      modelContext: jitLimits.modelContextTokens,
+      contextPolicy: "lmstudio-jit-request-v2", contextVerified: false },
+  } : null;
   await wireTrace?.("contractSelection", {
-    requested: outputContract.version,
+    requested: capabilityContract.version,
     selected: outputContract.version,
     ...formatDiagnostics,
     kind: outputContract.kind,
@@ -395,17 +483,21 @@ async function translateSingle(
     capabilitySource: outputContract.capabilitySource,
     provider: String(ai?.provider || adapter.id), model,
     automaticRetry: false,
+    ...thinkingAudit,
     promptLayout: audit.promptLayout,
+    ...(independentExamples ? {independentExamples:audit.promptLayout.independentExamples} : {}),
     ...(conversation ? {conversation:conversation.evidence, historyOrigins:conversation.origins} : {}),
     ...(contextPlan ? {contextPlan: contextPlan.evidence} : {}),
   });
   // The final guard checks the actual composed message and the exact window
   // being requested, not the smaller allocation from the earlier health probe.
-  const budgetHint = ai?.workload || (contextPlan ? {version:1, predictedOutput:standardOutputTokens} : null);
   let outputTokens;
   try {
     outputTokens = guardOutputBudget({ standard: standardOutputTokens, workload: budgetHint,
-      limits: contextPlan?.limits || ai?.model_capabilities?.limits, ...budgetInput });
+      limits: contextPlan?.limits || ai?.model_capabilities?.limits, ...budgetInput,
+      ...budgetOptions,
+      ...(conversation ? {requestOutputReserve:conversationOutputReserve} : {}),
+    });
   } catch (error) {
     error.diagnostics = {...error.diagnostics, ...(contextPlan?.evidence || {})};
     throw error;
@@ -425,14 +517,21 @@ async function translateSingle(
       ...adapter.userImageFields(imageDataUri),
     },
   ];
-  await wireTrace?.("systemPrompt", effectiveSystemPrompt);
+  // A native LM Studio continuation uses the retained response ID, so no
+  // system prompt is present in its actual provider request or wire audit.
+  if (!conversation?.providerConversation?.previousResponseId)
+    await wireTrace?.("systemPrompt", effectiveSystemPrompt);
   await wireTrace?.("userPrompt", messages.at(-1)?.content || "");
   await wireTrace?.("wireUnits", wireUnits);
   const controller = new AbortController(),
     abort = () => controller.abort(signal?.reason);
   signal?.addEventListener?.("abort", abort, { once: true });
+  // Preparation can await wire traces: honour cancellation that happened
+  // between the initial guard and installing this listener.
+  if (signal?.aborted) abort();
   const configuredTimeoutMs =
-    Number(timeoutMs) > 0 ? Math.max(1000, Number(timeoutMs)) : 0;
+    Number(timeoutMs) > 0 ? Math.max(1000, Number(timeoutMs))
+      : Number(adapter.defaultTimeoutMs) > 0 ? Number(adapter.defaultTimeoutMs) : 0;
   let timedOut = false;
   const timer = configuredTimeoutMs
     ? setTimeout(() => {
@@ -441,9 +540,21 @@ async function translateSingle(
       }, configuredTimeoutMs)
     : null;
   let exchange;
+  const attachFailureThinking = error => {
+    const existing = error.generationMeta || {};
+    error.generationMeta = {
+      ...existing,
+      provider: existing.provider || String(ai?.provider || adapter.id),
+      model: existing.model || model,
+      runtime: existing.runtime || "local",
+      ...thinkingAudit,
+    };
+    return error;
+  };
   try {
     exchange = await adapter.generate(
       { model, messages, outputTokens, thinkingMode, thinkingCapability: reasoning, responseSchema,
+        ...(conversation?.providerConversation?{providerConversation:conversation.providerConversation}:{}),
         ...(contextPlan ? {contextTokens:contextPlan.evidence.requestedContext} : {}) },
       {
         expectedIds: wireUnits.map((unit) => unit.id),
@@ -455,6 +566,8 @@ async function translateSingle(
         trace: diagnosticTrace,
         wireTrace,
         onProgress,
+        beforeDispatch,
+        onDispatched,
       },
     );
   } catch (cause) {
@@ -474,7 +587,34 @@ async function translateSingle(
         provider: String(ai?.provider || adapter.id), model, usage: cause.observedUsage, generationAttempts: error.generationAttempts,
       cacheCoordination: cause.cacheCoordination,
       };
-      throw error;
+      throw attachFailureThinking(error);
+    }
+    if (cause?.requestDispatched === false &&
+        ["local_model_thinking_unsupported","local_provider_response_contract"].includes(cause?.code)) {
+      cause.diagnostics={...formatDiagnostics,...(cause.diagnostics||{})};
+      cause.generationAttempts=0;
+      cause.providerAttempts=0;
+      throw attachFailureThinking(cause);
+    }
+    if (cause?.code === "invalid_local_request_rate" && cause?.requestDispatched === false) {
+      const error = new LocalAiError(cause.message, {
+        code: cause.code,
+        attempted: false,
+        diagnostics: { ...formatDiagnostics, ...(cause.diagnostics || {}) },
+      });
+      if (cause.cacheCoordination) error.cacheCoordination = cause.cacheCoordination;
+      throw attachFailureThinking(error);
+    }
+    if (cause?.code === "local_model_identity_mismatch") {
+      // Keep LM Studio's exact reported/requested identity visible to the
+      // caller; reclassifying it as a transport failure hides the root cause.
+      cause.diagnostics = { ...formatDiagnostics, ...(cause.diagnostics || {}) };
+      throw attachFailureThinking(cause);
+    }
+    if (adapter.id === "ollama" && cause?.code === "local_model_thinking_unsupported" &&
+        cause?.requestDispatched === true && cause?.providerResponded === true) {
+      cause.diagnostics = { ...formatDiagnostics, ...(cause.diagnostics || {}) };
+      throw attachFailureThinking(cause);
     }
     const providerResponded = cause?.providerResponded === true;
     const error = new LocalAiError(
@@ -499,7 +639,7 @@ async function translateSingle(
       provider: String(ai?.provider || adapter.id), model, usage: cause.observedUsage, generationAttempts: error.generationAttempts,
       cacheCoordination: cause.cacheCoordination,
     };
-    throw error;
+    throw attachFailureThinking(error);
   } finally {
     if (timer) clearTimeout(timer);
     signal?.removeEventListener?.("abort", abort);
@@ -509,7 +649,7 @@ async function translateSingle(
     const error = rejectedResponse(response, stream.raw);
     error.diagnostics = { ...formatDiagnostics, ...(error.diagnostics || {}) };
     error.cacheCoordination = cacheCoordination;
-    throw error;
+    throw attachFailureThinking(error);
   }
   try {
   if (
@@ -586,16 +726,24 @@ async function translateSingle(
     }
   let parseMs = performance.now() - envelopeStarted;
   const text = adapter.responseText(data),
-    finishReason = adapter.finishReason(data),
+    finishReason = adapter.finishReason(data,outputTokens),
     usage = adapter.usage(data);
   if (!stream.streaming && text) onProgress?.({ state: "first_response" });
   if (stream.earlyCompleted && usage.source == null) {
     usage.status = "incomplete_due_to_early_completion";
     usage.reason = adapter.incompleteUsageReason?.(stream) || null;
   }
+  const providerReasoningObserved =
+    data?.reasoningDeltaObserved === true || stream.reasoningObserved === true ||
+    (Number.isSafeInteger(data?.stats?.reasoning_output_tokens) && data.stats.reasoning_output_tokens > 0) ||
+    (Number.isSafeInteger(usage.thinkingTokens) && usage.thinkingTokens > 0) ||
+    Boolean(String(adapter.responseReasoning?.(data) || "").trim());
   const timings = adapter.timing(data, usage.outputTokens),
-    thinkingApplied = String(transportThinkingApplied || (thinkingMode === "default"
-      ? "provider_default" : "unverified"));
+    thinkingApplied = minimumAtProviderDefault
+      ? verifiedNonReasoning && !providerReasoningObserved
+        ? "not_applicable_non_reasoning_model" : "provider_managed_unverified"
+      : String(transportThinkingApplied || (thinkingMode === "default"
+        ? "provider_default" : "unverified"));
   const attach = (error, extra = 0) => {
     error.generationMeta = {
       provider: String(ai?.provider || adapter.id),
@@ -617,8 +765,20 @@ async function translateSingle(
     };
     return error;
   };
+  // Off is a user constraint on every Local adapter. A provider may accept a
+  // disable field yet still report reasoning in a stream, final body or usage.
+  // Reject that answer without retaining its conversation turn.
+  if ((thinkingRequested === "off" || adapter.id === "ollama" && thinkingMode === "off") &&
+      providerReasoningObserved) {
+    const error = new LocalAiError("Local AI produced reasoning despite Thinking off", {
+      code: "local_model_thinking_unsupported", attempted: true, retryable: false,
+      diagnostics: { validatorSubtype: "reasoning_reported_with_thinking_off" },
+    });
+    error.providerResponded = true;
+    throw attach(error);
+  }
   diagnosticTrace?.("AI diagnostic provider response", {
-    requestedContract: outputContract.version,
+    requestedContract: capabilityContract.version,
     selectedContract: outputContract.version,
     ...formatDiagnostics,
     selectedContractKind: outputContract.kind,
@@ -655,7 +815,8 @@ async function translateSingle(
             : "invalid_model_output",
         attempted: true,
         diagnostics: exhausted
-          ? { providerOutputTruncated: true, validatorSubtype: "empty_output" }
+          ? { providerOutputTruncated: true,
+            validatorSubtype: hadReasoning ? "reasoning_only_exhausted" : "empty_output" }
           : null,
       },
     );
@@ -717,6 +878,7 @@ async function translateSingle(
         ignoredProse: decoded.diagnostics.ignoredProse === true,
         ignoredProseChars: Number(decoded.diagnostics.ignoredProseChars || 0),
         formattingWhitespaceChars: Number(decoded.diagnostics.formattingWhitespaceChars || 0),
+        redundantClosingDelimiterChars: Number(decoded.diagnostics.redundantClosingDelimiterChars || 0),
         unexpectedProseChars: Number(decoded.diagnostics.unexpectedProseChars ?? (decoded.diagnostics.ignoredProse ? 1 : 0)),
         malformedMarkerIds: decoded.diagnostics.malformedMarkerIds || [],
         recoverableMalformedMarkerIds: decoded.diagnostics.recoverableMalformedMarkerIds || [],
@@ -732,7 +894,7 @@ async function translateSingle(
   await wireTrace?.("parsedRecords", decoded.translations);
   await wireTrace?.("providerValidation", { missingIds: missing, ...(contractDiagnostics || {}) });
   await wireTrace?.("contractApplied", {
-    requested: outputContract.version,
+    requested: capabilityContract.version,
     selected: outputContract.version,
     ...formatDiagnostics,
     applied: decoded.responseShape,
@@ -758,7 +920,19 @@ async function translateSingle(
         duplicateIds: contractDiagnostics?.duplicateIds || [],
         ignoredProseChars: contractDiagnostics?.ignoredProseChars || 0 },
     );
-  conversationContext?.capture(text);
+  if (conversation?.providerConversation) {
+    const responseId=String(data?.response_id||"");
+    if (!/^resp_[A-Za-z0-9_-]{1,256}$/.test(responseId)) {
+      const error=new LocalAiError("LM Studio finished without a usable retained response ID",{
+        code:"local_provider_response_contract",attempted:true,retryable:false,
+        diagnostics:{validatorSubtype:"missing_stateful_response_id"},
+      });
+      error.providerResponded=true;
+      error.generationAttempts=1;
+      throw attach(error);
+    }
+    conversationContext?.capture(text,responseId);
+  } else conversationContext?.capture(text);
   onProgress?.({ state: "completed" });
   return {
     schema: "tp.ai.result/1",
@@ -789,7 +963,7 @@ async function translateSingle(
       parseMs: Math.round(parseMs),
       modelLimits: contextPlan?.limits || ai?.model_capabilities?.limits || {},
       ...(contextPlan ? {contextPlan:contextPlan.evidence} : {}),
-      requestedContract: outputContract.version,
+      requestedContract: capabilityContract.version,
       selectedContract: outputContract.version,
       selectedContractKind: outputContract.kind,
       selectedContractReason: outputContract.reason,
@@ -841,7 +1015,7 @@ async function translateSingle(
         usage: observed, providerMs, generationAttempts: 1 };
       error.generationAttempts = 1;
     }
-    throw error;
+    throw attachFailureThinking(error);
   }
 }
 

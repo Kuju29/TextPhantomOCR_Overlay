@@ -24,6 +24,7 @@ def execute_chat_completion(
     cancel_check: Callable[[], bool] | None = None,
     trace_event: str = "ai.chat.generate", trace_file: str = "ai/transports/openai_chat.py",
     trace_fields: dict[str, Any] | None = None,
+    local_provider: bool = False,
 ) -> ChatResult:
     prepared, cache_policy = apply_chat_cache(
         payload, provider=provider_id, model=model, url=url, headers=headers,
@@ -34,6 +35,7 @@ def execute_chat_completion(
         expected_ids=expected_ids, cancel_check=cancel_check,
         trace_event=trace_event, trace_file=trace_file, trace_fields=trace_fields,
         cache_policy=cache_policy,
+        local_provider=local_provider,
         cost_authoritative=(provider_id == "openrouter" and urlsplit(url).hostname == "openrouter.ai"),
     )
 

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import vm from "node:vm";
 import {
   domainKeyOf,
   hostOf,
@@ -41,16 +42,121 @@ for (const value of ["koboldcpp", "vllm", "llamafile", "gpt4all"]) {
 }
 
 const manifest = JSON.parse(await read("platform/base.json"));
-const viewer = await read("src/viewer/viewer.html");
-const scripts = manifest.content_scripts[0].js;
-let last = -1;
-for (const script of scripts) {
-  const rel = script.startsWith("shared/") ? `../${script}` : `../${script}`;
-  const needle = `src="${rel}"`;
-  const i = viewer.indexOf(needle);
-  assert.ok(i >= 0, `viewer missing ${script}`);
-  assert.ok(i > last, `viewer order differs at ${script}`);
-  last = i;
+const manifestScripts = manifest.content_scripts[0].js;
+// Extension pages deliberately use only the content modules they need. Check
+// their translation path and relative order without enabling site-specific
+// readers or another Translate all control merely to mirror the manifest.
+const requiredPageScripts = [
+  "shared/compat.js", "shared/log-serialization.js", "content/namespace.js",
+  "shared/diagnostic-schema.js", "shared/image-status-view.js",
+  "content/trace.js", "content/keepalive.js", "content/dom-utils.js",
+  "content/progress-panel.js", "content/image-finder.js", "content/target-key.js",
+  "content/image-status.js", "content/erase-canvas.js", "content/payload.js",
+  "content/overlay/style.js", "content/overlay/background.js",
+  "content/overlay/font-scale.js", "content/overlay/sanitize.js",
+  "content/overlay/status.js", "content/overlay/mount.js",
+  "content/overlay/local-render.js", "content/overlay.js",
+  "content/overlay/message-controller.js", "content/sites/mangadex/adapter.js",
+  "content/sites/mangadex/collector.js", "content/mangadex.js",
+  "content/messaging.js", "content/index.js",
+];
+for (const page of ["viewer", "auto"]) {
+  const html = await read(`src/${page}/${page}.html`);
+  const pageScripts = [...html.matchAll(/<script\b[^>]*\bsrc="\.\.\/([^"]+)"[^>]*><\/script>/g)]
+    .map((match) => match[1]);
+  assert.equal(new Set(pageScripts).size, pageScripts.length, `${page}: duplicate content script`);
+  for (const script of requiredPageScripts) {
+    assert.ok(pageScripts.includes(script), `${page}: missing required ${script}`);
+  }
+  if (page === "viewer") {
+    assert.ok(pageScripts.includes("content/image-buttons.js"), "viewer: image button missing");
+  } else {
+    assert.ok(!pageScripts.includes("content/image-buttons.js"),
+      "auto: image button would translate a second time with the shared settings");
+  }
+  let last = -1;
+  for (const script of pageScripts) {
+    const position = manifestScripts.indexOf(script);
+    assert.ok(position >= 0, `${page}: unknown content script ${script}`);
+    assert.ok(position > last, `${page}: content script order differs at ${script}`);
+    last = position;
+  }
+
+  // Execute the actual HTML-selected logging modules in their page order.
+  // The browser console and TP_LOG transport must receive the same redacted
+  // record, including secrets embedded in an otherwise ordinary text field.
+  const sent = [], printed = [];
+  const context = vm.createContext({
+    URL,
+    window: { top: {} },
+    location: { href: `chrome-extension://test/${page}/${page}.html` },
+    chrome: { runtime: {
+      getManifest: () => ({ version: "test" }), lastError: null,
+      sendMessage: (message, callback) => { sent.push(message); callback?.(); },
+    } },
+    console: { warn: (...parts) => printed.push(parts) },
+  });
+  for (const script of pageScripts.filter((name) =>
+    name === "shared/log-serialization.js" || name === "content/namespace.js")) {
+    vm.runInContext(await read(`src/${script}`), context, { filename: script });
+  }
+  const error = vm.runInContext('new Error("Failed ?password=fixture-error-password-789")', context);
+  const errorWithUrl = vm.runInContext(
+    'new Error("Failed https://user:fixture-error-userinfo-123@source.invalid/fixture-error-path-456?unknown=fixture-error-query-789")',
+    context,
+  );
+  context.window.__TP.log.warn("privacy fixture", {
+    apiKey: "fixture-credential-123", key: "fixture-key-456",
+    pwd: "fixture-pwd-456", passwd: "fixture-passwd-456",
+    token: "fixture-token-789", inputTokens: 5000, reason: "network_retry",
+    note: "request sk-fixtureToken12345",
+    url: "https://example.invalid/image?password=fixture-url-password-456&token=fixture-url-token-123&safe=keep",
+    sourceUrl: "https://user:fixture-userinfo-123@example.invalid/fixture-path-456?unknown=fixture-query-789#fixture-fragment-101",
+    stack: "Error: failed ?password=fixture-stack-password-456\n at step (?token=fixture-stack-token-123)",
+    externalStack: "Error: failed file:///home/fixture-file-path-123/private.png\n at step (wss://user:fixture-ws-userinfo-456@socket.invalid/fixture-ws-path-789?m=fixture-ws-query-101)\n at ext (chrome-extension://test/content/messaging.js:77:10)",
+    error, errorWithUrl,
+  });
+  const record = sent.find((message) => message.type === "TP_LOG" &&
+    message.record?.msg === "privacy fixture")?.record;
+  assert.ok(record, `${page}: content warning did not reach TP_LOG`);
+  assert.equal(record.data.apiKey, "<redacted>", `${page}: API key reached TP_LOG`);
+  assert.equal(record.data.key, "<redacted>", `${page}: key reached TP_LOG`);
+  assert.equal(record.data.pwd, "<redacted>", `${page}: pwd reached TP_LOG`);
+  assert.equal(record.data.passwd, "<redacted>", `${page}: passwd reached TP_LOG`);
+  assert.equal(record.data.token, "<redacted>", `${page}: token reached TP_LOG`);
+  assert.equal(record.data.note, "request <redacted>", `${page}: token reached TP_LOG`);
+  assert.equal(record.data.inputTokens, 5000, `${page}: input token count was lost`);
+  assert.equal(record.data.reason, "network_retry", `${page}: normal diagnostic was lost`);
+  assert.equal(record.data.url, "https://example.invalid/<redacted-path>",
+    `${page}: entire HTTP URL path/query must be redacted`);
+  assert.equal(record.data.sourceUrl, "https://example.invalid/<redacted-path>",
+    `${page}: HTTP URL userinfo, unknown query and fragment must be redacted`);
+  assert.match(record.data.stack, /at step \([?]token=<redacted>\)/,
+    `${page}: stack query was not redacted selectively`);
+  assert.match(record.data.externalStack, /failed <redacted-url>/,
+    `${page}: file URL path must be redacted`);
+  assert.match(record.data.externalStack, /wss:\/\/socket\.invalid\/<redacted-path>\)/,
+    `${page}: WebSocket URL userinfo, path and query must be redacted`);
+  assert.match(record.data.externalStack, /chrome-extension:\/\/test\/content\/messaging\.js:77:10/,
+    `${page}: extension code path is useful for diagnostics`);
+  assert.match(record.data.error.message, /Failed [?]password=<redacted>/,
+    `${page}: Error message was not redacted`);
+  assert.match(record.data.error.stack, /Failed [?]password=<redacted>/,
+    `${page}: Error stack was not redacted`);
+  assert.match(record.data.errorWithUrl.message, /Failed https:\/\/source\.invalid\/<redacted-path>/,
+    `${page}: Error message URL was not redacted`);
+  assert.match(record.data.errorWithUrl.stack, /Failed https:\/\/source\.invalid\/<redacted-path>/,
+    `${page}: Error stack URL was not redacted`);
+  context.window.__TP.log.warn(
+    "error at https://user:fixture-message-password-123@err.invalid/fixture-message-path-456?odd=fixture-message-query-789",
+  );
+  assert.ok(sent.some((message) => message.record?.msg ===
+    "error at https://err.invalid/<redacted-path>"),
+  `${page}: URL in the log message was not redacted`);
+  assert.ok(printed.length, `${page}: warning missing from page console`);
+  assert.doesNotMatch(JSON.stringify({ sent, printed }),
+    /fixture-(?:credential|key|pwd|passwd|token|url-password|url-token|stack-password|stack-token|error-password|userinfo|path|query|fragment|file-path|ws-userinfo|ws-path|ws-query|error-userinfo|error-path|error-query|message-password|message-path|message-query)-\d+|sk-fixtureToken12345/,
+    `${page}: page console or TP_LOG exposed a fixture credential`);
 }
 
 const gemini = await read("api/backend/ai/providers/cloud_gemini.py");

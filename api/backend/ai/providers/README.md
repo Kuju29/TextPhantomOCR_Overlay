@@ -10,8 +10,13 @@ selected provider, API key, price, or model.
 Cloud (9): Gemini, OpenAI, OpenRouter, Anthropic, Groq, DeepSeek, Together,
 Hugging Face Router, Featherless.
 
-Local (10): Ollama, LM Studio, LocalAI, Jan, text-generation-webui, KoboldCpp,
+Local (9): Ollama, LM Studio, Jan, text-generation-webui, KoboldCpp,
 vLLM, llamafile, GPT4All, llama.cpp.
+
+The picker has a tenth Local option, Custom local adapter, implemented only
+in the Extension. The [19-provider request/cache/Thinking/image audit](../../../../docs/AI_PROVIDER_MATRIX_2026_09_27.md)
+lists exactly what each named endpoint proves; a provider leaf alone is not
+evidence of stored conversation or an actual cache hit.
 
 ## Policy
 
@@ -30,8 +35,10 @@ vLLM, llamafile, GPT4All, llama.cpp.
   loaded-model, usage, and thinking metadata that generic OpenAI compatibility
   would hide.
 - Reasoning controls are sent only when the exact provider/model contract proves
-  the wire field. Unknown support means provider default; it is not guessed from
-  OpenAI-compatible response shape.
+  the wire field. Unknown Lowest dispatches with provider-managed behavior and
+  an unverified trace; unknown explicit Off stops before generation. The UI has
+  no Provider default choice. OpenAI-compatible response shape alone cannot
+  prove a thinking control.
 - Model discovery/probing is bounded and separate from inference. Opening UI
   during an active translation must not generate provider probes.
 - Workload learning is provider/model scoped. Streaming transports report

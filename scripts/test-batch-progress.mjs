@@ -112,6 +112,54 @@ batchUpdateToast(multi, "AI is generating", true);
 assert.match(String(tabMessages.filter((msg) => msg?.type === "BATCH_STATUS_UPDATE").at(-1)?.batch?.message), /inserted 1\/2.*AI 1 active/,
   "translate-all must summarize active pipeline stages without pretending images run serially");
 
+// One AI request can fan each transport event out to dozens of image rows.
+// The visible board needs its new phase once, without 30 redundant full
+// snapshots or any change to the actual image/repair completion barrier.
+for (const isReader of [false, true]) {
+  const shared = ensureBatch(`progress-transport-${isReader}`, 17, 0);
+  if (isReader) shared.reader = {runId:'fixture-reader',released:false,processingComplete:false};
+  shared.total1 = 30;
+  for (let i=0;i<30;i++) shared.items.set(`p${i}`,{
+    attempt:1,status:'processing',phase:'ai_generating',
+    payload:{context:{page_index:i}},
+  });
+  const messages=()=>tabMessages.filter(msg=>msg?.type==='BATCH_STATUS_UPDATE'&&msg.batch?.id===shared.id);
+  const before=messages().length;
+  for (let i=0;i<30;i++) updateImagePresentation(shared.id,`p${i}`,{phase:'response_headers'});
+  assert.equal(messages().length,before,'transport fan-out must defer status until all rows are updated');
+  await Promise.resolve();
+  assert.equal(messages().length,before+1,'one transport event must yield one whole-batch snapshot');
+  assert.equal(messages().at(-1).batch.items.length,30);
+  assert.equal(messages().at(-1).batch.items.filter(row=>row.progress.ai.function==='waiting_response_text').length,30);
+  assert.equal(batchPassStats(shared).finished,0,'a status update must not finish AI or release repair');
+  for (let i=0;i<30;i++) updateImagePresentation(shared.id,`p${i}`,{phase:'response_headers'});
+  await Promise.resolve();
+  assert.equal(messages().length,before+1,'repeated transport phase must not flood status snapshots');
+  for (let i=0;i<30;i++) updateImagePresentation(shared.id,`p${i}`,{phase:'receiving_content'});
+  await Promise.resolve();
+  assert.equal(messages().length,before+2,'first visible text must publish the generating phase');
+  assert.equal(messages().at(-1).batch.items.filter(row=>row.progress.ai.function==='generating_response').length,30);
+  for (let i=0;i<30;i++) updateImagePresentation(shared.id,`p${i}`,{phase:'receiving_content'});
+  await Promise.resolve();
+  assert.equal(messages().length,before+2,'text chunks must not flood whole-batch snapshots');
+  for (let i=0;i<30;i++) updateImagePresentation(shared.id,`p${i}`,{phase:'validating'});
+  await Promise.resolve();
+  assert.equal(messages().length,before+3);
+  assert.equal(messages().at(-1).batch.items.filter(row=>row.progress.ai.function==='validating_result').length,30);
+  if (isReader) {
+    updateImagePresentation(shared.id,'p29',{placementPending:true});
+    await Promise.resolve();
+    assert.equal(messages().at(-1).batch.placement.waiting,1,'saved result must reach the reader board');
+    assert.equal(batchPassStats(shared).finished,0,'staged placement cannot complete the AI or repair barrier');
+  }
+  updateImagePresentation(shared.id,'p0',{translationMode:'conversation',conversation:{
+    phase:'turn_complete',turn:1,updatedAt:Date.now(),pageCount:30,unitCount:258,
+  }});
+  assert.equal(messages().at(-1).batch.conversation.phase,'turn_complete',
+    'provider turn completion must be visible to the panel before page deliveries finish');
+  assert.equal(batchPassStats(shared).finished,0,'a closed provider response cannot bypass final page delivery or repair');
+}
+
 const progressPanel = await readFile(new URL("../src/content/progress-panel.js", import.meta.url), "utf8");
 const messaging = await readFile(new URL("../src/content/messaging.js", import.meta.url), "utf8");
 assert.match(progressPanel, /AI \/ queue/);
@@ -156,7 +204,9 @@ page.__TP.updateBatchProgress({id:'reader-finished-with-unmounted-page',startedA
     repaired:1,unappliedRepairedUnits:1},items:[{label:'Image 1',terminal:true,inserted:true},
     {label:'Image 2',terminal:false,inserted:false,progress:{insert:{state:'queued'},ai:{state:'done'}}}]});
 await new Promise(resolve=>setTimeout(resolve,180));
-assert.match(nodes.text.textContent,/done .*processing complete.*1 saved for display/);
+assert.match(nodes.text.textContent,/AI finished in .*processing complete.*1 saved for display/);
+assert.doesNotMatch(nodes.text.textContent,/\bdone\b/,
+  'finished translation with unmounted pages must not claim that placement is done');
 assert.match(nodes.text.textContent,/Repair translated 1\/1/);
 assert.doesNotMatch(nodes.text.textContent,/Insert waiting|AI waiting/,
   'saved placement must not be displayed as live processing');

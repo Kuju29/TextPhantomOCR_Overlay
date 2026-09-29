@@ -464,6 +464,12 @@
   // Schedules an overlay update now and again once the image finishes loading.
 
   const api = {
+    // Read-only export inventory. Never remount, re-render or acquire an image.
+    downloadSnapshot: () => [...htmlOverlaysByKey.entries()]
+      .filter(([,r]) => r.host?.isConnected && r.img?.isConnected &&
+        (!r.displaySource || r.displaySource === TP.normUrl(r.img.currentSrc || r.img.src || TP.getBestImgUrl(r.img))))
+      .map(([key,r]) => Object.freeze({key, root:r.host, scope:r.scope, img:r.img,
+        clean:r.cleanImg, raster:r.kind==='raster' ? r.cleanImg : null, kind:r.kind})),
     destroyAllHtmlOverlays,
     ensureOverlayHostMountedNearImage,
     getOverlayBoxFromParent,

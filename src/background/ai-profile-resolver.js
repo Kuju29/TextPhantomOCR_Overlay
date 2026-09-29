@@ -10,6 +10,13 @@ import {
   resolveEffectiveAiProfile,
 } from "../shared/ai-profile-activation.js";
 import { cloudProviderSpec } from "../shared/ai/providers/cloud-registry.js";
+import {
+  isNamedLocalProvider,
+  localAiPreset,
+  localProviderTranslationMode,
+  normalizeLocalAiAdapter,
+  savedCustomLocalAdapter,
+} from "../shared/ai/providers/local-registry.js";
 import { resolveApiBase } from "../shared/api-defaults.js";
 import { normalizeUrl } from "../shared/url.js";
 import { BUNDLED_CANONICAL_PROMPT_PLANS } from "../generated/canonical-prompt-plans.js";
@@ -49,7 +56,7 @@ function canonicalDefaults(local) {
     pageImage: "off",
     memoryMode: "off",
     styleExamples: true,
-    translationMode: "conversation",
+    translationMode: local ? "independent" : "conversation",
     conversationReset: "0",
     concurrency: {
       mode: "auto",
@@ -88,6 +95,13 @@ async function resolveManualJobAiProfile(settings, { language = "en" } = {}) {
     aiModel: active.model,
   };
   const classification = classifyAiRuntime(selectedSettings);
+  if (classification.conflict) {
+    const error = new TypeError(
+      "The selected Cloud AI provider has a Local AI endpoint. Re-select the Provider before translating.",
+    );
+    error.code = "ai_provider_endpoint_conflict";
+    throw error;
+  }
   const controller = createAiProfileActivationController({
     state: migration.state,
     credentials: migration.credentials,
@@ -113,6 +127,19 @@ async function resolveManualJobAiProfile(settings, { language = "en" } = {}) {
     : registeredCloud
       ? String(registeredCloud.baseUrl || "")
       : String(selectedSettings.aiBaseUrl || "");
+  const localAdapter = !local ? null
+    : selectedSettings.aiProvider === "customlocal"
+      // An old flat rollback field must never bring a named preset into a
+      // canonically selected Custom Local profile.
+      ? settings.aiProvider === "customlocal"
+        ? savedCustomLocalAdapter(settings.localAiAdapter, selectedSettings.aiBaseUrl)
+        : null
+      : isNamedLocalProvider(selectedSettings.aiProvider)
+        ? normalizeLocalAiAdapter({
+          ...localAiPreset(selectedSettings.aiProvider),
+          ...(selectedSettings.aiBaseUrl ? { baseUrl: selectedSettings.aiBaseUrl } : {}),
+        }, { provider: selectedSettings.aiProvider })
+        : settings.localAiAdapter;
   const staleCloudEndpointCorrected = Boolean(
     canonicalCloudBase &&
     String(selectedSettings.aiBaseUrl || "").trim() &&
@@ -126,6 +153,7 @@ async function resolveManualJobAiProfile(settings, { language = "en" } = {}) {
   const effective = {
     ...selectedSettings,
     aiBaseUrl: local ? selectedSettings.aiBaseUrl : canonicalCloudBase,
+    localAiAdapter: localAdapter,
     aiKey: local ? "" : activated.credential,
     // Empty is an intentional canonical value; never resurrect a legacy prompt.
     aiPrompt: activated.prompt,
@@ -133,7 +161,7 @@ async function resolveManualJobAiProfile(settings, { language = "en" } = {}) {
     aiPageImage: profile.pageImage || "off",
     aiMemoryMode: profile.memoryMode || "off",
     aiStyleExamples: profile.styleExamples !== false,
-    aiTranslationMode: "conversation",
+    aiTranslationMode: local ? localProviderTranslationMode(selectedSettings.aiProvider) : "conversation",
     aiConversationReset: String(profile.conversationReset || "0"),
     aiThinking: profile.thinking || "minimum",
     aiLocalThinking: profile.thinking || "minimum",
@@ -194,10 +222,11 @@ export async function resolveJobAiProfile(settings, { language = "en" } = {}) {
     error.code = "PAID_CENTER_UNAVAILABLE";
     throw error;
   }
-  // If the operator removed TP_CENTER_URL, the extension resumes its normal
-  // Manual controls without altering the Manual profile or the stored choice.
-  if (advertised?.paid?.available !== true)
-    return resolveManualJobAiProfile(settings, { language });
+  if (advertised?.paid?.available !== true) {
+    const error = new Error("Paid is unavailable on this API. Select Manual explicitly to use your own provider.");
+    error.code = "PAID_CENTER_UNAVAILABLE";
+    throw error;
+  }
   const token = String(settings.paidSessionToken || "").trim();
   const model = String(settings.paidModel || "").trim();
   if (!token || !model || normalizeUrl(settings.paidApiBase) !== normalizeUrl(base)) {

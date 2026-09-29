@@ -16,7 +16,7 @@ ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'api'))
 h=runpy.run_path(str(ROOT/'scripts/test-api-provider-boundary-matrix.py'),run_name='capability_helpers')
 registry=list(h['compose_providers'](h['ProviderRegistry']()))
-Client=h['BoundaryClient'];Response=h['Response'];gemini=h['cloud_gemini'];anthropic=h['cloud_anthropic']
+Client=h['BoundaryClient'];NativeClient=h['NativeLmStudioClient'];Response=h['Response'];gemini=h['cloud_gemini'];anthropic=h['cloud_anthropic']
 GenerationRequest=h['GenerationRequest']
 
 prior=(
@@ -37,7 +37,7 @@ SCENARIOS=(
 )
 
 def dispatch(spec, request):
-    captured=[];Client.calls=[]
+    captured=[];Client.calls=[];NativeClient.calls=[]
     def gpost(*args,**kw):
         captured.append(args[2])
         return Response({'candidates':[{'finishReason':'STOP','content':{'parts':[{'text':'<<I2_P0:ไทย>>'}]}}],
@@ -47,11 +47,13 @@ def dispatch(spec, request):
         return Response({'content':[{'type':'text','text':'<<I2_P0:ไทย>>'}],
                          'stop_reason':'end_turn','usage':{'input_tokens':23,'output_tokens':7}})
     with ExitStack() as stack:
-        stack.enter_context(patch.object(h['openai_chat'].httpx,'Client',Client))
+        stack.enter_context(patch.object(h['openai_chat'].httpx,'Client',
+            NativeClient if spec.provider_id=='lmstudio' else Client))
         stack.enter_context(patch.object(gemini,'_post_once',side_effect=gpost))
         stack.enter_context(patch.object(anthropic,'post_json',side_effect=apost))
         result=spec.adapter.generate(request)
-    captured += [x['json'] for x in Client.calls]
+    boundary_calls=NativeClient.calls if spec.provider_id=='lmstudio' else Client.calls
+    captured += [x['json'] for x in boundary_calls if x['method']=='POST']
     assert len(captured)==1,(spec.provider_id,len(captured))
     return captured[0],result
 
@@ -76,10 +78,23 @@ for spec in registry:
             provider=spec.provider_id,model=spec.default_model,api_key='fixture',
             base_url=spec.default_base_url,system_text='SYSTEM_FIXED',
             user_parts=(CURRENT,),unit_count=1,expected_ids=('I2_P0',),
-            thinking=thinking,history_messages=prior,model_capabilities=copy.deepcopy(caps),
+            # Local compatibility snapshots in this test are synthetic, not
+            # exact server proof for native Thinking control.
+            thinking='default' if spec.local else thinking,
+            history_messages=prior,model_capabilities=copy.deepcopy(caps),
             # Deliberately no response_schema: Conversation must stay marker-only.
             response_schema=None,
         )
+        if spec.provider_id=='lmstudio':
+            stateless=replace(req,history_messages=(),cache_context={
+                'translationMode':'independent'})
+            payload,result=dispatch(spec,stateless)
+            assert payload['store'] is False and 'previous_response_id' not in payload
+            assert payload['system_prompt']=='SYSTEM_FIXED' and payload['input']==CURRENT
+            assert result.provider_response_id==''
+            assert_no_conversation_schema(spec.provider_id,payload)
+            count+=1
+            continue
         payload,_=dispatch(spec,req)
         native=native_messages(payload)
         assert native is not None,(spec.provider_id,scenario)
@@ -131,7 +146,9 @@ hreq_unknown=replace(hreq,model_capabilities={})
 assert cloud_huggingface._accepted_reasoning_effort(hreq_unknown) is None
 oreq=base('openai','gpt-5.6-luna',{'reasoning':{'supported':True,'control':'levels','supported_efforts':['none','low']}},'off')
 assert cloud_openai._verified_reasoning_mapping(oreq)[0]=='none'
-assert cloud_openai._verified_reasoning_mapping(replace(oreq,model_capabilities={}))[0] is None
+# A documented native model card is exact evidence even without catalogue fields.
+assert cloud_openai._verified_reasoning_mapping(replace(oreq,model_capabilities={}))[0] == 'none'
+assert cloud_openai._verified_reasoning_mapping(replace(oreq,model='gpt-future-unknown',model_capabilities={}))[0] is None
 
 # Future/provider-managed Gemini metadata never invents a thinkingConfig or
 # assume that a generic stale On maps to an active native mode. Provider default
@@ -139,4 +156,4 @@ assert cloud_openai._verified_reasoning_mapping(replace(oreq,model_capabilities=
 active,cfg,applied=cloud_gemini._thinking_state('gemini-future-x','on',{'reasoning':{'supported':True,'control':'provider'}})
 assert active is False and cfg is None and applied=='provider_default_capability'
 
-print(f'PASS {count} provider/model capability cases across {len(registry)} API adapters; Conversation stays I#_P# marker-only with native history roles')
+print(f'PASS {count} provider/model capability cases across {len(registry)} API adapters; 17 replay adapters and stateless LM Studio preserve marker-only output')

@@ -2,8 +2,7 @@
 import math
 from backend.ai.workload import positive
 
-POLICY_VERSION = "ollama-request-context-v1"
-AUTO_CEILING = 16384
+POLICY_VERSION = "ollama-live-model-context-v2"
 
 def plan_ollama_context(limits=None, estimate=None):
     limits, estimate = limits or {}, estimate or {}
@@ -12,8 +11,14 @@ def plan_ollama_context(limits=None, estimate=None):
     model = positive(limits.get("modelContextTokens"))
     runtime = positive(limits.get("runtimeContextTokens")) or positive(limits.get("contextTokens"))
     configured = positive(limits.get("configuredContextTokens"))
-    current = min(model or math.inf, runtime or configured or 4096)
-    ceiling = min(model, max(current, AUTO_CEILING)) if model else current
+    if not (model or runtime or configured):
+        return None
+    # A currently loaded allocation is a starting point, not a model maximum.
+    # Only /api/show's selected model context may authorize growth past it.
+    # With an unknown model maximum, preserve any proven allocation and ask
+    # Ollama to validate a minimal request-specific growth if needed.
+    current = min(model or math.inf, runtime or configured or min(model, 4096))
+    ceiling = model or math.inf
     inp = max(0, estimate.get("estimatedInput", 0) or 0)
     output = max(0, estimate.get("predictedOutput", 0) or 0)
     reasoning = max(0, estimate.get("reasoningReserve", 0) or 0)
@@ -25,8 +30,9 @@ def plan_ollama_context(limits=None, estimate=None):
     requested = min(ceiling, wanted)
     return {"limits": {**limits, "contextTokens": requested}, "evidence": {
         "runtimeContext": runtime, "modelContext": model, "requestedContext": requested,
-        "contextCeiling": ceiling, "contextRequired": required if math.isfinite(required) else None,
+        "contextCeiling": ceiling if math.isfinite(ceiling) else None,
+        "contextRequired": required if math.isfinite(required) else None,
         "contextPolicy": POLICY_VERSION,
         "contextReason": "bounded_growth" if requested > current else
-            ("bounded_limit" if model else "model_limit_unknown") if required > ceiling else "current_window",
+            "bounded_limit" if required > ceiling else "current_window",
         "contextVerified": False}}

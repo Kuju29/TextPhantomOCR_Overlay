@@ -32,6 +32,7 @@ import {
 import {
   localAiPreset,
   normalizeLocalAiAdapter,
+  sameLocalAdapterEndpoint,
 } from "./ai/providers/local-registry.js";
 import { classifyAiRuntime } from "./ai-settings-contract.js";
 import { normalizeEngineModePreference } from "./engine-mode.js";
@@ -134,6 +135,7 @@ export async function readFullSettings(options = {}) {
     "aiProvider",
     "aiBaseUrl",
     "localAiAdapter",
+    "localAiAdapterOwner",
     "aiGlossary",
     "aiCharMemory",
     "aiMemoryMode",
@@ -154,6 +156,9 @@ export async function readFullSettings(options = {}) {
     "rateProfile",
     "rateRpm",
     "rateBurst",
+    "aiLocalRateLimitEnabled",
+    "aiLocalRateRpm",
+    "aiLocalRateBurst",
     "aiLocalCapacityMode",
     "aiLocalManualConcurrency",
     "aiLocalCapabilityHint",
@@ -191,11 +196,14 @@ export async function readFullSettings(options = {}) {
       // typed aiBaseUrl when the popup closes before blur.
       const adapterSource =
         aiProvider === "customlocal"
-          ? it.localAiAdapter
+          ? it.localAiAdapterOwner === "customlocal" ? it.localAiAdapter : null
           : { ...(localAiPreset(aiProvider) || {}), baseUrl: it.aiBaseUrl };
       localAiAdapter = normalizeLocalAiAdapter(adapterSource, {
         provider: aiProvider,
       });
+      if (aiProvider === "customlocal" &&
+        !sameLocalAdapterEndpoint(localAiAdapter.baseUrl, it.aiBaseUrl))
+        localAiAdapter = null;
     } catch {
       localAiAdapter = null;
     }
@@ -266,8 +274,8 @@ export async function readFullSettings(options = {}) {
     // Series-memory mode: "off" (default) | "terms" (glossary only) | "full"
     // (glossary + character sheet). Migrates the old boolean when unset.
     aiStyleExamples: it.aiStyleExamples !== false,
-    // Keep the dormant Independent preference intact while execution is gated
-    // to Conversation. The active job builder owns that temporary gate.
+    // Preserve legacy saved mode without treating it as the active route.
+    // The selected provider resolves the effective mode when a job starts.
     aiTranslationMode: it.aiTranslationMode === "independent"
       ? "independent" : "conversation",
     aiConversationReset: String(it.aiConversationReset || "0"),
@@ -312,7 +320,16 @@ export async function readFullSettings(options = {}) {
     // "extension" is the current engine; "api" restores the pre-v2 split where
     // the server ran Lens, Lens graph grouping, AI and rendering.
     engineMode: normalizeEngineModePreference(it.engineMode),
-    // Local time/RPM pacing is always disabled. Capacity remains bounded.
+    // Separate Local request pacing; the Cloud cap never changes with a Local provider.
+    aiLocalRateLimitEnabled: it.aiLocalRateLimitEnabled === true,
+    // Preserve an invalid enabled cap for the job boundary to reject. A
+    // positive default would silently replace the user's selected limit.
+    aiLocalRateRpm: it.aiLocalRateLimitEnabled === true
+      ? readCount(it.aiLocalRateRpm, 0)
+      : Math.min(600, Math.max(0, readCount(it.aiLocalRateRpm, 6))),
+    aiLocalRateBurst: it.aiLocalRateLimitEnabled === true
+      ? readCount(it.aiLocalRateBurst, 0)
+      : Math.min(60, Math.max(0, readCount(it.aiLocalRateBurst, 1))),
     aiLocalCapacityMode: ["auto", "safe", "manual"].includes(
       it.aiLocalCapacityMode,
     )
@@ -334,15 +351,11 @@ export async function readFullSettings(options = {}) {
       : readBool(it.rateLimitEnabled, DEFAULT_RATE_LIMIT_ENABLED)
         ? "custom"
         : "auto",
-    rateRpm:
-      readBool(it.rateLimitEnabled, DEFAULT_RATE_LIMIT_ENABLED) &&
-      readCount(it.rateRpm, DEFAULT_RATE_RPM) === 0
-        ? DEFAULT_RATE_RPM
-        : readCount(it.rateRpm, DEFAULT_RATE_RPM),
-    rateBurst:
-      readBool(it.rateLimitEnabled, DEFAULT_RATE_LIMIT_ENABLED) &&
-      readCount(it.rateBurst, DEFAULT_RATE_BURST) === 0
-        ? DEFAULT_RATE_BURST
-        : readCount(it.rateBurst, DEFAULT_RATE_BURST),
+    // A saved zero is an incomplete manual cap, not consent to replace it
+    // with a hidden 30 RPM / default burst policy before popup hydration.
+    rateRpm: readCount(it.rateRpm,
+      it.rateLimitEnabled === true ? 0 : DEFAULT_RATE_RPM),
+    rateBurst: readCount(it.rateBurst,
+      it.rateLimitEnabled === true ? 0 : DEFAULT_RATE_BURST),
   };
 }

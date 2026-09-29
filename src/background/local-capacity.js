@@ -64,6 +64,7 @@ export function localCapacityConfig(payload) {
     mode === "manual" ? manual : mode === "safe" ? 1 : browserCapacity;
   return {
     mode,
+    provider: String(payload?.ai?.provider || '').trim().toLowerCase(),
     manual,
     evidence,
     ceiling,

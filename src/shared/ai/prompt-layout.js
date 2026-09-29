@@ -1,19 +1,19 @@
-import { buildStaticUserPrefix, buildStyleExamples } from "./direct-local/prompt.js";
+import { buildStaticUserPrefix, buildStyleExamples, CONVERSATION_STYLE_EXAMPLE_LIMIT } from "./direct-local/prompt.js";
 import { instructionLocale } from "./prompt-language.js";
 import { LOCALIZATION_POLICY_VERSION } from "../../generated/localization-content.js";
 import { normalizeLanguageCode } from "../../generated/language-code-aliases.js";
+import {formatIndependentStoryExamples, humanExampleCount, independentExampleEvidence} from "./independent/examples.js";
 
 async function digest(text) {
   const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
   return [...new Uint8Array(bytes)].map(b => b.toString(16).padStart(2, "0")).join("");
 }
 export async function promptLayout(system, user, {targetLang, sourceLang="", structured=false,
-  examples=true, memoryMode, selectedStyle, conversationRecords=false}={}) {
+  examples=true, memoryMode, selectedStyle, conversationRecords=false, independentExamples=null}={}) {
   const style = String(selectedStyle || "").trim();
-  const prefix = buildStaticUserPrefix(targetLang, sourceLang, structured, examples, style, conversationRecords);
+  const prefix = buildStaticUserPrefix(targetLang, sourceLang, structured, examples, style, conversationRecords, independentExamples);
   const basePersistentPrefix = buildStaticUserPrefix(targetLang, sourceLang, structured, false, style, conversationRecords);
-  // Conversation replays its first provider-visible User anchor byte-for-byte;
-  // therefore its entire static prefix, including human examples, is persistent.
+  // Conversation replays its first provider-visible User anchor byte-for-byte.
   const persistentPrefix = conversationRecords ? prefix : basePersistentPrefix;
   if (!user.startsWith(prefix + "\n\n")) throw new Error("prompt_static_prefix_mismatch");
   // Instruction occurrences only: OCR may legitimately contain arbitrary text.
@@ -23,15 +23,21 @@ export async function promptLayout(system, user, {targetLang, sourceLang="", str
   const [styleSha256, systemSha256, userStaticSha256, userPersistentStaticSha256, staticPrefixSha256] = await Promise.all([
     digest(style), digest(system), digest(prefix), digest(persistentPrefix), digest(system+"\0"+prefix),
   ]);
+  const actualExamples = examples === false || independentExamples?.source === 'none' ? ''
+    : independentExamples?.source === 'story' ? formatIndependentStoryExamples(independentExamples,targetLang)
+    : buildStyleExamples(targetLang,[],structured,sourceLang,
+      conversationRecords ? CONVERSATION_STYLE_EXAMPLE_LIMIT
+        : independentExamples?.source === 'human' ? humanExampleCount(independentExamples) : undefined);
   return {schema:"tp.prompt_layout/1", policyVersion:LOCALIZATION_POLICY_VERSION,
     styleRole:"system", systemStyleCopies, userStyleCopies, styleChars:Array.from(style).length, styleSha256,
     instructionLocale:instructionLocale(targetLang), targetLang:normalizeLanguageCode(targetLang), sourceLang:normalizeLanguageCode(sourceLang),
-    examplesEnabled:examples!==false, examplesIncluded:examples!==false&&!!buildStyleExamples(targetLang,[],structured,sourceLang),
+    examplesEnabled:examples!==false && independentExamples?.source !== 'none',
+    examplesIncluded:!!actualExamples,
+    ...(independentExamples ? { independentExamples:independentExampleEvidence(independentExamples,actualExamples) } : {}),
     memoryMode:["off","terms","full"].includes(memoryMode)?memoryMode:"legacy_filtered",
     systemChars:Array.from(system).length, userStaticChars:Array.from(prefix).length,
     userPersistentStaticChars:Array.from(persistentPrefix).length,
-    bootstrapExamplesChars: examples!==false
-      ? Array.from(buildStyleExamples(targetLang,[],structured,sourceLang)||"").length : 0,
+    bootstrapExamplesChars:independentExamples?.source === 'story' ? 0 : Array.from(actualExamples).length,
     dynamicChars:Array.from(user).length-Array.from(prefix).length,
     systemSha256, userStaticSha256, userPersistentStaticSha256, staticPrefixSha256,
     countUnit:"unicode_characters", styleCountScope:"instruction_blocks", cacheHit:null, cacheSupport:"unknown"};

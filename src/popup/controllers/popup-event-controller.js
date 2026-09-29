@@ -9,6 +9,7 @@ import {
 import {
   localAiPreset,
   normalizeLocalAiAdapter,
+  savedCustomLocalAdapter,
 } from "../../shared/ai/providers/local-registry.js";
 import { classifyLocalEndpointForTrace } from "./local-connection-controller.js";
 import { note } from "../../shared/trace.js";
@@ -74,6 +75,7 @@ export function bindPopupEvents(deps) {
     setProviderTransitionPending,
   } = deps;
   let endpointTimer = null;
+  let modelSelectionRevision = 0;
   const invalidateProviderRequests = () => {
     state.aiMetaSeq = (state.aiMetaSeq || 0) + 1;
     state.aiProbeSeq = (state.aiProbeSeq || 0) + 1;
@@ -151,6 +153,7 @@ export function bindPopupEvents(deps) {
   });
 
   els.apiUrl.addEventListener("input", (e) => {
+    apiHealthController.invalidateMeta();
     invalidateProviderRequests();
     state.lastApiOk = false;
     state.healthSeq += 1;
@@ -192,6 +195,7 @@ export function bindPopupEvents(deps) {
     );
     setProviderTransitionPending(true);
     setFieldMessage(els.aiProviderWrap, "", "");
+    setFieldMessage(els.aiModelWrap, "", "");
     const usageTarget = {
       runtime: local ? "local" : "cloud",
       provider: provider || "unknown",
@@ -241,7 +245,7 @@ export function bindPopupEvents(deps) {
         const staleForNamedLocal = Boolean(preset) && !isLocalHostUrl(cur);
         if (!cur || isAnyDefault || staleForNamedLocal)
           els.aiBaseUrl.value = def;
-      } else if (isAnyDefault && provider) {
+      } else if (isAnyDefault && provider && !local) {
         // Switching to a CLOUD provider: a local default left in the (now
         // hidden) endpoint field is still sent to /ai/resolve, where it reads as
         // "send this provider's key to localhost" and the request is refused.
@@ -265,6 +269,9 @@ export function bindPopupEvents(deps) {
       const flushed = await pendingEdits;
       if (flushed?.ok === false)
         throw flushed.error || new Error("Pending AI settings were not saved");
+      // A Custom Save/Connect may already be inside a storage write when this
+      // switch starts. Its write must settle before the new profile commits.
+      await localConnectionController.waitForPendingSettingsWrites?.();
       transition = profileController.beginProviderTransition(
         provider,
         (els.aiBaseUrl?.value || "").trim(),
@@ -290,9 +297,29 @@ export function bindPopupEvents(deps) {
       });
       els.aiKey.value = profileController.credentialForCurrent();
       updatePromptCount(AI_PROMPT_MAX_CHARS, els.aiPrompt.value);
+      const storedAdapter = await getStorage([
+        "localAiAdapter", "localAiAdapterOwner", "aiBaseUrl",
+      ]);
+      let adapterPatch = {};
+      if (provider === "customlocal") {
+        // The shared JSON is owned only by Custom Local. A named provider may
+        // have written an old preset here; URL equality cannot prove protocol
+        // ownership, even when both runtimes happen to use the same port.
+        const owned = storedAdapter.localAiAdapterOwner === "customlocal";
+        const custom = owned ? savedCustomLocalAdapter(
+          storedAdapter.localAiAdapter, selectedEndpoint,
+        ) : null;
+        if (els.aiLocalAdapter)
+          els.aiLocalAdapter.value = custom ? JSON.stringify(custom, null, 2)
+            : storedAdapter.localAiAdapter && typeof storedAdapter.localAiAdapter === "object"
+              ? JSON.stringify(storedAdapter.localAiAdapter, null, 2) : "";
+        adapterPatch = custom
+          ? { localAiAdapter: custom, localAiAdapterOwner: "customlocal" }
+          : { localAiAdapterOwner: "invalid" };
+      }
       await transition.commit({
         aiLocalCapabilityHint: null,
-        ...(preset ? { localAiAdapter: preset } : {}),
+        ...adapterPatch,
       });
       if (
         revision !== state.providerTransitionRevision ||
@@ -348,6 +375,7 @@ export function bindPopupEvents(deps) {
 
   els.aiBaseUrl?.addEventListener("input", () => {
     invalidateProviderRequests();
+    setFieldMessage(els.aiModelWrap, "", "");
     localConnectionController.invalidate(
       "Connection test cancelled because the Local AI URL changed.",
     );
@@ -380,7 +408,8 @@ export function bindPopupEvents(deps) {
       await profileController.saveConnection({ provider, endpoint: baseUrl });
       await setStorage({
         aiLocalCapabilityHint: null,
-        ...(adapter ? { localAiAdapter: adapter } : {}),
+        ...(adapter && provider === "customlocal"
+          ? { localAiAdapter: adapter, localAiAdapterOwner: "customlocal" } : {}),
       });
       providerMetaController.schedule();
     }, 400);
@@ -407,7 +436,8 @@ export function bindPopupEvents(deps) {
     await profileController.saveConnection({ provider, endpoint: baseUrl });
     await setStorage({
       aiLocalCapabilityHint: null,
-      ...(adapter ? { localAiAdapter: adapter } : {}),
+      ...(adapter && provider === "customlocal"
+        ? { localAiAdapter: adapter, localAiAdapterOwner: "customlocal" } : {}),
     });
     if (isLocalAiProvider(provider)) {
       const storedSnapshots = await getStorage(["aiLocalCapabilitySnapshotsV1"]);
@@ -483,7 +513,12 @@ export function bindPopupEvents(deps) {
     // never reload the runtime, re-list installed models, or invalidate a fresh
     // availability snapshot. The exact leaf adapter maps the saved preference
     // when the first real translation is dispatched.
+    if (els.aiProvider?.value === "lmstudio") {
+      state.aiModelBlocked = true;
+      toggleUi();
+    }
     await profileController.saveProfile({ thinking: value });
+    localConnectionController.refreshThinkingCompatibility?.();
     toggleUi();
   });
 
@@ -501,15 +536,33 @@ export function bindPopupEvents(deps) {
   });
 
   els.aiModel.addEventListener("change", async () => {
-    invalidateProviderRequests();
+    // Capture user intent before any repaint or await. Every late completion
+    // belongs only to this exact selection, including A -> B -> A changes.
+    const revision = ++modelSelectionRevision;
     const prevModel = state.desiredAiModel;
     const nextModel = normalizeAiModel(els.aiModel.value || prevModel);
+    const providerAtSelection = String(els.aiProvider?.value || "");
+    const endpointAtSelection = String(els.aiBaseUrl?.value || "");
+    const isCurrent = () => revision === modelSelectionRevision &&
+      String(els.aiProvider?.value || "") === providerAtSelection &&
+      String(els.aiBaseUrl?.value || "") === endpointAtSelection &&
+      String(els.aiModel.value || "") === nextModel;
+    const previousBlock = state.aiModelBlocked;
+    invalidateProviderRequests();
+    const switchingLocal = isLocalAiProvider(els.aiProvider?.value);
+    if (switchingLocal) {
+      state.aiModelBlocked = true;
+      toggleUi();
+    }
     const flushed = await flushPendingAiEditsForSwitch(
       state.desiredLang,
       prevModel,
     );
+    if (!isCurrent()) return;
     if (flushed?.ok === false) {
       els.aiModel.value = prevModel;
+      state.aiModelBlocked = previousBlock;
+      toggleUi();
       setFieldMessage(
         els.aiModelWrap,
         "error",
@@ -526,16 +579,31 @@ export function bindPopupEvents(deps) {
       selectedUsageTarget,
     );
     state.modelDirty = true;
+    // Commit explicit model intent before asynchronous prompt/probe work. A
+    // popup close must not depend on a later 400 ms debounce to save the model.
+    try {
+      await profileController.persist({}, isCurrent);
+    } catch (error) {
+      if (!isCurrent()) return;
+      state.aiProfileBlocked = true;
+      state.aiProfileErrorCode = "ai_profile_save_failed";
+      setFieldMessage(els.aiModelWrap, "error", "Model settings could not be saved. Select the model again to retry.");
+      toggleUi();
+      return;
+    }
+    if (!isCurrent()) return;
     state.lastAiProbe = null;
     renderLocalCapacityHint();
     await persistSelectedLocalCapacityHint();
+    if (!isCurrent()) return;
     await applyPromptForLang(state.desiredLang);
+    if (!isCurrent()) return;
     scheduleSaveAi();
     if (isLocalAiProvider(els.aiProvider?.value))
       await localConnectionController.markModelChanged(nextModel);
     else
       await providerMetaController.refresh();
-    toggleUi();
+    if (revision === modelSelectionRevision) toggleUi();
   });
 
   els.aiUsageReset?.addEventListener("click", async () => {
@@ -612,6 +680,11 @@ export function bindPopupEvents(deps) {
   // The persistent on-page control uses the same img_all context-menu flow.
   els.translateAllButtonToggle?.addEventListener("change", async () => {
     await setStorage({translateAllButtonEnabled:Boolean(els.translateAllButtonToggle.checked)});
+  });
+
+  // Download is page-local and independent of translation/provider selection.
+  els.downloadImagesToggle?.addEventListener("change", async () => {
+    await setStorage({downloadImagesEnabled:Boolean(els.downloadImagesToggle.checked)});
   });
 
   // Toggle the per-image 🔍 buttons. Content scripts on every page react to the

@@ -1,7 +1,7 @@
 """Canonical editorial standard; browser assets are generated from this source."""
 from backend.lens.languages import normalize
 
-LOCALIZATION_POLICY_VERSION = "system-style-human-bootstrap-2026.9.15.2"
+LOCALIZATION_POLICY_VERSION = "system-style-human-bootstrap-2026.9.27.8"
 from .instruction_packs import instruction_pack
 
 TRANSLATOR_IDENTITY_BASE = instruction_pack("en")["identity"]
@@ -427,7 +427,12 @@ STYLE_EXAMPLES = [
   }
 ]
 
-def build_style_examples(lang, expected_ids, *, structured_output=False, source_lang=""):
+HUMAN_STYLE_EXAMPLE_LIMIT = 20
+LOCAL_INDEPENDENT_HUMAN_STYLE_EXAMPLE_LIMIT = 4
+
+
+def build_style_examples(lang, expected_ids, *, structured_output=False, source_lang="",
+                         example_limit=HUMAN_STYLE_EXAMPLE_LIMIT):
     # All three human translations are shown together. This deliberately avoids
     # inventing a source-language relationship when OCR may be mixed-language.
     # expected_ids/structured_output remain accepted for API parity but examples
@@ -437,6 +442,10 @@ def build_style_examples(lang, expected_ids, *, structured_output=False, source_
         return ""
     pack = instruction_pack(lang)
     blocks = [pack["examplesHeading"]]
-    for row in STYLE_EXAMPLES:
+    if not isinstance(example_limit, int) or isinstance(example_limit, bool) or example_limit < 0:
+        raise ValueError("human_example_limit_invalid")
+    if example_limit == 0:
+        return ""
+    for row in STYLE_EXAMPLES[:min(example_limit, HUMAN_STYLE_EXAMPLE_LIMIT)]:
         blocks.append("\n".join((row["id"], f"EN: {row['en']}", f"JA: {row['ja']}", f"TH: {row['th']}")))
     return "\n\n".join(blocks)

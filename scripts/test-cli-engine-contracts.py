@@ -21,7 +21,7 @@ for value in (None, "", "garbage", 7):
 assert AiConfig(api_key="", thinking="minimum").thinking == "minimum"
 for value in (False, "off"):
     assert AiConfig(api_key="", thinking=value).thinking == "off"
-assert AiConfig(api_key="", thinking="auto").thinking == "default"
+assert AiConfig(api_key="", thinking="auto").thinking == "minimum"
 for value in ("on", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"):
     assert AiConfig(api_key="", thinking=value).thinking == value
 

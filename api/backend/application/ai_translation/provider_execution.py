@@ -16,6 +16,7 @@ from fastapi import HTTPException
 from backend import cancellation, trace
 from backend.ai.accounting import receipt_scope
 from backend.ai.rategate import rate_gate
+from backend.ai.rate_policy import rate_bucket_identity
 from backend.ai.translation.invocation import translate
 from backend.api.errors import cancelled_payload
 from backend.application.ai_translation.context import TranslationContext
@@ -132,7 +133,8 @@ async def _run(ctx: TranslationContext, *, rate_wait_ms: float) -> ExecutionResu
                 admission_note("admitted", final=False, queue_wait_ms=admission_wait_ms)
                 result = await loop.run_in_executor(ctx.request.app.state.ai_executor, threaded_invoke)
         if ctx.rate["enabled"] and not ctx.unlimited:
-            rate_gate.report_success(ctx.resolved_provider, ctx.config.model, ctx.config.api_key)
+            rate_gate.report_success(ctx.resolved_provider, ctx.config.model,
+                rate_bucket_identity(ctx.rate, base_url=ctx.config.base_url, api_key=ctx.config.api_key))
     except BaseException as exc:
         if isinstance(exc, (KeyboardInterrupt, SystemExit, asyncio.CancelledError)):
             if not ctx.unlimited:

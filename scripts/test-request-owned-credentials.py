@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException
 from starlette.requests import Request
 from backend.config import settings
 from backend.ai import resolve as resolution, probe as probing
-from backend.ai.credentials import request_api_key, MissingUserApiKey
+from backend.ai.credentials import request_api_key, MissingUserApiKey, ProviderEndpointConflict
 from backend.ai.provider_registry import provider_registry
 from backend.ai.translation.contracts import AiConfig
 from backend.application.ai_translation.request_validation import build_config
@@ -24,6 +24,7 @@ from backend.application import translate_context, translate_request, idempotenc
 from backend.jobs.stages.config import build_ai_config
 from backend.jobs.cache import build_cache_key, LruCache
 from backend.ai.rate_policy import is_local_target
+from backend.ai.translation.invocation import _translate_once_impl
 from backend.api.routes import ai as ai_routes, ai_v1, meta
 
 class Tests(unittest.TestCase):
@@ -48,6 +49,27 @@ class Tests(unittest.TestCase):
    a=build_config({'provider':{'id':provider,'baseUrl':'http://127.0.0.1:11434','apiKey':'USER_KEY'}})
    b=build_ai_config({'ai':{'provider':provider,'base_url':'http://127.0.0.1:11434','api_key':'USER_KEY'}},'lens_text','ai')
    for cfg in [a,b]:self.assertEqual(cfg.api_key,'');self.assertFalse(cfg.user_key)
+ def test_named_cloud_local_endpoint_fails_before_any_generation_or_key_rewrite(self):
+  url='http://127.0.0.1:11434/v1'
+  for spec in [s for s in provider_registry if not s.local]:
+   with self.subTest(provider=spec.provider_id):
+    self.assertFalse(is_local_target(spec.provider_id,url))
+    for key in ('','USER_KEY'):
+     with self.assertRaises(ProviderEndpointConflict):request_api_key(spec.provider_id,url,key)
+     with self.assertRaises(ProviderEndpointConflict):build_config({'provider':{
+       'id':spec.provider_id,'baseUrl':url,'apiKey':key}})
+     with self.assertRaises(ProviderEndpointConflict):build_ai_config({'ai':{
+       'provider':spec.provider_id,'base_url':url,'api_key':key}},'lens_text','ai')
+     with patch.object(spec.adapter,'generate',side_effect=AssertionError('must not dispatch')):
+      with self.assertRaises(ProviderEndpointConflict):_translate_once_impl(
+        '<<TP_P0:Hello>>','th',AiConfig(api_key=key,provider=spec.provider_id,base_url=url))
+     self.assertEqual(resolution.resolve({'provider':spec.provider_id,
+       'base_url':url,'api_key':key})['error'],'ai_provider_endpoint_conflict')
+     self.assertEqual(probing.probe({'provider':spec.provider_id,
+       'base_url':url,'api_key':key})['status'],'ai_provider_endpoint_conflict')
+  self.assertTrue(is_local_target('auto',url))
+  self.assertEqual(request_api_key('auto',url,''),'')
+  with self.assertRaises(ProviderEndpointConflict):request_api_key('auto',url,'USER_KEY')
  def test_missing_discovery_probe_never_network_on_any_cloud_adapter(self):
   cloud=[s for s in provider_registry if not s.local]
   with ExitStack() as stack:
@@ -87,6 +109,25 @@ class Tests(unittest.TestCase):
      r=await c.post(path,json={'provider':{'id':'huggingface','model':'fixture'},'units':[{'id':'P0','text':'Hello'}],'targetLang':'th'})
      self.assertEqual(r.status_code,400);self.assertEqual(r.json()['detail']['code'],'missing_api_key')
      self.assertNotIn('PRIVATE',r.text)
+     r=await c.post(path,json={'provider':{'id':'huggingface','model':'fixture','apiKey':'USER_FIXTURE'},
+       'rate':{'enabled':True,'rpm':60,'burst':0},
+       'units':[{'id':'P0','text':'Hello'}],'targetLang':'th'})
+     self.assertEqual(r.status_code,400)
+     self.assertEqual(r.json()['detail']['code'],'invalid_manual_rate_cap')
+     self.assertEqual(r.json()['detail']['providerAttempts'],0)
+     r=await c.post(path,json={'provider':{'id':'huggingface','model':'fixture','apiKey':'USER_FIXTURE'},
+       'rate':{'rpm':60,'burst':1},
+       'units':[{'id':'P0','text':'Hello'}],'targetLang':'th'})
+     self.assertEqual(r.status_code,400)
+     self.assertEqual(r.json()['detail']['code'],'invalid_manual_rate_cap')
+     self.assertEqual(r.json()['detail']['providerAttempts'],0)
+     for key in ('','gsk_local_fixture'):
+      r=await c.post(path,json={'provider':{'id':'groq','model':'fixture',
+       'baseUrl':'http://localhost:11434/v1','apiKey':key},
+       'units':[{'id':'P0','text':'Hello'}],'targetLang':'th'})
+      self.assertEqual(r.status_code,400)
+      self.assertEqual(r.json()['detail']['code'],'ai_provider_endpoint_conflict')
+      self.assertEqual(r.json()['detail']['providerAttempts'],0)
   asyncio.run(run())
  def test_idempotency_separates_keys_even_with_same_tab_and_retry_key(self):
   async def run():

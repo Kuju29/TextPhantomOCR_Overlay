@@ -72,11 +72,8 @@ with patch.object(cloud_openai, "openai_chat_probe", _openai_nonreasoning_probe)
         model="gpt-4o", api_key="sk-fixture", base_url=cloud_openai.DEFAULT_BASE_URL,
         model_capabilities={},
     ))
-assert ordinary.ok is True and not ordinary.capabilities
-assert _openai_probe_payloads == [
-    {"max_completion_tokens": 256, "reasoning_effort": "none"},
-    {"max_completion_tokens": 256},
-], _openai_probe_payloads
+assert ordinary.ok is True and ordinary.capabilities['reasoning']['supported'] is False
+assert _openai_probe_payloads == [{"max_tokens": 8}], _openai_probe_payloads
 
 # OpenRouter: account/plan + chat + text in/out are all required when published.
 router = cloud_openrouter.filter_model_items([

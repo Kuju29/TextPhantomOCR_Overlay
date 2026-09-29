@@ -14,8 +14,11 @@ from backend.ai.clients.provider_error import (ProviderAdapterContractError,
 from backend.ai.errors import ModelOutputContractError
 from backend.ai.workload import WorkloadBudgetError
 from backend.ai.capabilities import OutputCapabilityChanged
+from backend.ai.cloud_reasoning import CloudReasoningPreferenceUnavailable
+from backend.ai.translation_paths.store import ConversationError
 from backend.ai.failure_reason import classify, provider_http_failure, retry_after_sec
 from backend.ai.rategate import rate_gate
+from backend.ai.rate_policy import rate_bucket_identity
 from backend.api.errors import (
     cancelled_payload, failure_event, payload as error_payload, provider_status,
     safe_validation_reason,
@@ -117,6 +120,46 @@ def raise_execution_error(ctx: TranslationContext, exc: BaseException, *,
                       providerAttempts=0, generationAttempts=0)
         failure_event(ctx.requested_route, detail, **ctx.route_identity)
         raise HTTPException(409, detail=detail) from exc
+    if isinstance(exc, CloudReasoningPreferenceUnavailable):
+        detail = error_payload(
+            code=exc.code, message=str(exc),
+            user_message=(
+                "ยังยืนยันไม่ได้ว่าโมเดลนี้ปิด Thinking ได้ เลือกโมเดลที่ยืนยันว่า Off ใช้งานได้ หรือ Lowest available เมื่อรองรับ"
+                if exc.requested == "off" else
+                "ยังยืนยันโหมด Thinking ต่ำสุดของโมเดลนี้ไม่ได้ เลือกโมเดลที่รองรับการตั้งค่า Thinking"
+                if exc.requested == "minimum" else
+                f"ยังยืนยันไม่ได้ว่าโมเดลนี้รองรับ Thinking {exc.requested} เลือกโมเดลที่รองรับโหมดนี้"
+            ),
+            origin="api", stage="ai_reasoning_preflight", category="configuration",
+            retryable=False, http_status=409, trace_id=ctx.trace_id,
+            extra={"requestDispatched": False, "providerAttempts": 0,
+                   "generationAttempts": 0, "automaticContentRetry": False,
+                   "automaticTransportRetry": False},
+            correlation=dict(ctx.correlation),
+        )
+        trace_failure(ctx, "ai_reasoning_preflight", exc, 409, **common,
+                      providerAttempts=0, generationAttempts=0)
+        failure_event(ctx.requested_route, detail, **ctx.route_identity)
+        raise HTTPException(409, detail=detail) from exc
+    if isinstance(exc, ConversationError) and getattr(exc, "code", "") in {
+            "ai_local_thinking_unsupported", "ai_conversation_cursor_missing"}:
+        preflight_stage = ("ai_conversation_preflight" if exc.code == "ai_conversation_cursor_missing"
+                           else "ai_reasoning_preflight")
+        detail = error_payload(
+            code=exc.code, message=str(exc),
+            user_message=("ประวัติ LM Studio ไม่มีรหัสเชื่อมบทสนทนาที่ผ่านการตรวจ กรุณาเริ่มบทสนทนาใหม่"
+                if exc.code == "ai_conversation_cursor_missing" else
+                "โมเดล Local AI นี้ยังยืนยันโหมด Thinking ที่เลือกไม่ได้ กรุณาโหลดโมเดลที่รองรับและรีเฟรชข้อมูลโมเดล"),
+            origin="api", stage=preflight_stage, category="configuration",
+            retryable=False, http_status=409, trace_id=ctx.trace_id,
+            extra={"requestDispatched":False, "providerAttempts":0, "generationAttempts":0,
+                   "automaticContentRetry":False, "automaticTransportRetry":False},
+            correlation=dict(ctx.correlation),
+        )
+        trace_failure(ctx, preflight_stage, exc, 409, **common,
+                      providerAttempts=0, generationAttempts=0)
+        failure_event(ctx.requested_route, detail, **ctx.route_identity)
+        raise HTTPException(409, detail=detail) from exc
     if isinstance(exc, WorkloadBudgetError):
         detail = error_payload(
             code="ai_workload_budget_insufficient", message=str(exc),
@@ -162,14 +205,21 @@ def raise_execution_error(ctx: TranslationContext, exc: BaseException, *,
         budget = isinstance(exc, OutputBudgetExhausted)
         code = ("output_budget_exhausted" if budget else
                 "AI_OUTPUT_CONTRACT_MISMATCH" if getattr(exc, "code", "") == "AI_OUTPUT_CONTRACT_MISMATCH"
+                else exc.code if getattr(exc, "code", "") in {
+                    "ai_conversation_native_transcript_invalid", "ai_conversation_cursor_missing",
+                    "ai_local_thinking_violated"}
                 else "invalid_model_output")
         detail = error_payload(
             code=code, message=str(exc),
             user_message=("คำขอนี้ชนเพดานคำตอบก่อนแปลครบ (รวม reasoning ถ้ามี) ไม่ใช่เพดานรวมภาพขนาน" if budget
+                          else "LM Studio ตอบกลับในรูปแบบที่เก็บเป็นบทสนทนาต่อไม่ได้ กรุณาลองส่งคำขอนี้ใหม่" if code == "ai_conversation_native_transcript_invalid"
+                          else "LM Studio ไม่ส่งรหัสเชื่อมบทสนทนา จึงยังรับคำแปลรอบนี้ไม่ได้" if code == "ai_conversation_cursor_missing"
+                          else "Local AI ส่ง Thinking กลับมาแม้เลือก Off กรุณาตรวจการตั้งค่าโมเดล" if code == "ai_local_thinking_violated"
                           else "AI ตอบ ID ไม่ครบหรือรูปแบบผิด ยังไม่มีหลักฐานว่าชนเพดานโทเค็น"),
             origin="upstream_ai", stage="model_output_contract", category="upstream_contract",
             retryable=False, http_status=502, trace_id=ctx.trace_id, upstream_status=200,
             extra={"error": code, "constraintScope":"per_request" if budget else "output_contract", "structuralDetails": structural,
+                   "requestDispatched":True,
                    "providerAttempts": providers, "generationAttempts": generations,
                    "automaticContentRetry": False, "automaticTransportRetry": False,
                    "modelFallback": False, "schemaFallback": False},
@@ -190,7 +240,9 @@ def _raise_provider_failure(ctx: TranslationContext, exc: BaseException,
     retry_sec = retry_after_sec(exc) if limited else 0.0
     if ctx.rate["enabled"] and not ctx.unlimited and limited:
         rate_gate.report_rate_limited(ctx.resolved_provider, ctx.config.model,
-                                     ctx.config.api_key, retry_after_sec=retry_sec)
+                                     rate_bucket_identity(ctx.rate, base_url=ctx.config.base_url,
+                                                          api_key=ctx.config.api_key),
+                                     retry_after_sec=retry_sec)
     upstream = provider_status(exc)
     providers, generated = provider_call_counts(exc)
     generations = 0 if limited or (upstream is not None and 400 <= upstream < 500) else generated
@@ -213,7 +265,9 @@ def _raise_provider_failure(ctx: TranslationContext, exc: BaseException,
         origin="api" if internal else "upstream_ai", stage=stage,
         category="internal" if internal else "upstream", retryable=semantics.retryable,
         http_status=status, trace_id=ctx.trace_id, upstream_status=upstream,
-        extra={"constraintScope":"account_model_time_window" if limited else "unknown",
+        extra={"constraintScope":"unknown",
+               "upstreamProvider": str(getattr(exc, "upstream_provider", "") or "")[:80],
+               "retryAfterSource": "provider_header" if retry_sec > 0 else "local_default" if limited else "not_applicable",
                "quotaKind":"not_reported", "providerAttempts": providers, "generationAttempts": generations,
                "automaticContentRetry": False, "automaticTransportRetry": False,
                "modelFallback": False, "schemaFallback": False,

@@ -1,7 +1,8 @@
-import { createOpenAiCompatibleAdapter } from "./local-openai-compatible.js";
+import { createLmStudioNativeAdapter } from "./local-lmstudio-native.js";
 import { defineLocalProvider } from "./local-spec.js";
 export const localProvider = defineLocalProvider({
   id: "lmstudio",
+  continuationStrategy: "native_response_cursor",
   displayName: "LM Studio",
   protocol: "openai",
   baseUrl: "http://localhost:1234/v1",
@@ -13,5 +14,5 @@ export const localProvider = defineLocalProvider({
   includeUsage: true,
   thinking: null,
   capacity: "runtime",
-  create: createOpenAiCompatibleAdapter,
+  create: createLmStudioNativeAdapter,
 });

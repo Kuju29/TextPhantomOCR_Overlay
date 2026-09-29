@@ -2,7 +2,7 @@
  * Growth is a bounded request option, never a machine setting or a claim of free RAM.
  */
 export const OLLAMA_CONTEXT_POLICY = Object.freeze({
-  version: 'ollama-request-context-v1', fallback: 4096, step: 4096, autoCeiling: 16384,
+  version: 'ollama-live-model-context-v2', fallback: 4096, step: 4096,
 });
 const positive = value => Number.isSafeInteger(value) && value > 0 && value <= 100_000_000 ? value : null;
 
@@ -25,23 +25,26 @@ export function planOllamaContext(limits = {}, estimate = {}) {
   const model = positive(limits.modelContextTokens);
   const runtime = positive(limits.runtimeContextTokens) || positive(limits.contextTokens);
   const configured = positive(limits.configuredContextTokens);
-  const current = Math.min(model || Infinity, runtime || configured || OLLAMA_CONTEXT_POLICY.fallback);
-  const ceiling = model ? Math.min(model, Math.max(current, OLLAMA_CONTEXT_POLICY.autoCeiling)) : current;
+  if (!model && !runtime && !configured) return null;
+  const current = Math.min(model || Infinity, runtime || configured || Math.min(model, OLLAMA_CONTEXT_POLICY.fallback));
+  // The loaded allocation and Modelfile num_ctx are not architectural model
+  // limits. The selected /api/show model architecture is the only proven cap.
+  const ceiling = model || null;
   const input = Math.max(0, Number(estimate.estimatedInput) || 0);
   const output = Math.max(0, Number(estimate.predictedOutput) || 0);
   const reasoning = Math.max(0, Number(estimate.reasoningReserve) || 0);
   const required = Math.ceil(input + output + reasoning + 128 + Math.max(256, output * .5));
-  const minimum = Math.min(ceiling, positive(estimate.minimumContextTokens) || 0);
-  // Keep a window that already fits; otherwise request the smallest 4K step.
-  // If even the bounded window cannot fit, retain that bound for the guard to reject.
+  const minimum = Math.min(ceiling || Infinity, positive(estimate.minimumContextTokens) || 0);
+  // Keep an already allocated window; otherwise ask Ollama for the smallest
+  // 4K step that fits this request. An unknown model max stays unknown.
   const wanted = Math.max(minimum, current >= required ? current
     : Math.ceil(required / OLLAMA_CONTEXT_POLICY.step) * OLLAMA_CONTEXT_POLICY.step);
-  const requestedContextTokens = Math.min(ceiling, wanted);
+  const requestedContextTokens = Math.min(ceiling || Infinity, wanted);
   return { limits: { ...limits, contextTokens: requestedContextTokens },
     evidence: { runtimeContext: runtime, modelContext: model, requestedContext: requestedContextTokens,
       contextCeiling: ceiling, contextRequired: Number.isFinite(required) ? required : null,
       contextPolicy: OLLAMA_CONTEXT_POLICY.version,
       contextReason: requestedContextTokens > current ? 'bounded_growth'
-        : required > ceiling ? (model ? 'bounded_limit' : 'model_limit_unknown') : 'current_window',
+        : required > (ceiling || Infinity) ? 'bounded_limit' : 'current_window',
       contextVerified: false } };
 }

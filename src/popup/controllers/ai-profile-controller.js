@@ -1,3 +1,4 @@
+import { renderReasoningSelect } from "./reasoning-select.js";
 import { normalizeModelCapabilities } from "../../shared/model-capabilities.js";
 import {
   buildAiProfileStoragePatch,
@@ -12,7 +13,7 @@ import {
 import { ensureAiProfileStorageV2 } from "../../shared/ai-profile-storage.js";
 import { isLocalAiProvider } from "../../shared/constants.js";
 import { cloudProviderSpec } from "../../shared/ai/providers/cloud-registry.js";
-import { localProviderSpec } from "../../shared/ai/providers/local-registry.js";
+import { localProviderSpec, localProviderTranslationMode } from "../../shared/ai/providers/local-registry.js";
 import { isLocalHostUrl } from "../../shared/ai/providers/local-spec.js";
 
 
@@ -180,7 +181,7 @@ function defaultsFor(provider) {
     pageImage: "off",
     memoryMode: "off",
     styleExamples: true,
-    translationMode: "conversation",
+    translationMode: local ? "independent" : "conversation",
     conversationReset: "0",
     concurrency: { mode: "auto", max: 0 },
     providerOptions: {},
@@ -246,12 +247,13 @@ export function createAiProfileController({
   }
 
   function render(profile) {
-    if (els.aiThinking)
-      els.aiThinking.value = profile.thinking || "minimum";
+    renderReasoningSelect(els.aiThinking, profile.providerOptions?.modelCapabilities?.reasoning,
+      profile.thinking || "minimum");
     if (els.aiPageImage)
       els.aiPageImage.checked = profile.pageImage === "always";
     if (els.aiMemoryMode) els.aiMemoryMode.value = profile.memoryMode || "off";
-    const translationMode = "conversation";
+    const local = isLocalAiProvider(providerValue());
+    const translationMode = local ? localProviderTranslationMode(providerValue()) : "conversation";
     if (els.aiStyleExamples) {
       els.aiStyleExamples.checked = profile.styleExamples !== false;
       els.aiStyleExamples.disabled = translationMode === "conversation";
@@ -299,9 +301,8 @@ export function createAiProfileController({
       ...(local ? { aiLocalThinking: profile.thinking || "minimum" } : {}),
       aiCharMemory: profile.memoryMode === "full",
       aiStyleExamples: profile.styleExamples !== false,
-      // Persist the dormant user preference without making it executable.
-      aiTranslationMode: profile.translationMode === "independent"
-        ? "independent" : "conversation",
+      // The profile owns this selection; Cloud always renders Conversation.
+      aiTranslationMode: local ? localProviderTranslationMode(providerValue()) : "conversation",
       aiConversationReset: String(profile.conversationReset || "0"),
       aiLocalCapacityMode: profile.concurrency?.mode || "auto",
       aiLocalManualConcurrency: Math.min(4, Math.max(1, max)),
@@ -507,6 +508,7 @@ export function createAiProfileController({
           // first but completed after a newer Provider commit, restore the
           // newest canonical patch so the late completion cannot win.
           if (
+            !setStorage.orderedProfileWrites &&
             revision !== providerTransitionRevision &&
             latestProviderPatch?.revision === providerTransitionRevision
           ) {
@@ -585,6 +587,34 @@ export function createAiProfileController({
     }
 
     return { ...select({ model: selectedModel }), seededPrompt };
+  }
+
+  async function activateResolvedModel(model, isCurrent = () => true) {
+    const selectedModel = String(model || "").trim();
+    const request = currentRequest({ model: selectedModel });
+    const identity = makeProviderIdentity(request.provider, request.endpoint);
+    if (!selectedModel || selectedModel === "auto" || !isCurrent() ||
+        currentIdentity !== identity || modelValue() !== selectedModel) return false;
+    if (profiles.active?.providerIdentity === identity &&
+        profiles.active?.model === selectedModel) return false;
+    // Resolving auto is completion of the same selection, not a user switch
+    // to another model. Preserve edits made while its catalogue was loading.
+    // An existing concrete model always retains its own saved profile.
+    const providerRecord = profiles.providers[identity];
+    if (profiles.active?.model === "auto" && !providerRecord?.models?.[selectedModel]) {
+      const autoProfile = resolveAiProfile(profiles, currentRequest({model:"auto"})).profile;
+      const { providerOptions: _autoCapabilities, ...intent } = autoProfile;
+      profiles = updateAiProfile(profiles, {
+        ...request, patch: intent, select: false, now: now(),
+      });
+    }
+    const dirtyPrompt = state.promptDirty ? String(els.aiPrompt?.value || "") : null;
+    state.desiredAiModel = selectedModel;
+    selectModel(selectedModel);
+    // A metadata response is not permission to discard a pending style edit.
+    if (dirtyPrompt !== null && els.aiPrompt) els.aiPrompt.value = dirtyPrompt;
+    await persist(request, isCurrent);
+    return true;
   }
 
   async function saveProfile(patch) {
@@ -727,6 +757,7 @@ export function createAiProfileController({
     saveConnection,
     saveCredential,
     saveProfile,
+    activateResolvedModel,
     saveModelCapabilities,
     savePrompt,
     selectModel,

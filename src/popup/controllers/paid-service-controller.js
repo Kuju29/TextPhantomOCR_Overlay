@@ -16,16 +16,18 @@ export function createPaidServiceController({ els, state, getStorage, setStorage
   let loginReady = false, statusBase = "", statusCheckedAt = 0, statusRequestId = 0;
   let sending = false, verifying = false;
   const status = message => { if (els.aiPaidStatus) els.aiPaidStatus.textContent = message; };
-  const active = () => available && mode === "paid";
+  const active = () => mode === "paid";
   const apiBase = () => safeApiBase(base || els.apiUrl?.value);
+  const configuredApiBase = () => safeApiBase(state.lastSavedApiUrl) &&
+    safeApiBase(state.lastSavedApiUrl) === safeApiBase(els.apiUrl?.value);
 
   function syncLoginControls() {
-    if (els.aiPaidSend) els.aiPaidSend.disabled = !active() || !loginReady || sending;
-    if (els.aiPaidVerify) els.aiPaidVerify.disabled = !active() || !loginReady || verifying;
+    if (els.aiPaidSend) els.aiPaidSend.disabled = !available || !active() || !loginReady || sending;
+    if (els.aiPaidVerify) els.aiPaidVerify.disabled = !available || !active() || !loginReady || verifying;
   }
 
   async function checkLoginStatus(force = false) {
-    if (!active() || (token && account)) return;
+    if (!available || !active() || (token && account)) return;
     const target = apiBase();
     if (!force && target === statusBase && Date.now() - statusCheckedAt < 15000) return;
     const requestId = ++statusRequestId;
@@ -58,11 +60,17 @@ export function createPaidServiceController({ els, state, getStorage, setStorage
   function applyVisibility() {
     const showAi = els.mode?.value === "lens_text" && els.sources?.value === "ai";
     state.paidActive = showAi && active();
-    state.paidReady = Boolean(state.paidActive && token && account && selected &&
+    state.paidReady = Boolean(available && state.paidActive && token && account && selected &&
       account.models?.some(item => item.id === selected && Number(item.eligible_tp) > 0) &&
       !account.paid_paused);
     if (els.aiServiceWrap) els.aiServiceWrap.style.display = showAi && available ? "" : "none";
-    if (els.aiPaidPanel) els.aiPaidPanel.style.display = state.paidActive ? "" : "none";
+    if (els.aiPaidPanel) els.aiPaidPanel.style.display = state.paidActive && available ? "" : "none";
+    if (els.aiPaidUnavailable) {
+      els.aiPaidUnavailable.style.display = state.paidActive && !available ? "" : "none";
+      els.aiPaidUnavailable.textContent = configuredApiBase()
+        ? "Saved service is unavailable on this API. Set a working API URL to continue."
+        : "A saved account needs your own API URL before it can be used.";
+    }
     if (!state.paidActive) return;
     for (const wrap of [els.aiProviderWrap, els.aiKeyWrap, els.aiModelWrap, els.aiEndpointWrap]) {
       if (wrap) wrap.style.display = "none";
@@ -91,7 +99,7 @@ export function createPaidServiceController({ els, state, getStorage, setStorage
   }
 
   async function refreshAccount() {
-    if (!active() || !token || loading) return;
+    if (!available || !active() || !token || loading) return;
     loading = true;
     status("Loading account…");
     try {
@@ -130,11 +138,15 @@ export function createPaidServiceController({ els, state, getStorage, setStorage
   }
 
   function setAvailability(value, apiBase) {
-    available = value === true;
+    available = value === true && Boolean(configuredApiBase()) &&
+      safeApiBase(apiBase) === safeApiBase(els.apiUrl?.value);
     base = safeApiBase(apiBase);
-    if (!available) { loginReady = false; statusBase = ""; ++statusRequestId; }
+    if (!available) {
+      loginReady = false; statusBase = ""; ++statusRequestId;
+      if (active()) status("Paid is unavailable on this API. Select Manual to use your own provider.");
+    }
     if (available) keepSessionOnItsApi();
-    if (els.aiService) els.aiService.value = available && mode === "paid" ? "paid" : "manual";
+    if (els.aiService) els.aiService.value = mode;
     applyVisibility();
     if (active() && token) void refreshAccount();
     else if (active()) void checkLoginStatus();
@@ -149,7 +161,8 @@ export function createPaidServiceController({ els, state, getStorage, setStorage
     sessionBase = safeApiBase(values.paidApiBase);
     if (available) keepSessionOnItsApi();
     if (els.aiPaidEmail) els.aiPaidEmail.value = String(values.paidEmail || "");
-    if (els.aiService) els.aiService.value = available && mode === "paid" ? "paid" : "manual";
+    if (els.aiService) els.aiService.value = mode;
+    if (!available && active()) status("Paid is unavailable on this API. Select Manual to use your own provider.");
     applyVisibility();
     if (active() && token) void refreshAccount();
     else if (active()) void checkLoginStatus();

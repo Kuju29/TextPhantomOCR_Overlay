@@ -1,4 +1,4 @@
-import { batchUpdateToast, batchStopKeepAlive, persistBatchProgressSoon } from './batches.js';
+import { batchUpdateToast, batchStopKeepAlive, persistBatchProgressSoon, persistBatchProgressNow } from './batches.js';
 import { requestFromTabExact } from './tabs-messaging.js';
 import { forgetReaderAcquisition } from './reader-acquisition.js';
 const releasing = new WeakMap();
@@ -20,6 +20,7 @@ export async function releaseReaderBatch(batch, {replayReceipts=false}={}) {
     forgetReaderAcquisition(batch.reader.runId);
     batchUpdateToast(batch,batch.reader.released ? 'Processing complete; unmounted results remain available'
       : 'Processing complete; reader placement unavailable',true);
+    await persistBatchProgressNow();
     await batchStopKeepAlive(batch);
     return batch.reader.released;
   })();

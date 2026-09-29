@@ -1,18 +1,10 @@
 import json
-import sys
-import types
 from pathlib import Path
 
 from backend.ai.provider_resolution import (
     effective_model_capabilities,
     normalize_model_capabilities,
 )
-# Keep this contract test independent of optional provider HTTP SDKs. The config
-# boundary only needs local/cloud classification; provider composition is tested
-# by the provider suites.
-rate_policy = types.ModuleType("backend.ai.rate_policy")
-rate_policy.is_local_target = lambda provider, base_url="": str(provider).startswith("local")
-sys.modules.setdefault("backend.ai.rate_policy", rate_policy)
 from backend.jobs.stages.config import build_ai_config
 from backend.application.ai_translation.request_validation import build_config
 

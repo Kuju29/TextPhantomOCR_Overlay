@@ -18,7 +18,7 @@ for (const forbidden of [/\bfetch\s*\(/, /content-type/i, /protocol\s*===/, /pro
   assert.doesNotMatch(generation, forbidden, `generation leaked provider wire detail: ${forbidden}`);
 assert.equal((generation.match(/adapter\.generate\(/g) || []).length, 1);
 for (const shared of [discovery, capabilities])
-  assert.doesNotMatch(shared, /protocol\s*(?:===|!==)|\/api\/(?:tags|ps)|\/models|prompt_eval_count|completion_tokens/,
+  assert.doesNotMatch(shared, /protocol\s*(?:===|!==)|\/api\/(?:tags|ps)|["'`]\/models["'`]|prompt_eval_count|completion_tokens/,
     "shared discovery/capability dispatch must not contain provider branches or wire fields");
 assert.match(discovery, /adapter\.listModels\(/);
 
@@ -28,15 +28,26 @@ const streamed = (frames, type) => new Response(new ReadableStream({ start(contr
   for (const frame of frames) controller.enqueue(encoder.encode(frame)); controller.close();
 } }), { status: 200, headers: { "content-type": type } });
 try {
-  for (const spec of localProviderCatalog().filter((item) => item.id !== "ollama")) {
+  // LM Studio has a native stateful SSE adapter with its own request contract.
+  for (const spec of localProviderCatalog().filter((item) => !["ollama", "lmstudio"].includes(item.id))) {
     const adapter = spec.create(localAiPreset(spec.id));
     const payload = adapter.payload({
-      model: "local", messages: [], outputTokens: 128, thinkingMode: "on",
+      model: "local", messages: [], outputTokens: 128, thinkingMode: "default",
     });
     assert.equal(payload.think, undefined,
       `${spec.id} must not guess Ollama's think field from OpenAI compatibility`);
     assert.equal(payload.reasoning, undefined);
     assert.equal(payload.reasoning_effort, undefined);
+    for (const thinkingMode of ["off", "on", "low"])
+      assert.throws(() => adapter.payload({
+        model: "local", messages: [], outputTokens: 128, thinkingMode,
+        thinkingCapability: { supported: false, source: "openai_model_list" },
+      }), (error) => error.code === "local_model_thinking_unsupported" && error.requestDispatched === false,
+      `${spec.id}: the model list is no proof of an explicit Thinking control, including non-reasoning claims`);
+    const lowest = adapter.payload({ model: "local", messages: [], outputTokens: 128,
+      thinkingMode: "default", thinkingCapability: { supported: null, source: "openai_model_list" } });
+    assert.equal(lowest.reasoning, undefined,
+      `${spec.id}: unresolved Lowest must use provider-managed reasoning without an invented field`);
   }
 
   let request;
@@ -44,7 +55,7 @@ try {
     return streamed(['{"message":{"content":"<<TP_P0:ไทย>>"}}\n',
       '{"done":true,"done_reason":"stop","prompt_eval_count":9,"eval_count":4}\n'], "application/x-ndjson"); };
   const ollama = createOllamaAdapter({ baseUrl: "http://localhost:11434" });
-  const one = await ollama.generate({ model: "qwen", messages: [], outputTokens: 1024, thinkingMode: "off" }, { expectedIds: ["P0"] });
+  const one = await ollama.generate({ model: "qwen", messages: [], outputTokens: 1024, thinkingMode: "default" }, { expectedIds: ["P0"] });
   assert.equal(request.url, "http://localhost:11434/api/chat");
   assert.deepEqual(request.body.options, { num_predict: 1024, temperature: 0.2, seed: 0 });
   assert.deepEqual(tokenSummary(ollama.usage(one.stream.data)), { inputTokens: 9, outputTokens: 4, totalTokens: 13, source: "provider" });
@@ -233,7 +244,7 @@ await test("body-read and connection failures reach Direct Local timing evidence
     const events = [];
     globalThis.fetch = fetchImpl;
     await assert.rejects(translateDirectLocal([{ id: "g0", text: "原文" }], {
-      ai: { model: "local", provider: "local", local_adapter: {
+      ai: { model: "local", provider: "local", thinking: "default", local_adapter: {
         protocol: "openai", baseUrl: "http://127.0.0.1:1234/v1",
       }, prompt: "Target language: Thai\nTranslate naturally.", promptMode: "replace" },
       targetLang: "th", sourceLang: "ja", canonicalPrompt,

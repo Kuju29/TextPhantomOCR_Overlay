@@ -2,6 +2,7 @@ import { createOpenAiCompatibleAdapter } from "./local-openai-compatible.js";
 import { defineLocalProvider } from "./local-spec.js";
 export const localProvider = defineLocalProvider({
   id: "vllm",
+  continuationStrategy: "message_replay",
   displayName: "vLLM",
   protocol: "openai",
   baseUrl: "http://localhost:8000/v1",

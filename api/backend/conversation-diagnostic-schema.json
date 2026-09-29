@@ -20,7 +20,8 @@
       "conversation-ready-2026.9.14.10",
       "conversation-human-bootstrap-2026.9.15.1",
       "conversation-immutable-anchor-2026.9.15.2",
-      "conversation-cache-affinity-pages-2026.9.15.3"
+      "conversation-cache-affinity-pages-2026.9.15.3",
+      "conversation-image-records-2026.9.27.8"
     ],
     "scopeStatus": [
       "ready",
@@ -35,7 +36,8 @@
       "history_storage_budget",
       "source_changed",
       "source_replayed",
-      "source_order_rewound"
+      "source_order_rewound",
+      "native_context_rollover"
     ],
     "branch": [
       "initial",
@@ -60,7 +62,10 @@
       "not_committed_storage_error",
       "not_committed_cancelled_or_failed",
       "not_committed_failed",
-      "branched_without_new_turn"
+      "branched_without_new_turn",
+      "not_committed_provider_cursor_missing",
+      "not_committed_native_transcript_invalid",
+      "not_committed_storage_unavailable"
     ],
     "providerCacheStatus": [
       "not_reported",
@@ -87,6 +92,20 @@
       "pinned_from_committed_turn",
       "matched",
       "route_changed"
+    ],
+    "providerMemory": [
+      "new_thread",
+      "continued_thread"
+    ],
+    "providerState": [
+      "new",
+      "linked",
+      "cursor_missing",
+      "transcript_invalid"
+    ],
+    "continuationTransport": [
+      "message_replay",
+      "native_response_cursor"
     ]
   },
   "numeric": [
@@ -112,12 +131,14 @@
     "unexpectedProseChars",
     "pageCount",
     "unitCount",
-    "bootstrapExamplesChars"
+    "bootstrapExamplesChars",
+    "redundantClosingDelimiterChars"
   ],
   "booleans": [
     "staticUserRepeated",
     "legacyFallback",
     "bootstrapExamplesIncluded",
-    "bootstrapExamplesPersisted"
+    "bootstrapExamplesPersisted",
+    "providerThreadRollover"
   ]
 }

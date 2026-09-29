@@ -34,6 +34,9 @@ assert.equal(makeTpError({ message: "cancelled", stage: "poll" }).code, "CANCELL
 assert.equal(makeTpError({ message: "HTTP 404", stage: "lens" }).code, "LENS_FAILED");
 assert.equal(makeTpError({ message: "group failure", stage: "grouping" }).code, "GROUP_FAILED");
 assert.equal(makeTpError({ code: "AI_MODEL_UNAVAILABLE", message: "HTTP 404", stage: "ai" }).code, "AI_MODEL_UNAVAILABLE");
+const budget=makeTpError({code:'ai_workload_budget_insufficient',stage:'ai'});
+assert.match(budget.userMessage,/Context.*Local AI.*ยังไม่ได้ส่งคำขอให้ AI/);
+assert.equal(budget.code,'ai_workload_budget_insufficient');
 
 for (const code of [
   "server_busy", "provider_rate_limited", "lens_transport_error", "cancelled",
@@ -89,6 +92,16 @@ const thinkingOnly = imageErrorMessage(
 assert.equal(thinkingOnly.error.code, "local_ai_thinking_no_answer");
 assert.match(thinkingOnly.error.userMessage, /Thinking/);
 assert.doesNotMatch(thinkingOnly.error.userMessage, /ไม่ทราบสาเหตุ/);
+const wrongLocalModel = imageErrorMessage(
+  { imgUrl: "https://example/page.jpg" },
+  Object.assign(new Error("untrusted response must not reach the page"), {
+    code: "local_model_identity_mismatch", retryable: false,
+    diagnostics: { requestedModel: "selected", reportedModel: "other" },
+  }),
+);
+assert.equal(wrongLocalModel.error.code, "local_model_identity_mismatch");
+assert.match(wrongLocalModel.error.userMessage, /LM Studio.*โมเดลคนละตัว/);
+assert.doesNotMatch(JSON.stringify(wrongLocalModel), /untrusted response|"reportedModel":"other"/);
 
 // Public IMAGE_ERROR objects must always carry a safe reportable name. Raw
 // diagnostics, URLs, provider bodies and credentials remain log-only.

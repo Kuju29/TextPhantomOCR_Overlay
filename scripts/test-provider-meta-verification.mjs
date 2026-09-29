@@ -35,7 +35,7 @@ function fixture({ provider = "huggingface", model = "stale-model", resolveModel
   };
   const controller=createProviderMetaController({els,state,api,
     constants:{paths:{AI_RESOLVE:"/resolve",AI_PROBE:"/probe"},metaTimeout:100,probeTimeout:100},
-    provider:{isLocal:()=>false,label:x=>x,protocolLabel:()=>"chat"},
+    provider:{isLocal:id=>id==="lmstudio",label:x=>x,protocolLabel:()=>"chat"},
     profile:{saveModelCapabilities:async()=>{},selectModel:()=>{}}, prompt:{render:async()=>{},scheduleSave:()=>{}}, local:{}, usage:{},
     persist:async()=>{}, normalizeUrl:x=>x, setModelOptions,
     setFieldMessage:(wrap,type,text)=>messages.push({wrap,type,text}), setStatus:()=>{}, toggleUi:()=>{},
@@ -56,6 +56,27 @@ function fixture({ provider = "huggingface", model = "stale-model", resolveModel
   assert.deepEqual(t.els.aiModel.options.map(x=>x.value),[]);
   assert.equal(t.state.aiModelBlocked,true);
   assert.equal(t.state.lastAiResolve.model_candidates[0].eligibility,"unknown");
+}
+
+// The Cloud resolver's typed endpoint conflict must be shown as such, without
+// pretending that an unknown network transport caused the missing model list.
+{
+  const t=fixture({provider:"openrouter",model:"auto"});
+  t.state.lastAiResolve={provider:"openrouter",error:"ai_provider_endpoint_conflict",
+    backend_supported:true,key_status:"conflict",models_verified:false,models_source:"none"};
+  t.controller.renderStatus();
+  assert.match(t.messages.find(x=>x.wrap===t.els.aiModelWrap)?.text || "",/provider and server URL conflict/);
+  assert.doesNotMatch(t.messages.map(x=>x.text).join(" "),/unknown transport/);
+}
+
+// Local discovery has a separate provider/probe contract; its verified model
+// status must not be replaced by a Cloud-only "unknown transport" message.
+{
+  const t=fixture({provider:"lmstudio",model:"chat-fixture"});
+  t.state.lastAiResolve={provider:"lmstudio",backend_supported:true,models_verified:true,
+    verified_model:"chat-fixture",models:["chat-fixture"]};
+  t.controller.renderStatus();
+  assert.equal(t.messages.length,0,"Cloud metadata renderer must leave Local status alone");
 }
 
 // A stored model missing from this provider/account's authoritative catalogue
@@ -169,6 +190,19 @@ for (const status of ["unreachable","rate_limited","rejected","invalid_model_out
   await t.controller.refresh();
   assert.deepEqual(t.els.aiModel.options.map(x=>x.value),["good-model"]);
   assert.equal(t.state.aiModelBlocked,true);
+}
+{
+  const t=fixture({provider:"groq",model:"good-model",resolveModels:["good-model"],probeStatus:"rate_limited"});
+  await t.controller.refresh();
+  assert.deepEqual(t.els.aiModel.options.map(x=>x.value),["good-model"]);
+  assert.equal(t.state.aiModelBlocked,false,
+    "Groq's probe 429 must not override a verified live account model list");
+}
+{
+  const t=fixture({provider:"groq",model:"good-model",resolveModels:["good-model"],probeStatus:"probe_inconclusive"});
+  await t.controller.refresh();
+  assert.equal(t.state.aiModelBlocked,false,
+    "a tiny Groq reasoning probe must not demote a live account-listed model");
 }
 
 // If the catalogue itself cannot be verified, old models are cleared rather

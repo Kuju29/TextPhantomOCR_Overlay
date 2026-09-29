@@ -230,7 +230,7 @@
         return sendResponse({ resolved });
       }
 
-      if (type === "IMAGE_ERROR") {
+      if (type === "IMAGE_ERROR" || type === "IMAGE_NOTICE") {
         const r = await TP.applyInsertMessage?.(msg);
         return sendResponse(r || { ok: true });
       }

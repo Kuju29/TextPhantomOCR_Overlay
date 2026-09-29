@@ -89,7 +89,8 @@
       "continuation_reliability_restricted",
       "continuation_latency_limited",
       "anchor_one_page",
-      "continuation_token_budget"
+      "continuation_token_budget",
+      "application_context_bounded"
     ],
     "anchorRecovery": [
       "retry_same_anchor",

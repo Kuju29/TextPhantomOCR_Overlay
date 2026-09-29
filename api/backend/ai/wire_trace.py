@@ -1,8 +1,9 @@
-"""Opt-in, lossless AI boundary artifacts for operator diagnostics.
+"""Opt-in AI boundary artifacts for operator diagnostics.
 
 This is intentionally separate from the compact application trace.  It stores
 prompts and model output, so it is disabled unless ``TP_AI_WIRE_TRACE=1``.
-Credentials are the only values rewritten before persistence.
+OpenAI-compatible raw response bodies are omitted: provider reasoning fields
+cannot be safely separated from visible text in arbitrary SSE/JSON extensions.
 """
 
 from __future__ import annotations
@@ -22,6 +23,8 @@ _active: contextvars.ContextVar[Path | None] = contextvars.ContextVar("tp_ai_wir
 _secrets: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar("tp_ai_wire_secrets", default=())
 _lock = threading.Lock()
 _SECRET_KEYS = {"authorization", "api-key", "api_key", "apikey", "x-api-key", "cookie", "set-cookie"}
+_OMITTED_RAW_RESPONSE = "[raw provider response omitted]\n"
+_RAW_RESPONSE_ARTIFACTS = {"05_provider_response.raw", "response-stream.sse"}
 _RELAY_JSON_FILES = {
     "00_identity.json", "01_units.json", "03_wire_units.json",
     "04_provider_request.json", "04_contract_selection.json", "05_provider_response.meta.json",
@@ -121,8 +124,7 @@ def begin(identity: dict[str, Any]) -> contextvars.Token:
         # transport fails before a native payload/response exists.
         write_json("04_provider_request.json", {"status": "not_reached"})
         write_text("05_provider_response.raw", "")
-        # Human-readable model text assembled from parsed transport frames.
-        # The lossless raw boundary above remains authoritative.
+        # Human-readable visible model text assembled from parsed transport frames.
         write_text("05_provider_response.assembled.txt", "")
         write_json("11_terminal.json", {"terminal": False, "state": "started"})
         return token
@@ -190,6 +192,10 @@ def write_json_in(folder: Path, name: str, value: Any) -> None:
     if name not in _RELAY_JSON_FILES:
         raise AiWireTraceWriteError("AI_WIRE_TRACE_WRITE_FAILED: invalid artifact name")
     try:
+        if name == "05_provider_response.meta.json":
+            value = _safe_response_meta(value)
+        elif name in {"10_error.json", "11_terminal.json"}:
+            value = _safe_relay_terminal_meta(value)
         body = json.dumps(redact(value), ensure_ascii=False, indent=2, default=str) + "\n"
         with _lock:
             (folder / name).write_text(body, encoding="utf-8")
@@ -200,6 +206,8 @@ def write_text_in(folder: Path, name: str, value: str) -> None:
     if name not in {"02_system_prompt.txt", "03_user_prompt.txt", "05_provider_response.raw", "05_provider_response.assembled.txt"}:
         raise AiWireTraceWriteError("AI_WIRE_TRACE_WRITE_FAILED: invalid artifact name")
     try:
+        if name == "05_provider_response.raw" and value:
+            value = _OMITTED_RAW_RESPONSE
         with _lock:
             (folder / name).write_text(_scrub_text(str(value)), encoding="utf-8")
     except Exception as exc:
@@ -212,9 +220,10 @@ def end(token: contextvars.Token) -> None:
 def _safe_url(value: str) -> str:
     try:
         parsed = urlsplit(value)
-        query = [(k, "<redacted>" if k.lower() in _SECRET_KEYS or "key" in k.lower() else v)
-                 for k, v in parse_qsl(parsed.query, keep_blank_values=True)]
-        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
+        # Arbitrary provider query fields and URL userinfo can contain tokens.
+        query = [(k, "<redacted>") for k, _ in parse_qsl(parsed.query, keep_blank_values=True)]
+        return urlunsplit((parsed.scheme, parsed.netloc.rsplit("@", 1)[-1],
+                           parsed.path, urlencode(query), ""))
     except Exception:
         return value
 
@@ -233,11 +242,66 @@ def redact(value: Any, key: str = "") -> Any:
         return _safe_url(value)
     return value
 
+
+def _safe_response_meta(value: Any) -> dict[str, Any]:
+    row = value if isinstance(value, dict) else {}
+    status = row.get("status")
+    status = status if type(status) is int and 100 <= status <= 599 else None
+    streamed = row.get("streamed")
+    if type(streamed) is not bool:
+        streamed = True if row.get("mode") == "stream" else (
+            False if row.get("mode") == "body" else None)
+    safe = {"status": status, "streamed": streamed, "bodyStored": False}
+    for key in ("streamChunkCount", "reasoningChunkCount", "chunkCount",
+                "inputTokens", "outputTokens", "totalTokens",
+                "cachedInputTokens", "reasoningTokens"):
+        if key in row:
+            count = row[key]
+            safe[key] = count if type(count) is int and count >= 0 else None
+    # Safe error identifiers, never vendor message/raw/headers/reasoning.
+    from backend.ai.clients.provider_error import safe_diagnostic_label
+    for key in ("providerCode", "providerType", "upstreamProvider"):
+        label = safe_diagnostic_label(row.get(key))
+        if label:
+            safe[key] = label
+    wait = row.get("retryAfterMs")
+    if type(wait) is int and 0 <= wait <= 3_600_000:
+        safe["retryAfterMs"] = wait
+    if "chunkCount" not in safe and isinstance(row.get("chunks"), list):
+        safe["chunkCount"] = len(row["chunks"])
+    if type(row.get("complete")) is bool:
+        safe["complete"] = row["complete"]
+    return safe
+
+
+def _safe_relay_terminal_meta(value: Any) -> dict[str, Any]:
+    """Keep only structural facts from browser-supplied failure/terminal rows."""
+    row = value if isinstance(value, dict) else {}
+    safe: dict[str, Any] = {}
+    for key in ("state", "stage", "code"):
+        field = row.get(key)
+        if isinstance(field, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", field):
+            safe[key] = field
+    for key in ("terminal", "requestDispatched", "providerResponded"):
+        if type(row.get(key)) is bool:
+            safe[key] = row[key]
+    for key in ("status", "providerAttempts", "generationAttempts", "translated"):
+        count = row.get(key)
+        if type(count) is int and count >= 0:
+            safe[key] = count
+    if row.get("message"):
+        safe["message"] = "<omitted>"
+    return safe
+
 def write_json(name: str, value: Any) -> None:
     folder = _active.get()
     if folder is None:
         return
     try:
+        if name == "05_provider_response.meta.json":
+            value = _safe_response_meta(value)
+        elif name in {"10_error.json", "11_terminal.json"} and isinstance(value, dict):
+            value = {**value, "message": "<omitted>" if value.get("message") else ""}
         body = json.dumps(redact(value), ensure_ascii=False, indent=2, default=str) + "\n"
         with _lock:
             (folder / name).write_text(body, encoding="utf-8")
@@ -249,6 +313,8 @@ def write_text(name: str, value: str) -> None:
     if folder is None:
         return
     try:
+        if name in _RAW_RESPONSE_ARTIFACTS and value:
+            value = _OMITTED_RAW_RESPONSE
         with _lock:
             (folder / name).write_text(str(value), encoding="utf-8")
     except Exception as exc:
@@ -257,6 +323,10 @@ def write_text(name: str, value: str) -> None:
 def append_text(name: str, value: str) -> None:
     folder = _active.get()
     if folder is None:
+        return
+    if name in _RAW_RESPONSE_ARTIFACTS:
+        # SSE chunks can split a private reasoning value across frames. No
+        # per-frame rewrite can prove the concatenation is safe to persist.
         return
     try:
         with _lock:
@@ -277,39 +347,36 @@ def assembled_response(value: str) -> None:
     write_text("05_provider_response.assembled.txt", _scrub_text(str(value)))
 
 def record_error(exc: BaseException, *, stage: str) -> None:
-    """Persist a credential-safe terminal failure without swallowing it."""
+    """Persist structural failure evidence without vendor-controlled wording."""
     detail = getattr(exc, "detail", None)
     detail = detail if isinstance(detail, dict) and detail.get("schema") == "tp.error/1" else {}
-    message = _scrub_text(str(detail.get("message") or exc or ""))
-    message = re.sub(r"(?i)(bearer\s+)[^\s,;]+", r"\1<redacted>", message)
-    message = re.sub(r"([?&](?:key|api_key|token)=)[^&\s]+", r"\1<redacted>", message)
     code = detail.get("code") or getattr(exc, "code", None)
     evidence = {}
     for key in ("origin", "httpStatus", "upstreamStatus", "requestDispatched", "providerAttempts", "generationAttempts"):
         if key in detail:
             evidence[key] = detail[key]
-    validation = detail.get("validation")
-    if isinstance(validation, dict):
-        evidence["validation"] = {key: str(validation.get(key, ""))[:120] for key in ("field", "reason")}
+    status = getattr(exc, "status", None)
+    if "upstreamStatus" not in evidence and type(status) is int and 100 <= status <= 599:
+        evidence["upstreamStatus"] = status
     write_json("10_error.json", {
         "stage": stage, "type": type(exc).__name__,
-        "code": code, "message": message, **evidence,
+        "code": code, "message": "<omitted>", **evidence,
     })
-    terminal(state="failed", stage=stage, code=code, message=message, **evidence)
+    terminal(state="failed", stage=stage, code=code, **evidence)
 
 def terminal(*, state: str, stage: str = "", code: Any = None,
              message: str = "", **details: Any) -> None:
     """Write the authoritative end state for every started AI operation."""
     write_json("11_terminal.json", {
         "terminal": True, "state": state, "stage": stage,
-        "code": code, "message": _scrub_text(message), **details,
+        "code": code, "message": "<omitted>" if message else "", **details,
     })
 
 def provider_request(*, url: str, headers: dict[str, Any], payload: Any) -> None:
     found: set[str] = set()
     try:
         for key, value in headers.items():
-            if key.lower() in _SECRET_KEYS and value:
+            if value:
                 found.add(str(value))
                 if str(value).lower().startswith("bearer "):
                     found.add(str(value)[7:])
@@ -320,7 +387,26 @@ def provider_request(*, url: str, headers: dict[str, Any], payload: Any) -> None
     except Exception:
         pass
     _secrets.set(tuple(sorted(found, key=len, reverse=True)))
-    write_json("04_provider_request.json", {"url": url, "headers": headers, "body": payload})
+    # Header names aid diagnostics; values may be credentials under vendor
+    # specific names and are never needed to reproduce the prompt contract.
+    safe_headers = {str(key): "<redacted>" for key in headers}
+    write_json("04_provider_request.json", {"url": url, "headers": safe_headers, "body": payload})
+
+
+def provider_response_omitted(response: Any, *, streamed: bool | None) -> None:
+    """Record only HTTP status/mode for OpenAI-compatible response payloads.
+
+    A reasoning fragment may be split across SSE lines, and vendors may add
+    arbitrary JSON fields. Never persist even a prefix of that raw payload.
+    """
+    if _active.get() is None:
+        return
+    status = getattr(response, "status_code", None)
+    status = status if type(status) is int and 100 <= status <= 599 else None
+    write_text("05_provider_response.raw", _OMITTED_RAW_RESPONSE)
+    write_json("05_provider_response.meta.json", {
+        "status": status, "streamed": streamed, "bodyStored": False,
+    })
 
 def _scrub_text(value: str) -> str:
     text = str(value)
@@ -330,17 +416,10 @@ def _scrub_text(value: str) -> str:
     return text
 
 def provider_response(value: Any) -> None:
-    if isinstance(value, str):
-        write_text("05_provider_response.raw", _scrub_text(value))
-    else:
-        write_text("05_provider_response.raw", _scrub_text(json.dumps(value, ensure_ascii=False, default=str)))
+    # Deliberately do not inspect or serialize the vendor body. Thought fields
+    # may occur anywhere inside a JSON extension.
+    provider_response_omitted(None, streamed=None)
 
 def http_response(response: Any) -> None:
-    """Persist an HTTP body without requiring test doubles to expose ``text``."""
-    if _active.get() is None:
-        return
-    value = getattr(response, "text", None)
-    if value is None:
-        content = getattr(response, "content", b"")
-        value = content.decode("utf-8", errors="replace") if isinstance(content, bytes) else str(content)
-    provider_response(value)
+    """Persist status only; never touch a native provider's response body."""
+    provider_response_omitted(response, streamed=None)

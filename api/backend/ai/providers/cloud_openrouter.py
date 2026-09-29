@@ -4,9 +4,11 @@ from __future__ import annotations
 from typing import Any
 
 import re, httpx
+from collections import Counter
 from urllib.parse import urlsplit
 
 from backend.ai.provider_contract import GenerationRequest, ModelListResult, ProbeRequest, ProbeResponse, ProviderSpec
+from backend.ai.cloud_reasoning import observed_off_status
 from backend.ai.providers.probe_support import openai_chat_probe
 from backend.ai.transports.openrouter_chat import execute_openrouter_chat
 
@@ -24,6 +26,10 @@ def normalize_capabilities(item: dict[str, Any]) -> dict[str, Any]:
     efforts = reasoning.get("supported_efforts", item.get("supported_reasoning_efforts", []))
     clean = [value.strip().lower() for value in efforts if isinstance(value, str) and re.fullmatch(r"[a-z0-9_-]{1,32}", value.strip().lower())] if isinstance(efforts, list) else []
     result: dict[str, Any] = {}
+    if isinstance(efforts, list) and len(clean) != len(efforts):
+        # Do not send malformed names on the wire, but retain the fact that
+        # the visible valid levels may not include the true lowest level.
+        result["minimum_unresolved"] = True
     explicit = reasoning.get("supported")
     if isinstance(explicit, bool): result["supported"] = explicit
     elif "reasoning" in supported or clean or reasoning.get("mandatory") is True: result["supported"] = True
@@ -59,15 +65,15 @@ def normalize_capabilities(item: dict[str, Any]) -> dict[str, Any]:
     if "response_format" in supported or "structured_outputs" in supported:
         output["structured_output"] = {"supported": True}
     from backend.ai.workload import normalize_limits
-    top = item.get("top_provider") if isinstance(item.get("top_provider"), dict) else {}
     per_request = item.get("per_request_limits") if isinstance(item.get("per_request_limits"), dict) else {}
     limits = normalize_limits({"contextTokens": item.get("context_length"),
-        "outputHintTokens": top.get("max_completion_tokens"),
         "maxOutputTokens": per_request.get("completion_tokens"),
         "maxInputTokens": per_request.get("prompt_tokens"),
         "tokenizer": architecture.get("tokenizer"),
-        "source": "openrouter-account-model-catalogue", "scope": "catalogue-top-provider-hint"})
-    if any(key in limits for key in ("contextTokens", "outputHintTokens", "maxOutputTokens", "maxInputTokens")):
+        "source": "openrouter-account-model-catalogue", "scope": "account_model"})
+    # top_provider.max_completion_tokens describes one upstream candidate; an
+    # unpinned request can take another route, so it cannot limit this request.
+    if any(key in limits for key in ("contextTokens", "maxOutputTokens", "maxInputTokens")):
         output["limits"] = limits
     return output
 
@@ -131,14 +137,14 @@ def _budget(request: GenerationRequest, reasoning: bool) -> int:
     workload = dict(request.workload or {})
     predicted = workload.get("predictedOutput")
     if isinstance(predicted, int) and not isinstance(predicted, bool) and predicted > 0:
-        reserve = workload.get("reasoningReserve") if reasoning else 0
+        # The browser may have measured hidden thinking from this exact model
+        # despite an accepted Thinking Off control. Preserve that observation:
+        # all generated tokens share the output ceiling, irrespective of the UI
+        # toggle, and a continuation/repair needs room for the visible answer.
+        reserve = workload.get("reasoningReserve")
         reserve = reserve if isinstance(reserve, int) and not isinstance(reserve, bool) and reserve > 0 else 0
         dynamic = predicted + reserve + max(256, (predicted + 1) // 2)
-        standard = max(1024, min(standard, dynamic))
-    # A stale historical reasoning sample must not re-inflate an explicitly-Off
-    # request.  Off is already proven on the wire by reasoning.effort=none.
-    if not reasoning and workload:
-        workload["reasoningReserve"] = 0
+        standard = max(1024, min(MAX_OUTPUT_TOKENS, max(standard, dynamic) if reserve else min(standard, dynamic)))
     from backend.ai.workload import guard_output_budget
     return guard_output_budget(standard, workload=workload,
         limits=request.model_capabilities.get("limits"), system=request.system_text,
@@ -165,11 +171,14 @@ def _apply_official_routing(payload: dict[str, Any], base_url: str) -> dict[str,
     result["provider"] = {
         **current,
         "sort": current.get("sort", "throughput"),
+        # Restore the router's same-model upstream failover policy. This does
+        # not change TextPhantom's selected provider/model or issue app retries.
+        # Explicit caller restrictions remain authoritative.
         "allow_fallbacks": current.get("allow_fallbacks", True),
         "require_parameters": current.get("require_parameters", True),
         # Deprioritize endpoints whose recent p90 startup latency is already
-        # outside TextPhantom's interactive budget, without excluding them as
-        # fallbacks. OpenRouter treats this as a preference, not a hard filter.
+        # outside TextPhantom's interactive budget. OpenRouter treats this as
+        # a preference, not a hard filter for the initial upstream selection.
         "preferred_max_latency": current.get("preferred_max_latency", {"p90": 8}),
     }
     return result
@@ -207,7 +216,10 @@ def prepare_payload(request: GenerationRequest) -> dict[str, Any]:
         payload.update(temperature=TEMPERATURE, max_tokens=_budget(request, False))
     if reasoning_payload is not None:
         payload["reasoning"] = reasoning_payload
-    if reasoning_active and isinstance(reasoning_caps, dict) and reasoning_caps.get("supports_max_tokens") is True:
+    provider_managed_minimum = (request.thinking == "default" and
+                                request.cache_context.get("thinkingRequested") == "minimum")
+    if (reasoning_active and not provider_managed_minimum and
+            isinstance(reasoning_caps, dict) and reasoning_caps.get("supports_max_tokens") is True):
         # OpenRouter counts reasoning and final text against the same completion
         # ceiling. Bound reasoning for on/default/mandatory modes so it cannot
         # consume the entire response before any <<TP_Pn:...>> markers appear.
@@ -326,8 +338,23 @@ class OpenRouterAdapter:
                           "preferredMaxLatency": (payload.get("provider") or {}).get("preferred_max_latency")},
         )
         applied = "provider_default" if request.thinking == "default" else "unverified"
-        if isinstance(reasoning_value.get("enabled"), bool):
-            applied = "requested_on" if reasoning_value["enabled"] else "requested_off"
+        off_control_sent = (reasoning_value.get("enabled") is False
+                            or reasoning_value.get("effort") == "none")
+        if off_control_sent:
+            # OpenRouter may route to an upstream that accepts effort:none but
+            # still reports hidden reasoning. The request field alone is not
+            # proof that Thinking Off took effect.
+            observed = result.thinking_tokens
+            applied = observed_off_status(result)
+            trace.note("openrouter.reasoning_observed", {
+                "thinkingMode": request.thinking,
+                "reasoningControlSent": True,
+                "reportedReasoningTokens": observed if type(observed) is int else None,
+                "reasoningContentObserved": result.reasoning_observed,
+                "thinkingApplied": applied,
+            }, file="ai/providers/cloud_openrouter.py")
+        elif isinstance(reasoning_value.get("enabled"), bool):
+            applied = "requested_on"
         elif reasoning_value.get("effort"):
             applied = f"requested_{request.thinking}_effort_{reasoning_value['effort']}"
         elif reasoning_mandatory:
@@ -351,17 +378,27 @@ class OpenRouterAdapter:
             accepted = filter_model_items(items)
             models = sorted({str(item["id"]).strip() for item in accepted})
             caps = {str(item["id"]).strip(): normalize_capabilities(item) for item in accepted}
+            counts = Counter(str(item["id"]).strip() for item in accepted)
+            repeated = {model for model, count in counts.items() if count > 1}
+            for model in repeated:
+                # A duplicated model ID has no unique capability record.
+                # The last row cannot prove its reasoning, vision or limits.
+                caps[model] = {}
             candidates = {str(item["id"]).strip(): {
                 "eligibility": "usable", "evidence": "openrouter_account_models_user"
             } for item in accepted}
             return ModelListResult(tuple(models), "valid", capabilities=caps,
                                    candidates=candidates)
-        except Exception as exc:
-            return ModelListResult(status="unreachable", error=str(exc))
+        except httpx.RequestError as exc:
+            # HTTP exception strings can include the full URL. Catalogue
+            # diagnostics only need a bounded error class, never credentials.
+            return ModelListResult(status="unreachable", error=type(exc).__name__)
+        except (ValueError, TypeError, AttributeError, KeyError):
+            return ModelListResult(status="error", error="invalid_model_catalogue")
 
 ADAPTER = OpenRouterAdapter()
 SPEC = ProviderSpec(PROVIDER_ID, "openai_chat_completions", DEFAULT_MODEL,
                     DEFAULT_BASE_URL, ALIASES, key_prefixes=("sk-or-",), rate_rpm=60.0, rate_burst=8,
-                    rate_rpm_min=10.0, rate_rpm_max=300.0, adapter=ADAPTER)
+                    rate_rpm_min=10.0, rate_rpm_max=300.0, conversation_transport="message_replay", adapter=ADAPTER)
 
 __all__ = ["ADAPTER", "SPEC", "filter_model_items", "normalize_capabilities", "prepare_payload"]

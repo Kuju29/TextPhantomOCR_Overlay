@@ -1,3 +1,5 @@
+import {deepseekRate} from "./deepseek.js";
+import {huggingfaceRate} from "./huggingface.js";
 // Prices in USD per 1M tokens; exact model names only. These are snapshots of
 // official *standard* API prices. User overrides take precedence. Record the
 // snapshot on each request so a later price edit cannot rewrite history.
@@ -18,11 +20,21 @@ export const OFFICIAL_RATES = Object.freeze({
     "gemini-2.5-flash-lite": make("0.10", "0.01", "0.40", google),
   },
   openai: {
+    // Native standard rates, including the exact served snapshot returned by
+    // the API. Unknown snapshots/fine-tunes keep their own pricing identity.
+    "gpt-4.1": make("2", "0.5", "8", "https://developers.openai.com/api/docs/models/gpt-4.1", {asOf: "2026-09-28"}),
+    "gpt-4.1-2025-04-14": make("2", "0.5", "8", "https://developers.openai.com/api/docs/models/gpt-4.1", {asOf: "2026-09-28"}),
+    "gpt-4.1-mini": make("0.4", "0.1", "1.6", "https://developers.openai.com/api/docs/models/gpt-4.1-mini", {asOf: "2026-09-28"}),
+    "gpt-4.1-mini-2025-04-14": make("0.4", "0.1", "1.6", "https://developers.openai.com/api/docs/models/gpt-4.1-mini", {asOf: "2026-09-28"}),
+    "gpt-4.1-nano": make("0.1", "0.025", "0.4", "https://developers.openai.com/api/docs/models/gpt-4.1-nano", {asOf: "2026-09-28"}),
+    "gpt-4.1-nano-2025-04-14": make("0.1", "0.025", "0.4", "https://developers.openai.com/api/docs/models/gpt-4.1-nano", {asOf: "2026-09-28"}),
+
     "gpt-5.6-sol": make("4.00", "0.40", "20.00", openai, {cacheWrite: "5.00", highContextThreshold: 272000, highInputFactor: "2", highOutputFactor: "1.5"}),
     "gpt-5.6-terra": make("2.00", "0.20", "12.00", openai, {cacheWrite: "2.50", highContextThreshold: 272000, highInputFactor: "2", highOutputFactor: "1.5"}),
     "gpt-5.6-luna": make("0.20", "0.02", "1.20", openai, {cacheWrite: "0.25", highContextThreshold:272000, highInputFactor:"2", highOutputFactor:"1.5"}),
   },
   anthropic: {
+    "claude-sonnet-4-6": make("3", "0.30", "15", claude, {cacheWrite: "3.75", cacheWrite1h: "6", asOf: "2026-09-28"}),
     "claude-sonnet-5": make("2", "0.20", "10", claude, {cacheWrite: "2.50", cacheWrite1h: "4"}),
     "claude-haiku-4-5": make("1", "0.10", "5", claude, {cacheWrite: "1.25", cacheWrite1h: "2"}),
     "claude-haiku-4.5": make("1", "0.10", "5", claude, {cacheWrite: "1.25", cacheWrite1h: "2"}),
@@ -40,14 +52,20 @@ export const OFFICIAL_RATES = Object.freeze({
 export const rateKey = (provider, model) => `${String(provider || "").toLowerCase()}|${String(model || "").toLowerCase()}`;
 export const routeRateKey = (provider,model,upstream="") =>
   upstream ? `${rateKey(provider,model)}|${String(upstream).toLowerCase()}` : rateKey(provider,model);
-export function selectRate(provider, model, overrides = {}, upstream = "", liveRates = {}) {
+export function selectRate(provider, model, overrides = {}, upstream = "", liveRates = {}, at = Date.now()) {
   const key = rateKey(provider, model);
   const override = overrides && Object.hasOwn(overrides, key) ? overrides[key] : null;
   if (override?.input != null && override?.output != null) return {...override, origin:"user"};
   const live = liveRates && Object.hasOwn(liveRates, routeRateKey(provider,model,upstream))
     ? liveRates[routeRateKey(provider,model,upstream)] : null;
+  const routeSnapshot = String(provider).toLowerCase() === "huggingface" ? huggingfaceRate(model,upstream) : null;
   if (live?.input != null && live?.output != null &&
-      (!live.fetchedAt || Date.now()-live.fetchedAt < 24*60*60*1000)) return {...live, origin:"live_catalogue"};
+      (!live.fetchedAt || Date.now()-live.fetchedAt < 24*60*60*1000)) {
+    const sameRates = routeSnapshot && Number(live.input) === Number(routeSnapshot.input) && Number(live.output) === Number(routeSnapshot.output);
+    return {...live, ...(live.cached == null && sameRates ? {cached:routeSnapshot.cached,cachePriceSource:routeSnapshot.url} : {}), origin:"live_catalogue"};
+  }
+  if (String(provider).toLowerCase() === "deepseek") return deepseekRate(model,at);
+  if (routeSnapshot && at >= Date.parse("2026-09-28T00:00:00Z")) return routeSnapshot;
   const official = OFFICIAL_RATES[String(provider || "").toLowerCase()]?.[String(model || "").toLowerCase()];
   return official ? {...official, origin:"official_snapshot"} : null;
 }

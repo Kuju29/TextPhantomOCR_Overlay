@@ -12,6 +12,7 @@ from backend.ai.accounting import receipt_scope, adopt_receipt_references
 from backend.ai.translation.invocation import translate
 from backend.ai.usage import aggregate_usage
 from backend.ai.errors import ModelOutputContractError
+from backend.ai.clients.base import OutputBudgetExhausted
 from backend.jobs.stages.ai_repair import _target_script_diagnostic
 from backend.jobs.stage_admission import stage_slot
 from .store import execution_scope
@@ -27,6 +28,15 @@ def emit(value):
 def dispatch(rows,estimate,reason,profile):
     owners=list(dict.fromkeys(r['ticket'] for r in rows));first=owners[0]
     ai=type(first.ai)(**{f.name:copy.deepcopy(getattr(first.ai,f.name)) for f in fields(first.ai)});batch_id=str(uuid.uuid4());texts=[r['text'] for r in rows]
+    # Private metadata never enters workload, wire trace, or the page result.
+    # The READY planner owns this exact server/account/model evidence.
+    estimate=dict(estimate)
+    proof=estimate.pop('_runtimeContextEvidence', None)
+    selected_capabilities=estimate.pop('_preparedCapabilities', None)
+    if selected_capabilities is not None:
+        ai.model_capabilities=copy.deepcopy(selected_capabilities)
+    if proof is not None:
+        ai._runtime_context_evidence=proof
     origins=[]
     for t in owners:
         d=t.ai.conversation or {};own=[(i,r) for i,r in enumerate(rows) if r['ticket'] is t]
@@ -58,7 +68,7 @@ def dispatch(rows,estimate,reason,profile):
         # Preserve good records. The existing page renderer treats empty failed
         # records as unresolved instead of drawing an unvalidated foreign answer.
         values=[v if _target_script_diagnostic(v,first.target,s).get('decision')!='reject' else '' for s,v in zip(texts,values)]
-        learn(profile,result,estimate)
+        learn(profile,result,estimate,missing=sum(not v.strip() for v in values))
         emit({**evidence,'phase':'distributed','mappedUnits':sum(bool(v.strip()) for v in values),
               'missingUnits':sum(not v.strip() for v in values),'providerCallsAdded':1,'providerRequestCount':1})
         wire_trace.write_json('08_batch_mapping.json',{'batchId':batch_id,'origins':origins,'values':values})
@@ -73,6 +83,18 @@ def dispatch(rows,estimate,reason,profile):
             # pool. Keep earlier good chunks and the charged receipt, never
             # retry the whole combined initial batch to "fix" its history.
             meta.update(generation_attempts=1,provider_attempts=1,conversationBatchFailure=str(getattr(exc,'code','model_output_contract')))
+            if (isinstance(exc,OutputBudgetExhausted) and
+                    details.get('validatorSubtype') in ('empty_output','reasoning_only_exhausted') and
+                    str(meta.get('finish_reason') or '').lower() in ('length','max_tokens','max_output_tokens')):
+                # Keep a typed terminal failure until page projection. A page
+                # with good units from an earlier batch must still return its
+                # partial result and all its existing receipt references.
+                meta['_terminalBudgetFailure']={
+                    'responseShape':exc.response_shape,
+                    'details':{key:details[key] for key in (
+                        'validatorSubtype','reasoningOnlyExhausted','requestedOutputTokens',
+                        'resolvedProvider','resolvedModel') if key in details},
+                }
             emit({**evidence,'phase':'failed','mappedUnits':0,'missingUnits':len(rows),'providerCallsAdded':1,'providerRequestCount':1})
             wire_trace.write_json('08_batch_mapping.json',{'batchId':batch_id,'origins':origins,'values':['']*len(rows),'failureCode':meta['conversationBatchFailure']})
             wire_trace.terminal(state='failed',stage='response_mapping')
@@ -85,11 +107,19 @@ def project(t):
     meta={**t.meta,'usageScope':'shared_batch_receipts','sharedRequestRefs':t.refs,
           'ai_flow':'conversation_cross_page','translationMode':'conversation',
           'generation_attempts':len(t.refs),'provider_attempts':len(t.refs)}
+    terminal_budget=meta.pop('_terminalBudgetFailure',None)
     # Every generation has a stable receiptId. Returning receipt references with
     # several pages lets the existing ledger deduplicate even if one page is lost.
     if t.receipts:meta['usage']=aggregate_usage(t.receipts)
     if t.units and not any(str(v).strip() for v in t.values.values()):
-        error=ModelOutputContractError('Conversation page has no validated translations',response_shape='conversation_page_projection',missingIds=[f'P{i}' for i in range(len(t.units))],generationMeta=meta)
+        missing=[f'P{i}' for i in range(len(t.units))]
+        if terminal_budget:
+            error=OutputBudgetExhausted('AI spent its output budget without a visible translation',
+                response_shape=terminal_budget['responseShape'],missingIds=missing,
+                generationMeta=meta,**terminal_budget['details'])
+        else:
+            error=ModelOutputContractError('Conversation page has no validated translations',
+                response_shape='conversation_page_projection',missingIds=missing,generationMeta=meta)
         error.generationMeta=meta;error.generationAttempts=len(t.refs)
         error.providerAttempts=len(t.refs);error.requestDispatched=bool(t.refs)
         raise error

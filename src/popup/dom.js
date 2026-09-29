@@ -37,6 +37,7 @@ export const els = {
   aiServiceWrap: document.getElementById("ai-service-wrap"),
   aiService: document.getElementById("ai-service"),
   aiPaidPanel: document.getElementById("ai-paid-panel"),
+  aiPaidUnavailable: document.getElementById("ai-paid-unavailable"),
   aiPaidLogin: document.getElementById("ai-paid-login"),
   aiPaidAccount: document.getElementById("ai-paid-account"),
   aiPaidEmail: document.getElementById("ai-paid-email"),
@@ -75,6 +76,7 @@ export const els = {
   aiUsageHistoryClose: document.getElementById("ai-usage-history-close"),
   aiUsageHistoryList: document.getElementById("ai-usage-history-list"),
   aiBaseUrl: document.getElementById("ai-base-url"),
+  aiLocalWebsite: document.getElementById("ai-local-website"),
   aiEndpointWrap: document.getElementById("ai-endpoint-wrap"),
   aiLocalTest: document.getElementById("ai-local-test"),
   aiLocalStatus: document.getElementById("ai-local-status"),
@@ -91,6 +93,11 @@ export const els = {
   aiPageImageWrap: document.getElementById("ai-page-image-wrap"),
   aiPageImage: document.getElementById("ai-page-image"),
   aiRateWrap: document.getElementById("ai-rate-wrap"),
+  aiLocalRateWrap: document.getElementById("ai-local-rate-wrap"),
+  aiLocalRateEnabled: document.getElementById("ai-local-rate-enabled"),
+  aiLocalRateRpm: document.getElementById("ai-local-rate-rpm"),
+  aiLocalRateBurst: document.getElementById("ai-local-rate-burst"),
+  aiLocalRateHint: document.getElementById("ai-local-rate-hint"),
   aiLocalCapacityWrap: document.getElementById("ai-local-capacity-wrap"),
   aiLocalCapacityMode: document.getElementById("ai-local-capacity-mode"),
   aiLocalManualConcurrencyWrap: document.getElementById(
@@ -133,6 +140,7 @@ export const els = {
   apiGateAiOpen: document.getElementById("api-gate-ai-open"),
   translateAllButtonToggle: document.getElementById("translate-all-button-toggle"),
   imgButtonsToggle: document.getElementById("img-buttons-toggle"),
+  downloadImagesToggle: document.getElementById("download-images-toggle"),
   fontScaleRange: document.getElementById("font-scale-range"),
   fontScaleDown: document.getElementById("font-scale-down"),
   fontScaleUp: document.getElementById("font-scale-up"),
@@ -231,13 +239,14 @@ export function orderLanguages(list, pinnedCodes = []) {
  * No `auto` or static fallback is offered: if the provider/key cannot enumerate
  * a model, the user sees a disabled placeholder instead of a model that may fail.
  * @param {(string|{id:string,eligibility?:string,evidence?:string})[]} models
- * @param {{keepValue?:string, placeholder?:string, selectFirst?:boolean}} opts
+ * @param {{keepValue?:string, placeholder?:string, selectFirst?:boolean, showUnknownHint?:boolean}} opts
  */
 export function setModelOptions(
   models,
-  { keepValue = "", placeholder = "Select model…", selectFirst = true } = {},
+  { keepValue = "", placeholder = "Select model…", selectFirst = true, showUnknownHint = true,
+    clearPrevious = false } = {},
 ) {
-  const prev = String(keepValue || els.aiModel.value || "").trim();
+  const prev = String(keepValue || (!clearPrevious && els.aiModel.value) || "").trim();
   els.aiModel.innerHTML = "";
 
   const candidates = new Map();
@@ -261,7 +270,8 @@ export function setModelOptions(
     const opt = document.createElement("option");
     opt.value = id;
     const candidate = candidates.get(id);
-    opt.textContent = candidate.eligibility === "unknown" ? `${id} — verify before use` : id;
+    opt.textContent = candidate.label || (candidate.eligibility === "unknown" && showUnknownHint
+      ? `${id} — verify before use` : id);
     opt.dataset.eligibility = candidate.eligibility;
     if (candidate.evidence) opt.dataset.evidence = String(candidate.evidence).slice(0, 120);
     els.aiModel.appendChild(opt);
@@ -453,12 +463,15 @@ export function toggleUi({ hasEnvKey }) {
   }
   if (els.aiPageImageWrap)
     els.aiPageImageWrap.style.display = showAi && canConfigureAi ? "" : "none";
-  // Rate pacing applies to cloud providers only: a local server has no
-  // per-minute quota to respect, and the server-side gate skips it anyway.
+  // Cloud and Local request caps have separate switches and stored values.
   if (els.aiRateWrap) {
     els.aiRateWrap.style.display =
       showAi && canConfigureAi && !local ? "" : "none";
   }
+  if (els.aiLocalRateWrap) els.aiLocalRateWrap.style.display =
+    showAi && canConfigureAi && local ? "" : "none";
+  for (const el of [els.aiLocalRateRpm, els.aiLocalRateBurst])
+    if (el) el.disabled = !els.aiLocalRateEnabled?.checked;
   // Local API unlimited is separate from the Local AI control under Model.
   if (els.apiLocalUnlimitedWrap) {
     els.apiLocalUnlimitedWrap.style.display = isLocalApiUrl(

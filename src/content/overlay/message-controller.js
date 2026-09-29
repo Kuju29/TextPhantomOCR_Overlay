@@ -65,8 +65,24 @@
     if (!msg.generation && !error && !TP.shouldShowReplaceError(msg?.original))
       return { ok:true, applied:false, suppressed:true };
     const badged = TP.markImageError(msg?.original, error || text, msg?.generation);
-    if (!badged) TP.showToast?.(`Not translated: ${text}`, 12000);
-    return { ok:true, applied:badged === true, drawn:false, errorDisplayed:badged === true };
+    const notice = `Not translated: ${text}`;
+    if (!badged) TP.showToast?.(notice, 12000);
+    // A live batch may keep ownership of the shared toast and suppress this
+    // message. Calling showToast is not evidence that THIS error appeared.
+    const toast = !badged && document.getElementById?.('tp-toast');
+    const toastDisplayed = Boolean(toast?.isConnected && toast.textContent?.includes(notice) &&
+      getComputedStyle(toast).display !== 'none' && getComputedStyle(toast).visibility !== 'hidden');
+    return { ok:true, applied:badged === true, drawn:false, errorDisplayed:badged === true, toastDisplayed };
+  }
+
+  function applyImageNoticeMessage(msg) {
+    const current = checkImageErrorGeneration(TP,msg);
+    if (!current.ok && !msg?.generation?.readerRunId)
+      return {ok:true,applied:false,stale:true};
+    if (msg?.generation?.readerRunId)
+      return TP.stageReaderNotice?.(msg) || {ok:false,applied:false};
+    const applied=TP.markImageError?.(msg.original,msg.error,msg.generation);
+    return {ok:true,applied:applied===true};
   }
 
   async function showPlacementError(msg) {
@@ -91,6 +107,15 @@
     if (isText && !source) return { ok: true, ignored: true };
 
     let img = msg.readerReplayTarget || TP.findTargetImage(msg.original, msg.generation);
+
+    // Local Independent sends cumulative previews between provider chunks.
+    // An absent ordinary target could otherwise make every next chunk wait
+    // for the normal 60-second remount timer. The final insert retains that
+    // wait; a virtual reader still owns its own staged replay.
+    if (!img && !msg?.generation?.readerRunId &&
+        msg?.result?.meta?.provisional === true &&
+        msg?.result?.aiRoute?.translationMode === 'independent')
+      return {ok:true, applied:false, previewSkipped:true, reason:'target not mounted for preview'};
 
     if (!img && TP.waitForTarget && msg?.generation?.targetKey) {
       img = await TP.waitForTarget(msg.generation.targetKey, () =>
@@ -209,12 +234,16 @@
   async function applyInsertMessage(message) {
     const msg = message || {};
     const type = String(msg.type || "");
+    // A reader notice is metadata about an already staged result. It must
+    // never replace the translated page in the reader's result slot.
+    if (type === "IMAGE_NOTICE" && msg.generation?.readerRunId && !msg.readerReplay)
+      return TP.stageReaderNotice?.(msg) || {ok:false,error:"Reader notice unavailable"};
     if (msg.generation?.readerRunId && !msg.readerReplay)
       return TP.stageReaderInsert?.(msg) || {ok:false,error:"Reader placement unavailable"};
 
     // IMAGE_ERROR must validate its generation before adopting the producer's
     // trace. Other message types are safe to attach immediately.
-    if (msg.tpTrace && type !== "IMAGE_ERROR") TP.setTrace?.(msg.tpTrace);
+    if (msg.tpTrace && type !== "IMAGE_ERROR" && type !== "IMAGE_NOTICE") TP.setTrace?.(msg.tpTrace);
     TP.traceNote?.("content/overlay.js", "applyInsertMessage", {
       ev: "insert message received",
       type,
@@ -250,6 +279,7 @@
     }
     if (type === "OVERLAY_HTML") return applyOverlayMessage(msg);
     if (type === "IMAGE_ERROR") return applyImageErrorMessage(msg);
+    if (type === "IMAGE_NOTICE") return applyImageNoticeMessage(msg);
     return { ok: true, ignored: true };
   }
 
@@ -482,6 +512,8 @@
     if (TP.isStillCurrent?.(img, generation)?.ok === false) return 0;
     TP.noteAppliedImageSource?.(img, nextSrc);
     TP.clearImageError?.(img);
+    const downloadOwner = replacementOwners.get(img);
+    if (downloadOwner) downloadOwner.source = nextSrc;
     img.src = nextSrc;
     img.removeAttribute("srcset");
     img.removeAttribute("sizes");
@@ -502,6 +534,14 @@
     return 1;
   }
   Object.assign(TP, {
+    // Read-only evidence for downloads. A publisher recycling a tracked IMG
+    // must not make an unrelated original look like our translated raster.
+    downloadReplacementInfo(img) {
+      const owner = replacementOwners.get(img);
+      if (!owner?.source) return null;
+      return Object.freeze({source:owner.source, original:owner.original,
+        current:replacementOwnerIsCurrent(owner)});
+    },
     applyInsertBatch,
     applyInsertMessage,
     replaceImageInDOM,

@@ -8,12 +8,27 @@ const event={schema:'tp.conversation/1',mode:'conversation',path:'conversation',
  historyEstimatedTokens:300,estimatedInput:3300,currentUserChars:100,staticUserRepeated:false,queueWaitMs:35.5,trimmedTurns:0,
  rolloverReason:'request_profile_changed',historySha256:'b'.repeat(64),prefixSha256:'c'.repeat(64),branch:'initial',orderPolicy:'document_enqueue',
  commitStatus:'committed',providerCacheStatus:'reported_zero',storage:'api_sqlite',historyQuality:'structural_and_script_checks_not_human_approved',
+ continuationTransport:'message_replay',
  historyMessageRoles:'user,assistant,user,assistant',contextLimit:32768,outputReserve:640,providerCallsAdded:0,legacyFallback:false,
  cachedInputTokens:0,actualInputTokens:3300,actualOutputTokens:100,pageOrder:3,
  planner:'conversation_cross_page',pageCount:3,unitCount:18,formattingWhitespaceChars:34,unexpectedProseChars:0,
  prompt:'PRIVATE_CONTENT',api_key:'PRIVATE_KEY',history:['PRIVATE_HISTORY'],unknownCount:99};
 const safe=shortenValue(event);assert.equal(safe.commitStatus,'committed');assert.equal(safe.rolloverReason,'request_profile_changed');
+const nativeSafe=shortenValue({...event,policy:'conversation-image-records-2026.9.27.8',
+  rolloverReason:'native_context_rollover',commitStatus:'not_committed_provider_cursor_missing',
+  providerMemory:'continued_thread',providerState:'cursor_missing',providerThreadRollover:true,
+  continuationTransport:'native_response_cursor',
+  providerResponseId:'resp_private'});
+assert.equal(nativeSafe.policy,'conversation-image-records-2026.9.27.8');
+assert.equal(nativeSafe.rolloverReason,'native_context_rollover');
+assert.equal(nativeSafe.commitStatus,'not_committed_provider_cursor_missing');
+assert.equal(nativeSafe.providerMemory,'continued_thread');
+assert.equal(nativeSafe.providerState,'cursor_missing');
+assert.equal(nativeSafe.continuationTransport,'native_response_cursor');
+assert.equal(nativeSafe.providerThreadRollover,true);
+assert.doesNotMatch(JSON.stringify(nativeSafe),/resp_private/);
 assert.equal(safe.cachedInputTokens,0);assert.ok(Object.keys(safe).length>30);assert.doesNotMatch(JSON.stringify(safe),/PRIVATE/);
+assert.equal(safe.continuationTransport,'message_replay');
 rememberDiagnostic({provider:'huggingface',model:'fixture',operationId:'ai:'+'a'.repeat(32),conversation:event,result:{schema:'tp.audit/1',event:'translation_result',resultStatus:'complete_at_contract_boundary',actualInput:3300,actualOutput:100}});
 const row=recentDiagnostic('huggingface','fixture');assert.equal(row.conversation.historyTurns,2);assert.match(formatRequestDiagnostic(row),/Conversation/);assert.doesNotMatch(formatRequestDiagnostic(row),/PRIVATE|prefixSha|committed/);clearRecentDiagnostics();
 const batch={schema:'tp.conversation_batch/1',batchId:'11111111-1111-4111-8111-111111111111',phase:'distributed',planner:'conversation_cross_page',pageCount:3,unitCount:18,readyPageCount:4,readyUnitCount:22,splitReason:'learned_output_target',queueReason:'ready',firstOrder:1,lastOrder:3,estimatedInput:5000,predictedOutput:1024,mappedUnits:18,cancelledUnits:0,missingUnits:0,providerCallsAdded:0,providerRequestCount:1,usageOwner:'provider_request',requestMs:90,readyQueueWaitMs:30,previousTurnWaitMs:20,sourceOrderWaitMs:10,legacyFallback:false,prompt:'PRIVATE'};

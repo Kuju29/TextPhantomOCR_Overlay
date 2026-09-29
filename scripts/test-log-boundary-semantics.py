@@ -13,6 +13,30 @@ assert safe['usage']['thinkingTokens']==0
 assert safe['usage']['outputTokens']=='<redacted>'
 assert safe['usage']['accessToken']==safe['usage']['apiKey']=='<redacted>'
 assert set(safe['usage']['nested'].values())=={'<redacted>'}
+fixture='fixture-password-sentinel'
+private_url=f'https://user:{fixture}@example.invalid/chapters/{fixture}?password={fixture}&page=2#frag'
+safe_url=logfile.sanitize({'href':private_url,
+                           'diagnostic':f'failed at https://user:{fixture}@example.invalid/api?password={fixture}&page=2',
+                           'note':f'password={fixture} bearer {fixture}',
+                           'usage':{'inputTokens':42}})
+assert safe_url['href']=='https://example.invalid'
+assert fixture not in str(safe_url)
+assert safe_url['usage']['inputTokens']==42
+opaque='fixture-opaque-path-query'
+unsafe=f'https://user:{opaque}@example.invalid/chapters/{opaque}?custom={opaque}#fragment'
+safe_opaque=logfile.sanitize({'url':unsafe,'error':f'at fetch {unsafe} line 4',
+                              'href':unsafe,'inputTokens':42})
+assert opaque not in str(safe_opaque)
+assert safe_opaque['url']=='https://example.invalid/<redacted-path>'
+assert safe_opaque['error'].startswith('at fetch https://example.invalid/<redacted-path>')
+assert safe_opaque['inputTokens']==42
+aliases=logfile.sanitize({'key':opaque,'passwd':opaque,'pwd':opaque,
+                          'api-key':opaque,'x-api-key':opaque,'inputTokens':42})
+assert all(aliases[name]=='<redacted>' for name in ('key','passwd','pwd','api-key','x-api-key'))
+assert aliases['inputTokens']==42
+local_opaque=logfile.sanitize({'stack':f'at file:///home/{opaque}/image.png',
+                               'socket':f'ws://user:{opaque}@example.invalid/private'})
+assert opaque not in str(local_opaque)
 meta=defaultdict(lambda:0,units=2,rate={},cacheCoordination={},usage={},vision={},omittedIds=['I2_P1'],conversation={'pageCount':2},diagnostics={},provider='test',model='fixture',rateMode='provider_managed')
 body={'meta':meta,'translations':[{'id':'I1_P1','text':'ok'}],'memoryDelta':{'characters':[],'glossary':[]}}
 for repair in (False,True):

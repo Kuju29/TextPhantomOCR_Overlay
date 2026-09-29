@@ -30,6 +30,12 @@
     clearTimeout(run.recoveryTimer);
     run.intersection?.disconnect();
     clearTimeout(run.retryTimer);
+    clearTimeout(run.scrollTimer);
+    if (run.scrollChanged) {
+      document.removeEventListener('scroll',run.scrollChanged,true);
+      window.removeEventListener('scroll',run.scrollChanged,true);
+      window.removeEventListener('resize',run.scrollChanged);
+    }
     if (run.visibilityChanged) document.removeEventListener('visibilitychange',run.visibilityChanged);
     if(run.watchRoot && run.sourceLoaded)run.watchRoot.removeEventListener('load',run.sourceLoaded,true);
     clearTimeout(run.timer);
@@ -40,7 +46,7 @@
     if (!keepKaganeDisplay || run.plan.adapter!=='kagane')
       TP.overlayMount?.retireReaderOverlays?.([...run.results.keys()].map(id =>
         ({key:generation(run,id).targetKey,source:run.sources.get(id)})));
-    run.results.clear(); run.bindings.clear(); run.loads.clear(); run.pending.clear(); run.unresolved.clear(); run.observedSlots.clear();
+    run.results.clear(); run.bindings.clear(); run.notices.clear(); run.loads.clear(); run.pending.clear(); run.unresolved.clear(); run.observedSlots.clear();
     current = null;
     if (report) notify('TP_READER_CANCELLED', {readerRunId:run.id, reason});
   }
@@ -136,6 +142,22 @@
     },{root:null,rootMargin:'250px',threshold:0});
     run.observedSlots.set(id,slot);run.intersection.observe(slot);
   }
+  function nearbyPending(run, limit = 12) {
+    if (!run.unresolved.size) return [];
+    const height=window.innerHeight || document.documentElement.clientHeight || 0;
+    if (!height) return [];
+    const ids=[];
+    for (const id of run.unresolved) {
+      const slot=run.plan.slots.get(id);
+      if (!slot?.isConnected || !run.plan.root.contains(slot)) continue;
+      const box=slot.getBoundingClientRect();
+      if (box.bottom>=-350 && box.top<=height+350) {
+        ids.push(id);
+        if (ids.length>=limit) break;
+      }
+    }
+    return ids;
+  }
   function retryPending(run) {
     if (!live(run) || !run.unresolved.size || run.retryTimer || document.hidden) return;
     run.retryTimer=setTimeout(()=>{
@@ -143,12 +165,15 @@
       if (!live(run)) {if(run===current)cancel('reader_navigation',true);return;}
       if (!run.plan.root.isConnected) {waitForKaganeRoot(run);return;}
       if (document.hidden) return;
-      const ids=[...run.unresolved].slice(0,8);
+      const nearby=nearbyPending(run,8);
+      const ids=[...new Set([...nearby,...run.unresolved].slice(0,8))];
       for(const id of ids) {
         run.unresolved.delete(id);run.unresolved.add(id); // bounded round-robin
         watchPending(run,id);
       }
-      run.retryDelay=Math.min(5000,run.retryDelay*2);
+      // An eight-page rotation with a five-second backoff could miss a whole
+      // virtual chapter while the reader rapidly remounts nearby pages.
+      run.retryDelay=Math.min(1500,Math.ceil(run.retryDelay*1.5));
       schedule(run,ids);retryPending(run);
     },run.retryDelay);
   }
@@ -356,6 +381,23 @@
       };
       document.addEventListener('visibilitychange',run.visibilityChanged);
     }
+    if (!run.scrollChanged) {
+      run.scrollChanged=()=>{
+        if (!live(run) || document.hidden || !run.unresolved.size || run.scrollTimer) return;
+        // Page scrolls and nested reader scrollers both reach this capture
+        // listener. Inspect only staged numbered slots near the viewport.
+        run.scrollTimer=setTimeout(()=>{
+          run.scrollTimer=0;
+          if (!live(run) || document.hidden) return;
+          schedule(run,nearbyPending(run));
+          clearTimeout(run.retryTimer);run.retryTimer=0;run.retryDelay=750;
+          retryPending(run);
+        },0);
+      };
+      document.addEventListener('scroll',run.scrollChanged,true);
+      window.addEventListener('scroll',run.scrollChanged,true);
+      window.addEventListener('resize',run.scrollChanged);
+    }
     // Keep observing after all current images are placed: later remount is real work.
   }
   async function start(plan, selectedImage = null, mode = '', lang = '') {
@@ -372,9 +414,9 @@
     cancel('new_run',true,!!carry);
     const run = {id:crypto.randomUUID(),plan,href:location.href,pageInstanceId:TP.pageInstanceId,
       mode,lang,
-      sources:new Map(),results:new Map(),bindings:new Map(),loads:new Map(),pending:new Set(),
+      sources:new Map(),results:new Map(),bindings:new Map(),notices:new Map(),loads:new Map(),pending:new Set(),
       targetPages:new WeakMap(),activePlaces:0,unresolved:new Set(),observedSlots:new Map(),
-      intersection:null,retryTimer:0,retryDelay:750,
+      intersection:null,retryTimer:0,retryDelay:750,scrollTimer:0,scrollChanged:null,
       controller:new AbortController(),cancelled:false,processingComplete:false,observer:null,timer:0,chars:0};
     current = run;
     observe(run);
@@ -537,6 +579,15 @@
     row.lastPlacementError=error;resolved(run,id,row);
     return {ok:false,applied:false,error:text};
   }
+  function showReaderNotice(run,id) {
+    const notice=run.notices.get(id);
+    if (!notice || !live(run) || run.results.get(id)?.message?.type==='IMAGE_ERROR') return;
+    const anchor=errorTarget(run,id);
+    if(notice.anchor && notice.anchor!==anchor) TP.clearImageError?.(notice.anchor);
+    if (anchor && !TP.hasImageError?.(anchor) && errorCurrent(anchor,notice.generation).ok)
+      TP.markImageError?.(notice.original,notice.error,notice.generation);
+    notice.anchor=anchor;
+  }
   async function place(run,id) {
     if (!live(run)) return null;
     const row = run.results.get(id);
@@ -567,6 +618,7 @@
         ? TP.overlayMount?.hasHtmlOverlay?.(stamp.targetKey,img) === true
         : isError ? TP.hasImageError?.(img) === true : true;
     if (row.element === img && row.appliedVersion === row.version && (intact || (!isError && row.receipt?.drawn===false))) {
+      showReaderNotice(run,id);
       resolved(run,id,row);return row.receipt;
     }
     const attemptKey=`${row.version}:${canvas ? img.width+':'+img.height : img.currentSrc || img.src}:${rect.width}:${rect.height}`;
@@ -599,6 +651,11 @@
         row.element=img; row.appliedVersion=version;row.receipt=receipt;
         row.appliedSource=canvas ? run.sources.get(id) : TP.normUrl(row.message.type === "REPLACE_IMAGE" ? img.src : (img.currentSrc || img.src));
         row.attempts=0;resolved(run,id,row);
+        if(row.message.translationRun?.phase==='repair') {
+          TP.clearImageError?.(run.notices.get(id)?.anchor);
+          run.notices.delete(id);
+          TP.clearImageError?.(errorTarget(run,id));
+        } else showReaderNotice(run,id);
         TP.log.info('reader result placed',{pageId:id,runId:run.id,remount:row.everPlaced===true});
         const remount=row.everPlaced===true;
         row.everPlaced=true;
@@ -653,6 +710,17 @@
     if(receipt?.applied || receipt?.stale || receipt?.ok===false)return receipt;
     diagnostic(run,next,'prepared');
     return {ok:true,stored:true,pending:true,applied:false,readerStaged:true};
+  };
+  TP.stageReaderNotice = msg => {
+    const run=current,stamp=msg?.generation,id=String(stamp?.readerPageId||'');
+    if(!run || !live(run) || stamp?.readerRunId!==run.id ||
+       stamp?.pageInstanceId!==run.pageInstanceId || !run.sources.has(id))
+      return stale('reader run no longer owns this notice');
+    if(run.results.get(id)?.message?.translationRun?.phase==='repair')
+      return stale('repair result already owns this page');
+    run.notices.set(id,{...msg,anchor:null});
+    showReaderNotice(run,id);
+    return {ok:true,stored:true,applied:Boolean(TP.hasImageError?.(errorTarget(run,id)))};
   };
   TP.releaseReaderPlacement = async id => {
     const run=current;if(!run || !live(run) || run.id!==id)return stale('reader release cancelled');

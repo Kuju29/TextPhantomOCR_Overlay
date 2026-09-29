@@ -7,6 +7,7 @@ import { getStorage, setStorage } from '../../shared/storage.js';
 import { workloadSelection, normalizedWorkloadIdentity } from '../../shared/ai/workload/contract.js';
 import { initialProfile, normalizeLimits, validProfile, reasoningIsActive,
   takeWorkloadBatch, WORKLOAD_VERSION } from '../../shared/ai/workload/model.js';
+import {resolveReasoningPreference} from '../../shared/reasoning-preference.js';
 import { learnWorkload, observeWorkload } from '../../shared/ai/workload/learning.js';
 export const WORKLOAD_STORAGE_KEY = 'aiWorkloadProfilesV1';
 const MAX_PROFILES = 128;
@@ -149,6 +150,13 @@ export function createWorkloadController({ read = getStorage, write = setStorage
       delete ai.modelCapabilities;
       const limits = normalizeLimits(caps.limits || { contextTokens: caps.contextLength });
       const nativeOllama = route === 'direct-local' && (ai.provider === 'ollama' || ai.local_adapter?.protocol === 'ollama');
+      const nativeLmStudio = route === 'direct-local' && ai.provider === 'lmstudio';
+      const nativeOff = nativeLmStudio && caps?.reasoning?.source === 'lmstudio_native_loaded_instance' &&
+        caps.reasoning?.supported_efforts?.includes('off') &&
+        resolveReasoningPreference(ai.thinking,caps.reasoning) === 'off';
+      const nativeOllamaOff = nativeOllama && caps?.reasoning?.source === 'ollama-api-show' &&
+        caps.reasoning?.supported_efforts?.includes('off') &&
+        resolveReasoningPreference(ai.thinking, caps.reasoning) === 'off';
       const contract = selection.kind;
       const expectedIdentity = selection.model && selection.contract
         ? `${selection.model}|${selection.contract}` : '';
@@ -160,7 +168,8 @@ export function createWorkloadController({ read = getStorage, write = setStorage
         ...(nativeOllama ? { contextPolicy: OLLAMA_CONTEXT_POLICY.version, modelContext: limits.modelContextTokens } : {}),
         maxOutput: ai.max_output_tokens, revision: limits.modelRevision, context: nativeOllama ? {
           ceiling:planOllamaContext(limits)?.evidence.contextCeiling, configured:limits.configuredContextTokens
-        } : limits.contextTokens, reasoning: caps.reasoning });
+        } : nativeLmStudio ? 'live_runtime_context' : limits.contextTokens,
+        reasoning: caps.reasoning });
       // Unconfirmed execution must never borrow a persisted limit from a different
       // server-selected contract. It can still calibrate within this image.
       let privateProfile = initialProfile(now());
@@ -188,18 +197,32 @@ export function createWorkloadController({ read = getStorage, write = setStorage
         after:metrics(opened),persistence:expectedIdentity ? storageState(key) : 'memory_only',
         effective:{contract:selection.contract || 'unconfirmed'}});
       prune(key);
-      const context = { contract, limits, configureContext: nativeOllama ? planOllamaContext : null, reasoningActive: reasoningIsActive(ai, caps),
-        allowInputCalibration:['openrouter','openai'].includes(ai.provider) &&
+      const context = { contract, limits, provider:ai.provider, configureContext: nativeOllama ? planOllamaContext : null, reasoningActive: reasoningIsActive(ai, caps),
+        nativeLmStudioOff: nativeOff === true, nativeOffControl: nativeOff || nativeOllamaOff,
+        localIndependent: route === 'direct-local' && ai.translation_mode === 'independent',
+        allowInputCalibration:(nativeLmStudio && limits.source === 'lmstudio_native_loaded_instance' && !image) ||
+          ['openrouter','openai'].includes(ai.provider) &&
           Number.isSafeInteger(limits.contextTokens) && limits.contextTokens<=16384 &&
           !image && !/schema|json/i.test(String(contract)),
-        reasoningSupported: caps?.reasoning?.supported, singleRequest: singleRequest === true, wholePageFirst: wholePageFirst === true, phase,
+        reasoningSupported: nativeOff ? false : caps?.reasoning?.supported, singleRequest: singleRequest === true, wholePageFirst: wholePageFirst === true, phase,
         userMaxOutput: Number.isSafeInteger(ai.max_output_tokens) && ai.max_output_tokens > 0 ? ai.max_output_tokens : null,
         fixedInput: 0 };
-      const estimateFixedInput = createPromptInputEstimator({ ai, targetLang, sourceLang, image, contract });
+      let estimateFixedInput = createPromptInputEstimator({ ai, route, targetLang, sourceLang, image, contract });
       const currentProfile = checkedProfile;
       return {
         key,
         get ai() { return structuredClone(ai); },
+        setIndependentExamples(selection) {
+          if (ai.translation_mode !== 'independent' || route !== 'direct-local')
+            throw new Error('Independent examples cannot change a Conversation workload');
+          ai.independent_examples = structuredClone(selection);
+          estimateFixedInput = createPromptInputEstimator({ai,route,targetLang,sourceLang,image,contract});
+        },
+        setRepairReason(reason) {
+          if (phase !== 'repair') throw new Error('Repair instruction cannot change an initial workload');
+          ai.repair_reason = reason === 'wrong_target_script' ? reason : '';
+          estimateFixedInput = createPromptInputEstimator({ai,route,targetLang,sourceLang,image,contract});
+        },
         next(rows, offset) {
           const chunk = takeWorkloadBatch(rows, offset, currentProfile(), { ...context,
             estimateFixedInput: units => estimateFixedInput(units, pageUnits || rows, sourceContextForUnits ? sourceContextForUnits(units) : ai.source_context) });

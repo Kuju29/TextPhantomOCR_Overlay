@@ -4,7 +4,7 @@ import { bindPopupEvents } from "../src/popup/controllers/popup-event-controller
 import { createAiProfileController } from "../src/popup/controllers/ai-profile-controller.js";
 import { createLocalConnectionController } from "../src/popup/controllers/local-connection-controller.js";
 import { normalizeUrl } from "../src/shared/url.js";
-import { normalizeLocalAiAdapter } from "../src/shared/ai/providers/local-registry.js";
+import { localAiPreset, normalizeLocalAiAdapter } from "../src/shared/ai/providers/local-registry.js";
 import {
   createAiProfiles,
   updateAiProfile,
@@ -55,6 +55,12 @@ let storage = {
   aiProvider: "openrouter", aiBaseUrl: els.aiBaseUrl.value,
   aiModel: els.aiModel.value, aiKey: "fixture-key", aiCloudKey: "fixture-key",
 };
+chrome.storage.local = {
+  get(keys, callback) {
+    callback(Object.fromEntries(keys.map((key) => [key, structuredClone(storage[key])])));
+  },
+  set(patch, callback) { Object.assign(storage, structuredClone(patch)); callback?.(); },
+};
 const writes = [];
 const setStorage = async (patch) => {
   writes.push(structuredClone(patch));
@@ -80,6 +86,8 @@ const setModelOptions = (models, { keepValue = "", selectFirst = false } = {}) =
   const values = models.map(String);
   els.aiModel.value = values.includes(keepValue) ? keepValue : (selectFirst ? values[0] || "" : keepValue);
 };
+const fieldMessages = new Map();
+const setFieldMessage = (wrap, type, message) => fieldMessages.set(wrap, { type, message });
 let discoverCalls = 0;
 const localConnectionController = createLocalConnectionController({
   els, state, profile: profileController, persist: setStorage, getStorage,
@@ -91,7 +99,7 @@ const localConnectionController = createLocalConnectionController({
       selectedModelVerification: { model: "", status: "not_tested" },
     };
   },
-  normalizeUrl, setModelOptions, setFieldMessage() {}, renderPrompt: async () => {},
+  normalizeUrl, setModelOptions, setFieldMessage, renderPrompt: async () => {},
   scheduleSave() {}, clearResolveTimer() {}, clearCapacity() {}, renderCapacity() {},
   persistCapacity: async () => {}, toggleUi() {},
 });
@@ -107,7 +115,7 @@ bindPopupEvents({
   applyPromptForLang: async () => {}, applyPromptHistoryResult: async () => {},
   refreshPromptHistoryButtons: async () => {}, resetPromptForLang() {},
   updateAiPromptWarning() {}, updateAiPromptModeHint() {}, updatePromptCount() {},
-  fieldMessageType: () => "", setFieldMessage() {}, setEmojiStatus() {}, setModelOptions,
+  fieldMessageType: () => "", setFieldMessage, setEmojiStatus() {}, setModelOptions,
   toggleUi() {}, canUseAiUi: () => true, validateAiKey() {},
   ensureAiAvailableOrFallback: () => true, flushPromptForLang: async () => {},
   flushPendingAiEditsForSwitch: async () => ({ ok: true }), scheduleSaveApi() {},
@@ -121,7 +129,10 @@ bindPopupEvents({
 // Reproduce the popup bug: the hidden Cloud endpoint survives into the named
 // Local provider selection, then Connect rejects it before discovery.
 els.aiProvider.value = "ollama";
+fieldMessages.set(els.aiModelWrap, { type: "warn", message: "old provider warning" });
 await els.aiProvider.fire("change");
+assert.notEqual(fieldMessages.get(els.aiModelWrap)?.message, "old provider warning",
+  "provider switch must remove the previous model's status before discovery");
 assert.equal(els.aiBaseUrl.value, "http://localhost:11434",
   "named Local selection must replace a stale Cloud endpoint with its preset");
 assert.equal(storage.aiBaseUrl, "http://localhost:11434",
@@ -129,7 +140,8 @@ assert.equal(storage.aiBaseUrl, "http://localhost:11434",
 
 await els.aiLocalTest.fire("click");
 assert.equal(discoverCalls, 1, "Connect must dispatch TP_LOCAL_AI_DISCOVER exactly once");
-assert.equal(writes.some((patch) => patch.localAiAdapter?.baseUrl === "http://localhost:11434"), true);
+assert.equal(storage.localAiAdapter, undefined,
+  "named Local derives its own preset instead of overwriting a saved Custom adapter");
 
 // User-selected Local endpoints are not presets, but they are valid ownership
 // boundaries and must survive a named-provider switch.
@@ -140,11 +152,46 @@ assert.equal(els.aiBaseUrl.value, "http://192.168.1.50:1234/v1");
 assert.equal(storage.aiBaseUrl, "http://192.168.1.50:1234/v1");
 
 els.aiBaseUrl.value = "http://localhost:9999/v1";
-els.aiProvider.value = "localai";
+els.aiProvider.value = "jan";
 await els.aiProvider.fire("change");
 assert.equal(els.aiBaseUrl.value, "http://localhost:9999/v1");
 assert.equal(storage.aiBaseUrl, "http://localhost:9999/v1");
 assert.equal(discoverCalls, 1, "provider changes alone must not auto-discover Local AI");
+
+// A saved Custom adapter remains owned by Custom across a named Local switch,
+// even when both happen to serve different protocols on the same exact URL.
+els.aiProvider.value = "customlocal";
+await els.aiProvider.fire("change");
+const sharedEndpoint = "http://localhost:11434";
+const customAdapter = { version: 1, protocol: "openai", baseUrl: sharedEndpoint,
+  modelsPath: "/v1/models", chatPath: "/v1/chat/completions" };
+els.aiLocalAdapter.value = JSON.stringify(customAdapter);
+await els.aiLocalAdapter.fire("blur");
+assert.equal(storage.localAiAdapterOwner, "customlocal");
+assert.equal(storage.localAiAdapter.protocol, "openai");
+assert.equal(storage.aiBaseUrl, sharedEndpoint);
+els.aiProvider.value = "ollama";
+await els.aiProvider.fire("change");
+assert.equal(storage.localAiAdapter.protocol, "openai",
+  "a named Local selection must not replace Custom protocol at the same URL");
+els.aiProvider.value = "customlocal";
+await els.aiProvider.fire("change");
+assert.equal(JSON.parse(els.aiLocalAdapter.value).protocol, "openai");
+assert.equal(storage.localAiAdapter.protocol, "openai");
+assert.equal(storage.aiBaseUrl, sharedEndpoint);
+delete storage.localAiAdapterOwner;
+els.aiProvider.value = "ollama";
+await els.aiProvider.fire("change");
+assert.equal(storage.localAiAdapterOwner, undefined,
+  "switching away must not guess ownership of pre-upgrade JSON at a shared URL");
+storage.localAiAdapter = localAiPreset("ollama");
+els.aiProvider.value = "customlocal";
+await els.aiProvider.fire("change");
+assert.equal(storage.localAiAdapter.protocol, "ollama",
+  "an unowned old adapter remains an editable draft; user data is not destroyed");
+assert.equal(storage.localAiAdapterOwner, "invalid");
+assert.equal(JSON.parse(els.aiLocalAdapter.value).protocol, "ollama",
+  "the draft remains visible for review, but remains inactive until the user saves it");
 
 // Reopening the popup must repair the same poisoned canonical active profile,
 // not merely a live provider-change event.

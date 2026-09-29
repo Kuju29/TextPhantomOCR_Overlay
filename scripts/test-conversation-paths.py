@@ -9,6 +9,7 @@ from backend.ai.translation.contracts import AiConfig
 from backend.ai.translation.invocation import translate
 from backend.ai.provider_registry import provider_registry
 from backend.ai.clients.base import ChatResult
+from backend.ai.cloud_reasoning import CloudReasoningPreferenceUnavailable
 from backend.ai import markers, wire_trace
 from backend.ai.translation_paths.store import Store, execution_scope, current
 from backend.ai.translation_paths.mode import descriptor, mode, scope_material
@@ -30,24 +31,71 @@ class ConversationTests(unittest.TestCase):
      terminal_completed=self.complete,terminal_evidence='provider_done',finish_reason='stop',cached_input_tokens=self.cached)
   self.mock=patch.object(provider_registry.require('huggingface').adapter,'generate',side_effect=generate);self.mock.start();self.addCleanup(self.mock.stop)
   self.ai=AiConfig(api_key='PRIVATE_TEST_CREDENTIAL',provider='huggingface',model='fixture',base_url='https://router.huggingface.co/v1',
-   translation_mode='conversation',source_lang='en',memory_mode='off',
+   translation_mode='conversation',source_lang='en',memory_mode='off',thinking='default',
    conversation=descriptor({'documentId':'test-document'},context={'tp_tab_session':'caller-one'}),
    model_capabilities={'structured_output':{'supported':False},'limits':{'contextTokens':65536}})
  def call(self,text='Hello',ai=None,**kw):return translate(markers.apply([text]),'th',ai or self.ai,**kw)
- def test_abc_def_append_without_bootstrap_examples(self):
+ def test_auto_cloud_keeps_resolved_provider_after_billed_result(self):
+  # The client can select Auto with an unambiguous key. `finish` must use the
+  # concrete provider selected before dispatch, not AiConfig.provider="auto".
+  ai=replace(self.ai,provider='auto',api_key='hf_fixture_key')
+  first=self.call('Auto first',ai=ai); second=self.call('Auto second',ai=ai)
+  self.assertEqual([request.provider for request in self.requests],['huggingface']*2)
+  self.assertEqual(first['meta']['conversation']['commitStatus'],'committed')
+  self.assertEqual(second['meta']['conversation']['historyTurns'],1)
+  self.assertEqual(second['meta']['conversation']['continuationTransport'],'message_replay')
+
+ def test_auto_local_keeps_resolved_provider_after_generation(self):
+  from backend.ai.providers import local_ollama
+  from backend.ai.provider_contract import ProbeResponse
+  local_requests=[]
+  def complete(request):
+   local_requests.append(request)
+   text='{"P0":"คำแปล"}' if request.response_schema else '<<TP_P0:คำแปล>>'
+   return ChatResult(text=text,used_model=request.model,input_tokens=100,
+    output_tokens=10,total_tokens=110,thinking_tokens=0,terminal_completed=True,
+    terminal_evidence='provider_done',finish_reason='stop')
+  ai=replace(self.ai,provider='auto',api_key='',base_url='http://localhost:11434',
+             thinking='minimum')
+  # Network admission is tested separately; this fixture exercises the
+  # provider selected by Auto without reaching a Local runtime.
+  with patch('backend.ai.translation.invocation.assert_ai_base_url_allowed'), \
+       patch.object(local_ollama.ADAPTER,'probe',return_value=ProbeResponse(True,200,
+        capabilities={'generation':{'supported':True,'source':'fixture'},
+                      'reasoning':{'supported':False,'control':'none','supported_efforts':[]}})), \
+       patch.object(local_ollama.ADAPTER,'generate',side_effect=complete):
+   first=self.call('Local auto first',ai=ai);second=self.call('Local auto next',ai=ai)
+  self.assertEqual([request.provider for request in local_requests],['ollama']*2)
+  self.assertEqual(first['meta']['conversation']['commitStatus'],'committed')
+  self.assertEqual(second['meta']['conversation']['historyTurns'],1)
+  self.assertEqual(second['meta']['conversation']['continuationTransport'],'message_replay')
+
+ def test_unverified_off_and_lowest_block_before_generation(self):
+  # A cold model list that cannot establish exact Thinking support must not
+  # turn the saved Lowest choice into billable provider-default reasoning.
+  with patch('backend.ai.provider_resolution.refresh_cloud_model_capabilities',
+             return_value=(False,{})):
+   for choice,code in [('off','ai_thinking_off_unavailable'),
+                       ('minimum','ai_thinking_minimum_unavailable')]:
+    with self.subTest(choice=choice),self.assertRaises(CloudReasoningPreferenceUnavailable) as raised:
+     self.call(ai=replace(self.ai,thinking=choice))
+    self.assertEqual(raised.exception.code,code)
+  self.assertEqual(self.requests,[])
+ def test_abc_def_append_with_twenty_bootstrap_examples(self):
   a=self.call('Page A');b=self.call('Page C');c=self.call('Page E')
   self.assertEqual([r['meta']['conversation']['historyTurns'] for r in (a,b,c)],[0,1,2])
   self.assertEqual([r['meta']['conversation']['commitStatus'] for r in (a,b,c)],['committed']*3)
-  self.assertEqual([r['meta']['conversation']['bootstrapExamplesIncluded'] for r in (a,b,c)],[False,False,False])
-  self.assertEqual([r['meta']['conversation']['bootstrapExamplesPersisted'] for r in (a,b,c)],[False,False,False])
+  self.assertEqual([r['meta']['conversation']['bootstrapExamplesIncluded'] for r in (a,b,c)],[True,True,True])
+  self.assertEqual([r['meta']['conversation']['bootstrapExamplesPersisted'] for r in (a,b,c)],[False,True,True])
   layouts=[r['meta']['promptLayout'] for r in (a,b,c)]
-  self.assertEqual([x['examplesIncluded'] for x in layouts],[False,False,False])
-  self.assertEqual([x['bootstrapExamplesChars'] for x in layouts],[0,0,0])
+  self.assertEqual([x['examplesIncluded'] for x in layouts],[True,True,True])
+  self.assertGreater(layouts[0]['bootstrapExamplesChars'],0)
+  self.assertEqual([x['bootstrapExamplesChars'] for x in layouts],[layouts[0]['bootstrapExamplesChars']]*3)
   self.assertEqual(len({x['userStaticChars'] for x in layouts}),1)
   self.assertEqual([r['meta']['promptLayoutScope'] for r in (a,b,c)],['effective_provider_request']*3)
   m=[build_messages(r) for r in self.requests]
   first_user=m[0][-1]['content']; second_history=m[1][1]['content']; second_current=m[1][-1]['content']
-  self.assertNotIn('H01\nEN:',first_user)
+  self.assertIn('H01\nEN:',first_user);self.assertIn('H20\nEN:',first_user);self.assertNotIn('H21\nEN:',first_user)
   self.assertEqual(second_history,first_user);self.assertNotIn('H01\nEN:',second_current)
   self.assertNotIn('P1000000',first_user);self.assertNotIn('P1000000',second_history)
   self.assertIn('Page A',second_history);self.assertIn('Page C',second_current);self.assertNotIn('Page A',second_current)
@@ -55,6 +103,21 @@ class ConversationTests(unittest.TestCase):
   self.assertEqual(m[1][2],{'role':'assistant','content':'<<TP_P0:คำแปล>>'})
   self.assertEqual(len(self.requests),3)
   self.assertEqual(a['meta']['usage']['totalTokens'],110)
+ def test_conversation_omits_disabled_examples_and_separates_history(self):
+  self.call('Earlier page')
+  without=replace(self.ai,style_examples=False)
+  first=self.call('First without examples',ai=without)
+  second=self.call('Next without examples',ai=without)
+  self.assertEqual([first['meta']['conversation']['historyTurns'],
+                    second['meta']['conversation']['historyTurns']],[0,1])
+  self.assertFalse(first['meta']['conversation']['bootstrapExamplesIncluded'])
+  self.assertFalse(second['meta']['conversation']['bootstrapExamplesPersisted'])
+  self.assertEqual(first['meta']['promptLayout']['bootstrapExamplesChars'],0)
+  messages=[build_messages(request) for request in self.requests]
+  self.assertNotIn('H01\nEN:',messages[-2][-1]['content'])
+  self.assertNotIn('H01\nEN:',messages[-1][1]['content'])
+  self.assertIn('First without examples',messages[-1][1]['content'])
+  self.assertNotIn('Earlier page',messages[-1][1]['content'])
  def test_image_record_conversation_forces_markers_even_when_model_supports_schema(self):
   a=copy.deepcopy(self.ai)
   a.model_capabilities={'structured_output':{'supported':True,'strict':True,'source':'fixture'},'limits':{'contextTokens':65536}}

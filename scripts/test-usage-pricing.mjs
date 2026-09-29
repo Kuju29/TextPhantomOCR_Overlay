@@ -23,6 +23,36 @@ assert.equal(priceGeneration({...gemini,totalTokens:null}).status,"missing_usage
 assert.equal(priceGeneration({...gemini,provider:"manual",model:"custom"},
   {overrides:{"manual|custom":{input:"invalid",output:"2"}}}).status,"invalid_rate");
 assert.equal(priceGeneration({...gemini,provider:"openrouter",providerCostUsd:"0.001234567"}).usd,"0.001234567");
+const byok = priceGeneration({...gemini,provider:"openrouter",providerCostUsd:"0.01",
+  isByok:true,upstreamInferenceCostUsd:"0.23"});
+assert.equal(byok.usd,null,'OpenRouter fee alone must not become total BYOK spending');
+assert.equal(byok.status,'byok_upstream_separate');
+assert.equal(byok.providerFeeUsd,'0.01');
+assert.equal(byok.upstreamInferenceCostUsd,'0.23');
+const byokLedger=recordProviderGeneration(null,{...gemini,provider:'openrouter',model:'fixture',
+  operationId:'byok-fixture',providerCostUsd:'0.01',isByok:true,upstreamInferenceCostUsd:'0.23'},
+  {now:Date.parse('2026-09-25T18:00:00Z'),id:()=> 'byok-session'});
+const byokRow=usageDetailedRows(byokLedger)[0];
+assert.equal(byokRow.byokRequests,1);
+assert.equal(byokRow.priceTotals.unpricedRequests,1);
+assert.equal(byokRow.deltas[0].price.status,'byok_upstream_separate');
+assert.equal(byokRow.deltas[0].upstreamInferenceCostUsd,'0.23');
+for (const initialFee of [null,'0.01']) {
+ let receipt=recordProviderGeneration(null,{...gemini,provider:'openrouter',model:'fixture',
+   operationId:`byok-late-${initialFee||'missing'}`,receiptId:'same-receipt',
+   providerCostUsd:initialFee},{now:Date.parse('2026-09-25T18:00:00Z'),id:()=> 'late-session'});
+ receipt=recordProviderGeneration(receipt,{...gemini,provider:'openrouter',model:'fixture',
+   operationId:`byok-late-${initialFee||'missing'}`,receiptId:'same-receipt',
+   providerCostUsd:'0.01',isByok:true,upstreamInferenceCostUsd:'0.23'},
+   {now:Date.parse('2026-09-25T18:01:00Z'),id:()=> 'late-session'});
+ const row=usageDetailedRows(receipt)[0];
+ assert.equal(row.requests,1,'Late BYOK evidence must not create a second charged request');
+ assert.equal(row.byokRequests,1);
+ assert.equal(row.deltas[0].price.status,'byok_upstream_separate');
+ assert.equal(row.deltas[0].upstreamInferenceCostUsd,'0.23');
+ assert.equal(row.priceTotals.unpricedRequests,1);
+ assert.equal(row.priceTotals.pricedRequests,0);
+}
 assert.equal(priceGeneration({...gemini,runtime:"local"}).usd,"0");
 const claude=priceGeneration({...gemini,provider:"anthropic",model:"claude-sonnet-5",
   cacheWriteInputTokens:100,cacheWrite1hInputTokens:100});

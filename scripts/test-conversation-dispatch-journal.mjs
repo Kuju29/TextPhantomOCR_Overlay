@@ -30,7 +30,7 @@ const ctx={jobId:'job',imageKey:'page',tabId,frameId:0,imgUrl:payload.src,mode:'
   sessionId:'tab-session',settingsEpoch:1,generation:{pageInstanceId:'p'}};
 const pageReports=[];
 const coordinator=createRepairCoordinator({sessions,dispatchJournal,preparedPages,api:async(_run,path,body)=>{
-  if(path==='pages')pageReports.push(structuredClone(body));
+  if(path==='pages')pageReports.push(...structuredClone(body.pages || [body]));
   if(path==='seal')return {phase:'done'};
   return {};
 },getBase:async()=> 'https://fixture',getCapabilitiesFor:async()=>({}),
@@ -93,7 +93,7 @@ console.log('PASS Conversation page journals: prepared source, dispatch/result a
 // The previous all-at-once fold temporarily doubled every unmounted page.
 // Emulate Chrome's shared 10 MiB quota: 18 * 300 KiB fits once, not twice.
 {
-  const quota=10*1024*1024,source={};let peak=0,reports=0;
+  const quota=10*1024*1024,source={};let peak=0,reports=0,reportRequests=0;
   const bytes=state=>Object.entries(state).reduce((total,[key,value])=>total+Buffer.byteLength(key)+Buffer.byteLength(JSON.stringify(value)),0);
   const limited={
     async get(key){return key==null?structuredClone(source):{[key]:structuredClone(source[key])}},
@@ -111,7 +111,7 @@ console.log('PASS Conversation page journals: prepared source, dispatch/result a
   for(const p of payloads)runBatch.items.set(p.metadata.image_id,{attempt:1,status:'queued',phase:'waiting',payload:p});
   let tabSession='tab-session';
   const folding=createRepairCoordinator({sessions:durable,preparedPages:pages,dispatchJournal:receipts,
-    api:async(_run,path)=>{if(path==='pages')reports++;return path==='seal'?{phase:'done'}:{};},
+    api:async(_run,path,body)=>{if(path==='pages'){reportRequests++;reports+=(body.pages || [body]).length;}return path==='seal'?{phase:'done'}:{};},
     getBase:async()=> 'https://fixture',currentEpoch:()=>1,currentSession:()=> tabSession,
     insert:async()=>({ok:true}),emit:()=>{}});
   const active=await folding.registerBatch(runBatch,payloads);
@@ -121,7 +121,7 @@ console.log('PASS Conversation page journals: prepared source, dispatch/result a
     accepted:[],failures:[],blocked:[],inFlight:[],repaired:[]});
   assert(bytes(source)>5*1024*1024,'the fixture exercises a chapter large enough to exceed quota when doubled');
   await folding.finishInitial(runBatch);
-  assert.equal(reports,18);assert(peak<quota,'journal transfer stays under the shared quota');
+  assert.equal(reports,18);assert.equal(reportRequests,1,'18 reports share one bounded request');assert(peak<quota,'journal transfer stays under the shared quota');
   assert.equal((await durable.get(active.id)).phase,'done');
   assert.equal((await pages.listRun(active.id)).length,0,'all large prepared keys are released after transfer');
   const oldBatch=ensureBatch('conversation-old-tab',552,0),oldPayload={...payload,src:'https://fixture/old',metadata:{image_id:'old'}};

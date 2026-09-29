@@ -7,7 +7,7 @@ from unittest.mock import patch
 import unittest,sys,os,tempfile,threading,json,hashlib
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'api'))
 from backend.ai import markers,wire_trace,accounting
-from backend.ai.clients.base import ChatResult
+from backend.ai.clients.base import ChatResult,OutputBudgetExhausted,provider_output_error
 from backend.ai.translation.contracts import AiConfig
 from backend.ai.translation.invocation import translate
 from backend.ai.translation_paths.mode import descriptor
@@ -24,11 +24,17 @@ class ReadyTests(unittest.TestCase):
   self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
   p=patch.dict(os.environ,{'TP_CONVERSATION_STATE_FILE':self.temp.name+'/c.db','TP_USAGE_STATE_FILE':self.temp.name+'/u.db',
     'TP_AI_WIRE_TRACE':'1','TP_AI_WIRE_TRACE_DIR':self.temp.name+'/wire'});p.start();self.addCleanup(p.stop)
-  p=patch('backend.ai.provider_resolution.discovered_model_capabilities',return_value=(False,{}));p.start();self.addCleanup(p.stop)
+  # Synthetic Hugging Face account catalogue owns these numbers. The READY
+  # planner must ignore client-supplied model_capabilities for physical bounds.
+  p=patch('backend.ai.provider_resolution.discovered_model_capabilities',
+   side_effect=lambda provider,base,model,key='': (True,{
+    'structured_output':{'supported':False},
+    'limits':{'contextTokens':65536,'maxOutputTokens':8192}})
+    if provider=='huggingface' else (False,{}));p.start();self.addCleanup(p.stop)
   with accounting._schema_lock:
    accounting._receipt_cache.clear();accounting._receipt_bytes=0
   self.seen=[];self.block=threading.Event();self.release=threading.Event();self.hold=False;self.bad=False
-  self.answer_override=None;self.malformed_word=''
+  self.answer_override=None;self.malformed_word='';self.budget_failure_word=''
   def generate(r):
    # Synthetic dispatch hook for receipt ownership tests, not live network proof.
    from backend.ai import accounting
@@ -36,6 +42,15 @@ class ReadyTests(unittest.TestCase):
    wire_trace.provider_request(url="https://fixture.invalid/chat",headers={"Authorization":"Bearer PRIVATE_KEY"},payload={"messages":build_messages(r)})
    self.seen.append(r)
    if self.hold and 'Seed' in r.user_parts[-1]:self.block.set();self.release.wait(3)
+   if self.budget_failure_word and self.budget_failure_word in r.user_parts[-1]:
+    usage=accounting.observe({'prompt_tokens':1000,'completion_tokens':20,
+                              'total_tokens':1020},complete=True)
+    error=provider_output_error('Synthetic provider returned no visible text',
+     provider=r.provider,model=r.model,input_tokens=1000,output_tokens=20,
+     total_tokens=1020,finish_reason='length',provider_ms=2,parse_ms=0,
+     timeout_policy='fixture',usage_details=usage)
+    error.structural_details.update(validatorSubtype='empty_output',requestedOutputTokens=20)
+    raise error
    ids=list(r.expected_ids) or [f'P{i}' for i in range(r.unit_count)]
    def record(item,value): return f'<<{item}:{value}>>' if item.startswith('I') else f'<<TP_{item}:{value}>>'
    if self.malformed_word and self.malformed_word in r.user_parts[-1]: text='no markers'
@@ -50,7 +65,9 @@ class ReadyTests(unittest.TestCase):
   self.doc=self.temp.name
  def ai(self,index,owner='owner'):
   return AiConfig(api_key='PRIVATE_KEY',user_key=True,provider='huggingface',model='fixture',base_url='https://router.huggingface.co/v1',
-   translation_mode='conversation',source_lang='en',memory_mode='off',thinking='off',
+   # Ready queue behavior is independent of a verified Cloud reasoning
+   # capability; the synthetic Hugging Face fixture opts in to provider default.
+   translation_mode='conversation',source_lang='en',memory_mode='off',thinking='default',
    conversation=descriptor({'documentId':self.doc,'pageId':f'page{index}','pageIndex':index},context={'tp_tab_session':owner}),
    model_capabilities={'structured_output':{'supported':False},'limits':{'contextTokens':65536,'maxOutputTokens':8192}})
  def call(self,ai,texts):return ready_batch.translate_ready(texts,'th',ai,admission_identity=ai.conversation['owner'],cancel_check=lambda:False)
@@ -119,6 +136,27 @@ class ReadyTests(unittest.TestCase):
   mapping=next(m for f in native if len((m:=json.loads((f/'08_batch_mapping.json').read_text()))['origins'])==3)
   self.assertEqual(sum(len(p['unitIds']) for p in mapping['origins']),6)
   self.assertFalse(any('PRIVATE_KEY' in p.read_text() for folder in native for p in folder.iterdir() if p.is_file()))
+ def test_full_output_window_preserves_queue_and_receipts(self):
+  configs=[self.ai(i) for i in range(11)]
+  tickets=[ready_batch.reserve(a,'th') for a in configs]
+  self.hold=True
+  with ThreadPoolExecutor(11) as pool:
+   first=pool.submit(self.call,configs[0],['Seed'])
+   self.assertTrue(self.block.wait(2))
+   pending=[pool.submit(self.call,a,['ก'*50]*10) for a in configs[1:]]
+   import time
+   deadline=time.monotonic()+3
+   while not all(t.units is not None for t in tickets[1:]) and time.monotonic()<deadline:time.sleep(.001)
+   self.assertTrue(all(t.units is not None for t in tickets[1:]))
+   self.release.set()
+   replies=[first.result(8)]+[f.result(8) for f in pending]
+  self.assertEqual([r.unit_count for r in self.seen],[1,80,20],
+   'eight whole ready images go first and two remain for the next request')
+  self.assertEqual([len(markers.extract_paragraphs_exact(r['aiTextFull'],10)[0]) for r in replies[1:]], [10]*10)
+  receipts=[r['meta']['usage']['generations'][0]['receiptId'] for r in replies[1:]]
+  self.assertEqual(len(set(receipts[:8])),1)
+  self.assertEqual(len(set(receipts[8:])),1)
+  self.assertNotEqual(receipts[0],receipts[8])
  def test_api_page_atomic_dynamic_capacity(self):
   a=self.ai(0)
   class Owner: pass
@@ -137,13 +175,13 @@ class ReadyTests(unittest.TestCase):
   live={'successes':1,'cacheRatio':0,'cacheConfirmed':False,'cacheMissStreak':1,
    'lastCommittedUnits':9,'lastTurnMs':2000,'ratios':[],'reasoning':0}
   picked,estimate,reason=select_rows(rows,a,'th',live)
-  self.assertEqual(len(picked),19)
-  self.assertEqual(len({id(row['ticket']) for row in picked}),2)
-  self.assertEqual(reason,'conversation_page_output_target')
+  self.assertEqual(len(picked),31)
+  self.assertEqual(len({id(row['ticket']) for row in picked}),3)
+  self.assertEqual(reason,'ready_queue_drained')
   self.assertEqual(estimate['conversationCapacity'],'continuation_token_budget')
   self.assertGreaterEqual(estimate['recordTarget'],len(picked))
   cached={**live,'cacheRatio':.9,'cacheConfirmed':True,'cacheMissStreak':0,
-   'lastCommittedUnits':19,'lastTurnMs':3000}
+   'lastCommittedUnits':31,'lastTurnMs':3000}
   picked2,estimate2,reason2=select_rows(rows,a,'th',cached)
   self.assertEqual(len(picked2),len(picked))
   self.assertEqual(estimate2['conversationCapacity'],'continuation_token_budget')
@@ -151,10 +189,14 @@ class ReadyTests(unittest.TestCase):
    'reasoning':{'supported':True,'mandatory':True,'supports_max_tokens':False},
    'limits':{'contextTokens':65536,'maxOutputTokens':16384}})
   slow={**cached,'lastCommittedUnits':9,'lastTurnMs':35000}
-  picked3,estimate3,reason3=select_rows(rows,heavy,'th',slow)
-  self.assertEqual(len(picked3),7)
+  with patch('backend.ai.provider_resolution.discovered_model_capabilities',
+             return_value=(True,heavy.model_capabilities)):
+   picked3,estimate3,reason3=select_rows(rows,heavy,'th',slow)
+  self.assertEqual(len(picked3),31)
   self.assertEqual(estimate3['conversationCapacity'],'continuation_token_budget')
   self.assertGreater(estimate3['completionAvailable'],8192)
+  self.assertGreater(estimate3['reasoningReserve'],0)
+  self.assertLess(estimate3['target'],estimate3['completionAvailable'])
 
  def test_webpage_order_waits_only_for_live_predecessors(self):
   a,b,c=[self.ai(i) for i in range(3)]
@@ -227,6 +269,33 @@ class ReadyTests(unittest.TestCase):
   self.assertEqual(values,['คำแปล0','คำแปล1','','','คำแปล0'])
   self.assertEqual(len(r['meta']['usage']['generations']),3)
   self.assertEqual(len({x['receiptId'] for x in r['meta']['usage']['generations']}),3)
+ def test_empty_length_raises_typed_budget_with_one_shared_receipt(self):
+  self.budget_failure_word='BUDGET'
+  @accounting.api_pipeline_scope
+  def pipeline(payload):return self.call(self.ai(0),['BUDGET'])
+  with self.assertRaises(OutputBudgetExhausted) as raised:
+   pipeline({'idempotency_key':'budget-fixture'})
+  error=raised.exception
+  self.assertEqual(len(self.seen),1)
+  self.assertEqual(error.structural_details['validatorSubtype'],'empty_output')
+  self.assertEqual(error.structural_details['requestedOutputTokens'],20)
+  self.assertEqual(error.generationAttempts,1)
+  self.assertEqual(error.providerAttempts,1)
+  self.assertTrue(error.requestDispatched)
+  self.assertEqual(error.generationMeta['usage']['totalTokens'],1020)
+  self.assertEqual(error.generationMeta['usage']['receiptId'],
+                   error.structural_details['generationMeta']['usage']['receiptId'])
+  with accounting._schema_lock:self.assertEqual(len(accounting._receipt_cache),1)
+ def test_empty_length_after_valid_chunk_keeps_partial_and_both_receipts(self):
+  self.budget_failure_word='BUDGET'
+  choose=ready_batch.registry.choose
+  with patch.object(ready_batch.registry,'choose',
+      side_effect=lambda rows,ai,target,p:choose(rows[:1],ai,target,p)):
+   result=self.call(self.ai(0),['Good','BUDGET'])
+  self.assertEqual(len(self.seen),2)
+  self.assertEqual(markers.extract_paragraphs_exact(result['aiTextFull'],2)[0],['คำแปล0',''])
+  self.assertEqual(len(result['meta']['usage']['generations']),2)
+  self.assertNotIn('_terminalBudgetFailure',result['meta'])
  def test_private_scope_and_independent(self):
   self.call(self.ai(0),['Private first'])
   r=self.call(self.ai(1,'another'),['Other user']);self.assertEqual(r['meta']['conversation']['historyTurns'],0)

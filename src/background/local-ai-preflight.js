@@ -51,6 +51,26 @@ function readinessError(verification, cause = null) {
       "LOCAL_MODEL_UNAVAILABLE",
       "The selected Local AI model is not installed or is not exposed by the current runtime.",
     ],
+    model_not_loaded: [
+      "LOCAL_MODEL_NOT_LOADED",
+      "The selected LM Studio model is listed but its exact instance is not loaded. Load that model in LM Studio before translating.",
+    ],
+    loaded_state_unverified: [
+      "LOCAL_MODEL_LOADED_STATE_UNVERIFIED",
+      "LM Studio did not expose loaded-model identity through /api/v1/models. Cannot verify the selected model before translating.",
+    ],
+    loaded_window_unverified: [
+      "LOCAL_MODEL_CONTEXT_UNVERIFIED",
+      "LM Studio did not report a single active context window for this model. Reload the selected instance and refresh models.",
+    ],
+    reasoning_setting_unsupported: [
+      "LOCAL_MODEL_THINKING_UNSUPPORTED",
+      "The selected Local AI model requires reasoning and cannot use Thinking off. Choose a compatible mode or load another model.",
+    ],
+    reasoning_setting_unverified: [
+      "LOCAL_MODEL_THINKING_UNSUPPORTED",
+      "Local AI could not verify the selected model's Thinking mode from live metadata. Check its reasoning options or choose a model with a verified mode.",
+    ],
     unsupported_model: [
       "LOCAL_MODEL_UNSUPPORTED",
       "The selected Local AI model is installed but its runtime metadata says it cannot generate chat completions.",
@@ -174,7 +194,11 @@ export async function ensureLocalAiBatchReady(settings, {
       now,
       maxAgeMs,
     });
-    if (!force && cached.fresh) {
+    // These runtimes can reload an identically named model with a different
+    // context window. A model-list snapshot is not live token evidence.
+    const runtimeContextCanChange = ["lmstudio", "ollama", "vllm", "llamacpp", "koboldcpp"].includes(provider) ||
+      provider === "customlocal" && settings?.localAiAdapter?.protocol === "ollama";
+    if (!force && !runtimeContextCanChange && cached.fresh) {
       const hint = buildLocalCapabilityHint({
         provider,
         endpoint,
@@ -224,6 +248,7 @@ export async function ensureLocalAiBatchReady(settings, {
         model,
         thinking,
         verifySelected: true,
+        selectedModelOnly: true,
         probeTimeoutMs,
       });
     } catch (cause) {
@@ -241,7 +266,10 @@ export async function ensureLocalAiBatchReady(settings, {
       model,
       status: "not_tested",
     };
-    const passed = verification.status === "passed" &&
+    const jitLoadable = provider === "lmstudio" && verification.status === "jit_loadable" &&
+      result?.capability?.models?.[model]?.jitLoadable === true &&
+      result?.capability?.models?.[model]?.limits?.source === "lmstudio_native_jit_request";
+    const passed = (verification.status === "passed" || jitLoadable) &&
       String(verification.model || "").trim() === model &&
       Array.isArray(result?.models) && result.models.includes(model);
     if (!passed) {
@@ -291,6 +319,10 @@ export async function ensureLocalAiBatchReady(settings, {
       provider,
       model,
       thinking,
+      availabilityStatus: verification.status,
+      runtimeContextTokens: hint.modelCapabilities?.limits?.runtimeContextTokens ?? null,
+      runtimeContextStatus: jitLoadable ? "requested_unverified" :
+        hint.modelCapabilities?.limits?.runtimeContextTokens ? "reported" : "not_reported",
       modelCount: result.models.length,
       elapsedMs: Number(verification.elapsedMs) || null,
     }, traceId, emitTrace);
@@ -303,6 +335,7 @@ export async function ensureLocalAiBatchReady(settings, {
         provider,
         model,
         thinking,
+        availabilityStatus: verification.status,
       },
     };
   };
@@ -319,10 +352,51 @@ export async function ensureLocalAiBatchReady(settings, {
   // Share availability/capability evidence only. Each batch still owns its prompt, language,
   // memory mode and other execution settings, even when it joins the same metadata check.
   const evidence = await pending;
+  // Discovery is shared by endpoint/model, but Thinking is owned by each
+  // caller. A concurrent On request must never approve another caller's Off.
+  const nativeOllama = provider === "ollama" ||
+    provider === "customlocal" && settings?.localAiAdapter?.protocol === "ollama";
+  if ((provider === "lmstudio" || nativeOllama) && thinking === "off") {
+    const reasoning = evidence.hint?.modelCapabilities?.reasoning;
+    // A supported:false claim is safe only when verified against the selected
+    // runtime and loaded model immediately before this batch begins.
+    const verifiedNonReasoning=evidence.audit?.source==="live_metadata"&&
+      reasoning?.supported===false&&
+      (provider==="lmstudio"&&reasoning.source==="lmstudio_native_loaded_instance"&&
+        Array.isArray(reasoning.supported_efforts)&&reasoning.supported_efforts.length===0 ||
+       nativeOllama&&reasoning.source==="ollama-api-show");
+    if (reasoning?.mandatory === true)
+      throw readinessError({status:"reasoning_setting_unsupported"});
+    // Ollama permits an explicit `think:false` request even when /api/show
+    // omits thinking.values. The reply still has to pass the generation guard.
+    const ollamaOffAttempt = nativeOllama && typeof reasoning?.supported !== "boolean";
+    if (!reasoning?.supported_efforts?.includes("off")&&!verifiedNonReasoning&&!ollamaOffAttempt)
+      throw readinessError({status:"reasoning_setting_unverified"});
+  }
   return {
     settings: enrichSettings(settings, evidence.hint),
-    audit: { ...evidence.audit },
+    audit: { ...evidence.audit, thinking },
   };
+}
+
+/** Recheck a selected Local model immediately before planning an unsent request.
+ * Context metadata belongs to the loaded runtime, not to the saved profile.
+ * A failed check remains a failed request; never reuse an older context limit.
+ */
+export async function refreshLocalAiCapabilities(ai, route, options = {}) {
+  const provider = String(ai?.provider || "").trim().toLowerCase();
+  if (route !== "direct-local" || !["lmstudio", "ollama", "vllm", "llamacpp", "koboldcpp"].includes(provider) &&
+      !(provider === "customlocal" && ai?.local_adapter?.protocol === "ollama")) return ai;
+  if (options.signal?.aborted) throw options.signal.reason || new DOMException("Aborted", "AbortError");
+  const checked = await ensureLocalAiBatchReady({
+    aiProvider: provider,
+    aiBaseUrl: ai?.base_url,
+    aiModel: ai?.model,
+    aiLocalThinking: ai?.thinking,
+    localAiAdapter: ai?.local_adapter,
+  }, options);
+  if (options.signal?.aborted) throw options.signal.reason || new DOMException("Aborted", "AbortError");
+  return { ...ai, model_capabilities: checked.settings.aiModelCapabilities };
 }
 
 export function clearLocalAiPreflightInflightForTest() {

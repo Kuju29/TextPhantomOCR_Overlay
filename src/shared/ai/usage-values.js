@@ -13,13 +13,20 @@ export function addDecimal(a, b) {
   const total = String(units(a) + units(b)).padStart(n + 1, "0");
   return n ? `${total.slice(0, -n)}.${total.slice(-n)}` : total;
 }
-export function localProviderUsage(data, dialect = "openai") {
+export function localProviderUsage(data, dialect = "openai", { llamaCacheTimings = false } = {}) {
   const raw = dialect === "ollama" ? object(data) : object(data?.usage);
   const input = token(dialect === "ollama" ? raw.prompt_eval_count : raw.prompt_tokens ?? raw.input_tokens);
   const output = token(dialect === "ollama" ? raw.eval_count : raw.completion_tokens ?? raw.output_tokens);
   const prompt = object(raw.prompt_tokens_details ?? raw.input_tokens_details);
   const completion = object(raw.completion_tokens_details ?? raw.output_tokens_details);
-  const read = token(dialect === "ollama" ? raw.prompt_eval_cached_count : prompt.cached_tokens ?? raw.prompt_cache_hit_tokens);
+  const reportedRead = token(dialect === "ollama" ? raw.prompt_eval_cached_count :
+    prompt.cached_tokens ?? (llamaCacheTimings ? raw.cached_tokens : undefined) ?? raw.prompt_cache_hit_tokens);
+  const nativeRead = llamaCacheTimings && input != null ? token(data?.timings?.cache_n) : null;
+  // An explicit usage cache counter (including zero) is authoritative. Only
+  // llama.cpp family responses with missing usage detail may use cache_n.
+  const hasReportedRead = Object.hasOwn(prompt, "cached_tokens") ||
+    Object.hasOwn(raw, "prompt_cache_hit_tokens") || Object.hasOwn(raw, "cached_tokens");
+  const read = reportedRead ?? (!hasReportedRead && nativeRead != null && nativeRead <= input ? nativeRead : null);
   const write = token(prompt.cache_write_tokens), thought = token(completion.reasoning_tokens);
   const total = token(dialect === "ollama" ? raw.total_count : raw.total_tokens) ??
     (input != null && output != null ? token(input + output) : null);

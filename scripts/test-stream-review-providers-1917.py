@@ -44,7 +44,8 @@ class Client:
   return Response(lines())
 for spec in registry:
  Client.provider=spec.provider_id;Client.calls=[];Client.seen=[]
- req=h['GenerationRequest'](provider=spec.provider_id,model=spec.default_model,api_key='fixture',base_url=spec.default_base_url,system_text='system',user_parts=('<<I1_P0:one>><<I2_P0:two>>',),expected_ids=('I1_P0','I2_P0'),unit_count=2,thinking='off')
+ local=spec.local
+ req=h['GenerationRequest'](provider=spec.provider_id,model=spec.default_model,api_key='fixture',base_url=spec.default_base_url,system_text='system',user_parts=('<<I1_P0:one>><<I2_P0:two>>',),expected_ids=('I1_P0','I2_P0'),unit_count=2,thinking='default' if local else 'off',cache_context=({'thinkingRequested':'minimum','minimumProviderManagedUnverified':True} if local else {}))
  with patch.object(httpx,'Client',Client),content_stream.scope(Client.seen.append), patch('backend.ai.wire_trace.write_json') as writes:
   result=spec.adapter.generate(req)
  metrics=[c.args[1] for c in writes.call_args_list if c.args and c.args[0]=='09_stream_timing.json']
@@ -54,7 +55,8 @@ for spec in registry:
  assert result.text==A+B,(spec.provider_id,result.text)
  assert result.input_tokens==23 and result.output_tokens==7,(spec.provider_id,result.input_tokens,result.output_tokens)
  assert result.terminal_completed is True,(spec.provider_id,'terminal')
+ if local: assert result.thinking_applied=='provider_managed_unverified',(spec.provider_id,result.thinking_applied)
  assert len(Client.calls)==1,(spec.provider_id,'extra calls')
  print('PASS',spec.provider_id,'early A before B, exact final text, usage 23/7, terminal, one call')
-assert len(registry)==19
-print('PASS 19 provider registry adapters with real stream readers and fixture HTTP')
+assert len(registry)==18
+print('PASS 18 built-in API provider adapters with real stream readers and fixture HTTP; Custom Local is Extension-only')

@@ -1,7 +1,8 @@
-"""Actual generation-boundary contract matrix for all 19 API providers."""
+"""Actual generation-boundary contract matrix for all 18 API providers."""
 
 from __future__ import annotations
 
+import json
 import sys
 import types
 from contextlib import ExitStack
@@ -61,7 +62,7 @@ ANSWER = "<<TP_P0:คำแปล>>"
 USAGE = (23, 7, 30)
 CLOUD_FIELDS = {
     "anthropic": {"max_tokens", "thinking"},
-    "deepseek": {"temperature", "max_tokens"},
+    "deepseek": {"max_tokens"},
     "featherless": {"max_tokens"},
     "gemini": {"maxOutputTokens", "responseMimeType"},
     "groq": {"temperature", "max_completion_tokens"},
@@ -104,6 +105,14 @@ class BoundaryClient:
         self.calls.append({"method": "GET", "url": str(url), **kwargs})
         if str(url).endswith("/api/tags"):
             return Response({"models": [{"name": "llama3.1"}]})
+        if str(url).endswith("/api/extra/true_max_context_length"):
+            return Response({"value": 32768})
+        if str(url).endswith("/models"):
+            # vLLM and llama.cpp publish the exact running model allocation.
+            return Response({"data": [{"id": "local-model", "max_model_len": 32768,
+                                       "meta": {"n_ctx": 32768, "n_ctx_train": 65536}}]})
+        if str(url).endswith("/api/ps"):
+            return Response({"models": []})
         return Response({})
 
     def post(self, url, **kwargs):
@@ -197,6 +206,39 @@ class OpenAIStreamClient:
         return StreamResponse(lines)
 
 
+class NativeLmStudioClient:
+    """Stateless native LM Studio SSE boundary; store:false emits no cursor."""
+    calls: list[dict] = []
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def close(self):
+        return None
+
+    def stream(self, method, url, **kwargs):
+        self.calls.append({"method": method, "url": str(url), **kwargs})
+        model = kwargs["json"]["model"]
+        frames = [
+            {"type": "chat.start", "model_instance_id": model},
+            {"type": "message.delta", "content": ANSWER},
+            {"type": "chat.end", "result": {"model_instance_id": model,
+                "output": [{"type": "message", "content": ANSWER}],
+                "stats": {"input_tokens": USAGE[0], "total_output_tokens": USAGE[1]}}},
+        ]
+        lines = []
+        for frame in frames:
+            lines.extend(("event: " + frame["type"],
+                          "data: " + json.dumps(frame, ensure_ascii=False), ""))
+        return StreamResponse(lines)
+
+
 def system_and_user(payload: dict, protocol: str) -> tuple[list[str], str]:
     if protocol == "gemini_generate_content":
         system = [part["text"] for part in payload["systemInstruction"]["parts"]]
@@ -205,6 +247,8 @@ def system_and_user(payload: dict, protocol: str) -> tuple[list[str], str]:
         blocks = payload["system"]
         system = [block["text"] for block in blocks] if isinstance(blocks, list) else [blocks]
         return system, payload["messages"][0]["content"]
+    if payload.get("store") is False and "system_prompt" in payload:
+        return [payload["system_prompt"]], payload["input"]
     messages = payload["messages"]
     return [messages[0]["content"]], messages[1]["content"]
 
@@ -258,7 +302,7 @@ def main() -> None:
     ]
     assert len(fixture["systemSha256"]) == len(fixture["userSha256"]) == 64
     registry = list(compose_providers(ProviderRegistry()))
-    assert len(registry) == 19, [spec.provider_id for spec in registry]
+    assert len(registry) == 18, [spec.provider_id for spec in registry]
     rows = []
 
     for spec in registry:
@@ -270,7 +314,7 @@ def main() -> None:
             system_text=system_text,
             system_sections=sections,
             user_parts=(SOURCE,),
-            thinking="off",
+            thinking="default" if spec.local else "off",
             expected_ids=request_ids,
             unit_count=len(request_ids),
         )
@@ -297,9 +341,10 @@ def main() -> None:
                           "total_tokens": USAGE[2]},
             })
 
-        BoundaryClient.calls = []
+        boundary = NativeLmStudioClient if spec.provider_id == "lmstudio" else BoundaryClient
+        boundary.calls = []
         with ExitStack() as stack:
-            stack.enter_context(patch.object(openai_chat.httpx, "Client", BoundaryClient))
+            stack.enter_context(patch.object(openai_chat.httpx, "Client", boundary))
             if spec.protocol == "gemini_generate_content":
                 stack.enter_context(patch.object(cloud_gemini, "_post_once", side_effect=gemini_post))
             elif spec.protocol == "anthropic_messages":
@@ -307,7 +352,8 @@ def main() -> None:
             result = spec.adapter.generate(request)
 
         if spec.protocol not in {"gemini_generate_content", "anthropic_messages"}:
-            captured.extend(call["json"] for call in BoundaryClient.calls)
+            captured.extend(call["json"] for call in boundary.calls
+                            if call["method"] == "POST")
         assert len(captured) == 1, f"{spec.provider_id}: expected one dispatch, got {len(captured)}"
         payload = captured[0]
         system_blocks, user_text = system_and_user(payload, spec.protocol)
@@ -322,7 +368,13 @@ def main() -> None:
             spec.provider_id, result
         )
 
-        if spec.local and spec.provider_id != "ollama":
+        if spec.provider_id == "lmstudio":
+            assert payload["store"] is False
+            assert "previous_response_id" not in payload and "reasoning" not in payload
+            assert "max_output_tokens" in payload
+            assert "temperature" not in payload
+            assert result.provider_response_id == ""
+        elif spec.local and spec.provider_id != "ollama":
             assert "temperature" not in payload, f"{spec.provider_id}: guessed temperature sent"
             assert "think" not in payload, f"{spec.provider_id}: guessed thinking control sent"
             assert "max_tokens" in payload
@@ -350,9 +402,11 @@ def main() -> None:
                 "Claude Sonnet 5 documents an explicit disabled thinking mode"
             )
             assert "temperature" not in payload, "thinking requests must not send a non-default temperature"
-        rows.append((spec.provider_id, spec.protocol, "PASS"))
+        rows.append((spec.provider_id,
+                     "lmstudio_native_chat" if spec.provider_id == "lmstudio" else spec.protocol,
+                     "PASS"))
 
-    print("API provider actual-boundary matrix: 19/19 PASS")
+    print("API provider actual-boundary matrix: 18/18 PASS")
     for provider, protocol, status in rows:
         print(f"  {provider:14} {protocol:28} {status}")
     print("Custom Local API: N/A (extension-only contract)")
@@ -361,27 +415,30 @@ def main() -> None:
     base_ollama_request = GenerationRequest(
         provider="ollama", model=ollama.default_model,
         base_url=ollama.default_base_url, system_text=system_text,
-        system_sections=sections, user_parts=(SOURCE,), thinking="off",
+        system_sections=sections, user_parts=(SOURCE,), thinking="default",
         expected_ids=request_ids, unit_count=len(request_ids),
     )
     capability_cases = (
-        ({"reasoning": {"supported": None, "control": "unknown"}}, "off", None),
+        ({"reasoning": {"supported": None, "control": "unknown"}}, "default", None),
         ({"reasoning": {"supported": False, "control": "none"}}, "off", None),
-        ({"reasoning": {"supported": True, "control": "levels"}}, "on", None),
+        ({"reasoning": {"supported": True, "control": "levels",
+                         "supported_efforts": ["low"]}}, "low", "low"),
         ({"reasoning": {"supported": True, "control": "boolean"}}, "off", False),
         ({"reasoning": {"supported": True, "control": "toggle"}}, "on", True),
     )
     for capabilities, selected, expected in capability_cases:
         BoundaryClient.calls = []
         candidate = replace(base_ollama_request, thinking=selected,
-                            model_capabilities=capabilities)
+                            model_capabilities=capabilities,
+                            cache_context={"reasoningCapabilityVerified":True})
         with patch.object(openai_chat.httpx, "Client", BoundaryClient):
             ollama.adapter.generate(candidate)
         body = BoundaryClient.calls[0]["json"]
         if expected is None:
             assert "think" not in body, (capabilities, body)
         else:
-            assert body.get("think") is expected, (capabilities, body)
+            assert type(body.get("think")) is type(expected) and body.get("think") == expected, (
+                capabilities, body.get("think"))
 
     BoundaryClient.calls = []
     with patch("backend.ai.providers.local_ollama.httpx.Client", BoundaryClient):
@@ -395,9 +452,15 @@ def main() -> None:
     mandatory = {"reasoning": {"supported": True, "mandatory": True, "control": "levels"}}
     BoundaryClient.calls = []
     with patch.object(openai_chat.httpx, "Client", BoundaryClient):
-        ollama.adapter.generate(replace(base_ollama_request, model_capabilities=mandatory))
-    chat = next(call for call in BoundaryClient.calls if call["url"].endswith("/api/chat"))
-    assert "think" not in chat["json"], "mandatory level reasoning must use provider default"
+        from backend.ai.translation_paths.store import ConversationError
+        try:
+            ollama.adapter.generate(replace(base_ollama_request, thinking="off",
+                model_capabilities=mandatory, cache_context={"reasoningCapabilityVerified":True}))
+        except ConversationError as exc:
+            assert exc.code == "ai_local_thinking_unsupported"
+        else:
+            raise AssertionError("mandatory level model must reject explicit Off before dispatch")
+    assert not BoundaryClient.calls
     BoundaryClient.calls = []
     with patch("backend.ai.providers.local_ollama.httpx.Client", BoundaryClient):
         mandatory_probe = ollama.adapter.probe(ProbeRequest(
@@ -409,17 +472,21 @@ def main() -> None:
     mandatory_bool = {"reasoning": {"supported": True, "mandatory": True, "control": "boolean"}}
     BoundaryClient.calls = []
     with patch.object(openai_chat.httpx, "Client", BoundaryClient):
-        ollama.adapter.generate(replace(base_ollama_request, model_capabilities=mandatory_bool))
-    chat = next(call for call in BoundaryClient.calls if call["url"].endswith("/api/chat"))
-    assert chat["json"].get("think") is True, (
-        "a stale Off on a mandatory boolean model must resolve to the lowest supported mode"
-    )
+        try:
+            ollama.adapter.generate(replace(base_ollama_request, thinking="off",
+                model_capabilities=mandatory_bool, cache_context={"reasoningCapabilityVerified":True}))
+        except ConversationError as exc:
+            assert exc.code == "ai_local_thinking_unsupported"
+        else:
+            raise AssertionError("mandatory boolean model must reject explicit Off before dispatch")
+    assert not BoundaryClient.calls
     BoundaryClient.calls = []
     with patch.object(openai_chat.httpx, "Client", BoundaryClient):
-        ollama.adapter.generate(replace(base_ollama_request, thinking="on", model_capabilities=mandatory_bool))
+        ollama.adapter.generate(replace(base_ollama_request, thinking="on", model_capabilities=mandatory_bool,
+            cache_context={"reasoningCapabilityVerified":True}))
     chat = next(call for call in BoundaryClient.calls if call["url"].endswith("/api/chat"))
     assert chat["json"].get("think") is True
-    print("Ollama thinking boundary: model-specific controls preserved; incompatible preferences use lowest capability-proven mode PASS")
+    print("Ollama thinking boundary: verified controls preserved; unsupported explicit Off rejects before dispatch PASS")
 
     # Regression: marker completion is latency evidence, not permission to
     # freeze the body. A later suffix must reach decode but cannot invalidate
@@ -433,7 +500,7 @@ def main() -> None:
     request = GenerationRequest(
         provider="ollama", model=ollama.default_model,
         base_url=ollama.default_base_url, system_text=one_system_text,
-        system_sections=one_sections, user_parts=("<<TP_P0:  OCR source  >>",), thinking="off",
+        system_sections=one_sections, user_parts=("<<TP_P0:  OCR source  >>",), thinking="default",
         expected_ids=("P0",), unit_count=1,
     )
     for suffix in ("", " trailing"):

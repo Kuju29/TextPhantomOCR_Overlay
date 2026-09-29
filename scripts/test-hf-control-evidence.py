@@ -27,10 +27,14 @@ from backend.ai.provider_contract import GenerationRequest, ProbeRequest, ProbeR
 from backend.ai.providers import cloud_huggingface as hf
 from backend import trace
 
-probe_request = ProbeRequest(model="fixture-model", base_url=hf.DEFAULT_BASE_URL)
+probe_request = ProbeRequest(model="fixture-model", base_url=hf.DEFAULT_BASE_URL,
+    model_capabilities={"reasoning":{"supported":True,"control":"levels","supported_efforts":["none","low"]}})
 with patch.object(hf, "openai_chat_probe", return_value=ProbeResponse(True, 200)):
     capabilities = hf.ADAPTER.probe(probe_request).capabilities
 assert capabilities["reasoning"]["supported_efforts"] == ["none", "low"]
+with patch.object(hf, "openai_chat_probe", return_value=ProbeResponse(True, 200)):
+    unknown = hf.ADAPTER.probe(replace(probe_request, model_capabilities={})).capabilities
+assert unknown["reasoning"]["supported_efforts"] == ["none"], "Off evidence must not invent Low"
 
 request = GenerationRequest(
     provider="huggingface", model="fixture-model", system_text="STYLE",
@@ -55,7 +59,8 @@ for mode, effort in [("off", "none"), ("on", "low")]:
         "effectiveTemperature": "unknown", "topPSent": False,
     }
     assert fields["reasoningEvidence"]["behavior"] == "not_verified_by_probe"
-    assert result.thinking_applied == f"requested_{mode}_effort_{effort}"
+    assert result.thinking_applied == ("requested_off_observed_zero_reasoning" if mode == "off"
+                                      else f"requested_{mode}_effort_{effort}")
 
 with patch.object(hf, "execute_huggingface_chat", execute):
     hf.ADAPTER.generate(replace(request, model_capabilities={}))

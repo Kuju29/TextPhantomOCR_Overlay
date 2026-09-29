@@ -14,7 +14,11 @@ def normalize_reasoning_preference(value: Any, fallback: str = "minimum") -> str
     if value is False:
         return "off"
     raw = str(value or "").strip().lower()
-    if raw in {"auto", "provider", "provider_default"}:
+    # Historical user-facing `auto` was Lowest available. Keep the explicit
+    # internal/provider preference `default` separate from that saved value.
+    if raw == "auto":
+        return "minimum"
+    if raw in {"provider", "provider_default"}:
         return "default"
     if raw in {"lowest", "lowest_available", "min"}:
         return "minimum"
@@ -52,8 +56,18 @@ def concrete_reasoning_preferences(reasoning: Any) -> tuple[str, ...]:
 
 
 def minimum_reasoning_preference(reasoning: Any) -> str:
-    """Lowest available is the first concrete capability option, not a fixed effort."""
+    """Choose a proven minimum; leave unfamiliar effort rankings to the provider."""
+    cap = reasoning if isinstance(reasoning, dict) else {}
     options = concrete_reasoning_preferences(reasoning)
+    if options and options[0] == "off":
+        return "off"
+    efforts = cap.get("supported_efforts")
+    unknown_level = isinstance(efforts, list) and any(
+        not isinstance(value, str) or value.strip().lower() not in _EFFORT_SET | {"off", "none", "on"}
+        for value in efforts
+    )
+    if cap.get("minimum_unresolved") is True or unknown_level:
+        return "default"
     return options[0] if options else "default"
 
 

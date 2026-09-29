@@ -204,6 +204,7 @@
   const imageErrorTargets = new Set();
   const imageErrorGenerations = new WeakMap();
   const dismissedErrors = new WeakSet();
+  const dismissedReaderTargets = new Map();
   let errorFrame = 0, errorResize = null, errorListeners = false;
   function errorAnchorCurrent(img, generation) {
     if (!generation) return {ok:true};
@@ -330,6 +331,8 @@
   // sweep is defensive cleanup for badges left by an older extension build.
   function clearAllImageErrors() {
     for (const img of Array.from(imageErrorTargets)) clearImageError(img);
+    for (const img of dismissedReaderTargets.keys()) dismissedErrors.delete(img);
+    dismissedReaderTargets.clear();
     for (const badge of Array.from(
       document.querySelectorAll?.('[data-tp-image-error="1"]') || [],
     )) {
@@ -361,9 +364,10 @@
       ? TP.findReaderErrorTarget?.(generation) : findTargetImage(original, generation);
     if (!img || !errorAnchorCurrent(img,generation).ok) return false;
 
+    const warning = msg?.schema === 'tp.error/1' && msg.severity === 'warning';
     const full =
       msg && typeof msg === "object"
-        ? `${String(msg.userMessage || "เกิดข้อผิดพลาด")} · ${String(msg.code || "PROCESSING_FAILED")}`
+        ? `${String(msg.userMessage || "เกิดข้อผิดพลาด")} · ${String(msg.code || "PROCESSING_FAILED")}${msg.detail ? ` · ${String(msg.detail).slice(0,200)}` : ''}`
         : String(msg || "PROCESSING_FAILED");
     const short = shortImageError(msg?.schema === "tp.error/1" ? msg : full);
     let badge = imageErrorBadges.get(img);
@@ -374,9 +378,14 @@
       badge.dataset.tpImageError = "1";
       imageErrorBadges.set(img, badge);
       imageErrorTargets.add(img);
-      badge.addEventListener("click", () => {clearImageError(img);dismissedErrors.add(img);});
+      badge.addEventListener("click", () => {
+        const owner=imageErrorGenerations.get(img)?.readerRunId;
+        clearImageError(img);dismissedErrors.add(img);
+        if(owner) dismissedReaderTargets.set(img,owner);
+      });
     }
     dismissedErrors.delete(img);
+    dismissedReaderTargets.delete(img);
     imageErrorGenerations.set(img,generation);
     trackErrorBadge(img);
     // Keep the warning above the translation layer (whose z-index is maximal).
@@ -384,7 +393,7 @@
       document.body.appendChild(badge);
     if (!img.dataset.lensError)
       img.dataset.tpLensPrevOutline = img.style.outline || "";
-    img.style.outline = "3px solid red";
+    img.style.outline = warning ? '3px solid #b27000' : "3px solid red";
     badge.textContent = `⚠️ ${short}`;
     badge.setAttribute(
       "aria-label",
@@ -397,8 +406,8 @@
       whiteSpace: "normal",
       overflowWrap: "anywhere",
       background: "rgba(255,255,255,0.94)",
-      color: "rgba(90,0,0,0.98)",
-      border: "1px solid rgba(180,0,0,0.55)",
+      color: warning ? '#694700' : "rgba(90,0,0,0.98)",
+      border: warning ? '1px solid #b27000' : "1px solid rgba(180,0,0,0.55)",
       padding: "4px 6px",
       borderRadius: "5px",
       fontFamily: "system-ui,sans-serif",
@@ -446,6 +455,8 @@
     clearReaderImageErrors: runId => {
       for (const img of Array.from(imageErrorTargets))
         if (imageErrorGenerations.get(img)?.readerRunId===runId) clearImageError(img);
+      for (const [img,owner] of dismissedReaderTargets)
+        if (owner===runId) {dismissedReaderTargets.delete(img);dismissedErrors.delete(img);}
     },
     shortImageError,
     positionImageErrorBadge,

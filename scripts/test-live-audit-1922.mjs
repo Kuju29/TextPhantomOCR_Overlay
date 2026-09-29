@@ -36,6 +36,29 @@ await check('ACK count is 3 while finished remains 1; only inserted is displayed
  assert.match(broadcast.batch.message,/inserted 3\/26/);assert.doesNotMatch(broadcast.batch.message,/\bfinished\b/i);
  console.log(JSON.stringify({inserted:stats.inserted,finishedInternal:stats.finished,total:stats.total,text,backgroundMessage:broadcast.batch.message}));
 });
+await check('unmounted reader provisional is staged without an insert ACK and may be placed later',async()=>{
+ const f=progressFixture();
+ f.jobs.get('job-2').generation={readerRunId:'reader-fixture',readerPageId:'2'};
+ f.setReply({ok:true,stored:true,pending:true,applied:false});
+ await f.send(2,{complete:true});
+ const item=f.batch.items.get('image-2');
+ assert.equal(item.presentation?.placementPending,true);
+ assert.equal(item.presentation?.insertionAck,undefined);
+ assert.equal(item.phase,'ai_generating');
+ assert.equal(batchPassStats(f.batch).inserted,1);
+ f.setReply({ok:true,applied:true,drawn:true});
+ await f.send(2,{complete:true});
+ assert.equal(batchPassStats(f.batch).inserted,2);
+});
+await check('unmounted Local Independent preview skips its ACK and keeps its job alive',async()=>{
+ const f=progressFixture();
+ f.setReply({ok:true,applied:false,previewSkipped:true});
+ await f.send(2,{complete:false,missing:['P1']});
+ assert.equal(batchPassStats(f.batch).inserted,1);
+ assert.equal(f.batch.items.get('image-2').presentation?.insertionAck,undefined);
+ assert.equal(f.batch.items.get('image-2').phase,'ai_generating');
+ assert.equal(f.jobs.size,3);
+});
 await check('repeat ACK / final reuse cannot increment twice; saved count retained and a new attempt resets it',async()=>{
  const f=progressFixture();await f.send(2);await f.send(2);assert.equal(batchPassStats(f.batch).inserted,2);
  updateImagePresentation(f.batch.id,'image-2',{insertionAck:{present:true,provisional:false}});

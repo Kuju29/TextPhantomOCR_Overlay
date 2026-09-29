@@ -21,6 +21,10 @@ export function formatUsageLines(row) {
   if (row.incompleteRequests > 0) lines.push(['Requests missing usage', value(row.incompleteRequests)]);
   if (row.pendingOperations > 0) lines.push(['Awaiting usage', value(row.pendingOperations)]);
   if (row.pendingOverflow > 0) lines.push(['Older unresolved requests', value(row.pendingOverflow)]);
-  if (row.providerCostUsd != null && row.runtime !== 'local') lines.push(['Reported cost', `$${row.providerCostUsd}${row.costReportedRequests < row.requests ? ' (incomplete)' : ''}`]);
+  if (row.providerCostUsd != null && row.runtime !== 'local') lines.push([
+    String(row.provider || '').toLowerCase() === 'openrouter' && row.byokRequests > 0
+      ? row.byokRequests < row.requests ? 'Reported OpenRouter charges (BYOK upstream excluded)'
+        : 'Reported OpenRouter fee (BYOK upstream separate)' : 'Reported cost',
+    `$${row.providerCostUsd}${row.costReportedRequests < row.requests ? ' (incomplete)' : ''}`]);
   return lines.map(([label, text]) => `${label}: ${text}`).join('\n');
 }

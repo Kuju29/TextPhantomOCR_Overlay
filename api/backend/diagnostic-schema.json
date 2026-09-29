@@ -15,6 +15,7 @@
     "usage_commit_timing",
     "request_timing",
     "settings_effective",
+    "independent_examples",
     "image_status",
     "image_source",
     "image_composition",
@@ -30,7 +31,8 @@
     "stream_timing",
     "page_stream_timing",
     "render_timing",
-    "page_visibility"
+    "page_visibility",
+    "repair_lifecycle"
   ],
   "reasons": [
     "whole_page_fits",
@@ -134,7 +136,11 @@
     "records_complete",
     "dom_enqueued",
     "dom_acknowledged",
-    "page_validated"
+    "page_validated",
+    "repair_checkpoint_merge",
+    "repair_ledger_reports",
+    "repair_ledger_seal",
+    "reliability_recovered_after_eight_clean_answers"
   ],
   "states": [
     "planned",
@@ -184,6 +190,8 @@
   "numeric": [
     "estimatedInput",
     "estimatedOutput",
+    "inputSampleCount",
+    "runtimeContextTokens",
     "reasoningReserve",
     "completionAvailable",
     "contextLimit",
@@ -212,6 +220,11 @@
     "running",
     "queued",
     "unitCount",
+    "availableStoryPairs",
+    "availableExamplePairs",
+    "includedExamplePairs",
+    "sampleCandidates",
+    "poolPairs",
     "batchIndex",
     "total",
     "accepted",

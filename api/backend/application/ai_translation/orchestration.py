@@ -9,7 +9,7 @@ import time
 from backend import cancellation, trace
 from backend.ai import markers, prompts as ai_prompts, wire_trace
 from backend.ai.provider_resolution import resolve_provider
-from backend.ai.rate_policy import manual_rate_policy
+from backend.ai.rate_policy import InvalidManualRatePolicy, manual_rate_policy
 from backend.ai.rategate import RateGateCancelled, RateGateRejected, RateGateTimeout
 from backend.ai.translation.invocation import resolve_generation_model
 from backend.api.errors import (cancelled_payload, failure_event, merged_request_correlation,
@@ -20,7 +20,7 @@ from backend.application.ai_translation import idempotency_session, provider_exe
 from backend.application.ai_translation.context import TranslationContext
 from backend.application.ai_translation.provider_errors import trace_failure
 from backend.application.ai_translation.request_validation import MAX_TOTAL_CHARS, MAX_UNIT_CHARS, MAX_UNITS, build_config
-from backend.ai.credentials import MissingUserApiKey
+from backend.ai.credentials import MissingUserApiKey, ProviderEndpointConflict
 from backend.ai.translation_paths.origins import OriginValidationError
 from backend.jobs.admission import identity_of
 
@@ -46,14 +46,14 @@ def _prepare(
         is_mapping = isinstance(exc, OriginValidationError)
         validation = exc.validation if is_mapping else safe_validation_reason(str(exc))
         detail = error_payload(
-            code=exc.code if is_mapping else "missing_api_key" if isinstance(exc, MissingUserApiKey) else "invalid_request",
+            code=exc.code if isinstance(exc, (OriginValidationError, MissingUserApiKey, ProviderEndpointConflict, InvalidManualRatePolicy)) else "invalid_request",
             message=str(exc)[:200], user_message=str(exc)[:200],
             origin="api" if is_mapping else "client", stage=exc.stage if is_mapping else stage,
             category="input", retryable=False, http_status=400, trace_id=trace_id,
             extra={"validation": validation, "providerAttempts": 0, "generationAttempts": 0,
                    "requestDispatched": False, "providerHttpStatuses": []},
             correlation=correlation)
-        if isinstance(exc, MissingUserApiKey):
+        if isinstance(exc, (MissingUserApiKey, ProviderEndpointConflict)):
             detail["category"] = "configuration"
         if is_mapping:
             wire_trace.write_json("01_conversation_origin_validation.json", {
@@ -80,7 +80,10 @@ def _prepare(
     except ValueError as exc:
         reject(exc, "configuration")
     resolved_model = resolve_generation_model(resolved_provider, config.model)
-    rate = manual_rate_policy(payload, provider=resolved_provider, base_url=config.base_url)
+    try:
+        rate = manual_rate_policy(payload, provider=resolved_provider, base_url=config.base_url)
+    except InvalidManualRatePolicy as exc:
+        reject(exc, "rate_configuration")
     return TranslationContext(
         request=request, payload=payload, request_context=raw_context, units=tuple(units),
         target_lang=target_lang, config=config, marked=markers.apply([str(unit["text"]) for unit in units]),

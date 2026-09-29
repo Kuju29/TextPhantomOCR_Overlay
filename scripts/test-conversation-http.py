@@ -47,7 +47,9 @@ class LoopbackClient:
 
 try:
  with tempfile.TemporaryDirectory() as temp,patch.dict(os.environ,{'TP_CONVERSATION_STATE_FILE':temp+'/state.sqlite','TP_AI_WIRE_TRACE':'1','TP_AI_WIRE_TRACE_DIR':temp+'/wire','TP_USAGE_RECEIPTS':'off'}),patch.object(httpx,'Client',LoopbackClient),patch('backend.ai.provider_resolution.discovered_model_capabilities',return_value=(False,{})):
-  cfg=AiConfig(provider='huggingface',model='fixture',api_key='PRIVATE_ACCOUNT',base_url='https://router.huggingface.co/v1',thinking='off',source_lang='en',memory_mode='off',translation_mode='conversation',conversation=descriptor({'documentId':'doc'},context={'tp_tab_session':'owner'}),model_capabilities={'limits':{'contextTokens':32768,'maxOutputTokens':4096}})
+  # This fixture tests transcript replay, not a verified HF thinking control.
+  # Explicit Provider default permits the mocked account with no model catalogue.
+  cfg=AiConfig(provider='huggingface',model='fixture',api_key='PRIVATE_ACCOUNT',base_url='https://router.huggingface.co/v1',thinking='default',source_lang='en',memory_mode='off',translation_mode='conversation',conversation=descriptor({'documentId':'doc'},context={'tp_tab_session':'owner'}),model_capabilities={'limits':{'contextTokens':32768,'maxOutputTokens':4096}})
   def translate(i,config=cfg,text=None):
    token=wire_trace.begin({'traceId':'conversation','operationId':f'conversation-http-{i}'})
    try:return invocation.translate(markers.apply([text or 'Hello '+str(i)]),'th',config)
@@ -55,15 +57,18 @@ try:
   a,b,c=[translate(i) for i in range(3)]
   assert [len(p['messages']) for p in calls]==[2,4,6]
   assert calls[1]['messages'][0]==calls[0]['messages'][0]
-  assert 'H01\nEN:' not in calls[0]['messages'][1]['content']
+  assert 'H01\nEN:' in calls[0]['messages'][1]['content']
+  assert 'H20\nEN:' in calls[0]['messages'][1]['content']
+  assert 'H21\nEN:' not in calls[0]['messages'][1]['content']
   assert calls[1]['messages'][1]==calls[0]['messages'][1]
   assert 'H01\nEN:' not in calls[1]['messages'][-1]['content']
   assert calls[2]['messages'][:4]==calls[1]['messages']
   assert calls[1]['messages'][2]=={'role':'assistant','content':'<<TP_P0:สวัสดี>>'}
   for i,res in enumerate([a,b,c]):
    e=res['meta']['conversation'];assert e['historyTurns']==i and e['commitStatus']=='committed',e
-   assert e['bootstrapExamplesIncluded'] is False,e
-   assert e['bootstrapExamplesPersisted'] is False,e
+   assert e['bootstrapExamplesIncluded'] is True,e
+   assert e['bootstrapExamplesPersisted'] is (i>0),e
+   assert e['bootstrapExamplesChars']>0,e
    assert res['meta']['usage']['totalTokens']==3010,'do not subtract cache from input/total'
    folder=Path(temp)/'wire'/wire_trace.folder_name({'traceId':'conversation','operationId':f'conversation-http-{i}'})
    native=json.loads((folder/'04_provider_request.json').read_text())['body'];assert native==calls[i]
@@ -82,7 +87,7 @@ try:
   assert not fresh._rows
   assert not (Path(temp)/'state.sqlite').exists()
   # Complete runs:API stage uses same translation path and keeps output geometry contract.
-  p={'context':{'page_url':'runsapi-doc','tp_tab_session':'owner'},'metadata':{'image_id':'img'},'ai':{'provider':'huggingface','api_key':'PRIVATE_ACCOUNT','base_url':'https://router.huggingface.co/v1','model':'fixture','source_lang':'en','translation_mode':'conversation','conversation':{'reset':'0'},'model_capabilities':cfg.model_capabilities}}
+  p={'context':{'page_url':'runsapi-doc','tp_tab_session':'owner'},'metadata':{'image_id':'img'},'ai':{'provider':'huggingface','api_key':'PRIVATE_ACCOUNT','base_url':'https://router.huggingface.co/v1','model':'fixture','thinking':'default','source_lang':'en','translation_mode':'conversation','conversation':{'reset':'0'},'model_capabilities':cfg.model_capabilities}}
   api_cfg=job_config.build_ai_config(p,'lens_text','ai');assert api_cfg.translation_mode=='conversation'
   tree={'paragraphs':[{'text':'Hello API','items':[]}]}
   canon={'schema':'tp.canonical-original-tree/1','coverage':{'complete':True},'paragraphs':[{'id':'p0','text':'Hello API','source':{'contract':'tp.ai-source-members/1','rawParagraphIndices':[0],'documentParagraphIds':['p0']}}]}
@@ -114,7 +119,9 @@ try:
   bs=calls[before_batch:]
   assert [len(x['messages']) for x in bs]==[2,4,6]
   assert bs[1]['messages'][0]==bs[0]['messages'][0]
-  assert 'H01\nEN:' not in bs[0]['messages'][1]['content']
+  assert 'H01\nEN:' in bs[0]['messages'][1]['content']
+  assert 'H20\nEN:' in bs[0]['messages'][1]['content']
+  assert 'H21\nEN:' not in bs[0]['messages'][1]['content']
   assert bs[1]['messages'][1]==bs[0]['messages'][1]
   assert 'H01\nEN:' not in bs[1]['messages'][-1]['content']
   assert bs[2]['messages'][:4]==bs[1]['messages']

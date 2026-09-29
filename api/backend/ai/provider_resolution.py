@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 from copy import deepcopy
+from concurrent.futures import Future
 from functools import wraps
 from threading import RLock
 
@@ -15,7 +16,12 @@ LIST_TIMEOUT_SEC = 10.0
 LOCAL_LIST_TIMEOUT_SEC = 3.0
 _MODEL_CAPABILITIES: dict[tuple[str, str, str], dict[str, Any]] = {}
 _MODEL_CAPABILITIES_TTL_SEC = 300.0
+# A control-only probe cannot erase contradictory reasoning from an actual
+# generation, including across a transient /models failure that clears facts.
+_OFF_CONTRADICTIONS: dict[tuple[str, str, str], dict[str, float]] = {}
+_OFF_CONTRADICTIONS_NEXT_SWEEP = 0.0
 _CAPABILITY_CACHE_LOCK = RLock()
+_CLOUD_DISCOVERY_IN_FLIGHT: dict[tuple[str, str, str], Future] = {}
 
 def _capability_cache_transaction(function):
     # Metadata only. No network call or generation is inside this short lock.
@@ -89,13 +95,17 @@ def normalize_model_capabilities(value: Any) -> dict[str, Any]:
         return {}
     reasoning = value.get("reasoning") if isinstance(value.get("reasoning"), dict) else {}
     normalized = {key: reasoning[key] for key in
-                  ("supported", "mandatory", "default_enabled", "supports_max_tokens", "dynamic", "can_disable")
+                  ("supported", "mandatory", "default_enabled", "supports_max_tokens", "dynamic", "can_disable", "minimum_unresolved")
                   if isinstance(reasoning.get(key), bool)}
     control = reasoning.get("control")
     if isinstance(control, str) and control in {"toggle", "boolean", "levels", "provider"}:
         normalized["control"] = control
     efforts = reasoning.get("supported_efforts")
     if isinstance(efforts, list):
+        from backend.ai.reasoning_preference import EFFORTS
+        known_efforts = set(EFFORTS) | {"off", "none", "on"}
+        if any(not isinstance(x, str) or x.strip().lower() not in known_efforts for x in efforts):
+            normalized["minimum_unresolved"] = True
         clean = [x.strip().lower() for x in efforts if isinstance(x, str) and re.fullmatch(r"[a-z0-9_-]{1,32}", x.strip().lower())]
         if clean:
             normalized["supported_efforts"] = list(dict.fromkeys(clean))
@@ -125,16 +135,65 @@ def normalize_model_capabilities(value: Any) -> dict[str, Any]:
     limits = normalize_limits(value.get("limits"))
     if limits:
         result["limits"] = limits
+    # Hugging Face model cards can report a different window for each live
+    # upstream. Only an exact `model:provider` route may use its own number.
+    routes = value.get("provider_limits")
+    if isinstance(routes, dict):
+        verified = {name: normalized for name, route in routes.items()
+            if isinstance(name, str) and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", name)
+            if (normalized := normalize_limits(route))}
+        if verified:
+            result["provider_limits"] = verified
+    hf = value.get("hf_route")
+    if isinstance(hf, dict) and hf.get("policy") in {"auto_fastest", "fastest", "cheapest", "preferred", "provider"}:
+        result["hf_route"] = {"policy": hf["policy"],
+            "provider": str(hf.get("provider") or "")[:64],
+            "contextStatus": "reported" if hf.get("contextStatus") == "reported" else "unreported"}
+        for field in ("liveProviders", "missingLimitProviders"):
+            values = hf.get(field)
+            result["hf_route"][field] = [v for v in (values if isinstance(values, list) else []) if isinstance(v, str)
+                and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", v)][:64]
     return result
 
 def effective_model_capabilities(*, discovery_fresh: bool,
                                  server: Any, client: Any) -> dict[str, Any]:
-    """Prefer the current account catalogue; use the verified client snapshot only as fallback."""
-    return normalize_model_capabilities(server if discovery_fresh else client)
+    """Only this account's server catalogue can prove numeric model limits."""
+    caps = normalize_model_capabilities(server if discovery_fresh else client)
+    if not discovery_fresh and 'limits' in caps:
+        labels = {key: caps['limits'][key] for key in
+            ('source', 'scope', 'modelRevision', 'tokenizer') if key in caps['limits']}
+        if labels:
+            caps['limits'] = labels
+        else:
+            caps.pop('limits', None)
+    if not discovery_fresh:
+        caps.pop('provider_limits', None)
+    return caps
 
 def _capability_scope(provider: str, base_url: str, api_key: str) -> tuple[str, str, str]:
     return (canonical_provider(provider), str(base_url or "").rstrip("/"),
             hashlib.sha256(str(api_key or "").encode()).hexdigest())
+
+
+def _off_contradicted(scope: tuple[str, str, str], model: str, now: float) -> bool:
+    global _OFF_CONTRADICTIONS_NEXT_SWEEP
+    if now >= _OFF_CONTRADICTIONS_NEXT_SWEEP:
+        # Amortize cleanup across all account scopes. A transiently abandoned
+        # account must not leave expired model/hash metadata in a busy worker.
+        for entry_scope, candidates in list(_OFF_CONTRADICTIONS.items()):
+            live = {name: expires for name, expires in candidates.items() if expires > now}
+            if live:
+                _OFF_CONTRADICTIONS[entry_scope] = live
+            else:
+                _OFF_CONTRADICTIONS.pop(entry_scope, None)
+        _OFF_CONTRADICTIONS_NEXT_SWEEP = now + 60.0
+    return _OFF_CONTRADICTIONS.get(scope, {}).get(str(model), 0) > now
+
+
+def _contradicted_reasoning() -> dict[str, Any]:
+    # A field may be accepted but still fail to disable reasoning. Provider
+    # default remains available while explicit Off/Lowest fails preflight.
+    return {"supported": True, "mandatory": False, "control": "provider"}
 
 
 @_capability_cache_transaction
@@ -274,6 +333,31 @@ def remember_selected_model_capability(provider: str, base_url: str, api_key: st
     cached["selected"] = selected
 
 @_capability_cache_transaction
+def replace_selected_model_capabilities(provider: str, base_url: str, api_key: str,
+                                        model: str, capability: dict[str, Any]) -> None:
+    """Replace one exact-model probe, retaining other models and invalidating old evidence.
+
+    A failed native probe passes an empty dict. Existing catalogue metadata for
+    that model must not masquerade as fresh reasoning/vision after a reload.
+    Each selected model has its own short expiry; probing it does not extend the
+    account catalogue's TTL or change the other installed models.
+    """
+    scope, now = _capability_scope(provider, base_url, api_key), time.monotonic()
+    previous = _MODEL_CAPABILITIES.get(scope) or {}
+    models = dict(previous.get("models") or {})
+    models.pop(str(model), None)
+    selected = dict(previous.get("selected") or {})
+    selected.pop(str(model), None)
+    normalized = normalize_model_capabilities(capability)
+    if normalized:
+        selected[str(model)] = {"expires_at": now + _MODEL_CAPABILITIES_TTL_SEC,
+                                "capabilities": normalized}
+    _MODEL_CAPABILITIES[scope] = {
+        **previous, "models": models, "selected": selected,
+        "known_models": set(previous.get("known_models") or ()) | {str(model)},
+    }
+
+@_capability_cache_transaction
 def capture_capability_cache_revision(provider: str, base_url: str, api_key: str):
     """Opaque dispatch guard. Removal/refresh replaces it, rejecting late evidence."""
     scope = _capability_scope(provider, base_url, api_key)
@@ -298,6 +382,8 @@ def retain_observed_off_control(provider: str, base_url: str, api_key: str,
         if known is not None and model not in known:
             return False
     selected = cached.get("selected", {}).get(model, {})
+    if _off_contradicted(scope, model, now):
+        return False
     capabilities = deepcopy(selected.get("capabilities", {})) if selected.get("expires_at", 0) > now else {}
     if cached.get("expires_at", 0) > now:
         for feature, details in normalize_model_capabilities(cached.get("models", {}).get(model)).items():
@@ -312,6 +398,33 @@ def retain_observed_off_control(provider: str, base_url: str, api_key: str,
 
 
 @_capability_cache_transaction
+def invalidate_observed_off_control(provider: str, base_url: str, api_key: str,
+                                    model: str) -> None:
+    """Revoke one model's Off proof when a real response contains reasoning.
+
+    Replace the outer revision so an earlier in-flight zero-usage response
+    cannot restore the contradicted proof. Keep catalogue and other models.
+    The negative observation survives catalogue failures and expires
+    independently of later accepted probes. Only account/key hashes are held.
+    """
+    scope, now = _capability_scope(provider, base_url, api_key), time.monotonic()
+    _off_contradicted(scope, model, now)  # prune expired entries in this scope
+    _OFF_CONTRADICTIONS.setdefault(scope, {})[str(model)] = now + MODEL_PROBE_EVIDENCE_TTL_SEC
+    cached = _MODEL_CAPABILITIES.get(scope)
+    if cached is None:
+        return
+    selected = dict(cached.get("selected") or {})
+    prior = selected.get(str(model), {})
+    capabilities = deepcopy(prior.get("capabilities") or {})
+    capabilities.pop("reasoning", None)
+    if capabilities and prior.get("expires_at", 0) > now:
+        selected[str(model)] = {**prior, "capabilities": capabilities}
+    else:
+        selected.pop(str(model), None)
+    _MODEL_CAPABILITIES[scope] = {**cached, "selected": selected}
+
+
+@_capability_cache_transaction
 def forget_model_capabilities(provider: str, base_url: str, api_key: str) -> None:
     scope = (canonical_provider(provider), str(base_url or "").rstrip("/"),
              hashlib.sha256(str(api_key or "").encode()).hexdigest())
@@ -323,24 +436,120 @@ def forget_model_capabilities(provider: str, base_url: str, api_key: str) -> Non
 def discovered_model_capabilities(provider: str, base_url: str, model: str,
                                   api_key: str = "") -> tuple[bool, dict[str, Any]]:
     scope, now = _capability_scope(provider, base_url, api_key), time.monotonic()
+    contradicted = _off_contradicted(scope, model, now)
     cached = _MODEL_CAPABILITIES.get(scope)
     if not cached:
-        return False, {}
+        return (True, {"reasoning": _contradicted_reasoning()}) if contradicted else (False, {})
     catalogue_fresh = cached.get("expires_at", 0) > now
     selected = {name: entry for name, entry in cached.get("selected", {}).items()
                 if entry.get("expires_at", 0) > now}
     cached["selected"] = selected
-    if not catalogue_fresh and not selected:
+    detail_live = False
+    if canonical_provider(provider) == 'huggingface':
+        from .providers.huggingface_details import peek
+        detail_live = peek(base_url, api_key, model) is not None
+    if not catalogue_fresh and not selected and not detail_live:
         _MODEL_CAPABILITIES.pop(scope, None)
-        return False, {}
+        return (True, {"reasoning": _contradicted_reasoning()}) if contradicted else (False, {})
     result = deepcopy(selected.get(model, {}).get("capabilities") or {})
     if catalogue_fresh:
         for feature, details in normalize_model_capabilities(cached.get("models", {}).get(model)).items():
             result[feature] = {**result.get(feature, {}), **details}
+    if canonical_provider(provider) == 'huggingface':
+        from .providers.huggingface_catalogue import split_model, selection_capabilities
+        from .providers.huggingface_details import peek
+        base, suffix, policy = split_model(model)
+        card = normalize_model_capabilities(cached.get('models', {}).get(base)) if catalogue_fresh else {}
+        if suffix and policy != 'invalid' and not (catalogue_fresh and model in cached.get('models', {})):
+            # Older cached catalogues may not contain the explicit choices yet.
+            # Inherit only Hub modality and the correct route's numeric limits,
+            # NEVER Thinking evidence from an Auto request or another route.
+            if card.get('vision'):
+                result['vision'] = card['vision']
+            routes = card.get('provider_limits', {})
+            result.pop('limits', None)
+            if policy != 'provider' and card.get('limits'):
+                result['limits'] = card['limits']
+            elif policy == 'provider' and suffix in routes:
+                result['limits'] = routes[suffix]
+        detail = peek(base_url, api_key, model)
+        details = normalize_model_capabilities(selection_capabilities(detail, model))
+        if details:
+            # A selected-model GET is a complete newer metadata snapshot. An
+            # omitted limit cannot accidentally resurrect an older numeric one.
+            for field in ('limits', 'provider_limits', 'hf_route', 'vision'):
+                result.pop(field, None)
+            result.update(details)
+    if contradicted:
+        # Accepted request fields and a contradictory zero usage counter do
+        # not prove Off. Reject Off/Lowest at preflight until new evidence can
+        # establish the runtime's behavior after this observation expires.
+        result["reasoning"] = _contradicted_reasoning()
     return catalogue_fresh or bool(result), result
+
+def refresh_hf_selected_metadata(provider: str, base_url: str, model: str, api_key: str):
+    fresh, current = discovered_model_capabilities(provider, base_url, model, api_key)
+    if canonical_provider(provider) != 'huggingface':
+        return fresh, current
+    if not current.get('limits', {}).get('contextTokens'):
+        capture_capability_cache_revision(provider, base_url, api_key)
+        from .providers.huggingface_details import refresh
+        refresh(base_url, api_key, model)
+        fresh, current = discovered_model_capabilities(provider, base_url, model, api_key)
+    return fresh, current
 
 def model_capabilities(provider: str, base_url: str, model: str, api_key: str = "") -> dict[str, Any]:
     return discovered_model_capabilities(provider, base_url, model, api_key)[1]
+
+
+def refresh_cloud_model_capabilities(provider: str, base_url: str, model: str,
+                                     api_key: str) -> tuple[bool, dict[str, Any]]:
+    """Read an exact account catalogue once when an explicit Cloud control is cold.
+
+    Provider adapters own their bounded, read-only model-list requests. The
+    in-flight result is shared by concurrent translations for the same
+    credential and endpoint; no network work runs under the cache lock.
+    """
+    provider = canonical_provider(provider)
+    if is_local_provider(provider):
+        raise ValueError("Cloud capability refresh requires a Cloud provider")
+    fresh, capabilities = discovered_model_capabilities(provider, base_url, model, api_key)
+    if fresh:
+        return fresh, capabilities
+
+    scope = _capability_scope(provider, base_url, api_key)
+    with _CAPABILITY_CACHE_LOCK:
+        # A settings request may have populated the same account while this
+        # translation was preparing its prompt.
+        fresh, capabilities = discovered_model_capabilities(provider, base_url, model, api_key)
+        if fresh:
+            return fresh, capabilities
+        pending = _CLOUD_DISCOVERY_IN_FLIGHT.get(scope)
+        leader = pending is None
+        if leader:
+            pending = Future()
+            _CLOUD_DISCOVERY_IN_FLIGHT[scope] = pending
+    if not leader:
+        return pending.result()
+
+    try:
+        listed = provider_registry.require(provider).adapter.list_models(
+            api_key=api_key, base_url=base_url)
+        fresh, capabilities = discovered_model_capabilities(provider, base_url, model, api_key)
+        if not fresh and listed.status == "valid":
+            remember_model_capabilities(provider, base_url, api_key,
+                dict(listed.capabilities), models=listed.models)
+            fresh, capabilities = discovered_model_capabilities(provider, base_url, model, api_key)
+        result = (fresh, capabilities)
+        pending.set_result(result)
+        return result
+    except BaseException as error:
+        pending.set_exception(error)
+        raise
+    finally:
+        with _CAPABILITY_CACHE_LOCK:
+            if _CLOUD_DISCOVERY_IN_FLIGHT.get(scope) is pending:
+                del _CLOUD_DISCOVERY_IN_FLIGHT[scope]
 
 def openai_compat_models_status(api_key: str, base_url: str, *, provider: str,
                                 timeout_sec: float = LIST_TIMEOUT_SEC) -> dict[str, Any]:

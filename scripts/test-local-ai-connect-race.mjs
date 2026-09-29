@@ -15,8 +15,8 @@ assert.match(popup, /localConnectSeq:\s*0/);
 assert.match(popup, /localConnectInFlight:\s*null/);
 assert.match(providerMeta, /if \(state\.localConnectInFlight\) return;/,
   "automatic discovery must not start a duplicate Local connection");
-assert.match(providerMeta, /await local\.connect\(\)/,
-  "Local provider selection must load installed-model metadata automatically");
+assert.match(providerMeta, /await local\.connect\(\{ automatic: true \}\)/,
+  "Local provider selection requests automatic discovery, with Custom ownership verified by the connection controller");
 
 assert.match(localConnection, /clearResolveTimer\(\)/,
   "Connect must cancel a pending blur refresh");

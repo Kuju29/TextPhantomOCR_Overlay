@@ -98,7 +98,7 @@ try:
             async def extra_checks():
                 payload={'schema':'tp.ai.request/1','translationMode':'independent','units':[{'id':'g9','text':'Independent source'}],
                          'sourceLang':'en','targetLang':'th','provider':{'id':'huggingface','model':'fixture','apiKey':'PRIVATE_TEST_KEY',
-                         'baseUrl':'https://router.huggingface.co/v1','thinking':'off'},
+                         'baseUrl':'https://router.huggingface.co/v1','thinking':'default'},
                          'memory':{'mode':'off','styleExamples':True},'repair':{'owner':'extension','enabled':False}}
                 async with httpx.AsyncClient(base_url=base,trust_env=False) as client:
                     r=await client.post('/v2/engine/runsextension/ai/translate',json=payload)

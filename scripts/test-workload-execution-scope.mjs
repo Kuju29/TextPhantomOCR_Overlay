@@ -99,6 +99,22 @@ await check('Local schema and marker identity spellings match provider terminal 
   s.observe({units:b.units,answer:answer(b.units,{selectedContract:supported?'tp.translation.schema-object/1':'tp.translation.compact-records/1'}),plan:b.estimate});assert.equal(s.snapshot().samples,1);
  }
 });
+await check('LM Studio native Independent plans markers before identity and dispatch on both routes',async()=>{
+ for(const route of ['direct-local','server']) {
+  const o=opts();o.route=route;o.ai.provider='lmstudio';o.ai.translation_mode='independent';
+  o.ai.model_capabilities={structuredOutput:{supported:true,
+   contract:'tp.translation.schema-object/1',source:'stale_profile'},reasoning:{supported:false}};
+  const c=createWorkloadController(store()),s=await c.open(o),b=s.next(rows,0);
+  assert.equal(b.estimate.planningContract,'compact_markers_v1',`${route}: fixed native wire envelope`);
+  assert.equal(workloadSelection(s.ai,route).kind,'compact_records',`${route}: prompt estimator uses markers`);
+  assert.match(s.key,/^[a-f0-9]{64}$/,`${route}: workload profile identity is hashed`);
+  s.observe({units:b.units,answer:answer(b.units,{selectedContract:'tp.translation.compact-records/1'}),plan:b.estimate});
+  assert.equal(s.snapshot().samples,1,`${route}: the observed marker response matches the plan`);
+  assert.equal(route==='server'?s.ai.model_capabilities.structured_output.supported:
+   s.ai.model_capabilities.structuredOutput.supported,true,
+   `${route}: only wire selection changes; metadata remains inspectable`);
+ }
+});
 await check('new plan does not touch Style, usage keys or expose source/credentials in storage',async()=>{
  const io=store(),o=opts(),s=await createWorkloadController(io).open(o),b=s.next(rows,0);s.observe({units:b.units,answer:answer(b.units),plan:b.estimate});
  // flush using controller below verifies real persistence in the transition case;

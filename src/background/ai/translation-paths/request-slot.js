@@ -1,5 +1,5 @@
 // Admission for one combined request, not for each page waiting in a batch.
-import {acquire,releaseSuccess,releaseFailed,releaseDeferred,releaseLocalFailure,laneKeyFor,
+import {acquire,releaseSuccess,releaseFailed,releaseDeferred,releaseRejected,releaseLocalFailure,laneKeyFor,
   configureLocalCapacityForPayload,setLaneUnlimited} from '../../scheduler.js';
 import {summarizeExecutionTiming,providerLearningSample} from '../../../shared/ai/execution-timing.js';
 export async function withRequestSlot(options,signal,work) {
@@ -26,7 +26,14 @@ export async function withRequestSlot(options,signal,work) {
           timing:{queueMs:slot?.waitMs},counts:{attempts}},options.traceId);
         continue;
       }
-      if(local)releaseLocalFailure(key,error,Math.max(100,Number(error?.retryAfterMs)||250));else releaseFailed(key);
+      if(String(error?.code||'')==='api_rate_gate_timeout' &&
+        Number(error?.generationAttempts||error?.providerAttempts||0)===0)
+        releaseDeferred(key,Math.max(1000,Math.min(30000,Number(error?.retryAfterMs)||1000)));
+      else if(local)releaseLocalFailure(key,error,Math.max(100,Number(error?.retryAfterMs)||250));
+      else if(String(error?.code||'')==='provider_rate_limited' ||
+        (error?.requestDispatched===true && Number(error?.upstreamStatus)===429))
+        releaseRejected(key,Math.max(1000,Math.min(300000,Number(error?.retryAfterMs)||5000)));
+      else releaseFailed(key);
       throw error;
     }
   }

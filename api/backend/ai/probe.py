@@ -33,7 +33,7 @@ from backend.ai.provider_resolution import (
     model_is_promoted,
     MODEL_PROBE_EVIDENCE_TTL_SEC,
 )
-from backend.ai.rate_policy import is_local_target
+from backend.ai.rate_policy import cloud_local_endpoint_conflict, is_local_target
 from backend.security import assert_ai_base_url_allowed
 
 PROBE_TIMEOUT_SEC = 15.0
@@ -144,6 +144,10 @@ def probe(payload: dict[str, Any]) -> ProbeResult:
             cached=False,
         )
 
+    if cloud_local_endpoint_conflict(provider, base_hint):
+        return ProbeResult(ok=False, provider=provider, model="",
+            backend_supported=True, provider_protocol=protocol,
+            status="ai_provider_endpoint_conflict", http_status=0, cached=False)
     local = is_local_target(provider, base_hint)
     # Local providers never receive a cloud key.
     api_key = "" if local else supplied_key
@@ -169,6 +173,10 @@ def probe(payload: dict[str, Any]) -> ProbeResult:
     model = resolve_model(provider, str(payload.get("model") or "auto"))
     base_url = resolve_base_url(provider, str(payload.get("base_url") or "auto"))
     assert_ai_base_url_allowed(provider, base_url, user_key=bool(api_key), key_present=bool(api_key))
+
+    if provider == "huggingface":
+        from backend.ai.provider_resolution import refresh_hf_selected_metadata
+        refresh_hf_selected_metadata(provider, base_url, model, api_key)
 
     cache_key = _cache_key(provider, model, base_url, api_key)
     now = time.time()

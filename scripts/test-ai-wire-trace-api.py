@@ -1,4 +1,4 @@
-"""Executable contract checks for lossless runs:API AI wire evidence."""
+"""Executable contract checks for runs:API AI wire evidence."""
 from __future__ import annotations
 
 import json
@@ -24,7 +24,7 @@ from backend.application.ai_translation import telemetry  # noqa: E402
 EXPECTED = {
     "00_identity.json", "01_units.json", "02_system_prompt.txt",
     "04_provider_request.json", "05_provider_response.raw",
-    "05_provider_response.assembled.txt",
+    "05_provider_response.meta.json", "05_provider_response.assembled.txt",
     "11_terminal.json",
     "06_parsed_records.json", "07_validation.json", "08_apply_result.json", "09_timing.json",
 }
@@ -124,7 +124,10 @@ with tempfile.TemporaryDirectory(prefix="tp-wire-api-") as temp:
         folder = Path(temp) / "img-unknown--initial--trace-one--operation-one"
         assert EXPECTED == {item.name for item in folder.iterdir()}
         assert (folder / "02_system_prompt.txt").read_text(encoding="utf-8") == "SYSTEM-จริง"
-        assert (folder / "05_provider_response.raw").read_text(encoding="utf-8") == '{"text":"<<TP_P0:คำแปล>>"}'
+        assert (folder / "05_provider_response.raw").read_text(encoding="utf-8") == "[raw provider response omitted]\n"
+        assert json.loads((folder / "05_provider_response.meta.json").read_text(encoding="utf-8")) == {
+            "status": None, "streamed": None, "bodyStored": False,
+        }
         assert (folder / "05_provider_response.assembled.txt").read_text(encoding="utf-8") == "<<TP_P0:คำแปล>>"
         request = json.loads((folder / "04_provider_request.json").read_text(encoding="utf-8"))
         assert "do-not-leak" not in json.dumps(request, ensure_ascii=False)
@@ -187,7 +190,7 @@ with tempfile.TemporaryDirectory(prefix="tp-wire-provider-fail-") as temp:
         assert (folder / "00_identity.json").exists()
         assert (folder / "04_provider_request.json").exists()
         partial = (folder / "05_provider_response.raw").read_text("utf-8")
-        assert "บางส่วน" in partial
+        assert partial == ""
         assert "hidden-local-key" not in partial
         assert (folder / "05_provider_response.assembled.txt").read_text("utf-8") == "<<TP_P0:บางส่วน"
         error = json.loads((folder / "10_error.json").read_text("utf-8"))
@@ -494,7 +497,10 @@ with tempfile.TemporaryDirectory(prefix="tp-local-wire-relay-") as temp:
         assert json.loads((folder / "00_identity.json").read_text("utf-8"))["runtime"] == "direct-local"
         assert (folder / "02_system_prompt.txt").read_text("utf-8") == "SYSTEM exact"
         assert "TP_P0:原文" in (folder / "04_provider_request.json").read_text("utf-8")
-        assert "TP_P0:ไทย" in (folder / "05_provider_response.raw").read_text("utf-8")
+        assert (folder / "05_provider_response.raw").read_text("utf-8") == "[raw provider response omitted]\n"
+        relay_meta = json.loads((folder / "05_provider_response.meta.json").read_text("utf-8"))
+        assert relay_meta == {"status": None, "streamed": None,
+                              "bodyStored": False, "chunkCount": 1, "complete": True}
         assert (folder / "04_contract_selection.json").exists()
         assert (folder / "08_contract_applied.json").exists()
         failed_terminal = json.loads((folder / "11_terminal.json").read_text("utf-8"))

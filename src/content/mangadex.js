@@ -860,6 +860,13 @@
   } catch {}
 
   Object.assign(TP, {
+    downloadMangaDexSnapshot: () => [
+      ...[...mdHtmlOverlaysByKey.entries()].filter(([,r]) => r.host?.isConnected && r.img?.isConnected)
+        .map(([key,r]) => Object.freeze({key,root:r.host,scope:r.scope,img:r.img,clean:r.cleanImg,kind:r.kind})),
+      ...[...mdOverlaysByKey.entries()].filter(([,r]) => r.active && r.pageInstanceId===TP.pageInstanceId &&
+        r.el?.isConnected && r.img?.isConnected && TP.isStillCurrent?.(r.img,r.generation)?.ok!==false)
+        .map(([key,r]) => Object.freeze({key,img:r.img,raster:r.el,kind:'raster'})),
+    ],
     mdRememberPending,
     hydrateMangaDexFromCache,
     getMangaDexPageImagesInDOM,

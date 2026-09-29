@@ -19,7 +19,7 @@ export function createLocalPrefixObserver({clock=()=>performance.now(),leaseMs=1
     if(!/^[a-f0-9]{64}$/.test(layout?.staticPrefixSha256||''))return null;
     const key=await keyOf([url,model,Object.entries(headers).sort(([a],[b])=>a.localeCompare(b)),
       layout.staticPrefixSha256,layout.targetLang,layout.sourceLang,
-      payload.format||payload.response_format||null,revision,payload.think??null,payload.options?.num_ctx??null]);
+      payload.format||payload.response_format||null,revision,payload.think??payload.reasoning??null,payload.options?.num_ctx??null]);
     const now=clock(),requestId=id(),order=++sequence;
     const old=leaders.get(key),expired=!!old&&old.deadline<=now;
     while(leaders.size&&leaders.values().next().value.deadline<=now)leaders.delete(leaders.keys().next().value);

@@ -55,6 +55,20 @@ def prepare(request, layout, ai):
     lease = current()
     if lease is None:
         raise RuntimeError("Conversation path entered without an execution scope")
+    from backend.ai.provider_registry import provider_registry
+    from .store import ConversationError
+    spec = provider_registry.require(request.provider)
+    transport = spec.conversation_transport
+    if transport not in ("message_replay", "native_response_cursor"):
+        error = ConversationError("The selected provider has no verified Conversation transport")
+        error.code = "ai_conversation_unsupported"
+        raise error
+    native = transport == "native_response_cursor"
+    if native and (not callable(getattr(spec.adapter, "conversation_cursor", None)) or
+                   not callable(getattr(spec.adapter, "conversation_result_error", None))):
+        error = ConversationError("The selected provider has no validated native Conversation adapter")
+        error.code = "ai_conversation_unsupported"
+        raise error
     full = "\n\n".join(request.user_parts)
     static_len = layout["userStaticChars"]
     persistent_len = min(static_len, int(layout.get("userPersistentStaticChars", static_len)))
@@ -136,6 +150,7 @@ def prepare(request, layout, ai):
     scale = observed_input_scale(samples) if can_calibrate else 1.0
     lease.input_estimate_scale = scale
     trimmed = start_count-len(history)
+    native_budget_trimmed = 0
     def compose(turns):
         # Normal continuation is immutable append-only replay. If context trimming
         # removes the original anchor, re-anchor the oldest retained turn once;
@@ -157,8 +172,21 @@ def prepare(request, layout, ai):
     while history and (estimate > max_input or len(json.dumps(history, ensure_ascii=False)) + len(full) + len(request.image_b64) > MAX_HISTORY_CHARS-65536):
         history.pop(0)
         trimmed += 1
+        native_budget_trimmed += 1
         reason = "context_budget" if estimate > max_input else "history_storage_budget"
         messages, user, estimate, effective_history = compose(history)
+    provider_cursor = ""
+    if native:
+        # The native server owns earlier messages. A cursor after a budget
+        # trim would still reference those discarded turns, defeating the
+        # context guard. Start a visible new thread with the full anchor.
+        if native_budget_trimmed:
+            history = []
+            trimmed = start_count
+            reason = "native_context_rollover"
+            messages, user, estimate, effective_history = compose(history)
+        else:
+            provider_cursor = spec.adapter.conversation_cursor(effective_history)
     last_upstream = ""
     for turn in reversed(effective_history):
         candidate = str(turn.get("upstreamProvider") or "").strip().lower()
@@ -177,7 +205,7 @@ def prepare(request, layout, ai):
         "historyEstimatedTokens": max(0, estimate-base_estimate), "estimatedInput": estimate,
         "currentUserChars": len(user), "staticUserRepeated": not bool(history),
         "bootstrapExamplesIncluded": bool(bootstrap_examples),
-        "bootstrapExamplesPersisted": bool(bootstrap_examples and history and history[0].get("anchor")), "bootstrapExamplesChars": len(bootstrap_examples) if bootstrap_examples else 0,
+        "bootstrapExamplesPersisted": bool(bootstrap_examples and history and history[0].get("anchor")), "bootstrapExamplesChars": bootstrap_example_chars if image_records else len(bootstrap_examples) if bootstrap_examples else 0,
         "queueWaitMs": round(lease.wait_ms, 3), "trimmedTurns": trimmed, "rolloverReason": reason,
         "historySha256": _hash(json.dumps(messages, ensure_ascii=False, sort_keys=True)),
         "prefixSha256": prefix, "branch": (ai.conversation or {}).get("branch", "initial"),
@@ -186,6 +214,8 @@ def prepare(request, layout, ai):
         "storage": "api_memory" if lease.store else "ephemeral", "historyQuality": "structural_and_script_checks_not_human_approved",
         "historyMessageRoles": ",".join(m["role"] for m in messages),
         "contextLimit": context, "outputReserve": reserve,
+        "providerState": "linked" if provider_cursor else "new",
+        "continuationTransport": transport,
         "providerCallsAdded": 0, "legacyFallback": False,
         "recordProtocol": "tp.translation.image-records/1" if image_records else "tp.translation.compact-records/1",
         "continuationUserOcrOnly": bool(image_records and history),
@@ -210,6 +240,7 @@ def prepare(request, layout, ai):
     lease.prepared = {"history": effective_history, "prefix": compatibility, "dynamic": dynamic, "current_user": user,
         "image": request.image_b64, "mime": request.image_mime, "evidence": ev,"origins":origins,
         "prompt_layout": effective_layout, "provider_affinity": "",
+        "continuation_transport": transport, "provider_id": spec.provider_id,
         "last_observed_upstream": last_upstream}
     lease.evidence = ev
     emit(ev)
@@ -227,9 +258,15 @@ def prepare(request, layout, ai):
         from backend.ai.workload import text_weight
         workload["predictedOutput"] = max(128, min(4096, sum(text_weight(str(t)) for t in getattr(lease, "source_texts", []))*2 + request.unit_count*16))
     return replace(request, user_parts=(user,), history_messages=tuple(messages), workload=workload,
+        previous_response_id=provider_cursor,
         cache_context={**dict(request.cache_context), "staticPrefixSha256":effective_layout["staticPrefixSha256"],
             "translationMode":"conversation", "conversationPolicy":POLICY,
-            "conversationScope":lease.key})
+            "conversationScope":lease.key,
+            # The invocation passes resolved mode in request.thinking. Keep
+            # original user intent so native LM Studio cannot mistake an
+            # unresolved Minimum or clamped Off for requested Default.
+            **({"providerThinkingPreference": getattr(ai, "thinking", request.thinking)}
+               if native and spec.provider_id == "lmstudio" else {})})
 
 
 def _history_assistant_text(result_text, meta, prepared, translated, source_texts):
@@ -240,7 +277,8 @@ def _history_assistant_text(result_text, meta, prepared, translated, source_text
     accepted non-empty records in canonical compact form.
     """
     from backend.ai import markers
-    if not (meta.get("malformed_output_record_count") and meta.get("malformed_output_recoverable") is True):
+    if not (meta.get("redundant_closing_delimiter_chars") or
+            meta.get("malformed_output_record_count") and meta.get("malformed_output_recoverable") is True):
         return str(result_text or "")
     values = list(translated[0] if translated else [])
     wire_ids = []
@@ -260,6 +298,11 @@ def _history_assistant_text(result_text, meta, prepared, translated, source_text
 def finish(result, decoded, ai, source_texts, target_lang, cancel_check=None):
     lease = current()
     prepared = lease.prepared
+    from backend.ai.provider_registry import provider_registry
+    # AiConfig may name `auto` even after invocation has selected and billed a
+    # concrete provider. Finish the same adapter that prepared this lease.
+    spec = provider_registry.require(prepared["provider_id"])
+    native = prepared["continuation_transport"] == "native_response_cursor"
     ev = prepared["evidence"]
     meta = decoded.get("meta") or {}
     usage = meta.get("usage") or {}
@@ -285,15 +328,48 @@ def finish(result, decoded, ai, source_texts, target_lang, cancel_check=None):
         and bool(translated)
         and any(str(v).strip() for v in translated[0])
     )
+    canonicalized = bool(meta.get("malformed_output_record_count") or meta.get("redundant_closing_delimiter_chars"))
+    native_recoverable_partial = native and canonicalized and structural_usable
+    if native and canonicalized:
+        structural_usable = False
     ev["formattingWhitespaceChars"] = meta.get("formatting_whitespace_chars", 0)
     ev["unexpectedProseChars"] = meta.get("unexpected_prose_chars", 0)
+    ev["redundantClosingDelimiterChars"] = meta.get("redundant_closing_delimiter_chars", 0)
     ev["commitStatus"] = "not_committed_invalid_output"
     branch = (ai.conversation or {}).get("branch")
     if callable(cancel_check) and cancel_check():
         ev["commitStatus"] = "not_committed_cancelled"
     elif lease.lost:
         ev["commitStatus"] = "not_committed_stale_lease"
+    elif native_recoverable_partial:
+        # The decoder can still return valid units to the page repair path,
+        # but the server-side response_id points to the *raw* malformed reply.
+        # Leave the previous accepted cursor/history untouched: the next
+        # request continues from that cursor (or starts with a new anchor).
+        ev["commitStatus"] = "not_committed_native_transcript_invalid"
+        ev["providerState"] = "transcript_invalid"
+        if getattr(lease, "branch_only", False):
+            # A replay may have retired later accepted turns in prepare().
+            # Store.release must commit that branch without a new assistant
+            # turn, but its "branched_without_new_turn" storage status must
+            # not overwrite the returned partial answer's invalid-turn status.
+            lease.evidence = dict(ev)
+    elif native and not structural_usable:
+        # A native cursor points to the provider's raw answer, so an unusable
+        # or rewritten transcript cannot be accepted as a continuation.
+        ev["commitStatus"] = "not_committed_native_transcript_invalid"
+        ev["providerState"] = "transcript_invalid"
+        raise spec.adapter.conversation_result_error(result, reason="transcript_invalid",
+            malformed_count=meta.get("malformed_output_record_count") or 0)
     elif structural_usable:
+        if native:
+            error = spec.adapter.conversation_result_error(result, reason="cursor_missing")
+            if error is not None:
+                # A success without a cursor would strand the next turn after
+                # visible output; keep the provider's usage and report failure.
+                ev["commitStatus"] = "not_committed_provider_cursor_missing"
+                ev["providerState"] = "cursor_missing"
+                raise error
         lease.branch_only=False
         history_assistant = _history_assistant_text(result.text, meta, prepared, translated, source_texts)
         turn = {"pages":prepared["origins"],"user": prepared["current_user"], "anchor": not bool(prepared["history"]), "assistant": history_assistant,
@@ -303,6 +379,8 @@ def finish(result, decoded, ai, source_texts, target_lang, cancel_check=None):
                 "inputTokens": usage.get("inputTokens"), "rawEstimatedInput": ev["rawEstimatedInput"],
                 "outputTokens": usage.get("outputTokens"),
                 "upstreamProvider": resolved_upstream}
+        if native:
+            turn["providerResponseId"] = result.provider_response_id
         lease.history = prepared["history"] + [turn]
         lease.prefix = prepared["prefix"]
         lease.dirty = True

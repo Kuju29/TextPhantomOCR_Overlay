@@ -42,6 +42,11 @@ class ChatResult(NamedTuple):
     cache_policy: dict[str, Any] | None = None
     cache_coordination: dict[str, Any] | None = None
     first_content_ms: float | None = None
+    # Private native provider cursor. Only a validated conversation turn can
+    # commit this to its scoped lease; usage/accounting is not control state.
+    provider_response_id: str | None = None
+    # Content-level evidence only; no raw reasoning text crosses this boundary.
+    reasoning_observed: bool = False
 
 class LineCompletionDetector:
     """Detect an exact, closed records/1 set without trusting marker count."""

@@ -30,6 +30,7 @@ from backend.ai.errors import ModelOutputContractError  # noqa: E402
 from backend.ai.provider_registry import provider_registry  # noqa: E402
 from backend.ai.translation.contracts import AiConfig  # noqa: E402
 from backend.ai.translation.invocation import _translate_once  # noqa: E402
+from backend.ai.provider_contract import ProbeResponse  # noqa: E402
 
 
 SOURCE = "<<TP_P0>>\n一\n\n<<TP_P1>>\n二"
@@ -59,16 +60,24 @@ def invoke(provider: str, answer: str, capabilities: dict | None = None, *, sour
         base_url=spec.default_base_url,
         prompt_editable=STYLE,
         prompt_mode="replace",
-        thinking="off",
+        # This fixture checks schema/marker routing rather than model-specific
+        # Thinking controls, so use an explicit Provider default for both.
+        thinking="default",
         model_capabilities=capabilities or {},
         source_lang="ja",
         source_context=source_context or [],
         translation_mode="conversation" if conversation else "independent",
         conversation=conversation or {},
     )
-    with patch.object(spec.adapter, "generate", side_effect=generate), patch(
+    native_probe = ProbeResponse(True,200,capabilities={
+        "reasoning":{"supported":False}, "limits":{"contextTokens":8192,
+            "modelContextTokens":32768,"scope":"runtime","source":"ollama-api-show-and-ps"}})
+    with patch.object(spec.adapter, "generate", side_effect=generate), patch.object(
+        spec.adapter,"probe",return_value=native_probe), patch(
         "backend.ai.provider_resolution.discovered_model_capabilities",
         return_value=(False, {}),
+    ), patch(
+        "backend.ai.translation.invocation.assert_ai_base_url_allowed",
     ), patch("backend.ai.wire_trace.write_json") as write_json:
         translated = _translate_once(SOURCE, "th", ai)
     contract = next(call.args[1]["contract"] for call in write_json.call_args_list
@@ -143,14 +152,18 @@ def malformed_generate(request):
     return result('{"P0":"หนึ่ง"')
 
 
-with patch.object(ollama.adapter, "generate", side_effect=malformed_generate), patch(
+with patch.object(ollama.adapter, "generate", side_effect=malformed_generate), patch.object(
+    ollama.adapter,"probe",return_value=ProbeResponse(True,200,capabilities={
+        "reasoning":{"supported":False}})), patch(
     "backend.ai.provider_resolution.discovered_model_capabilities", return_value=(False, {}),
+), patch(
+    "backend.ai.translation.invocation.assert_ai_base_url_allowed",
 ):
     try:
         _translate_once(SOURCE, "th", AiConfig(
             api_key="", provider="ollama", model="test-model",
             base_url=ollama.default_base_url, prompt_editable=STYLE,
-            prompt_mode="replace", thinking="off",
+            prompt_mode="replace", thinking="default",
         ))
     except ModelOutputContractError as exc:
         assert exc.code == "AI_OUTPUT_CONTRACT_MISMATCH"

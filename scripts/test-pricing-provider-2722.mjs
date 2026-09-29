@@ -1,0 +1,33 @@
+import assert from 'node:assert/strict';
+import {priceGeneration} from '../src/shared/ai/pricing/calculate.js';
+import {recordProviderGeneration,usageToday,usageDetailedRows} from '../src/shared/ai-usage.js';
+import {fetchLiveRate} from '../src/shared/ai/pricing/live.js';
+const at=Date.parse('2026-09-28T11:50:00Z');
+const usage={runtime:'cloud',inputTokens:1000,outputTokens:200,totalTokens:1200,cachedInputTokens:400,usageStatus:'reported',timestamp:at};
+const cloud=['gemini','openai','openrouter','anthropic','groq','deepseek','together','huggingface','featherless'];
+const local=['ollama','lmstudio','jan','textgenwebui','koboldcpp','vllm','llamafile','gpt4all','llamacpp','customlocal'];
+for(const provider of cloud){
+ assert.equal(priceGeneration({...usage,provider,model:'unknown-unpriced-model'}).usd,null,provider+' unknown is not free');
+ assert.equal(priceGeneration({...usage,provider,model:'unknown-unpriced-model',providerCostUsd:'0'}).usd,'0',provider+' explicit provider zero is authoritative');
+ assert.equal(priceGeneration({...usage,provider,model:'unknown-unpriced-model',providerCostUsd:'1.234'}).usd,'1.234');
+}
+for(const provider of local)assert.equal(priceGeneration({...usage,runtime:'local',provider}).status,'local_api_free');
+const d=priceGeneration({...usage,provider:'deepseek',model:'deepseek-flash'});
+assert.equal(d.usd,'0.0002112');assert.equal(d.rate.tariff,'off_peak');
+assert.equal(priceGeneration({...usage,provider:'deepseek',model:'deepseek-flash',timestamp:Date.parse('2026-09-28T02:00:00Z')}).status,'upper_bound_tariff_calendar_unverified');
+assert.equal(priceGeneration({...usage,provider:'deepseek',model:'deepseek-flash',timestamp:Date.parse('2026-09-20T11:00:00Z')}).usd,null);
+const hf={...usage,provider:'huggingface',requestedModel:'deepseek-ai/DeepSeek-V4-Flash-0731',model:'deepseek-v4-flash-0731',upstreamProvider:'baseten'};
+assert.equal(priceGeneration(hf).usd,'0.0001412');
+assert.equal(priceGeneration({...hf,upstreamProvider:'another-provider'}).usd,null);
+const ledger=recordProviderGeneration(null,{...hf,operationId:'test-1'},{now:at,id:()=> 'fixture'});
+assert.equal(usageToday(ledger,at).usd,'0.0001412','production receipt keeps requested Hub identity for pricing');
+assert.equal(usageDetailedRows(ledger)[0].deltas[0].price.rate.origin,'official_route_snapshot');
+const fixture=data=>async()=>({ok:true,json:async()=>data});
+const row={id:hf.requestedModel,providers:[{provider:'baseten',status:'live',pricing:{input:0.13,output:0.26}}]};
+assert.equal((await fetchLiveRate('huggingface',hf.requestedModel,'baseten',fixture(row))).input,'0.13');
+assert.equal(await fetchLiveRate('huggingface',hf.requestedModel,'baseten',fixture({...row,providers:[...row.providers,...row.providers]})),null);
+assert.equal(await fetchLiveRate('huggingface',hf.requestedModel,'other',fixture(row)),null);
+const liveRate={input:'0.13',output:'0.26',cached:null,fetchedAt:Date.now()};
+assert.equal(priceGeneration(hf,{liveRates:{'huggingface|deepseek-ai/deepseek-v4-flash-0731|baseten':liveRate}}).usd,'0.0001412');
+assert.equal(priceGeneration(hf,{liveRates:{'huggingface|deepseek-ai/deepseek-v4-flash-0731|baseten':{...liveRate,input:'0.14'}}}).status,'missing_cache_rate');
+console.log('PASS 19 provider price-state branches + actual receipt identity, direct DeepSeek time tariffs, HF route/cache/live metadata; no live API calls');

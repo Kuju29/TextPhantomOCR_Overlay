@@ -53,7 +53,7 @@ try {
    calls++;captured=JSON.parse(init.body);
    return new Response(JSON.stringify({model:'fixture',message:{role:'assistant',content:structured?JSON.stringify({P0:answer}):`<<TP_P0:${answer}>>`},done:true,done_reason:'stop'}),{status:200,headers:{'Content-Type':'application/json'}});
   };
-  await translateWithLocalOpenAi([{id:'original-id',text:'Hello'}],{targetLang:lang,canonicalPrompt:plans[lang],ai:{provider:'ollama',model:'fixture',local_adapter:{protocol:'ollama',baseUrl:'http://localhost:11434'},prompt:'',model_capabilities:{structuredOutput:{supported:structured,contract:SCHEMA_OBJECT_CONTRACT,source:'fixture'}}}});
+  await translateWithLocalOpenAi([{id:'original-id',text:'Hello'}],{targetLang:lang,canonicalPrompt:plans[lang],ai:{provider:'ollama',model:'fixture',thinking:'default',local_adapter:{protocol:'ollama',baseUrl:'http://localhost:11434'},prompt:'',model_capabilities:{structuredOutput:{supported:structured,contract:SCHEMA_OBJECT_CONTRACT,source:'fixture'}}}});
   assert.equal(calls,1);
   const user=captured.messages[1].content;
   assert.ok(user.includes(instructionPack(lang).examplesHeading));

@@ -46,7 +46,7 @@ if (!process.argv.includes('--http')) {
  const {translateViaServer}=await import('../src/background/ai/transports/server.js');
  const traces=[];
  const caps={engineRoutesV2:true,aiConversation:'tp.conversation/1',aiConversationBatch:'tp.conversation_batch/1'};
- const profile={provider:'huggingface',model:'fixture',base_url:'https://router.huggingface.co/v1',api_key:'PRIVATE_TEST_KEY',translation_mode:'conversation',source_lang:'en',thinking:'off',style_examples:true,memory_mode:'off',prompt:'',
+ const profile={provider:'huggingface',model:'fixture',base_url:'https://router.huggingface.co/v1',api_key:'PRIVATE_TEST_KEY',translation_mode:'conversation',source_lang:'en',thinking:'default',style_examples:true,memory_mode:'off',prompt:'',
    model_capabilities:{limits:{contextTokens:131072,maxOutputTokens:8192},structuredOutput:{supported:false},reasoning:{supported:true,control:'reasoning_effort',offValue:'none'}}};
  function page(i){const payload={source:'ai',lang:'th',context:{page_url:'http-e2e-doc',tp_tab_session:'private-http-owner',page_index:i},metadata:{image_id:`page-${i}`},ai:{...profile}};
   reserveConversationJob(payload,1);return {payload,ai:payload.ai,imageId:`page-${i}`,targetLang:'th',sourceLang:'en',route:'server',base,tabSession:'private-http-owner',sourceFingerprint:'a'.repeat(64),capabilities:caps,trace:(name,d)=>traces.push({name,d})};}

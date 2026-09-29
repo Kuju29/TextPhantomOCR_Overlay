@@ -76,7 +76,8 @@ function aiFunctionFromDetail(detail = "") {
   if (value.includes("waiting for local ai model")) return "waiting_model";
   if (value.includes("connecting to local ai")) return "connecting";
   if (value.includes("local ai is thinking")) return "thinking";
-  if (value.includes("local ai is generating") || value.includes("local ai responded")) return "receiving_response";
+  if (value.includes("waiting for local ai terminal")) return "waiting_provider_terminal";
+  if (value.includes("local ai is generating") || value.includes("local ai responded")) return "generating_response";
   if (value.includes("repair")) return value.includes("waiting") ? "repair_waiting" : "repairing";
   if (value.includes("recovering anchor")) return "recovering_context";
   return "";
@@ -208,7 +209,8 @@ export function mergeProgressDetail(progress, patch = {}, now = Date.now()) {
       usage_pending: ["preparing_request", "Preparing AI request"],
       sending_request: ["sending_request", "Sending AI request"],
       http_wait: ["waiting_response", "Request sent · waiting response"],
-      response_headers: ["receiving_response", "Response received"],
+      response_headers: ["waiting_response_text", "Response opened · waiting for text"],
+      receiving_content: ["generating_response", "AI is generating · receiving text"],
       validating: ["validating_result", "Validating AI result"],
     };
     const mapped = AI_PHASES[aiPhase];

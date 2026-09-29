@@ -36,7 +36,8 @@ class RoutingTests(unittest.TestCase):
         candidate=listed.candidates['deepseek-ai/DeepSeek-V4-Flash-0731']
         self.assertEqual(candidate['fastestProviderHint'],'scaleway')
         self.assertEqual(candidate['routingPolicy'],'hf_auto_fastest_failover')
-        self.assertNotIn('deepseek-ai/DeepSeek-V4-Flash-0731', listed.capabilities)
+        self.assertEqual(listed.capabilities['deepseek-ai/DeepSeek-V4-Flash-0731']['vision']['supported'], False)
+        self.assertNotIn('routing', listed.capabilities['deepseek-ai/DeepSeek-V4-Flash-0731'])
         request=req(context={'translationMode':'conversation','hfInferenceProvider':'scaleway'},
                     capabilities={'routing':{'preferred_provider':'scaleway'}})
         self.assertEqual(hf._effective_conversation_model(request),

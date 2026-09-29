@@ -13,9 +13,9 @@ export function conversationBatchProfile(profile, state = {}) {
   let target = Math.max(profile.target, reasoningRisk ? 1280 : 1536);
   let capacity = continuation ? 'continuation_token_budget' : 'anchor';
 
-  // Measured output/structure pressure is real quality evidence. Reduce the
-  // content target, while complete pages remain atomic unless a hard provider
-  // or application budget says otherwise.
+  // This is the fallback for models without confirmed large windows. The
+  // planner recomputes a per-candidate target from the actual completion and
+  // context budget for confirmed models, including the first request.
   if (profile.reliabilityRestricted || profile.outcomes?.some(x => x === 'length')) {
     target = Math.min(target, reasoningRisk ? 1024 : 1280);
     capacity = 'continuation_reliability_restricted';

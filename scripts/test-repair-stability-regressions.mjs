@@ -70,7 +70,7 @@ async function runPool(abortAfterSecond = false, abortOnDispatch = false, wrongL
   };
   try {
     const run = { id: `test:${crypto.randomUUID()}`, token: 'a'.repeat(64) };
-    const pages = new Map(await Promise.all([0,1,2].map(async i => { const p = await page(`p${i}`, options.conversation ? {translation_mode:'conversation',conversation:{pageId:`p${i}`,pageOrder:i+1,pageIndex:i,documentId:'repair-fixture',owner:'owner'}} : {}); return [p.pageId, p]; })));
+    const pages = new Map(await Promise.all(Array.from({length:options.pageCount || 3},(_,i)=>i).map(async i => { const p = await page(`p${i}`, options.conversation ? {translation_mode:'conversation',conversation:{pageId:`p${i}`,pageOrder:i+1,pageIndex:i,documentId:'repair-fixture',owner:'owner'}} : {}); return [p.pageId, p]; })));
     await b.api(run, 'register', { manifest: [...pages.keys()] });
     for (const p of pages.values()) await b.api(run, 'pages', { pageId: p.pageId, generationId: p.generationId, groupKey: p.groupKey, status: 'finished', initialAccepted: 0, failed: (options.reverseUnits ? [...p.units].reverse() : p.units).map(u => ({ id: u.id, text: u.text, sourceHash: u.sourceHash, reason: 'missing' })) });
     let caught;
@@ -101,6 +101,10 @@ async function runPool(abortAfterSecond = false, abortOnDispatch = false, wrongL
               code:'billing_required', failureKind:'billing_required', upstreamStatus:402,
               requestDispatched:true, providerAttempts:1, generationAttempts:0,
             });
+            if (options.modelIdentityMismatch) throw Object.assign(new Error('LM Studio returned another model'), {
+              code:'local_model_identity_mismatch', requestDispatched:true,
+              providerResponded:true, retryable:false, providerAttempts:1, generationAttempts:1,
+            });
             if (calls.length <= Number(options.capacityFailures || 0)) {
               const error = Object.assign(new Error('fixture output budget exhausted'), {
                 code: 'output_budget_exhausted', requestDispatched: true, providerResponded: true,
@@ -126,6 +130,14 @@ await check('pool batches 6 failed units in 3 requests and delivers one final sn
   assert.equal(r.applications.length, 1, 'do not apply after each provider response');
   assert.equal(r.applications[0].calls, 3);
   assert.equal(r.applications[0].ids.length, 6);
+});
+await check('236 failed units fit the real ledger as 200 + 36 claims in ONE repair round', async () => {
+  const r = await runPool(false,false,false,{conversation:true,pageCount:118,planSize:1000});
+  if(r.caught)throw r.caught;
+  assert.deepEqual(r.calls.map(c=>c.length),[200,36]);
+  assert.equal(new Set(r.calls.flatMap(c=>c.map(u=>u.id))).size,236);
+  assert.equal(r.applications.length,1);
+  assert.equal(r.applications[0].ids.length,236);
 });
 await check('repair tasks overlap only up to the scheduler capacity and still apply once', async () => {
   const r = await runPool(false, false, false, { capacityLimit: 2, delayMs: 40 });
@@ -159,6 +171,16 @@ await check('billing failure stops remaining Conversation repairs and preserves 
   assert.equal(r.calls.length,1, 'only first request reaches Provider; ledger closes unsent tasks');
   assert.ok(r.progressEvents.some(event=>event.phase==='repair_circuit_open'));
   assert.equal(r.applications.length,1);assert.deepEqual(r.applications[0].ids,[]);
+});
+await check('LM Studio model mismatch closes repair group without silently retrying wrong model', async () => {
+  const r=await runPool(false,false,false,{modelIdentityMismatch:true,planSize:1});
+  if(r.caught)throw r.caught;
+  assert.equal(r.calls.length,2,'only the already-planned bounded wave may reach the wrong model');
+  assert.ok(r.progressEvents.some(event=>event.phase==='repair_circuit_open' &&
+    event.reason==='local_model_identity_mismatch'),
+    'pending repairs must carry the exact identity mismatch reason');
+  assert.equal(r.applications.length,1);
+  assert.deepEqual(r.applications[0].ids,[],'no wrong-model answer may be applied');
 });
 await check('Conversation repair sorts original units before planner slicing, not merely inside each wire batch', async () => {
   const r=await runPool(false,false,false,{conversation:true,reverseUnits:true,planSize:1});
@@ -199,7 +221,7 @@ await check('running cloud receipt pauses quickly and remains durable instead of
   assert.ok(Date.now() - started < 500, 'foreground recovery must not wait for the old 12-minute deadline');
   assert.ok(!actions.some(action => action.includes('/fail')), 'running paid receipt must remain resumable');
 });
-async function runCoordinator({ acknowledge = true, race = false, testProgress = false, partial = false, noSource = false, raceAtFinal = false, deferred = false, stagedHealthy = false, lostInitial = false } = {}) {
+async function runCoordinator({ acknowledge = true, race = false, testProgress = false, partial = false, noSource = false, raceAtFinal = false, deferred = false, stagedHealthy = false, lostInitial = false, noticeAck = null, forceUnavailable = false } = {}) {
   let value = {}, writes = 0, epoch = 7, transientWrites = 0, firstAckSaw = 0;
   const area = { async get(k) { return { [k]: structuredClone(value[k]) }; }, async set(v) {
     writes++; Object.assign(value, structuredClone(v));
@@ -214,13 +236,13 @@ async function runCoordinator({ acknowledge = true, race = false, testProgress =
   const reports = [];
   const api = async (_r, action, body) => {
     apiActions.push(action);
-    if(action === 'pages') reports.push(body);
+    if(action === 'pages') reports.push(...(body.pages || [body]));
     return action === 'seal' ? { phase:'repairing', pending:[] } : {};
   };
   const co = createRepairCoordinator({ sessions, api, currentEpoch: () => epoch, currentSession: () => 'session', getBase: async () => 'http://fixture.invalid', getContext: id => ctxs.get(id), getCapabilitiesFor: async () => ({}), emit: (ev,d) => events.push({ ev,d }),
     insert: async (_tab, msg) => {
       if (msg.type !== 'OVERLAY_HTML') {
-        if (msg.type === 'IMAGE_ERROR') terminalErrors.push(msg);
+        if (msg.type === 'IMAGE_ERROR') {terminalErrors.push(msg);if(noticeAck)return noticeAck;}
         return { ok:true, applied:true };
       }
       rendered.push(msg);
@@ -236,6 +258,7 @@ async function runCoordinator({ acknowledge = true, race = false, testProgress =
       });
     },
     execute: async options => {
+      if(forceUnavailable)throw Object.assign(new Error('fixture provider failed'),{code:'repair_run_not_found'});
       const rows = [];
       for (const p of payloads) {
         const saved = await options.getPage(p.metadata.image_id);
@@ -357,6 +380,19 @@ await check('repair-owned IMAGE_ERROR stays deferred until recovery is terminal'
   assert.equal(pending.terminalErrors.length,0,'ambiguous placement is still recoverable and must not be declared terminal');
   assert([...pending.batch.items.values()].every(item=>item.deferredImageError?.type==='IMAGE_ERROR'),
     'apply_pending keeps the terminal message for later recovery');
+});
+await check('terminal error notice requires its own DOM acknowledgement; not translation success', async () => {
+  for(const ack of [{ok:false},{ok:true,stale:true},{ok:true},{ok:true,applied:true}]) {
+    const r=await runCoordinator({deferred:true,forceUnavailable:true,noticeAck:ack});
+    const events=r.events.filter(e=>e.ev==='repairTerminalImageError');
+    assert.equal(events.length,3);
+    const delivered=ack.ok===true && ack.applied===true && !ack.stale;
+    assert.equal(events[0].d.delivered,delivered);
+    assert.equal(events[0].d.errorNoticeDelivered,delivered);
+    assert.equal(events[0].d.outcome,'failed','showing an error is not successful translation');
+    const item=[...r.batch.items.values()].at(-1);
+    assert.equal(Boolean(item.deferredImageError),!delivered,'do not discard a failed acknowledgement');
+  }
 });
 await check('settings change during delivery invalidates the run before terminal cleanup', async () => {
   const r = await runCoordinator({ race:true });

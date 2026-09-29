@@ -17,7 +17,7 @@ from backend.ai.rategate import rate_gate, RateGateTimeout, RateGateRejected
 from backend.ai.errors import ModelOutputContractError
 from backend.ai.failure_reason import classify as classify_ai_failure
 from backend.ai.provider_resolution import resolve_provider
-from backend.ai.rate_policy import is_local_target
+from backend.ai.rate_policy import is_local_target, manual_rate_policy, rate_bucket_identity
 from backend import cancellation, trace
 from backend.jobs.admission import identity_of, ANONYMOUS
 from backend.api.errors import activity_fields, payload_correlation
@@ -355,6 +355,10 @@ class JobQueue:
         caller_scope: str = "",
     ) -> dict[str, Any]:
         """Register a new job and return its public metadata."""
+        if self._queue_kind(payload) == self.AI:
+            # The legacy route is public; reject malformed caps before a job
+            # reaches an AI worker, where an exception would strand that job.
+            self._rate_options(payload)
         self._evict_if_needed()
         # These are opaque hashes prepared by the HTTP boundary. The queue
         # never retains a raw retry key, credential, or caller identifier.
@@ -428,30 +432,23 @@ class JobQueue:
 
     @staticmethod
     def _rate_options(payload: dict) -> dict[str, Any]:
-        """Read the user's rate-limit settings out of a payload.
+        """Read the optional legacy queued-job request cap.
 
         The extension sends ``{"rate": {"enabled": bool, "rpm": number,
-        "burst": number}}``. A missing ``rate`` object means "client didn't say",
-        which falls back to the server default (``TP_RATE_GATE``, on) — NOT to
-        "off", because losing the pacing silently is how a batch trips a
-        provider's 429s. ``rpm``/``burst`` of 0 mean "use the provider policy".
+        "burst": number}}``. A missing object retains the legacy server-owned
+        default. An explicitly selected manual cap must be complete and uses
+        the same validation as both synchronous AI routes.
         """
-        raw = payload.get("rate") if isinstance(payload.get("rate"), dict) else {}
-        enabled = raw.get("enabled")
-        if enabled is None:
-            enabled = bool(settings.rate_gate_enabled)
-        elif isinstance(enabled, str):
-            enabled = enabled.strip().lower() in ("1", "true", "yes", "on")
-        else:
-            enabled = bool(enabled)
-
-        def _num(key: str) -> float:
-            try:
-                return max(0.0, float(raw.get(key) or 0.0))
-            except (TypeError, ValueError):
-                return 0.0
-
-        return {"enabled": enabled, "rpm": _num("rpm"), "burst": int(_num("burst"))}
+        ai = payload.get("ai") if isinstance(payload.get("ai"), dict) else {}
+        key = str(ai.get("api_key") or "")
+        provider = resolve_provider(str(ai.get("provider") or "auto"), key)
+        raw = payload.get("rate")
+        if raw is None or raw == {}:
+            return {"enabled": bool(settings.rate_gate_enabled), "rpm": 0.0,
+                    "burst": 0, "local": False}
+        # Reuse the same explicit-cap validation as the synchronous routes.
+        return manual_rate_policy(payload, provider=provider,
+                                  base_url=str(ai.get("base_url") or ""))
 
     async def _await_ai_slot(self, job_id: str, payload: dict) -> bool:
         """Acquire a rate-gate token for an AI job before it runs.
@@ -472,19 +469,22 @@ class JobQueue:
         api_key = str(ai.get("api_key") or "")
         provider = resolve_provider(str(ai.get("provider") or "auto"), api_key)
         model = str(ai.get("model") or "auto")
+        bucket_key = rate_bucket_identity(rate, base_url=str(ai.get("base_url") or ""),
+                                          api_key=api_key)
         ctx = payload.get("context") if isinstance(payload.get("context"), dict) else {}
         session = str(ctx.get("tp_tab_session") or "")
         try:
             await rate_gate.acquire(
                 provider,
                 model,
-                api_key,
+                bucket_key,
                 session=session,
                 job_id=job_id,
                 deadline_sec=settings.rate_max_wait_sec,
                 max_waiters=settings.rate_max_waiters_per_bucket,
                 rpm_override=rate["rpm"] or None,
                 burst_override=rate["burst"] or None,
+                manual_local=rate.get("local") is True,
             )
             return True
         except (RateGateTimeout, RateGateRejected) as exc:
@@ -495,7 +495,7 @@ class JobQueue:
             # with the job so a poller can pace instead of guessing at five
             # seconds — which, with a queue in front of it, is a guess that
             # brings every rejected job back at the same moment.
-            retry_after = rate_gate.retry_after_sec(provider, model, api_key)
+            retry_after = rate_gate.retry_after_sec(provider, model, bucket_key)
             await self._set_job(
                 job_id,
                 {**prev, "status": "error", "result": f"rate limited: {exc}",
@@ -794,7 +794,8 @@ class JobQueue:
             # is a cheap async wait (it does not pin the worker thread) and it
             # keeps every provider under its requests-per-minute limit.
             gate_wait_ms = 0.0
-            if kind == self.AI and rate_gate.enabled():
+            if kind == self.AI and (rate_gate.enabled() or
+                                   self._rate_options(payload)["rpm"] > 0):
                 _t_gate = time.perf_counter()
                 try:
                     granted = await self._await_ai_slot(job_id, payload)

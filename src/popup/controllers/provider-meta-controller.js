@@ -31,7 +31,18 @@ export function createProviderMetaController({
     state.aiModelBlocked = Boolean(blocked);
   };
 
-  const probeBlocksModel = (status) => String(status || "") !== "passed";
+  const probeBlocksModel = (status) => {
+    if (String(status || "") === "passed") return false;
+    // Groq's short health probe shares the account's rate window. A 429 says
+    // nothing about the selected model when the live account catalogue already
+    // confirmed that exact model. Let the actual request report its own 429.
+    if (["rate_limited", "probe_inconclusive"].includes(String(status || "")) &&
+        String(els.aiProvider?.value || "") === "groq" &&
+        state.lastAiResolve?.models_verified === true &&
+        state.lastAiResolve?.key_status === "valid" &&
+        state.lastAiResolve.models?.includes(String(els.aiModel?.value || ""))) return false;
+    return true;
+  };
 
   // Capture the complete popup context before async work, including a revision
   // so A -> B -> A cannot revive a response started before the intervening edit.
@@ -63,6 +74,10 @@ export function createProviderMetaController({
 
   const renderStatus = () => {
     if (!canUse() || !state.lastAiResolve) return;
+    // Local discovery owns this field and has no cloud provider protocol.
+    // Saving a Local model or reopening the popup must not overwrite its
+    // concrete availability message with "Backend: unknown transport".
+    if (provider.isLocal(els.aiProvider?.value)) return;
     const data = state.lastAiResolve;
     const id = String(data.provider || els.aiProvider?.value || "").trim();
     const name = provider.label(id || "provider");
@@ -92,6 +107,13 @@ export function createProviderMetaController({
         "error",
         "✕ This endpoint requires your own API key",
       );
+      return;
+    }
+    if (data.error === "ai_provider_endpoint_conflict") {
+      setFieldMessage(els.aiProviderWrap, "error",
+        "✕ This Cloud provider has a Local AI server URL. Select the matching Local AI provider, or reselect the Cloud provider to restore its endpoint.");
+      setFieldMessage(els.aiModelWrap, "error",
+        "✕ Model list was not requested because the provider and server URL conflict.");
       return;
     }
     setFieldMessage(
@@ -154,6 +176,7 @@ export function createProviderMetaController({
         model_access_denied: ["error", " • ✕ Account cannot use this model"],
         model_unavailable: ["error", " • ✕ Model unavailable"],
         rate_limited: ["warn", " • ⚠ Provider rate-limited the test"],
+        probe_inconclusive: ["warn", " • ⚠ Test output limit reached; model availability is unverified"],
         rejected: ["error", " • ✕ Provider rejected the test"],
         request_rejected: ["error", " • ✕ Test request rejected; model availability is unverified"],
         provider_error: ["warn", " • ⚠ Provider test failed"],
@@ -277,7 +300,7 @@ export function createProviderMetaController({
             const answer = data && typeof data.status === "string"
               ? { ...data, provider: id, model, cached: Boolean(data.cached) }
               : { provider: id, model, status: "probe_failed", cached: false };
-            if (!["unreachable", "rate_limited", "probe_busy", "probe_pending", "request_rejected", "billing_required"].includes(String(answer.status || "")))
+            if (!["unreachable", "rate_limited", "probe_inconclusive", "probe_busy", "probe_pending", "request_rejected", "billing_required"].includes(String(answer.status || "")))
               probeCache.set(identity, { ts: Date.now(), data: answer });
             return answer;
           }).finally(() => {
@@ -331,7 +354,7 @@ export function createProviderMetaController({
     if (provider.isLocal(selectedProvider)) {
       // Check availability live; the worker reuses a verified, still-loaded model.
       if (state.localConnectInFlight) return;
-      await local.connect();
+      await local.connect({ automatic: true });
       return;
     }
     const base = normalizeUrl(els.apiUrl.value);
@@ -447,6 +470,10 @@ export function createProviderMetaController({
       // Auto model selection above is an intentional synchronous UI update.
       // Subsequent user edits still invalidate this new captured selection.
       selection = selectionSnapshot();
+      if (selection.model && usableModels.includes(selection.model)) {
+        await profile.activateResolvedModel?.(selection.model, isCurrent);
+        if (!isCurrent()) return;
+      }
       if (selection.model === String(data?.model || "").trim() &&
           !await saveCapabilities(selectedCapability, selection, isCurrent)) return;
       if (!isCurrent()) return;

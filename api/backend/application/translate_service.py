@@ -14,7 +14,7 @@ from backend.config import settings
 from backend.ai.provider_resolution import resolve_provider
 from backend.ai import wire_trace
 from backend.ai import local_wire_relay
-from backend.ai.rate_policy import is_local_target, manual_rate_policy
+from backend.ai.rate_policy import InvalidManualRatePolicy, is_local_target, manual_rate_policy, rate_bucket_identity
 from backend.ai.rategate import (
     rate_gate, RateGateCancelled, RateGateRejected, RateGateTimeout,
 )
@@ -205,18 +205,32 @@ async def execute(payload: dict[str, Any], request: Request) -> dict:
         api_key = str(ai_cfg.get("api_key") or "")
         rate_provider = resolve_provider(str(ai_cfg.get("provider") or "auto"), api_key)
         rate_model = str(ai_cfg.get("model") or "auto")
-        rate = manual_rate_policy(
-            payload,
-            provider=rate_provider,
-            base_url=str(ai_cfg.get("base_url") or ""),
-        )
-        paced = lane == "ai" and rate["enabled"] and not unlimited
+        try:
+            rate = manual_rate_policy(
+                payload,
+                provider=rate_provider,
+                base_url=str(ai_cfg.get("base_url") or ""),
+            )
+        except InvalidManualRatePolicy as exc:
+            detail = error_payload(
+                code=exc.code, message=str(exc), user_message=str(exc),
+                origin="client", stage="rate_configuration", category="configuration",
+                retryable=False, http_status=400, trace_id=trace_id,
+                extra={"generationAttempts":0,"providerAttempts":0,"requestDispatched":False},
+                correlation=correlation,
+            )
+            failure_event(requested_route, detail, mode=mode, source=source, **route_identity)
+            raise HTTPException(status_code=400, detail=detail) from exc
+        rate_key = rate_bucket_identity(rate, base_url=str(ai_cfg.get("base_url") or ""), api_key=api_key)
+        # A trusted local peer may skip shared pipeline fairness, but never
+        # bypass the user's explicitly selected provider request cap.
+        paced = lane == "ai" and rate["enabled"]
         rate_wait_ms = 0.0
         if paced:
             rate_started = time.perf_counter()
             try:
                 await rate_gate.acquire(
-                    rate_provider, rate_model, api_key,
+                    rate_provider, rate_model, rate_key,
                     session=str(((payload.get("context") or {}) if isinstance(payload.get("context"), dict) else {})
                                 .get("tp_tab_session") or trace_id),
                     job_id=str(payload.get("idempotency_key") or trace_id or f"v1-{time.time_ns()}"),
@@ -224,6 +238,7 @@ async def execute(payload: dict[str, Any], request: Request) -> dict:
                     max_waiters=settings.rate_max_waiters_per_bucket,
                     rpm_override=rate["rpm"] or None,
                     burst_override=rate["burst"] or None,
+                    manual_local=rate.get("local", False),
                     cancel_check=lambda: cancellation.is_cancelled(payload),
                 )
             except RateGateCancelled as exc:
@@ -293,11 +308,11 @@ async def execute(payload: dict[str, Any], request: Request) -> dict:
         close_ingress_failure(exc, "runsapi_dispatch")
         translate_failures.raise_mapped(
             exc, prepared=prepared, ai_cfg=ai_cfg, paced=paced,
-            rate_provider=rate_provider, rate_model=rate_model, api_key=api_key,
+            rate_provider=rate_provider, rate_model=rate_model, rate_key=rate_key,
             lane=lane, is_local_target=is_local_target,
         )
     if paced:
-        rate_gate.report_success(rate_provider, rate_model, api_key)
+        rate_gate.report_success(rate_provider, rate_model, rate_key)
 
     if cancellation.is_cancelled(payload):
         event("v1.translate.cancelled", {"mode": mode, "source": source}, ok=True)
@@ -308,5 +323,5 @@ async def execute(payload: dict[str, Any], request: Request) -> dict:
         result, prepared=prepared, api_version=API_VERSION, rate=rate,
         paced=paced, rate_wait_ms=rate_wait_ms,
         admission_wait_ms=admission_wait_ms, rate_provider=rate_provider,
-        rate_model=rate_model, api_key=api_key,
+        rate_model=rate_model, rate_key=rate_key,
     )

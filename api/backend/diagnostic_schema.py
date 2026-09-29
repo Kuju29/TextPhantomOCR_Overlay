@@ -29,16 +29,26 @@ def _part(v, depth=0):
                 'compositionCode':('metadata_missing','grid_unsupported','algo_unsupported','decode_failed','unavailable','size_invalid','encode_failed','failed','unknown'),
             }
             out[k]=x if isinstance(x,str) and x in allowed[k] else 'unknown'
-        elif k in ('contextPolicy','contextReason','connectionStage','verificationStatus','errorCode','constraintScope','instructionLocale','memoryMode','estimateKind','cacheStatus','resultStatus','attemptKind'):
+        elif k in ('exampleSource','exampleScope','exampleStorage','examplePhase'):
+            allowed={
+                'exampleSource':('human','story','none'),
+                'exampleScope':('verified_series','document','unscoped','disabled'),
+                'exampleStorage':('ready','write_failed','unscoped','disabled'),
+                'examplePhase':('selected','after_checkpoint'),
+            }
+            out[k]=x if isinstance(x,str) and x in allowed[k] else 'unknown'
+        elif k in ('contextPolicy','contextReason','connectionStage','verificationStatus','errorCode','constraintScope','instructionLocale','memoryMode','estimateKind','inputCountStatus','runtimeContextStatus','cacheStatus','resultStatus','attemptKind'):
             allowed={
                 'connectionStage':('list_models','verify_model','model_metadata','save_snapshot','result','ui_apply'),
-                'verificationStatus':('passed','timeout','rejected','invalid_output','unreachable','thinking_required','not_tested','model_unavailable','unsupported_model','not_selected'),
-                'errorCode':('local_ai_unreachable','local_ai_timeout','local_ai_discovery_failed','local_ai_invalid_response','local_ai_http_error','local_ai_invalid_adapter','local_ai_empty_models','local_models_empty','local_models_http_error','invalid_local_endpoint','local_provider_response_contract','ai_endpoint_missing','cancelled'),
+                'verificationStatus':('passed','timeout','rejected','invalid_output','unreachable','thinking_required','not_tested','model_unavailable','model_not_loaded','loaded_state_unverified','loaded_window_unverified','reasoning_setting_unsupported','unsupported_model','not_selected'),
+                'errorCode':('local_ai_unreachable','local_ai_timeout','local_ai_discovery_failed','local_ai_invalid_response','local_ai_http_error','local_ai_invalid_adapter','local_ai_empty_models','local_models_empty','local_models_http_error','invalid_local_endpoint','local_provider_response_contract','local_model_identity_mismatch','local_model_not_loaded','local_model_context_unverified','local_model_thinking_unsupported','ai_endpoint_missing','cancelled'),
                 'constraintScope':('per_request','reliability','account_window','runtime_concurrency','unknown'),
                 'instructionLocale':('th','en','ja'),
                 'memoryMode':('off','terms','full','legacy_filtered'),
                 'estimateKind':('script_weight_calibrated_from_valid_provider_usage','script_weight_with_output_calibration'),
-                'contextPolicy':('ollama-request-context-v1',),
+                'inputCountStatus':('runtime_count_pending','provider_usage_calibrated','script_estimate'),
+                'runtimeContextStatus':('reported','not_reported'),
+                'contextPolicy':('ollama-request-context-v1','ollama-live-model-context-v2'),
                 'contextReason':('bounded_growth','bounded_limit','model_limit_unknown','current_window'),
                 'cacheStatus':('not_reported','reported_hit','reported_zero'),
                 'resultStatus':('complete_at_contract_boundary','incomplete_ids','wrong_language','output_truncated','cancelled','transport_failure','protocol_failure','rate_limited','input_budget_rejected','unverified'),

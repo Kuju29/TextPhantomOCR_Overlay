@@ -31,7 +31,6 @@ from backend.ai.providers import (
     local_llamacpp,
     local_llamafile,
     local_lmstudio,
-    local_localai,
     local_textgen,
     local_vllm,
 )
@@ -43,7 +42,7 @@ EXPECTED_CLOUD = {
 }
 EXPECTED_LOCAL = {
     "gpt4all", "jan", "koboldcpp", "llamacpp", "llamafile",
-    "lmstudio", "localai", "ollama", "textgen", "vllm",
+    "lmstudio", "ollama", "textgen", "vllm",
 }
 
 registry = list(compose_providers(ProviderRegistry()))
@@ -51,7 +50,7 @@ cloud = {spec.provider_id for spec in registry if not spec.local}
 local = {spec.provider_id for spec in registry if spec.local}
 assert cloud == EXPECTED_CLOUD, cloud
 assert local == EXPECTED_LOCAL, local
-assert len(registry) == 19
+assert len(registry) == 18
 assert all(spec.adapter is not None for spec in registry)
 
 # OpenRouter routing belongs only to the official OpenRouter endpoint.
@@ -97,7 +96,7 @@ assert cloud_huggingface._effective_conversation_model(explicit) == (
 # loopback defaults, no cloud routing, no guessed reasoning/sampling controls.
 local_modules = (
     local_gpt4all, local_jan, local_koboldcpp, local_llamacpp,
-    local_llamafile, local_lmstudio, local_localai, local_textgen, local_vllm,
+    local_llamafile, local_lmstudio, local_textgen, local_vllm,
 )
 for module in local_modules:
     policy = module.POLICY
@@ -122,4 +121,4 @@ learning = (ROOT / "src/shared/ai/workload/learning.js").read_text(encoding="utf
 assert "first_content_ms" in core and "firstContentMs" in local_runtime
 assert "slowTotalMsWhenFirstContentUnknown" in learning
 
-print("Hermes-inspired provider policy audit: 19/19 named providers PASS")
+print("Hermes-inspired provider policy audit: 18/18 named providers PASS")

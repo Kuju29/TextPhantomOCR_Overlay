@@ -40,6 +40,8 @@ assert.equal(
 );
 
 const modelOptions = [];
+const modelUiOptions = [];
+const modelMessages = [];
 const els = {
   aiProvider: { value: "ollama" }, aiBaseUrl: { value: endpoint },
   aiModel: { value: "qwen3.5:9b" },
@@ -50,8 +52,9 @@ const state = { desiredAiModel: "qwen3.5:9b", localAiCapability: null, lastAiRes
 const controller = createLocalConnectionController({
   els, state, profile: {}, persist: async () => {}, getStorage: async () => ({}),
   sendMessage: async () => ({}), normalizeUrl: String,
-  setModelOptions: (models) => modelOptions.push(...models),
-  setFieldMessage: () => {}, renderPrompt: async () => {}, scheduleSave: () => {},
+  setModelOptions: (models, options) => { modelOptions.push(...models); modelUiOptions.push(options); },
+  setFieldMessage: (_wrap, type, message) => modelMessages.push({type, message}),
+  renderPrompt: async () => {}, scheduleSave: () => {},
   clearResolveTimer: () => {}, clearCapacity: () => {}, renderCapacity: () => {},
   persistCapacity: async () => {}, toggleUi: () => {},
 });
@@ -59,7 +62,10 @@ assert.equal(controller.restoreSnapshot(records), true);
 assert.equal(state.localAiCapability.models["qwen3.5:9b"].reasoning.supported, true);
 assert.deepEqual(modelOptions, ["qwen3.5:9b"]);
 assert.equal(state.lastAiResolve.verification_source, "saved_snapshot");
-assert.match(els.aiLocalStatus.textContent, /metadata checked/);
+assert.match(els.aiLocalStatus.textContent, /Saved model metadata.*Availability is rechecked/);
+assert.equal(modelUiOptions.at(-1).showUnknownHint, false);
+assert.equal(modelMessages.at(-1).type, "info");
+assert.match(modelMessages.at(-1).message, /the runtime is checked again before translation/);
 assert.equal(state.aiModelBlocked, false);
 const legacy = structuredClone(records);
 delete legacy[identity].verificationVersion;

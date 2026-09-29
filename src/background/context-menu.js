@@ -7,6 +7,7 @@ import { createLogger } from "../shared/logger.js";
 import { readFullSettings } from "../shared/settings.js";
 import { effectiveEngineMode } from "../shared/engine-mode.js";
 import { isLocalAiProvider } from "../shared/constants.js";
+import { localProviderTranslationMode } from "../shared/ai/providers/local-registry.js";
 import { AI_PROMPT_MODE } from "../shared/ai-prompt-policy.js";
 import { normalizeReasoningPreference } from "../shared/reasoning-preference.js";
 import { attachTpError, publicTpError } from "../shared/error-contract.js";
@@ -212,8 +213,8 @@ export async function buildAiPayload(mode, source, settings, seriesKey) {
     prev_context: useChars ? memory.prevContext || [] : [],
     char_memory: useChars,
     memory_mode: memMode,
-    style_examples: settings.aiStyleExamples !== false,
-    translation_mode: "conversation",
+    style_examples: local ? settings.aiStyleExamples !== false : true,
+    translation_mode: local ? localProviderTranslationMode(settings.aiProvider) : "conversation",
     conversation_reset: String(settings.aiConversationReset || "0"),
     send_image: sendImage,
     thinking: normalizeReasoningPreference(
@@ -249,26 +250,48 @@ function aiIsLocal(settings) {
   return classifyAiRuntime(settings).local;
 }
 
+function invalidManualCap(local) {
+  return attachTpError(new Error(local
+    ? "Local AI request cap is incomplete. Enter RPM and burst, or turn the cap off in AI settings."
+    : "Cloud AI request cap is incomplete. Enter RPM and burst, or turn the cap off in AI settings."), {
+    code: "invalid_manual_rate_cap",
+    category: "configuration",
+    origin: "user",
+    stage: "ai_configuration",
+    retryable: false,
+  });
+}
+
 // Builds optional user-pinned pacing. Empty/Auto means NO TextPhantom RPM
 // throttle: the provider's real quota is authoritative and actual 429/503
 // responses drive the adaptive concurrency lane.
 export function buildRatePayload(mode, source, settings) {
   if (mode !== "lens_text" || source !== "ai") return null;
-  // runs:Extension talks to a selected local runtime directly. Local capacity
-  // is controlled independently by scheduler slots, so an RPM/token-bucket
-  // delay is never appropriate here (including when the old Unlimited switch
-  // is off).
+  // Local and Cloud have independent manual request limits. The browser owns
+  // Direct Local pacing; the server uses this rate only for runs:API.
   if (aiIsLocal(settings)) {
-    return { enabled: false, rpm: 0, burst: 0, unlimited: true };
+    const rpm = Number(settings.aiLocalRateRpm);
+    const burst = Number(settings.aiLocalRateBurst);
+    const enabled = settings.aiLocalRateLimitEnabled === true;
+    if (enabled && (!Number.isInteger(rpm) || rpm < 1 || rpm > 600 ||
+      !Number.isInteger(burst) || burst < 1 || burst > 60 || burst > rpm)) {
+      throw invalidManualCap(true);
+    }
+    return { enabled, rpm: enabled ? rpm : 0,
+      burst: enabled ? burst : 0,
+      unlimited: !enabled };
   }
-  const configuredRpm =
-    Number(settings.rateRpm) > 0 ? Number(settings.rateRpm) : 0;
-  const configuredBurst =
-    Number(settings.rateBurst) > 0 ? Number(settings.rateBurst) : 0;
+  const configuredRpm = Number(settings.rateRpm);
+  const configuredBurst = Number(settings.rateBurst);
   // Burst is only a concurrency companion to an explicitly enabled RPM cap;
   // a stale Burst value must never activate pacing by itself.
-  const enabled = settings.rateLimitEnabled === true &&
-    settings.rateProfile !== "auto" && configuredRpm > 0;
+  const enabled = settings.rateLimitEnabled === true;
+  if (enabled && (settings.rateProfile === "auto" ||
+    !Number.isInteger(configuredRpm) || configuredRpm < 1 || configuredRpm > 600 ||
+    !Number.isInteger(configuredBurst) || configuredBurst < 1 ||
+    configuredBurst > 60 || configuredBurst > configuredRpm)) {
+    throw invalidManualCap(false);
+  }
   // Stored values are preferences, not active limits. If the user turns the
   // switch OFF, do not let yesterday's RPM/Burst silently seed today's
   // scheduler window or server rate gate.
@@ -317,11 +340,11 @@ export function buildLimitsPayload(settings) {
         }
       : null;
   return {
-    aiUnlimited: local,
-    apiUnlimited: settings.apiLocalUnlimited === true,
+    aiUnlimited: local && settings.aiLocalRateLimitEnabled !== true,
+    apiUnlimited: settings.apiLocalUnlimited === true && settings.aiLocalRateLimitEnabled !== true,
     // Explicit names prevent consumers from mistaking disabled time pacing
     // for permission to run an unbounded number of generations.
-    timePacingDisabled: local,
+    timePacingDisabled: local && settings.aiLocalRateLimitEnabled !== true,
     capacityMode,
     manualConcurrency,
     localCapability,
@@ -875,7 +898,8 @@ async function dispatchContextMenuClick(menuInfo, tab, options = {}) {
       "AI_PROFILE_INCOMPLETE",
       "AI_PROFILE_MIGRATION_CONFLICT",
       "AI_PROFILE_MIGRATION_INCOMPLETE",
-    ].includes(e?.code) || e?.tpError?.stage === "ai_configuration") {
+    ].includes(e?.code) || e?.tpError?.stage === "ai_configuration" ||
+      e?.profileValidationStage === "local_model_preflight") {
       traceNote(
         "background/ai-profile-resolver.js",
         "jobProfileValidationError",

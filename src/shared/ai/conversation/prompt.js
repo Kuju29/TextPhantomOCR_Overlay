@@ -2,7 +2,7 @@ import {branchHistory,pageBoundaries,checkedOrigins} from "./origins.js";
 // Pure history assembly. It never dispatches, retries, changes old prompts or updates UI.
 import {estimateProviderInput} from "../workload/budget.js";
 import {planOllamaContext} from "../providers/ollama-context.js";
-const POLICY="conversation-image-records-2026.9.15.5";
+const POLICY="conversation-image-records-2026.9.27.8";
 const INTRO={
  th:"นี่คือการแปลต่อเนื่องในเอกสารเดียวกัน ตอบเฉพาะ ID ในข้อความผู้ใช้ล่าสุด หากมีคำแปลก่อนหน้าที่สำเร็จอยู่ในประวัตินี้ ให้ใช้เป็นหลักเพื่อคงศัพท์ น้ำเสียง และรูปแบบให้ต่อเนื่อง แต่ต้นฉบับปัจจุบันที่ชัดเจนมีน้ำหนักเหนือกว่าเสมอ",
  ja:"同じ文書の翻訳を続けます。最後のユーザーメッセージのIDだけを返してください。この履歴に成功した以前の訳がある場合だけ、用語・口調・表現の一貫性の主な基準として使い、現在の明確な原文を常に優先してください。",

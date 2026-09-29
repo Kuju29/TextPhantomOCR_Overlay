@@ -36,26 +36,47 @@ let payloads=0;
 const oldFetch=globalThis.fetch;
 try {
  for(const spec of localProviderCatalog()) for (const corrupt of [false,true]) {
-  const history=[{anchor:true,user:'UNCHANGED_SOURCE\n<<I1_P0:Hello>>',assistant:'<<I1_P0:สวัสดี>>'}];
+  const native=spec.id==='lmstudio';
+  const history=[{anchor:true,user:'UNCHANGED_SOURCE\n<<I1_P0:Hello>>',assistant:'<<I1_P0:สวัสดี>>',
+   ...(native?{providerResponseId:'resp_alignment_previous'}:{})}];
   const copy=structuredClone(history);const calls=[];
   const ai={provider:spec.id,model:'alignment-fixture',base_url:spec.baseUrl,local_adapter:localAiPreset(spec.id),
-   prompt:'',translation_mode:'conversation',style_examples:false,thinking:'off',
+   prompt:'',translation_mode:'conversation',style_examples:false,thinking:'minimum',
    model_capabilities:{limits:{contextTokens:65536},structuredOutput:{supported:false},reasoning:{supported:false,control:'none'}},
    conversation:{branch:'repair',origins:[10,26].map(order=>{const unitIds=ids.filter(id=>id.startsWith(`I${order}_`));
     return {pageId:`page-I${order}`,pageOrder:order,unitIds,originalIds:unitIds.map(id=>'original-'+id)};})}};
   globalThis.fetch=async(url,init)=>{
    calls.push(JSON.parse(init.body));const content=[...ids.map(id=>`<<${id}:คำแปลภาษาไทย>>`),
     ...(corrupt?['<<I26_P11:ข้อความบริบทที่ไม่ควรตอบ>>']:[])].join('\n');
+   if(native){
+    const event=(type,value)=>`event: ${type}\ndata: ${JSON.stringify({type,...value})}\n\n`;
+    const stream=event('chat.start',{model_instance_id:ai.model})+
+     event('message.delta',{content})+
+     event('chat.end',{result:{model_instance_id:ai.model,response_id:'resp_alignment_next',
+      output:[{type:'message',content}],stats:{input_tokens:100,total_output_tokens:20}}});
+    return new Response(stream,{headers:{'content-type':'text/event-stream'}});
+   }
    const data=spec.protocol==='ollama'?{message:{content},done:true,done_reason:'stop',prompt_eval_count:100,eval_count:20}:
     {choices:[{message:{content},finish_reason:'stop'}],usage:{prompt_tokens:100,completion_tokens:20,total_tokens:120}};
    return new Response(JSON.stringify(data),{headers:{'content-type':'application/json'}});
   };
   const answer=await translateWithLocalOpenAi(units,{ai,canonicalPrompt:BUNDLED_CANONICAL_PROMPT_PLANS.th,
-   targetLang:'th',sourceLang:'en',conversationContext:{prepare:input=>prepareConversation({...input,ai,
-    state:{history,revision:1,scope:'alignment-fixture',storage:'memory'}}),messages:appendPreparedMessages,capture(){}}});
+   targetLang:'th',sourceLang:'en',conversationContext:{prepare:async input=>{
+    const prepared=await prepareConversation({...input,ai,
+     state:{history,revision:1,scope:'alignment-fixture',storage:'memory'}});
+    if(native)prepared.providerConversation={enabled:true,historyTurns:prepared.turns.length,
+     previousResponseId:prepared.turns.at(-1)?.providerResponseId||''};
+    return prepared;
+   },messages:appendPreparedMessages,capture(){}}});
   assert.equal(calls.length,1,'one generation even when alignment fails');checks++;
   assert.deepEqual(history,copy);checks++;
-  assert.deepEqual(calls[0].messages.slice(1,3),[{role:'user',content:copy[0].user},{role:'assistant',content:copy[0].assistant}]);checks++;
+  if(native){
+   assert.equal(calls[0].previous_response_id,copy[0].providerResponseId);
+   assert.equal(calls[0].system_prompt,undefined);
+   assert.ok(!JSON.stringify(calls[0]).includes(copy[0].user));
+  }else assert.deepEqual(calls[0].messages.slice(1,3),
+   [{role:'user',content:copy[0].user},{role:'assistant',content:copy[0].assistant}]);
+  checks++;
   assert.deepEqual(answer.meta.alignmentUncertainIds,corrupt?ids.slice(1):[]);checks++;
   assert.deepEqual(repairValidation(answer,units,'th').accepted,corrupt?ids.slice(0,1):ids);checks++;
   assert.equal(answer.meta.usage.inputTokens,100);assert.equal(answer.meta.usage.outputTokens,20);checks++;

@@ -7,7 +7,12 @@ globalThis.chrome = {
     local: {
       get(keys, cb) {
         const out = {};
-        for (const key of keys || []) out[key] = storage[key];
+        const defaults = keys && typeof keys === "object" && !Array.isArray(keys)
+          ? keys : {};
+        const names = Array.isArray(keys) ? keys : typeof keys === "string"
+          ? [keys] : Object.keys(defaults);
+        for (const key of names)
+          out[key] = storage[key] === undefined ? defaults[key] : storage[key];
         cb(out);
       },
       set(patch, cb) { Object.assign(storage, patch); cb?.(); },
@@ -29,7 +34,7 @@ globalThis.chrome = {
 const { readFullSettings } = await import("../src/shared/settings.js");
 const { readCoreSettings } = await import("../src/shared/settings.js");
 const { getStorage, setStorage } = await import("../src/shared/storage.js");
-const { autoAiSettingsIssue, classifyAiRuntime } = await import("../src/shared/ai-settings-contract.js");
+const { autoAiSettingsIssue, aiConfigurationIssueForError, classifyAiRuntime } = await import("../src/shared/ai-settings-contract.js");
 const contextMenuSource = await (await import("node:fs/promises")).readFile(
   new URL("../src/background/context-menu.js", import.meta.url), "utf8",
 );
@@ -213,15 +218,15 @@ assert.equal(settings.aiKey, "cloud-key",
 assert.equal(settings.localAiAdapter, null,
   "a stale localhost endpoint must not construct a Local adapter for a selected Cloud provider");
 const { resolveJobAiProfile } = await import("../src/background/ai-profile-resolver.js");
-const cloudConflictSnapshot = await resolveJobAiProfile(
-  { ...settings, lang: "th", aiPrompt: "full style" }, { language: "th" },
+await assert.rejects(
+  () => resolveJobAiProfile(
+    { ...settings, lang: "th", aiPrompt: "full style" }, { language: "th" },
+  ),
+  (error) => error?.code === "ai_provider_endpoint_conflict",
+  "the active Cloud profile must reject its Local endpoint before a canonical URL can conceal it",
 );
-assert.equal(cloudConflictSnapshot.audit.runtime, "cloud");
-assert.equal(cloudConflictSnapshot.audit.classificationReason, "cloud_provider_local_endpoint_conflict");
-assert.equal(cloudConflictSnapshot.audit.configurationConflict, true);
-assert.equal(cloudConflictSnapshot.audit.provider, "openrouter");
-assert.equal(cloudConflictSnapshot.audit.model, settings.aiModel);
-assert.equal(typeof cloudConflictSnapshot.audit.profileRevision, "number");
+assert.equal(aiConfigurationIssueForError({ code: "ai_provider_endpoint_conflict" })?.code,
+  "ai_provider_endpoint_conflict", "the user must see a configuration error");
 
 // A present canonical record is authoritative even when flat rollback values
 // look usable. Corruption and a broken active pointer must surface explicitly.
@@ -229,6 +234,19 @@ const canonicalState = structuredClone((await import("../src/shared/ai-profiles.
   stored: undefined,
   legacy: { ...settings, aiProvider: "openrouter", aiBaseUrl: "https://openrouter.ai/api/v1", aiModel: "strict-model", aiCloudKey: "canonical-key" },
 }).state);
+const conflictingCanonical = (await import("../src/shared/ai-profiles.js")).migrateAiProfiles({
+  stored: undefined,
+  legacy: { ...settings, aiProvider: "openrouter", aiBaseUrl: "http://localhost:11434",
+    aiModel: "strict-model", aiCloudKey: "canonical-key" },
+});
+storage.aiProfilesV1 = conflictingCanonical.state;
+storage.aiProfileCredentialsV1 = conflictingCanonical.credentials;
+storage.aiProfilePromptsV1 = conflictingCanonical.prompts;
+await assert.rejects(
+  () => resolveJobAiProfile({ ...settings, aiBaseUrl: "https://openrouter.ai/api/v1" }, { language: "th" }),
+  (error) => error?.code === "ai_provider_endpoint_conflict",
+  "a conflicting canonical profile must not be hidden by a clean legacy rollback field",
+);
 const canonicalIdentity = canonicalState.active.providerIdentity;
 storage.aiProfilesV1 = canonicalState;
 storage.aiProfileCredentialsV1 = { [canonicalIdentity]: "canonical-key" };
@@ -283,7 +301,13 @@ assert.equal(autoAiSettingsIssue({
 assert.equal(autoAiSettingsIssue({
   aiProvider: "customlocal", aiBaseUrl: "http://127.0.0.1:9000/v1",
   aiKey: "", engineMode: "extension",
+  localAiAdapter: { protocol: "openai", baseUrl: "http://127.0.0.1:9000/v1" },
 }), null, "custom adapters remain available on the direct Extension engine");
+assert.equal(autoAiSettingsIssue({
+  aiProvider: "customlocal", aiBaseUrl: "http://127.0.0.1:9000/v1",
+  aiKey: "", engineMode: "extension", localAiAdapter: null,
+})?.code, "LOCAL_ADAPTER_MISSING",
+"a Custom Local profile missing its saved adapter must fail before preflight or image collection");
 assert.equal(autoAiSettingsIssue({
   aiProvider: "ollama", aiBaseUrl: "http://127.0.0.1:11434", engineMode: "extension",
 }, { mainApiBaseUrl: "https://example.hf.space" }), null,
@@ -329,6 +353,8 @@ storage.aiModel = "local-fixture-model";
 storage.aiPromptByLang = { th: "Thai fixture style" };
 storage.apiUrlDefault = "https://api.example.invalid";
 storage.apiDefaultsFetchedAt = Date.now();
+const savedFetch = globalThis.fetch;
+globalThis.fetch = async () => { throw new Error("offline API fixture"); };
 const { buildRatePayload, onContextMenuClicked } = await import("../src/background/context-menu.js");
 
 delete storage.rateLimitEnabled;
@@ -379,13 +405,13 @@ assert.deepEqual(
   { enabled: false, rpm: 0, burst: 0, unlimited: true },
   "direct-local must always bypass legacy time/RPM pacing while capacity remains separately bounded",
 );
-assert.deepEqual(
-  buildRatePayload("lens_text", "ai", {
+assert.throws(
+  () => buildRatePayload("lens_text", "ai", {
     aiProvider: "gemini", aiBaseUrl: "https://generativelanguage.googleapis.com",
     rateLimitEnabled: true, rateRpm: 0, rateBurst: 4,
   }),
-  { enabled: false, rpm: 0, burst: 0 },
-  "cloud Burst alone must not activate a time/RPM cap",
+  (error) => error?.code === "invalid_manual_rate_cap",
+  "an enabled Cloud cap without RPM must be rejected rather than silently disabled",
 );
 assert.deepEqual(
   buildRatePayload("lens_text", "ai", {
@@ -398,6 +424,82 @@ assert.deepEqual(
 const savedConsoleError = console.error;
 console.error = () => {};
 try {
+  // The service-worker entry must reject the conflicting selected profile
+  // before reading an image or dispatching any Provider request.
+  storage.aiProvider = "openrouter";
+  storage.aiBaseUrl = "http://localhost:11434";
+  storage.aiModel = "deepseek/test";
+  storage.aiCloudKey = "cloud-key";
+  const requestsBeforeCloudConflict = tabRequests.length;
+  await assert.rejects(
+    onContextMenuClicked(
+      { menuItemId: "img_one", srcUrl: "https://example.invalid/cloud-conflict.jpg" },
+      { id: 7, url: "https://example.invalid/page", title: "Page" },
+      { overrides: { mode: "lens_text", lang: "th", source: "ai" }, propagateErrors: true },
+    ),
+    (error) => error?.tpError?.code === "ai_provider_endpoint_conflict" &&
+      !String(error?.message || "").includes(storage.aiCloudKey),
+    "the programmatic job must return the configuration error without exposing its Cloud key",
+  );
+  assert.ok(!tabRequests.slice(requestsBeforeCloudConflict).includes("GET_CONTEXT_IMAGE_PAYLOAD"),
+    "a contradictory profile must not begin image collection");
+  delete storage.aiProfilesV1;
+  delete storage.aiProfileCredentialsV1;
+  delete storage.aiProfilePromptsV1;
+  delete storage.aiProfileStorageVersion;
+  storage.aiProvider = "customlocal";
+  storage.aiBaseUrl = "http://localhost:1234/v1";
+  storage.customApiUrl = "https://api.example.invalid";
+  storage.aiModel = "local-model";
+  storage.localAiAdapter = { version: 1, baseUrl: "http://localhost:1234/v1" };
+  const malformedCustom = await readFullSettings();
+  assert.equal(malformedCustom.localAiAdapter, null,
+    "a saved Custom Local adapter missing its protocol must not be completed from LM Studio");
+  const requestsBeforeMalformedCustom = tabRequests.length;
+  await assert.rejects(
+    onContextMenuClicked(
+      { menuItemId: "img_one", srcUrl: "https://example.invalid/custom.jpg" },
+      { id: 7, url: "https://example.invalid/page", title: "Page" },
+      { overrides: { mode: "lens_text", lang: "th", source: "ai" }, propagateErrors: true },
+    ),
+    (error) => error?.tpError?.code === "LOCAL_ADAPTER_MISSING",
+    "saved incomplete Custom Local must be rejected before the Local model probe",
+  );
+  assert.ok(!tabRequests.slice(requestsBeforeMalformedCustom).includes("GET_CONTEXT_IMAGE_PAYLOAD"),
+    "saved incomplete Custom Local must not collect a source image");
+  storage.localAiAdapter = { version: 1, protocol: "ollama",
+    baseUrl: "http://localhost:1234/v1" };
+  delete storage.localAiAdapterOwner;
+  assert.equal((await readFullSettings()).localAiAdapter, null,
+    "markerless old Custom JSON is a draft, even if its URL and protocol are valid");
+  storage.localAiAdapterOwner = "invalid";
+  assert.equal((await readFullSettings()).localAiAdapter, null,
+    "an adapter from a different provider stays blocked even at the same URL");
+  storage.localAiAdapter = { version: 1, protocol: "openai",
+    baseUrl: "http://localhost:1234/v1" };
+  storage.localAiAdapterOwner = "customlocal";
+  assert.equal((await resolveJobAiProfile(await readFullSettings(),
+    { language: "th" })).settings.localAiAdapter.protocol, "openai",
+  "an explicitly owned Custom adapter survives real profile activation");
+  storage.aiBaseUrl = "http://LOCALHOST:1234/v1";
+  assert.equal((await readFullSettings()).localAiAdapter?.protocol, "openai",
+    "URL identity comparison accepts the same host in different letter cases");
+  assert.equal((await resolveJobAiProfile(await readFullSettings(),
+    { language: "th" })).settings.localAiAdapter?.protocol, "openai");
+  storage.aiBaseUrl = "http://localhost:1234/v1";
+  storage.aiProvider = "ollama";
+  assert.equal((await resolveJobAiProfile(await readFullSettings(),
+    { language: "th" })).settings.localAiAdapter, null,
+  "a stale flat named preset cannot replace the canonical Custom adapter");
+  delete storage.aiProfilesV1;
+  delete storage.aiProfileCredentialsV1;
+  delete storage.aiProfilePromptsV1;
+  delete storage.aiProfileStorageVersion;
+  delete storage.localAiAdapter;
+  delete storage.localAiAdapterOwner;
+  delete storage.customApiUrl;
+  storage.aiProvider = "ollama";
+  storage.aiBaseUrl = "";
   const requestsBeforeInvalidAi = tabRequests.length;
   await assert.rejects(
     onContextMenuClicked(
@@ -425,6 +527,7 @@ try {
   );
 } finally {
   console.error = savedConsoleError;
+  globalThis.fetch = savedFetch;
 }
 
 console.log("Auto AI settings contract test passed: effective-language prompt and conservative preflight are wired.");

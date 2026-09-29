@@ -19,13 +19,19 @@ try {
   const opts={ai,canonicalPrompt,targetLang:'th'};
   const before=await translateWithLocalOpenAi(units,opts);
   const after=await translateWithLocalOpenAi(units,{...opts,ai:{...ai,workload}});
-  assert.equal(bodies.length,2);assert.deepEqual(bodies[0],bodies[1],'Within original budget, exact wire bytes/parameters remain unchanged');
+  assert.equal(bodies.length,2);
+  const baselineOutput=bodies[0].options.num_predict;
+  assert.deepEqual({...bodies[0],options:{...bodies[0].options,num_predict:0}},
+    {...bodies[1],options:{...bodies[1].options,num_predict:0}},
+    'A workload estimate preserves model, prompt, sampling, schema and Thinking settings');
+  assert.ok(bodies[1].options.num_predict>0 && bodies[1].options.num_predict<=baselineOutput,
+    'A smaller source-bound prediction may lower the requested completion allowance');
   assert.equal(after.translations[0].id,'global_42');assert.equal(after.translations[0].text,'อรุณสวัสดิ์');
   assert.equal(after.meta.usage.cachedInputTokens,512);assert.equal(after.meta.requestedOutputTokens,bodies[1].options.num_predict);assert.ok(after.meta.requestedOutputTokens<1024);
-  await assert.rejects(translateWithLocalOpenAi(units,{...opts,ai:{...ai,workload:{...workload,predictedOutput:3000}}}),
-   e=>e.code==='ai_workload_budget_insufficient');
-  assert.equal(bodies.length,2,'No probe/retry/dispatch after rejected budget');
-  console.log(`PASS direct Ollama ${schema?'JSON':'marker'}: unchanged wire, exact global ID, real cache counters, pre-dispatch guard`);
+  const inflated=await translateWithLocalOpenAi(units,{...opts,ai:{...ai,workload:{...workload,predictedOutput:3000}}});
+  assert.equal(inflated.translations[0].text,'อรุณสวัสดิ์');
+  assert.ok(bodies[2].options.num_predict<=1024,'A browser prediction cannot claim a larger native output limit');
+  console.log(`PASS direct Ollama ${schema?'JSON':'marker'}: unchanged prompt, source-bounded allowance, exact global ID, real cache counters`);
  }
  const diag={event:'observation',operationId:'op',profileId:'abc',outcome:'ok',finishReason:'stop',requestedOutputTokens:1024,
   usage:{inputTokens:1000,outputTokens:80,visible:80,thinkingTokens:0,cachedInput:512},validation:{missingCount:0,wrongLanguageCount:0},

@@ -1,6 +1,6 @@
-import { batchesForTab, getBatch, batchMark, batchUpdateToast, updateImagePresentation, batchStopKeepAlive } from './batches.js';
+import { batchesForTab, getBatch, batchMark, batchUpdateToast, updateImagePresentation, batchStopKeepAlive, restorePersistedBatches, persistBatchProgressNow } from './batches.js';
 import { repairCoordinator } from './repair/coordinator.js';
-import { getTabSessionId } from './tab-sessions.js';
+import { getTabSessionId, restoreTabSessions } from './tab-sessions.js';
 import { requestFromTabExact } from './tabs-messaging.js';
 import { forgetReaderAcquisition } from './reader-acquisition.js';
 import * as wf from './workflow-track.js';
@@ -9,6 +9,9 @@ const log = createLogger('SW.reader');
 // Content is reporting only placement of a result already owned by this batch.
 // No path here schedules an image or calls AI.
 export async function handleReaderReceipt(message, sender, discardBatchResults) {
+  // On a freshly woken service worker, the first mount receipt can arrive
+  // before module-level session and batch restoration finish.
+  await Promise.all([restorePersistedBatches(), restoreTabSessions()]);
   const batch=batchesForTab(sender?.tab?.id).find(b=>b.reader?.runId===message.readerRunId &&
     b.frameId===(sender.frameId || 0) && !b.cancelled);
   if(!batch || (message.pageInstanceId && batch.reader.pageInstanceId!==message.pageInstanceId))return {ok:true,stale:true};
@@ -24,7 +27,9 @@ export async function handleReaderReceipt(message, sender, discardBatchResults) 
   if(message.type==='TP_READER_PLACEMENT_FAILED'){
     updateImagePresentation(batch.id,key,{placementPending:false,placementConfirmed:false,
       progressEvent:{lane:'insert',state:'error',resultState:'error',detail:message.error || 'Reader placement failed'}});
-    batchUpdateToast(batch,'Reader placement failed',true);return {ok:false};
+    batchUpdateToast(batch,'Reader placement failed',true);
+    if(batch.reader.processingComplete)await persistBatchProgressNow();
+    return {ok:false};
   }
   updateImagePresentation(batch.id,key,{placementPending:false,placementConfirmed:message.kind!=='IMAGE_ERROR' && !message.provisional,
     insertionAck:{present:message.drawn===true,provisional:message.provisional===true,acknowledgedAt:Date.now()},
@@ -37,6 +42,7 @@ export async function handleReaderReceipt(message, sender, discardBatchResults) 
     await repairCoordinator.confirmDeferredPlacement(batch,message);
   }
   batchUpdateToast(batch,message.kind==='IMAGE_ERROR'?'Image error':'Translation placed',true);
+  if(batch.reader.processingComplete)await persistBatchProgressNow();
   return {ok:true};
 }
 

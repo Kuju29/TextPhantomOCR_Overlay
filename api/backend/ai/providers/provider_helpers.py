@@ -23,8 +23,9 @@ def invoke_leaf_generate(request: GenerationRequest, generate: Callable):
         response_schema=dict(request.response_schema or {}) or None,
         thinking=request.thinking, cancel_check=request.cancel_check,
         **({"history_messages": request.history_messages} if request.history_messages else {}),
-        **({"workload": dict(request.workload), "model_capabilities": dict(request.model_capabilities)}
-           if request.workload else {}),
+        **({"workload": dict(request.workload)} if request.workload else {}),
+        **({"model_capabilities": dict(request.model_capabilities)}
+           if request.model_capabilities else {}),
     )
 
 def resolve_alias(model: str, aliases: dict[str, str], default: str) -> str:

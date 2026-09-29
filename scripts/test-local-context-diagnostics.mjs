@@ -3,7 +3,7 @@ import {spawnSync} from 'node:child_process';
 import {rejectedBudgetDiagnostic} from '../src/shared/ai/request-diagnostics.js';
 import {note,flushTrace,setTracingEnabled} from '../src/shared/trace.js';
 import '../src/shared/diagnostic-schema.js';
-const rows=['initial','repair'].map(attemptKind=>rejectedBudgetDiagnostic({diagnostics:{constraint:'context_window',estimatedInput:8870,estimatedOutput:100,completionAvailable:0,contextLimit:2048,modelContext:2048,runtimeContext:2048,requestedContext:2048,contextCeiling:2048,contextRequired:9354,contextPolicy:'ollama-request-context-v1',contextReason:'bounded_limit',estimateKind:'script_weight_with_output_calibration'}},{attemptKind,pageUnits:12,operationId:'ai:'+'a'.repeat(32)}));
+const rows=['initial','repair'].map(attemptKind=>rejectedBudgetDiagnostic({diagnostics:{constraint:'context_window',estimatedInput:8870,estimatedOutput:100,completionAvailable:0,contextLimit:2048,modelContext:2048,runtimeContext:2048,requestedContext:2048,contextCeiling:2048,contextRequired:9354,contextPolicy:'ollama-live-model-context-v2',contextReason:'bounded_limit',estimateKind:'script_weight_with_output_calibration'}},{attemptKind,pageUnits:12,operationId:'ai:'+'a'.repeat(32)}));
 const fetch=globalThis.fetch,ships=[];
 try{
  globalThis.fetch=async(_u,init)=>{ships.push(JSON.parse(init.body));return {ok:true,status:200,json:async()=>({ok:true})};};
@@ -38,6 +38,7 @@ with tempfile.TemporaryDirectory() as temp:
   assert row['requestDispatched'] is False and row['requestUnits']==0
   assert row['planned']['contextLimit']==2048 and row['planned']['modelContext']==2048
   assert row['planned']['contextReason']=='bounded_limit'
+  assert row['planned']['contextPolicy']=='ollama-live-model-context-v2'
   assert row['estimateKind']=='script_weight_with_output_calibration'
   assert row['planned']['inputLimit'] is None
  assert 'PRIVATE_TEST' not in text

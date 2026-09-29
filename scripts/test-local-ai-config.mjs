@@ -7,7 +7,16 @@ import { delimiter } from "node:path";
 import { localAiPreset, normalizeLocalAiAdapter, parseLocalAiAdapterJson, serializeLocalAiAdapter, localProviderCatalog, localProviderSpec } from "../src/shared/ai/providers/local-registry.js";
 
 const catalog = localProviderCatalog();
-assert.equal(catalog.length, 10);
+for (const incomplete of [{version:1},{version:1,protocol:'openai'},
+  {version:1,baseUrl:'http://localhost:1234/v1'}])
+  assert.throws(()=>parseLocalAiAdapterJson(JSON.stringify(incomplete)),/explicit protocol and baseUrl/,
+    'Custom Local must not inherit an LM Studio endpoint/protocol');
+for (const incomplete of [{version:1},{version:1,protocol:'openai'},
+  {version:1,baseUrl:'http://localhost:1234/v1'}])
+  assert.throws(()=>normalizeLocalAiAdapter(incomplete,{provider:'customlocal'}),
+    error=>error?.code==='LOCAL_ADAPTER_MISSING',
+    'a malformed saved Custom Local adapter must not inherit an LM Studio preset');
+assert.equal(catalog.length, 9);
 assert.equal(new Set(catalog.map((spec) => spec.id)).size, catalog.length, "provider IDs must be unique");
 for (const spec of catalog) {
   assert.ok(spec.displayName && spec.baseUrl && spec.modelsPath && spec.chatPath && spec.auth && spec.capacity);
@@ -20,14 +29,16 @@ for (const spec of catalog.filter((item) => item.id !== "ollama"))
 const reloaded = await import(`../src/shared/ai/providers/local-registry.js?reload=${Date.now()}`);
 assert.deepEqual(reloaded.localProviderCatalog().map((spec) => spec.id), catalog.map((spec) => spec.id));
 const providerFiles = (await readdir(new URL("../src/shared/ai/providers/", import.meta.url)))
-  .filter((name) => /^local-(?!registry|spec|transport-runtime|openai-compatible).*\.js$/.test(name));
-assert.equal(providerFiles.length, 10, "every named Local AI provider must have one leaf module");
+  .filter((name) => /^local-(?!registry|spec|transport-runtime|openai-compatible|lmstudio-native).*\.js$/.test(name));
+assert.equal(providerFiles.length, 9, "every named Local AI provider must have one leaf module");
+assert.ok((await readFile(new URL("../src/shared/ai/providers/local-lmstudio-native.js", import.meta.url), "utf8")).includes("createLmStudioNativeAdapter"),
+  "the additional LM Studio native transport is owned by its named provider");
 for (const leaf of providerFiles) {
   const source = await readFile(new URL(`../src/shared/ai/providers/${leaf}`, import.meta.url), "utf8");
   assert.doesNotMatch(source, /defineLocalProvider\(\{[^\n]+\}\)/, `${leaf} must remain maintainable provider-owned metadata`);
 }
 
-for (const provider of ["ollama", "lmstudio", "localai", "jan", "textgen", "vllm", "llamacpp"]) {
+for (const provider of ["ollama", "lmstudio", "jan", "textgen", "vllm", "llamacpp"]) {
   const adapter = normalizeLocalAiAdapter(localAiPreset(provider), { provider });
   assert.equal(adapter.protocol, provider === "ollama" ? "ollama" : "openai");
   assert.match(adapter.baseUrl, /^http:\/\/(?:localhost|127\.|10\.|192\.168\.)/);
@@ -245,7 +256,7 @@ assert.match(popupHtml, /option value="minimum" selected/i,
   "Thinking must default to Lowest available until the user chooses another policy");
 const thinkingSelectHtml = popupHtml.match(/<select id="ai-thinking"[\s\S]*?<\/select>/i)?.[0] || "";
 assert.doesNotMatch(thinkingSelectHtml, /option value="default"/i,
-  "Provider default must not be user-selectable; it is an internal fallback only");
+  "Provider default is an internal fallback, not a user choice");
 assert.doesNotMatch(thinkingSelectHtml, /option value="auto"/i,
   "Thinking Auto must not be present in the selector");
 assert.match(popupHtml, /For vision models\. Uses more time and memory/,
@@ -265,10 +276,10 @@ assert.match(popupEvents, /try\s*\{[\s\S]*await pendingEdits[\s\S]*transition = 
 assert.match(popupEvents, /setProviderTransitionPending\(true\)[\s\S]*finally\s*\{[\s\S]*setProviderTransitionPending\(false\)/,
   "translation/provider controls must remain disabled until transition settlement");
 const settingsSource = await readFile(new URL("../src/shared/settings.js", import.meta.url), "utf8");
-assert.match(localConnection, /const saved = savedModel\(\)[\s\S]*setModelOptions\(models/,
+assert.match(localConnection, /const saved = savedModel\(\)[\s\S]*setModelOptions\(localPickerOptions\(provider, models/,
   "a saved Local model must be restored directly into the installed-model picker");
-assert.match(localConnection, /selectedModelVerification[\s\S]*?verification\.status === "passed"/,
-  "a successful explicit connection must require a verified selected model");
+assert.match(localConnection, /selectedModelVerification[\s\S]*?\["passed", "jit_loadable"\]\.includes\(verification\.status\)/,
+  "a successful Local connection must require an exact loaded instance or JIT-eligible model");
 assert.match(localConnection, /state\.localAiCapability\s*=\s*[\s\S]*?response\.capability/,
   "Local discovery capability must be retained for the selected-model hint");
 assert.doesNotMatch(popupSource, /\bisLocalProvider\(/,
@@ -371,7 +382,7 @@ assert.match(llamaCppProviderSource, /POLICY = LocalOpenAIChatPolicy\(/,
 const neutralLocalRuntime = await readFile(
   new URL("../api/backend/ai/providers/local_openai_runtime.py", import.meta.url), "utf8",
 );
-for (const providerId of ["llamacpp", "lmstudio", "localai", "jan", "textgen", "vllm"]) {
+for (const providerId of ["llamacpp", "lmstudio", "jan", "textgen", "vllm"]) {
   assert.doesNotMatch(neutralLocalRuntime, new RegExp(`[\"']${providerId}[\"']`),
     `neutral Local OpenAI runtime must not contain ${providerId} policy`);
 }

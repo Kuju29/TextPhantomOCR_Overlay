@@ -203,6 +203,27 @@ with sync_playwright() as playwright:
     ev('__TP.cancelReaderRun()')
     check('cancelled run rejects late results',ev('__TP.stageReaderInsert(messageFor(1))').get('stale')==True)
     page.close()
+
+    page,ev=setup(mounted=0,canvas=True)
+    page.evaluate('''()=>{document.querySelectorAll('.page-slot').forEach((s,i)=>{
+      s.__reactProps$fixture={page:{url:items[i]}};
+    })}''')
+    # A virtual reader may scroll and replace its page before an observer
+    # delivers a mutation/intersection record. Simulate that missed callback.
+    ev('''window.MutationObserver=class {observe(){} disconnect(){}};
+      window.IntersectionObserver=class {observe(){} unobserve(){} disconnect(){}}''')
+    ev("(async()=>{window.runItems=(await __TP.collectReaderImages('lens_text','th')).items;return runItems.length})()")
+    page.evaluate("document.querySelectorAll('.page-slot')[27].querySelector('canvas').remove()")
+    ev('''window.messageForLast={type:'OVERLAY_HTML',generation:runItems[27].generation,
+      result:{},translationRun:{runId:'translation',generationId:'generation',phase:'initial',revision:1}}''')
+    wait=ev('__TP.stageReaderInsert(messageForLast)')
+    check('unmounted last page stays pending without a false placement receipt',
+          wait.get('pending')==True and ev("calls.placed.includes('28')")==False)
+    page.evaluate("(()=>{const c=document.createElement('canvas');c.width=600;c.height=860;document.querySelectorAll('.page-slot')[27].append(c);document.querySelectorAll('.page-slot')[27].scrollIntoView()})()")
+    page.wait_for_timeout(250)
+    check('fast viewport scroll wakes last page even if observer notifications are missed',
+          ev("calls.placed.includes('28') && calls.events.some(e=>e.type==='TP_READER_PLACED'&&e.pageId==='28')"))
+    page.close()
     browser.close()
 
 failed=[name for name,ok in results if not ok]

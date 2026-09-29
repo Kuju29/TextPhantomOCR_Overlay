@@ -2,6 +2,7 @@ import { createOpenAiCompatibleAdapter } from "./local-openai-compatible.js";
 import { defineLocalProvider } from "./local-spec.js";
 export const localProvider = defineLocalProvider({
   id: "gpt4all",
+  continuationStrategy: "message_replay",
   displayName: "GPT4All",
   protocol: "openai",
   baseUrl: "http://localhost:4891/v1",

@@ -71,8 +71,8 @@ const {
   stored = { rateLimitEnabled: true, rateRpm: 0, rateBurst: 0 };
   const migratedCap = await readFullSettings();
   assert.equal(migratedCap.rateLimitEnabled, true);
-  assert.equal(migratedCap.rateRpm, 30, "enabled legacy zero RPM must use the visible safe default");
-  assert.equal(migratedCap.rateBurst, 4, "enabled legacy zero burst must use the visible safe default");
+  assert.equal(migratedCap.rateRpm, 0, "saved zero RPM must not become a hidden throttle");
+  assert.equal(migratedCap.rateBurst, 0, "saved zero burst must not become a hidden throttle");
   assert.equal(migratedCap.rateProfile, "custom");
 
   stored = { rateLimitEnabled: false, rateRpm: 0, rateBurst: 0 };

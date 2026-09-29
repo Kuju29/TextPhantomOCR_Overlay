@@ -1,4 +1,5 @@
 import { applyProviderKeyLink } from "../provider-key-links.js";
+import { localAiPreset, localProviderWebsite } from "../../shared/ai/providers/local-registry.js";
 import { modelVisionSupport } from "../../shared/page-image-policy.js";
 import {
   normalizeUserReasoningPreference,
@@ -6,24 +7,7 @@ import {
 } from "../../shared/reasoning-preference.js";
 
 
-function replaceReasoningOptions(select, options) {
-  const doc = select?.ownerDocument || globalThis.document;
-  if (typeof select?.replaceChildren === "function" && typeof doc?.createElement === "function") {
-    select.replaceChildren(...options.map(({ value, label }) => {
-      const option = doc.createElement("option");
-      option.value = value;
-      option.textContent = label;
-      return option;
-    }));
-    return;
-  }
-  // Dependency-light test/runtime shims may expose a mutable options array
-  // without a browser Document. Real browser selects always take the path above.
-  if (Array.isArray(select?.options)) {
-    select.options.splice(0, select.options.length,
-      ...options.map(({ value, label }) => ({ value, textContent: label })));
-  }
-}
+import { renderReasoningSelect } from "./reasoning-select.js";
 
 export function reasoningCapabilityForSelection({
   local,
@@ -89,6 +73,11 @@ export function createPopupUiController({
       .toLowerCase();
     const local = isLocalProvider(provider);
     applyProviderKeyLink(els.aiKeyGet, local ? "" : provider);
+    if (els.aiLocalWebsite) {
+      const website = local ? localProviderWebsite(provider) : "";
+      els.aiLocalWebsite.href = website || "#";
+      els.aiLocalWebsite.hidden = !website;
+    }
     const model = String(els.aiModel?.value || state.desiredAiModel || "").trim();
     const reasoning = reasoningCapabilityForSelection({
       local,
@@ -112,6 +101,8 @@ export function createPopupUiController({
     const reasoningSupported =
       reasoning?.supported === true || reasoning?.mandatory === true;
     const thinkingUnknown = reasoning == null || typeof reasoning?.supported !== "boolean";
+    const preset = local && localAiPreset(provider);
+    const runtimeControlsThinking = thinkingUnknown && preset?.protocol === "openai" && !preset.thinking;
     const showAi =
       (els.mode.value || "lens_text") === "lens_text" &&
       (els.sources.value || "") === "ai";
@@ -128,24 +119,10 @@ export function createPopupUiController({
       // allowed to describe what the selected model can execute, but it must
       // never rewrite Off/Low/etc. in the control while the popup is open.
       // The leaf adapter resolves unsupported intent at dispatch time.
-      const requested = normalizeUserReasoningPreference(els.aiThinking.value);
-      const options = reasoningOptionsForCapability(reasoning);
-      const labels = {
-        minimum: "Lowest available", off: "Thinking off", on: "Thinking on",
-        minimal: "Thinking minimal", low: "Thinking low", medium: "Thinking medium",
-        high: "Thinking high", xhigh: "Thinking xhigh", max: "Thinking max", ultra: "Thinking ultra",
-      };
-      const requestedVisible = options.some(option => option.value === requested);
-      const visibleOptions = options.length ? [...options] : [];
-      if (!requestedVisible) visibleOptions.push({
-        value: requested,
-        label: `${labels[requested] || `Thinking ${requested}`} (saved)`,
-      });
-      replaceReasoningOptions(els.aiThinking, visibleOptions);
-      els.aiThinking.value = requested;
+      renderReasoningSelect(els.aiThinking, reasoning);
       // Capability discovery describes execution, never ownership of the user's
       // saved intent. Keep the control editable even when the selected model has
-      // no reasoning support; in that case Off is simply the effective state.
+      // no reasoning support; unsupported selections need a visible error.
       els.aiThinking.disabled = false;
     }
     if (els.aiThinkingHint) {
@@ -154,12 +131,22 @@ export function createPopupUiController({
         ? reasoning.supported_efforts.join(", ") : "";
       const requested = normalizeUserReasoningPreference(els.aiThinking?.value);
       const executable = reasoningOptionsForCapability(reasoning).some(option => option.value === requested);
-      els.aiThinkingHint.textContent = reasoning?.supported === true && !executable && requested !== "minimum"
-        ? `Saved ${requested === "off" ? "Thinking off" : `Thinking ${requested}`}; this model cannot execute that exact mode, so dispatch uses its lowest verified mode without changing your saved choice.`
+      els.aiThinkingHint.textContent = local && provider === "lmstudio" && reasoning?.supported === true && !executable && requested !== "minimum"
+        ? `Saved ${requested === "off" ? "Thinking off" : `Thinking ${requested}`}; LM Studio cannot execute this mode with the selected model. Choose Lowest available or a verified mode before translation.`
+        : reasoning?.supported === true && !executable && requested !== "minimum"
+        ? `Saved ${requested === "off" ? "Thinking off" : `Thinking ${requested}`}; this model cannot verify that exact mode. Translation will report a configuration error instead of silently changing your choice.`
+        : reasoning?.supported === false && !["off", "minimum"].includes(requested)
+        ? `Saved Thinking ${requested}; this model does not support reasoning. Translation will report a configuration error. Choose Thinking off or Lowest available before translation.`
         : reasoning?.supported === false
         ? "This model has no reasoning support. Execution is Off; your saved selection is kept."
+        : local && provider === "ollama" && thinkingUnknown
+          ? "Ollama Thinking controls are not verified. Off and Lowest available try to turn thinking off when permitted; translation reports an error if reasoning is returned. Other levels require verified controls."
+        : runtimeControlsThinking
+          ? "This Local AI adapter cannot verify or set the model's reasoning mode. Lowest available uses the runtime default, which may think; Off requires verified control."
+        : local && thinkingUnknown
+          ? "Local runtime reasoning control is not verified. Lowest available uses the runtime default, which may think; Off requires verified control."
         : thinkingUnknown
-          ? "Reasoning control is not verified yet. Your selected thinking mode is kept; the provider adapter resolves it only when capability is known."
+          ? "TextPhantom checks the selected Cloud model before translation. If Lowest available cannot be verified, translation reports a configuration error; Off and named levels also require verified controls."
           : control === "levels"
             ? `Lowest available is TextPhantom's default; the saved policy is kept. Verified levels${efforts ? `: ${efforts}` : ""}.`
             : ["toggle", "boolean"].includes(control)

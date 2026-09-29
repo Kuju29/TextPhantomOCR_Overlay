@@ -108,6 +108,28 @@ def record_page(run: dict, body: dict) -> dict:
     run["pages"][page]["digest"] = digest
     return {"recorded": True, "replayed": False}
 
+def record_pages(run: dict, body: dict) -> dict:
+    """One bounded transaction, same page validation/idempotency as legacy.
+
+    Must run inside RepairStore.transact: it owns a private working copy and
+    commits only when *all* reports pass, including size/account quotas. This
+    prevents an invalid final page from partially registering earlier pages.
+    """
+    if "pages" not in body:
+        return record_page(run, body)  # old extension/one-page clients
+    rows = body["pages"]
+    if set(body) != {"pages"} or not isinstance(rows, list) or not 1 <= len(rows) <= 32:
+        raise PoolError("invalid_repair_page_batch", 400)
+    if any(not isinstance(row, dict) for row in rows):
+        raise PoolError("invalid_repair_page_batch", 400)
+    ids = [identifier(row.get("pageId")) for row in rows]
+    if len(set(ids)) != len(ids):
+        raise PoolError("duplicate_repair_page", 400)
+    receipts = [record_page(run, row) for row in rows]
+    return {"recorded": True, "pageCount": len(rows),
+            "replayedCount": sum(r["replayed"] for r in receipts)}
+
+
 def seal(run: dict) -> dict:
     check_active(run)
     if len(run["pages"]) != len(run["manifest"]):

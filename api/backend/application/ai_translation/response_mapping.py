@@ -4,6 +4,7 @@ import time
 
 from backend.ai import markers, prompts, wire_trace
 from backend.ai.rategate import rate_gate
+from backend.ai.rate_policy import rate_bucket_identity
 from backend.application import ai_request
 
 RESULT_SCHEMA = "tp.ai.result/1"
@@ -49,7 +50,9 @@ def map_result(*, result: dict, units: list[dict], payload: dict, target_lang: s
                    "rpm": 0, "burst": 0} if unlimited else
                   ({"gated": False, "adaptive": False, "pinned": False,
                     "rpm": 0, "burst": 0, "waiting": 0} if not rate["enabled"] else
-                   rate_gate.snapshot(resolved_provider, config.model, config.api_key)))
+                   rate_gate.snapshot(resolved_provider, config.model,
+                       rate_bucket_identity(rate, base_url=config.base_url, api_key=config.api_key),
+                       manual_local=rate.get("local", False), manual_override=True)))
     body = {
         "schema": RESULT_SCHEMA, "operationId": str(payload.get("operationId") or ""),
         "translations": translations, "missing": missing,
@@ -73,7 +76,8 @@ def map_result(*, result: dict, units: list[dict], payload: dict, target_lang: s
             "upstreamProvider": meta.get("upstream_provider") or "",
             "alignmentUncertainIds": list(meta.get("alignment_uncertain_ids") or []),
             "alignmentStatus": meta.get("alignment_status", "not_semantically_verified"),
-            "contractDiagnostics": {"formattingWhitespaceChars":meta.get("formatting_whitespace_chars",0),
+            "contractDiagnostics": {"redundantClosingDelimiterChars":meta.get("redundant_closing_delimiter_chars",0),
+                "formattingWhitespaceChars":meta.get("formatting_whitespace_chars",0),
                 "unexpectedProseChars":meta.get("unexpected_prose_chars",0), "duplicateIds": meta.get("duplicate_output_ids") or [],
                 "ignoredUnknownIds": meta.get("ignored_output_ids") or [],
                 "malformedMarkerIds": ["unknown"] if meta.get("malformed_output_record_count") else []},

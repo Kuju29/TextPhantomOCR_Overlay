@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { translateWithLocalOpenAi as translateRaw } from "../src/shared/ai/direct-local/generation.js";
-const translateWithLocalOpenAi = (units, options = {}) => translateRaw(units, { targetLang: "th", ...options, ai: { prompt: "full style", promptMode: "replace", ...(options.ai || {}) } });
+const translateWithLocalOpenAi = (units, options = {}) => translateRaw(units, { targetLang: "th", ...options, ai: { prompt: "full style", promptMode: "replace", thinking: "default", ...(options.ai || {}) } });
 
 const prompt = { version: "translation-plan-2", pieces: { systemPolicy: "Translate.", editableStyle: "Target language: Thai", targetLanguageInstruction: "Target language: Thai (ภาษาไทย).", sourceInputContract: "Read marker records.", imageHint: "Use image context.", structuredOutputContract: "Return strict JSON.", markerOutputContract: "markers", seriesNotesHeading: "SERIES NOTES" } };
 const units = [{ id: "bubble-a", text: "APPLE" }, { id: "bubble-b", text: "BANANA" }, { id: "bubble-c", text: "CHERRY" }];

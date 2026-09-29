@@ -13,6 +13,8 @@ import { translateUnits } from '../ai/translation-service.js';
 import { diagnoseTargetScripts } from '../ai/script-diagnostics.js';
 import { repairRequest } from './client.js';
 import { pageImageEnabled } from '../../shared/page-image-policy.js';
+import {independentExampleStore as defaultIndependentExampleStore, verifiedIndependentPairs} from '../ai/independent-example-store.js';
+import {planIndependentExamples} from '../ai/independent-example-budget.js';
 
 const cancelled = signal => {
   if (signal?.aborted) throw new DOMException('Repair cancelled', 'AbortError');
@@ -81,6 +83,7 @@ export async function accountRecoveredRepair(run, task, answer, persist = persis
 export async function executeRepairPool({ run, snapshot, executor, signal, getPage, resolveAi,
   checkpointTask, readTask = async () => null, onProgress, applyResults, withCapacity, capabilities,
   api = repairRequest, translate = translateUnits, planner = workloadController,
+  independentExamples = defaultIndependentExampleStore,
   receiptPollBudgetMs = 60_000, receiptPollIntervalMs = 1_500,
 }) {
   const profiles = new Map();
@@ -122,6 +125,27 @@ export async function executeRepairPool({ run, snapshot, executor, signal, getPa
       accepted, ...(task.route === 'direct-local' ? { answer } : {}),
     }, { signal });
     await checkpointTask({ id: task.id, state: 'done' });
+    if (page.route === 'direct-local' && page.ai?.translation_mode === 'independent' &&
+        page.ai.style_examples !== false) {
+      const acceptedRows = (answer?.translations || []).filter(row => acceptedSet.has(String(row.id)));
+      const learned = verifiedIndependentPairs(task.units,
+        {...answer,translations:acceptedRows},
+        {missing:task.units.filter(row=>!acceptedSet.has(String(row.id))).map(row=>row.id),
+          wrongLanguage:wrongLanguageIds},page.targetLang);
+      if (learned.length) {
+        try { await independentExamples.append(page.ai.independent_scope,learned); }
+        catch (error) {
+          // The repair ACK is already durable. Never reinterpret an accepted
+          // provider answer as a failed task because auxiliary history is full.
+          diagnosticNote('background/repair/executor.js','independentExamples',{
+            schema:'tp.audit/1',event:'independent_examples',examplePhase:'after_checkpoint',
+            exampleStorage:'write_failed',sampleCandidates:learned.length,
+            scope:{runId:run.id,batchId:run.batchId}},run.id);
+          onProgress({phase:'repair_request',event:'example_store_failed',taskId:task.id,
+            unitCount:task.units.length,code:String(error?.code || 'independent_examples_storage_unavailable')});
+        }
+      }
+    }
     return next;
   }
 
@@ -205,14 +229,20 @@ export async function executeRepairPool({ run, snapshot, executor, signal, getPa
     const conversationRepair = resolvedAi?.translation_mode === "conversation";
     const prepareRepairWire = units => prepareConversationRepairWire(pages, units, conversationRepair);
     let baseAi = { ...resolvedAi, page_context: [], repair_reason: '', conversation: {...(resolvedAi.conversation || {}), branch:'repair'} };
+    const independentScope = page.route === 'direct-local' && baseAi.translation_mode === 'independent'
+      ? baseAi.independent_scope || {key:'',scopeStatus:'unscoped'} : null;
+    if (independentScope) baseAi.independent_examples = await independentExamples.select(
+      independentScope,page.targetLang,baseAi.style_examples !== false);
     let workloadSession = profiles.get(groupKey);
-    if (!workloadSession) {
+    const mutableLocalWindow = page.route === 'direct-local' &&
+      ['lmstudio','ollama'].includes(String(baseAi.provider || '').toLowerCase());
+    if (!workloadSession || mutableLocalWindow) {
       workloadSession = await planner.open({ ai: { ...baseAi, repair_reason: "wrong_target_script" }, route: page.route, sourceLang: page.sourceLang,
         targetLang: page.targetLang, image: pageImageEnabled(baseAi.send_image), phase: "repair", sourceContextForUnits });
       profiles.set(groupKey, workloadSession);
     }
     if (workloadSession.ai) baseAi = { ...workloadSession.ai, repair_reason: '' };
-    value = { groupKey, page, baseAi, workloadSession, sourceContextForUnits, conversationRepair, prepareRepairWire,
+    value = { groupKey, page, baseAi, workloadSession, sourceContextForUnits, conversationRepair, prepareRepairWire, independentScope,
       orderUnits: units => orderRepairUnits(pages, units) };
     groupContexts.set(groupKey, value);
     return value;
@@ -270,6 +300,8 @@ export async function executeRepairPool({ run, snapshot, executor, signal, getPa
 
     const workload = { version: 1, predictedOutput: estimate.predictedOutput,
       reasoningReserve: estimate.reasoningReserve, estimatedInput: estimate.estimatedInput,
+      inputEstimateScale: estimate.inputEstimateScale, inputSampleCount: estimate.inputSampleCount,
+      inputUnverified: estimate.inputUnverified,
       completionAvailable: estimate.completionAvailable, limits: estimate.limits };
     let answer;
     try {
@@ -319,7 +351,8 @@ export async function executeRepairPool({ run, snapshot, executor, signal, getPa
       const latestTask = latest.tasks.find(x => x.id === taskId);
       if (latestTask?.state === 'answered') answer = latestTask.answer;
       else if (['failed', 'unknown', 'done'].includes(latestTask?.state)) return { groupKey, taskId, outcome: observed?.outcome || 'failed',
-        billingFailure:isProviderBillingFailure(error), capacityFailure: capacityCode(error?.code) || ['length','structure'].includes(observed?.outcome), code: String(error?.code || '') };
+        billingFailure:isProviderBillingFailure(error), capacityFailure: capacityCode(error?.code) || ['length','structure'].includes(observed?.outcome),
+        hardFailure: error?.code === 'local_model_identity_mismatch', code: String(error?.code || '') };
       else if (latestTask?.state === 'running' && page.route === 'server') {
         throw Object.assign(new Error('Cloud repair is still running; its receipt can be resumed'), { code: 'repair_receipt_pending' });
       } else {
@@ -330,6 +363,7 @@ export async function executeRepairPool({ run, snapshot, executor, signal, getPa
         return { groupKey, taskId, outcome: observed?.outcome || 'failed',
           billingFailure:isProviderBillingFailure(error),
           capacityFailure: capacityCode(error?.code) || ['length','structure'].includes(observed?.outcome),
+          hardFailure: error?.code === 'local_model_identity_mismatch',
           code: String(error?.code || 'repair_generation_failed') };
 
       }
@@ -386,6 +420,13 @@ export async function executeRepairPool({ run, snapshot, executor, signal, getPa
   while ((snapshot.pending || []).length) {
     cancelled(signal);
     waveIndex += 1;
+    // A Local runtime may have been resized since the prior repair wave.
+    // Retain the existing Cloud and other provider group contexts unchanged.
+    for (const [key, context] of groupContexts) {
+      if (context.page.route === 'direct-local' &&
+          ['lmstudio','ollama'].includes(String(context.baseAi.provider || '').toLowerCase()))
+        groupContexts.delete(key);
+    }
     if (waveIndex > 4096) throw Object.assign(new Error('Repair planner did not converge'), { code: 'repair_planner_stalled' });
 
     // Groups whose provider repeatedly exhausted/invalidated output are closed
@@ -407,23 +448,58 @@ export async function executeRepairPool({ run, snapshot, executor, signal, getPa
       let remaining = pending.filter(row => row.groupKey === groupKey);
       if (!remaining.length) continue;
       const context = await groupContext(groupKey, remaining);
-      if (context.conversationRepair) remaining = context.orderUnits(remaining);
-      const plansPerWave = context.conversationRepair ? 1 : MAX_PLANS_PER_GROUP_WAVE;
+      if (context.independentScope && context.baseAi.style_examples !== false) {
+        const selection = await independentExamples.select(context.independentScope,context.page.targetLang,true);
+        context.workloadSession.setIndependentExamples(selection);
+        context.baseAi = {...context.baseAi,independent_examples:selection};
+      }
+      if (context.conversationRepair || context.independentScope) remaining = context.orderUnits(remaining);
+      const plansPerWave = context.conversationRepair || (context.independentScope && context.baseAi.style_examples !== false) ? 1 : MAX_PLANS_PER_GROUP_WAVE;
       for (let planIndex = 0; planIndex < plansPerWave && remaining.length; planIndex++) {
+        const localIndependent = context.independentScope && context.baseAi.translation_mode === 'independent';
+        // Only units with the same instruction enter a Local Independent plan.
+        // The estimator and dispatched prompt must use the same repair reason.
+        const firstWrong = remaining[0]?.reason === 'wrong_language';
+        const nextReason = remaining.findIndex(row =>
+          (row.reason === 'wrong_language') !== firstWrong);
+        // The pool claim contract limits each task to 200 IDs, independently
+        // of model/context capacity. Bound BEFORE estimating so wire and budget
+        // cover exactly the same units (including non-Local conversation work).
+        const candidateRows = (localIndependent
+          ? remaining.slice(0, nextReason < 0 ? remaining.length : nextReason)
+          : remaining).slice(0, 200);
+        if (localIndependent) context.workloadSession.setRepairReason(
+          firstWrong ? 'wrong_target_script' : '');
         let chunk, preflightError;
-        try { chunk = context.conversationRepair
-          ? context.workloadSession.nextRepair(remaining, context.sourceContextForUnits)
-          : context.workloadSession.next(remaining, 0); }
-        catch (error) { chunk = { units: [remaining[0]], estimate: {} }; preflightError = error; }
+        let planExamples = context.baseAi.independent_examples;
+        try {
+          if (context.conversationRepair)
+            chunk=context.workloadSession.nextRepair(candidateRows, context.sourceContextForUnits);
+          else if (context.independentScope && context.baseAi.style_examples !== false) {
+            const examplesPlan=planIndependentExamples(context.workloadSession,candidateRows,0,
+              context.baseAi.independent_examples);
+            chunk=examplesPlan.chunk;
+            planExamples=examplesPlan.selection;
+            diagnosticNote('background/repair/executor.js','independentExamples',{
+              schema:'tp.audit/1',event:'independent_examples',examplePhase:'selected',
+              exampleSource:examplesPlan.selection.source,
+              availableExamplePairs:examplesPlan.availableExamplePairs,
+              includedExamplePairs:examplesPlan.includedExamplePairs,
+              exampleScope:examplesPlan.selection.scopeStatus || 'unscoped',
+              exampleStorage:examplesPlan.selection.storageStatus || 'ready',
+              batchId:run.batchId},run.id);
+          } else chunk=context.workloadSession.next(candidateRows,0);
+        }
+        catch (error) { chunk = { units: [candidateRows[0]], estimate: {} }; preflightError = error; }
         let units = Array.isArray(chunk?.units) && chunk.units.length ? chunk.units : [remaining[0]];
-        const remainingIds = new Set(remaining.map(row => row.id));
+        const remainingIds = new Set(candidateRows.map(row => row.id));
         units = units.filter(row => remainingIds.has(row?.id));
         if (!units.length) units = [remaining[0]];
         const selected = new Set(units.map(row => row.id));
         const repairReason = units.some(row => row.reason === 'wrong_language') ? 'wrong_target_script' : '';
         const wire = context.prepareRepairWire(units);
         plans.push({ ...context, page: context.page, wire,
-          ai: { ...context.baseAi, repair_reason: repairReason, source_context: wire.sourceContext,
+          ai: { ...context.baseAi, independent_examples:planExamples, repair_reason: repairReason, source_context: wire.sourceContext,
             conversation: {...(context.baseAi.conversation || {}), branch:"repair", origins:wire.origins} }, units:wire.taskUnits,
           estimate: chunk?.estimate || {}, splitReason:chunk.splitReason, poolUnits:remaining.length, preflightError });
         remaining = remaining.filter(row => !selected.has(row.id));
@@ -442,7 +518,8 @@ export async function executeRepairPool({ run, snapshot, executor, signal, getPa
     if (fatal) { await flushRepairEvidence(); throw fatal.reason; }
     for (const result of settled.map(item => item.value).filter(Boolean)) {
       const current = groupCircuits.get(result.groupKey) || { consecutive: 0, open: false };
-      if (result.capacityFailure) current.reason = result.hardFailure || result.outcome === 'length'
+      if (result.code === 'local_model_identity_mismatch') current.reason = 'local_model_identity_mismatch';
+      else if (result.capacityFailure) current.reason = result.hardFailure || result.outcome === 'length'
         ? 'repair_capacity_circuit_open' : 'repair_reliability_circuit_open';
       if (result.billingFailure) {
         current.reason = "billing_required";

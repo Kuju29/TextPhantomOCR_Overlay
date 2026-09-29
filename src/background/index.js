@@ -1,3 +1,4 @@
+import { readDownloadImage, cancelDownloadRead, cancelTabDownloadReads } from "./download-images.js";
 import { handleReaderReceipt } from "./reader-events.js";
 import { recentDiagnostic, clearRecentDiagnostics } from "./ai/recent-diagnostics.js";
 import { repairCoordinator } from "./repair/coordinator.js";
@@ -205,6 +206,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  cancelTabDownloadReads(tabId);
   const active = batchesForTab(tabId).filter(batch => batch.reader && !batch.cancelled);
   if (active.length) log.warn('reader cancellation trigger', {
     source:'tab_closed',tabId,runIds:active.map(batch=>batch.reader.runId),
@@ -228,6 +230,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const type = String(msg?.type || "");
 
   switch (type) {
+    case "TP_DOWNLOAD_READ_SOURCE":
+      readDownloadImage(msg,sender).then(sendResponse);
+      return true;
+    case "TP_DOWNLOAD_CANCEL_READ":
+      sendResponse(cancelDownloadRead(msg,sender));
+      return true;
     case "TP_READER_PLACED":
     case "TP_READER_PLACEMENT_FAILED":
     case "TP_READER_CANCELLED":

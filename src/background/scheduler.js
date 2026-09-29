@@ -39,6 +39,7 @@ const AI_LEARNING_MAX_ENTRIES = 128;
 let learningCache = null;
 let learningLoadPromise = null;
 let learningGeneration = 0;
+let learningPersistTail = Promise.resolve();
 
 const lanes = new Map();
 let diagnosticLaneSequence = 0;
@@ -87,6 +88,7 @@ function makeLane(key) {
     learnedWindow: 0,
     learnedUpdatedAt: 0,
     lastPersistedWindow: 0,
+    lastPersistedCooldown: 0,
     // Fresh lanes without a server capacity hint still use slow start. Once
     // a provider has pushed back we permanently switch this lane to additive
     // recovery, so a recovered key never jumps straight back into the overload
@@ -138,10 +140,12 @@ export function setLocalCapacityPolicy(key, config = {}) {
   const evidence = Math.max(0, Number(config.evidence) || 0);
   const samePolicy =
     l.localCapacity?.mode === mode &&
+    l.localCapacity?.provider === String(config.provider || '') &&
     l.localCapacity?.evidence === evidence &&
     l.localCapacity?.ceiling === ceiling;
   l.localCapacity = {
     mode,
+    provider:String(config.provider || ''),
     evidence,
     ceiling,
     capacitySource: String(config.capacitySource || "user_selected"),
@@ -232,6 +236,15 @@ export function restoredLocalAutoLearning(saved, ceiling) {
     : { valid:false, window:MIN_WINDOW, latencyMs:0, score:0 };
 }
 
+// A suspected LM Studio parallel stream abort is capacity evidence, even
+// though it contains no valid latency sample. Preserve only its bounded
+// one-slot cooldown across a service-worker restart, never another provider's.
+export function restoredLocalParallelCooldown(saved, provider) {
+  return provider === 'lmstudio' && saved?.localParallelStreamCooldown === true &&
+    Number(saved?.localAutoVersion) === LOCAL_AUTO_LEARNING_VERSION &&
+    Number(saved?.window) === MIN_WINDOW;
+}
+
 async function ensureLearningLoaded(l) {
   if (l.learningLoaded) return;
   l.learningLoaded = true;
@@ -250,6 +263,16 @@ async function ensureLearningLoaded(l) {
   // because the service worker/browser restarted.
   if (saved?.slowStart === false) l.slowStart = false;
   if (l.localCapacity?.mode === "auto") {
+    if (restoredLocalParallelCooldown(saved, l.localCapacity.provider)) {
+      l.window = MIN_WINDOW;
+      l.localAuto = {bestWindow:MIN_WINDOW,bestLatencyMs:0,bestScore:0,
+        probeWindow:MIN_WINDOW,probeSamples:0,probeTotalMs:0,
+        stable:true,cooldownSuccesses:Math.min(LOCAL_AUTO_REPROBE_SUCCESSES-1,
+          Math.max(0,Math.floor(Number(saved.localParallelStreamSuccesses)||0))),
+        parallelStreamCooldown:true};
+      auditCapacity(l,"stored_parallel_stream_cooldown");
+      return;
+    }
     const restored = restoredLocalAutoLearning(saved, effectiveMax(l));
     if (!restored.valid) {
       // Pre-.54 Local Auto learned from successful completions alone. Those
@@ -297,26 +320,35 @@ function persistLearning(l, { force = false } = {}) {
     MIN_WINDOW,
     Math.floor(Math.min(learnedCandidate, effectiveMax(l))),
   );
-  if (!force && safe === l.lastPersistedWindow) return;
+  const cooling = l.localCapacity?.mode === 'auto' && l.localAuto?.parallelStreamCooldown === true;
+  const cooldownSuccesses = cooling ? Math.max(0,Math.floor(l.localAuto.cooldownSuccesses||0)) : 0;
+  if (!force && safe === l.lastPersistedWindow &&
+      (!cooling || cooldownSuccesses === l.lastPersistedCooldown)) return;
   l.lastPersistedWindow = safe;
+  l.lastPersistedCooldown = cooldownSuccesses;
   l.learnedWindow = safe;
   l.learnedUpdatedAt = Date.now();
   const generation = learningGeneration;
-  void loadLearningCache()
-    .then((cache) => {
-      if (generation !== learningGeneration) return undefined;
-      cache[l.key] = {
-        window: safe,
-        updatedAt: l.learnedUpdatedAt,
-        slowStart: l.slowStart !== false,
-        ...(l.localCapacity?.mode === "auto" ? {
-          localAutoVersion: LOCAL_AUTO_LEARNING_VERSION,
-          localBestLatencyMs: Math.max(0, Math.round(Number(l.localAuto?.bestLatencyMs) || 0)),
-          localBestScore: Math.max(0, Number(l.localAuto?.bestScore) || 0),
-        } : {}),
-      };
+  // Freeze the decision now; a later completion or policy switch cannot
+  // rewrite this earlier storage entry. Serialize writes to the one storage
+  // record so an older callback cannot win after a newer cooldown update.
+  const entry = {
+    window:safe,updatedAt:l.learnedUpdatedAt,slowStart:l.slowStart !== false,
+    ...(l.localCapacity?.mode === 'auto' ? {
+      localAutoVersion:LOCAL_AUTO_LEARNING_VERSION,
+      localBestLatencyMs:Math.max(0,Math.round(Number(l.localAuto?.bestLatencyMs)||0)),
+      localBestScore:Math.max(0,Number(l.localAuto?.bestScore)||0),
+      ...(cooling ? {localParallelStreamCooldown:true,
+        localParallelStreamSuccesses:cooldownSuccesses} : {}),
+    } : {}),
+  };
+  learningPersistTail = learningPersistTail.catch(() => {}).then(async () => {
+      if (generation !== learningGeneration) return;
+      const cache = await loadLearningCache();
+      if (generation !== learningGeneration) return;
+      cache[l.key] = entry;
       pruneLearning(cache);
-      return setStorage({ [AI_LEARNING_STORAGE_KEY]: cache });
+      await setStorage({ [AI_LEARNING_STORAGE_KEY]: {...cache} });
     })
     .catch(() => {});
 }
@@ -475,8 +507,11 @@ function localAutoSuccess(l, latency) {
         pump(l, "local_stable_capacity");
         return;
       }
+      const resumedParallelProbe = state.parallelStreamCooldown === true;
+      state.parallelStreamCooldown = false;
       state.stable = false;
       state.cooldownSuccesses = 0;
+      if (resumedParallelProbe) persistLearning(l, {force:true});
     }
     if (current < cap) {
       l.window = current + 1;
@@ -609,11 +644,12 @@ export function releaseReplay(key) {
 // Returns a slot after REAL provider backpressure, halving the provider window
 // and pausing this exact provider/model/key lane for Retry-After. Server_busy
 // must use releaseDeferred instead: it says nothing about provider capacity.
-export function releaseRejected(key, retryAfterMs = 0) {
+export function releaseRejected(key, retryAfterMs = 0, reason = "provider_backpressure") {
   const l = lane(key);
   if (consumeResetRelease(l)) return;
   l.running = Math.max(0, l.running - 1);
-  l.stats.rejected++;
+  if (reason === 'local_parallel_stream_abort') l.stats.failed++;
+  else l.stats.rejected++;
   if (l.unlimited) return;
   l.window = Math.max(MIN_WINDOW, l.window * BACKOFF_FACTOR);
   l.backpressured = true;
@@ -628,11 +664,14 @@ export function releaseRejected(key, retryAfterMs = 0) {
     l.localAuto.stable = true;
     l.localAuto.cooldownSuccesses = 0;
     resetLocalProbe(l, safe);
+    if (reason === 'local_parallel_stream_abort')
+      l.localAuto.parallelStreamCooldown = true;
   }
   const pause = Number(retryAfterMs) || 0;
   if (pause > 0) l.pausedUntil = Math.max(l.pausedUntil, Date.now() + pause);
   persistLearning(l, { force: true });
-  pump(l,"provider_backpressure");
+  pump(l,reason,reason === 'local_parallel_stream_abort'
+    ? {validatorSubtype:'provider_terminal_missing', overlapping:true} : null);
 }
 
 // Returns a slot rejected by TextPhantom admission before provider generation.
@@ -707,6 +746,20 @@ export function releaseLocalFailure(key, error, retryAfterMs = 0) {
   if (status === 429 || status === 503 || isLocalCapacityFailure(error)) {
     releaseRejected(key, 0);
     return "rejected";
+  }
+  // LM Studio may return HTTP 200, generate reasoning, then close both streams
+  // without chat.end when its parallel engine cannot keep the slots alive.
+  // A missing terminal alone does not prove memory pressure; narrow Auto only
+  // when this exact runtime had overlapping generations at failure time.
+  // Manual is the user's explicit concurrency choice and remains untouched.
+  const l = lane(key);
+  if (key.startsWith('ai-local:') && l.localCapacity?.provider === 'lmstudio' &&
+      l.localCapacity?.mode === 'auto' &&
+      l.running > 1 && error?.requestDispatched === true &&
+      error?.providerResponded === true && error?.code === 'provider_protocol_error' &&
+      error?.diagnostics?.validatorSubtype === 'provider_terminal_missing') {
+    releaseRejected(key, 0, 'local_parallel_stream_abort');
+    return 'rejected';
   }
   releaseFailed(key);
   return "failed";
@@ -832,6 +885,7 @@ export function resetAdaptiveLearning() {
     l.learnedWindow = 0;
     l.learnedUpdatedAt = 0;
     l.lastPersistedWindow = 0;
+    l.lastPersistedCooldown = 0;
     l.backpressured = false;
     l.slowStart = true;
     l.recoverySuccesses = 0;

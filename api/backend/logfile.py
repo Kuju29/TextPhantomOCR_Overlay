@@ -6,7 +6,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-import os, json, threading, time
+import os, json, re, threading, time
+from urllib.parse import urlsplit
 
 # Thailand is UTC+7 year-round; matching backend.log keeps the two readable
 # side by side without mental arithmetic.
@@ -54,29 +55,60 @@ def _prune() -> None:
 def _secret_key(key: Any) -> bool:
     lowered = str(key).strip().lower()
     return (
+        lowered in {"key", "passwd", "pwd", "api-key", "x-api-key"}
+        or
         any(marker in lowered for marker in _SECRET_KEYS)
         or lowered == "sig"
         or lowered.startswith("x-amz-")
         or lowered.startswith("x-goog-")
     )
 
+def _log_origin(value: Any) -> str:
+    """Keep a useful host while dropping a page URL's path and credentials."""
+    if not isinstance(value, str):
+        return ""
+    try:
+        url = urlsplit(value)
+        host = url.hostname
+        port = url.port
+        if not url.scheme or not host:
+            return ""
+        name = f"[{host}]" if ":" in host else host
+        return f"{url.scheme}://{name}{':' + str(port) if port is not None else ''}"
+    except ValueError:
+        return ""
+
+def _mask_private_url(match: re.Match[str]) -> str:
+    raw = match.group(0)
+    url = raw.rstrip(".,);]")
+    trailing = raw[len(url):]
+    origin = _log_origin(url)
+    if not origin:
+        return "<redacted-url>" + trailing
+    # Query names cannot prove their values are safe; paths can carry signed IDs.
+    return origin + ("/<redacted-path>" if url != origin else "") + trailing
+
 def sanitize(value: Any) -> Any:
     """Redact credentials recursively and truncate oversized strings."""
     if isinstance(value, str):
         # Credentials sometimes appear in exception URLs (notably Gemini's
         # ``?key=``). Redaction at the sink protects every present/future caller.
-        import re
+        value = re.sub(r"(?i)(?:https?|wss?|file)://[^\s\"'<>]+", _mask_private_url, value)
         value = re.sub(
-            r"(?i)(authorization:\s*bearer\s+|bearer\s+|[?&](?:key|api_key|token|signature|sig|policy|x-amz-[^=&\s]+|x-goog-[^=&\s]+)=)[^\s&,]+",
+            r"(?i)(authorization:\s*bearer\s+|bearer\s+|\b(?:password|passwd|pwd|api[_-]?key|access[_-]?token|refresh[_-]?token|cookie|secret|token|key|signature|sig|policy)=)[^\s&,\"'<>]+",
             lambda m: m.group(1) + "<redacted>", value,
         )
+        value = re.sub(r"(?i)(https?://)[^/?#@\s]+@", r"\1<redacted>@", value)
+        value = re.sub(r"([?&][^\s?&#=]{1,80}=)[^\s&#\"'<>]+",
+                       lambda m: m.group(1) + "<redacted>", value)
         if len(value) > _MAX_VALUE_CHARS:
             return value[:_MAX_VALUE_CHARS] + f"…(+{len(value) - _MAX_VALUE_CHARS} chars)"
         return value
     if isinstance(value, dict):
         return {
             k: (v if k in _USAGE_COUNTS and (v is None or type(v) in (int, float))
-                else "<redacted>" if _secret_key(k) else sanitize(v))
+                else "<redacted>" if _secret_key(k)
+                else _log_origin(v) if str(k).lower() == "href" else sanitize(v))
             for k, v in value.items()
         }
     if isinstance(value, list):

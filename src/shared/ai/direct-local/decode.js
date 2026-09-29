@@ -257,7 +257,7 @@ function decodeStrictRecords(raw, units, wireUnits) {
     for (const frame of stack) islandInvalidIds.add(frame.id);
     for (const [id] of pending) islandInvalidIds.add(id);
   };
-  let formattingWhitespaceChars = 0, unexpectedProseChars = 0;
+  let formattingWhitespaceChars = 0, unexpectedProseChars = 0, redundantClosingDelimiterChars = 0;
   let at = 0;
   while (at < source.length) {
     if (source.startsWith("<<>>", at) && stack.length) {
@@ -331,7 +331,17 @@ function decodeStrictRecords(raw, units, wireUnits) {
       at += 2;
       if (!stack.length) {
         if (islandInvalid) malformedClaims.push(...islandInvalidIds, ...pending.map(([id]) => id));
-        else parsed.push(...pending);
+        else {
+          parsed.push(...pending);
+          // Only a single surplus closer on an otherwise owned closed line.
+          // Match the server decoder; arbitrary prose/unknown/nested records
+          // remain invalid and are not permitted into Conversation history.
+          if (pending.length === 1 && expected.includes(frame.id) &&
+              /^>[ \t]*(?:\r?\n|\r|$)/u.test(source.slice(at))) {
+            at += 1;
+            redundantClosingDelimiterChars++;
+          }
+        }
         pending = [];
         islandInvalid = false;
         islandInvalidIds = new Set();
@@ -381,7 +391,7 @@ function decodeStrictRecords(raw, units, wireUnits) {
       ignoredUnknownIds: extraIds,
       ignoredProse: ignoredProseChars > 0,
       ignoredProseChars: Math.max(0, ignoredProseChars),
-      formattingWhitespaceChars, unexpectedProseChars,
+      formattingWhitespaceChars, unexpectedProseChars, redundantClosingDelimiterChars,
     },
   };
 }

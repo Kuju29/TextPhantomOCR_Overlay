@@ -10,6 +10,7 @@ const make = (answers, extra = {}) => {
   const calls = [];
   const result = { lensDocument: { languages: { source: "ja" } }, eraseBoxes: [] };
   const dependencies = {
+    refreshLocalAiCapabilities: async ai => ai,
     requireAiLensDocument: (value) => value.lensDocument,
     translationUnits: () => units,
     requireTranslationConservation: () => ({

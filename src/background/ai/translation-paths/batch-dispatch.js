@@ -8,21 +8,29 @@ import {createAiWireRecorder,aiWireTraceEnabled} from '../wire-trace.js';
 import {budgetDiagnostic,resultDiagnostic} from '../../../shared/ai/request-diagnostics.js';
 import {rememberDiagnostic} from '../recent-diagnostics.js';
 import {withRequestSlot} from './request-slot.js';
+import {refreshLocalAiCapabilities} from '../../local-ai-preflight.js';
 
 const trace=(data,o)=>o.trace?.('conversationBatch',data,o.traceId);
+export async function planConversationReady(rows,o,{
+  refresh=refreshLocalAiCapabilities,open=workloadController.open,
+}={}) {
+  // A READY page may wait while the user reloads the exact same Local model
+  // with a different window. Refresh before selecting units and carry this
+  // snapshot through the matching transport; never plan from page-submission
+  // settings or a five-minute UI snapshot.
+  const planningAi=await refresh(o.ai,o.route,{signal:o.signal,traceId:o.traceId});
+  const session=await open({ai:planningAi,route:o.route,sourceLang:o.sourceLang,targetLang:o.targetLang,
+    image:!!o.imageDataUri,pageUnits:[],wholePageFirst:false,phase:'initial'});
+  try{return {...session.nextReady(rows,o.conversationPageSizes||[],{
+    continuation:o.conversationContinuation===true,
+    cacheConfirmed:o.conversationCacheConfirmed===true,
+    cacheRatio:Number(o.conversationCacheRatio)||0,
+    cacheMissStreak:Number(o.conversationCacheMissStreak)||0,
+    previousUnitCount:Number(o.conversationPreviousUnitCount)||0,
+    previousTurnMs:Number(o.conversationPreviousTurnMs)||0}),session};}catch(e){await session.flush();throw e;}
+}
 const queue=createReadyQueue({trace,
-  async choose(rows,o) {
-    const planningAi=o.ai;
-    const session=await workloadController.open({ai:planningAi,route:o.route,sourceLang:o.sourceLang,targetLang:o.targetLang,
-      image:!!o.imageDataUri,pageUnits:[],wholePageFirst:false,phase:'initial'});
-    try{return {...session.nextReady(rows,o.conversationPageSizes||[],{
-      continuation:o.conversationContinuation===true,
-      cacheConfirmed:o.conversationCacheConfirmed===true,
-      cacheRatio:Number(o.conversationCacheRatio)||0,
-      cacheMissStreak:Number(o.conversationCacheMissStreak)||0,
-      previousUnitCount:Number(o.conversationPreviousUnitCount)||0,
-      previousTurnMs:Number(o.conversationPreviousTurnMs)||0}),session};}catch(e){await session.flush();throw e;}
-  },
+  choose:planConversationReady,
   async dispatch(units,o,p) {
     const scope={operationId:p.batchId,profileId:p.session.key.slice(0,16),pageUnits:units.length};
     const budget=budgetDiagnostic(p,scope);budget.wholePage=false;
@@ -36,7 +44,9 @@ const queue=createReadyQueue({trace,
     try {
       const estimate=p.estimate;
       const workload={version:1,predictedOutput:estimate.predictedOutput,reasoningReserve:estimate.reasoningReserve,
-        estimatedInput:estimate.estimatedInput,completionAvailable:estimate.completionAvailable,limits:estimate.limits};
+        estimatedInput:estimate.estimatedInput,inputEstimateScale:estimate.inputEstimateScale,
+        inputSampleCount:estimate.inputSampleCount,inputUnverified:estimate.inputUnverified,
+        completionAvailable:estimate.completionAvailable,limits:estimate.limits};
       const ai={...p.session.ai,workload,page_context:[],conversation:{...o.ai.conversation,
         planner:'conversation_cross_page',batchId:p.batchId,origins:p.origins}};
       await recorder?.('units',units);

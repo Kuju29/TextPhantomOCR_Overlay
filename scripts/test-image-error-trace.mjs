@@ -146,6 +146,56 @@ assert.equal(isPermanentSemanticGroupingFailure(
   assert.equal(finalized,1,"batch recovery still starts after deferring terminal UI");
 }
 
+// A partial initial image is normal input for a registered repair round. The
+// reader must not stage a top-left notice and replay it on a later mount.
+// Without an active repair owner, keep the existing incomplete-image notice.
+async function deliverPartial({ repairOwned, reader }) {
+  const imageKey = "https://example/partial.jpg";
+  const batchId = "batch-partial";
+  const jobId = "job-partial";
+  const notices = [];
+  const item = { presentation: { repairPhase: repairOwned ? "collecting" : "unavailable" } };
+  const batch = { id: batchId, repair: { phase: repairOwned ? "collecting" : "unavailable" },
+    items: new Map([[imageKey, item]]) };
+  const ctx = { batchId, imageKey, imgUrl:imageKey,tabId:7,frameId:0,sessionId:"session-1",
+    source:"ai",mode:"lens_text",metadata:{batch_id:batchId,image_id:imageKey},
+    ...(reader ? {generation:{readerRunId:"run-partial",readerPageId:"10"}} : {}) };
+  const delivery = createResultDelivery({
+    pendingByJob:new Map([[jobId,ctx]]), findContext:()=>ctx,
+    getTabSessionId:()=>"session-1",getSettingsEpoch:()=>0,ensureBatch:()=>batch,
+    summarizeResultPresentation:()=>({newImg:null,hasHtml:true,skipReason:"",shouldShowSkipBadge:false}),
+    enqueueDomInsert:async (_tab,msg)=>{
+      notices.push(msg);
+      return msg.type === "OVERLAY_HTML"
+        ? {ok:true,stored:reader,applied:!reader} : {ok:true};
+    },
+    shouldSuppressPartialNotice:({batch:owner,imageKey:key})=>
+      owner?.repair?.phase === "collecting" &&
+      owner.items.get(key)?.presentation?.repairPhase === "collecting",
+    resolveSeriesKey:async()=>"",accumulateSeriesMemory:async()=>{},
+    mdCacheKey:()=>"",mdKeyFromUrl:x=>x,normImgSrc:x=>x,
+    setCachedDataUri(){},setCachedResult(){},stripImageFields:x=>x,
+    markImagePhase(){},batchUpdateToast(){},finalizeBatch(){},removeJob(){},
+    traceNote(){},log:{warn(){},info(){}},
+    workflow:{renderReady:async()=>{},applyRequested:async()=>{},
+      applied:async()=>{},placementPending:async()=>{},failed:async()=>{}},
+  });
+  await delivery.handleResult(jobId, {}, {missing:["I10_P1"]});
+  return notices;
+}
+for (const reader of [false,true]) {
+  const repairing = await deliverPartial({repairOwned:true,reader});
+  assert.equal(repairing.filter(x=>x.type === "OVERLAY_HTML").length,1,
+    "a repair-owned page must still deliver or stage its partial overlay");
+  assert.equal(repairing.some(x=>x.type === "IMAGE_NOTICE"),false,
+    "an active repair must not show or stage its normal missing-unit notice");
+  const withoutRepair = await deliverPartial({repairOwned:false,reader});
+  assert.equal(withoutRepair.filter(x=>x.type === "IMAGE_NOTICE").length,1,
+    "an incomplete image without repair ownership must still show its notice");
+  assert.doesNotMatch(withoutRepair.find(x=>x.type === "IMAGE_NOTICE").error.userMessage,/รอบซ่อม/,
+    "a missing repair owner must not claim the image is waiting for repair");
+}
+
 assert.equal(isUrlOnlyImageAcquisitionFailure(
   new Error("could not read the image bytes: HTTP 403"),
 ), true);

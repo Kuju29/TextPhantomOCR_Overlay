@@ -7,7 +7,9 @@ const translateWithLocalOpenAi = (units, options = {}) => translateRaw(units, {
   canonicalPrompt: options.canonicalPrompt || canonicalPrompt,
   targetLang: "th",
   ...options,
-  ai: { prompt: "full style", promptMode: "replace", ...(options.ai || {}) },
+  // Transport fixtures without a reasoning capability choose provider-managed
+  // thinking explicitly; separate negative tests cover strict Off/Lowest.
+  ai: { prompt: "full style", promptMode: "replace", thinking: "default", ...(options.ai || {}) },
 });
 
 const shortLocalBudget = localAiOutputBudgetForTest([{ text: "สั้น" }]);
@@ -335,6 +337,33 @@ try {
   assert.equal(calls[0].body.reasoning_effort, "medium",
     "custom OpenAI-compatible runtimes receive only their declared thinking mapping");
 
+  // A local OpenAI-shaped endpoint can contradict the selected model's
+  // non-reasoning metadata. The shared response guard must reject the turn
+  // even when the wire adapter initially had exact loaded-model evidence.
+  calls.length = 0;
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return new Response(JSON.stringify({ choices: [{ message: {
+      content: "<<TP_P0:ทดสอบ>>", reasoning_content: "unexpected hidden reasoning",
+    } }], usage: { prompt_tokens: 10, completion_tokens: 5 } }), { status: 200 });
+  };
+  await assert.rejects(
+    translateWithLocalOpenAi([{ id: "real-id", text: "test" }], {
+      ai: {
+        provider: "local-openai", model: "loaded-model", thinking: "off",
+        base_url: "http://localhost:1234/v1",
+        model_capabilities: { reasoning: { supported: false,
+          source: "lmstudio_native_loaded_instance" } },
+        local_adapter: { id: "lmstudio", version: 1, protocol: "openai",
+          baseUrl: "http://localhost:1234/v1" },
+      },
+    }),
+    (error) => error.code === "local_model_thinking_unsupported" &&
+      error.providerResponded === true && error.generationAttempts === 1,
+    "an observed reasoning trace violates explicit Off on every Local wire format",
+  );
+  assert.equal(calls.length, 1);
+
   globalThis.fetch = async () => new Response(JSON.stringify({
     message: { content: [{ type: "text", text: '<<TP_P0:ส่วนคำตอบ>>' }] }, done_reason: "stop",
   }), { status: 200 });
@@ -353,6 +382,42 @@ try {
     (error) => error.code === "local_ai_thinking_no_answer" && /reasoning was produced/.test(error.message) && /stop/.test(error.message),
     "thinking must be diagnostic only and never become translated text",
   );
+  const reasoningBodies = [];
+  globalThis.fetch = async (_url, init) => {
+    reasoningBodies.push(JSON.parse(init.body));
+    return new Response(JSON.stringify({
+      message: { content: "", thinking: "reasoning consumed the output" },
+      done_reason: "length", prompt_eval_count: 80, eval_count: 384,
+    }), { status: 200 });
+  };
+  const offWireTrace = [];
+  await assert.rejects(
+    translateWithLocalOpenAi([{ id: "P0", text: "x" }], {
+      ai: { provider: "ollama", model: "qwen", base_url: "http://localhost:11434",
+        thinking: "minimum", local_adapter: { protocol: "ollama", baseUrl: "http://localhost:11434" } },
+      wireTrace: (stage, value) => offWireTrace.push({ stage, value }),
+    }),
+    error => error.code === "local_model_thinking_unsupported" &&
+      error.diagnostics?.validatorSubtype === "reasoning_reported_with_thinking_off" &&
+      error.requestDispatched === true && error.providerResponded === true,
+    "unknown Lowest requests native Off and rejects a model that still thinks",
+  );
+  assert.equal(reasoningBodies[0].think, false);
+  assert.equal(offWireTrace.find(event=>event.stage==='providerAssembled')?.value.text,
+    '<omitted-provider-body>','non-stream raw body must not reach a custom Ollama Off trace');
+  assert.equal(JSON.stringify(offWireTrace).includes('reasoning consumed the output'),false,
+    'hidden reasoning must not leak through any Ollama Off wire stage');
+  await assert.rejects(
+    translateWithLocalOpenAi([{ id: "P0", text: "x" }], {
+      ai: { provider: "ollama", model: "qwen", base_url: "http://localhost:11434",
+        thinking: "default", local_adapter: { protocol: "ollama", baseUrl: "http://localhost:11434" } },
+    }),
+    error => error.code === "output_budget_exhausted" &&
+      error.diagnostics?.validatorSubtype === "reasoning_only_exhausted" &&
+      error.requestDispatched === true && error.providerResponded === true,
+    "provider-managed reasoning-only length exhaustion retains its terminal diagnostic",
+  );
+  assert.equal("think" in reasoningBodies[1], false);
 
   globalThis.fetch = async () => new Response(JSON.stringify({ error: { message: "model not found" } }), { status: 404 });
   await assert.rejects(
@@ -454,7 +519,7 @@ try {
     return chunkedResponse([ndjson.slice(0, 9), ndjson.slice(9)], "application/x-ndjson");
   };
   const streamed = await translateWithLocalOpenAi(twentyFour, {
-    ai: { provider: "ollama", model: "qwen", base_url: "http://localhost:11434",
+    ai: { provider: "ollama", model: "qwen", base_url: "http://localhost:11434", thinking: "default",
       local_adapter: { protocol: "ollama", baseUrl: "http://localhost:11434" } }, canonicalPrompt,
   });
   assert.equal(streamed.translations.length, 24);
@@ -464,13 +529,13 @@ try {
   assert.ok(streamed.meta.streamChunks >= 1);
   assert.equal(batchBodies.length, 1);
   assert.equal(streamed.meta.batchCount, 1);
-  assert.equal(streamed.meta.thinkingSelected, "off",
-    "unknown exact-model reasoning capability must preserve the user's saved Off intent");
-  assert.equal(streamed.meta.thinkingApplied, "unverified",
-    "unknown capability omits the provider field while keeping Off as user intent");
+  assert.equal(streamed.meta.thinkingSelected, "default",
+    "the stream framing fixture explicitly selects provider-managed reasoning");
+  assert.equal(streamed.meta.thinkingApplied, "provider_default",
+    "an unknown capability may omit the control only for provider-managed reasoning");
   assert.deepEqual(tokenSummary(streamed.meta.usage), { inputTokens: 44, outputTokens: 88, totalTokens: 132, source: "provider" });
   assert.ok(batchBodies.every((body) => !("think" in body)),
-    "unknown Ollama capability must omit think instead of relying on a model name or stale adapter state");
+    "provider-managed reasoning must omit think instead of relying on a model name or stale adapter state");
 
   // Initial translation is one provider generation per image regardless of
   // the image's unit count. A later repair is a distinct invocation and can

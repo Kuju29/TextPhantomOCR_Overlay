@@ -26,6 +26,7 @@ function ai(modelCapabilities) {
     local_adapter: { protocol: "ollama", baseUrl: "http://localhost:11434" },
     prompt: "STYLE SENTINEL",
     promptMode: "replace",
+    thinking: "default",
     model_capabilities: modelCapabilities,
   };
 }
@@ -96,11 +97,19 @@ try {
   assert.equal(schema.result.meta.capabilitySource, "ollama-api-show");
   const schemaSelection = schema.wire.find(({ stage }) => stage === "contractSelection")?.value;
   const schemaApplied = schema.wire.find(({ stage }) => stage === "contractApplied")?.value;
-  assert.deepEqual(schemaSelection, {
+  assert.equal(schemaSelection.independentExamples?.source, "human");
+  assert.equal(schemaSelection.independentExamples?.includedPairs, 4);
+  const { independentExamples: _exampleAudit, ...schemaSelectionFields } = schemaSelection;
+  assert.deepEqual(schemaSelectionFields, {
     requested: SCHEMA_OBJECT_CONTRACT, selected: SCHEMA_OBJECT_CONTRACT,
+    plannedOutputContract: SCHEMA_OBJECT_CONTRACT,
+    selectedOutputContract: SCHEMA_OBJECT_CONTRACT,
+    selectionReason: "ollama_format_schema_supported",
+    parserId: "schema_object", decodedResponseShape: null, formatSwitch: false,
     kind: "schema_object", reason: "ollama_format_schema_supported",
     capabilitySource: "ollama-api-show", provider: "ollama", model: "qwen3.5:9b",
     automaticRetry: false,
+    thinkingRequested: "default", thinkingSelected: "default",
     promptLayout: schema.result.meta.promptLayout,
   });
   assert.equal(schemaSelection.promptLayout.cacheHit, null);

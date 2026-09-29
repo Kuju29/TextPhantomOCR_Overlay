@@ -13,7 +13,7 @@ with tempfile.TemporaryDirectory() as tmp:
    if action=='register':out=db.register(rid,token,body['manifest'],'test')
    elif action=='delete':out=db.delete(rid,token)
    elif action=='':out=db.read(rid,token)
-   elif action=='pages':out=db.transact(rid,token,lambda r:s.record_page(r,body))
+   elif action=='pages':out=db.transact(rid,token,lambda r:s.record_pages(r,body))
    elif action=='seal':out=db.transact(rid,token,s.seal)
    elif action=='claim':out=db.transact(rid,token,lambda r:s.claim(r,body))
    elif action=='cancel':out=db.transact(rid,token,s.cancel)

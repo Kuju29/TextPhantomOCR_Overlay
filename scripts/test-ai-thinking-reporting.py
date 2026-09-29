@@ -24,27 +24,46 @@ class ThinkingAndCompletionTests(unittest.TestCase):
             self.assertIsNone(LineCompletionDetector(["P0"]).inspect(legacy, 1))
 
     def test_missing_adapter_acknowledgement_is_unverified(self):
-        adapter = invocation.provider_registry.require("lmstudio").adapter
-        for selected in ("off", "on"):
+        adapter = invocation.provider_registry.require("jan").adapter
+        for selected in ("default", "on"):
             with self.subTest(selected=selected), patch.object(type(adapter), "generate",
                     return_value=ChatResult("<<TP_P0:translated>>", "test-model")), \
                     patch.object(invocation, "decode_result", side_effect=lambda **values: {**values, "meta": {"prompt_audit": {}}}), \
                     patch.object(invocation, "assert_ai_base_url_allowed"):
                 result = invocation._translate_once(markers.apply(["source"]), "en", AiConfig(
-                    api_key="", provider="lmstudio", model="test-model",
-                    base_url="http://localhost:1234/v1", thinking=selected,
+                    api_key="", provider="jan", model="test-model",
+                    base_url="http://localhost:1337/v1", thinking=selected,
                     prompt_mode="replace", prompt_editable="Translate accurately."))
-                self.assertEqual(result["thinking_selected"], "off" if selected == "off" else "default")
+                self.assertEqual(result["thinking_selected"], "default")
                 self.assertEqual(result["thinking_applied"], "unverified")
 
-    def test_ollama_omits_unverified_native_control(self):
-        for selected in ("off", "on", "default"):
-            with patch.object(local_ollama, "generate", return_value=ChatResult("text", "model")) as generate:
+    def test_ollama_unknown_native_control_preserves_saved_off_or_lowest(self):
+        with patch.object(local_ollama, "generate", return_value=ChatResult("text", "model")) as generate:
+            result = local_ollama.ADAPTER.generate(GenerationRequest(
+                provider="ollama", model="renamed-model", system_text="style",
+                user_parts=("source",), thinking="default"))
+            self.assertEqual(generate.call_args.kwargs["thinking"], "default")
+            self.assertEqual(result.thinking_applied, "provider_default")
+
+        for requested, selected in (("off", "off"), ("minimum", "default")):
+            with self.subTest(requested=requested), patch.object(local_ollama, "generate",
+                    return_value=ChatResult("text", "model")) as generate:
                 result = local_ollama.ADAPTER.generate(GenerationRequest(
                     provider="ollama", model="renamed-model", system_text="style",
-                    user_parts=("source",), thinking=selected))
-                self.assertEqual(generate.call_args.kwargs["thinking"], "default")
-                self.assertEqual(result.thinking_applied, "provider_default")
+                    user_parts=("source",), thinking=selected,
+                    cache_context={"thinkingRequested": requested,
+                                   "reasoningCapabilityVerified": False}))
+            self.assertEqual(generate.call_args.kwargs["thinking"], "off")
+            self.assertTrue(generate.call_args.kwargs["reject_observed_thinking"])
+            self.assertEqual(result.thinking_applied, "requested_off_unverified_metadata")
+
+        for requested in ("on", "low"):
+            with self.subTest(requested=requested), patch.object(local_ollama, "generate") as generate, \
+                    self.assertRaisesRegex(Exception, "cannot verify"):
+                local_ollama.ADAPTER.generate(GenerationRequest(
+                    provider="ollama", model="renamed-model", system_text="style",
+                    user_parts=("source",), thinking=requested))
+            generate.assert_not_called()
 
     def test_ollama_sends_verified_boolean_control(self):
         capabilities = {"reasoning": {"supported": True, "control": "boolean"}}
@@ -53,7 +72,8 @@ class ThinkingAndCompletionTests(unittest.TestCase):
                 result = local_ollama.ADAPTER.generate(GenerationRequest(
                     provider="ollama", model="renamed-model", system_text="style",
                     user_parts=("source",), thinking=selected,
-                    model_capabilities=capabilities))
+                    model_capabilities=capabilities,
+                    cache_context={"reasoningCapabilityVerified": True}))
                 self.assertEqual(generate.call_args.kwargs["thinking"], selected)
                 self.assertEqual(result.thinking_applied, f"requested_{selected}")
 

@@ -382,14 +382,16 @@ const beginRecheck = jobsSource.indexOf("if (await stopIfBatchWasCancelled()) re
   jobsSource.indexOf("const workflowId = await wf.begin"));
 const baseLookup = jobsSource.indexOf("const base = await getApiBase();", beginRecheck);
 const baseRecheck = jobsSource.indexOf("if (await stopIfBatchWasCancelled()) return;", baseLookup);
-const firstPrefetch = jobsSource.indexOf("if (shouldPrefetchDataUri(payload))", baseRecheck);
+const prefetchDecision = jobsSource.indexOf("const needsPrefetch=shouldPrefetchDataUri(payload);", baseRecheck);
+const firstPrefetch = jobsSource.indexOf("if (needsPrefetch)", prefetchDecision);
 const mediaReady = jobsSource.indexOf("await wf.mediaReady(workflowId);", firstPrefetch);
 const mediaRecheck = jobsSource.indexOf("if (await stopIfBatchWasCancelled()) return;", mediaReady);
 const pendingRegistration = jobsSource.indexOf("pendingByImage.set", mediaRecheck);
 const capabilitiesProbe = jobsSource.indexOf("await getFreshCapabilitiesForScope(base", mediaRecheck);
 assert.ok(beginRecheck > 0 && beginRecheck < baseLookup,
   "cancellation must be rechecked immediately after wf.begin yields");
-assert.ok(baseRecheck > baseLookup && baseRecheck < firstPrefetch,
+assert.ok(baseRecheck > baseLookup && baseRecheck < prefetchDecision &&
+  prefetchDecision < firstPrefetch,
   "cancellation must be rechecked after getApiBase and before external prefetch");
 assert.ok(mediaRecheck > mediaReady && mediaRecheck < pendingRegistration,
   "cancellation must be rechecked after media awaits and before registration");
@@ -402,8 +404,8 @@ assert.match(jobsSource, /const scheduled = scheduleOwnedImageJob\(\{[\s\S]{0,70
 assert.match(jobsSource, /beginInFlight\(prefetchId, tabId, batchId\)/,
   "navigation cancellation must own the prefetch before network work starts");
 assert.match(jobsSource,
-  /try \{\s*return await processJobInner\(payload, tabId, frameId\);\s*\} finally \{\s*finishConversationJob\(payload\);\s*releasePreparedDataUri\(payload\);/,
-  "every processJob exit must release retained data URI admission and its payload copy");
+  /try \{\s*return await processJobInner\(payload, tabId, frameId\);\s*\} finally \{\s*finishConversationJob\(payload\);\s*finishLocalIndependentJob\(payload\);\s*releasePreparedDataUri\(payload\);/,
+  "every processJob exit must release Conversation ownership and retained data URI admission");
 
 // Exercise the production ownership scheduler itself, not only its map.
 {

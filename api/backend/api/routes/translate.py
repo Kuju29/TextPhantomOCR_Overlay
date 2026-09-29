@@ -12,6 +12,7 @@ from typing import Any
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 
 from backend.jobs.queue import IdempotencyConflict, JobQueue, QueueFull
+from backend.ai.rate_policy import InvalidManualRatePolicy
 from backend.application import legacy_translation
 from backend.api.errors import payload as error_payload
 from backend.log import dbg
@@ -60,6 +61,13 @@ async def translate(
             category="input",
             retryable=False,
             http_status=409,
+        )) from exc
+    except InvalidManualRatePolicy as exc:
+        message = str(exc)
+        raise HTTPException(status_code=400, detail=error_payload(
+            code=exc.code, message=message, user_message=message,
+            origin="client", stage="rate_configuration", category="configuration",
+            retryable=False, http_status=400,
         )) from exc
     except QueueFull as exc:
         # 503 + Retry-After so the client can back off instead of failing hard.

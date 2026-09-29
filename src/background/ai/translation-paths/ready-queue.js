@@ -1,8 +1,9 @@
+import {isControlPreflightFailure} from "./preflight-fence.js";
 // Collect READY source units, not provider requests. No timer, debounce or warmup.
 // Each output is projected back to its page; accounting stays inside dispatch.
 import {createStreamRecords} from './stream-records.js';
 import {checkedOrigins} from '../../../shared/ai/conversation/origins.js';
-import {conversationTicket,conversationTickets,onConversationReady,fenceConversationBilling} from './order.js';
+import {conversationTicket,conversationTickets,onConversationReady,fenceConversationBilling,fenceConversationConfiguration} from './order.js';
 import {isProviderBillingFailure} from '../../../shared/error-contract.js';
 const abortError=()=>new DOMException('Conversation page cancelled','AbortError');
 export function createReadyQueue({choose,dispatch,trace=()=>{}}) {
@@ -37,7 +38,7 @@ export function createReadyQueue({choose,dispatch,trace=()=>{}}) {
   async function pump(g) {
     for(const e of g.entries.values()) {
       if(e.ticket.done&&!e.settled)finish(e,abortError());
-      else if(e.ticket.billingFailure&&!e.inFlight&&!e.settled)finish(e,e.ticket.billingFailure);
+      else if((e.ticket.billingFailure||e.ticket.configurationFailure)&&!e.inFlight&&!e.settled)finish(e,e.ticket.billingFailure||e.ticket.configurationFailure);
     }
     if(g.running){for(const e of g.entries.values())if(!e.inFlight&&!e.settled)waiting(e,'waiting_for_previous_turn');return;}
     // OCR stays parallel. Dispatch the contiguous ready prefix in webpage order;
@@ -76,7 +77,7 @@ export function createReadyQueue({choose,dispatch,trace=()=>{}}) {
       const picked=plan.units.map(u=>mapped.find(r=>r.id===u.id));
       if(picked.some(r=>!r))throw new Error('Conversation planner lost unit ownership');
       const pages=[...new Set(picked.map(r=>r.entry))];
-      if(pages.some(e=>e.settled||e.signal?.aborted||e.ticket.billingFailure)){await plan.session?.flush?.();return;} // Re-select before dispatch; no source loss.
+      if(pages.some(e=>e.settled||e.signal?.aborted||(e.ticket.billingFailure||e.ticket.configurationFailure))){await plan.session?.flush?.();return;} // Re-select before dispatch; no source loss.
       for(const e of pages){waiting(e,'');e.inFlight=true;}
       for(const e of g.entries.values())if(!pages.includes(e)&&!e.settled)waiting(e,'waiting_for_previous_turn');
       const controller=new AbortController();
@@ -107,12 +108,18 @@ export function createReadyQueue({choose,dispatch,trace=()=>{}}) {
       await Promise.all(pages.map(e=>e.options.beforeBatchDispatch?.({batchId,estimate:plan.estimate,
         units:picked.filter(r=>r.entry===e).map(r=>({id:r.originalId,text:r.text}))})));
       checkpointBeforeMs=performance.now()-checkpointStarted;
-      if(pages.some(e=>e.signal?.aborted||e.settled||e.ticket.billingFailure)){
+      if(pages.some(e=>e.signal?.aborted||e.settled||(e.ticket.billingFailure||e.ticket.configurationFailure))){
         for(const e of pages){e.inFlight=false;e.signal?.removeEventListener('abort',cancel);}
         await plan.session?.flush?.();return;
       }
       let answer,error;
       const stream=createStreamRecords(picked.map(({id,text})=>({id,text})));
+      // Both Extension and API LM Studio paths use a retained native cursor.
+      const statefulLmStudio=ready[0].options.ai?.provider==='lmstudio';
+      // Ollama can stream reasoning despite think:false. Wait for its terminal
+      // evidence before showing translation deltas under explicit Thinking off.
+      const deferProvisional=statefulLmStudio||ready[0].options.route==='direct-local'&&
+        ready[0].options.ai?.provider==='ollama'&&ready[0].options.ai?.thinking==='off';
       const provisionalTasks=new Map(),provisionalShown=new Set();
       const publish=(values,terminal=false,failure=null)=>{
         for(const e of pages){
@@ -145,11 +152,29 @@ export function createReadyQueue({choose,dispatch,trace=()=>{}}) {
       const providerStarted=performance.now();
       try {answer=await dispatch(picked.map(({id,text})=>({id,text})),ready[0].options,{...plan,batchId,origins,signal:controller.signal,
         onProgress:p=>{
-          if(p?.state==='translation_delta'){const before=stream.revision;stream.push(p.text);if(stream.revision!==before)publish(stream.accepted);}
+          if(p?.state==='translation_delta'){
+            const before=stream.revision;stream.push(p.text);
+            // Native LM Studio has not accepted this turn until chat.end and
+            // its response ID have committed. Never render uncommitted deltas.
+            if(!deferProvisional&&stream.revision!==before)publish(stream.accepted);
+          }
           else pages.forEach(e=>e.options.onProgress?.(p));
         }});}
       catch(e){error=e;}
       finally{providerRoundTripMs=performance.now()-providerStarted;for(const e of pages){e.inFlight=false;e.signal?.removeEventListener('abort',cancel);}}
+      const nativeCommitStatus=answer?.meta?.conversation?.commitStatus;
+      const retainedNativeAnswer=nativeCommitStatus==='history_storage_limit'||
+        ready[0].options.route==='direct-local'&&nativeCommitStatus==='not_committed_storage_unavailable'||
+        ready[0].options.route==='server'&&nativeCommitStatus==='not_committed_storage_error';
+      if(statefulLmStudio&&!error&&nativeCommitStatus!=='committed'&&
+          !retainedNativeAnswer){
+        error=Object.assign(new Error('LM Studio Conversation turn was not committed'),{
+          code:'ai_conversation_turn_not_committed',requestDispatched:true,
+          generationAttempts:Number(answer?.meta?.generationAttempts||1),
+          diagnostics:{conversation:answer?.meta?.conversation||null},
+        });
+        answer=undefined;
+      }
       stream.finish();
       projectionStarted=performance.now();
       if(error) trace({...evidence,phase:'failed',apiHttpStatus:Number.isInteger(error.status)?error.status:null,
@@ -165,21 +190,35 @@ export function createReadyQueue({choose,dispatch,trace=()=>{}}) {
         fenceConversationBilling(pages.find(e=>!e.settled&&!e.ticket.done)?.ticket);
         for(const e of [...g.entries.values()]) {
           if(pages.includes(e))finish(e,error);
-          else if(e.ticket.billingFailure)finish(e,e.ticket.billingFailure);
+          else if((e.ticket.billingFailure||e.ticket.configurationFailure))finish(e,(e.ticket.billingFailure||e.ticket.configurationFailure));
+        }
+        return;
+      }
+      if (isControlPreflightFailure(error)) {
+        fenceConversationConfiguration(pages.find(e=>!e.settled&&!e.ticket.done)?.ticket,error);
+        for (const e of [...g.entries.values()]) {
+          if (pages.includes(e)) finish(e,error);
+          else if (e.ticket.configurationFailure) finish(e,e.ticket.configurationFailure);
         }
         return;
       }
       if(error?.requestDispatched===false||error?.name==='AbortError'){
         for(const e of pages)finish(e,error);return;
       }
-      let recoverable=error&&(error.requestDispatched===true||Number(error.generationAttempts||error.providerAttempts)>0)&&
-        /invalid_model_output|output_budget_exhausted|wrong_language|output_contract|invalid_result_schema/i.test(String(error.code||''));
-      if(error&&stream.revision>0){
+      let recoverable=!statefulLmStudio&&error&&(error.requestDispatched===true||Number(error.generationAttempts||error.providerAttempts)>0)&&
+        /invalid_model_output|output_budget_exhausted|wrong_language|output_contract|invalid_result_schema|provider_stream_incomplete/i.test(String(error.code||''))&&
+        !(error.code==='output_budget_exhausted'&&
+          ['reasoning_only_exhausted','empty_output'].includes(error.diagnostics?.validatorSubtype));
+      if(error&&stream.revision>0&&recoverable){
         answer={translations:[...stream.accepted].map(([id,text])=>({id,text})),meta:{streamFailure:{code:String(error.code||'provider_stream_failed'),message:String(error.message||error)}}};
         recoverable=true;
       }
       const conversationState=answer?.meta?.conversation||error?.generationMeta?.conversation||error?.structuralDetails?.generationMeta?.conversation||error?.diagnostics?.conversation||{};
-      const committed=conversationState.historyTurns>0 || ["pending_commit","committed","ephemeral_not_retained"].includes(conversationState.commitStatus);
+      // Earlier history does not imply this provider turn was accepted.
+      // Preserve the legacy history-only inference only when no commit status
+      // was supplied at all (older transport fixtures).
+      const committed=["pending_commit","committed","ephemeral_not_retained"].includes(conversationState.commitStatus)||
+        conversationState.commitStatus==null&&Number(conversationState.historyTurns)>0;
       if(committed){
         g.hasCommittedTurn=true;
         g.lastCommittedUnits=picked.length;
@@ -192,13 +231,17 @@ export function createReadyQueue({choose,dispatch,trace=()=>{}}) {
       // If a truly malformed anchor cannot be committed, distribute/fail only this
       // request and let the next source page establish a fresh anchor; never cascade
       // one page failure across every queued page.
-      const actualInput=Number(conversationState.actualInputTokens),cachedInput=Number(conversationState.cachedInputTokens);
+      const actualInput=conversationState.actualInputTokens == null ? null : Number(conversationState.actualInputTokens);
+      const cachedInput=conversationState.cachedInputTokens == null ? null : Number(conversationState.cachedInputTokens);
       const resolvedUpstream=String(conversationState.resolvedUpstreamProvider||'').trim();
       if(resolvedUpstream)g.upstreamProvider=resolvedUpstream;
       if(Number.isFinite(actualInput)&&actualInput>0&&Number.isFinite(cachedInput)&&cachedInput>0){
         g.cacheConfirmed=true;g.cacheRatio=Math.max(0,Math.min(1,cachedInput/actualInput));g.cacheMissStreak=0;
-      }else if(g.hasCommittedTurn&&Number.isFinite(actualInput)&&actualInput>0){
+      }else if(cachedInput===0&&g.hasCommittedTurn&&Number.isFinite(actualInput)&&actualInput>0){
+        g.cacheConfirmed=false;g.cacheRatio=0;
         g.cacheMissStreak=(Number(g.cacheMissStreak)||0)+1;
+      }else{
+        g.cacheConfirmed=false;g.cacheRatio=0;
       }
       try{ready[0].options.onConversationStatus?.({phase:error?'turn_failed':'turn_complete',turn:g.turnIndex,
         pageCount:pages.length,unitCount:picked.length,readyPageCount:ready.length,readyUnitCount:mapped.length,
@@ -208,7 +251,7 @@ export function createReadyQueue({choose,dispatch,trace=()=>{}}) {
       const returned=new Map(), duplicates=new Set();
       for(const t of answer?.translations||[]){const id=String(t.id);if(returned.has(id))duplicates.add(id);returned.set(id,String(t.text||''));}
       for(const id of [...duplicates,...stream.invalid])returned.delete(id);
-      publish(returned,true,error||null);
+      if(!statefulLmStudio)publish(returned,true,error||null);
       let applied=0,cancelled=0;
       const projections=[];
       for(const e of pages){
@@ -239,14 +282,17 @@ export function createReadyQueue({choose,dispatch,trace=()=>{}}) {
         if(failure)finish(e,failure);
         else if(e.offset===e.units.length)finish(e);
       }
-    } catch(error) {finish(ready[0],error);}
+    } catch(error) {
+      if (isControlPreflightFailure(error)) fenceConversationConfiguration(ready[0].ticket,error);
+      finish(ready[0],error);
+    }
     finally{cleanup();g.running=false;wake();}
   }
   return {
     submit(units,options) {
       const ticket=conversationTicket(options.payload);
       if(!ticket)return Promise.reject(Object.assign(new Error('Conversation source has no owner/document reservation'),{code:'ai_conversation_scope_missing',requestDispatched:false}));
-      if(ticket.billingFailure){ticket.consumed=true;return Promise.reject(ticket.billingFailure);}
+      if(ticket.billingFailure||ticket.configurationFailure){ticket.consumed=true;return Promise.reject(ticket.billingFailure||ticket.configurationFailure);}
       let group=groups.get(ticket.key);if(!group){group={key:ticket.key,entries:new Map(),running:false,readySequence:0,hasCommittedTurn:false,cacheConfirmed:false,cacheRatio:0,cacheMissStreak:0,turnIndex:0,lastCommittedUnits:0,lastTurnMs:0,upstreamProvider:''};groups.set(ticket.key,group);}
       if(group.entries.has(ticket))return Promise.reject(new Error('Page already queued for conversation'));
       return new Promise((resolve,reject)=>{

@@ -3,10 +3,10 @@
 
 from __future__ import annotations
 
-import time, httpx
+import re, time, httpx
 from functools import partial
 from backend.ai import wire_trace, accounting, content_stream
-from backend.ai.workload import guard_output_budget
+from backend.ai.workload import guard_output_budget, normalize_limits
 from backend.ai.prompt_cache import enabled as cache_enabled
 
 from backend.ai.generation_defaults import DEFAULT_GENERATION, output_token_budget
@@ -16,7 +16,7 @@ from backend.ai.clients.base import (
 from backend.ai.clients.provider_error import ProviderTransportError, safe_http_error
 from backend.ai.transports.cancellable_http import post_json
 from backend.ai.provider_contract import GenerationRequest, ModelListResult, ProbeRequest, ProbeResponse, ProviderSpec, SystemPromptSection
-from backend.ai.reasoning_preference import resolve_reasoning_preference
+from backend.ai.providers.anthropic_reasoning import _reasoning_capability, _apply_reasoning, _is_model_or_snapshot
 from backend.ai.providers.probe_support import response_error, response_error_details
 from backend.ai.providers.provider_helpers import (
     contract_model_status, invoke_leaf_generate, model_status,
@@ -29,8 +29,27 @@ DEFAULT_MODEL = "claude-sonnet-5"
 DEFAULT_BASE_URL = "https://api.anthropic.com"
 ALIASES: tuple[str, ...] = ()
 KEY_PREFIXES = ("sk-ant-",)
-MODEL_ALIASES = {"claude-sonnet-4-20250514": "claude-sonnet-4-6"}
+# Full model IDs/snapshots are user intent, not aliases for a newer generation.
+MODEL_ALIASES = {}
 RATE_POLICY = {"rpm": 50.0, "burst": 8, "rpm_min": 10.0, "rpm_max": 400.0}
+
+# Official model cards confirm image input for these Claude aliases and their
+# dated snapshots. Intersect this list with /models for account availability;
+# unknown/future names do not inherit a guessed vision capability.
+_DOCUMENTED_VISION_FAMILIES = (
+    "claude-fable-5-1", "claude-opus-5-5", "claude-opus-5",
+    "claude-sonnet-5", "claude-mythos-5-1", "claude-mythos-5",
+    "claude-mythos-preview", "claude-opus-4-8", "claude-opus-4-7",
+    "claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5",
+    "claude-opus-4-5", "claude-sonnet-4-5",
+)
+
+
+def _documented_vision_model(model: str) -> bool:
+    # Anthropic snapshot IDs suffix an existing versioned alias with YYYYMMDD.
+    # A different future version (such as claude-opus-5-6) must be researched
+    # separately even if an older major release happened to accept images.
+    return any(_is_model_or_snapshot(model, alias) for alias in _DOCUMENTED_VISION_FAMILIES)
 
 
 def _safe_error_text(response: httpx.Response) -> str:
@@ -44,93 +63,6 @@ def _safe_error_text(response: httpx.Response) -> str:
     if isinstance(error, dict):
         return str(error.get("message") or error.get("type") or "")[:240]
     return str(error or "")[:240]
-
-def _reasoning_capability(model_id: str) -> dict:
-    """Documented Anthropic reasoning controls for current adaptive families.
-
-    Unknown and legacy manual-thinking models deliberately return no capability:
-    they remain usable with Provider default rather than receiving guessed fields.
-    """
-    model = (model_id or "").strip().lower()
-
-    def levels(efforts, *, default_enabled: bool, mandatory: bool = False, default_effort: str = "high"):
-        supported = list(efforts)
-        if not mandatory and "none" not in supported:
-            supported.insert(0, "none")
-        return {
-            "supported": True,
-            "mandatory": mandatory,
-            "default_enabled": default_enabled,
-            "control": "levels",
-            "dynamic": True,
-            "supported_efforts": supported,
-            "default_effort": default_effort,
-        }
-
-    # Claude 5: adaptive thinking is provider-default ON. Opus/Sonnet can be
-    # disabled explicitly; Fable/Mythos are adaptive-thinking-only.
-    if _is_model_or_snapshot(model, "claude-opus-5") or _is_model_or_snapshot(model, "claude-sonnet-5"):
-        return levels(("low", "medium", "high", "xhigh", "max"), default_enabled=True)
-    if any(_is_model_or_snapshot(model, prefix) for prefix in (
-        "claude-fable-5-1", "claude-mythos-5-1", "claude-fable-5", "claude-mythos-5"
-    )):
-        return levels(("low", "medium", "high", "xhigh", "max"),
-                      default_enabled=True, mandatory=True)
-    if _is_model_or_snapshot(model, "claude-mythos-preview"):
-        return levels(("low", "medium", "high", "max"),
-                      default_enabled=True, mandatory=True)
-
-    # Claude 4.6-4.8 adaptive thinking is opt-in: omitting `thinking` keeps it
-    # off. The exact effort ladders differ by family/version.
-    if _is_model_or_snapshot(model, "claude-opus-4-7") or _is_model_or_snapshot(model, "claude-opus-4-8"):
-        return levels(("low", "medium", "high", "xhigh", "max"), default_enabled=False)
-    if _is_model_or_snapshot(model, "claude-opus-4-6") or _is_model_or_snapshot(model, "claude-sonnet-4-6"):
-        return levels(("low", "medium", "high", "max"), default_enabled=False)
-
-    # 4.5 and earlier use manual budget_tokens rather than the adaptive/effort
-    # shape used above. TextPhantom does not invent a generic budget here.
-    return {}
-
-
-def _apply_reasoning(payload: dict, model: str, requested: str, model_capabilities=None) -> str:
-    """Map TextPhantom's provider-neutral preference to Anthropic-native fields.
-
-    Provider default means *omit* the reasoning fields. This is important because
-    Claude 4.6-4.8 default to thinking off while Claude 5 defaults to adaptive
-    thinking on. TextPhantom's `minimum` preference (and stale Off on a
-    mandatory-reasoning family) resolves through the shared capability layer to
-    the lowest exact native mode instead of inheriting a potentially heavier
-    provider default.
-    """
-    external = (model_capabilities or {}).get("reasoning", {}) if isinstance(model_capabilities, dict) else {}
-    external = external if isinstance(external, dict) else {}
-    native = _reasoning_capability(model)
-    cap = native or external
-    selected = resolve_reasoning_preference(requested, cap) if cap else "default"
-    if selected == "default":
-        return "provider_default"
-
-    # Only emit native Anthropic fields for model families whose exact wire
-    # contract is known here. Generic/externally-described models stay on the
-    # provider default instead of receiving guessed Anthropic syntax.
-    if not native:
-        return "provider_default_unverified_wire"
-
-    if selected == "off":
-        payload["thinking"] = {"type": "disabled"}
-        return "requested_off"
-
-    efforts = {str(value).strip().lower() for value in native.get("supported_efforts", [])
-               if isinstance(value, str)}
-    if selected in efforts and selected != "none":
-        payload["thinking"] = {"type": "adaptive"}
-        payload["output_config"] = {**(payload.get("output_config") or {}), "effort": selected}
-        return f"requested_effort_{selected}"
-
-    # `on` has no single stable Anthropic meaning across current families.
-    # If it reaches this provider through a stale profile, preserve provider
-    # default rather than silently choosing an effort.
-    return "provider_default_incompatible_preference"
 
 
 def models_status(api_key: str, *, timeout_sec: float = 10.0) -> dict:
@@ -161,10 +93,32 @@ def models_status(api_key: str, *, timeout_sec: float = 10.0) -> dict:
         "eligibility": "usable", "evidence": "anthropic_account_models_api"
     } for model in models}
     capabilities = {}
+    catalogue_rows = {}
+    for item in data.get("data") or []:
+        if isinstance(item, dict) and isinstance(item.get("id"), str):
+            catalogue_rows.setdefault(item["id"].strip(), []).append(item)
     for model in models:
+        capability = {}
         reasoning = _reasoning_capability(model)
         if reasoning:
-            capabilities[model] = {"reasoning": reasoning}
+            capability["reasoning"] = reasoning
+        if _documented_vision_model(model):
+            capability["vision"] = {
+                "supported": True, "source": "anthropic_documented_model_vision",
+            }
+        # Anthropic publishes independent input and output ceilings. A
+        # repeated ID is ambiguous; never take an arbitrary last row's limit.
+        rows = catalogue_rows.get(model, [])
+        if len(rows) == 1:
+            limits = normalize_limits({
+                "maxInputTokens": rows[0].get("max_input_tokens"),
+                "maxOutputTokens": rows[0].get("max_tokens"),
+                "source": "anthropic_account_models_api", "scope": "model",
+            })
+            if "maxInputTokens" in limits or "maxOutputTokens" in limits:
+                capability["limits"] = limits
+        if capability:
+            capabilities[model] = capability
     if capabilities:
         result["capabilities"] = capabilities
     return result
@@ -210,12 +164,10 @@ SPEC = ProviderSpec(
     default_model=DEFAULT_MODEL, default_base_url=DEFAULT_BASE_URL, aliases=ALIASES,
     model_aliases=MODEL_ALIASES, key_prefixes=KEY_PREFIXES,
     rate_rpm=50.0, rate_burst=8, rate_rpm_min=10.0, rate_rpm_max=400.0,
-    adapter=ADAPTER,
+    conversation_transport="message_replay", adapter=ADAPTER,
 )
 
-def _is_model_or_snapshot(model: str, prefix: str) -> bool:
-    m = (model or "").strip().lower()
-    return m == prefix or m.startswith(prefix + "-")
+
 
 
 # def _supports_native_schema(model: str) -> bool:
@@ -253,6 +205,7 @@ def _accepts_temperature(model: str) -> bool:
         "claude-opus-4-7",
         "claude-opus-4-8",
         "claude-opus-5",
+        "claude-opus-5-5",
         "claude-sonnet-5",
         "claude-fable-5",
         "claude-mythos-5",
@@ -339,7 +292,8 @@ def generate(
     messages = native_history(history_messages, "anthropic") + messages
     payload = {
         "model": model,
-        "max_tokens": guard_output_budget(output_token_budget(user_parts, system_text),
+        "max_tokens": guard_output_budget(output_token_budget(user_parts, system_text) +
+                (1024 if thinking == "on" and _reasoning_capability(model).get("control") == "toggle" else 0),
                 workload=workload, limits=(model_capabilities or {}).get("limits"),
                 system=system_text, parts=user_parts, schema=response_schema, image=bool(image_b64), history=history_messages),
         "system": _build_system_field(system_text, system_static, system_dynamic, system_sections),
@@ -427,10 +381,18 @@ def generate(
     ).strip()
     if not text:
         output_error("Anthropic returned empty text")
+    if reasoning_state == "requested_off":
+        reasoning_state = (
+            "provider_ignored_off"
+            if any(isinstance(part, dict) and part.get("type") == "thinking" and
+                   str(part.get("thinking") or "").strip() for part in content)
+            else "requested_off_unverified_effect"
+        )
     wire_trace.assembled_response(text)
     parse_ms = round((time.perf_counter() - parse_started) * 1000, 1)
     return ChatResult(text, model, inp, out, total, stop_reason or None, provider_ms, parse_ms,
                       "provider" if any(v is not None for v in (inp, out, total)) else None,
                       None, True, "native_sse_terminal" if content_stream.active() else "non_stream_body_read", usage_details=usage_details,
                       cached_input_tokens=usage_details.get("cachedInputTokens"), requested_output_tokens=payload["max_tokens"],
-                      first_content_ms=getattr(r, "extensions", {}).get("first_content_ms"))
+                      first_content_ms=getattr(r, "extensions", {}).get("first_content_ms"),
+                      thinking_applied=reasoning_state)

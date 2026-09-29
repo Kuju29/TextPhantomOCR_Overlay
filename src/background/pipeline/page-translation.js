@@ -30,8 +30,13 @@ import {
 import { aiWireTraceEnabled, createAiWireRecorder } from "../ai/wire-trace.js";
 import { classifyAiOutcomeIds } from "./ai-outcome-classification.js";
 import { workloadController as defaultWorkloadController } from "../ai/workload-controller.js";
+import {independentExampleStore as defaultIndependentExampleStore, verifiedIndependentPairs} from "../ai/independent-example-store.js";
+import {planIndependentExamples} from "../ai/independent-example-budget.js";
 import { WORKLOAD_POLICY } from "../../shared/ai/workload/model.js";
 import { normalizeReasoningPreference } from "../../shared/reasoning-preference.js";
+import { normalizeLanguageCode } from "../../generated/language-code-aliases.js";
+import { CONVERSATION_STYLE_EXAMPLE_LIMIT } from "../../shared/ai/direct-local/prompt.js";
+import { refreshLocalAiCapabilities as defaultRefreshLocalAiCapabilities } from "../local-ai-preflight.js";
 
 import { workloadOperationId } from "../ai/workload-identity.js";
 import { pageImageEnabled } from "../../shared/page-image-policy.js";
@@ -133,6 +138,7 @@ export async function translateLensPage({
   log = quietLog,
   dependencies = {},
   conversationSubmit = null,
+  onLocalDispatch = null,
   onCheckpoint = async () => {},
   onStatus = () => {},
   onProvisionalResult = null,
@@ -297,6 +303,21 @@ export async function translateLensPage({
     };
   }
 
+  const independentExamples = dependencies.independentExampleStore || defaultIndependentExampleStore;
+  const isLocalIndependent = plan.route === 'direct-local' && plan.ai?.translation_mode === 'independent';
+  const examplesEnabled = isLocalIndependent && plan.ai.style_examples !== false;
+  const exampleScopeContext = {...(payload?.context || {}),batch_id:
+    String(payload?.context?.batch_id || '').trim() ||
+    String(payload?.metadata?.batch_id || '').trim()};
+  const independentScope = examplesEnabled
+    ? await independentExamples.scope(plan.ai,exampleScopeContext,
+        String(doc?.languages?.source || ''),String(payload.lang || ''))
+    : {key:'',scopeStatus:'disabled'};
+  if (isLocalIndependent) {
+    plan.ai = {...plan.ai, independent_scope:independentScope,
+      independent_examples:await independentExamples.select(independentScope,String(payload.lang || ''),examplesEnabled)};
+  }
+
   const acceptedStatusIds = new Set();
   let statusBatch = 0;
   const status = patch => { try { onStatus(patch); } catch {} };
@@ -328,19 +349,34 @@ export async function translateLensPage({
     }
   };
   const workloadController = dependencies.workloadController || defaultWorkloadController;
+  const refreshLocalAiCapabilities = dependencies.refreshLocalAiCapabilities || defaultRefreshLocalAiCapabilities;
+  const liveLocalContext = !conversationSubmit && plan.route === 'direct-local' &&
+    (['lmstudio','ollama','vllm','llamacpp','koboldcpp'].includes(String(plan.ai?.provider || '').toLowerCase()) ||
+      plan.ai?.provider === 'customlocal' && plan.ai?.local_adapter?.protocol === 'ollama');
+  if (liveLocalContext) plan.ai = await refreshLocalAiCapabilities(plan.ai, plan.route, {traceId, signal});
   const workloadStartedAt = clock();
-  const workloadSession = conversationSubmit ? {key:"conversation_cross_page", ai:plan.ai} : await workloadController.open({ ai: plan.ai, route: plan.route, pageUnits: sendable,
+  let workloadSession = conversationSubmit ? {key:"conversation_cross_page", ai:plan.ai} : await workloadController.open({ ai: plan.ai, route: plan.route, pageUnits: sendable,
     sourceLang: String(doc?.languages?.source || ""), targetLang: String(payload.lang || ""),
     image: pageImageEnabled(plan.ai?.send_image), wholePageFirst: true, phase: "initial", singleRequest: false });
   const workloadOpenMs = Math.max(0, clock() - workloadStartedAt);
   // Capture the same snapshot that selected the workload before any async
   // metadata refresh can change what the transport or repair sees.
   if (workloadSession.ai) plan = { ...plan, ai: workloadSession.ai };
+  const conversationExamplesEnabled = plan.ai.translation_mode === "conversation" &&
+    plan.ai.style_examples !== false && ["th","en","ja"].includes(normalizeLanguageCode(payload.lang));
   trace("effectiveSettings", {schema:"tp.audit/1",event:"settings_effective",reason:"initial",
     scope:{profileId:workloadSession.key.slice(0,16),imageId:correlation.imageId,batchId:cancelBatchId},
     engine:payload.engine === 'api' ? 'api' : 'extension',route:plan.route,
     planned:{thinking:normalizeReasoningPreference(plan.ai.thinking, 'minimum'),pageImage:pageImageEnabled(plan.ai.send_image),
-      examplesEnabled:plan.ai.style_examples!==false,memoryMode:plan.ai.memory_mode || "off",
+      examplesPreferenceSaved:plan.ai.style_examples!==false,
+      examplesEnabled:conversationExamplesEnabled || (!conversationSubmit && plan.ai.translation_mode!=="conversation" && plan.ai.style_examples!==false &&
+        (!isLocalIndependent || plan.ai.independent_examples?.source !== 'none')),
+      ...(plan.ai.translation_mode === "conversation" ? {bootstrapExamplePairs:conversationExamplesEnabled ? CONVERSATION_STYLE_EXAMPLE_LIMIT : 0} : {}),
+      ...(isLocalIndependent ? {exampleSource:plan.ai.independent_examples?.source || 'none',
+        availableStoryPairs:plan.ai.independent_examples?.pairs?.length || 0,
+        exampleScope:independentScope.scopeStatus,
+        exampleStorage:plan.ai.independent_examples?.storageStatus || 'ready'} : {}),
+      memoryMode:plan.ai.memory_mode || "off",
       memoryEnabled:plan.ai.char_memory===true,temperature:plan.ai.temperature ?? null,
       maxOutput:plan.ai.max_output_tokens ?? null,glossaryItems:plan.ai.glossary?.length || 0,
       characterItems:plan.ai.characters?.length || 0,previousItems:plan.ai.prev_context?.length || 0}},traceId);
@@ -378,6 +414,7 @@ export async function translateLensPage({
       onProgress: onStreamProgress,
       capabilities,
       wireTrace: recorder,
+      onDispatched: onLocalDispatch,
     });
       recordExecutionTiming(answer);
       if (telemetry) telemetry.sampleWorkload = executionTimings.length === 1
@@ -454,9 +491,53 @@ export async function translateLensPage({
     const unsentIds = [];
     let offset = 0;
     let preparedDispatch = null;
+    let exampleStorageFailed = false;
+    let lastSelectedExamplePool = null;
     let consecutiveCapacityFailures = 0;
     let circuitOpened = false;
     let circuitReason = '';
+    // A renderer replaces the entire page layer on every update. Keep only
+    // verified IDs and publish a cumulative snapshot after each completed
+    // Local Independent subrequest, never an unvalidated stream delta.
+    const acceptedForPlacement = new Map();
+    const publishIndependentProgress = async (accepted, moreToSend) => {
+      if (!isLocalIndependent || !onProvisionalResult || !moreToSend || isCancelled() || !accepted.length) return;
+      for (const item of accepted) acceptedForPlacement.set(String(item.id), item);
+      // The normal terminal policy rejects a page with >=80% wrong-language
+      // units. Do not expose a sparse provisional page that could later fail
+      // that same policy, even if every remaining unit is wrong.
+      const minimumAccepted = sendable.length - Math.ceil(sendable.length * .8) + 1;
+      if (acceptedForPlacement.size < minimumAccepted) return;
+      try {
+        const applied = applyTranslations(doc, [...acceptedForPlacement.values(), ...passthrough]);
+        const missing = sendable.filter(unit => !acceptedForPlacement.has(String(unit.id)))
+          .map(unit => String(unit.id));
+        const safeErase = missing.length ? erasePartial(applied.document, result.eraseBoxes) : null;
+        if (safeErase && !safeErase.ok) {
+          trace('localIndependentProvisional', { ...correlation, event:'skipped',
+            reason:'unsafe_erase', detail:safeErase.reason, accepted:acceptedForPlacement.size }, traceId);
+          return;
+        }
+        if (isCancelled()) return;
+        const snapshot = { ...result, lensDocument:applied.document,
+          ...(safeErase ? {eraseBoxes:safeErase.eraseBoxes} : {}),
+          meta:{...(result.meta || {}), provisional:true},
+          aiRoute:{ route:plan.route, translationMode:'independent', provisional:true },
+          aiPartial:{ partial:missing.length > 0, translated:acceptedForPlacement.size, missing } };
+        await onProvisionalResult(snapshot, {complete:missing.length === 0,
+          missing, isCancelled, streamTiming:{validatedAt:Date.now()} });
+        trace('localIndependentProvisional', { ...correlation, event:'placed',
+          accepted:acceptedForPlacement.size, remaining:missing.length }, traceId);
+      } catch (error) {
+        // A detached or unmounted page must not discard accepted translations
+        // or prevent later provider chunks and the normal final/repair delivery.
+        trace('localIndependentProvisional', { ...correlation, event:'delivery_failed',
+          code:String(error?.code || 'provisional_insert_failed'),
+          reason:String(error?.message || error).slice(0,200) }, traceId);
+        log.warn('Local Independent partial overlay delivery failed',
+          {code:String(error?.code || 'provisional_insert_failed')});
+      }
+    };
     const markRemainingUnsent = async (reason) => {
       const remaining = selectedUnits.slice(offset);
       if (!remaining.length) return;
@@ -474,12 +555,44 @@ export async function translateLensPage({
     try {
       while (offset < selectedUnits.length) {
         if (isCancelled()) throw signal?.reason || new DOMException("Aborted", "AbortError");
+        if (liveLocalContext && offset > 0) {
+          const refreshed = await refreshLocalAiCapabilities(plan.ai, plan.route, {traceId, signal});
+          if (JSON.stringify(refreshed.model_capabilities) !== JSON.stringify(plan.ai.model_capabilities)) {
+            plan.ai = refreshed;
+            workloadSession = await workloadController.open({ai:plan.ai, route:plan.route, pageUnits:sendable,
+              sourceLang:String(doc?.languages?.source || ''), targetLang:String(payload.lang || ''),
+              image:pageImageEnabled(plan.ai?.send_image), wholePageFirst:true, phase:'initial', singleRequest:false});
+            if (workloadSession.ai) plan = {...plan, ai:workloadSession.ai};
+          }
+        }
+        let selectedExamples = null;
+        if (isLocalIndependent && examplesEnabled) {
+          const selection = exampleStorageFailed ? lastSelectedExamplePool
+            : await independentExamples.select(independentScope,String(payload.lang || ''),true);
+          if (!exampleStorageFailed) lastSelectedExamplePool = selection;
+          selectedExamples = selection;
+        }
         const priorDispatch = preparedDispatch;
         preparedDispatch = null;
-        const chunk = priorDispatch?.chunk || workloadSession.next(selectedUnits, offset);
+        const examplesPlan = selectedExamples
+          ? planIndependentExamples(workloadSession,selectedUnits,offset,selectedExamples) : null;
+        if (examplesPlan) plan.ai={...plan.ai,independent_examples:examplesPlan.selection};
+        const chunk = priorDispatch?.chunk || examplesPlan?.chunk || workloadSession.next(selectedUnits, offset);
         const index = subBatches.length;
         const single = offset === 0 && chunk.units.length === selectedUnits.length;
         const subOperationId = priorDispatch?.operationId || await workloadOperationId(operationId, index, chunk.units, workloadSession.key);
+        if (isLocalIndependent) {
+          const selected = plan.ai.independent_examples;
+          trace('independentExamples',{schema:'tp.audit/1',event:'independent_examples',
+            examplePhase:'selected',exampleSource:selected?.source || 'none',
+            availableStoryPairs:selected?.pairs?.length || 0,
+            availableExamplePairs:examplesPlan?.availableExamplePairs ?? 0,
+            includedExamplePairs:examplesPlan?.includedExamplePairs ?? 0,
+            exampleScope:selected?.scopeStatus || independentScope.scopeStatus,
+            exampleStorage:selected?.storageStatus || 'disabled',
+            operationId:subOperationId,parentId:operationId,batchIndex:index,
+            batchId:cancelBatchId},traceId);
+        }
         let recorder = wireTrace;
         const childTrace = subOperationId !== operationId;
         if (childTrace) {
@@ -498,6 +611,8 @@ export async function translateLensPage({
         rememberDiagnostic({provider:plan.ai.provider,model:plan.ai.model,operationId:subOperationId,budget});
         const workload = { version: 1, predictedOutput: estimate.predictedOutput,
           reasoningReserve: estimate.reasoningReserve, estimatedInput: estimate.estimatedInput,
+          inputEstimateScale: estimate.inputEstimateScale, inputSampleCount: estimate.inputSampleCount,
+          inputUnverified: estimate.inputUnverified,
           completionAvailable: estimate.completionAvailable, limits: estimate.limits };
         trace("aiModelWorkload", { event: "dispatch", operationId: subOperationId,
           parentOperationId: operationId, profileId: workloadSession.key.slice(0, 16),
@@ -551,8 +666,22 @@ export async function translateLensPage({
           const generated = error?.providerResponded === true || error?.requestDispatched === true ||
             Number(error?.generationAttempts || 0) > 0 || Number(error?.providerAttempts || 0) > 0 ||
             observed.outcome === "length" || observed.outcome === "structure";
+          const terminalEmptyOutput = code === "output_budget_exhausted" &&
+            ["reasoning_only_exhausted", "empty_output"].includes(error?.diagnostics?.validatorSubtype);
           const recoverableGeneratedFailure = generated &&
-            /invalid_model_output|output_budget_exhausted|wrong_language|output_contract|invalid_result_schema/.test(code);
+            /invalid_model_output|output_budget_exhausted|wrong_language|output_contract|invalid_result_schema/.test(code) &&
+            // A completion exhausted before any visible answer cannot be
+            // repaired by requesting the same model with an even smaller
+            // output allowance. Some runtimes do not expose reasoning text,
+            // so an empty output is equally terminal regardless of whether
+            // the provider reported its reasoning channel.
+            !terminalEmptyOutput;
+          // Earlier chunks may already be accepted or marked malformed. The
+          // terminal failure blocks every still-untranslated ID on this page,
+          // including unsent IDs, so the batch repair barrier cannot schedule
+          // another generation on the same exhausted model.
+          const terminalBlockedIds = terminalEmptyOutput ? selectedUnits
+            .filter(unit => !acceptedStatusIds.has(String(unit.id))).map(unit => String(unit.id)) : null;
           // A typed upstream HTTP failure returned by the API ends this API
           // invocation. It does not establish provider billing or downstream
           // generation termination. Pool it once at the batch barrier; do not
@@ -564,7 +693,8 @@ export async function translateLensPage({
             failures: terminalGatewayFailure ? chunk.units.map(u => ({ id: String(u.id), reason: "provider_http_error" }))
               : recoverableGeneratedFailure ? chunk.units.map(u => ({ id: String(u.id),
               reason: code === "output_budget_exhausted" ? "length" : code === "wrong_language_output" ? "wrong_language" : "malformed" })) : [],
-            blocked: recoverableGeneratedFailure || terminalGatewayFailure ? [] : chunk.units.map(u => String(u.id)),
+            blocked: terminalBlockedIds || (recoverableGeneratedFailure || terminalGatewayFailure
+              ? [] : chunk.units.map(u => String(u.id))),
           });
           if (childTrace) await recorder?.("terminal", { state: "failed", stage: "provider_generation",
             code: code || "provider_generation_failed", providerResponded: generated,
@@ -610,7 +740,7 @@ export async function translateLensPage({
         // The coordinator retains its existing explicit unavailable/degraded
         // behavior if session storage fails; no checkpoint is fire-and-forgotten.
         let planningError;
-        if (!isCancelled() && offset + chunk.units.length < selectedUnits.length &&
+        if (!liveLocalContext && !examplesEnabled && !isCancelled() && offset + chunk.units.length < selectedUnits.length &&
             consecutiveCapacityFailures < WORKLOAD_POLICY.circuitFailureThreshold) {
           try {
             const next = workloadSession.next(selectedUnits, offset + chunk.units.length);
@@ -630,6 +760,27 @@ export async function translateLensPage({
             : answer?.meta?.declinedIds?.includes(id) ? "empty"
             : answer?.meta?.omittedIds?.includes(id) ? "omitted" : "missing" })),
         });
+        await publishIndependentProgress(
+          (answer?.translations || []).filter(item => !rejected.has(String(item.id))),
+          offset + chunk.units.length < selectedUnits.length,
+        );
+        if (examplesEnabled) {
+          const learned = verifiedIndependentPairs(chunk.units,answer,chunkDefects,String(payload.lang || ""));
+          let persisted = {accepted:null};
+          try { if (learned.length) persisted = await independentExamples.append(independentScope,learned); }
+          catch (error) {
+            exampleStorageFailed = true;
+            lastSelectedExamplePool = {...lastSelectedExamplePool,storageStatus:'write_failed'};
+            plan.ai.independent_examples = {...plan.ai.independent_examples,storageStatus:'write_failed'};
+            log.warn('Independent example write failed after accepted translation checkpoint',
+              {code:String(error?.code || 'independent_examples_storage_unavailable')});
+          }
+          trace('independentExamples',{schema:'tp.audit/1',event:'independent_examples',
+            examplePhase:'after_checkpoint',sampleCandidates:learned.length,
+            ...(Number.isFinite(persisted.accepted) ? {poolPairs:persisted.accepted} : {}),
+            exampleStorage:exampleStorageFailed?'write_failed':independentScope.key?'ready':'unscoped',
+            operationId:subOperationId,batchId:cancelBatchId},traceId);
+        }
         if (planningError) throw planningError;
         translations.push(...(answer?.translations || []));
         missing.push(...(answer?.missing || []));

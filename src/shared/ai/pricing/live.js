@@ -17,7 +17,9 @@ export async function fetchLiveRate(provider, model, upstream = "", fetcher = gl
     if (!response.ok) return null;
     const raw = await response.json();
     const data = raw?.data && !Array.isArray(raw.data) ? raw.data : raw;
-    if (data?.id !== slug && name === "featherless") return null;
+    // Both catalogues must identify the requested model. Duplicate/ambiguous
+    // provider rows are not evidence for an arbitrary first route's tariff.
+    if (data?.id !== slug) return null;
     let rates;
     if (name === "featherless") {
       const p = data?.pricing;
@@ -25,9 +27,10 @@ export async function fetchLiveRate(provider, model, upstream = "", fetcher = gl
         cached:p?.cached_prompt != null ? multiplyMoney(p.cached_prompt,"1000000") : null,
         extraFees:Number(money(p?.image) || 0) > 0 || Number(money(p?.request) || 0) > 0};
     } else {
-      const route = data?.providers?.find(p => p?.provider === upstream && p.status === "live");
-      if (!route || !route.pricing) return null;
-      rates = {input:money(route.pricing.input),output:money(route.pricing.output),cached:money(route.pricing.cached_input)};
+      const routes = data?.providers?.filter(p => p?.provider === upstream && p.status === "live") || [];
+      const route = routes.length === 1 ? routes[0] : null;
+      if (!route || (!route.pricing && route.is_free !== true)) return null;
+      rates = {input:money(route.pricing?.input),output:money(route.pricing?.output),cached:money(route.pricing?.cached_input)};
       if (route.is_free === true) rates = {input:"0",output:"0",cached:"0"};
     }
     if (rates.input === null || rates.output === null || Number(rates.input) > 10000 || Number(rates.output) > 10000) return null;

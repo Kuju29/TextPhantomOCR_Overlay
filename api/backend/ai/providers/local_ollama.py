@@ -6,7 +6,7 @@ from backend.ai import content_stream
 from backend.ai.transports.stream_timing import StreamTiming
 from typing import Any
 
-import httpx, time, threading, json
+import httpx, time, threading, json, re
 from backend.ai import wire_trace, accounting
 
 from backend import trace
@@ -18,7 +18,7 @@ from backend.ai.clients.base import ChatResult, LineCompletionDetector, provider
 from backend.ai.clients.provider_error import safe_http_error
 from backend.ai.provider_contract import GenerationRequest, ModelListResult, ProbeRequest, ProbeResponse, ProviderSpec
 from backend.ai.providers.probe_support import response_error, response_error_details
-from backend.ai.reasoning_preference import normalize_reasoning_preference, resolve_reasoning_preference
+from backend.ai.reasoning_preference import EFFORTS, normalize_reasoning_preference, resolve_reasoning_preference
 
 _USAGE_DRAIN_GRACE_SEC = 2.0
 _DRAIN_WATCH_POLL_SEC = 0.025
@@ -52,6 +52,82 @@ def _thinking_mode(selected: str, capabilities: Any) -> str:
         if effective in efforts:
             return effective
     return "default"
+
+
+def _native_thinking_capability(value: Any) -> dict[str, Any]:
+    """Only this model's `/api/show` public values prove a Thinking control."""
+    if not isinstance(value, dict):
+        return {}
+    choices = value.get("values")
+    has_default = "default" in value
+    default = value.get("default")
+    if (not isinstance(choices, list) or not choices or len(choices) > 16 or any(
+            type(choice) is not bool and (not isinstance(choice, str) or not choice
+                or choice.strip() != choice or len(choice) > 64) for choice in choices)
+            or len(set(choices)) != len(choices)):
+        return {}
+    if has_default:
+        if type(default) is bool:
+            verified_default = any(type(choice) is bool and choice is default for choice in choices)
+        elif isinstance(default, str):
+            verified_default = any(isinstance(choice, str) and choice == default for choice in choices)
+        else:
+            verified_default = False
+        if not verified_default:
+            return {}
+    can_disable = any(type(choice) is bool and choice is False for choice in choices)
+    can_enable = any(type(choice) is bool and choice is True for choice in choices)
+    # A string "off" is a model-defined level, not a documented boolean
+    # disable. Accept only exact names our provider-neutral UI can resolve.
+    levels = [choice for choice in choices if isinstance(choice, str) and choice in EFFORTS]
+    unknown_names = any(isinstance(choice, str) and choice not in EFFORTS for choice in choices)
+    supported = can_enable or any(isinstance(choice, str) for choice in choices)
+    if not supported:
+        return {"supported": False, "control": "none", "source": "ollama-api-show-thinking-values"}
+    efforts = (["none"] if can_disable else []) + (["on"] if can_enable else []) + levels
+    native_default = ("on" if default is True else "none" if default is False
+                      else default if default in EFFORTS else None)
+    return {"supported": True, "mandatory": not can_disable,
+            "can_disable": can_disable,
+            **({"default_enabled": default is not False} if has_default else {}),
+            "control": "boolean" if all(type(choice) is bool for choice in choices) else "levels",
+            "supported_efforts": list(dict.fromkeys(efforts)),
+            **({"default_effort": native_default} if native_default else {}),
+            # Private probe-time evidence. The shared catalogue normalizer
+            # deliberately omits it; invocation rechecks native metadata at
+            # each explicit-thinking dispatch before choosing Minimum.
+            "minimum_unresolved": unknown_names and not can_disable,
+            "source": "ollama-api-show-thinking-values"}
+
+def _show_context_limits(show: dict[str, Any]) -> dict[str, Any]:
+    """Read exact selected-model context facts, never infer from an image encoder."""
+    from backend.ai.workload import positive
+    info = show.get("model_info") if isinstance(show.get("model_info"), dict) else {}
+    architecture = info.get("general.architecture")
+    model_context = positive(info.get(f"{architecture}.context_length")) if isinstance(architecture, str) and architecture else None
+    parameters = show.get("parameters")
+    configured_match = re.search(r"^\s*num_ctx\s+(\d+)\s*$", parameters, re.MULTILINE) if isinstance(parameters, str) else None
+    configured = positive(int(configured_match.group(1))) if configured_match else None
+    if not (model_context or configured):
+        return {}
+    return {**({"modelContextTokens": model_context} if model_context else {}),
+            **({"configuredContextTokens": configured} if configured else {}),
+            "source": "ollama-api-show", "scope": "runtime"}
+
+def _loaded_context(base: str, model: str, timeout_sec: float) -> int | None:
+    """A current `/api/ps` allocation is the only runtime context proof."""
+    from backend.ai.workload import positive
+    try:
+        with httpx.Client(timeout=min(timeout_sec, 3.0)) as client:
+            response = client.get(base + "/api/ps")
+        if not response.is_success:
+            return None
+        models = response.json().get("models")
+        matches = [item for item in models if isinstance(item, dict) and
+                   (item.get("name") or item.get("model")) == model] if isinstance(models, list) else []
+        return positive(matches[0].get("context_length")) if len(matches) == 1 else None
+    except (httpx.RequestError, ValueError, TypeError, AttributeError):
+        return None
 
 class OllamaAdapter:
     """Provider-owned native Ollama generation and tag discovery."""
@@ -88,27 +164,71 @@ class OllamaAdapter:
         if not isinstance(data, dict):
             return ProbeResponse(False, response.status_code, "invalid_model_output", "invalid response shape")
         native = data.get("capabilities")
-        capabilities = [str(value).strip().lower() for value in native] if isinstance(native, list) else None
+        capabilities = [value.strip().lower() for value in native] if isinstance(native, list) and all(
+            isinstance(value, str) for value in native) else None
         if capabilities is not None and "completion" not in capabilities:
             return ProbeResponse(False, response.status_code, "unsupported_model",
                                  "selected model does not expose completion capability")
         proved: dict[str, Any] = {}
+        reasoning = _native_thinking_capability(data.get("thinking"))
+        if reasoning:
+            proved["reasoning"] = reasoning
         if capabilities is not None:
-            if "thinking" not in capabilities:
-                proved["reasoning"] = {"supported": False, "control": "none", "source": "ollama-api-show"}
-            else:
-                details = data.get("details") if isinstance(data.get("details"), dict) else {}
-                info = data.get("model_info") if isinstance(data.get("model_info"), dict) else {}
-                families = [info.get("general.architecture"), details.get("family"), *(details.get("families") or [])]
-                levels_only = any(str(value or "").lower() in {"gptoss", "gpt-oss"} for value in families)
-                proved["reasoning"] = ({"supported": True, "mandatory": True, "default_enabled": True,
-                    "control": "levels", "supported_efforts": ["low", "medium", "high"], "source": "ollama-api-show"}
-                    if levels_only else {"supported": True, "mandatory": False, "control": "boolean",
-                        "source": "ollama-api-show"})
+            proved["vision"] = {"supported": "vision" in capabilities, "source": "ollama-api-show"}
+        # `/api/show.capabilities` has no model-specific JSON-schema field.
+        # Preserve verified account metadata when available; missing evidence
+        # retains Ollama's existing native format fallback at request planning.
+        structured = request.model_capabilities.get("structured_output")
+        if isinstance(structured, dict) and isinstance(structured.get("supported"), bool):
+            proved["structured_output"] = {"supported": structured["supported"]}
+        limits = _show_context_limits(data)
+        # Every request/READY check reads the actual loaded allocation. A
+        # 300-second account snapshot may describe an earlier instance with
+        # this same model name and must never size a new request.
+        loaded = _loaded_context(base, request.model, float(request.timeout_sec))
+        if loaded:
+            limits["runtimeContextTokens"] = loaded
+            limits["contextTokens"] = loaded
+            limits["source"] = "ollama-api-show-and-ps"
+            limits["scope"] = "runtime"
+        if limits:
+            proved["limits"] = limits
         return ProbeResponse(True, response.status_code, capabilities=proved)
 
     def generate(self, request: GenerationRequest) -> ChatResult:
         thinking = _thinking_mode(request.thinking, dict(request.model_capabilities))
+        requested = normalize_reasoning_preference(
+            request.cache_context.get("thinkingRequested", request.thinking), "off")
+        reasoning = request.model_capabilities.get("reasoning")
+        reasoning = reasoning if isinstance(reasoning, dict) else {}
+        verified = request.cache_context.get("reasoningCapabilityVerified") is True
+        verified_plain = verified and reasoning.get("supported") is False
+        managed_minimum = (requested == "minimum" and request.thinking == "default" and
+                           request.cache_context.get("minimumProviderManagedUnverified") is True)
+        # Ollama's /api/show can omit thinking.values for a model that accepts
+        # /api/chat think:false. Try the native switch for saved Off/Lowest,
+        # then reject any response that actually contains thinking. This is
+        # request-time evidence, not verified model metadata.
+        unknown_control = type(reasoning.get("supported")) is not bool
+        native_off_attempt = (requested in {"off", "minimum"} and unknown_control and
+                              reasoning.get("mandatory") is not True and
+                              request.thinking in {"off", "default"})
+        if native_off_attempt:
+            thinking = "off"
+        if ((requested in EFFORTS + ("on",) and
+             (not verified or request.thinking != requested or thinking != requested)) or
+            (requested == "off" and not verified_plain and
+             not native_off_attempt and
+             (not verified or request.thinking != "off" or thinking != "off")) or
+            (requested == "minimum" and not verified_plain and not native_off_attempt and
+             (reasoning.get("mandatory") is True and thinking == "default" or
+              not managed_minimum and (not verified or thinking == "default")))):
+            # A missing `think` field leaves Ollama on its model default.
+            # Mandatory reasoning also cannot silently override a saved Off.
+            from backend.ai.translation_paths.store import ConversationError
+            error = ConversationError("Ollama cannot verify the selected Thinking Off or Lowest available setting for this model")
+            error.code = "ai_local_thinking_unsupported"
+            raise error
         result = generate(
             request.base_url or DEFAULT_BASE_URL, request.model, request.system_text,
             list(request.user_parts), image_b64=request.image_b64,
@@ -118,9 +238,14 @@ class OllamaAdapter:
             cancel_check=request.cancel_check, expected_ids=list(request.expected_ids),
             **({"history_messages": request.history_messages} if request.history_messages else {}),
             workload=dict(request.workload or {}), model_capabilities=dict(request.model_capabilities),
+            source_unit_texts=request.source_unit_texts,
+            reject_observed_thinking=thinking == "off",
         )
         # Request fields describe intent, not proof that the runtime honored it.
-        applied = ("provider_default" if thinking == "default"
+        applied = ("requested_off_unverified_metadata" if native_off_attempt
+                   else "provider_managed_unverified" if managed_minimum
+                   else "not_applicable_non_reasoning_model" if verified_plain and requested in {"off", "minimum"}
+                   else "provider_default" if thinking == "default"
                    else f"requested_{thinking}")
         return (result._replace(thinking_applied=applied)
                 if hasattr(result, "_replace") else result)
@@ -135,7 +260,7 @@ ADAPTER = OllamaAdapter()
 SPEC = ProviderSpec(
     provider_id="ollama", protocol="ollama_native_chat",
     default_model=DEFAULT_MODEL, default_base_url=DEFAULT_BASE_URL, aliases=ALIASES,
-    local=True, default_local=True, adapter=ADAPTER,
+    local=True, default_local=True, conversation_transport="message_replay", adapter=ADAPTER,
 )
 
 def normalize_base_url(base_url: str) -> str:
@@ -185,6 +310,19 @@ def _extract_text(data: dict) -> str:
         )
     suffix = f" (done_reason={done_reason})" if done_reason else ""
     raise RuntimeError(f"Ollama returned no final text{suffix}")
+
+def _has_thinking(message: Any) -> bool:
+    return isinstance(message, dict) and any(message.get(field) for field in
+        ("thinking", "reasoning", "reasoning_content"))
+
+def _without_thinking(item: dict) -> dict:
+    """Retain envelope metadata in opt-in traces but redact reasoning text."""
+    message = item.get("message")
+    if not isinstance(message, dict):
+        return item
+    return {**item, "message": {**message,
+        **{field: "<redacted>" for field in ("thinking", "reasoning", "reasoning_content")
+           if field in message}}}
 
 def _messages(
     system_text: str,
@@ -267,7 +405,9 @@ def generate(
     expected_ids: list[str] | None = None,
     workload=None,
     model_capabilities=None,
+    source_unit_texts=(),
     history_messages=(),
+    reject_observed_thinking: bool = False,
 ) -> ChatResult:
     """Stream one native Ollama generation, buffering before layout decode."""
     _ = image_mime  # Ollama accepts raw base64 and infers the image format.
@@ -281,13 +421,18 @@ def generate(
     limits = (model_capabilities or {}).get("limits") or {}
     estimated_input = estimate_provider_input(system=system_text, parts=user_parts,
         schema=response_schema, image=bool(image_b64), history=history_messages)
+    # num_predict holds *both* hidden thinking and visible translation. The
+    # small READY predictedOutput is not the larger native wire allocation.
+    planned_completion = max(requested_output_tokens,
+        ((workload or {}).get("predictedOutput") or 0) +
+        ((workload or {}).get("reasoningReserve") or 0))
     context_plan = plan_ollama_context(limits, {"estimatedInput": estimated_input,
-        "predictedOutput": (workload or {}).get("predictedOutput") or requested_output_tokens,
-        "reasoningReserve": (workload or {}).get("reasoningReserve") or 0})
+        "predictedOutput": planned_completion, "reasoningReserve": 0})
     hint = workload or ({"version":1,"predictedOutput":requested_output_tokens} if context_plan else None)
     try:
         requested_output_tokens = guard_output_budget(requested_output_tokens, workload=hint,
             limits=context_plan["limits"] if context_plan else limits, system=system_text, parts=user_parts,
+            source_unit_texts=source_unit_texts,
             schema=response_schema, image=bool(image_b64), history=history_messages)
     except Exception as error:
         if context_plan and hasattr(error, "diagnostics"):
@@ -320,6 +465,8 @@ def generate(
     local_timeout_policy = ("local_generation_unbounded_until_terminal" if progressive_delivery
                             else "local_generation_unbounded_post_completion_drain_bounded")
     response = None
+    forbid_thinking = thinking_mode == "off" or reject_observed_thinking
+    observed_thinking = False
     try:
         # Local reads are unbounded; connect/write remain bounded and cancellable.
         timeout_factory = getattr(httpx, "Timeout", None)
@@ -340,7 +487,6 @@ def generate(
             provider_done = False
             if can_stream:
                 chunks: list[str] = []
-                raw_wire_lines: list[str] = []
                 timing = StreamTiming(provider_started)
                 final_data: dict[str, Any] = {}
                 first_content_ms: float | None = None
@@ -395,9 +541,6 @@ def generate(
                                         from backend.ai.clients.base import ProviderGenerationCancelled
                                         raise ProviderGenerationCancelled("Local AI generation was cancelled")
                                     line = raw_line.decode() if isinstance(raw_line, bytes) else str(raw_line or "")
-                                    raw_wire_lines.append(line)
-                                    with timing.measure("wireWrite"):
-                                        wire_trace.append_text("05_provider_response.raw", line + "\n")
                                     if not line.strip():
                                         continue
                                     try:
@@ -406,12 +549,34 @@ def generate(
                                         raise RuntimeError(f"Ollama returned invalid NDJSON (model={model})") from exc
                                     if not isinstance(item, dict):
                                         continue
+                                    message = item.get("message") or {}
+                                    observed_thinking = observed_thinking or _has_thinking(message)
+                                    with timing.measure("wireWrite"):
+                                        wire_trace.append_text("05_provider_response.raw",
+                                            (json.dumps(_without_thinking(item), ensure_ascii=False)
+                                             if _has_thinking(message) else line) + "\n")
                                     final_data.update(item)
-                                    accounting.observe(final_data, "ollama", complete=item.get("done") is True)
+                                    observed_usage = accounting.observe(
+                                        final_data, "ollama", complete=item.get("done") is True)
+                                    if forbid_thinking and observed_thinking:
+                                        # The response is already redacted in the wire trace.
+                                        # Stop the stream before more hidden tokens are spent.
+                                        error = provider_output_error(
+                                            "Ollama returned thinking content despite selected Thinking Off",
+                                            provider="ollama", model=model,
+                                            input_tokens=observed_usage.get("inputTokens"),
+                                            output_tokens=observed_usage.get("outputTokens"),
+                                            total_tokens=observed_usage.get("totalTokens"),
+                                            finish_reason=str(item.get("done_reason") or "unknown")[:80],
+                                            provider_ms=round((time.perf_counter() - provider_started) * 1000, 1),
+                                            parse_ms=0, timeout_policy=local_timeout_policy,
+                                            usage_details=observed_usage)
+                                        error.code = "ai_local_thinking_violated"
+                                        error.structural_details["validatorSubtype"] = "reasoning_reported_with_thinking_off"
+                                        raise error
                                     if item.get("done") is True:
                                         provider_done = True
                                         timing.terminal("provider_done")
-                                    message = item.get("message") or {}
                                     raw_content = message.get("content") if isinstance(message, dict) else ""
                                     content = raw_content if isinstance(raw_content, str) else _content_text(raw_content)
                                     # Completion evidence is latency telemetry only. Continue
@@ -467,10 +632,14 @@ def generate(
                 # Compatibility fallback for older/mock transports only.
                 payload["stream"] = False
                 response = client.post(url, json=payload, headers={"Content-Type": "application/json"})
-                wire_trace.http_response(response)
                 response.raise_for_status()
                 data = response.json()
                 message_value = data.get("message") if isinstance(data, dict) else None
+                observed_thinking = _has_thinking(message_value)
+                if observed_thinking:
+                    wire_trace.provider_response(_without_thinking(data))
+                else:
+                    wire_trace.http_response(response)
                 if isinstance(message_value, dict):
                     wire_trace.assembled_response(_content_text(message_value.get("content")))
                 first_content_ms = None
@@ -507,6 +676,7 @@ def generate(
             "providerMs": provider_ms,
             "parseMs": parse_ms,
             "thinking": thinking_mode or "default",
+            "thinkingObserved": observed_thinking,
             "timeoutPolicy": local_timeout_policy,
             "stream": streamed,
             "streamChunkCount": chunk_count,
@@ -534,15 +704,32 @@ def generate(
     if total is None and inp is not None and out is not None:
         # Exact total from provider counters; no estimation.
         total = inp + out
+    if forbid_thinking and observed_thinking:
+        error = provider_output_error(
+            "Ollama returned thinking content despite selected Thinking Off",
+            provider="ollama", model=model, input_tokens=inp, output_tokens=out,
+            total_tokens=total, finish_reason=finish_reason, provider_ms=provider_ms,
+            parse_ms=parse_ms, timeout_policy=local_timeout_policy,
+            usage_details=usage_details)
+        error.code = "ai_local_thinking_violated"
+        raise error
     try:
         text = _extract_text(data)
     except RuntimeError as exc:
-        raise provider_output_error(
+        error = provider_output_error(
             str(exc), provider="ollama", model=model,
             input_tokens=inp, output_tokens=out, total_tokens=total,
             finish_reason=finish_reason, provider_ms=provider_ms, parse_ms=parse_ms,
             timeout_policy=local_timeout_policy, usage_details=usage_details,
-        ) from exc
+        )
+        if (finish_reason == "length" and
+                not _content_text((data.get("message") or {}).get("content"))):
+            if observed_thinking:
+                error.structural_details["reasoningOnlyExhausted"] = True
+            error.structural_details["validatorSubtype"] = (
+                "reasoning_only_exhausted" if observed_thinking else "empty_output")
+            error.structural_details["requestedOutputTokens"] = requested_output_tokens
+        raise error from exc
     usage_status = "incomplete_due_to_early_completion" if early_evidence and not any(v is not None for v in (inp, out, total)) else None
     return ChatResult(text, model, inp, out, total, finish_reason,
                       provider_ms, parse_ms,

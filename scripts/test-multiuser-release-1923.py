@@ -28,7 +28,13 @@ class MultiuserTests(unittest.TestCase):
             'TP_CONVERSATION_STATE_FILE': self.temp+'/state', 'TP_USAGE_RECEIPTS':'off',
             'TP_AI_WIRE_TRACE':'0', 'TP_PROMPT_CACHE':'auto', 'TP_ALLOW_LOCAL_UNLIMITED':'0',
             'TP_AI_ENDPOINT_POLICY':'shared'}))
-        self.stack.enter_context(patch('backend.ai.provider_resolution.discovered_model_capabilities', return_value=(False,{})))
+        # The synthetic account catalogue explicitly verifies a non-reasoning model.
+        # An unverified (False,{}) fixture correctly fails strict Off preflight
+        # before reaching the ownership/admission paths this test exercises.
+        self.stack.enter_context(patch('backend.ai.provider_resolution.discovered_model_capabilities', return_value=(True,{
+            'reasoning': {'supported':False,'mandatory':False,'control':'none','supported_efforts':[]},
+            'limits': {'contextTokens':65536},
+        })))
         self.prefix = uuid.uuid4().hex
         self.calls=[]; self.call_lock=threading.Lock(); self.holds={}; self.entered={}
         self.active=0; self.max_active=0

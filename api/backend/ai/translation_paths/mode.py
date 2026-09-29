@@ -5,7 +5,7 @@ import json
 from collections.abc import Mapping
 
 MODES = ("independent", "conversation")
-POLICY = "conversation-image-records-2026.9.15.5"
+POLICY = "conversation-image-records-2026.9.27.8"
 
 
 def mode(value=None, *, default="conversation") -> str:
@@ -54,8 +54,7 @@ def scope_material(ai, target_lang: str) -> str | None:
         "provider": ai.provider, "model": ai.model, "endpoint": ai.base_url,
         "key": ai.api_key, "target": target_lang, "source": ai.source_lang,
         "prompt": ai.prompt_editable, "promptMode": ai.prompt_mode,
-        # Style examples are intentionally dormant in Conversation; do not let a
-        # hidden preference split otherwise identical history scopes.
-        "examples": False, "memoryMode": ai.memory_mode,
+        "examples": "human20" if getattr(ai, "style_examples", True) is not False else "none",
+        "memoryMode": ai.memory_mode,
         "thinking": ai.thinking, "image": bool(ai.send_image or ai.image_b64),
         "contract": ai.output_contract, "policy": POLICY}, sort_keys=True, ensure_ascii=False)

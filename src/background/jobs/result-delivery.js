@@ -409,6 +409,28 @@ export function createResultDelivery(deps) {
       generation:ctx.generation||null,translationRun:ctx.translationRun||null,tpTrace:ctx.traceId||'',
       streamError:state.invalidated||state.failure ? String(state.failure?.message||`AI output invalid: ${(state.missing||[]).join(', ')}`):''},ctx.frameId||0);
     if(stale())return;
+    if (response?.previewSkipped === true) {
+      traceNote('background/jobs/result-delivery.js','provisionalOverlay',{
+        schema:'tp.audit/1',event:'page_stream_timing',reason:'preview_skipped_unmounted',
+        ...streamTiming,terminal:false},ctx.traceId||'');
+      return;
+    }
+    if(ctx.generation?.readerRunId && response?.ok===true && response?.stored===true &&
+        response?.applied!==true && response?.stale!==true){
+      // A virtual reader has accepted this provisional layer but has no mounted
+      // image yet. It will replay the saved revision on mount; the final result
+      // can replace it later. This is neither a failed insert nor a final ACK.
+      updateImagePresentation?.(batchId,ctx.imageKey || ctx.metadata?.image_id,{
+        placementPending:true,
+        progressEvent:{lane:'insert',state:'queued',
+          detail:'Streamed translation saved; waiting for reader page'},
+      });
+      traceNote('background/jobs/result-delivery.js','provisionalOverlay',{
+        schema:'tp.audit/1',event:'page_stream_timing',reason:'dom_staged',
+        ...streamTiming,domStagedAt:Date.now(),complete:state.complete===true,
+        terminal:false},ctx.traceId||'');
+      return;
+    }
     if(response===false||response?.ok===false||response?.applied!==true)
       throw new Error(`Provisional overlay not applied: ${response?.reason||response?.error||'no applied acknowledgement'}`);
     updateImagePresentation?.(batchId, ctx.imageKey || ctx.metadata?.image_id, {
@@ -425,7 +447,7 @@ export function createResultDelivery(deps) {
       complete:state.complete===true,invalidated:state.invalidated===true,terminal:false},ctx.traceId||'');
   }
 
-  async function handleResult(jobId, result) {
+  async function handleResult(jobId, result, partialNotice = null) {
     const ctx = findContext(jobId, result?.metadata?.image_id);
     if (!ctx) {
       log.warn("result for unknown job", { id: jobId });
@@ -631,6 +653,17 @@ export function createResultDelivery(deps) {
     if (hasHtml && (!overlayOk?.ok || overlayOk?.stale || overlayOk?.notFound || overlayOk?.expired)) {
       ok = false;
       errMsg = "Overlay insert failed";
+    }
+    if (ok && hasHtml && partialNotice && !stopStaleDraw() &&
+        !deps.shouldSuppressPartialNotice?.({ ctx, batch, imageKey })) {
+      const missing = partialNotice.missing.filter(id => typeof id === 'string');
+      // In a virtualized reader, a notice remains staged until mount. A repair
+      // owner must not stage its normal missing-unit work as an image error.
+      await enqueueDomInsert(tabId, {type:'IMAGE_NOTICE',original:imgUrl,
+        generation:ctx.generation || null,
+        error:{schema:'tp.error/1',code:'AI_INCOMPLETE',severity:'warning',
+          userMessage:`AI แปลขาด ${missing.length} จุด`,
+          detail:missing.slice(0,6).join(', ')}},frameId);
     }
     const storedForReader = Boolean(ctx.generation?.readerRunId &&
       ((overlayOk?.stored && !overlayOk?.applied) || (replaceOk?.stored && !replaceOk?.applied)));

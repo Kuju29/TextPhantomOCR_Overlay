@@ -40,7 +40,7 @@ class LoopbackClient:
 
 try:
  with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ,{'TP_AI_WIRE_TRACE':'1','TP_AI_WIRE_TRACE_DIR':temp,'TP_USAGE_RECEIPTS':'off','TP_PROMPT_CACHE':'on','TP_PROMPT_CACHE_COORDINATION':'auto','TP_PROMPT_CACHE_WAIT_MS':'1000'}),patch.object(httpx,'Client',LoopbackClient),patch.object(cache,'_coordinator',cache.PrefixCoordinator()),patch('backend.ai.provider_resolution.discovered_model_capabilities',return_value=(False,{})):
-  cfg=AiConfig(provider='huggingface',model='deepseek-ai/fixture-model',api_key='PRIVATE_ACCOUNT',base_url='https://router.huggingface.co/v1',thinking='off',source_lang='en',memory_mode='off')
+  cfg=AiConfig(provider='huggingface',model='deepseek-ai/fixture-model',api_key='PRIVATE_ACCOUNT',base_url='https://router.huggingface.co/v1',thinking='default',source_lang='en',memory_mode='off')
   def translate(i):
    token=wire_trace.begin({'traceId':'fixture','operationId':f'cache-http-{i}'})
    try:
@@ -70,7 +70,11 @@ try:
   for i,result in enumerate([a,b,third]):
    assert result['meta']['usage']['totalTokens']==3010,'cache not subtracted from logical token total'
    folder=next(path.parent for path in Path(temp).glob('*/00_identity.json') if json.loads(path.read_text()).get('operationId')==f'cache-http-{i}')
-   raw=(folder/'05_provider_response.raw').read_text();assert 'cached_tokens' in raw
+   raw=(folder/'05_provider_response.raw').read_text()
+   assert raw=='[raw provider response omitted]\n'
+   response_meta=json.loads((folder/'05_provider_response.meta.json').read_text())
+   assert response_meta['status']==200 and response_meta['streamed'] is True
+   assert response_meta['bodyStored'] is False and response_meta['inputTokens']==3000
    d=json.loads((folder/'03_cache_coordination.json').read_text());assert d['phase']=='finished'
    assert d==result['meta']['cacheCoordination']
    request=json.loads((folder/'04_provider_request.json').read_text())['body']

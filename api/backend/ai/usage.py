@@ -34,6 +34,22 @@ def _dict(value: Any) -> dict:
 def _pick(raw: dict, *keys: str) -> int | None:
     return next((v for key in keys if (v := token(raw.get(key))) is not None), None)
 
+def llama_cached_usage(raw: Any, cache_n: Any) -> Any:
+    """Merge a llama.cpp family timing cache read only when usage omitted it.
+
+    The transport chooses the concrete provider; this function only checks
+    observed integers and never estimates a cache hit or retains response text.
+    """
+    data = _dict(raw)
+    inp, cached = _pick(data, 'prompt_tokens', 'input_tokens'), token(cache_n)
+    if inp is None or cached is None or cached > inp:
+        return raw
+    details = _dict(data.get('prompt_tokens_details') or data.get('input_tokens_details'))
+    if ('cached_tokens' in details or 'cached_tokens' in data or
+            'prompt_cache_hit_tokens' in data):
+        return raw
+    return {**data, 'prompt_tokens_details': {**details, 'cached_tokens': cached}}
+
 def finalize_usage(values: dict, *, complete: bool = True) -> dict:
     out = {**values}
     for key in TOKEN_FIELDS:
@@ -90,7 +106,8 @@ def normalize_usage(raw: Any, dialect: str = 'openai', *, complete: bool = True,
                  outputTokens=_pick(data, 'output_tokens'), totalTokens=_pick(data, 'total_tokens'),
                  cachedInputTokens=read, cacheWriteInputTokens=write,
                  cacheWrite5mInputTokens=_pick(_dict(data.get('cache_creation')), 'ephemeral_5m_input_tokens'),
-                 cacheWrite1hInputTokens=_pick(_dict(data.get('cache_creation')), 'ephemeral_1h_input_tokens'))
+                 cacheWrite1hInputTokens=_pick(_dict(data.get('cache_creation')), 'ephemeral_1h_input_tokens'),
+                 thinkingTokens=_pick(_dict(data.get('output_tokens_details')), 'thinking_tokens'))
     elif dialect == 'gemini':
         visible = _pick(data, 'candidatesTokenCount')
         thought = _pick(data, 'thoughtsTokenCount')

@@ -19,6 +19,11 @@ export function createApiHealthController({
   paidAvailability = null,
 }) {
   const inFlight = new Map();
+  let metaSeq = 0;
+  const invalidateMeta = () => {
+    ++metaSeq;
+    paidAvailability?.(false, "");
+  };
 
   const scheduleRetry = (url, attempt) => {
     clearTimeout(state.retryTimer);
@@ -29,9 +34,13 @@ export function createApiHealthController({
   };
 
   const refreshMeta = async (baseUrl) => {
+    const sequence = ++metaSeq;
+    const current = () => sequence === metaSeq && state.lastApiOk === true &&
+      normalizeUrl(els.apiUrl.value) === baseUrl;
     try {
       const data = await fetchJson(`${baseUrl}${paths.META}`, null, timeout);
-      if (!data?.ok) return;
+      if (!current()) return;
+      if (!data?.ok) { paidAvailability?.(false, baseUrl); return; }
       state.metaCache = data;
       paidAvailability?.(data.paid?.available === true, baseUrl);
       const availableLanguages =
@@ -66,13 +75,14 @@ export function createApiHealthController({
         patch.sources = state.desiredSources;
       }
       if (Object.keys(patch).length) await persist(patch);
+      if (!current()) return;
       toggleUi();
-    } catch { paidAvailability?.(false, baseUrl); }
+    } catch { if (current()) paidAvailability?.(false, baseUrl); }
   };
 
   const check = async (url, attempt = 0) => {
     const cleaned = normalizeUrl(url);
-    if (!cleaned) return;
+    if (!cleaned) { invalidateMeta(); return; }
     const sequence = ++state.healthSeq;
     // A fresh positive snapshot remains visible while verification happens;
     // do not make a healthy API appear to flap merely because the popup opened.
@@ -99,6 +109,7 @@ export function createApiHealthController({
         setStatus("ok", "Online");
         void refreshMeta(cleaned);
       } else {
+        invalidateMeta();
         availabilityGate?.failure();
         setStatus(
           "error",
@@ -109,6 +120,7 @@ export function createApiHealthController({
     } catch (error) {
       if (sequence !== state.healthSeq) return;
       state.lastApiOk = false;
+      invalidateMeta();
       availabilityGate?.failure();
       const message =
         error?.name === "AbortError"
@@ -140,7 +152,7 @@ export function createApiHealthController({
   };
 
   const markBrowserOffline = () =>
-    availabilityGate?.failure({ definitive: true });
+    (invalidateMeta(), availabilityGate?.failure({ definitive: true }));
 
-  return { check, refreshMeta, acceptSnapshot, markBrowserOffline };
+  return { check, refreshMeta, acceptSnapshot, markBrowserOffline, invalidateMeta };
 }

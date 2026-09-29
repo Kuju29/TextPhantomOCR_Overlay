@@ -20,6 +20,7 @@ const {
   reset,
   restoredWindowForPolicy,
   restoredLocalAutoLearning,
+  restoredLocalParallelCooldown,
 } = await import("../src/background/scheduler.js");
 
 const jobsSource = await readFile(new URL("../src/background/pipeline/server-translation.js", import.meta.url), "utf8");
@@ -27,8 +28,10 @@ const extensionAiSource = await readFile(new URL("../src/background/pipeline/ai-
 assert.doesNotMatch(extensionAiSource,
   /if\s*\(!localCapacity\)[\s\S]{0,180}setLaneSlotCeiling\(key,\s*0\)/,
   "Cloud AI setup must not erase the server-advertised capacity ceiling");
-assert.match(jobsSource,
-  /const requestLane = laneKeyFor\(outbound\);[\s\S]{0,400}configureLocalCapacityForPayload\(outbound\);[\s\S]{0,900}await acquire\(requestLane/,
+const laneSelection = jobsSource.indexOf('const requestLane = laneKeyFor(outbound);');
+const localPolicy = jobsSource.indexOf('configureLocalCapacityForPayload(outbound);', laneSelection);
+const firstAcquire = jobsSource.indexOf('await acquire(requestLane', localPolicy);
+assert.ok(laneSelection >= 0 && localPolicy > laneSelection && firstAcquire > localPolicy,
   "API-engine path must configure local capacity before its first acquire");
 const safeDeferredStart = jobsSource.indexOf("const safeDeferred =");
 const safeDeferredContinue = jobsSource.indexOf("continue;", safeDeferredStart);
@@ -219,6 +222,62 @@ reset();
     "post-generation local OOM/503 must narrow capacity");
   assert.equal(describe(failureKey).pausedMs, 0,
     "direct-local Retry-After must not install time pacing");
+
+  // LM Studio native may close two concurrent SSE streams without a terminal
+  // after HTTP 200. The browser cannot prove OOM from that frame alone, but
+  // overlapping execution is enough to stop Auto's current parallel probe.
+  reset();
+  const lm = local('deepseek-r1', {aiLocalCapacityMode:'auto'}, 'http://localhost:1234/v1');
+  lm.ai.provider='lmstudio';
+  lm.ai.local_adapter={protocol:'openai',baseUrl:lm.ai.base_url};
+  configureLocalCapacityForPayload(lm);
+  const lmKey=laneKeyFor(lm);
+  assert.ok(lmKey.startsWith('ai-local:openai:'),
+    'LM Studio native uses the openai transport lane key');
+  await acquire(lmKey);releaseSuccess(lmKey,1000);
+  await Promise.all([acquire(lmKey),acquire(lmKey)]);
+  const missingTerminal={code:'provider_protocol_error',status:200,
+    generationAttempts:1,requestDispatched:true,providerResponded:true,
+    diagnostics:{validatorSubtype:'provider_terminal_missing'}};
+  assert.equal(releaseLocalFailure(lmKey,missingTerminal),'rejected');
+  assert.equal(Math.floor(describe(lmKey).window),1,
+    'LM Studio Auto must narrow when a stream ends without terminal during overlap');
+  assert.equal(describe(lmKey).rejected,0,
+    'a generated HTTP 200 protocol failure is not a provider rejection');
+  assert.equal(describe(lmKey).failed,1);
+  assert.equal(releaseLocalFailure(lmKey,missingTerminal),'failed',
+    'a second completion from the same incident must not invent extra capacity failures');
+  assert.equal(restoredLocalParallelCooldown({window:1,localAutoVersion:1,
+    localParallelStreamCooldown:true},'lmstudio'),true);
+  assert.equal(restoredLocalParallelCooldown({window:1,localAutoVersion:1,
+    localParallelStreamCooldown:true},'ollama'),false);
+  for (let i=0;i<11;i++) {
+    await acquire(lmKey);releaseSuccess(lmKey,1000);
+    assert.equal(Math.floor(describe(lmKey).window),1,
+      'a suspected parallel stream abort keeps Auto serial during recovery');
+  }
+  await acquire(lmKey);releaseSuccess(lmKey,1000);
+  assert.equal(Math.floor(describe(lmKey).window),2,
+    'after twelve completed samples Auto may probe parallel capacity again');
+  reset();
+  configureLocalCapacityForPayload(lm);
+  await acquire(lmKey);releaseSuccess(lmKey,1000);
+  await acquire(lmKey);
+  assert.equal(releaseLocalFailure(lmKey,missingTerminal),'failed');
+  assert.equal(Math.floor(describe(lmKey).window),2,
+    'a lone missing terminal is a protocol error, not evidence of overload');
+  reset();
+  const manualLm=local('deepseek-r1',{aiLocalCapacityMode:'manual',manualConcurrency:2},
+    'http://localhost:1234/v1');
+  manualLm.ai.provider='lmstudio';
+  manualLm.ai.local_adapter={protocol:'openai',baseUrl:manualLm.ai.base_url};
+  configureLocalCapacityForPayload(manualLm);
+  const manualLmKey=laneKeyFor(manualLm);
+  await Promise.all([acquire(manualLmKey),acquire(manualLmKey)]);
+  assert.equal(releaseLocalFailure(manualLmKey,missingTerminal),'failed');
+  assert.equal(Math.floor(describe(manualLmKey).window),2,
+    'explicit Manual concurrency must remain the user choice');
+  releaseFailed(manualLmKey);
 
   reset();
   const saturated = local("gemma-saturated", { aiLocalCapacityMode: "auto" });

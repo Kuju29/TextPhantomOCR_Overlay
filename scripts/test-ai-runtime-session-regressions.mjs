@@ -23,7 +23,7 @@ for (const [method, reason, href] of [
 }
 
 const index = await readFile(new URL("../src/background/index.js", import.meta.url), "utf8");
-assert.match(index, /import\s*\{\s*bumpTabSession\s*,\s*dropTabSession\s*,\s*ensureTabSession\s*,\s*getTabSessionId\s*,?\s*\}/,
+assert.match(index, /import\s*\{[^}]*\bbumpTabSession\s*,\s*dropTabSession\s*,\s*ensureTabSession\s*,\s*getTabSessionId\b[^}]*\}\s*from\s*["']\.\/tab-sessions\.js["']/,
   "the composition root must import every tab-session identifier it uses");
 const aiLocal = await readFile(new URL("../src/background/ai/transports/server.js", import.meta.url), "utf8");
 const translateBody = aiLocal.slice(aiLocal.indexOf("export async function translateViaServer"));

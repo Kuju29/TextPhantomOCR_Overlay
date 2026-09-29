@@ -1,11 +1,17 @@
 import { readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { isForbiddenProjectArchiveEntry } from "./source-package-policy.mjs";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const distRoot = path.join(projectRoot, "dist");
-const packageRoot = path.join(projectRoot, "packages");
+const testRunId = String(process.env.TEXTPHANTOM_BUILD_TEST_RUN_ID || "");
+if (testRunId && !/^[a-f0-9-]{36}$/.test(testRunId))
+  throw new Error("TEXTPHANTOM_BUILD_TEST_RUN_ID must be a UUID");
+const buildWorkRoot = testRunId
+  ? path.join(tmpdir(), `textphantom-build-test-${testRunId}`) : projectRoot;
+const distRoot = path.join(buildWorkRoot, "dist");
+const packageRoot = path.join(buildWorkRoot, "packages");
 const targets = ["chrome", "edge", "opera", "firefox", "thunderbird"];
 const failures = [];
 const baseManifest = JSON.parse(

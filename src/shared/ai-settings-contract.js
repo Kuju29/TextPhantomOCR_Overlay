@@ -1,6 +1,7 @@
 // Pure readiness checks shared by browser entry points. This module never
 // receives/logs a raw key beyond testing whether a non-empty value exists.
 import { isLocalAiProvider, isLocalHostUrl } from "./constants.js";
+import { sameLocalAdapterEndpoint } from "./ai/providers/local-registry.js";
 
 export const AI_SETTINGS_UI_PATHS = Object.freeze({
   provider: "[AI option > Provider]",
@@ -20,6 +21,10 @@ const configurationIssue = (code, message, path) => ({
 /** Maps profile-storage validation failures to one actionable UI location. */
 export function aiConfigurationIssueForError(error) {
   const code = String(error?.code || "");
+  if (code === "ai_provider_endpoint_conflict")
+    return configurationIssue(code,
+      "The selected Cloud AI provider has a Local AI endpoint. Re-select the Provider at",
+      AI_SETTINGS_UI_PATHS.provider);
   if (code === "AI_PROMPT_REQUIRED")
     return configurationIssue(code, "ยังไม่ได้ตั้งค่า AI Style กรุณาตั้งค่าที่", AI_SETTINGS_UI_PATHS.prompt);
   if (code === "AI_PROFILE_INCOMPLETE") {
@@ -102,6 +107,10 @@ export function autoAiSettingsIssue(
     .toLowerCase();
   const baseUrl = String(settings?.aiBaseUrl || "").trim();
   const userKey = String(settings?.aiKey || "").trim();
+  if (provider === "localai") return configurationIssue(
+    "ai_provider_removed", "The saved LocalAI preset was removed. Select your installed Local AI provider at",
+    AI_SETTINGS_UI_PATHS.provider,
+  );
   const classification = classifyAiRuntime(settings);
   const local = classification.local;
 
@@ -139,7 +148,7 @@ export function autoAiSettingsIssue(
     return {
       code: "ai_provider_endpoint_conflict",
       message:
-        "The selected Cloud AI provider has a Local AI endpoint. Re-select the Provider or save its Cloud endpoint before translating.",
+        "The selected Cloud AI provider has a Local AI endpoint. Re-select the Provider before translating.",
     };
   }
 
@@ -150,8 +159,18 @@ export function autoAiSettingsIssue(
     return {
       code: "custom_local_extension_only",
       message:
-        "Custom Local Adapter runs from the Extension only. Open the main popup and choose Where the work runs: Extension.",
+      "Custom Local Adapter runs from the Extension only. Open the main popup and choose Where the work runs: Extension.",
     };
+  }
+  if (provider === "customlocal" &&
+    (!["openai", "ollama"].includes(settings?.localAiAdapter?.protocol) ||
+      !String(settings?.localAiAdapter?.baseUrl || "").trim() ||
+      !sameLocalAdapterEndpoint(settings.localAiAdapter.baseUrl, baseUrl))) {
+    return configurationIssue(
+      "LOCAL_ADAPTER_MISSING",
+      "Custom Local requires an explicit protocol and server URL in the adapter JSON at",
+      AI_SETTINGS_UI_PATHS.localUrl,
+    );
   }
 
   if (

@@ -1,14 +1,31 @@
 import { observeLocalPrefix } from "../cache-coordination.js";
 import { completedLineContract } from "../contracts/marker-completion.js";
 import { decodedLines } from "../direct-local/stream-reader.js";
+import { LocalAiError } from "../direct-local/error.js";
 
 function emitWire(wireTrace, stage, value) {
   try { Promise.resolve(wireTrace?.(stage, value)).catch(() => {}); } catch {}
 }
 
+// Diagnostic counts come from the same native parser as Tokens used. Never
+// relay raw envelopes/cursors/reasoning just to make Local accounting auditable.
+function responseUsageCounters(adapter, data) {
+  let usage;
+  try { usage = adapter.usage(data); } catch { return {}; }
+  const out = {};
+  for (const [target, source] of Object.entries({inputTokens:"inputTokens",outputTokens:"outputTokens",
+      totalTokens:"totalTokens",cachedInputTokens:"cachedInputTokens",reasoningTokens:"thinkingTokens"})) {
+    const value = usage?.[source];
+    out[target] = Number.isSafeInteger(value) && value >= 0 ? value : null;
+  }
+  return out;
+}
+
 export async function readProviderResponse(response, adapter, {
   expectedIds = [], signal = null, trace = null, onProgress = null, wireTrace = null,
   dispatchStartedAt = null, headersReceivedAt = null, emitTranslationDeltas = false,
+  expectedModel = "",
+  expectedOutputTokens = null,
 } = {}) {
   const started = Number.isFinite(dispatchStartedAt) ? dispatchStartedAt : performance.now();
   const headersAt = Number.isFinite(headersReceivedAt) ? headersReceivedAt : performance.now();
@@ -29,6 +46,11 @@ export async function readProviderResponse(response, adapter, {
           terminalMs: failedAt - started }, error: { name: String(error?.name || "Error"),
           message: String(error?.message || error), code: String(error?.code || "") } });
       throw error;
+    }
+    if (response.ok && adapter.assertResponseModel) {
+      let data;
+      try { data = JSON.parse(raw); } catch {} // Existing invalid-JSON handling owns this error.
+      if (data) adapter.assertResponseModel(data, expectedModel);
     }
     const bodyReadAt = performance.now();
     const timing = { dispatchToHeadersMs: headersAt - started, firstByteMs: null,
@@ -78,7 +100,10 @@ export async function readProviderResponse(response, adapter, {
     const evidence = completedLineContract(content, expectedIds);
     if (!evidence) return false;
     completionEvidence = evidence; earlyCompletionMs = performance.now() - started;
-    if (!emitTranslationDeltas && adapter.shouldDrainAfterCompletion(providerDone)) drainDeadline = performance.now() + adapter.drainGraceMs;
+    if (!emitTranslationDeltas && adapter.shouldDrainAfterCompletion(providerDone)) {
+      drainDeadline = performance.now() + adapter.drainGraceMs;
+      progress("waiting_for_terminal", {completionEvidence:evidence}, true);
+    }
     return true;
   };
   const consume = (line) => {
@@ -90,6 +115,7 @@ export async function readProviderResponse(response, adapter, {
     if (event.kind === "malformed") { malformedFrameCount += 1; malformedFrameSubtypes.add(event.subtype);
       trace?.("AI local malformed stream frame", { streamMode: adapter.streamMode,
         validatorSubtype: event.subtype, frameChars: event.chars }); return; }
+    if (response.ok) adapter.assertResponseModel?.(event.item, expectedModel);
     adapter.mergeEnvelope(envelope, event.item);
     if (event.providerDone) { providerDone = true; protocolTerminalMs = performance.now() - started; }
     if (event.reasoning) { reasoningObserved = true; reasoningChars += event.reasoning.length; }
@@ -119,7 +145,7 @@ export async function readProviderResponse(response, adapter, {
       if (processedAt != null) maxReadWaitMs = Math.max(maxReadWaitMs, receivedAt - processedAt);
       frameAt = receivedAt;
       try {
-        chunks += 1; if (firstByteMs == null) firstByteMs = performance.now() - started;
+        chunks += 1; if (firstByteMs == null) firstByteMs = receivedAt - started;
         rawChunks.push(String(batch.rawChunk ?? batch.lines.join("\n")));
         for (const line of batch.lines) {
           consume(line); observeCompletion();
@@ -174,12 +200,13 @@ export async function readProviderResponse(response, adapter, {
   const terminalAt = performance.now();
   const streamTiming = streamTimingAt(terminalAt);
   const data = adapter.finalizeEnvelope(envelope, content);
-  const finishReason = adapter.finishReason(data);
+  const finishReason = adapter.finishReason(data, expectedOutputTokens);
   const normalFinish = /^(?:stop|end_turn|completed|complete)$/i.test(finishReason);
   const terminalCompleted = adapter.terminalCompleted({ providerDone, terminal, normalFinish });
   emitWire(wireTrace, "providerResponse", { mode: "stream", status: response.status,
     chunks: rawChunks, bodyReadComplete,
     providerTerminalComplete: terminalCompleted, complete: terminalCompleted,
+    ...responseUsageCounters(adapter, data),
     reconstructedEnvelope: JSON.stringify(data),
     timing: { dispatchToHeadersMs: headersAt - started, firstByteMs, firstContentMs,
       lastContentMs, terminalMs: terminalCompleted ? terminalAt - started : null, streamTiming } });
@@ -206,24 +233,41 @@ export async function dispatchProviderRequest(adapter, request, context) {
         model: request.model, reasoning: request.thinkingCapability, payload,
       })
     : request.thinkingMode === "default" ? "provider_default" : "unverified";
+  // A selected Off may be the user's explicit choice or Lowest available for
+  // a model with a verified disable option. Either way, omitting the control
+  // can silently restore the model's thinking default.
+  if (request.thinkingMode === "off" && request.thinkingCapability?.supported !== false &&
+      !/^requested_off(?:_|$)/.test(thinkingApplied))
+    throw new LocalAiError("This Local AI provider cannot verify Thinking off on the request", {
+      code:"local_model_thinking_unsupported",attempted:false,retryable:false,
+    });
   const cacheLease = await observeLocalPrefix({url,model:request.model,headers,payload,
     layout:context.cacheContext,trace:context.trace,revision:context.cacheRevision || "",operationId:context.cacheOperationId || ""});
-  emitWire(context.wireTrace, "providerRequest", { url, method: "POST", headers, body: payload,
-    ...(cacheLease ? {cacheCoordination:cacheLease.snapshot()} : {}) });
   const requestBody = JSON.stringify(payload);
-  const started = performance.now();
+  let started = performance.now();
   const requestSetupMs = started - setupStarted;
   let response;
+  let dispatched = false;
   try {
     if (context.signal?.aborted) throw context.signal.reason || new DOMException("Cancelled", "AbortError");
+    await context.beforeDispatch?.(context.signal);
+    if (context.signal?.aborted) throw context.signal.reason || new DOMException("Cancelled", "AbortError");
+    started = performance.now();
+    emitWire(context.wireTrace, "providerRequest", { url, method: "POST", headers, body: payload,
+      ...(cacheLease ? {cacheCoordination:cacheLease.snapshot()} : {}) });
     cacheLease?.dispatched();
-    response = await fetch(url, {
+    dispatched = true;
+    const pendingResponse = fetch(url, {
       method: "POST", headers, cache: "no-store", credentials: "omit",
       redirect: "error", signal: context.signal, body: requestBody,
     });
+    // The source-order gate releases only after the real HTTP request starts,
+    // so rate admission and payload preparation cannot reorder Local pages.
+    context.onDispatched?.();
+    response = await pendingResponse;
   } catch (error) {
     error.cacheCoordination = cacheLease?.finish({}, false, context.signal?.aborted ? "cancelled" : "failed");
-    error.requestDispatched = cacheLease ? cacheLease.snapshot().requestDispatched : !context.signal?.aborted;
+    error.requestDispatched = dispatched;
     error.providerResponded = false;
     const failedAt = performance.now();
     error.diagnostics = { ...(error.diagnostics || {}),
@@ -237,9 +281,15 @@ export async function dispatchProviderRequest(adapter, request, context) {
   context.onProgress?.({ state: "waiting_for_model" });
   let stream;
   try { stream = await readProviderResponse(response, adapter, {
-    ...context, dispatchStartedAt: started, headersReceivedAt,
+    ...context, dispatchStartedAt: started, headersReceivedAt, expectedModel: request.model,
+    expectedOutputTokens:request.outputTokens,
   }); }
   catch (error) {
+    if (error?.code === "local_model_identity_mismatch") {
+      // Close the response stream once the first frame identifies the
+      // mismatch. Whether the local runtime stops computing is unverified.
+      try { Promise.resolve(response.body?.cancel?.("model_identity_mismatch")).catch(() => {}); } catch {}
+    }
     error.cacheCoordination = cacheLease?.finish(error.observedUsage || {}, false, context.signal?.aborted ? "cancelled" : "failed");
     error.requestDispatched = true;
     error.providerResponded = true;

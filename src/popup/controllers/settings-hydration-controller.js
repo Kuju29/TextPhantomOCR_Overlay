@@ -5,6 +5,7 @@ import { effectiveEngineMode } from "../../shared/engine-mode.js";
 import {
   localAiPreset,
   normalizeLocalAiAdapter,
+  savedCustomLocalAdapter,
 } from "../../shared/ai/providers/local-registry.js";
 import { sendRuntimeMessage } from "../../shared/messaging.js";
 import {
@@ -16,6 +17,7 @@ import {
   DEFAULT_RATE_LIMIT_ENABLED,
   DEFAULT_RATE_RPM,
   DEFAULT_RATE_BURST,
+  isLocalAiProvider,
 } from "../../shared/constants.js";
 import {
   AI_PROMPT_MAX_CHARS,
@@ -132,6 +134,7 @@ export async function loadPopupSettings(deps) {
     "aiProvider",
     "aiBaseUrl",
     "localAiAdapter",
+    "localAiAdapterOwner",
     "aiCharMemory",
     "aiMemoryMode",
     "aiSendImage",
@@ -142,11 +145,15 @@ export async function loadPopupSettings(deps) {
     "fontScale",
     "imgButtonsEnabled",
     "translateAllButtonEnabled",
+    "downloadImagesEnabled",
     "relayoutTranslated",
     "rateLimitEnabled",
     "rateProfile",
     "rateRpm",
     "rateBurst",
+    "aiLocalRateLimitEnabled",
+    "aiLocalRateRpm",
+    "aiLocalRateBurst",
     "aiLocalCapacityMode",
     "aiLocalManualConcurrency",
     "aiLocalCapabilitySnapshotsV1",
@@ -162,6 +169,8 @@ export async function loadPopupSettings(deps) {
     els.imgButtonsToggle.checked = Boolean(stored.imgButtonsEnabled);
   if (els.translateAllButtonToggle)
     els.translateAllButtonToggle.checked = Boolean(stored.translateAllButtonEnabled);
+  if (els.downloadImagesToggle)
+    els.downloadImagesToggle.checked = Boolean(stored.downloadImagesEnabled);
   if (els.apiLocalUnlimited)
     els.apiLocalUnlimited.checked = stored.apiLocalUnlimited !== false;
   // API execution is temporarily unavailable in the extension UI. Keep the
@@ -280,15 +289,30 @@ export async function loadPopupSettings(deps) {
     },
   });
   const aiProfileReady = activation.ready;
+  if (storedProviderRaw === "localai") {
+    state.aiProfileBlocked = true;
+    setFieldMessage(els.aiProviderWrap, "error", "LocalAI preset was removed. Select your installed Local AI provider.");
+  }
   if (aiProfileReady && els.aiLocalAdapter) {
     try {
+      const custom = els.aiProvider?.value === "customlocal";
+      const owned = custom && stored.localAiAdapterOwner === "customlocal" &&
+        savedCustomLocalAdapter(stored.localAiAdapter, els.aiBaseUrl?.value);
       const adapter = normalizeLocalAiAdapter(
-        stored.localAiAdapter || localAiPreset(els.aiProvider?.value),
+        custom
+          ? stored.localAiAdapter
+          : localAiPreset(els.aiProvider?.value),
         { provider: els.aiProvider?.value },
       );
       els.aiLocalAdapter.value = JSON.stringify(adapter, null, 2);
+      if (custom && !owned)
+        setFieldMessage(els.aiEndpointWrap, "warn",
+          "Review and save this Custom adapter before connecting; it is not active for the selected URL.");
     } catch {
-      els.aiLocalAdapter.value = "";
+      // Keep old or malformed JSON editable. Unowned drafts cannot auto-connect.
+      els.aiLocalAdapter.value = els.aiProvider?.value === "customlocal" &&
+        stored.localAiAdapter && typeof stored.localAiAdapter === "object"
+        ? JSON.stringify(stored.localAiAdapter, null, 2) : "";
     }
   }
   void seriesMemoryController.refresh();
@@ -300,6 +324,11 @@ export async function loadPopupSettings(deps) {
         : DEFAULT_RELAYOUT_TRANSLATED;
   }
   if (els.rateLimitEnabled) {
+    if (els.aiLocalRateEnabled) {
+      els.aiLocalRateEnabled.checked = stored.aiLocalRateLimitEnabled === true;
+    }
+    if (els.aiLocalRateRpm) els.aiLocalRateRpm.value = String(Number(stored.aiLocalRateRpm) > 0 ? stored.aiLocalRateRpm : (els.aiLocalRateEnabled?.checked ? "" : 6));
+    if (els.aiLocalRateBurst) els.aiLocalRateBurst.value = String(Number(stored.aiLocalRateBurst) > 0 ? stored.aiLocalRateBurst : (els.aiLocalRateEnabled?.checked ? "" : 1));
     els.rateLimitEnabled.checked =
       typeof stored.rateLimitEnabled === "boolean"
         ? stored.rateLimitEnabled
@@ -318,22 +347,17 @@ export async function loadPopupSettings(deps) {
         ? "custom"
         : "auto";
   }
-  if (els.rateLimitEnabled &&
-      (els.rateProfile?.value === "auto" || Number(stored.rateRpm) <= 0)) {
-    els.rateLimitEnabled.checked = false;
-    if (stored.rateLimitEnabled === true)
-      await setStorage({ rateLimitEnabled: false });
-  }
   if (els.rateRpm)
     els.rateRpm.value = String(
-      Number(stored.rateRpm) > 0 ? stored.rateRpm : DEFAULT_RATE_RPM,
+      Number(stored.rateRpm) > 0 ? stored.rateRpm : (els.rateLimitEnabled?.checked ? "" : DEFAULT_RATE_RPM),
     );
   if (els.rateBurst) {
     els.rateBurst.value = String(
-      Number(stored.rateBurst) > 0 ? stored.rateBurst : DEFAULT_RATE_BURST,
+      Number(stored.rateBurst) > 0 ? stored.rateBurst : (els.rateLimitEnabled?.checked ? "" : DEFAULT_RATE_BURST),
     );
   }
   rateSettingsController.renderHint();
+  rateSettingsController.renderLocalHint();
   // Storage is the source of truth during first paint. Live verification is
   // advisory and must never erase a saved selection.
   const hydratedModel = aiProfileReady
@@ -342,6 +366,7 @@ export async function loadPopupSettings(deps) {
   setModelOptions(hydratedModel && hydratedModel !== "auto" ? [hydratedModel] : [], {
     keepValue: hydratedModel,
     placeholder: "Select a model",
+    showUnknownHint: !isLocalAiProvider(state.activeAiProvider),
   });
   if (aiProfileReady)
     localConnectionController.restoreSnapshot(stored.aiLocalCapabilitySnapshotsV1);

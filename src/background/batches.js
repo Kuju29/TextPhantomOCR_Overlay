@@ -8,6 +8,7 @@ import { sendToTab, sendToastToTab } from "./tabs-messaging.js";
 import { serverBackoffMs } from "./transports/polling.js";
 import { releaseActiveOperationForBatch } from "./active-operations.js";
 import { noteSessionStorageFailure } from "./session-storage-diagnostics.js";
+import {isLocalAiPayload} from './local-capacity.js';
 
 const TOAST_MIN_INTERVAL_MS = 350;
 const BATCH_TTL_MS = 20 * 60 * 1000;
@@ -73,9 +74,14 @@ const COMPACT_PHASE_LABEL = Object.freeze({
 });
 
 const batches = new Map();
+// One provider transition is fanned out to every page in a shared request.
+// Send a single progress snapshot after those presentation-only updates land.
+const pendingPresentationSnapshots = new Set();
 const initialAiWaiters = new Map();
 const SESSION_KEY = "tpBatchProgressV1";
 let persistTimer = 0;
+let persistWrites = Promise.resolve();
+let restoration = null;
 
 let lastBatchStatus = null;
 
@@ -190,29 +196,49 @@ function sessionArea() {
   }
 }
 
-function persistBatchesSoon() {
+function pendingReaderPlacement(b) {
+  return !!b?.reader && [...(b.items?.values?.() || [])]
+    .some(item => item?.presentation?.placementPending === true);
+}
+function persistBatches() {
   const area = sessionArea();
-  if (!area || persistTimer) return;
-  persistTimer = setTimeout(() => {
-    persistTimer = 0;
+  if (!area) return Promise.resolve(false);
+  // Read the latest snapshot when our turn reaches storage. A delayed write
+  // must never restore an older ACK after the last pending page has placed.
+  persistWrites = persistWrites.catch(() => {}).then(() => new Promise(resolve => {
     const value = [...batches.values()]
-      .filter(b => !b.cancelled && (!b.completedAt || b.repair?.phase === 'apply_pending'))
-      .map(serializeBatchSnapshot)
-      .filter(Boolean);
+      .filter(b => !b.cancelled && (!b.completedAt || b.repair?.phase === 'apply_pending' || pendingReaderPlacement(b)))
+      .map(serializeBatchSnapshot).filter(Boolean);
     try {
-      area.set({ [SESSION_KEY]: value }, () => {
+      const result = area.set({ [SESSION_KEY]: value }, () => {
         const error = chrome.runtime?.lastError;
         if (error) noteSessionStorageFailure('batch_progress', error);
+        resolve(!error);
       });
-    } catch (error) { noteSessionStorageFailure('batch_progress', error); }
-  }, 80);
+      result?.then?.(() => resolve(true), error => {
+        noteSessionStorageFailure('batch_progress', error); resolve(false);
+      });
+    } catch (error) { noteSessionStorageFailure('batch_progress', error); resolve(false); }
+  }));
+  return persistWrites;
+}
+function persistBatchesSoon() {
+  if (!sessionArea() || persistTimer) return;
+  persistTimer = setTimeout(() => { persistTimer = 0; void persistBatches(); }, 80);
 }
 export const persistBatchProgressSoon = persistBatchesSoon;
+// The worker is about to release its keepalive, or has received a late mount
+// ACK. Commit metadata before allowing it to sleep; the image stays in content.
+export function persistBatchProgressNow() {
+  if (persistTimer) { clearTimeout(persistTimer); persistTimer = 0; }
+  return persistBatches();
+}
 
-export async function restorePersistedBatches() {
+export function restorePersistedBatches() {
+  if (restoration) return restoration;
   const area = sessionArea();
-  if (!area) return 0;
-  return new Promise((resolve) => {
+  if (!area) return Promise.resolve(0);
+  restoration = new Promise((resolve) => {
     try {
       area.get(SESSION_KEY, (result) => {
         void chrome.runtime?.lastError;
@@ -235,6 +261,7 @@ export async function restorePersistedBatches() {
       resolve(0);
     }
   });
+  return restoration;
 }
 
 void restorePersistedBatches();
@@ -374,6 +401,7 @@ function publicItem(imageKey, item, fallbackPhaseAt, now = Date.now()) {
   return {
     imageKey,
     label: Number.isFinite(pageIndex) ? `Image ${pageIndex + 1}` : "Image",
+    pageIndex:Number.isSafeInteger(pageIndex) && pageIndex>=0 ? pageIndex : null,
     phase,
     phaseAt: Number(item?.phaseAt) || fallbackPhaseAt,
     terminal: TERMINAL_PHASES.has(phase),
@@ -387,14 +415,18 @@ function publicItem(imageKey, item, fallbackPhaseAt, now = Date.now()) {
 export function batchProgressSnapshot(b, stage = "", now = Date.now()) {
   if (!b) return null;
   const stats = batchPassStats(b);
+  const conversation = conversationPresentation(b)?.state;
   const items = [];
   for (const [imageKey, item] of b.items?.entries?.() || []) {
     if (!item || (!b.reader && item.attempt !== stats.pass)) continue;
     items.push(publicItem(imageKey, item, b.createdAt || now, now));
   }
-  items.sort(
-    (a, z) => Number(a.terminal) - Number(z.terminal) || z.phaseAt - a.phaseAt,
-  );
+  const independentLocal=[...(b.items?.values?.()||[])].some(item=>
+    item?.payload?.source==='ai' && item.payload?.ai?.translation_mode==='independent' &&
+    isLocalAiPayload(item.payload));
+  items.sort(independentLocal
+    ? (a,z)=>(a.pageIndex??Infinity)-(z.pageIndex??Infinity) || a.phaseAt-z.phaseAt
+    : (a,z)=>Number(a.terminal)-Number(z.terminal) || z.phaseAt-a.phaseAt);
   const terminal = items.filter((item) => item.terminal).length;
   const active = items.length - terminal;
   const phaseCounts = {};
@@ -416,6 +448,7 @@ export function batchProgressSnapshot(b, stage = "", now = Date.now()) {
     placement: b.reader ? {released:b.reader.released === true,
       waiting:[...b.items.values()].filter(i=>i.presentation?.placementPending).length,
       placed:items.filter(i=>i.inserted).length} : null,
+    conversation: conversation ? {phase:String(conversation.phase || ''),turn:Number(conversation.turn) || 0} : null,
     repair: b.repair || null,
     stats,
     total: b.reader ? b.items.size : Math.max(stats.total, active + terminal),
@@ -632,6 +665,8 @@ export function updateImagePresentation(batchId, imageKey, patch = {}) {
   const b = getBatch(batchId), item = b?.items?.get(String(imageKey || ""));
   if (!item || b.cancelled) return;
   const now = Date.now();
+  const previousPhase = item.presentation?.phase;
+  const previousPlacementPending = item.presentation?.placementPending === true;
   if (patch.placementPending && item.presentation?.placementConfirmed) patch={...patch,placementPending:false};
   item.presentation = {...(item.presentation || {}), ...patch};
   item.progress = mergeProgressDetail(item.progress, patch, now);
@@ -654,6 +689,15 @@ export function updateImagePresentation(batchId, imageKey, patch = {}) {
   publishImageStatus(b, String(imageKey), item);
   if(patch?.insertionAck || patch?.translationMode==='conversation'||patch?.conversation)
     batchUpdateToast(b, patch?.insertionAck ? 'Translation placed' : patch?.conversation?.phase || '', false);
+  else if ((['usage_pending','sending_request','http_wait','response_headers','receiving_content','validating'].includes(String(patch?.phase || '')) && patch.phase !== previousPhase
+    || patch?.placementPending === true && !previousPlacementPending)
+    && !pendingPresentationSnapshots.has(b.id)) {
+    pendingPresentationSnapshots.add(b.id);
+    queueMicrotask(() => {
+      pendingPresentationSnapshots.delete(b.id);
+      if (getBatch(b.id) === b && !b.cancelled) batchUpdateToast(b, '', false);
+    });
+  }
 }
 
 export function markImagePhase(batchId, imageKey, phase, details = {}) {
@@ -692,6 +736,7 @@ const LOCAL_AI_PROGRESS_LABEL = Object.freeze({
   thinking: "Local AI is thinking",
   first_response: "Local AI responded",
   generating: "Local AI is generating",
+  waiting_for_terminal: "Waiting for Local AI terminal and token usage",
   completed: "Local AI response complete",
 });
 

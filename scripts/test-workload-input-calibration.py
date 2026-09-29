@@ -2,8 +2,11 @@
 from pathlib import Path
 import sys
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'api'))
+from backend.ai.provider_bootstrap import ensure_provider_registry
 from backend.ai.translation_paths.store import Lease, _current
 from backend.ai.workload import estimate_provider_input, observed_input_scale, guard_output_budget, WorkloadBudgetError
+
+ensure_provider_registry()
 
 assert observed_input_scale([])==1
 assert observed_input_scale([(1248,7559)])==.45
@@ -50,6 +53,7 @@ class Request:
     cache_context: dict=None
     unit_count: int=1
     history_messages: tuple=()
+    previous_response_id: str | None=None
 
 static='ก'*5100
 prompt=Request('Translator', (static+'\n\n'+'ป'*320,), model_capabilities={'limits':{'contextTokens':8191}},

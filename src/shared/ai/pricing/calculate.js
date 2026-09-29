@@ -1,3 +1,4 @@
+import {pricingModel} from "./provider-identity.js";
 import { money, sumMoney, lessMoney, multiplyMoney, perMillion } from "./money.js";
 import { selectRate } from "./providers.js";
 const count = n => Number.isSafeInteger(n) && n >= 0 ? n : null;
@@ -6,9 +7,12 @@ export function priceGeneration(event, config = {}) {
   if (event?.runtime === "local") return { usd: "0", source: "local_api_free", status: "local_api_free", savingsUsd: null };
   if (String(event?.provider || "").toLowerCase() === "paid")
     return { usd: null, source: "paid_credits", status: "credit_charge_unavailable", savingsUsd: null };
+  if (String(event?.provider || "").toLowerCase() === "openrouter" && event?.isByok === true)
+    return { usd: null, source: "provider", status: "byok_upstream_separate", savingsUsd: null,
+      providerFeeUsd: provided, upstreamInferenceCostUsd: money(event?.upstreamInferenceCostUsd) };
   if (provided !== null) return { usd: provided, source: "provider", status: "reported", savingsUsd: null };
-  const rate = selectRate(event?.provider, event?.resolvedModel || event?.model,
-    config.overrides,event?.upstreamProvider,config.liveRates);
+  const rate = selectRate(event?.provider, pricingModel(event),
+    config.overrides,event?.upstreamProvider,config.liveRates,event?.timestamp);
   if (!rate) return { usd: null, source: "no_rate", status: "unpriced", savingsUsd: null };
   if ([rate.input,rate.output].some(value=>money(value)===null) ||
       [rate.cached,rate.cacheWrite,rate.cacheWrite1h].some(value=>value != null && money(value)===null))
@@ -50,7 +54,7 @@ export function priceGeneration(event, config = {}) {
   };
   return {
     usd: sumMoney(...Object.values(parts)), source: rate.origin,
-    status: cached === null && rate.cached ? "upper_bound_cache_unreported" :
+    status: rate.upperBoundReason ? "upper_bound_tariff_calendar_unverified" : cached === null && rate.cached ? "upper_bound_cache_unreported" :
       !durationKnown && rate.cacheWrite1h ? "cache_write_duration_unknown" :
       event.failures > 0 ? "estimated_failed_request" :
       rate.extraFees ? "estimate_excludes_extras" : "estimated",

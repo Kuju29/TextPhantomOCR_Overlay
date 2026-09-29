@@ -10,6 +10,7 @@ import {
   normalizeAiPromptMode,
 } from "./ai-prompt-policy.js";
 import { normalizeUserReasoningPreference } from "./reasoning-preference.js";
+import { localProviderTranslationMode } from "./ai/providers/local-registry.js";
 
 const clone = (value) => structuredClone(value);
 
@@ -82,6 +83,9 @@ export function resolveEffectiveAiProfile(snapshot) {
       ? snapshot.profile
       : {};
   const unsupported = [];
+  const local = snapshot?.target?.runtime === "local";
+  const translationMode = local
+    ? localProviderTranslationMode(snapshot?.target?.provider) : "conversation";
   if (
     profile.tokenPolicy?.mode === "manual" ||
     Number(profile.tokenPolicy?.maxOutputTokens) > 0
@@ -101,7 +105,7 @@ export function resolveEffectiveAiProfile(snapshot) {
     pageImage: profile.pageImage || "off",
     memoryMode: profile.memoryMode || "off",
     styleExamples: profile.styleExamples !== false,
-    translationMode: "conversation",
+    translationMode,
     conversationReset: String(profile.conversationReset || "0"),
     concurrency: profile.concurrency || { mode: "auto", max: 0 },
     providerOptions: profile.providerOptions || {},
@@ -121,6 +125,8 @@ export function buildEffectiveAiPayload(
   const promptMode = requirePromptMode(effective?.promptMode);
   const target = effective?.target || {};
   const local = target.runtime === "local";
+  const translationMode = local
+    ? localProviderTranslationMode(target.provider) : "conversation";
   return frozenCopy({
     ai: {
       api_key: local ? "" : String(effective?.credential || ""),
@@ -130,8 +136,8 @@ export function buildEffectiveAiPayload(
       prompt: normalizeAiPrompt(effective?.prompt),
       prompt_mode: promptMode,
       memory_mode: String(effective?.memoryMode || "off"),
-      style_examples: effective?.styleExamples !== false,
-      translation_mode: "conversation",
+      style_examples: local ? effective?.styleExamples !== false : true,
+      translation_mode: translationMode,
       conversation_reset: String(effective?.conversationReset || "0"),
       send_image: effective?.pageImage === "always",
       thinking: normalizeUserReasoningPreference(effective?.thinking),

@@ -11,12 +11,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'api'))
 from backend.ai import markers
 from backend.ai.clients.base import ChatResult
+from backend.ai.clients.base import OutputBudgetExhausted
 from backend.ai.translation.contracts import AiConfig
 from backend.ai.translation.result_decode import decode_result
 from backend.ai.repair_alignment import uncertain_repair_ids
 from backend.application.ai_translation.response_mapping import map_result
 from backend.application.repair_pool import state as s
 from backend.application.repair_pool.store import RepairStore
+from backend.jobs.stages.ai_repair import translate_with_one_repair
 
 IDS = ['I10_P11', 'I26_P23', 'I26_P28', 'I26_P29', 'I26_P30']
 RAW = '\n'.join(['<<I10_P11:ประเมินสถานการณ์ต่ำไป>>', '<<I26_P11:บทถัดไป>>',
@@ -35,6 +37,43 @@ def decode(raw=RAW, ids=IDS, branch='repair'):
         system_text='fixture', user_parts=[], capture_request=True, is_retry=False)
 
 class AlignmentTest(unittest.TestCase):
+    def test_local_empty_completion_never_spends_nested_repair(self):
+        for subtype in ('empty_output', 'reasoning_only_exhausted'):
+            with self.subTest(subtype=subtype):
+                failure = OutputBudgetExhausted('Visible translation exhausted',
+                    validatorSubtype=subtype,
+                    generationMeta={'usage': {'inputTokens': 2105, 'outputTokens': 529}})
+                failure.requestDispatched = True
+                failure.generationAttempts = 1
+                calls = []
+                def generation(*_args, **_kwargs):
+                    calls.append(True)
+                    raise failure
+                with self.assertRaises(OutputBudgetExhausted) as caught:
+                    translate_with_one_repair(markers.apply(['Source']), 'th',
+                        AiConfig(api_key='', provider='ollama', repair_enabled=True), 1,
+                        translate_fn=generation)
+                self.assertIs(caught.exception, failure)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(failure.structural_details['generationMeta']['usage']['outputTokens'], 529)
+                self.assertFalse(failure.structural_details['repairAttempted'])
+                self.assertEqual(failure.structural_details['repairReason'], 'no_visible_output_at_limit')
+    def test_unclassified_truncation_still_uses_existing_repair(self):
+        failure = OutputBudgetExhausted('Truncated answer',
+            generationMeta={'usage': {'inputTokens': 50, 'outputTokens': 100}})
+        calls = []
+        def generation(*_args, **_kwargs):
+            calls.append(True)
+            if len(calls) == 1:
+                raise failure
+            return {'aiTextFull': markers.apply(['คำแปล']),
+                'meta': {'generationAttempts': 1,
+                    'usage': {'inputTokens': 20, 'outputTokens': 10}}}
+        result = translate_with_one_repair(markers.apply(['Source']), 'th',
+            AiConfig(api_key='', provider='ollama', repair_enabled=True), 1,
+            translate_fn=generation)
+        self.assertEqual(len(calls), 2)
+        self.assertIn('คำแปล', result['aiTextFull'])
     def test_sparse_expected_and_uncertainty_matrix(self):
         for extra, expected in [([],[]),(['I26_P11'],IDS[1:]),(['I10_P7'],IDS[:1]),
             (['I10_P7','I26_P11'],IDS),(['I90_P0'],IDS),(['P0'],IDS),(['I26_P23'],[])]:

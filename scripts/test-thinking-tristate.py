@@ -31,7 +31,7 @@ def request(mode="auto", caps=None):
                              thinking=mode, model_capabilities=caps or {})
 
 assert request("garbage").thinking == "off"
-assert request("auto").thinking == "default"
+assert request("auto").thinking == "minimum"
 payload = openrouter_payload(request("auto", {"reasoning":{"supported":True,"control":"toggle","default_enabled":True}}))
 assert "reasoning" not in payload
 assert "max_completion_tokens" in payload
@@ -61,15 +61,21 @@ routed = _apply_official_routing({"model":"fixture"}, "https://openrouter.ai/api
 assert routed["provider"] == {"sort":"throughput", "allow_fallbacks":True, "require_parameters":True, "preferred_max_latency":{"p90":8}}
 assert "provider" not in _apply_official_routing({"model":"fixture"}, "https://proxy.example/v1")
 
-# Workload prediction owns the normal completion reservation.  A short marker
-# translation must not advertise the old 7-8K ceiling when Thinking is Off.
+# Workload prediction owns the completion reservation. An Off request whose
+# model already spent tokens thinking must still reserve those output tokens.
 dynamic = GenerationRequest(provider="openrouter", model="fixture", system_text="s"*100,
     user_parts=("x"*800,), thinking="off", unit_count=20,
     workload={"version":1,"predictedOutput":1000,"reasoningReserve":3000,"estimatedInput":2000,"completionAvailable":8192},
     model_capabilities={"reasoning":{"supported":True,"control":"levels","can_disable":True,"supported_efforts":["low"]}})
 dynamic_payload = openrouter_payload(dynamic)
-assert dynamic_payload["max_tokens"] <= 1750, dynamic_payload["max_tokens"]
+assert dynamic_payload["max_tokens"] >= 4500, dynamic_payload["max_tokens"]
+assert dynamic_payload["max_tokens"] <= 8192, dynamic_payload["max_tokens"]
 assert dynamic_payload["reasoning"] == {"effort":"none"}
+plain = GenerationRequest(provider="openrouter", model="fixture", system_text="s"*100,
+    user_parts=("x"*800,), thinking="off", unit_count=20,
+    workload={"version":1,"predictedOutput":1000,"reasoningReserve":0,"estimatedInput":2000,"completionAvailable":8192},
+    model_capabilities=dynamic.model_capabilities)
+assert openrouter_payload(plain)["max_tokens"] <= 1750
 
 deepseek = build_payload(GenerationRequest(provider="deepseek", model="deepseek-chat", system_text="s",
     user_parts=("u",), thinking="auto"), "deepseek-chat", POLICY)
@@ -83,7 +89,7 @@ def ingress(value=...):
 for incoming in (..., None, "", "garbage", 7):
     assert ingress(incoming) == "off"
 assert ingress(False) == "off"
-assert ingress("auto") == "default"
+assert ingress("auto") == "minimum"
 assert ingress("off") == "off"
 assert ingress("on") == "on"
 for caps in ({}, {"supported": False}, {"supported": None},

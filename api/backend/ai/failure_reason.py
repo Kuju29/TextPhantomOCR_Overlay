@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from backend.ai.errors import ModelOutputContractError
 from backend.ai.clients.provider_error import (
     ProviderAdapterContractError, ProviderHttpError, ProviderTransportError,
-    upstream_http_status,
+    upstream_http_status, structured_upstream_http_status,
 )
 
 def classify(exc: BaseException) -> str:
@@ -88,12 +88,24 @@ _RATE_LIMIT_MARKERS = (
 
 def is_rate_limited(exc: BaseException) -> bool:
     """Whether the provider itself refused for rate or quota reasons."""
+    # Structured HTTP evidence wins over incidental words/numbers in the
+    # provider message or model ID. A 503 overload is not an account 429;
+    # a 401 containing a model named 429 must remain an authentication error.
+    status = structured_upstream_http_status(exc)
+    if status is not None:
+        return status == 429
+    if isinstance(exc, (ProviderTransportError, ProviderAdapterContractError)):
+        return False
     message = str(exc).lower()
     return any(marker in message for marker in _RATE_LIMIT_MARKERS)
 
 def retry_after_sec(exc: BaseException) -> float:
     """Seconds the provider asked us to wait, or 0 when it did not say."""
     import re
+
+    structured = getattr(exc, "retry_after_sec", None)
+    if isinstance(structured, (int, float)) and not isinstance(structured, bool) and 0 < structured <= 3600:
+        return float(structured)
 
     match = re.search(r"retry[-_ ]?after[\"\':= ]+(\d+(?:\.\d+)?)", str(exc), re.IGNORECASE)
     return float(match.group(1)) if match else 0.0

@@ -10,7 +10,7 @@ globalThis.document = { createElement: () => element() };
 const els = Object.fromEntries([
   "mode", "sources", "apiUrl", "aiService", "aiServiceWrap", "aiPaidPanel",
   "aiProviderWrap", "aiKeyWrap", "aiModelWrap", "aiEndpointWrap",
-  "aiPaidLogin", "aiPaidAccount", "aiPageImageWrap", "aiPaidStatus",
+  "aiPaidLogin", "aiPaidAccount", "aiPageImageWrap", "aiPaidStatus", "aiPaidUnavailable",
   "aiPaidEmail", "aiPaidCode", "aiPaidSend", "aiPaidCheck", "aiPaidVerify", "aiPaidEmailLabel",
   "aiPaidCredits", "aiPaidModel", "aiPaidRefresh", "aiPaidLogout",
 ].map(name => [name, element()]));
@@ -47,6 +47,9 @@ await controller.initialize();
 assert.equal(els.aiServiceWrap.style.display, "none", "No Center means old controls only");
 assert.equal(els.aiProviderWrap.style.display, "");
 controller.setAvailability(true, "http://127.0.0.1:7860");
+assert.equal(els.aiServiceWrap.style.display, "none", "A default API URL is not a user-configured Paid URL");
+state.lastSavedApiUrl = els.apiUrl.value;
+controller.setAvailability(true, "http://127.0.0.1:7860");
 assert.equal(els.aiServiceWrap.style.display, "");
 els.aiService.value = "paid";
 await els.aiService.listeners.change();
@@ -78,8 +81,20 @@ assert.equal(storage.paidApiBase, "http://localhost:7860");
 assert.equal(storage.paidModel, "qa/test");
 assert.equal(state.paidReady, true);
 assert.match(els.aiPaidCredits.textContent, /8000 TP/);
+controller.setAvailability(false, "http://127.0.0.1:7860");
+assert.equal(storage.aiServiceMode, "paid", "Paid choice remains explicit while Center is unavailable");
+assert.equal(els.aiService.value, "paid");
+assert.equal(els.aiServiceWrap.style.display, "none");
+assert.equal(els.aiPaidPanel.style.display, "none");
+assert.equal(els.aiPaidUnavailable.style.display, "");
+assert.equal(state.paidReady, false);
+assert.match(els.aiPaidStatus.textContent, /Select Manual/);
+controller.setAvailability(true, "http://127.0.0.1:7860");
+await settle();
 assert.equal(requests.at(-1).options.headers.Authorization, "Bearer customer-session");
 const beforeSwitch = requests.length;
+els.apiUrl.value = "http://127.0.0.1:7999";
+state.lastSavedApiUrl = els.apiUrl.value;
 controller.setAvailability(true, "http://127.0.0.1:7999");
 assert.equal(storage.paidSessionToken, "", "A new API must not receive the old Center token");
 assert.equal(state.paidReady, false);
@@ -93,6 +108,17 @@ await els.aiService.listeners.change();
 assert.equal(storage.aiServiceMode, "manual");
 assert.equal(state.paidActive, false);
 assert.ok(updates > 0);
+storage.aiServiceMode = "paid";
+els.apiUrl.value = "";
+state.lastSavedApiUrl = "";
+controller.setAvailability(false, "");
+const beforeRestore = requests.length;
+await controller.initialize();
+assert.equal(storage.aiServiceMode, "paid", "a saved Paid profile stays owned by the user");
+assert.equal(els.aiServiceWrap.style.display, "none", "Paid controls cannot appear before an explicit URL");
+assert.equal(els.aiPaidPanel.style.display, "none");
+assert.equal(els.aiPaidUnavailable.style.display, "", "the user sees a separate recovery notice");
+assert.equal(requests.length, beforeRestore, "restoring Paid without an API URL must not contact the Center");
 const { resolveJobAiProfile } = await import("../src/background/ai-profile-resolver.js");
 globalThis.chrome = { storage: { local: { get(_keys, callback) {
   callback({ customApiUrl: "http://127.0.0.1:7999", apiDefaultsFetchedAt: Date.now() });
@@ -101,4 +127,8 @@ globalThis.fetch = async () => ({ ok: true, json: async () => ({ paid: { availab
 await assert.rejects(() => resolveJobAiProfile({ aiServiceMode: "paid",
   paidSessionToken: "old-session", paidModel: "qa/test",
   paidApiBase: "http://localhost:7860" }), error => error.code === "PAID_LOGIN_REQUIRED");
+globalThis.fetch = async () => ({ ok: true, json: async () => ({ paid: { available: false } }) });
+await assert.rejects(() => resolveJobAiProfile({ aiServiceMode: "paid",
+  paidSessionToken: "old-session", paidModel: "qa/test",
+  paidApiBase: "http://localhost:7999" }), error => error.code === "PAID_CENTER_UNAVAILABLE" && /Select Manual/.test(error.message));
 console.log("Conditional Paid/Manual UI and OTP account flow passed.");

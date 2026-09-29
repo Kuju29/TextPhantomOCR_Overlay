@@ -31,9 +31,13 @@ export function workloadSelection(ai, route) {
   // native structured-output support.  Letting a schema-capable model select
   // JSON here while dispatch later forces I#_P# markers creates two workload
   // identities for the same request and can reset/poison learned capacity.
-  // Independent keeps its historical capability-driven contract untouched.
+  // LM Studio's named native chat transport accepts marker records only,
+  // including Independent. An old capability hint advertising JSON schema
+  // cannot change the request contract after this plan has been admitted.
+  // Other Independent providers retain their capability-driven contract.
   const conversation = ai?.translation_mode === 'conversation';
-  const contract = conversation ? 'compact_markers_v1'
+  const nativeLmStudio = String(ai?.provider || '').trim().toLowerCase() === 'lmstudio';
+  const contract = conversation || nativeLmStudio ? 'compact_markers_v1'
     : route === 'direct-local'
       ? workloadContract(selectLocalOutputContract({provider:ai.provider, model:ai.model, modelCapabilities:caps}).version)
       : caps.structured_output?.supported === true ? 'json_schema_object_v1'

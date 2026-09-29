@@ -9,11 +9,12 @@ export function requestGroups(history, day = null) {
     let group = groups.get(key);
     if (!group) { group = { id:groupId, startedAt:delta.timestamp, runtime:row.runtime,
       provider:row.provider, model:row.model, requests:0, failures:0,
-      imageRequests:0, totalTokens:0, usd:"0", unpricedRequests:0, deltas:[] }; groups.set(key,group); }
+      imageRequests:0, totalTokens:0, usd:"0", unpricedRequests:0, byokRequests:0, deltas:[] }; groups.set(key,group); }
     group.requests += delta.requests || 1;
     group.failures += delta.failures || 0;
     group.imageRequests += delta.imageCount || 0;
     group.totalTokens += delta.totalTokens || 0;
+    if (delta.isByok === true) group.byokRequests += delta.requests || 1;
     group.startedAt = Math.min(group.startedAt, delta.timestamp);
     if (delta.price?.usd == null) group.unpricedRequests += delta.requests || 1;
     else group.usd = sumMoney(group.usd, delta.price.usd);

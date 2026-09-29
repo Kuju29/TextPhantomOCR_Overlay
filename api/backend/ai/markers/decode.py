@@ -42,6 +42,7 @@ class DecodedTranslation:
     ignored_prose_chars: int = 0
     formatting_whitespace_chars: int = 0
     unexpected_prose_chars: int = 0
+    redundant_closing_delimiter_chars: int = 0
 
 class _DuplicateJsonKey(ValueError):
     def __init__(self, key: str) -> None:
@@ -140,7 +141,7 @@ def _decode_strict_records(raw: str, expected: list[str]) -> DecodedTranslation:
         island_invalid = True
         island_invalid_ids.update(frame["id"] for frame in stack)
         island_invalid_ids.update(item for item, _ in pending)
-    whitespace = prose = 0
+    whitespace = prose = redundant_closers = 0
     at = 0
     while at < len(text):
         if text.startswith("<<>>", at) and stack:
@@ -200,6 +201,14 @@ def _decode_strict_records(raw: str, expected: list[str]) -> DecodedTranslation:
                     malformed.extend(island_invalid_ids); malformed.extend(item for item, _ in pending)
                 else:
                     parsed.extend(pending)
+                    # A single extra closing bracket at this owned physical
+                    # line boundary is formatting, not a new translation or
+                    # prose. Never recover arbitrary suffixes, nested islands,
+                    # unknown IDs or repeated brackets. Values remain exact.
+                    if (len(pending) == 1 and frame["id"] in expected
+                            and re.match(r">[ \t]*(?:\r?\n|\r|\Z)", text[at:])):
+                        at += 1
+                        redundant_closers += 1
                 pending=[]; island_invalid=False; island_invalid_ids=set()
             continue
         if stack: stack[-1]["value"] += text[at]
@@ -227,6 +236,7 @@ def _decode_strict_records(raw: str, expected: list[str]) -> DecodedTranslation:
         duplicate_ids=tuple(duplicates),
         ignored_prose_chars=max(0, len(text) - record_chars),
         formatting_whitespace_chars=whitespace, unexpected_prose_chars=prose,
+        redundant_closing_delimiter_chars=redundant_closers,
     )
 
 # Rejects an ambiguous id set. A missing id is not ambiguous: it is one unit the

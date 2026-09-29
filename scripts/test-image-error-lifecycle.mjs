@@ -101,6 +101,27 @@ assert.equal(TP.markImageError(image.src, { userMessage: "Current failure", code
   "a legitimate current-page error must remain visible");
 assert.equal(document.querySelectorAll('[data-tp-image-error="1"]').length, 1);
 
+TP.applyHtmlOverlay = async img => { TP.clearImageError(img); return {drawn:true}; };
+const repair = (revision, missing) => TP.applyInsertMessage({type:'OVERLAY_HTML',mode:'lens_text',
+  source:'translated',original:image.src,generation:currentGeneration,
+  translationRun:{runId:'repair-run',generationId:'repair-page',phase:'repair',revision},
+  result:missing.length ? {aiPartial:{missing}} : {}});
+assert.equal((await repair(1,['P1'])).applied,true);
+assert.equal(document.querySelectorAll('[data-tp-image-error="1"]').length,0,
+  'a repair applied to the image clears the pending warning without a second badge');
+assert.equal((await repair(2,[])).applied,true);
+assert.equal(document.querySelectorAll('[data-tp-image-error="1"]').length,0,
+  'a fully repaired page clears the previous warning');
+
+const oldReader={...currentGeneration,readerRunId:'reader-old',readerPageId:'1'};
+TP.findReaderErrorTarget=()=>image;
+TP.readerErrorCurrent=()=>({ok:true});
+TP.markImageError(image.src,{schema:'tp.error/1',code:'AI_INCOMPLETE',severity:'warning',userMessage:'partial'},oldReader);
+document.querySelectorAll('[data-tp-image-error="1"]')[0].dispatch('click');
+assert.equal(TP.hasImageError(image),true,'dismissed warning remains dismissed during its reader run');
+TP.clearReaderImageErrors('reader-old');
+assert.equal(TP.hasImageError(image),false,'a new run can present its own warning on the same image');
+
 TP.clearImageError(image);
 await TP.replaceImageInDOM(image.src, "https://example.test/replaced.jpg", currentGeneration);
 TP.resetPageInstance("generic_navigation");

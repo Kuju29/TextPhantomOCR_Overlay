@@ -4,9 +4,11 @@ import { pageContextText } from "../page-context.js";
 import { wrongLanguageRepairInstruction } from "../repair-instruction.js";
 import { normalizeLanguageCode } from "../../../generated/language-code-aliases.js";
 import { FALLBACK_LANGS } from "../../constants.js";
+import {formatIndependentStoryExamples,humanExampleCount} from "../independent/examples.js";
 
 import { TRANSLATOR_IDENTITY_BASE, TASK_GUIDANCE, STYLE_EXAMPLES } from "../../../generated/localization-content.js";
 export { TRANSLATOR_IDENTITY_BASE };
+export const CONVERSATION_STYLE_EXAMPLE_LIMIT = 20;
 
 export function composeTranslatorIdentitySystem(style, lang = "en") {
   const selected = String(style || "").trim();
@@ -279,14 +281,19 @@ export function conversationRecordContract(targetLang, structuredOutput=false) {
   return "INPUT/OUTPUT — tp.translation.image-records/1\nReal translation records use <<I<image>_P<unit>:source text>>. I identifies the image and P the unit; IDs are not speakers. Return only I<number>_P<number> IDs from the latest user message exactly once as <<I<image>_P<unit>:translated text>>. The text after ':' inside each marker must be a non-empty translation. Keep both << and >> delimiters and replace the source text with the translation. Never keep source text inside a marker and put its translation outside; output no non-whitespace text outside markers. Previous turns are context only.";
 }
 
-export function buildStaticUserPrefix(targetLang, sourceLang = "", structuredOutput = false, enabled = true, selectedStyle, conversationRecords = false) {
+export function buildStaticUserPrefix(targetLang, sourceLang = "", structuredOutput = false, enabled = true, selectedStyle, conversationRecords = false, independentExamples = null) {
   const pack = instructionPack(targetLang);
   const style = String(selectedStyle || "").trim();
   if (!style) throw new Error("AI translation style is empty");
   const blocks = [`${pack.taskHeading}\n${targetLanguagePriority(targetLang)}`, `${pack.dataHeading}\n${pack.task}`];
   if (!conversationRecords) blocks.push(pack[structuredOutput ? "schemaInput" : "markerInput"]);
   if (enabled) {
-    const examples = buildStyleExamples(targetLang, [], structuredOutput, sourceLang);
+    const examples = independentExamples?.source === 'story'
+      ? formatIndependentStoryExamples(independentExamples, targetLang)
+      : independentExamples?.source === 'none' ? ''
+      : buildStyleExamples(targetLang, [], structuredOutput, sourceLang,
+        conversationRecords ? CONVERSATION_STYLE_EXAMPLE_LIMIT
+          : independentExamples?.source === 'human' ? humanExampleCount(independentExamples) : undefined);
     if (examples) blocks.push(examples);
   }
   // Conversation owns one stable image/unit marker contract. Keep this final in
@@ -297,10 +304,10 @@ export function buildStaticUserPrefix(targetLang, sourceLang = "", structuredOut
   return blocks.join("\n\n");
 }
 
-export function composeTranslationUserMessage({ sections, requestOutputContract, sourceRecords, targetLang, repairReason = "", expectedIds = [], structuredOutput = false, sourceLang = "", conversationRecords = false }) {
+export function composeTranslationUserMessage({ sections, requestOutputContract, sourceRecords, targetLang, repairReason = "", expectedIds = [], structuredOutput = false, sourceLang = "", conversationRecords = false, independentExamples = null }) {
   const pack = instructionPack(targetLang);
   const style = [sections?.language, sections?.style].filter(Boolean).join("\n");
-  const blocks = [buildStaticUserPrefix(targetLang, sourceLang, structuredOutput, sections?.useStyleExamples !== false, style, conversationRecords)];
+  const blocks = [buildStaticUserPrefix(targetLang, sourceLang, structuredOutput, sections?.useStyleExamples !== false, style, conversationRecords, independentExamples)];
   const runtime = String(sections?.runtime || "").trim();
   if (runtime) blocks.push(`${pack.contextHeading}\n${runtime}`);
   const output = String(requestOutputContract || "").trim();
@@ -329,12 +336,12 @@ export async function sessionPromptFingerprint(value) {
   return sha256Text(`${promptAuditSessionKey}\0${String(value || "")}`);
 }
 
-export function buildStyleExamples(lang, expectedIds, structuredOutput, sourceLang = "") {
+export function buildStyleExamples(lang, expectedIds, structuredOutput, sourceLang = "", count = CONVERSATION_STYLE_EXAMPLE_LIMIT) {
   const target = normalizeLanguageCode(lang);
   if (!["en", "ja", "th"].includes(target)) return "";
   const pack = instructionPack(lang);
   const blocks = [pack.examplesHeading];
-  for (const row of STYLE_EXAMPLES) {
+  for (const row of STYLE_EXAMPLES.slice(0, count)) {
     blocks.push([row.id, `EN: ${row.en}`, `JA: ${row.ja}`, `TH: ${row.th}`].join("\n"));
   }
   return blocks.join("\n\n");

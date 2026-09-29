@@ -2,6 +2,8 @@
 // This transport owns the local trust boundary, trace evidence and usage ledger;
 // orchestration (including repair policy) remains with its caller.
 import { translateWithLocalOpenAi } from "../../../shared/ai/direct-local/generation.js";
+import { createLocalGenerationReceipt } from "../../../shared/ai/local-generation-receipt.js";
+import { waitForLocalRequest } from "../local-request-rate.js";
 import {
   failureUsageDetails,
   persistProviderGeneration,
@@ -18,6 +20,7 @@ export async function translateDirectLocal(
   units,
   {
     ai,
+    rate = null,
     imageDataUri = "",
     targetLang,
     sourceLang,
@@ -33,6 +36,7 @@ export async function translateDirectLocal(
     trace = null,
     onProgress = null,
     wireTrace = null,
+    onDispatched = null,
   } = {},
 ) {
   if (!units.length) {
@@ -45,6 +49,7 @@ export async function translateDirectLocal(
 
   const started = performance.now();
   const usageStartedAt = Date.now();
+  const receipt = createLocalGenerationReceipt();
   const usageTiming = timing => {
     try { trace?.("aiLocalUsageTiming", {schema:"tp.audit/1", event:"usage_commit_timing",
       reason:timing.failed ? "failed" : "success",
@@ -93,6 +98,10 @@ export async function translateDirectLocal(
       trace,
       onProgress,
       wireTrace,
+      // Admission belongs immediately before the real provider POST; missing
+      // models, prompt errors and failed preparation must not consume a token.
+      beforeDispatch: dispatchSignal => waitForLocalRequest(ai, rate, dispatchSignal),
+      onDispatched,
     });
   } catch (error) {
     const charged = failureUsageDetails(error);
@@ -100,6 +109,13 @@ export async function translateDirectLocal(
       0,
       Number(charged.generationAttempts || error?.generationAttempts || 0),
     );
+    if (generationAttempts > 0) {
+      charged.usage = receipt(charged.usage);
+      error.generationMeta = { ...(error.generationMeta || {}), usage: charged.usage };
+      // failureUsageDetails reads the structural envelope first when present.
+      if (error.structuralDetails?.generationMeta)
+        error.structuralDetails.generationMeta = { ...error.structuralDetails.generationMeta, usage: charged.usage };
+    }
     const providerAttempts = Math.max(
       generationAttempts,
       Number(error?.providerAttempts || 0),
@@ -204,6 +220,7 @@ export async function translateDirectLocal(
       );
     throw error;
   }
+  result.meta = { ...(result.meta || {}), usage: receipt(result.meta?.usage) };
   const generationAttempts = Math.max(
     1,
     Number(result?.meta?.generationAttempts || 1),

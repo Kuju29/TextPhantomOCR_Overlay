@@ -22,52 +22,62 @@ except WorkloadBudgetError: pass
 else: raise AssertionError('reasoning must count towards allowance')
 assert normalize_capabilities({'top_provider':False,'per_request_limits':False,'architecture':[]})=={'reasoning':{}}
 c=normalize_capabilities({'context_length':4096,'top_provider':{'max_completion_tokens':2048},'architecture':{'tokenizer':'Example'}})
-assert c['limits']['outputHintTokens']==2048 and 'maxOutputTokens' not in c['limits']
+assert c['limits']['contextTokens']==4096 and 'maxOutputTokens' not in c['limits']
 print('PASS normalization, unknown limits, output vs reasoning, endpoint-hint provenance')
 
 registry=list(h['compose_providers'](h['ProviderRegistry']()))
-Client=h['BoundaryClient']; Response=h['Response']; openai_chat=h['openai_chat']; gemini=h['cloud_gemini']; anthropic=h['cloud_anthropic']
+Client=h['BoundaryClient']; NativeClient=h['NativeLmStudioClient']; Response=h['Response']; openai_chat=h['openai_chat']; gemini=h['cloud_gemini']; anthropic=h['cloud_anthropic']
 Request=h['GenerationRequest']; calls=[]
 def strip_budget(payload):
     p=copy.deepcopy(payload)
-    for k in ('max_tokens','max_completion_tokens'):p.pop(k,None)
+    for k in ('max_tokens','max_completion_tokens','max_output_tokens'):p.pop(k,None)
     p.get('options',{}).pop('num_predict',None)
     p.get('generationConfig',{}).pop('maxOutputTokens',None)
     return p
 for spec in registry:
     req=Request(provider=spec.provider_id,model=spec.default_model,api_key='fixture',base_url=spec.default_base_url,
-       system_text='IDENTITY AND STYLE: keep exact text.',user_parts=('TASK: Translate into Thai. <<TP_P0:Morning.>>',),thinking='off',unit_count=1,expected_ids=('P0',),
+       system_text='IDENTITY AND STYLE: keep exact text.',user_parts=('TASK: Translate into Thai. <<TP_P0:Morning.>>',),thinking='default' if spec.local else 'off',unit_count=1,expected_ids=('P0',),
        model_capabilities={'limits':{'contextTokens':4096,'maxOutputTokens':256},'reasoning':{'supported':False}})
     def dispatch(request):
-        captured=[];Client.calls=[]
+        captured=[];Client.calls=[];NativeClient.calls=[]
         def gpost(*args,**kw):
             captured.append(args[2]);return Response({'candidates':[{'finishReason':'STOP','content':{'parts':[{'text':h['ANSWER']}]}}],
              'usageMetadata':{'promptTokenCount':23,'candidatesTokenCount':7,'totalTokenCount':30}})
         def apost(*args,**kw):
             captured.append(kw['json']);return Response({'content':[{'type':'text','text':h['ANSWER']}],'stop_reason':'end_turn','usage':{'input_tokens':23,'output_tokens':7}})
         with ExitStack() as stack:
-            stack.enter_context(patch.object(openai_chat.httpx,'Client',Client))
+            stack.enter_context(patch.object(openai_chat.httpx,'Client',
+                NativeClient if spec.provider_id=='lmstudio' else Client))
             stack.enter_context(patch.object(gemini,'_post_once',side_effect=gpost))
             stack.enter_context(patch.object(anthropic,'post_json',side_effect=apost))
             result=spec.adapter.generate(request)
-        captured += [x['json'] for x in Client.calls]
+        boundary_calls=NativeClient.calls if spec.provider_id=='lmstudio' else Client.calls
+        captured += [x['json'] for x in boundary_calls if x['method']=='POST']
         assert len(captured)==1,(spec.provider_id,len(captured))
         return captured[0],result
     old,_=dispatch(req)
     bounded=replace(req,workload={'version':1,'predictedOutput':100,'estimatedInput':128,'completionAvailable':256})
     new,result=dispatch(bounded)
-    values=[new.get('max_tokens'),new.get('max_completion_tokens'),new.get('options',{}).get('num_predict'),new.get('generationConfig',{}).get('maxOutputTokens')]
+    values=[new.get('max_tokens'),new.get('max_completion_tokens'),new.get('max_output_tokens'),
+            new.get('options',{}).get('num_predict'),new.get('generationConfig',{}).get('maxOutputTokens')]
+    if spec.provider_id in {'vllm','llamacpp','koboldcpp'}:
+        assert sum(x['method']=='GET' and x['url'].endswith('/models') for x in Client.calls)==1
+        if spec.provider_id == 'koboldcpp':
+            assert sum(x['method']=='GET' and x['url'].endswith('/api/extra/true_max_context_length') for x in Client.calls)==1
+        assert new['max_tokens']>256, 'browser output cap must not override live Local runtime'
+        assert strip_budget(old)==strip_budget(new)
+        print('PASS',spec.provider_id,'live exact runtime limit overrides client numeric hints')
+        continue
     assert 256 in values,(spec.provider_id,values)
     assert strip_budget(old)==strip_budget(new),f'{spec.provider_id}: unexpected prompt/schema/thinking change'
     assert result.text==h['ANSWER'],spec.provider_id
     assert result.requested_output_tokens==256,(spec.provider_id,result.requested_output_tokens)
-    before=len(Client.calls)
     try:dispatch(replace(req,workload={'version':1,'predictedOutput':1000,'completionAvailable':256}))
     except WorkloadBudgetError:pass
     else:raise AssertionError(f'{spec.provider_id}: oversized prediction should fail BEFORE dispatch')
-    assert Client.calls==[],f'{spec.provider_id}: unexpected HTTP after preflight rejection'
+    assert Client.calls==[] and NativeClient.calls==[],f'{spec.provider_id}: unexpected HTTP after preflight rejection'
     print('PASS',spec.provider_id,'budget bounded, original prompts/settings unchanged, oversize rejected before HTTP')
-print('Workload provider guard matrix: 19/19 PASS; no live requests.')
+print('Workload provider guard matrix: 18/18 PASS; no live requests.')
 
 # The public endpoint must preserve the pre-dispatch failure type and zero usage.
 from types import SimpleNamespace

@@ -16,7 +16,7 @@ MODEL='fixture/model'; KEY='hf_fixture_only'; BASE=hf.DEFAULT_BASE_URL
 CAP={'reasoning':{'supported':True,'mandatory':False,'control':'levels','supported_efforts':['none','low']}}
 class BootstrapOff(unittest.TestCase):
  def setUp(self):
-  cache._MODEL_CAPABILITIES.clear();cache._MODEL_PROMOTIONS.clear()
+  cache._MODEL_CAPABILITIES.clear();cache._OFF_CONTRADICTIONS.clear();cache._OFF_CONTRADICTIONS_NEXT_SWEEP=0.;cache._MODEL_PROMOTIONS.clear()
   self.clock=patch.object(cache.time,'monotonic',return_value=1000.);self.clock.start();self.addCleanup(self.clock.stop)
  def caps(self,key=KEY,model=MODEL,base=BASE):
   return cache.discovered_model_capabilities('huggingface',base,model,key)[1]
@@ -44,7 +44,9 @@ class BootstrapOff(unittest.TestCase):
  def test_unknown_reasoning_is_not_zero(self):
   self.generate(tokens=None);self.refresh();self.assertNotIn('reasoning',self.caps())
  def test_provider_ignored_off_does_not_gain_proof(self):
-  self.generate(tokens=42);self.refresh();self.assertNotIn('reasoning',self.caps())
+  self.generate(tokens=42);self.refresh()
+  self.assertEqual(self.caps()['reasoning']['control'],'provider')
+  self.assertNotIn('none',self.caps()['reasoning'].get('supported_efforts',[]))
  def test_no_native_control_no_proof(self):
   self.generate(cap={});self.refresh();self.assertNotIn('reasoning',self.caps())
  def test_on_request_does_not_prove_off(self):

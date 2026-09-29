@@ -3,7 +3,8 @@ from __future__ import annotations
 import hashlib
 from .source_context import build_source_context_block
 from .instruction_packs import instruction_pack
-from .localization import TRANSLATOR_IDENTITY_BASE, TASK_GUIDANCE, build_style_examples
+from .localization import (HUMAN_STYLE_EXAMPLE_LIMIT, TRANSLATOR_IDENTITY_BASE,
+                           TASK_GUIDANCE, build_style_examples)
 
 from backend.lens.languages import normalize as _normalize_lang
 from backend.ai.provider_contract import SystemPromptSection
@@ -300,7 +301,8 @@ def conversation_record_contract(lang: str, *, structured_output: bool = False) 
 
 def build_static_user_prefix(lang: str, *, structured_output: bool = False,
                              source_lang: str = "", style_examples: bool = True,
-                             selected_style: str | None = None, conversation_records: bool = False) -> str:
+                             selected_style: str | None = None, conversation_records: bool = False,
+                             human_example_limit: int = HUMAN_STYLE_EXAMPLE_LIMIT) -> str:
     """Task/protocol/examples only; the selected style is owned by System."""
     pack = instruction_pack(lang)
     style = select_style(lang)[0] if selected_style is None else str(selected_style).strip()
@@ -311,7 +313,8 @@ def build_static_user_prefix(lang: str, *, structured_output: bool = False,
     if not conversation_records:
         blocks.append(pack["schemaInput" if structured_output else "markerInput"])
     if style_examples is not False:
-        examples = build_style_examples(lang, [], structured_output=structured_output, source_lang=source_lang)
+        examples = build_style_examples(lang, [], structured_output=structured_output,
+                                        source_lang=source_lang, example_limit=human_example_limit)
         if examples:
             blocks.append(examples)
     # Conversation keeps the I#_P# contract final immediately before SOURCE.
@@ -329,6 +332,7 @@ def build_translation_user_message(
     prev_context=None, page_context=None, source_lang="", source_context=None,
     repair_reason="", style_examples: bool = True, memory_mode: str | None = None,
     conversation_records: bool = False,
+    human_example_limit: int = HUMAN_STYLE_EXAMPLE_LIMIT,
 ) -> str:
     """Static prefix first; dynamic source evidence last. IDs are output locations.
 
@@ -353,7 +357,8 @@ def build_translation_user_message(
     selected_style, _ = select_style(lang, prompt_override, prompt_mode)
     blocks = [build_static_user_prefix(lang, structured_output=structured_output,
                                        source_lang=source_lang, style_examples=style_examples,
-                                       selected_style=selected_style, conversation_records=conversation_records)]
+                                       selected_style=selected_style, conversation_records=conversation_records,
+                                       human_example_limit=human_example_limit)]
     # No dynamic ID list, context, image or repair reason before this point.
     if runtime:
         blocks.append(pack["contextHeading"] + "\n" + runtime)

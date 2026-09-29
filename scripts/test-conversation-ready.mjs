@@ -20,6 +20,28 @@ function page(id,doc='fixture-doc',extra={}){
  return {payload,ai:payload.ai,imageId:`page-${id}`,targetLang:'th',sourceLang:'en',route:'direct-local',sourceFingerprint:'a'.repeat(64)};
 }
 const units=(prefix,n=2)=>Array.from({length:n},(_,i)=>({id:`P${i}`,text:`${prefix} ${i}`}));
+// The status for a new turn must reflect that turn's provider counters, not a
+// prior hit or a made-up zero when the provider omits cache telemetry.
+{
+ const statuses=[];let round=0;
+ const q=createReadyQueue({choose:async rows=>({units:rows,splitReason:'ready_queue_drained'}),
+  dispatch:async us=>{const cached=[200,0,null][round++];return {
+   translations:us.map(u=>({id:u.id,text:'คำแปล'})),meta:{conversation:{historyTurns:round,
+    commitStatus:'committed',actualInputTokens:500,cachedInputTokens:cached}}};}});
+ for(let i=0;i<3;i++){
+  const p=page(i,'cache-status-current-turn');p.onConversationStatus=value=>statuses.push(value);
+  await q.submit(units('Cache'),p);finishConversationJob(p.payload);
+ }
+ const completed=statuses.filter(s=>s.phase==='turn_complete');
+ assert.equal(completed.length,3);
+ assert.equal(completed[0].cachedInputTokens,200);
+ assert.equal(completed[0].cacheConfirmed,true);
+ assert.equal(completed[1].cachedInputTokens,0);
+ assert.equal(completed[1].cacheConfirmed,false);
+ assert.equal(completed[2].cachedInputTokens,null);
+ assert.equal(completed[2].cacheConfirmed,false);
+ q.close();cases++;
+}
 // Optional/malformed indices use a stable numeric reservation key, never a
 // pairwise fallback comparator (which can create A<B<C<A cycles).
 {
@@ -98,6 +120,102 @@ const units=(prefix,n=2)=>Array.from({length:n},(_,i)=>({id:`P${i}`,text:`${pref
  assert.deepEqual(r.missing,['P0','P1']);
  finishConversationJob(p0.payload);q.close();cases+=2;
 }
+// An earlier accepted turn does not make a malformed current turn committed;
+// the planner must keep the last accepted turn's size after that failure.
+{
+ const observed=[];let round=0;
+ const q=createReadyQueue({choose:async(rows,options)=>{
+   observed.push(options.conversationPreviousUnitCount);
+   return {units:rows.filter(row=>row.entry===rows[0].entry),splitReason:'ready_queue_drained'};
+ },dispatch:async us=>{
+   round++;
+   return {translations:round===2?[]:us.map(u=>({id:u.id,text:'คำแปล'})),
+     missing:round===2?us.map(u=>u.id):[],meta:{conversation:{
+       historyTurns:round-1,commitStatus:round===2?'not_committed_invalid_output':'committed'}}};
+ }});
+ const pages=[0,1,2].map(i=>page(i,'invalid-after-committed'));
+ const results=await Promise.all(pages.map((p,i)=>q.submit(units('Record',i===0?2:1),p)));
+ assert.deepEqual(results[1].missing,['P0']);
+ assert.deepEqual(observed,[0,2,2],
+   'rejected turn must not replace the last accepted request size');
+ for(const p of pages)finishConversationJob(p.payload);
+ q.close();cases+=3;
+}
+// LM Studio can stream complete-looking markers and still fail at chat.end or
+// return no durable cursor. Neither preview nor final page may accept those.
+for(const route of ['direct-local','server']) {
+ const seen=[],previews=[];let cursor='',round=0;
+ const q=createReadyQueue({choose:async rows=>({
+   units:rows.filter(row=>row.entry===rows[0].entry),splitReason:'ready_queue_drained'}),
+  dispatch:async(us,_options,plan)=>{
+   round++;seen.push(cursor);
+   if(round===2){
+     plan.onProgress({state:'translation_delta',text:`<<${us[0].id}:ยัง未確定>>`});
+     throw Object.assign(new Error('Native terminal has no response ID'),{
+       code:route==='server'?'ai_conversation_cursor_missing':'local_provider_response_contract',
+       requestDispatched:true,generationAttempts:1});
+   }
+   if(round===3)return {translations:us.map(u=>({id:u.id,text:'คำแปลที่ยังไม่บันทึก'})),
+     meta:{conversation:{historyTurns:1,
+       commitStatus:route==='server'?'pending_commit':'not_committed_invalid_output'}}};
+   cursor=`resp_queue_${round}`;
+   return {translations:us.map(u=>({id:u.id,text:'คำแปลที่ยืนยันแล้ว'})),
+     meta:{conversation:{historyTurns:round===1?0:1,commitStatus:'committed'}}};
+  }});
+ const pages=[0,1,2,3].map(i=>{const p=page(i,'native-terminal-reject',{provider:'lmstudio'});
+   p.route=route;
+   p.onProvisionalResult=data=>previews.push({page:i,data});return p;});
+ const outcomes=await Promise.allSettled(pages.map(p=>q.submit(units('Native',1),p)));
+ assert.equal(outcomes[0].status,'fulfilled');
+ assert.equal(outcomes[1].status,'rejected');
+ assert.equal(outcomes[1].reason.code,route==='server'?'ai_conversation_cursor_missing':'local_provider_response_contract');
+ assert.equal(outcomes[2].status,'rejected');
+ assert.equal(outcomes[2].reason.code,'ai_conversation_turn_not_committed');
+ assert.equal(outcomes[3].status,'fulfilled');
+ assert.deepEqual(seen,['','resp_queue_1','resp_queue_1','resp_queue_1'],
+   'later native page continues only from the accepted cursor');
+ assert.deepEqual(previews,[],`${route}: uncommitted native SSE markers never reach a provisional overlay`);
+ for(const p of pages)finishConversationJob(p.payload);
+ q.close();cases+=5;
+}
+// Ollama can claim an Off wire control and still produce reasoning in the
+// response. Its provisional markers must wait until the terminal check passes.
+{
+ const previews=[],checkpoints=[];
+ const q=createReadyQueue({choose:async rows=>({units:rows,splitReason:'ready_queue_drained'}),
+  dispatch:async(us,_options,plan)=>{
+   plan.onProgress({state:'translation_delta',text:`<<${us[0].id}:คำแปลชั่วคราว>>`});
+   throw Object.assign(new Error('Provider ignored think:false'),{
+     code:'local_model_thinking_unsupported',requestDispatched:true,generationAttempts:1});
+  }});
+ const p=page(0,'ollama-reasoning-off-terminal');
+ p.onProvisionalResult=data=>previews.push(data);
+ p.afterBatchResult=data=>checkpoints.push(data);
+ await assert.rejects(q.submit(units('Source',1),p),error=>
+   error.code==='local_model_thinking_unsupported');
+ assert.deepEqual(previews,[],'ignored think:false cannot publish a provisional translation');
+ assert.deepEqual(checkpoints,[],'reasoning violation cannot commit a page projection');
+ finishConversationJob(p.payload);q.close();cases+=3;
+}
+// A budget-exhausted Conversation turn without visible text has no records to
+// salvage. Reject it once even if the runtime did not report reasoning tokens.
+{
+ let calls=0;const checkpoints=[];
+ const q=createReadyQueue({choose:async rows=>({units:rows,splitReason:'ready_queue_drained'}),
+  dispatch:async()=>{
+   calls++;
+   throw Object.assign(new Error('No visible output before the completion limit'),{
+    code:'output_budget_exhausted',requestDispatched:true,generationAttempts:1,
+    diagnostics:{validatorSubtype:'empty_output',providerOutputTruncated:true}});
+  }});
+ const p=page(0,'conversation-zero-visible');
+ p.afterBatchResult=data=>checkpoints.push(data);
+ await assert.rejects(q.submit(units('Source',1),p),error=>
+  error.code==='output_budget_exhausted'&&error.diagnostics?.validatorSubtype==='empty_output');
+ assert.equal(calls,1);
+ assert.deepEqual(checkpoints,[],'empty completion cannot become a repairable page projection');
+ finishConversationJob(p.payload);q.close();cases+=3;
+}
 // Cancellation of a queued reservation without a separate AbortSignal.
 {
  let release;const sent=[];
@@ -169,6 +287,10 @@ const units=(prefix,n=2)=>Array.from({length:n},(_,i)=>({id:`P${i}`,text:`${pref
 const sourceUnits=label=>translationUnits({paragraphs:[{id:'p0',sourceText:label+' first'},{id:'p1',sourceText:label+' second'}]});
 const requests=[],traces=[];let firstRelease,firstOpened=false;
 const server=http.createServer(async(req,res)=>{
+ if(req.url==='/api/tags')return void res.end(JSON.stringify({models:[{name:'fixture',size:6000000000}]}));
+ if(req.url==='/api/ps')return void res.end(JSON.stringify({models:[{name:'fixture',context_length:12288,size:6000000000}]}));
+ if(req.url==='/api/show')return void res.end(JSON.stringify({capabilities:['completion'],thinking:{values:[false,true],default:false},
+  model_info:{'general.architecture':'fixture','fixture.context_length':32768}}));
  let raw='';for await(const x of req)raw+=x;const b=JSON.parse(raw);requests.push(b);
  if(requests.length===1){firstOpened=true;await new Promise(r=>firstRelease=r);}
  const last=b.messages.at(-1).content;
@@ -189,7 +311,7 @@ try{
  assert.ok(requests.every(r=>r.format==null),'Conversation image records stay marker-only even when structured output is supported');
  assert.deepEqual(requests[1].messages.map(m=>m.role),['system','user','assistant','user']);
  assert.deepEqual(requests[1].messages[0],requests[0].messages[0]);
- assert.ok(!requests[0].messages[1].content.includes('H01\nEN:'),'Conversation anchor must not inject Human Bootstrap Examples');
+ assert.ok(requests[0].messages[1].content.includes('H01\nEN:') && requests[0].messages[1].content.includes('H20\nEN:') && !requests[0].messages[1].content.includes('H21\nEN:'),'Conversation anchor includes exactly twenty human examples');
  const anchor=requests[0].messages[1].content;
  assert.ok(anchor.includes('tp.translation.image-records/1'),'Conversation Local anchor must advertise I#_P# protocol');
  assert.ok(!anchor.includes('แต่ละรายการเป็น <<TP_Pn:ข้อความต้นฉบับ>>'),'Conversation Local anchor must not advertise legacy TP_Pn input');
@@ -204,7 +326,7 @@ try{
  assert.equal(results[2].translations[0].text,'คำแปล2');
  assert.equal(results[3].translations[1].text,'คำแปล5');
  const tail=await submitConversationPage(sourceUnits('Last'),ps[4]);assert.equal(requests[2].messages.length,6);
- assert.equal(tail.meta.conversation.historyTurns,2);assert.equal(tail.meta.conversation.commitStatus,'committed');
+ assert.equal(tail.meta.conversation.historyTurns,2);assert.equal(tail.meta.conversation.commitStatus,'ephemeral_not_retained');
  assert.equal(tail.meta.conversation.providerCacheStatus,'not_reported');
  assert.equal(traces.filter(x=>x.schema==='tp.conversation_batch/1'&&x.phase==='dispatch').length,3);
  const {AI_USAGE_STORAGE_KEY,currentUsage,flushUsageReceiptJournal}=await import('../src/shared/ai-usage.js');

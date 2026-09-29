@@ -34,6 +34,8 @@
   };
   const AI_FUNCTION_LABEL=Object.freeze({
     waiting_slot:'waiting for slot',preparing_request:'preparing request',sending_request:'sending request',
+    waiting_response_text:'waiting for response text',generating_response:'generating · receiving text',
+    waiting_provider_terminal:'waiting for final usage',
     waiting_response:'waiting response',receiving_response:'receiving response',validating_result:'validating result',
     connecting:'connecting',waiting_model:'waiting for model',thinking:'thinking',recovering_context:'recovering context',
     preparing_next_turn:'preparing next turn',repair_waiting:'repair waiting for batch',repairing:'preparing repair',
@@ -54,14 +56,27 @@
   const aiSummary=batch=>{
     const lane=laneSet(batch,'ai');if(!lane.running.length&&!lane.queued.length)return '';
     if(!lane.running.length)return `AI waiting for slot ${lane.queued.length}p`;
-    const active=lane.running.map(item=>item?.progress?.ai||{}),focus=active.find(x=>x.function)||active[0]||{};
+    const active=lane.running.map(item=>item?.progress?.ai||{});
+    const mostRecentTurn=Math.max(...active.map(x=>Number(x.turn)||0),0);
+    const focus=active.find(x=>Number(x.turn)===mostRecentTurn && x.function)||active.find(x=>x.function)||active[0]||{};
+    // turn_complete is emitted when the provider closes, before the ready
+    // queue projects its answer to every page. Other rows may still have a
+    // stale receiving_response function; their AI/repair ownership is intact.
+    // The repair coordinator may be in "collecting" for the entire initial
+    // provider request; that phase alone is not a repair generation.
+    const repairGenerating=repairActive(batch) && batch?.repair?.phase!=='collecting';
+    if(batch?.conversation?.phase==='turn_complete' && !repairGenerating &&
+       Number(batch.conversation.turn)>=mostRecentTurn)
+      return 'AI reply complete · delivering page results';
     const fn=aiFunction(focus),conversation=active.some(x=>x.conversation===true);
     let pages=0,units=0;
     if(conversation){pages=Math.max(...active.map(x=>Number(x.pageCount)||0),lane.running.length);units=Math.max(...active.map(x=>Number(x.unitCount)||0),0);}
     else {pages=lane.running.length;units=active.reduce((sum,x)=>sum+(Number(x.unitCount)||0),0);}
     const scope=units>0?`${pages}p/${units}u`:`${pages}p`;
     const elapsed=oldestElapsed(lane.running);
-    let text=`AI ${fn} ${scope}`;
+    // The running lane belongs to the whole request, including pages that
+    // already received a provisional overlay while later pages stream in.
+    let text=conversation?`AI request ${fn} (${scope} turn)`:`AI ${fn} ${scope}`;
     if(elapsed)text+=` · ${elapsed}`;
     const hinted=Math.max(...active.map(x=>Number(x.queuedPageCount)||0),0),queue=Math.max(hinted,lane.queued.length);
     if(queue>0)text+=` · queue ${queue}p`;
@@ -107,13 +122,18 @@
       const insert=insertSummary(batch);if(insert)parts.push(insert);
     }
     parts.push(...resultAlerts(batch));
-    if(total>0&&batch?.lifecycle!=="cancelled"&&(processingDone(batch)||(terminal>=total&&!repairActive(batch)&&!batch?.placement?.waiting)))parts.splice(1,0,`done ${batchElapsed(batch)}`);
+    if(total>0&&batch?.lifecycle!=="cancelled"&&batch?.placement?.waiting&&processingDone(batch))
+      parts.splice(1,0,`AI finished in ${batchElapsed(batch)}`);
+    else if(total>0&&batch?.lifecycle!=="cancelled"&&(!batch?.placement?.waiting&&(processingDone(batch)||(terminal>=total&&!repairActive(batch)))))
+      parts.splice(1,0,`done ${batchElapsed(batch)}`);
     return parts.join(' · ');
   };
 
 
   function setCollapsed(value){
+    const opening=collapsed && !Boolean(value);
     collapsed=Boolean(value);if(!body||!toggleBtn||!main||!root||!textEl)return;
+    if(opening && latest)renderDetails(latest);
     body.style.display=collapsed?'none':'block';
     toggleBtn.textContent=collapsed?'+':'−';
     toggleBtn.title=collapsed?'Show per-image TextPhantom progress':'Hide per-image TextPhantom progress';
@@ -168,21 +188,31 @@
     const detail=String(result.detail||item?.error||'').trim();if(detail&&state!=='done'){const sub=css(document.createElement('div'),{marginTop:'2px',fontSize:'10px',color:'#aeb0b8',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'});sub.textContent=detail;sub.title=detail;cell.appendChild(sub);}return cell;
   }
   function renderDetails(batch){
-    if(!body)return;body.textContent='';
+    if(!body)return;const scrollTop=body.scrollTop;body.textContent='';
     const grid=css(document.createElement('div'),{display:'grid',gridTemplateColumns:'54px 76px minmax(100px,1fr) minmax(100px,1fr) minmax(130px,1.25fr) minmax(100px,1fr) minmax(90px,1fr)',minWidth:'720px'});
     for(const title of ['Page','Total','Lens','Group','AI / queue','Insert','Result']){const h=css(document.createElement('div'),{padding:'5px 6px',position:'sticky',top:'0',zIndex:'1',background:'#18181b',fontWeight:'700',color:'#ddd',borderBottom:'1px solid rgba(255,255,255,.1)'});h.textContent=title;grid.appendChild(h);}
     const items=itemsOf(batch).slice();items.sort((a,b)=>Number(a.terminal)-Number(b.terminal)||Number(a?.label?.match(/\d+/)?.[0]||999)-Number(b?.label?.match(/\d+/)?.[0]||999));
     for(const item of items){const p=item.progress||{},rowCells=[],page=css(document.createElement('div'),{padding:'6px',fontWeight:'700',borderBottom:'1px solid rgba(255,255,255,.05)'});page.textContent=String(item.label||'Image').replace('Image ','#');rowCells.push(page);rowCells.push(laneCell(p.overall,'overall'),laneCell(p.lens,'lens'),laneCell(p.grouping,'grouping'),laneCell(p.ai,'ai'),laneCell(p.insert,'insert'),resultCell(item));for(const c of rowCells){c.style.borderBottom='1px solid rgba(255,255,255,.05)';grid.appendChild(c);}}
-    body.appendChild(grid);
+    body.appendChild(grid);body.scrollTop=scrollTop;
   }
   function render(batch){
-    latest=batch;if(!batch||!ensure())return;if(hideTimer){clearTimeout(hideTimer);hideTimer=0;}
-    updateCompact(batch);renderDetails(batch);setCollapsed(collapsed);
-    if(!batchActive(batch)) {
-      const deadline=terminalDeadlines.get(batch.id) || Date.now()+6000;
+    latest=batch;if(!batch)return;
+    const active=batchActive(batch);
+    const deadline=active ? 0 : (terminalDeadlines.get(batch.id) || Date.now()+6000);
+    // A late placement/status receipt after the terminal grace period must
+    // not reopen the box for a single paint and immediately hide it again.
+    if(!active && deadline<=Date.now())return;
+    if(!ensure())return;if(hideTimer){clearTimeout(hideTimer);hideTimer=0;}
+    updateCompact(batch);if(!collapsed)renderDetails(batch);setCollapsed(collapsed);
+    if(!active) {
       terminalDeadlines.set(batch.id,deadline);
       while(terminalDeadlines.size>128)terminalDeadlines.delete(terminalDeadlines.keys().next().value);
-      hideTimer=setTimeout(()=>{if(root)root.style.display='none';TP.setToastProgressMode?.(false);if(timer){clearInterval(timer);timer=0;}},Math.max(0,deadline-Date.now()));
+      hideTimer=setTimeout(()=>{
+        hideTimer=0;
+        if(batchActive(chooseVisible()) || (pending && batchActive(pending)))return;
+        if(root)root.style.display='none';TP.setToastProgressMode?.(false);
+        if(timer){clearInterval(timer);timer=0;}
+      },Math.max(0,deadline-Date.now()));
     } else terminalDeadlines.delete(batch.id);
   }
   function tick(){

@@ -16,12 +16,13 @@ POLICY = LocalOpenAIChatPolicy(
     append_path="/v1", completion_path="/chat/completions",
     discovery_path="/models", strip_paths=("/chat/completions",),
     model_allow_prefixes=(), model_deny_prefixes=(),
+    runtime_context_fields=("max_model_len",),
 )
 ADAPTER = LocalOpenAIChatAdapter(POLICY)
 SPEC = ProviderSpec(POLICY.provider_id, "openai_chat_completions",
                     POLICY.default_model, POLICY.default_base_url,
                     aliases=POLICY.aliases, model_aliases=POLICY.model_aliases,
-                    key_prefixes=POLICY.key_prefixes, local=True, adapter=ADAPTER)
+                    key_prefixes=POLICY.key_prefixes, local=True, conversation_transport="message_replay", adapter=ADAPTER)
 
 normalize_base_url = ADAPTER.normalize_base_url
 normalize_model = ADAPTER.normalize_model

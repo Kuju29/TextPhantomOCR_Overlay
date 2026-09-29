@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
+from .huggingface_catalogue import split_model, add_explicit_choices
 
 import httpx
 
@@ -14,6 +16,7 @@ from backend.ai.provider_contract import (
     ProbeResponse,
     ProviderSpec,
 )
+from backend.ai.cloud_reasoning import observed_off_status
 from backend.ai.providers.openai_provider_runtime import (
     OpenAIProviderAdapter,
     OpenAIProviderPolicy,
@@ -44,9 +47,8 @@ def _effective_conversation_model(request: GenerationRequest) -> tuple[str, str]
     being pinned merely because it served an earlier turn.
     """
     requested = str(request.model or "").strip()
-    if _base_model_id(requested) != requested:
-        return requested, requested.rsplit(":", 1)[-1].lower()
-    return requested, ""
+    _, suffix, policy = split_model(requested)
+    return requested, suffix if policy == "provider" else ""
 
 PROVIDER_ID = "huggingface"
 DEFAULT_MODEL = "google/gemma-2-2b-it"
@@ -188,19 +190,36 @@ class HuggingFaceAdapter(OpenAIProviderAdapter):
             return ModelListResult(status="error", http_status=response.status_code, error="invalid_json")
         items = body.get("data", []) if isinstance(body, dict) else []
         models = filter_model_items(items)
+        counts = Counter(models)
         capabilities, candidates = {}, {}
         for item in items if isinstance(items, list) else []:
             if not isinstance(item, dict) or str(item.get("id") or "").strip() not in models:
                 continue
             model_id = str(item["id"]).strip()
+            architecture = item.get("architecture")
+            inputs = architecture.get("input_modalities") if isinstance(architecture, dict) else None
+            if isinstance(inputs, list) and inputs:
+                # The router's account-model catalogue, not a model-name guess,
+                # is the evidence that Page-image input can be sent here.
+                capabilities[model_id] = {"vision": {
+                    "supported": "image" in {str(value).strip().lower() for value in inputs},
+                    "source": "huggingface_live_chat_model_catalogue",
+                }}
+            if counts[model_id] == 1:
+                from .huggingface_limits import catalogue_limits
+                routes, common = catalogue_limits(item.get("providers"))
+                if routes:
+                    capabilities.setdefault(model_id, {})["provider_limits"] = routes
+                if common:
+                    capabilities.setdefault(model_id, {})["limits"] = common
             live = [entry for entry in (item.get("providers") or [])
                     if isinstance(entry, dict) and str(entry.get("status") or "").lower() == "live"
                     and _HF_PROVIDER_SUFFIX.fullmatch(str(entry.get("provider") or "").strip().lower())]
             if live:
-                # HF documents :fastest/auto as the highest-throughput live
-                # provider. Mirror that policy once, then pin the selected
-                # provider for the whole Conversation cache chain. Fall back to
-                # lowest measured TTFT only when throughput is unavailable.
+                # Catalogue throughput is a hint, not an upstream pin. HF
+                # Router still chooses the live provider for each request;
+                # only an explicit model:provider suffix pins it. Use latency
+                # as a catalogue hint when throughput is unavailable.
                 throughput = [entry for entry in live if isinstance(entry.get("throughput"), (int, float))]
                 latency = [entry for entry in live if isinstance(entry.get("first_token_latency_ms"), (int, float))]
                 if throughput:
@@ -219,7 +238,10 @@ class HuggingFaceAdapter(OpenAIProviderAdapter):
                 candidates[model_id] = {"eligibility":"usable","evidence":POLICY.catalogue_evidence,
                     "fastestProviderHint":preferred,"routingPolicy":"hf_auto_fastest_failover",
                     "routingEvidence":routing_source}
-        return ModelListResult(models=tuple(models), status="valid", http_status=response.status_code,
+        from .huggingface_details import discard_account
+        discard_account(base_url, api_key)
+        choices = add_explicit_choices(models, items, capabilities, candidates)
+        return ModelListResult(models=choices, status="valid", http_status=response.status_code,
                                capabilities=capabilities, candidates=candidates)
 
     def generate(self, request: GenerationRequest):
@@ -235,6 +257,7 @@ class HuggingFaceAdapter(OpenAIProviderAdapter):
             payload.pop("temperature", None)
         from backend.ai.provider_resolution import (
             capture_capability_cache_revision, retain_observed_off_control,
+            invalidate_observed_off_control,
         )
         evidence_base = request.base_url or DEFAULT_BASE_URL
         dispatch_revision = capture_capability_cache_revision(PROVIDER_ID, evidence_base, request.api_key)
@@ -252,6 +275,8 @@ class HuggingFaceAdapter(OpenAIProviderAdapter):
             trace_fields={
                 "requestedModel": model,
                 "effectiveModel": effective_model,
+                "hfRoutingPolicy": split_model(model)[2],
+                "hfRouteMetadata": request.model_capabilities.get("hf_route", {}),
                 "hfInferenceProviderAffinity": affinity or None,
                 "temperatureSent": "temperature" in payload,
                 "sampling": {
@@ -279,7 +304,8 @@ class HuggingFaceAdapter(OpenAIProviderAdapter):
         returned_model = str(result.used_model or "").strip().casefold()
         base_model = _base_model_id(model)
         same_model = returned_model in {base_model.casefold(), base_model.rsplit("/", 1)[-1].casefold()}
-        if same_model and effort == "none" and type(result.thinking_tokens) is int and result.thinking_tokens == 0:
+        if (same_model and effort == "none" and not result.reasoning_observed and
+                type(result.thinking_tokens) is int and result.thinking_tokens == 0):
             retained = retain_observed_off_control(PROVIDER_ID, evidence_base, request.api_key,
                 model, dispatch_revision=dispatch_revision)
             if retained:
@@ -290,13 +316,14 @@ class HuggingFaceAdapter(OpenAIProviderAdapter):
                 })
         if not effort:
             applied = "unverified"
-        elif effort == "none" and isinstance(result.thinking_tokens, int) and result.thinking_tokens > 0:
-            # The route accepted the field but did not actually suppress hidden
-            # reasoning. Workload telemetry will reserve those measured tokens
-            # for subsequent unsent batches instead of trusting the toggle.
-            applied = "provider_ignored_off"
+        elif effort == "none":
+            # The route may expose reasoning content without reporting its token
+            # count. In that case Off failed and no positive control is retained.
+            applied = observed_off_status(result)
         else:
             applied = f"requested_{request.thinking}_effort_{effort}"
+        if applied == "provider_ignored_off":
+            invalidate_observed_off_control(PROVIDER_ID, evidence_base, request.api_key, model)
         return result._replace(thinking_applied=applied)
 
 
@@ -309,7 +336,7 @@ SPEC = ProviderSpec(
     ALIASES,
     key_prefixes=("hf_",),
     proactive_rate_gate=False,
-    adapter=ADAPTER,
+    conversation_transport="message_replay", adapter=ADAPTER,
 )
 
 __all__ = [

@@ -12,6 +12,8 @@ export function isLocalHostUrl(value) {
 }
 
 export function defineLocalProvider(spec) {
+  if (!["native_response_cursor", "message_replay"].includes(spec?.continuationStrategy))
+    throw new Error("Named Local provider must declare its chat continuation strategy");
   return Object.freeze({ version: 1, translationContract: "v2", auth: "none", capacity: "runtime", ...spec });
 }
 
@@ -26,6 +28,7 @@ export function normalizeAdapter(spec, value = {}) {
   const parsed = new URL(baseUrl);
   if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash)
     throw new Error("baseUrl must be a credential-free local HTTP(S) URL");
+  baseUrl = parsed.toString().replace(/\/+$/, "");
   const out = { version: 1, protocol: legacyOllama ? "ollama" : protocol,
     translationContract: String(raw.translationContract || spec.translationContract).trim().toLowerCase(), baseUrl };
   if (!new Set(["v1", "v2"]).has(out.translationContract)) throw new Error("translationContract must be v1 or v2");

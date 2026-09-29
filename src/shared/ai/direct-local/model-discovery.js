@@ -8,14 +8,39 @@ function verificationResult(model, status, extra = {}) {
 export function verifyLocalModelAvailability(models, capability, model) {
   const selected = String(model || "").trim();
   if (!selected) return verificationResult("", "not_selected", { evidence: "model_list" });
-  if (!Array.isArray(models) || !models.includes(selected))
-    return verificationResult(selected, "model_unavailable", { evidence: "model_list" });
   const hint = capability?.models?.[selected];
   if (hint?.generation?.supported === false)
     return verificationResult(selected, "unsupported_model", {
       evidence: String(hint.generation.source || "runtime_metadata"),
       reason: String(hint.generation.reason || "generation_not_supported"),
     });
+  if (!Array.isArray(models) || !models.includes(selected))
+    return verificationResult(selected, "model_unavailable", { evidence: "model_list" });
+  if (!hint || typeof hint !== "object")
+    return verificationResult(selected, "invalid_output", { evidence: "model_metadata" });
+  if (capability?.source === "openai_model_list" &&
+      capability?.nativeMetadataStatus !== undefined &&
+      capability.nativeMetadataStatus !== "not_applicable") {
+    // LM Studio /v1/models can include downloaded, inactive models with JIT.
+    // The native list identifies either a loaded instance or an exact LLM key
+    // that the real chat may load. A loadable key is not a loaded instance.
+    if (capability.nativeMetadataStatus !== "verified_loaded_instances")
+      return verificationResult(selected, "loaded_state_unverified", { evidence: "lmstudio_native_models" });
+    if (hint.loaded === null || hint.loaded === undefined)
+      return verificationResult(selected, "loaded_state_unverified", { evidence: "lmstudio_native_loaded_instance" });
+    if (hint.loaded !== true) {
+      if (hint.jitLoadable === true && hint?.limits?.source === "lmstudio_native_jit_request" &&
+          hint?.limits?.scope === "request" &&
+          Number.isSafeInteger(hint.limits.contextTokens) && hint.limits.contextTokens > 0)
+        return verificationResult(selected, "jit_loadable", {
+          evidence: "lmstudio_native_downloaded_model_and_openai_list",
+          metadataOnly: true, checkedAt: Date.now(),
+        });
+      return verificationResult(selected, "model_not_loaded", { evidence: "lmstudio_native_loaded_instance" });
+    }
+    if (!Number.isSafeInteger(hint?.limits?.runtimeContextTokens) || hint.limits.runtimeContextTokens <= 0)
+      return verificationResult(selected, "loaded_window_unverified", { evidence: "lmstudio_native_loaded_instance" });
+  }
   return verificationResult(selected, "passed", {
     evidence: hint?.generation?.source || capability?.source || "model_list",
     metadataOnly: true,
@@ -42,15 +67,18 @@ export async function discoverLocalModels(settings = {}, options = {}) {
       ...options,
       timeoutMs: Math.max(1_000, Number(options.timeoutMs || options.probeTimeoutMs) || 10_000),
     });
-    if (!result.models.length)
+    if (!result.models.length && !result.listedModels?.length)
       throw new LocalAiError("Local AI returned no usable model IDs", {
         code: "local_models_empty",
       });
-    options.onProgress?.({ stage: "models_loaded", models: result.models, capability: result.capability, protocol: adapter.id });
+    options.onProgress?.({ stage: "models_loaded", models: result.models,
+      selectableModels: result.selectableModels, capability: result.capability, protocol: adapter.id });
     const requested = String(options.model || "").trim();
     const selected = requested && requested.toLowerCase() !== "auto"
       ? requested
-      : String(result.models[0] || "").trim();
+      : String(result.selectableModels?.[0] || ((options.provider || settings.provider || settings.id) === "lmstudio" ? "" : result.models.find((id) =>
+        result.capability?.models?.[id]?.generation?.supported !== false) ||
+        result.models[0] || result.listedModels?.[0]) || "").trim();
     let verification = verificationResult(selected, "not_tested");
     if (options.verifySelected === true) {
       options.onProgress?.({ stage: "model_verify", model: selected, reused: false, metadataOnly: true });
@@ -60,6 +88,7 @@ export async function discoverLocalModels(settings = {}, options = {}) {
       ok: true,
       checkedAt: Date.now(),
       models: result.models,
+      selectableModels: result.selectableModels,
       protocol: adapter.id,
       endpoint: adapter.requestUrl({}).replace(/\/[^/]+(?:\/[^/]+)?$/, ""),
       capability: result.capability,

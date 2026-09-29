@@ -1,3 +1,4 @@
+import {reserveLocalIndependentJob,finishLocalIndependentJob,cancelLocalIndependentJobs} from "./ai/translation-paths/independent-order.js";
 import { completeBatch } from './reader-placement.js';
 import { cancelTrackedBatches, cancelBatchState } from "./reader-events.js";
 import { acquireReaderImage } from "./reader-acquisition.js";
@@ -358,8 +359,12 @@ const { failJobImmediately, handleStaleJob, handleJobError, handleResult, handle
     summarizeResultPresentation,
     traceNote,
     workflow: wf,
-    shouldDeferImageError: ({ batch, imageKey, terminalAiError }) =>
-      terminalAiError === true && repairCoordinator.ownsInitialFailure(batch?.id, imageKey),
+    shouldDeferImageError: ({ batch, imageKey, terminalAiError, error }) =>
+      terminalAiError === true &&
+      String(error?.tpError?.code || error?.code || "").toLowerCase() !== 'local_model_identity_mismatch' &&
+      repairCoordinator.ownsInitialFailure(batch?.id, imageKey),
+    shouldSuppressPartialNotice: ({ batch, imageKey }) =>
+      repairCoordinator.ownsInitialFailure(batch?.id, imageKey),
     onDelivered: (ctx, ok) => repairCoordinator.markDelivered(ctx, ok),
     log,
   });
@@ -387,6 +392,7 @@ export async function processJob(payload, tabId, frameId = 0) {
     return await processJobInner(payload, tabId, frameId);
   } finally {
     finishConversationJob(payload);
+    finishLocalIndependentJob(payload);
     releasePreparedDataUri(payload);
   }
 }
@@ -805,6 +811,7 @@ async function runSyncTranslate(
     if (direct) {
       await wf.lensReady(workflowId);
       lensDone = true;
+      let partialNotice = null;
       if (plan) {
         directStage = "ai";
         const aiContext = pendingByJob.get(jobId);
@@ -904,6 +911,7 @@ async function runSyncTranslate(
           return;
         }
         if (!aiOutcome.complete) {
+          partialNotice = {missing:Array.isArray(aiOutcome.missing) ? aiOutcome.missing : []};
           traceNote("background/jobs.js", "aiPartial", {
               event: "extension-first AI is inserting a partial single response",
               translated: aiOutcome.translated,
@@ -923,7 +931,7 @@ async function runSyncTranslate(
       }
       directStage = "postprocess";
       await wf.textReady(workflowId);
-      await handleResult(jobId, direct);
+      await handleResult(jobId, direct, partialNotice);
       return;
     } else {
       await wf.lensDegraded(workflowId, "lens direct declined this image");
@@ -1060,6 +1068,7 @@ export function enqueue(payload, tabId, frameId = 0) {
   });
   const isAdmissible = enqueuePolicy.shouldStart;
   reserveConversationJob(payload, tabId);
+  reserveLocalIndependentJob(payload, tabId);
   const scheduled = scheduleOwnedImageJob({
     identity: {
       batchId: String(payload?.metadata?.batch_id || getCurrentBatchId() || ""),
@@ -1075,9 +1084,9 @@ export function enqueue(payload, tabId, frameId = 0) {
     work: () => processJob(payload, tabId, frameId),
     // Extension orchestration is governed by its Lens/AI lanes.
     laneManaged: payload?.engine !== "api",
-    onRelease: () => finishConversationJob(payload),
+    onRelease: () => { finishConversationJob(payload); finishLocalIndependentJob(payload); },
   });
-  if (!scheduled) finishConversationJob(payload);
+  if (!scheduled) { finishConversationJob(payload); finishLocalIndependentJob(payload); }
   return scheduled;
 }
 
@@ -1085,6 +1094,7 @@ export function enqueue(payload, tabId, frameId = 0) {
 export function cancelTabWork(tabId, reason = "navigation", sessionId = "") {
   if (!Number.isFinite(tabId)) return;
   cancelConversationJobs({tabId});
+  cancelLocalIndependentJobs({tabId});
   void repairCoordinator.cancelTab(tabId, reason);
   releaseTabImageJobs(tabId);
   const msg = String(reason || "navigation");

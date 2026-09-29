@@ -24,15 +24,36 @@ RAW_USAGE = {'prompt_tokens': 100, 'completion_tokens': 20, 'total_tokens': 120,
 
 class FakeClient:
     calls = []
+    get_calls = []
     def __init__(self, *args, **kw): pass
     def __enter__(self): return self
     def __exit__(self, *args): self.close()
     def close(self): pass
+    def get(self, url, **kw):
+        url = str(url)
+        self.get_calls.append((url, kw))
+        if url == 'http://localhost:8000/v1/models':
+            # vLLM publishes the active window on the selected model row.
+            data = {'data': [{'id': 'local-model', 'max_model_len': 32768}]}
+        elif url == 'http://localhost:8080/v1/models':
+            # llama.cpp's training window is not the current allocation;
+            # the sole exact model can be resolved against /props instead.
+            data = {'data': [{'id': 'local-model', 'meta': {'n_ctx_train': 65536}}]}
+        elif url == 'http://localhost:8080/props':
+            data = {'default_generation_settings': {'n_ctx': 32768}}
+        elif url == 'http://localhost:5001/v1/models':
+            data = {'data': [{'id': 'local-model'}]}
+        elif url == 'http://localhost:5001/api/extra/true_max_context_length':
+            data = {'value': 32768}
+        else:
+            raise AssertionError(f'Unexpected Local runtime metadata GET: {url}')
+        return httpx.Response(200, json=data, request=httpx.Request('GET', url))
     def post(self, url, **kw):
         self.calls.append((str(url), kw))
         if 'anthropic.com' in str(url):
             data={'id':'native-claude', 'content':[{'type':'text','text':ANSWER}], 'stop_reason':'end_turn',
-                  'usage':{'input_tokens':25, 'cache_read_input_tokens':70,'cache_creation_input_tokens':5,'output_tokens':20}}
+                  'usage':{'input_tokens':25, 'cache_read_input_tokens':70,'cache_creation_input_tokens':5,
+                           'output_tokens':20,'output_tokens_details':{'thinking_tokens':3}}}
         elif 'googleapis.com' in str(url):
             data={'responseId':'native-google','candidates':[{'finishReason':'STOP','content':{'parts':[
                 {'text':'PRIVATE THOUGHT MUST NOT BECOME TRANSLATION','thought':True},{'text':ANSWER}]}}],
@@ -44,6 +65,31 @@ class FakeClient:
             data={'id':'chat-id','model':'served-model','choices':[{'finish_reason':'stop','message':{'content':ANSWER}}], 'usage':RAW_USAGE}
         return httpx.Response(200,json=data,request=httpx.Request('POST',str(url)))
 
+    @contextmanager
+    def stream(self, method, url, **kw):
+        self.calls.append((str(url), kw))
+        payload = kw['json']
+        assert method == 'POST' and str(url).endswith('/api/v1/chat')
+        assert payload['store'] is False and 'previous_response_id' not in payload
+        assert payload['system_prompt'] == 'Private style sentinel'
+        assert 'Private OCR sentinel' in payload['input']
+        model = payload['model']
+        class NativeResponse:
+            is_success = True
+            def close(self): pass
+            def iter_lines(self):
+                frames = ({'type':'chat.start', 'model_instance_id':model},
+                          {'type':'message.delta', 'content':ANSWER},
+                          {'type':'chat.end', 'result':{'model_instance_id':model,
+                              'output':[{'type':'message','content':ANSWER}],
+                              'stats':{'input_tokens':100,'total_output_tokens':20,
+                                       'reasoning_output_tokens':3}}})
+                for frame in frames:
+                    yield 'event: '+frame['type']
+                    yield 'data: '+json.dumps(frame,ensure_ascii=False)
+                    yield ''
+        yield NativeResponse()
+
 class UsageTests(unittest.TestCase):
     def test_openai_subsets_are_not_added_twice(self):
         u=normalize_usage(RAW_USAGE,cost_authoritative=True)
@@ -54,6 +100,22 @@ class UsageTests(unittest.TestCase):
         u=normalize_usage({'input_tokens':25,'cache_read_input_tokens':70,'cache_creation_input_tokens':5,'output_tokens':20},'anthropic')
         self.assertEqual((u['inputTokens'],u['totalTokens']),(100,120))
         self.assertTrue(u['totalDerived']);self.assertEqual(u['ordinaryInputTokens'],25)
+    def test_anthropic_reported_thinking_is_output_subset_not_extra_tokens(self):
+        # Claude Messages reports billed thinking in usage.output_tokens_details.
+        response={'usage':{'input_tokens':25,'cache_read_input_tokens':70,
+                           'cache_creation_input_tokens':5,'output_tokens':20,
+                           'output_tokens_details':{'thinking_tokens':3}}}
+        u=normalize_usage(response['usage'],'anthropic')
+        self.assertEqual((u['inputTokens'],u['outputTokens'],u['totalTokens']),(100,20,120))
+        self.assertEqual((u['thinkingTokens'],u['visibleOutputTokens']),(3,17))
+        self.assertEqual(u['usageStatus'],'reported')
+        for detail,expected in (({'thinking_tokens':0},0),({'thinking_tokens':None},None),
+                                ({'thinking_tokens':'3'},None),({},None)):
+            observed=normalize_usage({**response['usage'],'output_tokens_details':detail},'anthropic')
+            self.assertEqual(observed['thinkingTokens'],expected)
+            self.assertEqual(observed['visibleOutputTokens'],20 if expected==0 else None)
+        self.assertIsNone(normalize_usage({k:v for k,v in response['usage'].items()
+            if k!='output_tokens_details'},'anthropic')['thinkingTokens'])
     def test_gemini_thoughts_and_cache(self):
         u=normalize_usage({'promptTokenCount':100,'cachedContentTokenCount':70,'candidatesTokenCount':17,'thoughtsTokenCount':3,'totalTokenCount':120},'gemini')
         self.assertEqual(u['outputTokens'],20);self.assertEqual(u['visibleOutputTokens'],17)
@@ -111,6 +173,51 @@ class CacheTests(unittest.TestCase):
         b,_=self.apply(provider='openai',url='https://api.openai.com/v1/chat/completions');self.assertIn('prompt_cache_key',b);self.assertNotIn('session_id',b)
         with patch.dict(os.environ,{'TP_PROMPT_CACHE':'off'}):
             b,p=self.apply(model='anthropic/claude-sonnet-4-6');self.assertEqual(b,self.payload);self.assertEqual(p['strategy'],'disabled')
+    def test_groq_automatic_prefix_cache_is_exact_model_and_host_only(self):
+        url='https://api.groq.com/openai/v1/chat/completions'
+        for model in ('openai/gpt-oss-20b','openai/gpt-oss-120b','openai/gpt-oss-safeguard-20b'):
+            body,policy=self.apply(provider='groq',model=model,url=url)
+            self.assertEqual(body,self.payload)
+            self.assertEqual(policy['strategy'],'automatic')
+            self.assertIsNone(policy['hit']);self.assertFalse(policy['discountGuaranteed'])
+        for model,endpoint in (('qwen/qwen3.8-27b',url),('openai/gpt-oss-20b','https://proxy.example/v1')):
+            body,policy=self.apply(provider='groq',model=model,url=endpoint)
+            self.assertEqual(body,self.payload);self.assertEqual(policy['strategy'],'unknown')
+    def test_together_cache_routing_hint_only_for_official_host(self):
+        for host in ('api.together.xyz','api.together.ai'):
+            url=f'https://{host}/v1/chat/completions'
+            body,policy=self.apply(provider='together',model='model-a',url=url,key='credential-one')
+            self.assertEqual(policy['strategy'],'automatic')
+            self.assertEqual(policy['support'],'documented')
+            self.assertIsNone(policy['hit']);self.assertFalse(policy['discountGuaranteed'])
+            key=body['prompt_cache_key']
+            self.assertRegex(key,r'^tp-[a-f0-9]{48}$')
+            self.assertNotIn('credential-one',key);self.assertNotIn('OCR A',key)
+            self.assertEqual(body['messages'],self.payload['messages'])
+            alternate={**self.payload,'messages':[self.payload['messages'][0],{'role':'user','content':'OCR B'}]}
+            other,_=self.apply(provider='together',model='model-a',url=url,body=alternate,key='credential-one')
+            self.assertEqual(key,other['prompt_cache_key'])
+            for model,credential,system in (('model-b','credential-one','Exact style'),
+                                            ('model-a','credential-two','Exact style'),
+                                            ('model-a','credential-one','Different style')):
+                changed={**self.payload,'messages':[{'role':'system','content':system},self.payload['messages'][1]]}
+                different,_=self.apply(provider='together',model=model,url=url,body=changed,key=credential)
+                self.assertNotEqual(key,different['prompt_cache_key'])
+            with patch.dict(os.environ,{'TP_PROMPT_CACHE':'off'}):
+                disabled,off=self.apply(provider='together',model='model-a',url=url)
+                self.assertEqual(disabled,self.payload);self.assertEqual(off['strategy'],'disabled')
+                self.assertTrue(off['providerCacheUncontrolled'])
+                self.assertIsNone(off['hit'])
+        for provider,url in (('together','https://api.together.xyz.attacker.test/v1/chat/completions'),
+                             ('together','https://proxy.example/v1/chat/completions'),
+                             ('groq','https://api.together.xyz/v1/chat/completions'),
+                             ('featherless','https://api.featherless.ai/v1/chat/completions')):
+            unchanged,policy=self.apply(provider=provider,url=url)
+            self.assertEqual(unchanged,self.payload)
+            self.assertNotIn('prompt_cache_key',unchanged)
+        without_system,_=self.apply(provider='together',url='https://api.together.xyz/v1/chat/completions',
+                                    body={'messages':[{'role':'user','content':'OCR'}]})
+        self.assertNotIn('prompt_cache_key',without_system)
     def test_no_system_no_fake_cache_prefix(self):
         b,p=self.apply(body={'messages':[{'role':'user','content':'OCR'}]});self.assertNotIn('session_id',b)
 
@@ -118,29 +225,45 @@ class ReceiptTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.path=Path(self.tmp.name)/'receipts.sqlite'
         self.env=patch.dict(os.environ,{'TP_USAGE_STATE_FILE':str(self.path),'TP_USAGE_REQUIRED':'1','TP_USAGE_RECEIPTS':'on'})
-        self.env.start();FakeClient.calls=[]
+        self.env.start();FakeClient.calls=[];FakeClient.get_calls=[]
         accounting._receipt_cache.clear();accounting._receipt_bytes=0
     def tearDown(self):self.env.stop();self.tmp.cleanup()
     def rows(self):
         self.assertFalse(self.path.exists())
         return [json.loads(value) for value in accounting._receipt_cache.values()]
-    def test_all_19_provider_boundaries_both_engine_scopes(self):
-        specs=list(compose_providers(ProviderRegistry()));self.assertEqual(len(specs),19)
+    def test_all_18_provider_boundaries_both_engine_scopes(self):
+        specs=list(compose_providers(ProviderRegistry()));self.assertEqual(len(specs),18)
         for engine in ('runsextension','runsapi'):
             for spec in specs:
                 with self.subTest(engine=engine,provider=spec.provider_id):
                     req=GenerationRequest(provider=spec.provider_id,model=spec.default_model,api_key='secret-key',base_url=spec.default_base_url,
                       system_text='Private style sentinel',system_sections=(SystemPromptSection('identity','Private style sentinel',True),),
-                      user_parts=('<<TP_P0:Private OCR sentinel>>',),thinking='off',expected_ids=('P0',),unit_count=1)
+                      user_parts=('<<TP_P0:Private OCR sentinel>>',),thinking='default',expected_ids=('P0',),unit_count=1)
                     with patch.object(httpx,'Client',FakeClient),accounting.receipt_scope(engine,'operation-'+engine+'-'+spec.provider_id):
                         result=accounting.generate_with_receipt(spec.adapter,req)
                     self.assertEqual((result.input_tokens,result.output_tokens,result.total_tokens),(100,20,120))
-                    self.assertEqual(result.usage_details['cachedInputTokens'],70)
+                    if spec.provider_id == 'lmstudio':
+                        # Native chat reports usage but no cache-read counter;
+                        # never invent the OpenAI-compatible fixture's 70.
+                        self.assertIsNone(result.usage_details['cachedInputTokens'])
+                        self.assertIsNone(result.usage_details['uncachedInputTokens'])
+                        self.assertEqual(result.usage_details['inputTokens'],100)
+                        self.assertEqual((result.usage_details['thinkingTokens'],
+                                          result.usage_details['visibleOutputTokens']),(3,17))
+                    else:
+                        self.assertEqual(result.usage_details['cachedInputTokens'],70)
+                    if spec.provider_id == 'anthropic':
+                        self.assertEqual((result.usage_details['thinkingTokens'],result.usage_details['visibleOutputTokens']),(3,17))
                     self.assertEqual(result.usage_details['engine'],engine)
                     self.assertFalse(result.usage_details['receiptDurable']);self.assertFalse(result.usage_details['billingEligible'])
                     self.assertEqual(result.text,ANSWER)
-        rows=self.rows();self.assertEqual(len(rows),38);self.assertEqual(len(FakeClient.calls),38)
-        self.assertEqual(len({v['receiptId'] for v in rows}),38)
+        rows=self.rows();self.assertEqual(len(rows),36);self.assertEqual(len(FakeClient.calls),36)
+        self.assertEqual(sorted(url for url, _ in FakeClient.get_calls), sorted([
+            'http://localhost:8000/v1/models', 'http://localhost:8080/v1/models',
+            'http://localhost:8080/props', 'http://localhost:5001/v1/models',
+            'http://localhost:5001/api/extra/true_max_context_length',
+        ] * 2), 'Local requests must verify the selected model and runtime context before generation')
+        self.assertEqual(len({v['receiptId'] for v in rows}),36)
         serial=json.dumps(rows);self.assertNotIn('secret-key',serial);self.assertNotIn('Private OCR',serial);self.assertNotIn('Private style',serial)
     def test_actual_invocation_records_before_invalid_translation(self):
         from backend.ai.provider_registry import provider_registry
@@ -149,7 +272,7 @@ class ReceiptTests(unittest.TestCase):
         def invalid(client,url,**kw):
             response=original(client,url,**kw);data=response.json();data['choices'][0]['message']['content']='not a valid marker response'
             return httpx.Response(200,json=data,request=httpx.Request('POST',url))
-        ai=AiConfig(api_key='secret-key',provider='openrouter',model=spec.default_model,base_url=spec.default_base_url,prompt_editable='Translate accurately.',prompt_mode='replace',thinking='off')
+        ai=AiConfig(api_key='secret-key',provider='openrouter',model=spec.default_model,base_url=spec.default_base_url,prompt_editable='Translate accurately.',prompt_mode='replace',thinking='default')
         with patch.object(httpx,'Client',FakeClient),patch.object(FakeClient,'post',invalid),patch('backend.ai.provider_resolution.discovered_model_capabilities',return_value=(False,{})),accounting.receipt_scope('runsextension','bad-translation'):
             with patch('backend.ai.translation.invocation.decode_result',side_effect=ValueError('test post-provider decode failure')):
                 with self.assertRaisesRegex(ValueError,'post-provider'):_translate_once('<<TP_P0>>\nSource','th',ai)

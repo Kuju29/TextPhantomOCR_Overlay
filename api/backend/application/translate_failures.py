@@ -56,7 +56,7 @@ def terminal_metadata(exc: BaseException, *, ai_cfg: dict[str, Any], engine: str
             "languageDiagnostics": list(structural.get("languageDiagnostics") or [])[:10]}
 
 def raise_mapped(exc: BaseException, *, prepared, ai_cfg, paced, rate_provider,
-                 rate_model, api_key, lane, is_local_target) -> None:
+                 rate_model, rate_key, lane, is_local_target) -> None:
     route, trace_id = prepared.requested_route, prepared.trace_id
     common = dict(mode=prepared.mode, source=prepared.source, **prepared.route_identity)
     if isinstance(exc, (asyncio.CancelledError, ProviderGenerationCancelled)):
@@ -100,7 +100,7 @@ def raise_mapped(exc: BaseException, *, prepared, ai_cfg, paced, rate_provider,
         default_retryable=mapped.retryable, upstream_status=upstream)
     status = int(semantics.get("httpStatus") or mapped.status)
     if paced and mapped.status == 429 and ai_rate_feedback_allowed(failed_stage):
-        rate_gate.report_rate_limited(rate_provider, rate_model, api_key, retry_after_sec=retry_after_sec(exc))
+        rate_gate.report_rate_limited(rate_provider, rate_model, rate_key, retry_after_sec=retry_after_sec(exc))
     trace.write("api", "api/routes/translate_v1.py", "translate_sync", "!!",
                 {"failureKind": semantics["code"], "httpStatus": status,
                  "upstreamStatus": upstream, "errorType": type(exc).__name__,

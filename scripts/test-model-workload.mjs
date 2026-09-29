@@ -117,7 +117,25 @@ await test('batch target is NOT num_predict; retain headroom',()=>{
   const hint={version:1,predictedOutput:100,reasoningReserve:0};
   assert.equal(guardOutputBudget({standard:2000,workload:hint,system:'style',user:'source'}),2000);
   assert.equal(guardOutputBudget({standard:2000,workload:hint,limits:{maxOutputTokens:512}}),512);
-  assert.equal(guardOutputBudget({standard:2000,workload:null,limits:{maxOutputTokens:512}}),2000);
+  assert.equal(guardOutputBudget({standard:2000,workload:null,limits:{maxOutputTokens:512}}),512,
+    'verified physical limits apply even without a workload hint');
+  assert.equal(guardOutputBudget({standard:529,workload:hint,limits:{contextTokens:12288},
+    system:'style',user:'source',localReasoningRisk:true}),8192,
+    'an unverified Local Thinking mode must retain response headroom');
+  assert.equal(guardOutputBudget({standard:8192,workload:{version:1,predictedOutput:12000},
+    limits:{contextTokens:32768},user:'long indivisible source',sourceTexts:['漢'.repeat(6500)]}),18000,
+    'large source may use a verified context above the ordinary request target');
+  assert.equal(guardOutputBudget({standard:8192,workload:{version:1,predictedOutput:1e8},
+    user:'short',sourceTexts:[' '.repeat(60000)]}),8192,
+    'whitespace and a forged output prediction do not authorize a huge completion');
+});
+await test('ordinary 8K completion target is not a physical model ceiling',()=>{
+  const plan=estimateRequest(units(1,'漢'.repeat(6500)),initialProfile(),
+    {...ctx,limits:{contextTokens:65536}});
+  assert.ok(plan.predictedOutput>8192);
+  assert.equal(plan.completionAvailable,8192);
+  assert.ok(plan.physicalAvailable>plan.predictedOutput);
+  assert.equal(plan.fitsHard,true);
 });
 await test('composed-message budget guard rejects before provider',()=>{
   assert.throws(()=>guardOutputBudget({standard:8192,workload:{version:1,predictedOutput:100},

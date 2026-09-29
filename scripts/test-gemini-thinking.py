@@ -124,7 +124,8 @@ def main():
     assert default_result.thinking_applied == "provider_default_levels"
     assert default_result.requested_output_tokens > off_result.requested_output_tokens
     assert off_payload["generationConfig"]["thinkingConfig"] == {"thinkingBudget": 0}
-    assert off_result.thinking_applied == "requested_off"
+    assert off_result.thinking_applied == "provider_ignored_off", (
+        "the fixture reports 500 thought tokens despite an Off request")
     assert flash_low_payload["generationConfig"]["thinkingConfig"] == {"thinkingBudget": 1024}
     assert flash_low_result.thinking_applied == "requested_effort_low"
     assert flash_medium_payload["generationConfig"]["thinkingConfig"] == {"thinkingBudget": 8192}
@@ -137,11 +138,11 @@ def main():
     assert lite_result.thinking_applied == "provider_default_levels"
     assert lite_result.requested_output_tokens == off_result.requested_output_tokens
     assert lite_off_payload["generationConfig"]["thinkingConfig"] == {"thinkingBudget": 0}
-    assert lite_off_result.thinking_applied == "requested_off"
+    assert lite_off_result.thinking_applied == "provider_ignored_off"
     assert "thinkingConfig" not in pro_off_payload["generationConfig"]
     assert pro_off_result.thinking_applied == "provider_default_levels"
     assert pro_off_result.requested_output_tokens > off_result.requested_output_tokens
-    assert pro_low_payload["generationConfig"]["thinkingConfig"] == {"thinkingBudget": 1024}
+    assert pro_low_payload["generationConfig"]["thinkingConfig"] == {"thinkingBudget": 128}
     assert pro_low_result.thinking_applied == "requested_effort_low"
     assert pro_medium_payload["generationConfig"]["thinkingConfig"] == {"thinkingBudget": 8192}
     assert pro_medium_result.thinking_applied == "requested_effort_medium"

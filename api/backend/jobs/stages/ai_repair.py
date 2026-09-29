@@ -7,6 +7,7 @@ from typing import Any
 import time, re, unicodedata
 
 from backend.ai import markers, wire_trace
+from backend.ai.clients.base import OutputBudgetExhausted
 from backend.ai.errors import ModelOutputContractError, WrongLanguageOutput
 from backend.ai.translation.contracts import AiConfig
 from backend.ai.translation.invocation import translate as ai_translate
@@ -435,6 +436,19 @@ def translate_with_one_repair(
                 "repairReason": reason,
             })
             raise first_error
+
+    # A Local model that exhausted its completion without any visible text has
+    # no validated record to salvage. A second call with the same model spends
+    # more tokens without evidence that a smaller repair can answer.
+    if (isinstance(first_error, OutputBudgetExhausted) and
+            first_error.structural_details.get("validatorSubtype")
+            in {"reasoning_only_exhausted", "empty_output"}):
+        first_error.structural_details.update({
+            "repairAttempted": False,
+            "repairSkipped": True,
+            "repairReason": "no_visible_output_at_limit",
+        })
+        raise first_error
 
     defective = list((first_state or {}).get("missing") or [])
     if reason == "wrong_target_script" and first_state is not None:

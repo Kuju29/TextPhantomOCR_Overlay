@@ -93,7 +93,7 @@ async def status(run_id: str, request: Request):
 @router.post("/{run_id}/pages")
 async def page_done(run_id: str, request: Request):
     data = await body(request)
-    return await change(request, run_id, lambda run: state.record_page(run, data))
+    return await change(request, run_id, lambda run: state.record_pages(run, data))
 
 @router.post("/{run_id}/seal")
 async def seal(run_id: str, request: Request):

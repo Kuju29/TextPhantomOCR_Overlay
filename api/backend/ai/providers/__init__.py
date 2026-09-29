@@ -10,14 +10,14 @@ from . import (
     cloud_anthropic, cloud_deepseek, cloud_featherless, cloud_gemini,
     cloud_groq, cloud_huggingface, cloud_openai, cloud_openrouter, cloud_paid,
     cloud_together, local_gpt4all, local_jan, local_koboldcpp,
-    local_llamacpp, local_llamafile, local_lmstudio, local_localai,
+    local_llamacpp, local_llamafile, local_lmstudio,
     local_ollama, local_textgen, local_vllm,
 )
 _MODULES = (
     cloud_anthropic, cloud_deepseek, cloud_featherless, cloud_gemini,
     cloud_groq, cloud_huggingface, cloud_openai, cloud_openrouter,
     cloud_together, local_gpt4all, local_jan, local_koboldcpp,
-    local_llamacpp, local_llamafile, local_lmstudio, local_localai,
+    local_llamacpp, local_llamafile, local_lmstudio,
     local_ollama, local_textgen, local_vllm,
 )
 if center_base_url():

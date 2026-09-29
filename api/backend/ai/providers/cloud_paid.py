@@ -100,4 +100,4 @@ class PaidAdapter:
 
 ADAPTER = PaidAdapter()
 SPEC = ProviderSpec(PROVIDER_ID, "openai_chat_completions", "", DEFAULT_BASE_URL,
-                    adapter=ADAPTER, rate_rpm=60.0, rate_burst=8)
+                    conversation_transport="message_replay", adapter=ADAPTER, rate_rpm=60.0, rate_burst=8)

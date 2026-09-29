@@ -2,7 +2,7 @@
 const tokenSummary = u => Object.fromEntries(["inputTokens", "outputTokens", "totalTokens", "source"].map(k => [k, u[k]]));
 import assert from "node:assert/strict";
 import { translateWithLocalOpenAi as translateRaw } from "../src/shared/ai/direct-local/generation.js";
-const translateWithLocalOpenAi = (units, options = {}) => translateRaw(units, { targetLang: "th", ...options, ai: { prompt: "full style", promptMode: "replace", ...(options.ai || {}) } });
+const translateWithLocalOpenAi = (units, options = {}) => translateRaw(units, { targetLang: "th", ...options, ai: { prompt: "full style", promptMode: "replace", thinking: "default", ...(options.ai || {}) } });
 
 const prompt = { version: "translation-plan-2", pieces: { systemPolicy: "Translate OCR.", editableStyle: "Target language: Thai", targetLanguageInstruction: "Target language: Thai (ภาษาไทย).", sourceInputContract: "Read marker records.", imageHint: "Use image context.", structuredOutputContract: "Return JSON.", markerOutputContract: "Return markers.", seriesNotesHeading: "SERIES NOTES" } };
 const units = [{ id: "duplicate-a", text: "同じ >> OCR-like source" }, { id: "duplicate-b", text: "同じ ກ mixed Unicode {\"x\"}" }];
@@ -12,6 +12,11 @@ globalThis.fetch = async (_url, init) => {
   return new Response(JSON.stringify({ choices: [{ message: { content: "<<TP_P1:คำแปลสอง >> บรรทัด>>\n<<TP_P0:คำแปลแรก>>" } }] }), { status: 200 });
 };
 const result = await translateWithLocalOpenAi(units, { ai: { model: "small-local", local_adapter: { protocol: "openai", baseUrl: "http://localhost:1234/v1" } }, canonicalPrompt: prompt });
+globalThis.fetch = async () => new Response(`event: message\nid: fixture-1\ndata: ${JSON.stringify({choices:[{delta:{content:'<<TP_P0:หนึ่ง>>\n<<TP_P1:สอง>>'}}]})}\n\nretry: 3000\ndata: [DONE]\n\n`,
+  {status:200,headers:{'content-type':'text/event-stream'}});
+const withSseMetadata = await translateWithLocalOpenAi(units, { ai: { model: "small-local", local_adapter: { protocol: "openai", baseUrl: "http://localhost:1234/v1" } }, canonicalPrompt: prompt });
+assert.deepEqual(withSseMetadata.translations.map(x=>x.text),['หนึ่ง','สอง'],
+  'Valid SSE event/id/retry fields must not invalidate Local translation');
 assert.equal(request.stream, true);
 assert.equal("format" in request, false);
 assert.equal("response_format" in request, false);

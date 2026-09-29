@@ -7,6 +7,9 @@ from typing import Any
 import re, httpx
 
 from backend.ai.provider_contract import GenerationRequest, ModelListResult, ProbeRequest, ProbeResponse, ProviderSpec
+from backend.ai.cloud_reasoning import observed_off_status
+from backend.ai.providers.openai_limits import documented_limits
+from backend.ai.providers.openai_reasoning import reasoning_capability as _reasoning_capability, reasoning_family as _reasoning_family
 from backend.ai.providers.probe_support import openai_chat_probe
 from backend.ai.providers.provider_helpers import resolve_alias
 from backend.ai.transports.openai_cloud_chat import execute_openai_cloud_chat
@@ -56,14 +59,20 @@ def filter_model_items(items) -> list[str]:
             models.append(model_id)
     return models
 
-def _reasoning_family(model: str) -> bool:
-    value = model.lower()
-    return value == "gpt-5" or value.startswith(("gpt-5-", "gpt-5.")) or bool(
-        re.match(r"^o(?:1|3|4)(?:-|$)", value)
-    )
+
+# /models establishes account eligibility, but publishes no modality flags.
+# Only these exact Chat Completions IDs have image input documented in the
+# corresponding OpenAI model cards; do not infer vision for all GPT/O snapshots,
+# fine-tunes, or newly released names from their prefixes.
+_DOCUMENTED_CHAT_VISION = frozenset({
+    "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol",
+    "gpt-4o", "gpt-4o-2024-08-06", "gpt-4o-2024-11-20",
+    "gpt-4o-mini", "gpt-4o-mini-2024-07-18",
+    "gpt-5", "o3", "o3-2025-04-16", "o4-mini",
+})
 
 def _verified_reasoning_mapping(request: GenerationRequest) -> tuple[str | None, list[str]]:
-    reasoning = request.model_capabilities.get("reasoning", {})
+    reasoning = _reasoning_capability(request.model) or request.model_capabilities.get("reasoning", {})
     reasoning = reasoning if isinstance(reasoning, dict) else {}
     efforts = [
         str(value).strip().lower()
@@ -142,12 +151,22 @@ def prepare_payload(request: GenerationRequest) -> dict[str, Any]:
 
 class OpenAIAdapter:
     def probe(self, request: ProbeRequest) -> ProbeResponse:
-        # OpenAI's /models catalogue does not expose reasoning controls. Do not
-        # infer them from the model name: feature-detect only the exact selected
-        # model. First prove a native Off (`none`), then a low-cost native On
-        # (`low`). A model that rejects those controls still gets an ordinary
-        # health probe, so control discovery can never make a usable model look
-        # unavailable.
+        # Known model contracts need one health call, not two generation probes
+        # that accidentally narrow a six-level model to none/low. Unknown IDs
+        # still use exact selected-model feature detection below.
+        native = _reasoning_capability(request.model)
+        if native:
+            from backend.ai.reasoning_preference import minimum_reasoning_preference
+            selected = minimum_reasoning_preference(native)
+            extra = {"max_completion_tokens": 256} if native.get("supported") else {"max_tokens": 8}
+            if native.get("supported"):
+                extra["reasoning_effort"] = "none" if selected == "off" else selected
+            response = openai_chat_probe(request, payload_extra=extra)
+            if response.ok:
+                return ProbeResponse(True, response.http_status, capabilities={
+                    "reasoning": native, **({"limits": limits} if (limits := documented_limits(request.model)) else {}),
+                })
+            return response
         off = _probe_effort(request, "none")
         if off.ok:
             on = _probe_effort(request, "low")
@@ -204,6 +223,8 @@ class OpenAIAdapter:
         )
         applied = (f"requested_{request.thinking}" if "reasoning_effort" in payload
                    else "provider_default" if request.thinking == "default" else "unverified")
+        if payload.get("reasoning_effort") == "none":
+            applied = observed_off_status(result)
         return result._replace(thinking_applied=applied)
 
     def list_models(self, *, api_key: str, base_url: str) -> ModelListResult:
@@ -229,12 +250,23 @@ class OpenAIAdapter:
             "eligibility": "usable",
             "evidence": "openai_account_gpt_o_chat_filter",
         } for model in models}
+        capabilities = {}
+        for model in models:
+            cap = {}
+            if model in _DOCUMENTED_CHAT_VISION:
+                cap["vision"] = {"supported": True, "source": "openai_documented_chat_model_card"}
+            if reasoning := _reasoning_capability(model):
+                cap["reasoning"] = reasoning
+            if limits := documented_limits(model):
+                cap["limits"] = limits
+            if cap:
+                capabilities[model] = cap
         return ModelListResult(tuple(models), "valid", http_status=response.status_code,
-                               candidates=candidates)
+                               capabilities=capabilities, candidates=candidates)
 
 ADAPTER = OpenAIAdapter()
 SPEC = ProviderSpec(PROVIDER_ID, "openai_chat_completions", DEFAULT_MODEL,
                     DEFAULT_BASE_URL, ALIASES, model_aliases=MODEL_ALIASES,
-                    adapter=ADAPTER)
+                    conversation_transport="message_replay", adapter=ADAPTER)
 
 __all__ = ["ADAPTER", "SPEC", "MODEL_ALIASES", "prepare_payload", "resolve_model"]

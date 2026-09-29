@@ -100,6 +100,9 @@ def openai_chat_probe(
         if isinstance(text, list):
             text = "".join(str(item.get("text") or "") for item in text if isinstance(item, dict))
         if not isinstance(text, str) or not text.strip():
+            if isinstance(choices, list) and choices and choices[0].get("finish_reason") == "length":
+                return ProbeResponse(False, response.status_code, "probe_inconclusive",
+                    "Probe output limit reached before visible text")
             raise ValueError("empty completion")
     except (ValueError, IndexError, TypeError, AttributeError) as exc:
         return ProbeResponse(False, response.status_code, "invalid_model_output", str(exc))

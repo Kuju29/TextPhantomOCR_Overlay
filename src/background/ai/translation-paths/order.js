@@ -1,3 +1,4 @@
+import {controlFenceError, isControlPreflightFailure} from "./preflight-fence.js";
 import {providerBillingFenceError} from "../../../shared/error-contract.js";
 // Per-document ordering for real image jobs. Not a provider-cache warm-up gate.
 // Reserve before OCR can finish out of order; enter BEFORE acquiring AI capacity.
@@ -57,6 +58,17 @@ export function fenceConversationBilling(ownerTicket) {
   for (const ticket of active) {
     if (ticket.billingKey === billingKey && !ticket.done && !ticket.consumed)
       ticket.billingFailure = providerBillingFenceError();
+  }
+  wakeConversationReady();
+}
+export function fenceConversationConfiguration(ownerTicket, error) {
+  if (!active.has(ownerTicket) || ownerTicket.done || !isControlPreflightFailure(error)) return;
+  for (const ticket of active) {
+    // key includes owner, document, provider, account, model and Thinking.
+    // Restrict to this run as well: a concurrent new click must not inherit it.
+    if (ticket.key === ownerTicket.key && ticket.batchId === ownerTicket.batchId &&
+        !ticket.done && !ticket.consumed)
+      ticket.configurationFailure = controlFenceError(error);
   }
   wakeConversationReady();
 }

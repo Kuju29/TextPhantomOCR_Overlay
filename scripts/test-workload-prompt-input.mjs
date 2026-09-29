@@ -37,8 +37,33 @@ for (const targetLang of ['th', 'en', 'ja']) for (const structured of [false, tr
 const builtIn = createPromptInputEstimator({ targetLang: 'th' })(page);
 assert.ok(builtIn > 512, 'full built-in style/examples must replace old constant allowance');
 const conversationAnchor = createPromptInputEstimator({ ai: { translation_mode: 'conversation', style_examples: false }, targetLang: 'th' })(page);
+const conversationWithExamples = createPromptInputEstimator({ ai: { translation_mode: 'conversation', style_examples: true }, targetLang: 'th' })(page);
 const independentNoExamples = createPromptInputEstimator({ ai: { translation_mode: 'independent', style_examples: false }, targetLang: 'th' })(page);
-assert.ok(conversationAnchor > independentNoExamples, 'Conversation logical/context planning must keep immutable human examples even when the old prefix is expected to be cached');
+const localOllama={provider:'ollama',translation_mode:'independent',style_examples:true};
+const apiLocalEstimate=createPromptInputEstimator({ai:localOllama,route:'server',targetLang:'th'})(page);
+const directLocalEstimate=createPromptInputEstimator({ai:localOllama,route:'direct-local',targetLang:'th'})(page);
+assert.equal(apiLocalEstimate,directLocalEstimate,
+  'API and Direct Local Independent send the same four human examples');
+assert.ok(createPromptInputEstimator({ai:{...localOllama,provider:'openai'},route:'server',targetLang:'th'})(page)>apiLocalEstimate,
+  'Cloud Independent retains its twenty-example prompt');
+assert.ok(createPromptInputEstimator({ai:{...localOllama,translation_mode:'conversation'},route:'server',targetLang:'th'})(page)>apiLocalEstimate,
+  'Local Conversation retains its twenty-example prompt');
+assert.ok(createPromptInputEstimator({ai:localOllama,targetLang:'th'})(page)>apiLocalEstimate,
+  'unknown routes retain the conservative twenty-example estimate');
+const explicit={...localOllama,independent_examples:{source:'human',humanExampleCount:7}};
+assert.ok(createPromptInputEstimator({ai:explicit,route:'direct-local',targetLang:'th'})(page)>directLocalEstimate,
+  'explicit Direct Local example selection takes precedence over its four-example default');
+assert.equal(createPromptInputEstimator({ai:explicit,route:'server',targetLang:'th'})(page),apiLocalEstimate,
+  'the API ignores extension-only example selection and still sends its four built-in examples');
+assert.equal(createPromptInputEstimator({ai:{...localOllama,independent_examples:{source:'story',pairs:[{source:'UNSENT',translation:'UNSENT'}]}},route:'server',targetLang:'th'})(page),apiLocalEstimate,
+  'stale extension-only story selection cannot make the API estimate smaller than its actual prompt');
+assert.ok(conversationWithExamples > conversationAnchor, 'Conversation input estimation must omit disabled examples');
+assert.ok(conversationAnchor >= independentNoExamples, 'Conversation record protocol must still reserve its input');
+const oneRecord = [{id:'I1_P0',text:'HELLO'}];
+const narrowConversation = estimateRequest(oneRecord,initialProfile(),{
+  contract:'compact_records',limits:{contextTokens:8192,maxOutputTokens:4096},reasoningActive:false,
+  fixedInput:0,estimateFixedInput:createPromptInputEstimator({ai:{translation_mode:'conversation'},targetLang:'th'})});
+assert.equal(narrowConversation.fitsHard,false,'a verified narrow context must reject the full fixed anchor before provider dispatch');
 const tooSmall = estimateRequest(page, initialProfile(), { contract: 'compact_records',
   limits: { maxInputTokens: 1000 }, reasoningActive: false, fixedInput: 0,
   estimateFixedInput: createPromptInputEstimator({ targetLang: 'th' }) });
