@@ -25,8 +25,8 @@
 | :--- | :---: | :--- |
 | <img src="https://cdn.simpleicons.org/googlechrome" width="20" height="20"> **Chrome** | ✅ พร้อมใช้งาน | **[Chrome Web Store](https://chromewebstore.google.com/detail/cjbaepobgmickhgebgagklfcfacbbpem)** |
 | <img src="https://cdn.simpleicons.org/brave" width="20" height="20"> **Brave** | ✅ พร้อมใช้งาน | **[Chrome Web Store](https://chromewebstore.google.com/detail/cjbaepobgmickhgebgagklfcfacbbpem)** |
-| <img src="https://cdn.simpleicons.org/firefoxbrowser" width="20" height="20"> **Firefox** | ✅ พร้อมใช้งาน | **[Firefox Add-ons](https://addons.mozilla.org/en-US/firefox/addon/textphantom-%E0%B9%81%E0%B8%9B%E0%B8%A5%E0%B8%82%E0%B8%AD%E0%B8%84%E0%B8%A7%E0%B8%B2%E0%B8%A1%E0%B9%83%E0%B8%99%E0%B8%A0%E0%B8%B2%E0%B8%9E%E0%B8%A1%E0%B8%87%E0%B8%87%E0%B8%B0/)** |
-| <img src="https://r.bing.com/rp/LsvpbzBUOsWWr-fV50e3ltHS3IE.png" width="20" height="20"> **Edge** | ⏳ รออนุมัติ | เร็ว ๆ นี้ |
+| <img src="https://cdn.simpleicons.org/firefoxbrowser" width="20" height="20"> **Firefox** | ⏳ รออนุมัติ | **[Firefox Add-ons](https://addons.mozilla.org/en-US/firefox/addon/textphantom-%E0%B9%81%E0%B8%9B%E0%B8%A5%E0%B8%82%E0%B8%AD%E0%B8%84%E0%B8%A7%E0%B8%B2%E0%B8%A1%E0%B9%83%E0%B8%99%E0%B8%A0%E0%B8%B2%E0%B8%9E%E0%B8%A1%E0%B8%87%E0%B8%87%E0%B8%B0/)** |
+| <img src="https://r.bing.com/rp/LsvpbzBUOsWWr-fV50e3ltHS3IE.png" width="20" height="20"> **Edge** | ✅ พร้อมใช้งาน | **[Edge Add-ons](https://microsoftedge.microsoft.com/addons/detail/nnaoinajfdjccoeeoafhbkchifppknmi)**  |
 | <img src="https://cdn.simpleicons.org/opera" width="20" height="20"> **Opera** | ⏳ รออนุมัติ | เร็ว ๆ นี้ |
 
 > **Brave:** สามารถติดตั้งเวอร์ชัน Chrome จาก Chrome Web Store ได้โดยตรง
