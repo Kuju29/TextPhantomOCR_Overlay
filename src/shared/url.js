@@ -31,7 +31,3 @@ export function normalizeUrl(raw) {
   }
 }
 
-/** Join an API base with a path (base must already be normalised). */
-export function apiUrl(base, path) {
-  return String(base || "").replace(/\/+$/, "") + path;
-}

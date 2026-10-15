@@ -28,15 +28,6 @@ class RubyAttachment:
 
 
 @dataclass(frozen=True)
-class PixelEvidence:
-    known: bool
-    line_strength: float = 0.0
-    whitespace_strength: float = 0.0
-    contrast: float = 0.0
-    reason: str = ""
-
-
-@dataclass(frozen=True)
 class BoundaryEvidence:
     right_id: str
     left_id: str

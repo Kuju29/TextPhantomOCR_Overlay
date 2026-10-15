@@ -58,8 +58,10 @@ export function createIndependentExampleStore({read=getStorage,write=setStorage,
       const identity = series || document;
       if (!identity) return {key:'',scopeStatus:'unscoped'};
       // No credentials or story names in storage keys or compact diagnostics.
-      const data = JSON.stringify(['private_batch_v2',owner,batch,identity,ai?.provider,ai?.model,ai?.base_url,
-        ai?.prompt,sourceLang,targetLang]);
+      // OCR source detection may vary within a mixed-language page/run. Keep
+      // accepted examples attached to the run and selected target language.
+      const data = JSON.stringify(['private_batch_v3',owner,batch,identity,ai?.provider,ai?.model,ai?.base_url,
+        ai?.prompt,targetLang]);
       const bytes = new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(data)));
       return {key:[...bytes].map(b=>b.toString(16).padStart(2,'0')).join(''),
         scopeStatus:series?'verified_series':'document'};

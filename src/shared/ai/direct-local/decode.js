@@ -117,8 +117,7 @@ export function assertNoDuplicateJsonKeys(raw) {
 }
 
 export const MARKER_CONTRACT_VERSION = "tp.translation.compact-records/1";
-export const SELECTED_MARKER_CONTRACT = "plain_records_v1";
-export const SCHEMA_OBJECT_CONTRACT_VERSION = "tp.translation.schema-object/1";
+const SCHEMA_OBJECT_CONTRACT_VERSION = "tp.translation.schema-object/1";
 const CONTRACT_MISMATCH = "AI_OUTPUT_CONTRACT_MISMATCH";
 function markerError(
   message,
@@ -131,7 +130,7 @@ function markerError(
   return error;
 }
 
-export function decodeSchemaObject(raw, units, wireUnits) {
+function decodeSchemaObject(raw, units, wireUnits) {
   const source = String(raw || "").trim();
   const expected = (wireUnits || []).map((unit) => String(unit?.id || ""));
   const fail = (subtype, details = {}) => {

@@ -1,200 +1,128 @@
-/**
- *
- * Ship the extension's log lines to the API so they land in a file.
- *
- * An extension cannot write files, and its two consoles (service worker, page)
- * are not being watched at the moment a problem happens. That is how three
- * regressions in a row came to be diagnosed by guessing: by the time anyone
- * looked, the evidence was gone.
- *
- * These records go to `POST /v1/logs`, which appends them to
- * `api/logs/extension-*.log` — the same folder as the server's own log, so one
- * timeline covers both sides of a request.
- *
- * Three rules, because a diagnostic that damages the thing it is diagnosing is
- * worse than none:
- *
- * 1. **Never blocks and never throws.** Shipping is fire-and-forget. A failure
- *    to log must not fail a translation.
- * 2. **Bounded.** A capped buffer that drops the OLDEST records and counts the
- *    drops. A log sink that can grow without limit is a memory bug waiting for
- *    a loop.
- * 3. **Off unless there is somewhere to send it.** No API base, no shipping,
- *    no repeated failing requests in the background.
+/** Bounded, API-scoped, durable diagnostic journal. TP_LOG_FILE decides shipping.
+ * Unknown metadata keeps only explicit diagnostic records locally. Authoritative
+ * disabled clears them. Transient failures retain/retry, never replay business calls.
  */
-
-const MAX_BUFFER = 400;
-const FLUSH_AFTER_MS = 1500;
-const FLUSH_AT_COUNT = 40;
-const MAX_BATCH = 200;
-const MAX_REQUEST_BYTES = 48 * 1024;
-
-let buffer = [];
-let dropped = 0;
-let timer = null;
-let shipping = false;
-let configurationRevision = 0;
-let baseUrlProvider = null;
-let enabled = false;
-let consecutiveFailures = 0;
-let activeBaseKey = "";
-// Older servers do not advertise features.logFile. Remember a documented 503
-// per API base so every image in the same session does not repeat the probe.
-const unsupportedBases = new Set();
-
-// Line identity
-// Every record gets a run id and a strictly increasing number. Without them,
-// two identical lines in the file are ambiguous: they can mean the event
-// happened twice, or that the shipper sent the same batch twice. On 2026-08-06
-// a batch of work showed five byte-identical "menu click" lines at the SAME
-// millisecond, and the log could not answer which of those it was — so the
-// question had to be left open. With `run` + `n` it answers itself: same `n`
-// means one event written twice, different `n` means it really happened twice.
-const RUN_ID = Math.random().toString(36).slice(2, 10);
-let lineNo = 0;
-
-/** Give up after this many failed shipments; a dead endpoint stays dead. */
-const FAILURE_BUDGET = 3;
-
-/**
- * Turn shipping on.
- *
- * @param {() => Promise<string>} getBaseUrl resolves the API base, or "".
- */
-export function setLogShippingEnabled(
-  on,
-  getBaseUrl,
-  baseKey = "",
-  { authoritative = false } = {},
-) {
-  const previousBase = activeBaseKey, previousEnabled = enabled;
-  if (getBaseUrl) baseUrlProvider = getBaseUrl;
-  activeBaseKey = String(baseKey || "").replace(/\/+$/, "");
-  if (authoritative && on && activeBaseKey)
-    unsupportedBases.delete(activeBaseKey);
-  enabled =
-    Boolean(on) && !(activeBaseKey && unsupportedBases.has(activeBaseKey));
-  if (previousBase !== activeBaseKey || previousEnabled !== enabled) configurationRevision++;
-  if (!enabled) {
-    buffer = [];
-    dropped = 0;
-    consecutiveFailures = 0;
-    if (timer) clearTimeout(timer);
-    timer = null;
-  }
+import './log-serialization.js';
+const MAX_BUFFER=400,MAX_BYTES=512*1024,MAX_BATCH=100,MAX_REQUEST_BYTES=48*1024,TTL=7*86400000;
+const KEY='tpDiagnosticJournalV1';
+const RUN_ID=globalThis.crypto?.randomUUID?.()||Math.random().toString(36).slice(2);
+let lineNo=0,buffer=[],dropped=0,timer=null,shipping=false,enabled=false,known=false,baseUrlProvider=null,activeBaseKey='';
+let revision=0,failures=0,restored=false,restoreTask=null,saveTask=null,saveDirty=false,storageFailures=0;
+const unsupportedBases=new Set();
+const normalize=base=>String(base||'').replace(/\/+$/,'');
+const cloneSafe=value=>globalThis.__TPLogSerialization?.normalize(value)??value;
+function persist(){
+  if(!activeBaseKey)return Promise.resolve();
+  saveDirty=true;
+  if(saveTask)return saveTask;
+  saveTask=Promise.resolve().then(async()=>{
+    while(saveDirty){
+      saveDirty=false;
+      try{
+        const store=globalThis.chrome?.storage?.local;
+        if(!store?.set){storageFailures++;break;}
+        const value=JSON.parse(JSON.stringify({base:activeBaseKey,records:buffer,dropped,enabled:known?enabled:null,updatedAt:Date.now()}));
+        await store.set({[KEY]:value});
+      }catch{storageFailures++;}
+    }
+  }).finally(()=>{saveTask=null;});
+  return saveTask;
 }
-
-/** Forget compatibility-probe outcomes after the configured API changes. */
-export function resetLogShippingSupport(baseKey = "") {
-  const key = String(baseKey || "").replace(/\/+$/, "");
-  if (key) unsupportedBases.delete(key);
-  else unsupportedBases.clear();
+function cap(){
+  if(buffer.length>MAX_BUFFER){dropped+=buffer.length-MAX_BUFFER;buffer.splice(0,buffer.length-MAX_BUFFER);}
+  let bytes=new TextEncoder().encode(JSON.stringify(buffer)).length;
+  while(bytes>MAX_BYTES&&buffer.length){const row=buffer.shift();bytes-=new TextEncoder().encode(JSON.stringify(row)).length;dropped++;}
 }
-
-/**
- * Record one line.
- *
- * Called from `createLogger`, so it is on the hot path of every log call in
- * the extension: it must stay cheap and it must never throw.
- */
-export function recordLogLine(record) {
-  if (!enabled) return;
-  try {
-    buffer.push({ ...record, run: RUN_ID, n: ++lineNo });
-    if (buffer.length > MAX_BUFFER) {
-      // Drop the OLDEST. When a loop is spraying lines, the recent ones
-      // describe the current state; the old ones describe how it started, and
-      // only one of those can be kept.
-      const excess = buffer.length - MAX_BUFFER;
-      buffer.splice(0, excess);
-      dropped += excess;
-    }
-    if (buffer.length >= FLUSH_AT_COUNT) {
-      void flushLogs();
-      return;
-    }
-    if (!timer) timer = setTimeout(() => void flushLogs(), FLUSH_AFTER_MS);
-  } catch {
-    /* a logger that can throw is worse than a logger that loses a line */
-  }
+function schedule(delay=1500){
+  if(!enabled||shipping||timer||!buffer.length)return;
+  timer=setTimeout(()=>{timer=null;void flushLogs();},delay);timer?.unref?.();
 }
-
-/** Send whatever is buffered. Safe to call at any time. */
-export async function flushLogs() {
-  if (timer) {
-    clearTimeout(timer);
-    timer = null;
-  }
-  if (!enabled || shipping || !buffer.length) return;
-  if (consecutiveFailures >= FAILURE_BUDGET) return;
-
-  shipping = true;
-  const revision = configurationRevision;
-  let deadline;
-  try {
-    const base = String((await baseUrlProvider?.()) || "").replace(/\/+$/, "");
-    if (!base || !enabled || revision !== configurationRevision) return;
-    const batch = [], oversized = new Set();
-    let bytes = 256;
-    for (const record of buffer.slice(0, MAX_BATCH)) {
-      let recordBytes;
-      try { recordBytes = new TextEncoder().encode(JSON.stringify(record)).length + 1; }
-      catch { oversized.add(record); continue; }
-      if (recordBytes + 256 > MAX_REQUEST_BYTES) { oversized.add(record); continue; }
-      if (batch.length && bytes + recordBytes > MAX_REQUEST_BYTES) break;
-      batch.push(record); bytes += recordBytes;
+export async function initializeLogJournal(base){
+  const target=normalize(base);
+  if(!target)return;
+  if(restored&&target===activeBaseKey)return;
+  if(restoreTask&&target===activeBaseKey)return restoreTask;
+  if(activeBaseKey&&activeBaseKey!==target){revision++;buffer=[];dropped=0;failures=0;enabled=false;known=false;restored=false;}
+  activeBaseKey=target;baseUrlProvider=()=>target;
+  const epoch=revision;
+  restoreTask=(async()=>{
+    try{
+      const stored=await globalThis.chrome?.storage?.local?.get?.(KEY),saved=stored?.[KEY];
+      if(epoch!==revision||target!==activeBaseKey)return;
+      if(saved?.base===target&&Array.isArray(saved.records)&&saved.updatedAt>Date.now()-TTL){
+        const existing=new Set(buffer.map(x=>`${x.run}:${x.n}`));
+        buffer=[...saved.records.filter(x=>x?.t>Date.now()-TTL&&!existing.has(`${x.run}:${x.n}`)).map(cloneSafe),...buffer];
+        dropped+=Math.max(0,Number(saved.dropped)||0);cap();
+        // Remember a prior enabled sink, but re-negotiate on every API startup.
+        if(!known&&saved.enabled===true)enabled=true;
+      }
+    }catch{}
+    finally{if(epoch===revision){restored=true;restoreTask=null;await persist();schedule();}}
+  })();
+  return restoreTask;
+}
+export function setLogShippingEnabled(on,getBaseUrl,baseKey='',{authoritative=false}={}){
+  const key=normalize(baseKey);
+  if(getBaseUrl)baseUrlProvider=getBaseUrl;
+  if(key&&activeBaseKey&&key!==activeBaseKey){revision++;buffer=[];dropped=0;restored=false;}
+  if(key)activeBaseKey=key;
+  known=true;
+  if(authoritative&&on&&key)unsupportedBases.delete(key);
+  enabled=Boolean(on)&&!unsupportedBases.has(activeBaseKey);
+  if(!enabled){revision++;buffer=[];dropped=0;if(timer)clearTimeout(timer);timer=null;}
+  failures=0;void persist();schedule(0);
+}
+export function resetLogShippingSupport(baseKey=''){
+  const key=normalize(baseKey);if(key)unsupportedBases.delete(key);else unsupportedBases.clear();
+  failures=0;
+}
+export function recordLogLine(record){
+  if(!enabled&&(!record?.diagnostic||known))return;
+  try{
+    const clean=cloneSafe(record);
+    const line={...clean,t:Number(clean.t)||Date.now(),run:RUN_ID,n:++lineNo};
+    const serialized=JSON.stringify(line);
+    if(new TextEncoder().encode(serialized).length>16000){dropped++;return;}
+    buffer.push(line);cap();void persist();
+    if(buffer.length>=40)void flushLogs();else schedule();
+  }catch{}
+}
+export function logShippingState(){return {enabled,known,pending:buffer.length,dropped,consecutiveFailures:failures,persistent:restored&&storageFailures===0,storageFailures};}
+export function persistLogJournal(){return persist();}
+export async function flushLogs(){
+  if(timer){clearTimeout(timer);timer=null;}
+  if(!enabled||shipping||!buffer.length)return;
+  shipping=true;const epoch=revision;let deadline;
+  try{
+    const base=normalize(await baseUrlProvider?.());
+    if(!base||!enabled||epoch!==revision||activeBaseKey&&base!==activeBaseKey)return;
+    const batch=[];let bytes=256;
+    for(const item of buffer.slice(0,MAX_BATCH)){
+      const n=new TextEncoder().encode(JSON.stringify(item)).length+1;
+      if(bytes+n>MAX_REQUEST_BYTES&&batch.length)break;
+      if(n+256>MAX_REQUEST_BYTES){dropped++;buffer=buffer.filter(x=>x!==item);continue;}
+      batch.push(item);bytes+=n;
     }
-    if (oversized.size) {
-      buffer = buffer.filter(record => !oversized.has(record));
-      dropped += oversized.size;
+    if(!batch.length)return;
+    const gap=dropped,controller=new AbortController();deadline=setTimeout(()=>controller.abort(),10000);deadline?.unref?.();
+    const response=await fetch(`${base}/v1/logs`,{method:'POST',signal:controller.signal,headers:{'Content-Type':'application/json'},cache:'no-store',redirect:'error',credentials:'omit',keepalive:false,
+      body:JSON.stringify({records:batch,droppedSinceLastBatch:gap,shipping:{pending:buffer.length,failures,storageFailures}})});
+    if(epoch!==revision)return;
+    if(!response.ok){
+      let data;try{data=await response.json();}catch{}
+      const code=data?.detail?.code||data?.detail?.error?.code||data?.error?.code;
+      // A generic 503 may be a proxy outage or disk-full, not "logging disabled".
+      if(response.status===503&&code==='diagnostic_logging_disabled'){
+        known=true;enabled=false;unsupportedBases.add(base);buffer=[];dropped=0;await persist();return;
+      }
+      throw new Error('Diagnostic transport failure');
     }
-    if (!batch.length) return;
-    const droppedAtSend = dropped;
-    const controller = new AbortController();
-    deadline = setTimeout(() => controller.abort(), 10000);
-    const response = await fetch(`${base}/v1/logs`, {
-      method: "POST", signal: controller.signal,
-      headers: { "Content-Type": "application/json" },
-      cache: "no-store",
-      // Worker-owned diagnostics are not unload beacons and must not contend
-      // with other outstanding requests for the small keepalive body quota.
-      keepalive: false,
-      body: JSON.stringify({ records: batch, droppedSinceLastBatch: droppedAtSend }),
-    });
-    if (revision !== configurationRevision) return;
-    if (response.status === 503) {
-      // The server answers 503 for exactly one reason here: file logging is
-      // turned off (TP_LOG_FILE), which is the default. That is a settled
-      // answer, not a transient failure — retrying it three times per run adds
-      // three doomed requests to every session. Stop, and say why once.
-      enabled = false;
-      if (base) unsupportedBases.add(String(base).replace(/\/+$/, ""));
-      buffer = [];
-      dropped = 0;
-      return;
-    }
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    // Remove THESE records, not "the first N". While the fetch was in flight
-    // new lines were appended, and an overflow trim may have removed some from
-    // the front — in which case slicing by count would discard lines that were
-    // never sent and keep ones that were.
-    const sent = new Set(batch);
-    buffer = buffer.filter((r) => !sent.has(r));
-    dropped = Math.max(0, dropped - droppedAtSend);
-    consecutiveFailures = 0;
-  } catch {
-    if (revision !== configurationRevision) return;
-    consecutiveFailures++;
-    if (consecutiveFailures >= FAILURE_BUDGET) {
-      // Stop rather than retry forever: an unreachable log endpoint would
-      // otherwise add a failing request to every batch of work.
-      buffer = [];
-    }
-  } finally {
-    if (deadline) clearTimeout(deadline);
-    shipping = false;
-    if (enabled && buffer.length && consecutiveFailures < FAILURE_BUDGET && !timer) {
-      timer = setTimeout(() => void flushLogs(), FLUSH_AFTER_MS);
-    }
+    const ack=await response.json();if(ack?.ok!==true)throw new Error('Missing diagnostic ACK');
+    const sent=new Set(batch);buffer=buffer.filter(r=>!sent.has(r));dropped=Math.max(0,dropped-gap);failures=0;await persist();
+  }catch{
+    if(epoch===revision){failures++;await persist();}
+  }finally{
+    if(deadline)clearTimeout(deadline);shipping=false;
+    schedule(failures?Math.min(60000,1500*2**Math.min(failures,6)):1500);
   }
 }

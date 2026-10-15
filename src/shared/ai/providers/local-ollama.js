@@ -25,8 +25,8 @@ export const localProvider = defineLocalProvider({
   create: createOllamaAdapter,
 });
 
-export const OLLAMA_CHAT_PATH = "/api/chat";
-export const OLLAMA_TERMINAL_DRAIN_GRACE_MS = 2000;
+const OLLAMA_CHAT_PATH = "/api/chat";
+const OLLAMA_TERMINAL_DRAIN_GRACE_MS = 2000;
 // Discovery metadata only; generation must never load a model to inspect it.
 const reasoningByEndpoint = new Map();
 
@@ -67,7 +67,7 @@ export function ollamaReasoningCapability(show = null) {
 }
 
 
-export function ollamaGenerationCapability(show = null) {
+function ollamaGenerationCapability(show = null) {
   const capabilities = Array.isArray(show?.capabilities) &&
     show.capabilities.every((value) => typeof value === "string")
       ? show.capabilities : null;
@@ -78,7 +78,15 @@ export function ollamaGenerationCapability(show = null) {
   return { supported: true, source: "ollama-api-show", reason: "completion_capability_confirmed" };
 }
 
-export function ollamaStructuredOutputCapability(show = null) {
+export function ollamaVisionCapability(show = null) {
+  const native = show?.capabilities;
+  const capabilities = Array.isArray(native) && native.every(value => typeof value === "string")
+    ? native.map(value => value.trim().toLowerCase()) : null;
+  return { supported: capabilities === null ? null : capabilities.includes("vision"),
+    source: "ollama-api-show" };
+}
+
+function ollamaStructuredOutputCapability(show = null) {
   const capabilities = Array.isArray(show?.capabilities) &&
     show.capabilities.every((value) => typeof value === "string")
       ? show.capabilities : null;
@@ -145,7 +153,7 @@ function responseContractError(detail) {
   return error;
 }
 
-export function ollamaCapabilityHints(modelsData = null, runningData = null, reasoning = new Map(), structured = new Map(), context = new Map(), generation = new Map()) {
+function ollamaCapabilityHints(modelsData = null, runningData = null, reasoning = new Map(), structured = new Map(), context = new Map(), generation = new Map(), vision = new Map()) {
   const installed = Array.isArray(modelsData?.models) ? modelsData.models : [];
   const running = Array.isArray(runningData?.models) ? runningData.models : [];
   const active = new Map(running.map((item) => [String(item?.name ?? item?.model ?? "").trim(), item]));
@@ -164,6 +172,7 @@ export function ollamaCapabilityHints(modelsData = null, runningData = null, rea
         modelRevision: String(loaded?.digest || tag?.digest || '').slice(0,160),
         source: context.has(model) ? 'ollama-api-show-and-ps' : 'ollama-api-ps', scope: 'runtime' },
       generation: generation.get(model) || { supported: null, source: "ollama-api-tags", reason: "model_capability_metadata_unavailable" },
+      vision: vision.get(model) || ollamaVisionCapability(),
       reasoning: reasoning.get(model) || ollamaReasoningCapability(),
       structuredOutput: structured.get(model) || ollamaStructuredOutputCapability(),
       details: { family: short(details?.family), parameterSize: short(details?.parameter_size),
@@ -331,6 +340,7 @@ export function createOllamaAdapter(settings = {}) {
     const structured = new Map();
     const context = new Map();
     const generation = new Map();
+    const vision = new Map();
     const modelsPath = safePath(settings.modelsPath, "/api/tags");
     const [data, running] = await Promise.all([
       getProviderJson(`${base}${modelsPath}`, { signal, timeoutMs }),
@@ -357,6 +367,7 @@ export function createOllamaAdapter(settings = {}) {
       structured.set(name, ollamaStructuredOutputCapability(show));
       context.set(name, ollamaContextMetadata(show));
       generation.set(name, ollamaGenerationCapability(show));
+      vision.set(name, ollamaVisionCapability(show));
     });
 
     // Explicit metadata that says "no completion" is authoritative: image/
@@ -364,10 +375,11 @@ export function createOllamaAdapter(settings = {}) {
     // metadata remains visible instead of being guessed unusable.
     const models = installed.filter((name) => generation.get(name)?.supported !== false);
     const selected = requested && requested !== "auto" ? requested : models[0];
-    const capability = ollamaCapabilityHints(data, running, reasoning, structured, context, generation);
+    const capability = ollamaCapabilityHints(data, running, reasoning, structured, context, generation, vision);
     if (selected && !capability.models[selected]) capability.models[selected] = {
       model: selected,
       generation: generation.get(selected) || { supported: null, source: "ollama-api-show" },
+      vision: vision.get(selected) || ollamaVisionCapability(),
       reasoning: reasoning.get(selected),
       structuredOutput: structured.get(selected),
     };
@@ -375,10 +387,6 @@ export function createOllamaAdapter(settings = {}) {
     return { data, models, capability: { ...capability, baseUrl: base } };
   };
   return adapter;
-}
-
-export async function generateWithOllama(settings, request, context) {
-  return createOllamaAdapter(settings).generate(request, context);
 }
 
 export function buildOllamaGeneration({ model, messages, outputTokens, thinkingMode, responseSchema = null, contextTokens = null }) {
@@ -391,7 +399,7 @@ export function buildOllamaGeneration({ model, messages, outputTokens, thinkingM
   return body;
 }
 
-export function ollamaStreamFrame(item) {
+function ollamaStreamFrame(item) {
   return {
     content: String(item?.message?.content || ""),
     reasoning: String(item?.message?.thinking || item?.message?.reasoning ||
@@ -400,7 +408,7 @@ export function ollamaStreamFrame(item) {
   };
 }
 
-export function normalizeOllamaLine(line) {
+function normalizeOllamaLine(line) {
   const value = String(line || "").trim();
   if (!value) return { kind: "empty" };
   let item;

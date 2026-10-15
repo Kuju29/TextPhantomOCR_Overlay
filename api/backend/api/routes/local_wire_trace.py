@@ -1,4 +1,4 @@
-"""Authenticated internal relay for extension-owned Direct Local AI traces."""
+"""Bounded process-capability relay for Direct Local AI diagnostic traces."""
 
 import asyncio
 import json
@@ -55,8 +55,15 @@ async def local_wire_trace(
         await asyncio.to_thread(local_wire_relay.receive, payload)
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=400, detail="invalid trace JSON") from exc
+    except local_wire_relay.WireTraceRateLimited:
+        raise HTTPException(status_code=429, detail={"code": "diagnostic_rate_limited"},
+                            headers={"Retry-After": "60"}) from None
     except OverflowError as exc:
         raise HTTPException(status_code=413, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (OSError, local_wire_relay.wire_trace.AiWireTraceWriteError):
+        # A local model already ran outside this API. Report incomplete
+        # diagnostics explicitly without turning its successful output into 500.
+        return {"ok": False, "recorded": False, "code": "diagnostic_storage_unavailable"}
     return {"ok": True}

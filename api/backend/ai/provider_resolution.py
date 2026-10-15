@@ -9,11 +9,8 @@ from threading import RLock
 
 import time, re, hashlib
 
-# from backend.ai import providers as _provider_modules  # noqa: F401
 from backend.ai.provider_registry import provider_registry
 
-LIST_TIMEOUT_SEC = 10.0
-LOCAL_LIST_TIMEOUT_SEC = 3.0
 _MODEL_CAPABILITIES: dict[tuple[str, str, str], dict[str, Any]] = {}
 _MODEL_CAPABILITIES_TTL_SEC = 300.0
 # A control-only probe cannot erase contradictory reasoning from an actual
@@ -23,19 +20,39 @@ _OFF_CONTRADICTIONS_NEXT_SWEEP = 0.0
 _CAPABILITY_CACHE_LOCK = RLock()
 _CLOUD_DISCOVERY_IN_FLIGHT: dict[tuple[str, str, str], Future] = {}
 
+# One scope per (provider, base_url, key hash), so every
+# user key adds one. Bound the number of scopes; victims are scopes whose
+# catalogue and probe evidence have all expired, then the least recently
+# refreshed (lowest expires_at). An evicted scope is simply re-discovered.
+MAX_CAPABILITY_SCOPES = 1024
+
+
+def _scope_freshness(entry: dict[str, Any]) -> float:
+    selected = entry.get("selected") or {}
+    return max([float(entry.get("expires_at") or 0.0)] +
+               [float(value.get("expires_at") or 0.0) for value in selected.values() if isinstance(value, dict)])
+
+
+def _bound_capability_scopes() -> None:
+    excess = len(_MODEL_CAPABILITIES) - MAX_CAPABILITY_SCOPES
+    if excess <= 0:
+        return
+    for scope, _ in sorted(_MODEL_CAPABILITIES.items(), key=lambda item: _scope_freshness(item[1]))[:excess]:
+        _MODEL_CAPABILITIES.pop(scope, None)
+
+
 def _capability_cache_transaction(function):
     # Metadata only. No network call or generation is inside this short lock.
     @wraps(function)
     def guarded(*args, **kwargs):
         with _CAPABILITY_CACHE_LOCK:
-            return function(*args, **kwargs)
+            try:
+                return function(*args, **kwargs)
+            finally:
+                _bound_capability_scopes()
     return guarded
 
-_MODEL_PROMOTIONS: dict[tuple[str, str, str], dict[str, float]] = {}
-_MODEL_REJECTIONS: dict[tuple[str, str, str], dict[str, dict[str, Any]]] = {}
 MODEL_PROBE_EVIDENCE_TTL_SEC = 15 * 60.0
-_MODEL_PROMOTION_TTL_SEC = MODEL_PROBE_EVIDENCE_TTL_SEC
-_MODEL_REJECTION_TTL_SEC = MODEL_PROBE_EVIDENCE_TTL_SEC
 _SECRET_PATTERN = re.compile(r"Bearer\s+[A-Za-z0-9._\-]{8,}|(?:key=|sk-|hf_|gsk_)[A-Za-z0-9._\-]{8,}")
 
 def canonical_provider(provider: str) -> str:
@@ -116,6 +133,9 @@ def normalize_model_capabilities(value: Any) -> dict[str, Any]:
     if normalized.get("mandatory"):
         normalized["supported"] = True
     result: dict[str, Any] = {"reasoning": normalized} if normalized else {}
+    parameters = value.get("supported_parameters")
+    if isinstance(parameters, list) and all(isinstance(parameter, str) for parameter in parameters):
+        result["supported_parameters"] = sorted(set(parameters))
     vision = value.get("vision")
     if isinstance(vision, dict) and isinstance(vision.get("supported"), bool):
         normalized_vision: dict[str, Any] = {"supported": vision["supported"]}
@@ -217,8 +237,10 @@ def remember_model_capabilities(provider: str, base_url: str, api_key: str,
         evidence = deepcopy(entry.get("capabilities") or {})
         for feature, fresh in catalogue.get(model, {}).items():
             old = evidence.get(feature, {})
-            if isinstance(old, dict) and any(key in old and old[key] != value
-                                            for key, value in fresh.items()):
+            conflict = (any(key in old and old[key] != value for key, value in fresh.items())
+                if isinstance(old, dict) and isinstance(fresh, dict)
+                else feature in evidence and old != fresh)
+            if conflict:
                 evidence.pop(feature, None)
         if evidence:
             selected[model] = {**entry, "capabilities": evidence}
@@ -226,94 +248,6 @@ def remember_model_capabilities(provider: str, base_url: str, api_key: str,
         "expires_at": now + _MODEL_CAPABILITIES_TTL_SEC,
         "models": catalogue, "selected": selected, "known_models": known,
     }
-
-@_capability_cache_transaction
-def remember_model_promotion(provider: str, base_url: str, api_key: str, model: str) -> None:
-    scope = _capability_scope(provider, base_url, api_key)
-    now = time.monotonic()
-    promoted = {key: expiry for key, expiry in _MODEL_PROMOTIONS.get(scope, {}).items()
-                if expiry > now}
-    promoted[str(model)] = now + _MODEL_PROMOTION_TTL_SEC
-    _MODEL_PROMOTIONS[scope] = promoted
-    rejected = {key: value for key, value in _MODEL_REJECTIONS.get(scope, {}).items()
-                if key != str(model) and value.get("expires_at", 0) > now}
-    if rejected:
-        _MODEL_REJECTIONS[scope] = rejected
-    else:
-        _MODEL_REJECTIONS.pop(scope, None)
-
-@_capability_cache_transaction
-def remember_model_rejection(provider: str, base_url: str, api_key: str, model: str,
-                             *, status: str, http_status: int = 0, error: str = "") -> None:
-    """Remember deterministic selected-model probe failures for this account route.
-
-    This is deliberately account/provider/endpoint/model scoped. Transient
-    network/rate-limit failures must never call this function.
-    """
-    scope = _capability_scope(provider, base_url, api_key)
-    now = time.monotonic()
-    rejected = {key: value for key, value in _MODEL_REJECTIONS.get(scope, {}).items()
-                if value.get("expires_at", 0) > now}
-    rejected[str(model)] = {
-        "expires_at": now + _MODEL_REJECTION_TTL_SEC,
-        "status": str(status or "rejected")[:64],
-        "http_status": int(http_status or 0),
-        "error": _SECRET_PATTERN.sub("[redacted]", " ".join(str(error or "").split()))[:200],
-    }
-    _MODEL_REJECTIONS[scope] = rejected
-    promoted = {key: expiry for key, expiry in _MODEL_PROMOTIONS.get(scope, {}).items()
-                if key != str(model) and expiry > now}
-    if promoted:
-        _MODEL_PROMOTIONS[scope] = promoted
-    else:
-        _MODEL_PROMOTIONS.pop(scope, None)
-
-@_capability_cache_transaction
-def model_rejection(provider: str, base_url: str, api_key: str, model: str) -> dict[str, Any] | None:
-    scope = _capability_scope(provider, base_url, api_key)
-    now = time.monotonic()
-    rejected = {key: value for key, value in _MODEL_REJECTIONS.get(scope, {}).items()
-                if value.get("expires_at", 0) > now}
-    if rejected:
-        _MODEL_REJECTIONS[scope] = rejected
-    else:
-        _MODEL_REJECTIONS.pop(scope, None)
-    value = rejected.get(str(model))
-    return deepcopy(value) if value else None
-
-@_capability_cache_transaction
-def model_is_promoted(provider: str, base_url: str, api_key: str, model: str) -> bool:
-    scope = _capability_scope(provider, base_url, api_key)
-    now = time.monotonic()
-    promoted = {key: expiry for key, expiry in _MODEL_PROMOTIONS.get(scope, {}).items()
-                if expiry > now}
-    if promoted:
-        _MODEL_PROMOTIONS[scope] = promoted
-    else:
-        _MODEL_PROMOTIONS.pop(scope, None)
-    return promoted.get(str(model), 0) > now
-
-@_capability_cache_transaction
-def retain_model_promotions(provider: str, base_url: str, api_key: str,
-                            models: list[str] | tuple[str, ...]) -> None:
-    """Invalidate probe evidence for models no longer in this account catalogue."""
-    scope = _capability_scope(provider, base_url, api_key)
-    allowed, now = {str(model) for model in models}, time.monotonic()
-    retained = {model: expiry for model, expiry in _MODEL_PROMOTIONS.get(scope, {}).items()
-                if model in allowed and expiry > now}
-    if retained:
-        _MODEL_PROMOTIONS[scope] = retained
-    else:
-        _MODEL_PROMOTIONS.pop(scope, None)
-    rejected = {model: value for model, value in _MODEL_REJECTIONS.get(scope, {}).items()
-                if model in allowed and value.get("expires_at", 0) > now}
-    if rejected:
-        _MODEL_REJECTIONS[scope] = rejected
-    else:
-        _MODEL_REJECTIONS.pop(scope, None)
-
-# Semantic alias used by callers that make the negative evidence explicit.
-retain_model_rejections = retain_model_promotions
 
 @_capability_cache_transaction
 def remember_selected_model_capability(provider: str, base_url: str, api_key: str,
@@ -387,7 +321,8 @@ def retain_observed_off_control(provider: str, base_url: str, api_key: str,
     capabilities = deepcopy(selected.get("capabilities", {})) if selected.get("expires_at", 0) > now else {}
     if cached.get("expires_at", 0) > now:
         for feature, details in normalize_model_capabilities(cached.get("models", {}).get(model)).items():
-            capabilities[feature] = {**capabilities.get(feature, {}), **details}
+            capabilities[feature] = ({**capabilities.get(feature, {}), **details}
+                if isinstance(details, dict) else deepcopy(details))
     if capabilities.get("reasoning"):
         return False  # Explicit facts and existing proof, including negatives, win.
     capabilities["reasoning"] = {"supported": True, "mandatory": False,
@@ -429,8 +364,6 @@ def forget_model_capabilities(provider: str, base_url: str, api_key: str) -> Non
     scope = (canonical_provider(provider), str(base_url or "").rstrip("/"),
              hashlib.sha256(str(api_key or "").encode()).hexdigest())
     _MODEL_CAPABILITIES.pop(scope, None)
-    _MODEL_PROMOTIONS.pop(scope, None)
-    _MODEL_REJECTIONS.pop(scope, None)
 
 @_capability_cache_transaction
 def discovered_model_capabilities(provider: str, base_url: str, model: str,
@@ -454,7 +387,8 @@ def discovered_model_capabilities(provider: str, base_url: str, model: str,
     result = deepcopy(selected.get(model, {}).get("capabilities") or {})
     if catalogue_fresh:
         for feature, details in normalize_model_capabilities(cached.get("models", {}).get(model)).items():
-            result[feature] = {**result.get(feature, {}), **details}
+            result[feature] = ({**result.get(feature, {}), **details}
+                if isinstance(details, dict) else deepcopy(details))
     if canonical_provider(provider) == 'huggingface':
         from .providers.huggingface_catalogue import split_model, selection_capabilities
         from .providers.huggingface_details import peek
@@ -487,6 +421,36 @@ def discovered_model_capabilities(provider: str, base_url: str, model: str,
         result["reasoning"] = _contradicted_reasoning()
     return catalogue_fresh or bool(result), result
 
+def selected_model_listed(provider: str, base_url: str, model: str,
+                          api_key: str = "") -> bool | None:
+    """Whether a fresh account catalogue holds a record for this exact model.
+
+    ``None`` means this process holds no catalogue scope to judge from. A
+    model absent from a fresh catalogue has no record at all: AI think stays
+    "loading" (an explicit pre-dispatch error), never a silent provider default.
+    """
+    scope, now = _capability_scope(provider, base_url, api_key), time.monotonic()
+    cached = _MODEL_CAPABILITIES.get(scope)
+    if not cached:
+        return None
+    if any(name == str(model) and entry.get("expires_at", 0) > now
+           for name, entry in (cached.get("selected") or {}).items()):
+        return True
+    if cached.get("expires_at", 0) <= now:
+        return None
+    known = cached.get("known_models")
+    if not isinstance(known, (set, frozenset, list, tuple)):
+        return None
+    if str(model) in known:
+        return True
+    if canonical_provider(provider) == "huggingface":
+        from .providers.huggingface_catalogue import split_model
+        base, suffix, policy = split_model(model)
+        if suffix and policy != "invalid" and base in known:
+            return True
+    return False
+
+
 def refresh_hf_selected_metadata(provider: str, base_url: str, model: str, api_key: str):
     fresh, current = discovered_model_capabilities(provider, base_url, model, api_key)
     if canonical_provider(provider) != 'huggingface':
@@ -513,6 +477,35 @@ def refresh_cloud_model_capabilities(provider: str, base_url: str, model: str,
     provider = canonical_provider(provider)
     if is_local_provider(provider):
         raise ValueError("Cloud capability refresh requires a Cloud provider")
+    if provider == "login":
+        # Login sessions rotate independently of the TextPhantom bearer. Read
+        # this exact account/model; a fresh catalogue for an old session cannot
+        # establish capability evidence for a newly connected account.
+        # Concurrent cold translations of this exact account/model share one read.
+        flight = _capability_scope(provider, base_url, api_key) + ("model:" + str(model),)
+        with _CAPABILITY_CACHE_LOCK:
+            pending = _CLOUD_DISCOVERY_IN_FLIGHT.get(flight)
+            leader = pending is None
+            if leader:
+                pending = Future()
+                _CLOUD_DISCOVERY_IN_FLIGHT[flight] = pending
+        if not leader:
+            fresh, capabilities = pending.result()
+            return fresh, deepcopy(capabilities)
+        try:
+            from .login.login_translation import selected_model
+            selected = selected_model(api_key, model)
+            capabilities = normalize_model_capabilities(selected["model_capabilities"])
+            replace_selected_model_capabilities(provider, base_url, api_key, model, capabilities)
+            pending.set_result((True, deepcopy(capabilities)))
+            return True, capabilities
+        except BaseException as error:
+            pending.set_exception(error)
+            raise
+        finally:
+            with _CAPABILITY_CACHE_LOCK:
+                if _CLOUD_DISCOVERY_IN_FLIGHT.get(flight) is pending:
+                    del _CLOUD_DISCOVERY_IN_FLIGHT[flight]
     fresh, capabilities = discovered_model_capabilities(provider, base_url, model, api_key)
     if fresh:
         return fresh, capabilities
@@ -551,26 +544,3 @@ def refresh_cloud_model_capabilities(provider: str, base_url: str, model: str,
             if _CLOUD_DISCOVERY_IN_FLIGHT.get(scope) is pending:
                 del _CLOUD_DISCOVERY_IN_FLIGHT[scope]
 
-def openai_compat_models_status(api_key: str, base_url: str, *, provider: str,
-                                timeout_sec: float = LIST_TIMEOUT_SEC) -> dict[str, Any]:
-    """Compatibility-free registry model discovery retained as a public API."""
-    del timeout_sec
-    spec = provider_registry.require(provider)
-    result = spec.adapter.list_models(api_key=api_key, base_url=base_url)
-    capabilities = dict(result.capabilities)
-    if result.status == "valid":
-        remember_model_capabilities(spec.provider_id, base_url, api_key, capabilities, models=result.models)
-        capabilities = {model: model_capabilities(spec.provider_id, base_url, model, api_key)
-                        for model in result.models}
-    else:
-        forget_model_capabilities(spec.provider_id, base_url, api_key)
-    return {"models": list(result.models), "status": result.status,
-            "http_status": result.http_status, "error": result.error,
-            "capabilities": capabilities}
-
-# def _safe_error_text(response) -> str:
-#     try:
-#         text = response.text or ""
-#     except Exception:
-#         return "<error body could not be read>"
-#     return _SECRET_PATTERN.sub("[redacted]", " ".join(text.split()))[:240]

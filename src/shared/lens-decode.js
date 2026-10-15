@@ -1,20 +1,10 @@
 /**
- * One raw Lens response in, one document + erase boxes out.
- * This is `POST /v1/lens/decode`, moved into the browser.
- * The extension already holds the Lens response, so decoding locally avoids
- * an extra round trip. The API keeps `_decode` in
- * `api/backend/api/routes/lens_v1.py` for `/v1/lens/fallback`, where the
- * server did the Lens call itself.
- *
- * It lives in `shared/` rather than inside the service worker because the
- * COMPOSITION is the part worth pinning. Each piece can match Python while the
- * assembly does not — a layer passed in the wrong order, a warning prefix
- * dropped — and the result is a document that looks right and is not what the
- * server would have sent. `scripts/test-lens-tree.mjs` asserts this function
- * against the same fixture `api/tests/test_lens_tree.py` holds `_decode` to.
- *
- * Nothing here touches the network, `chrome.*`, or the DOM, which is what
- * makes that test possible.
+ * One raw Lens response in, one document + erase boxes out: `POST
+ * /v1/lens/decode` run in the browser (the API keeps `_decode` in
+ * `api/backend/api/routes/lens_v1.py` for `/v1/lens/fallback`). It stays pure
+ * (no network, `chrome.*` or DOM) so `scripts/test-lens-tree.mjs` can pin the
+ * whole COMPOSITION against the fixture `api/tests/test_lens_tree.py` holds
+ * `_decode` to.
  */
 
 import { geometryDiagnostics, rubyDiagnostics } from "./geometry-diagnostics.js";
@@ -48,14 +38,9 @@ export function authoritativeLensImageSize(image) {
 }
 
 /**
- * Decode a raw Lens response.
- *
- * Throws rather than returning a partial result. Every step is pure
- * computation on bytes the caller already has — there is no transient failure
- * mode here, so anything that goes wrong means the decoder no longer matches
- * what Google sends, and that is permanent until this code is updated. A
- * caller that swallowed it would show an empty overlay and send the next
- * person looking at the renderer.
+ * Decode a raw Lens response. Throws rather than returning a partial result:
+ * this is pure computation with no transient failure mode, so an error means the
+ * decoder no longer matches what Google sends.
  *
  * @param {object} lens raw Lens response
  * @param {{width: number, height: number, targetLang?: string}} options
@@ -110,10 +95,8 @@ export function decodeLensResponse(lens, { width, height, targetLang = "", sourc
   // intentionally absent, matching the user's "remove text and box" contract.
   const eraseBoxes = buildOwnedEraseBoxes(originalTree);
 
-  // What the DECODE threw away, carried ON the document — the same place
-  // `/v1/lens/decode` puts it, so a consumer cannot tell which route built the
-  // thing it is holding. Returning them only as a side channel would mean the
-  // renderer stopped seeing them the day this route went live.
+  // Decode warnings travel ON the document, as `/v1/lens/decode` does, so a
+  // consumer cannot tell which route built it.
   const decodeWarnings = [
     ...treeWarnings(originalTree).map((line) => `original: ${line}`),
     ...treeWarnings(translatedTree).map((line) => `translated: ${line}`),

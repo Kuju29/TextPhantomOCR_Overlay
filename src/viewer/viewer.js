@@ -1,20 +1,16 @@
 /**
- *
- * Local-viewer orchestrator.
- *
- * Loads a saved image session, renders the sidebar page list + reader strip,
- * supports drag-reordering / selection / zoom, and exports translated pages
- * (image or standalone HTML). Translation itself happens through the
- * content-script modules also loaded on this page — they emit
- * `textphantom:image-updated` / `textphantom:overlay-updated` events which we
- * listen for to update each page's badge.
+ * Local-viewer orchestrator: loads a saved image session, renders the page list
+ * and reader strip, handles reordering / selection / zoom, and exports
+ * translated pages (image or standalone HTML). Translation runs through the
+ * content-script modules loaded on this page; their `textphantom:image-updated`
+ * / `textphantom:overlay-updated` events update each page's badge.
  */
 
 import {
-  deleteLocalSession,
   dropEntriesFrom,
   filterImageFiles,
   imagesFromDroppedEntries,
+  isBraveBrowser,
   isTopLevelRelativePath,
   loadLocalSession,
   pagesFromDrop,
@@ -77,10 +73,14 @@ function revokeObjectUrls() {
 // UI sync
 function updateSelectionSummary() {
   const selected = selectedPageIds.size;
+  const total = pageOrder.length;
+  for (const button of [els.downloadImages, els.downloadHtml])
+    if (button) button.disabled = selected === 0;
+  for (const button of [els.toggleSelect, els.reverseOrder, els.clearViewer])
+    if (button) button.disabled = total === 0;
   if (els.selectionSummary)
     els.selectionSummary.textContent = `${selected} selected`;
   if (els.toggleSelect) {
-    const total = pageOrder.length;
     els.toggleSelect.textContent =
       total && selected === total ? "Deselect all" : "Select all";
   }
@@ -256,11 +256,9 @@ function currentImageUrlForPage(pageId) {
 }
 
 /**
- * Flatten the background image + the live HTML overlay text onto a canvas,
- * returning a PNG blob. This is what makes "Download image" actually bake the
- * translated text INTO the picture when the overlay is drawn as HTML (rather
- * than as a server-rendered translated image). Returns null when there is no
- * overlay text to draw (caller then falls back to the plain image).
+ * Bake the live HTML overlay text onto the background image as a PNG, so
+ * "Download image" contains the translation. Null when there is no overlay text
+ * (the caller then downloads the plain image).
  *
  * @param {string} pageId
  * @returns {Promise<Blob|null>}
@@ -552,6 +550,7 @@ function makeSelectionCheckbox(page) {
 
 function makePageMeta(page, index) {
   const details = document.createElement("div");
+  details.setAttribute("data-tp-ui-private", "");
   const name = document.createElement("div");
   name.className = "page-name";
   name.textContent = page.name;
@@ -623,6 +622,7 @@ function makeReaderPage(page, index) {
 
   const frame = document.createElement("div");
   frame.className = "page-frame";
+  frame.setAttribute("data-tp-ui-private", "");
   const image = document.createElement("img");
   image.src = page.objectUrl;
   image.alt = page.name;
@@ -652,6 +652,36 @@ function renderSession() {
 }
 
 // Session lifecycle
+/**
+ * Tell the background which stored session this tab shows ("" = none). It
+ * deletes a session's images once no viewer tab shows it (tab closed,
+ * navigated away, or switched to another session).
+ */
+function attachViewerSession(sid) {
+  return new Promise((resolve) => {
+    try {
+      chrome.runtime.sendMessage({ type: "TP_LOCAL_VIEWER_ATTACH", sid }, (reply) => {
+        const error = chrome.runtime.lastError;
+        if (error || reply?.ok === false)
+          console.warn("[TextPhantom] Local viewer attach failed", error?.message || reply?.code);
+        resolve(reply);
+      });
+    } catch (error) {
+      console.warn("[TextPhantom] Local viewer attach failed", error?.message || String(error));
+      resolve(null);
+    }
+  });
+}
+
+/** A session was just saved: the background sweeps abandoned ones (after a grace period). */
+function noteLocalSessionCreated() {
+  try {
+    chrome.runtime.sendMessage({ type: "TP_LOCAL_SESSION_CREATED" }, () => void chrome.runtime.lastError);
+  } catch {
+    /* the sweep also runs on worker start and on every viewer attach */
+  }
+}
+
 async function loadSessionIntoView(id) {
   currentSession = await loadLocalSession(id);
   pagesById.clear();
@@ -661,9 +691,8 @@ async function loadSessionIntoView(id) {
   pageOrder = [];
 
   let pages = Array.isArray(currentSession?.pages) ? currentSession.pages : [];
-  // Folder sessions: enforce "top-level images only" at LOAD time too, so a
-  // session saved before this rule existed (or by any other path) can never
-  // resurface subfolder images in the reader.
+  // Folder sessions hold top-level images only; enforced at load too, so no
+  // saved session can resurface subfolder images.
   if (String(currentSession?.title || "") === "folder") {
     pages = pages.filter((p) => isTopLevelRelativePath(p?.relativePath));
   }
@@ -725,9 +754,18 @@ async function replaceSessionFromPages(pages, sourceLabel) {
     title: sourceLabel,
     pages,
   });
-  if (currentSession?.id) deleteLocalSession(currentSession.id).catch(() => {});
+  // The session this tab showed until now is released by the background once
+  // the new page attaches: it is deleted unless another tab still shows it.
+  noteLocalSessionCreated();
   location.href = `${location.pathname}?sid=${encodeURIComponent(next.id)}`;
 }
+
+const BRAVE_FOLDER_HINT =
+  "Brave has File System Access disabled. Enable brave://flags/#file-system-access-api " +
+  "and Relaunch Brave. The Select folder button intentionally does not fall back to " +
+  "webkitdirectory because that API materialises every file in the folder hierarchy first.";
+const FOLDER_DRAG_HINT =
+  "This browser has no folder picker. Drag the folder onto this page instead — the images directly inside it are loaded.";
 
 async function replaceSessionFromDirectoryPicker() {
   let picked;
@@ -745,11 +783,9 @@ async function replaceSessionFromDirectoryPicker() {
     return;
   }
   if (!picked.supported) {
-    setStatus(
-      "Brave has File System Access disabled. Enable brave://flags/#file-system-access-api " +
-        "and Relaunch Brave. The Select folder button intentionally does not fall back to " +
-        "webkitdirectory because that API materialises every file in the folder hierarchy first.",
-    );
+    // Firefox/Thunderbird have no directory picker at all, so the Brave flag
+    // advice would send their users after a setting that does not exist.
+    setStatus(isBraveBrowser() ? BRAVE_FOLDER_HINT : FOLDER_DRAG_HINT);
     return;
   }
   if (picked.cancelled) return;
@@ -777,11 +813,8 @@ async function replaceSessionFromDirectoryPicker() {
 }
 
 /**
- * Load the images out of dropped folders.
- *
- * This is the folder selection that works in every Chromium browser, Brave
- * included: the browser hands over the directory, only its top level is read,
- * only images are taken, and nothing is uploaded or confirmed.
+ * Load the images from dropped folders: works in every Chromium browser (Brave
+ * included). Only the top level is read, only images are taken, nothing is uploaded.
  */
 async function replaceSessionFromDrop(entries, plainFiles) {
   if (!entries.length) {
@@ -834,8 +867,12 @@ async function replaceSessionFromDrop(entries, plainFiles) {
 }
 
 async function clearViewer() {
-  if (currentSession?.id)
-    await deleteLocalSession(currentSession.id).catch(() => {});
+  // Drop the sid from this tab and tell the background: the images are deleted
+  // unless another tab still shows the same session.
+  if (currentSession?.id || sessionId) {
+    history.replaceState(null, "", location.pathname);
+    await attachViewerSession("");
+  }
   currentSession = null;
   pagesById.clear();
   selectedPageIds.clear();
@@ -1059,9 +1096,29 @@ window.addEventListener("beforeunload", revokeObjectUrls);
 (async () => {
   applyReaderWidth(readerWidth);
   if (!sessionId) {
+    // Opened empty on purpose (Firefox/Thunderbird popups cannot keep a file
+    // dialog open, so the popup sends the pick here): say what to do next.
+    void attachViewerSession("");
     renderEmpty();
-    setStatus("Missing local viewer session.");
+    const wantsFolder =
+      new URLSearchParams(location.search).get("pick") === "folder";
+    setStatus(
+      wantsFolder && typeof window.showDirectoryPicker !== "function" && !isBraveBrowser()
+        ? FOLDER_DRAG_HINT
+        : "Select images or a folder, then right-click an image to translate.",
+    );
     return;
   }
+  void attachViewerSession(sessionId);
   await loadSessionIntoView(sessionId);
 })();
+
+// Back/forward cache: the session may have been deleted while this page was
+// away (navigating away releases it). Re-attach; reload when it is gone so the
+// page does not keep showing images that are no longer stored.
+window.addEventListener("pageshow", async (event) => {
+  if (!event.persisted) return;
+  const sid = String(new URLSearchParams(location.search).get("sid") || "").trim();
+  await attachViewerSession(sid);
+  if (sid && !(await loadLocalSession(sid).catch(() => null))) location.reload();
+});

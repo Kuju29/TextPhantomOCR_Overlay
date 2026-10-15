@@ -1,5 +1,6 @@
 import { money, multiplyMoney } from "./money.js";
 import { bangkokDate } from "./fx.js";
+import { normalizeOpenRouterPrice } from "./openrouter.js";
 
 // Only documented public model catalogue endpoints. Never send API credentials
 // to a new host. If a catalogue requires auth, leave the rate unavailable.
@@ -9,19 +10,24 @@ export async function fetchLiveRate(provider, model, upstream = "", fetcher = gl
   const name = String(provider || "").toLowerCase();
   let url;
   if (name === "featherless") url = `https://api.featherless.ai/v1/models/${encodeURIComponent(slug)}`;
+  else if (name === "openrouter") url = 'https://openrouter.ai/api/v1/models';
   else if (name === "huggingface" && upstream)
     url = `https://router.huggingface.co/v1/models/${slug.split("/").map(encodeURIComponent).join("/")}`;
   else return null;
   try {
-    const response = await fetcher(url,{signal:AbortSignal.timeout(4500)});
+    const response = await fetcher(url,{signal:AbortSignal.timeout(4500),credentials:'omit',redirect:'error',cache:'no-store'});
     if (!response.ok) return null;
     const raw = await response.json();
-    const data = raw?.data && !Array.isArray(raw.data) ? raw.data : raw;
+    const matching = name === 'openrouter' && Array.isArray(raw?.data) ? raw.data.filter(row=>row?.id===slug) : [];
+    const data = name === 'openrouter' ? (matching.length===1?matching[0]:null) : raw?.data && !Array.isArray(raw.data) ? raw.data : raw;
     // Both catalogues must identify the requested model. Duplicate/ambiguous
     // provider rows are not evidence for an arbitrary first route's tariff.
     if (data?.id !== slug) return null;
     let rates;
-    if (name === "featherless") {
+    if (name === 'openrouter') {
+      rates=normalizeOpenRouterPrice(data.pricing);
+      if(!rates)return null;
+    } else if (name === "featherless") {
       const p = data?.pricing;
       rates = {input:multiplyMoney(p?.prompt,"1000000"),output:multiplyMoney(p?.completion,"1000000"),
         cached:p?.cached_prompt != null ? multiplyMoney(p.cached_prompt,"1000000") : null,
@@ -34,6 +40,7 @@ export async function fetchLiveRate(provider, model, upstream = "", fetcher = gl
       if (route.is_free === true) rates = {input:"0",output:"0",cached:"0"};
     }
     if (rates.input === null || rates.output === null || Number(rates.input) > 10000 || Number(rates.output) > 10000) return null;
-    return { ...rates, origin:"live_catalogue", asOf:bangkokDate(), fetchedAt:Date.now(), url };
+    return { ...rates, origin:"live_catalogue", asOf:bangkokDate(), fetchedAt:Date.now(), url,
+      ...(name==='openrouter'?{syncStatus:'current',checkedAt:Date.now()}:{}), };
   } catch {return null;}
 }

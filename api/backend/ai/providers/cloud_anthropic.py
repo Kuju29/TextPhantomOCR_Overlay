@@ -1,9 +1,8 @@
-"""Anthropic (api.anthropic.com) chat client.
-"""
+"""Anthropic (api.anthropic.com) chat client."""
 
 from __future__ import annotations
 
-import re, time, httpx
+import time, httpx
 from functools import partial
 from backend.ai import wire_trace, accounting, content_stream
 from backend.ai.workload import guard_output_budget, normalize_limits
@@ -11,7 +10,7 @@ from backend.ai.prompt_cache import enabled as cache_enabled
 
 from backend.ai.generation_defaults import DEFAULT_GENERATION, output_token_budget
 from backend.ai.clients.base import (
-    ChatResult, ProviderGenerationCancelled, provider_output_error, token_usage,
+    ChatResult, ProviderGenerationCancelled, provider_output_error,
 )
 from backend.ai.clients.provider_error import ProviderTransportError, safe_http_error
 from backend.ai.transports.cancellable_http import post_json
@@ -31,7 +30,6 @@ ALIASES: tuple[str, ...] = ()
 KEY_PREFIXES = ("sk-ant-",)
 # Full model IDs/snapshots are user intent, not aliases for a newer generation.
 MODEL_ALIASES = {}
-RATE_POLICY = {"rpm": 50.0, "burst": 8, "rpm_min": 10.0, "rpm_max": 400.0}
 
 # Official model cards confirm image input for these Claude aliases and their
 # dated snapshots. Intersect this list with /models for account availability;
@@ -48,7 +46,7 @@ _DOCUMENTED_VISION_FAMILIES = (
 def _documented_vision_model(model: str) -> bool:
     # Anthropic snapshot IDs suffix an existing versioned alias with YYYYMMDD.
     # A different future version (such as claude-opus-5-6) must be researched
-    # separately even if an older major release happened to accept images.
+    # separately; it does not inherit image support.
     return any(_is_model_or_snapshot(model, alias) for alias in _DOCUMENTED_VISION_FAMILIES)
 
 
@@ -63,6 +61,27 @@ def _safe_error_text(response: httpx.Response) -> str:
     if isinstance(error, dict):
         return str(error.get("message") or error.get("type") or "")[:240]
     return str(error or "")[:240]
+
+
+def _catalogue_no_thinking(row: dict) -> dict:
+    """Account /v1/models proof that a model has no thinking at all.
+
+    The Models API row carries ``capabilities.thinking.supported`` and
+    ``capabilities.effort.supported``. Only an explicit ``false`` for thinking
+    (with no effort ladder) proves there is no reasoning to lower or switch
+    off; a missing or malformed object stays unknown so Lowest never silently
+    accepts hidden reasoning. Documented native families keep their own map.
+    """
+    capabilities = row.get("capabilities") if isinstance(row, dict) else None
+    if not isinstance(capabilities, dict):
+        return {}
+    thinking = capabilities.get("thinking")
+    effort = capabilities.get("effort")
+    if not isinstance(thinking, dict) or thinking.get("supported") is not False:
+        return {}
+    if isinstance(effort, dict) and effort.get("supported") is not False:
+        return {}
+    return {"supported": False, "control": "none", "source": "anthropic_account_models_api"}
 
 
 def models_status(api_key: str, *, timeout_sec: float = 10.0) -> dict:
@@ -99,7 +118,10 @@ def models_status(api_key: str, *, timeout_sec: float = 10.0) -> dict:
             catalogue_rows.setdefault(item["id"].strip(), []).append(item)
     for model in models:
         capability = {}
+        rows = catalogue_rows.get(model, [])
         reasoning = _reasoning_capability(model)
+        if not reasoning and len(rows) == 1:
+            reasoning = _catalogue_no_thinking(rows[0])
         if reasoning:
             capability["reasoning"] = reasoning
         if _documented_vision_model(model):
@@ -108,7 +130,6 @@ def models_status(api_key: str, *, timeout_sec: float = 10.0) -> dict:
             }
         # Anthropic publishes independent input and output ceilings. A
         # repeated ID is ambiguous; never take an arbitrary last row's limit.
-        rows = catalogue_rows.get(model, [])
         if len(rows) == 1:
             limits = normalize_limits({
                 "maxInputTokens": rows[0].get("max_input_tokens"),
@@ -148,6 +169,12 @@ class AnthropicAdapter:
         return ProbeResponse(True, response.status_code)
 
     def generate(self, request: GenerationRequest) -> ChatResult:
+        # The stream reports translated lines n/N against these IDs.
+        from backend.ai.transports.stream_progress import expected_lines
+        with expected_lines(request.expected_ids):
+            return self._generate(request)
+
+    def _generate(self, request: GenerationRequest) -> ChatResult:
         return invoke_leaf_generate(request, partial(
             generate,
             conversation_mode=request.cache_context.get("translationMode") == "conversation",
@@ -168,32 +195,6 @@ SPEC = ProviderSpec(
 )
 
 
-
-
-# def _supports_native_schema(model: str) -> bool:
-#     """Return true only for Claude families with documented output_config.
-
-#     Sonnet/Opus/Haiku 4.5 and subsequent explicitly known releases support
-#     native structured outputs. Older and unknown models keep the same JSON
-#     contract in the prompt but receive no transport-level output_config.
-#     """
-#     m = (model or "").strip().lower()
-#     supported_starts = (
-#         "claude-sonnet-4-5",
-#         "claude-sonnet-4-6",
-#         "claude-sonnet-5",
-#         "claude-opus-4-5",
-#         "claude-opus-4-6",
-#         "claude-opus-4-7",
-#         "claude-opus-4-8",
-#         "claude-opus-5",
-#         "claude-haiku-4-5",
-#         "claude-fable-5",
-#         "claude-mythos-5",
-#         "claude-mythos-preview",
-#     )
-#     return any(_is_model_or_snapshot(m, prefix) for prefix in supported_starts)
-
 def _accepts_temperature(model: str) -> bool:
     """Whether a non-default sampling temperature is accepted by Claude.
 
@@ -211,7 +212,13 @@ def _accepts_temperature(model: str) -> bool:
         "claude-mythos-5",
         "claude-mythos-preview",
     )
-    return not any(_is_model_or_snapshot(model, prefix) for prefix in rejects_sampling)
+    if any(_is_model_or_snapshot(model, prefix) for prefix in rejects_sampling):
+        return False
+    # A new Claude name is not proof that a non-default sampling value works.
+    # Omit this optional server default unless an established native contract
+    # permits it; the provider's default needs no model-specific negotiation.
+    native = _reasoning_capability(model)
+    return bool(native) and native.get("mandatory") is not True
 
 def _build_system_field(
     system_text: str, system_static: str, system_dynamic: str,
@@ -312,7 +319,9 @@ def generate(
                 system_blocks[i].pop("cache_control", None)
         payload["cache_control"] = {"type": "ephemeral"}
     reasoning_state = _apply_reasoning(payload, model, thinking, model_capabilities)
-    if _accepts_temperature(model) and not payload.get("thinking"):
+    from backend.ai.providers.provider_helpers import accepts_optional_parameter
+    if (_accepts_temperature(model) and not payload.get("thinking")
+            and accepts_optional_parameter(model_capabilities, "temperature")):
         payload["temperature"] = DEFAULT_GENERATION.temperature
     # Translation generation is always plain lines/1. JSON remains decoder-only.
     use_schema = False

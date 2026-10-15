@@ -14,24 +14,18 @@ const state={localAiCapability:{provider:'ollama',baseUrl:'http://localhost:1143
 const ui=createPopupUiController({els,state,isLocalProvider:provider=>provider==='ollama',
   toggleDom:()=>{},updatePromptWarning:()=>{},validateAiKey:()=>{},validateLangSource:()=>{}});
 
-for(const requested of ['on','low','medium']){
+// 10488 owner decision: a model whose live record proves no reasoning shows a
+// disabled "Provider default" control. Every saved choice is kept unchanged.
+for(const requested of ['on','low','medium','off','minimum']){
   select.value=requested;
   ui.toggle();
   assert.equal(select.value,requested,'capability refresh must retain the saved explicit mode');
-  assert.ok(select.options.some(option=>option.value===requested),'saved mode remains editable');
-  assert.match(els.aiThinkingHint.textContent,/does not support reasoning/i);
-  assert.match(els.aiThinkingHint.textContent,/configuration error/i);
-  assert.match(els.aiThinkingHint.textContent,/choose Thinking off or Lowest available/i);
-  assert.doesNotMatch(els.aiThinkingHint.textContent,/Execution is Off/i,
-    'the hint must not claim an unsupported explicit mode executes as Off');
-}
-for(const requested of ['off','minimum']){
-  select.value=requested;
-  ui.toggle();
-  assert.equal(select.value,requested);
-  assert.match(els.aiThinkingHint.textContent,/Execution is Off/i);
+  assert.equal(select.disabled,true,'no reasoning: the control is not clickable');
+  assert.deepEqual(select.options.map(option=>option.textContent),['Provider default (this model has no AI think)']);
+  assert.match(els.aiThinkingHint.textContent,/no AI think/i);
+  assert.match(els.aiThinkingHint.textContent,/provider default/i);
   assert.doesNotMatch(els.aiThinkingHint.textContent,/configuration error/i,
-    'supported Off and Lowest retain the plain-model hint');
+    'a model without reasoning never reports a Thinking configuration error');
 }
 for(const unknown of [null,{supported:null,control:'unknown',source:'ollama-api-show'}]){
   state.localAiCapability.models.fixture.reasoning=unknown;
@@ -39,9 +33,9 @@ for(const unknown of [null,{supported:null,control:'unknown',source:'ollama-api-
     select.value=requested;
     ui.toggle();
     assert.equal(select.value,requested,'unknown Ollama metadata cannot rewrite the saved choice');
-    assert.match(els.aiThinkingHint.textContent,/Off and Lowest available try to turn thinking off/i);
-    assert.match(els.aiThinkingHint.textContent,/reports an error if reasoning is returned/i);
-    assert.doesNotMatch(els.aiThinkingHint.textContent,/Off requires verified control/i);
+    assert.equal(select.disabled,true);
+    assert.match(els.aiThinkingHint.textContent,/does not publish an AI think control/i);
+    assert.match(els.aiThinkingHint.textContent,/provider default/i);
   }
 }
 const cloudEls={...els,aiProvider:{value:'openrouter'},aiKey:{value:'test-key'},
@@ -49,15 +43,17 @@ const cloudEls={...els,aiProvider:{value:'openrouter'},aiKey:{value:'test-key'},
 createPopupUiController({els:cloudEls,state:{lastAiResolve:null},isLocalProvider:()=>false,
   toggleDom:()=>{},updatePromptWarning:()=>{},validateAiKey:()=>{},validateLangSource:()=>{}}).toggle();
 assert.equal(cloudEls.aiThinking.value,'minimum');
-assert.match(cloudEls.aiThinkingHint.textContent,/checks the selected Cloud model before translation/i);
-assert.match(cloudEls.aiThinkingHint.textContent,/reports a configuration error/i);
-assert.doesNotMatch(cloudEls.aiThinkingHint.textContent,/Lowest available uses the provider default/i);
+assert.equal(cloudEls.aiThinking.disabled,true,'no Cloud record yet: Checking model…');
+assert.match(cloudEls.aiThinkingHint.textContent,/appear after the selected model is checked/i);
+assert.doesNotMatch(cloudEls.aiThinkingHint.textContent,/provider default/i,
+  'a missing record is never presented as the provider default');
 
 const localEls={...els,aiProvider:{value:'jan'},aiBaseUrl:{value:'http://localhost:1337/v1'},
   aiThinking:{value:'minimum',options:[]},aiThinkingHint:{textContent:''},aiThinkingWrap:{style:{}}};
 createPopupUiController({els:localEls,state:{localAiCapability:null},isLocalProvider:()=>true,
   toggleDom:()=>{},updatePromptWarning:()=>{},validateAiKey:()=>{},validateLangSource:()=>{}}).toggle();
 assert.equal(localEls.aiThinking.value,'minimum');
-assert.match(localEls.aiThinkingHint.textContent,/Lowest available uses the runtime default, which may think/i,
-  'unknown OpenAI-compatible Local controls remain provider-managed and unverified');
-console.log('Popup verified non-reasoning hint preserves saved modes and reports unsupported explicit Thinking');
+assert.equal(localEls.aiThinking.disabled,true);
+assert.match(localEls.aiThinkingHint.textContent,/appear after the selected model is checked/i,
+  'an unchecked OpenAI-compatible Local model is loading, not default');
+console.log('Popup no-reasoning and unknown models show a disabled provider-default AI think control and keep saved modes');

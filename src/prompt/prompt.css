@@ -231,3 +231,5 @@ body {
     min-height: 50vh;
   }
 }
+.ps-head{gap:16px}.ps-title{min-width:0}.ps-head-actions{min-width:0;overflow-wrap:anywhere}
+@media(max-width:720px){.ps-head{flex-wrap:wrap;gap:10px;padding:16px}.ps-title{flex:1 1 100%}.ps-head-actions{flex:1 1 130px;text-align:end}.ps-head>[data-tp-language-host]{flex:none}}

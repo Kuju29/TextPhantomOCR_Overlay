@@ -1,5 +1,6 @@
+import { allowLoginTabs } from "./login/login-tab-guard.js";
 import { publishImageStatus } from "./image-status.js";
-import { createImageProgress, mergeProgressDetail, publicImageProgress, reduceImageProgress } from "./progress/image-progress-store.js";
+import { mergeProgressDetail, publicImageProgress, reduceImageProgress } from "./progress/image-progress-store.js";
 import { note as traceNote } from "../shared/trace.js";
 // Tracks the per-image state of one context-menu run across its two passes and renders its progress toast.
 
@@ -8,7 +9,9 @@ import { sendToTab, sendToastToTab } from "./tabs-messaging.js";
 import { serverBackoffMs } from "./transports/polling.js";
 import { releaseActiveOperationForBatch } from "./active-operations.js";
 import { noteSessionStorageFailure } from "./session-storage-diagnostics.js";
+import { persistableSource } from "./job-keys.js";
 import {isLocalAiPayload} from './local-capacity.js';
+import { installWaitUntil, onInstallWaitChange } from "./transports/install-header.js";
 
 const TOAST_MIN_INTERVAL_MS = 350;
 const BATCH_TTL_MS = 20 * 60 * 1000;
@@ -77,6 +80,20 @@ const batches = new Map();
 // One provider transition is fanned out to every page in a shared request.
 // Send a single progress snapshot after those presentation-only updates land.
 const pendingPresentationSnapshots = new Set();
+// Provider-phase status for a batch reaches the page at most twice a
+// second (several pages of one batch may stream at once).
+const PHASE_TOAST_INTERVAL_MS = 500;
+const phaseToastTimers = new Map();
+function schedulePhaseToast(b) {
+  if (phaseToastTimers.has(b.id)) return;
+  const wait = Math.max(0, PHASE_TOAST_INTERVAL_MS - (Date.now() - (Number(b.lastPhaseToastAt) || 0)));
+  phaseToastTimers.set(b.id, setTimeout(() => {
+    phaseToastTimers.delete(b.id);
+    if (getBatch(b.id) !== b || b.cancelled) return;
+    b.lastPhaseToastAt = Date.now();
+    batchUpdateToast(b, '', false);
+  }, wait));
+}
 const initialAiWaiters = new Map();
 const SESSION_KEY = "tpBatchProgressV1";
 let persistTimer = 0;
@@ -121,7 +138,8 @@ export function serializeBatchSnapshot(b) {
       progress: item.progress || null,
       generation: item?.payload?.generation || null,
       reader: item?.payload?.reader || null,
-      source: item?.payload?.src || "",
+      // data: sources are stored as a compact marker (job-keys.js).
+      source: persistableSource(item?.payload?.src || ""),
       sessionId: item?.payload?.context?.tp_tab_session || "",
       pageIndex: Number.isFinite(Number(item?.payload?.context?.page_index))
         ? Number(item.payload.context.page_index)
@@ -266,9 +284,6 @@ export function restorePersistedBatches() {
 
 void restorePersistedBatches();
 
-// Returns the last broadcast batch status, replayed to the popup on demand.
-export const getLastBatchStatus = () => lastBatchStatus;
-
 // Returns an existing batch without creating or rebinding one. Admission
 // checks use this so a late queued task cannot resurrect a cancelled batch.
 export const getBatch = (batchId) => batches.get(String(batchId || "")) || null;
@@ -294,7 +309,8 @@ export function registerBatchPayload(b, payload, imageKey) {
 }
 
 function placementProgress(item) {
-  if (!item?.presentation?.placementPending || !item.progress || item.phase === 'cancelled') return;
+  if (!item?.presentation?.placementPending || !item.progress || item.phase === 'cancelled' ||
+      ['blocked', 'unavailable', 'apply_failed'].includes(item.presentation.repairPhase)) return;
   const at=Date.now(), label='Saved result; waiting for reader placement';
   item.progress.insert={...item.progress.insert,state:'queued',finishedAt:0,detail:label};
   item.progress.overall={...item.progress.overall,state:'running',finishedAt:0,detail:label};
@@ -337,6 +353,9 @@ export function ensureBatch(batchId, tabId, frameId) {
       items: new Map(),
     };
     batches.set(id, b);
+    // A new Translate press may open a Login website tab again even if the
+    // person closed it during earlier work (login-tab-guard.js).
+    allowLoginTabs();
     persistBatchesSoon();
   } else {
     if (!b.tabId && Number.isFinite(tabId) && tabId > 0) b.tabId = tabId;
@@ -450,6 +469,9 @@ export function batchProgressSnapshot(b, stage = "", now = Date.now()) {
       placed:items.filter(i=>i.inserted).length} : null,
     conversation: conversation ? {phase:String(conversation.phase || ''),turn:Number(conversation.turn) || 0} : null,
     repair: b.repair || null,
+    // The shared API limited this browser install: work resumes by itself at
+    // `until` (the page shows a countdown). Null when nothing is waiting.
+    rateWait: installWaitUntil(now) > now ? { until: installWaitUntil(now) } : null,
     stats,
     total: b.reader ? b.items.size : Math.max(stats.total, active + terminal),
     active,
@@ -460,6 +482,20 @@ export function batchProgressSnapshot(b, stage = "", now = Date.now()) {
   };
 }
 
+function batchWorkPending(b) {
+  const stats = batchPassStats(b);
+  const repairPending = ["collecting", "repairing", "repair_request", "repair_wave", "repair_circuit_open", "applying",
+    "apply_pending"].includes(b?.repair?.phase);
+  return !b.cancelled && (b.lifecycle === "discovering" || stats.finished < stats.total ||
+    (repairPending && !b.reader?.processingComplete));
+}
+
+// An install-limit wait started or ended: refresh the status of every batch
+// that still has work, so the countdown appears and clears without delay.
+onInstallWaitChange(() => {
+  for (const b of batches.values()) if (batchWorkPending(b)) batchUpdateToast(b, "");
+});
+
 // Sends a toast for a batch, throttled unless forced.
 export function batchToast(b, text, ms = 2000, force = false) {
   if (!b || !b.tabId || !text) return;
@@ -468,7 +504,7 @@ export function batchToast(b, text, ms = 2000, force = false) {
   b.lastToastTs = now;
   const stats = batchPassStats(b);
   const repairPending = ["collecting", "repairing", "repair_request", "repair_wave", "repair_circuit_open", "applying",
-    "blocked", "apply_pending"].includes(b.repair?.phase);
+    "apply_pending"].includes(b.repair?.phase);
   const pageInstanceId = [...(b.items?.values?.() || [])]
     .map(item => item?.payload?.generation?.pageInstanceId).find(Boolean) || "";
   sendToastToTab(b.tabId, b.frameId || 0, text, ms, {
@@ -521,7 +557,7 @@ function conversationPresentation(b) {
 }
 
 // Renders the batch's current progress into a toast and broadcasts it.
-export function batchUpdateToast(b, stage, force = false) {
+export function batchUpdateToast(b, stage) {
   if (!b) return;
   pruneBatches();
   b.progressSequence = (Number(b.progressSequence) || 0) + 1;
@@ -607,10 +643,9 @@ export function batchUpdateToast(b, stage, force = false) {
   if (queue) parts.push(queue);
   const msg = `${head} ${parts.join(" • ")}`.trim();
 
-  // The page-level progress board is the single live presenter for batch work.
-  // Keep TP_TOAST for explicit one-off notices/errors from other call sites;
-  // duplicating this continuously-changing batch state in a second overlay made
-  // parallel work look frozen and unreadable.
+  // The page-level progress board is the single live presenter for batch work;
+  // TP_TOAST is kept for one-off notices. Duplicating this changing state in a
+  // second overlay makes parallel work look frozen.
 
   lastBatchStatus = {
     ...batchProgressSnapshot(b, stage),
@@ -640,8 +675,8 @@ export function batchMark(batchId, imageKey, patch) {
       next.presentation = {...(next.presentation || {}), insertionAck:null};
     }
     const before = canonicalPhase(cur);
-    // During migration, an old caller's explicit status update remains
-    // authoritative when it did not also provide a canonical phase.
+    // An explicit status update stays authoritative when the caller provides
+    // no canonical phase.
     if (
       Object.hasOwn(patch || {}, "status") &&
       !Object.hasOwn(patch || {}, "phase")
@@ -652,7 +687,14 @@ export function batchMark(batchId, imageKey, patch) {
     const after = canonicalPhase(next);
     if (after !== before || !next.phaseAt) next.phaseAt = Date.now();
     next.phase = after;
-    next.progress = reduceImageProgress(cur.progress, after, { ...patch, ...next }, Date.now());
+    // Receipt/notice bookkeeping does not change the processing outcome.
+    // Re-reducing canonical "done" here would erase a repair's unresolved
+    // result after the error badge was acknowledged by the content script.
+    const changesProgress = after !== before || !cur.progress ||
+      ["phase", "status", "stage", "lastError", "attempt"].some(key => Object.hasOwn(patch || {}, key));
+    next.progress = changesProgress
+      ? reduceImageProgress(cur.progress, after, { ...patch, ...next }, Date.now())
+      : cur.progress;
     placementProgress(next);
     b.items.set(k, next);
     publishImageStatus(b, k, next);
@@ -671,8 +713,8 @@ export function updateImagePresentation(batchId, imageKey, patch = {}) {
   item.presentation = {...(item.presentation || {}), ...patch};
   item.progress = mergeProgressDetail(item.progress, patch, now);
   // Repair owns the deferred terminal boundary for initial AI failures. Once it
-  // is durably done, the canonical batch row must become terminal too; keeping
-  // only Result=done left Total RUN forever and kept the batch at 25/26.
+  // is durably done the canonical batch row must become terminal too, or Total
+  // stays RUN and the batch never completes (e.g. 25/26).
   if (String(patch?.repairPhase || "") === "done") {
     item.phase = "done";
     item.status = "done";
@@ -685,10 +727,22 @@ export function updateImagePresentation(batchId, imageKey, patch = {}) {
     item.progress = reduceImageProgress(item.progress, canonicalPhase(item), {stage:'Reader placement confirmed',status:item.status,lastError:item.lastError}, now);
     item.progress = mergeProgressDetail(item.progress, patch, now);
   }
+  // Placement/provisional ACKs report the DOM, not translation completeness.
+  // Their progressEvent can mark Insert done without a confirmed placement.
+  // Reapply the saved terminal outcome unless this patch supplies a new one.
+  if ((patch.placementConfirmed === true || patch.insertionAck?.present === true) &&
+      patch.progressEvent?.state !== 'error' && patch.progressEvent?.resultState !== 'error' &&
+      !Object.hasOwn(patch, 'repairPhase') &&
+      ['done', 'blocked', 'unavailable', 'apply_failed'].includes(item.presentation.repairPhase)) {
+    item.progress = mergeProgressDetail(item.progress,
+      {repairPhase:item.presentation.repairPhase, pending:item.presentation.pending}, now);
+  }
   placementProgress(item);
   publishImageStatus(b, String(imageKey), item);
   if(patch?.insertionAck || patch?.translationMode==='conversation'||patch?.conversation)
     batchUpdateToast(b, patch?.insertionAck ? 'Translation placed' : patch?.conversation?.phase || '', false);
+  else if (patch?.providerPhase && Object.keys(patch).length === 1)
+    schedulePhaseToast(b);
   else if ((['usage_pending','sending_request','http_wait','response_headers','receiving_content','validating'].includes(String(patch?.phase || '')) && patch.phase !== previousPhase
     || patch?.placementPending === true && !previousPlacementPending)
     && !pendingPresentationSnapshots.has(b.id)) {

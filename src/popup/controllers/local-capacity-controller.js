@@ -6,15 +6,17 @@ export function createLocalCapacityController({
   state,
   isLocalProvider,
   persist,
+  onRender = null,
 }) {
   const render = () => {
+    try { onRender?.(); } catch { /* display only */ }
     if (!els.aiLocalCapacityHint) return;
     const model = String(els.aiModel?.value || state.desiredAiModel || "").trim();
     const capability = state.localAiCapability;
     const hint = capability?.models?.[model] || null;
     if (!hint) {
       els.aiLocalCapacityHint.textContent =
-        capability?.reason || "Auto adapts to this model.";
+        capability?.reason || "";
       return;
     }
     const facts = [];

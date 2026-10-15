@@ -11,7 +11,7 @@ from backend.ai.cloud_reasoning import observed_off_status
 from backend.ai.providers.openai_limits import documented_limits
 from backend.ai.providers.openai_reasoning import reasoning_capability as _reasoning_capability, reasoning_family as _reasoning_family
 from backend.ai.providers.probe_support import openai_chat_probe
-from backend.ai.providers.provider_helpers import resolve_alias
+from backend.ai.providers.provider_helpers import resolve_alias, accepts_optional_parameter, normalized_efforts
 from backend.ai.transports.openai_cloud_chat import execute_openai_cloud_chat
 
 PROVIDER_ID = "openai"
@@ -74,11 +74,7 @@ _DOCUMENTED_CHAT_VISION = frozenset({
 def _verified_reasoning_mapping(request: GenerationRequest) -> tuple[str | None, list[str]]:
     reasoning = _reasoning_capability(request.model) or request.model_capabilities.get("reasoning", {})
     reasoning = reasoning if isinstance(reasoning, dict) else {}
-    efforts = [
-        str(value).strip().lower()
-        for value in reasoning.get("supported_efforts", [])
-        if isinstance(value, str)
-    ]
+    efforts = normalized_efforts(reasoning)
     if reasoning.get("supported") is not True or reasoning.get("control") != "levels":
         return None, efforts
     if request.thinking == "off" and "none" in efforts:
@@ -139,6 +135,8 @@ def prepare_payload(request: GenerationRequest) -> dict[str, Any]:
             payload["reasoning_effort"] = verified_effort
     else:
         payload.update(temperature=TEMPERATURE, max_tokens=_budget(request, False))
+    if not accepts_optional_parameter(request.model_capabilities, "temperature"):
+        payload.pop("temperature", None)
     if request.response_schema:
         if not _native_schema(model):
             raise ValueError("OpenAI model was not selected for native JSON schema")

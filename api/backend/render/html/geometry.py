@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-from typing import Any
 
 from backend.render.components.typography import (
     MIN_FONT_PX as _MIN_FONT_PX,

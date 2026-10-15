@@ -1,6 +1,7 @@
 """19.19 release blockers: real routers/store, synthetic I/O, loopback only."""
 from __future__ import annotations
 import asyncio
+import os
 import json
 import sys
 import threading
@@ -38,7 +39,7 @@ def config(**values):
 class RouteTests(unittest.IsolatedAsyncioTestCase):
     async def test_concurrent_io_and_heartbeat(self):
         app=FastAPI();app.include_router(routes.router);app.include_router(meta_routes.router)
-        for path,target,attr in [('/ai/resolve',routes.ai_resolve,'resolve'),('/ai/probe',routes.ai_probe,'probe'),('/warmup',meta_routes,'run_warmup')]:
+        for path,target,attr in [('/ai/resolve',routes.ai_resolve,'resolve'),('/warmup',meta_routes,'run_warmup')]:
             with self.subTest(path=path):
                 ticks=[];running=True
                 async def heartbeat():
@@ -92,7 +93,7 @@ class RouteTests(unittest.IsolatedAsyncioTestCase):
         with config(ai_endpoint_policy='shared',ai_extra_hosts=''):
             with patch.object(resolution,'_enumerate_models_detailed') as enumeration:
                 async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://fixture') as c:
-                    for endpoint in ['/ai/resolve','/ai/probe']:
+                    for endpoint in ['/ai/resolve']:
                         for key in ['', 'caller-key']:
                             response=await c.post(endpoint,json={'provider':'ollama','model':'fixture','base_url':'http://127.0.0.1:11434','api_key':key})
                             self.assertEqual(response.status_code,200)
@@ -142,6 +143,10 @@ class UrlPolicyTests(unittest.TestCase):
         srv=ThreadingHTTPServer(('127.0.0.1',0),Handler);thread=threading.Thread(target=srv.serve_forever,daemon=True);thread.start()
         url=f'http://127.0.0.1:{srv.server_port}'
         try:
+            # The local HTTP fixture must not inherit the host's SOCKS/HTTP proxy.
+            # Production URL admission and actual redirect behavior remain active.
+            proxies = patch.dict(os.environ, {key: '' for key in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy')})
+            proxies.start()
             with config(ai_endpoint_policy='shared',ai_extra_hosts=''):
                 with self.assertRaises(UnsafeBaseUrl):resolution.resolve({'provider':'ollama','base_url':url})
                 self.assertEqual(hits,[])
@@ -154,7 +159,7 @@ class UrlPolicyTests(unittest.TestCase):
                 assert_ai_base_url_allowed('ollama',url,user_key=False,key_present=False)
                 resolution._enumerate_models_detailed('ollama','',url)
                 self.assertNotIn('/private-target',hits)
-        finally:srv.shutdown();srv.server_close();thread.join()
+        finally:proxies.stop();srv.shutdown();srv.server_close();thread.join()
 
 
 class HistoryTests(unittest.TestCase):

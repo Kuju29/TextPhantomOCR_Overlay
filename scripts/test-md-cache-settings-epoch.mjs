@@ -49,6 +49,7 @@ globalThis.chrome = {
     },
     create() {},
   },
+  alarms: { onAlarm: event(), create() {} },
   tabs: {
     onUpdated: event(),
     onRemoved: event(),
@@ -58,25 +59,19 @@ globalThis.chrome = {
 };
 
 await import(`../src/background/index.js?epoch-regression=${Date.now()}`);
-assert.equal(onMessage.listeners.length, 1, "background must register one message listener");
-
-let response;
+const responses = [];
 assert.doesNotThrow(() => {
-  const handled = onMessage.listeners[0](
-    {
-      type: "TP_MD_CACHE_GET",
-      lang: "th",
-      mode: "lens_text",
-      source: "ai",
-      keys: ["chapter/page-1"],
-    },
-    { tab: { id: 1 } },
-    (value) => {
-      response = value;
-    },
-  );
-  assert.equal(handled, true);
+  const message = {
+    type: "TP_MD_CACHE_GET",
+    lang: "th",
+    mode: "lens_text",
+    source: "ai",
+    keys: ["chapter/page-1"],
+  };
+  const handlers = onMessage.listeners.map(listener => listener(message, { tab: { id: 1 } }, value => responses.push(value)));
+  assert.equal(handlers.filter(handled => handled === true).length, 1, "exactly one listener owns this cache request");
 });
-assert.deepEqual(response, { items: {} });
+assert.equal(responses.length, 1, "other features must not issue a second cache response");
+assert.deepEqual(responses[0], { items: {} });
 
 console.log("PASS TP_MD_CACHE_GET resolves the settings epoch through the registered background event path.");

@@ -11,7 +11,7 @@
     return !!run && run === current && !run.cancelled && run.pageInstanceId === TP.pageInstanceId && (run.plan.adapter==='kagane' ? TP.kagane.isCurrent(run.plan) : run.href === location.href);
   }
   function notify(type, detail) {
-    try { chrome.runtime.sendMessage({type, ...detail}, () => void chrome.runtime.lastError); } catch {}
+    try { chrome.runtime.sendMessage({type, ...detail}, () => { try { void chrome.runtime.lastError; } catch {} }); } catch {}
   }
   function cancel(reason = 'cancelled', report = false, keepKaganeDisplay = false) {
     const run = current;
@@ -767,7 +767,7 @@
           const size=(offset)=>((png.charCodeAt(offset)<<24)|(png.charCodeAt(offset+1)<<16)|
             (png.charCodeAt(offset+2)<<8)|png.charCodeAt(offset+3))>>>0;
           if(size(16)!==painted.width||size(20)!==painted.height)throw Error('DOM_COMPOSITE_SIZE_MISMATCH');
-          if(dataUri.length>36*1024*1024)throw Error('DOM_IMAGE_TOO_LARGE');
+          if(dataUri.length>32*1024*1024+64/* Base64 of the API's 24 MiB image cap */)throw Error('DOM_IMAGE_TOO_LARGE');
           if(!live(run))throw new DOMException('Reader cancelled','AbortError');
           return {ok:true,dataUri,composition:'rendered_canvas'};
         }catch(error){
@@ -793,7 +793,7 @@
       const canvas=document.createElement('canvas');canvas.width=fresh.naturalWidth;canvas.height=fresh.naturalHeight;
       const ctx=canvas.getContext('2d');if(!ctx)throw new Error('DOM_CANVAS_UNAVAILABLE');ctx.drawImage(fresh,0,0);
       const dataUri=canvas.toDataURL('image/png');canvas.width=canvas.height=0;
-      if(dataUri.length>36*1024*1024)throw new Error('DOM_IMAGE_TOO_LARGE');
+      if(dataUri.length>32*1024*1024+64/* Base64 of the API's 24 MiB image cap */)throw new Error('DOM_IMAGE_TOO_LARGE');
       return {ok:true,dataUri};
     } catch(error) {return {ok:false,error:error.message};}
   };

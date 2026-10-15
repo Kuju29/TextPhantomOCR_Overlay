@@ -403,7 +403,4 @@
   TP.canReadImagePixels = canReadImagePixels;
   TP.annotateDocumentTextLight = annotateDocumentTextLight;
   TP.buildErasedBackground = buildErasedBackground;
-  // Exported for the geometry parity test against the Python implementation.
-  TP.__eraseBoxQuadPx = boxQuadPx;
-  TP.__annotateDocumentTextLightPixels = annotateDocumentTextLightPixels;
 })();

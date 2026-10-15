@@ -1,4 +1,4 @@
-import { batchesForTab, getBatch, batchMark, batchUpdateToast, updateImagePresentation, batchStopKeepAlive, restorePersistedBatches, persistBatchProgressNow } from './batches.js';
+import { batchesForTab, batchMark, batchUpdateToast, updateImagePresentation, restorePersistedBatches, persistBatchProgressNow } from './batches.js';
 import { repairCoordinator } from './repair/coordinator.js';
 import { getTabSessionId, restoreTabSessions } from './tab-sessions.js';
 import { requestFromTabExact } from './tabs-messaging.js';
@@ -27,7 +27,7 @@ export async function handleReaderReceipt(message, sender, discardBatchResults) 
   if(message.type==='TP_READER_PLACEMENT_FAILED'){
     updateImagePresentation(batch.id,key,{placementPending:false,placementConfirmed:false,
       progressEvent:{lane:'insert',state:'error',resultState:'error',detail:message.error || 'Reader placement failed'}});
-    batchUpdateToast(batch,'Reader placement failed',true);
+    batchUpdateToast(batch,'Reader placement failed');
     if(batch.reader.processingComplete)await persistBatchProgressNow();
     return {ok:false};
   }

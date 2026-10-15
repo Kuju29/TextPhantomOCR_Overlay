@@ -53,7 +53,10 @@ def decode_result(*, result, ids: list[str], provider: str, base_url: str,
             markers.decode_legacy_translation_response
             if native_schema else markers.decode_translation_response
         )
-        decoded = decoder(result.text, ids, require_complete=True,
+        from backend.ai.series_summary import split_summary
+        translation_text, series_summary, summary_status = split_summary(
+            result.text, enabled=getattr(ai, "memory_mode", None) == "full", native_schema=native_schema)
+        decoded = decoder(translation_text, ids, require_complete=True,
                           allow_complete_without_end=(
                               not provider_output_truncated and positive_terminal_completion
                           ))
@@ -85,7 +88,9 @@ def decode_result(*, result, ids: list[str], provider: str, base_url: str,
         )
         exc.structural_details.setdefault("resolvedProvider", provider)
         exc.structural_details.setdefault("resolvedModel", used_model)
-        exc.structural_details.setdefault("generationMeta", {
+        generation_meta = exc.structural_details.setdefault("generationMeta", {
+            "provider": provider,
+            "model": used_model,
             "usage": usage_meta(result),
             "finish_reason": result.finish_reason,
             "provider_ms": result.provider_ms,
@@ -97,6 +102,15 @@ def decode_result(*, result, ids: list[str], provider: str, base_url: str,
                 else "provider_total_bounded"
             ),
         })
+        # Contract rejection of an authenticated settled Paid receipt did not
+        # make a new generation. Keep the same trusted evidence as a decoded
+        # result; request metadata cannot supply these provider usage details.
+        if provider == "paid" and (result.usage_details or {}).get("centerOperationReplayed") is True:
+            generation_meta.update(centerOperationReplayed=True, requestDispatched=False,
+                                   providerAttempts=0, generationAttempts=0)
+            exc.generationMeta = generation_meta
+            exc.providerAttempts = exc.generationAttempts = 0
+            exc.requestDispatched = False
         trace_preview.note("AI diagnostic contract failure", {
             **format_diagnostics, "decodedResponseShape": exc.response_shape,
             "selectedContract": selected_wire_contract,
@@ -193,6 +207,7 @@ def decode_result(*, result, ids: list[str], provider: str, base_url: str,
         "formatting_whitespace_chars": decoded.formatting_whitespace_chars,
         "unexpected_prose_chars": decoded.unexpected_prose_chars,
         "redundant_closing_delimiter_chars": decoded.redundant_closing_delimiter_chars,
+        "record_header_recovery_count": decoded.record_header_recovery_count,
         "malformed_output_record_count": decoded.malformed_line_count,
         "recoverable_malformed_output_record_count": decoded.recoverable_malformed_line_count,
         "malformed_output_recoverable": decoded.malformed_records_recoverable,
@@ -214,6 +229,18 @@ def decode_result(*, result, ids: list[str], provider: str, base_url: str,
             effective_system_text=system_text,
         ),
     }
+    if getattr(ai, "memory_mode", None) == "full":
+        meta["seriesSummaryStatus"] = summary_status
+        if series_summary and not decoded.missing_ids and not uncertain_ids and not decoded.discarded_ids and not decoded.duplicate_ids and not decoded.unexpected_prose_chars and not decoded.malformed_line_count:
+            meta["seriesSummary"] = series_summary
+            meta["seriesSummaries"] = [series_summary]
+            meta["seriesSummaryRecords"] = [{"text": series_summary, "sourceIds": list(ids)}]
+    # Only the Paid adapter can produce this normalized evidence after an
+    # authenticated, owned Center receipt lookup. Browser options do not feed
+    # usage_details. Retained token/cost values describe the original charge.
+    if provider == "paid" and (result.usage_details or {}).get("centerOperationReplayed") is True:
+        meta.update(centerOperationReplayed=True, requestDispatched=False,
+                    providerAttempts=0, generationAttempts=0)
     if characters:
         meta["characters"] = characters
     if image_b64:

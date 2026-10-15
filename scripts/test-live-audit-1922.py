@@ -1,4 +1,4 @@
-"""Offline regression: real probe, Conversation owner, adapter and HTTP reader."""
+"""Offline regression: Conversation owner, adapter and HTTP reader (the /ai/probe service was removed in 10491)."""
 import copy
 import json
 import os
@@ -11,8 +11,10 @@ from contextlib import ExitStack
 from unittest.mock import patch
 import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'api'))
-from backend.ai import probe as service, markers
-from backend.ai.provider_contract import ProbeResponse, GenerationRequest
+from backend.ai import markers
+from backend.ai.provider_registry import provider_registry
+from backend.ai.provider_contract import GenerationRequest, ModelListResult
+from backend.ai.cloud_reasoning import CloudReasoningPreferenceUnavailable
 from backend.ai.providers import compose_providers
 from backend.ai.providers import cloud_openrouter
 from backend.ai.translation.contracts import AiConfig
@@ -20,36 +22,23 @@ from backend.ai.translation.invocation import translate
 from backend.ai.translation_paths.mode import descriptor
 compose_providers()
 
-class ProbeBillingTests(unittest.TestCase):
-    def test_402_is_account_error_even_when_native_status_says_rejected(self):
-        for native_status in ['', 'rejected']:
-            with self.subTest(native_status=native_status), ExitStack() as stack:
-                stack.enter_context(patch.dict(service._PROBE_CACHE, {}, clear=True))
-                stack.enter_context(patch.dict(service._PROBE_INFLIGHT, {}, clear=True))
-                stack.enter_context(patch.object(service,'discovered_model_capabilities',return_value=(True,{})))
-                stack.enter_context(patch.object(service,'model_is_promoted',return_value=True))
-                promote=stack.enter_context(patch.object(service,'remember_model_promotion'))
-                demote=stack.enter_context(patch.object(service,'remember_model_rejection'))
-                adapter=service.provider_registry.get('huggingface').adapter
-                native=stack.enter_context(patch.object(adapter,'probe',return_value=ProbeResponse(
-                    ok=False,status=native_status,http_status=402,error='Monthly included credits depleted')))
-                result=service.probe({'provider':'huggingface','model':'fixture','api_key':'fake-fixture-key',
-                    'base_url':'https://router.huggingface.co/v1'})
-                self.assertEqual(result['status'],'billing_required');self.assertFalse(result['ok'])
-                self.assertEqual(result['http_status'],402);self.assertEqual(native.call_count,1)
-                self.assertEqual(demote.call_count,0);self.assertEqual(promote.call_count,0)
-    def test_other_classifications_stay_distinct(self):
-        self.assertEqual(service._classify_status(401),'invalid_key')
-        self.assertEqual(service._classify_status(429),'rate_limited')
-        self.assertEqual(service._classify_status(404),'model_unavailable')
-
 class RouterSessionTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         env=patch.dict(os.environ,{'TP_CONVERSATION_STATE_FILE':self.tmp.name+'/history',
              'TP_AI_WIRE_TRACE':'0','TP_USAGE_RECEIPTS':'off','TP_PROMPT_CACHE':'auto'})
         env.start();self.addCleanup(env.stop)
-        discovery=patch('backend.ai.provider_resolution.discovered_model_capabilities',return_value=(False,{}))
+        def discovered(provider,base_url,model,api_key):
+            # Only the fixture's exact server-side account/model metadata proves
+            # Off. Retain the real preflight guard against browser-only hints.
+            if (provider=='openrouter' and base_url=='https://openrouter.ai/api/v1'
+                    and (model,api_key) in {('fixture-model','fake-private-key'),
+                        ('fixture-model','different-private-fixture-key'),
+                        ('fixture-model-b','fake-private-key')}):
+                return True,{'reasoning':{'supported':False},'structured_output':{'supported':False},
+                             'limits':{'contextTokens':65536}}
+            return False,{}
+        discovery=patch('backend.ai.provider_resolution.discovered_model_capabilities',side_effect=discovered)
         discovery.start();self.addCleanup(discovery.stop)
         self.payloads=[];self.headers=[]
         real_client=httpx.Client
@@ -71,6 +60,19 @@ class RouterSessionTests(unittest.TestCase):
         return httpx.Response(200,headers={'content-type':'text/event-stream'},text=data,request=request)
     def call(self,source='Hello',ai=None):
         return translate(markers.apply([source]),'th',ai or self.ai)
+    def test_client_off_hint_without_server_evidence_never_dispatches(self):
+        hinted=replace(self.ai,model_capabilities={'reasoning':{'supported':False},
+            'structured_output':{'supported':False},'limits':{'contextTokens':65536}})
+        adapter=provider_registry.require('openrouter').adapter
+        with patch('backend.ai.provider_resolution.discovered_model_capabilities',return_value=(False,{})), \
+                patch.object(adapter,'list_models',return_value=ModelListResult(status='invalid_key',http_status=401)) as discovery:
+            with self.assertRaises(CloudReasoningPreferenceUnavailable) as rejected:
+                self.call(ai=hinted)
+        self.assertEqual(rejected.exception.code,'ai_thinking_off_unavailable')
+        self.assertFalse(rejected.exception.requestDispatched)
+        self.assertEqual(rejected.exception.providerAttempts,0)
+        self.assertEqual(discovery.call_count,1);self.assertEqual(self.payloads,[])
+        self.assertEqual(self.headers,[])
     def test_first_continuation_and_repair_keep_session_and_exact_prefix(self):
         previous=None;ids=[]
         for i in range(3):

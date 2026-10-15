@@ -18,7 +18,7 @@ from backend.ai.errors import ModelOutputContractError
 from backend.ai.failure_reason import classify as classify_ai_failure
 from backend.ai.provider_resolution import resolve_provider
 from backend.ai.rate_policy import is_local_target, manual_rate_policy, rate_bucket_identity
-from backend import cancellation, trace
+from backend import cancellation, trace, diagnostics
 from backend.jobs.admission import identity_of, ANONYMOUS
 from backend.api.errors import activity_fields, payload_correlation
 
@@ -120,12 +120,27 @@ def _result_generation_attempts(result: Any) -> int:
         return 0
     ai_result = result.get("Ai") if isinstance(result.get("Ai"), dict) else {}
     ai_meta = ai_result.get("meta") if isinstance(ai_result.get("meta"), dict) else {}
+    if (ai_meta.get('provider') == 'paid' and ai_meta.get('centerOperationReplayed') is True
+            and ai_meta.get('requestDispatched') is False
+            and ai_meta.get('generationAttempts') == 0 and ai_meta.get('providerAttempts') == 0):
+        return 0
     if isinstance(ai_meta.get("usage"), dict) and isinstance(ai_meta["usage"].get("generations"), list):
         return len(ai_meta["usage"]["generations"])
     return max(1, int(ai_meta.get("generation_attempts") or 1)) if (ai_meta.get("provider") or ai_meta.get("model")) else 0
 
+def _owned_paid_replay_meta(meta: Any) -> bool:
+    return (isinstance(meta, dict) and meta.get('provider') == 'paid'
+            and meta.get('centerOperationReplayed') is True and meta.get('requestDispatched') is False
+            and type(meta.get('generationAttempts')) is int and meta['generationAttempts'] == 0
+            and type(meta.get('providerAttempts')) is int and meta['providerAttempts'] == 0
+            and isinstance(meta.get('usage'), dict)
+            and meta['usage'].get('centerOperationReplayed') is True)
+
+
 def _exception_generation_attempts(exc: BaseException) -> int:
     meta = getattr(exc, "generationMeta", None)
+    if _owned_paid_replay_meta(meta):
+        return 0
     usage = meta.get("usage") if isinstance(meta, dict) else None
     if isinstance(usage, dict) and isinstance(usage.get("generations"), list):
         return len(usage["generations"])
@@ -138,12 +153,17 @@ def _queue_error(exc, payload, *, cancelled=False, generation_meta=None):
         return "cancelled" if cancelled else str(exc)
     usage = meta["usage"]
     ai = payload.get("ai") or {}
-    count = len(usage["generations"]) if isinstance(usage.get("generations"), list) else 1
+    retained = ai.get('provider') == 'paid' and _owned_paid_replay_meta(meta)
+    count = 0 if retained else (len(usage["generations"]) if isinstance(usage.get("generations"), list) else 1)
     safe = {"provider": meta.get("provider") or usage.get("provider") or ai.get("provider"),
             "model": meta.get("model") or usage.get("model") or ai.get("model"), "usage": usage}
+    if retained:
+        safe.update(centerOperationReplayed=True, requestDispatched=False,
+                    generationAttempts=0, providerAttempts=0)
     return {"code": "cancelled" if cancelled else "PROCESSING_FAILED",
             "message": "Translation cancelled." if cancelled else "Translation failed after provider execution.",
-            "generationAttempts": count, "requestDispatched": True,
+            "generationAttempts": count, "requestDispatched": not retained,
+            **({'providerAttempts': 0, 'centerOperationReplayed': True} if retained else {}),
             "structuralDetails": {"generationMeta": safe}}
 
 def _uses_local_ai_generation(payload: dict[str, Any]) -> bool:
@@ -204,6 +224,52 @@ def _trace_ai_terminal(
 class QueueFull(Exception):
     """Raised by :meth:`JobQueue.enqueue` when the pending queue is saturated."""
 
+class CallerQueueFull(QueueFull):
+    """One caller (tab session / client) already holds its share of the queue."""
+    code = "queue_caller_limit"
+
+class QueueBytesFull(QueueFull):
+    """Queued payloads (mostly page images) already use the queue's byte budget."""
+    code = "queue_bytes_limit"
+
+
+def payload_bytes(value: Any, _depth: int = 0) -> int:
+    """Cheap size estimate of a decoded JSON payload (no serialisation copy)."""
+    if isinstance(value, str):
+        return len(value)
+    if isinstance(value, (bytes, bytearray)):
+        return len(value)
+    if _depth > 32:
+        return 0
+    if isinstance(value, dict):
+        return sum(len(str(k)) + payload_bytes(v, _depth + 1) for k, v in value.items()) + 2
+    if isinstance(value, (list, tuple)):
+        return sum(payload_bytes(v, _depth + 1) for v in value) + 2
+    return 8
+
+# A finished job's rendered image (0.5-3 MB data URI) is kept only for a short
+# grace window after first delivery, so a lost response can be re-polled; then
+# the bytes are dropped and the small text record stays for the rest of the
+# TTL. A later read sees ``imageReleased: true`` instead of a silent omission.
+DELIVERED_IMAGE_GRACE_SEC = 120
+_IMAGE_FIELDS = ("imageDataUri", "sourceImageDataUri", "image", "image_b64")
+
+
+def _release_image_bytes(result: Any) -> tuple[Any, int]:
+    """Return a copy of ``result`` without inline image bytes, and bytes released."""
+    if not isinstance(result, dict):
+        return result, 0
+    released = 0
+    out = dict(result)
+    for key in _IMAGE_FIELDS:
+        value = out.get(key)
+        if isinstance(value, str) and (value.startswith("data:") or len(value) > 4096):
+            released += len(value)
+            out[key] = ""
+    if released:
+        out["imageReleased"] = True
+    return out, released
+
 class IdempotencyConflict(Exception):
     """A scoped retry key was reused for different semantic input."""
 
@@ -241,12 +307,13 @@ class JobQueue:
         self._jobs: dict[str, Job] = {}
         self._idempotency: dict[str, str] = {}
         self._conditions: dict[str, asyncio.Condition] = {}
-        self._subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = {}
         qmax = max(1, settings.max_queue_size)
         self._queues: dict[str, FairIdentityQueue] = {
             self.DIRECT: FairIdentityQueue(maxsize=qmax),
             self.AI: FairIdentityQueue(maxsize=qmax),
         }
+        # job_id -> (byte owner, bytes) for payloads still waiting in a queue.
+        self._queued_bytes: dict[str, tuple[str, int]] = {}
         self._started = False
         self._tasks: set[asyncio.Task[Any]] = set()
         self._ai_workers, self._direct_workers = self._worker_split()
@@ -261,9 +328,9 @@ class JobQueue:
         configured_ai = int(getattr(settings, "ai_max_concurrency", 0) or 0)
         configured_direct = int(getattr(settings, "direct_max_concurrency", 0) or 0)
 
-        # Legacy transport workers are only dispatch carriers now; real resource
-        # ownership is enforced by the shared Lens/Grouping/AI stage gates. Do
-        # not split SERVER_MAX_WORKERS in half and recreate the old 8/7 funnel.
+        # Legacy transport workers are only dispatch carriers; resource ownership
+        # is enforced by the shared Lens/Grouping/AI stage gates, so
+        # SERVER_MAX_WORKERS is not split between lanes here.
         if configured_ai > 0:
             ai_workers = max(1, min(configured_ai, int(settings.ai_thread_workers)))
         else:
@@ -324,10 +391,10 @@ class JobQueue:
         if self._processor_accepts_admission_identity:
             work = loop.run_in_executor(
                 self._executor,
-                lambda: self._processor(payload, admission_identity=admission_identity),
+                diagnostics.bind_context(lambda: self._processor(payload, admission_identity=admission_identity)),
             )
         else:
-            work = loop.run_in_executor(self._executor, self._processor, payload)
+            work = loop.run_in_executor(self._executor, diagnostics.bind_context(self._processor), payload)
         if _uses_local_ai_generation(payload):
             return await work
         return await asyncio.wait_for(
@@ -377,6 +444,34 @@ class JobQueue:
 
         if self._total_depth() >= max(1, settings.max_queue_size):
             raise QueueFull("server busy: translation queue is full")
+        from backend.api.ingress import current_identity
+        identity = current_identity() or ""
+        per_identity = max(1, int(getattr(settings, "max_queue_per_identity", 200) or 200))
+        if identity and sum(1 for j in self._jobs.values()
+                            if j.get("status") == "queued" and j.get("identity") == identity) >= per_identity:
+            # One browser (install id / trusted IP) across all of its tabs.
+            raise CallerQueueFull(
+                f"server busy: this browser already has {per_identity} translations waiting; "
+                "new pages will be accepted as earlier ones finish")
+        size = payload_bytes(payload)
+        owner = identity or str(caller_scope or "") or "anonymous"
+        total_bytes = sum(n for _, n in self._queued_bytes.values())
+        owner_bytes = sum(n for o, n in self._queued_bytes.values() if o == owner)
+        if total_bytes + size > max(1, int(getattr(settings, "max_queue_bytes", 512 << 20))):
+            raise QueueBytesFull("server busy: queued images use the server's memory budget")
+        if owner_bytes + size > max(1, int(getattr(settings, "max_queue_bytes_per_identity", 128 << 20))):
+            raise QueueBytesFull(
+                "server busy: this browser's waiting images already use its memory share; "
+                "new pages will be accepted as earlier ones finish")
+        caller = str(caller_scope or "")
+        per_caller = max(1, int(getattr(settings, "max_queue_per_caller", 200) or 200))
+        if caller and sum(1 for j in self._jobs.values()
+                          if j.get("status") == "queued" and j.get("caller_scope") == caller) >= per_caller:
+            # One tab/client cannot take the whole shared queue from other
+            # users. Same 503 + Retry-After contract as QueueFull.
+            raise CallerQueueFull(
+                f"server busy: this tab already has {per_caller} translations waiting; "
+                "new pages will be accepted as earlier ones finish")
 
         job_id = str(uuid.uuid4())
         kind = self._queue_kind(payload)
@@ -393,16 +488,20 @@ class JobQueue:
             "batch_id": _opaque_selector(cancellation.batch_id_of(payload)),
             "session": _opaque_selector(cancellation.scope_of(payload)),
             "caller_scope": str(caller_scope or ""),
+            "identity": identity,
         }
         if idem:
             rec["idempotency_token"] = idem
             rec["request_fingerprint"] = fingerprint
             self._idempotency[idem] = job_id
         self._jobs[job_id] = rec
+        diagnostics.writer.link_job(job_id,diagnostics.current())
+        diagnostics.emit("pipeline.queued", job_id=job_id, queue_kind=kind, queue_depth=self._total_depth())
 
         try:
             fair_owner = _fair_stage_identity(payload, str(caller_scope or ""))
             self._queues[kind].put_nowait((job_id, payload, fair_owner))
+            self._queued_bytes[job_id] = (owner, size)
         except asyncio.QueueFull as exc:
             self._jobs.pop(job_id, None)
             if idem:
@@ -412,13 +511,36 @@ class JobQueue:
         await self._publish(job_id)
         return self.public_record(job_id)
 
-    def get(self, job_id: str) -> Job:
+    def note_delivered(self, job_id: str) -> None:
+        """Start the image-release grace window of a finished job read by its client."""
+        rec = self._jobs.get(job_id)
+        if rec and rec.get("status") == "done" and isinstance(rec.get("result"), dict):
+            rec.setdefault("delivered_at", time.time())
+
+    def release_delivered_images(self, now: float | None = None) -> int:
+        """Drop inline image bytes of results delivered >= DELIVERED_IMAGE_GRACE_SEC ago."""
+        now = time.time() if now is None else now
+        total = 0
+        for rec in self._jobs.values():
+            at = rec.get("delivered_at")
+            if at is None or rec.get("image_released") or now - float(at) < DELIVERED_IMAGE_GRACE_SEC:
+                continue
+            rec["result"], released = _release_image_bytes(rec.get("result"))
+            rec["image_released"] = True
+            total += released
+        if total:
+            dbg("jobs.image_release", {"bytes": total})
+        return total
+
+    def get(self, job_id: str, *, deliver: bool = True) -> Job:
         rec = self._jobs.get(job_id)
         if not rec:
             return {"id": job_id, "status": "error", "result": "job_not_found"}
+        if deliver:
+            self.note_delivered(job_id)
         return self.public_record(job_id)
 
-    def get_scoped(self, job_id: str, *, caller_scope: str) -> Job:
+    def get_scoped(self, job_id: str, *, caller_scope: str, deliver: bool = True) -> Job:
         """Return a job only to its opaque owner.
 
         A missing job and a job owned by another caller deliberately have the
@@ -428,6 +550,8 @@ class JobQueue:
         rec = self._jobs.get(job_id)
         if not rec or not caller_scope or str(rec.get("caller_scope") or "") != caller_scope:
             return self.public_record("") | {"id": job_id, "result": "job_not_found"}
+        if deliver:
+            self.note_delivered(job_id)
         return self.public_record(job_id)
 
     @staticmethod
@@ -489,12 +613,9 @@ class JobQueue:
             return True
         except (RateGateTimeout, RateGateRejected) as exc:
             prev = dict(self._jobs.get(job_id) or {})
-            # Same distinction the sync route now makes: this is THIS gate
-            # saying "your key's tokens are spoken for", not the provider saying
-            # "you are sending too fast". The code and the computed wait travel
-            # with the job so a poller can pace instead of guessing at five
-            # seconds — which, with a queue in front of it, is a guess that
-            # brings every rejected job back at the same moment.
+            # THIS gate saying "your key's tokens are spoken for", not the
+            # provider saying "too fast". The code and computed wait travel with
+            # the job so pollers pace instead of all returning at once.
             retry_after = rate_gate.retry_after_sec(provider, model, bucket_key)
             await self._set_job(
                 job_id,
@@ -639,23 +760,6 @@ class JobQueue:
                 return fin
             await asyncio.sleep(0.25)
 
-    def create_event_queue(self) -> asyncio.Queue[dict[str, Any]]:
-        return asyncio.Queue(maxsize=200)
-
-    def subscribe(self, q: asyncio.Queue[dict[str, Any]], job_id: str) -> None:
-        jid = str(job_id or "").strip()
-        if jid:
-            self._subscribers.setdefault(jid, set()).add(q)
-
-    def unsubscribe(self, q: asyncio.Queue[dict[str, Any]], job_id: str) -> None:
-        subs = self._subscribers.get(str(job_id or "").strip())
-        if subs:
-            subs.discard(q)
-
-    def close_event_queue(self, q: asyncio.Queue[dict[str, Any]]) -> None:
-        for subs in self._subscribers.values():
-            subs.discard(q)
-
     async def run_inline(self, payload: dict) -> dict:
         return await asyncio.to_thread(self._processor, payload)
 
@@ -663,8 +767,8 @@ class JobQueue:
     def public_record(self, job_id: str) -> Job:
         rec = dict(self._jobs.get(job_id) or {"id": job_id, "status": "error", "result": "job_not_found"})
         for internal_key in (
-            "idempotency_token", "request_fingerprint", "caller_scope",
-            "batch_id", "session",
+            "idempotency_token", "request_fingerprint", "caller_scope", "identity",
+            "batch_id", "session", "delivered_at", "image_released",
         ):
             rec.pop(internal_key, None)
         rec.setdefault("id", job_id)
@@ -676,9 +780,8 @@ class JobQueue:
         rec["queue_depth_ai"] = self._queues[self.AI].qsize()
         rec["direct_workers"] = self._direct_workers
         rec["ai_workers"] = self._ai_workers
-        # 0 means: client does not need to self-throttle; server-side lanes are
-        # already enforcing the processing concurrency.  New extension builds
-        # ignore this hint, old builds treat <=0 as no update.
+        # 0: no client self-throttling needed; server-side lanes enforce
+        # concurrency (older extension builds treat <=0 as no update).
         rec["recommended_client_concurrency"] = 0
         rec["poll_after_ms"] = self._poll_after_ms(kind)
         rec["server_time"] = time.time()
@@ -726,48 +829,26 @@ class JobQueue:
     async def _set_job(self, job_id: str, rec: Job) -> None:
         rec["id"] = job_id
         rec["updated"] = time.time()
+        diagnostics.emit("pipeline.state",job_id=job_id,status=rec.get("status"),queue_kind=rec.get("queue_kind"))
         self._jobs[job_id] = rec
         await self._publish(job_id)
 
     async def _publish(self, job_id: str) -> None:
-        rec = self.public_record(job_id)
         cond = self._conditions.get(job_id)
         if cond:
             async with cond:
                 cond.notify_all()
 
-        msg: dict[str, Any] = {
-            "type": "job.status",
-            "id": job_id,
-            "status": rec.get("status"),
-            "queue_kind": rec.get("queue_kind"),
-            "queue_position": rec.get("queue_position"),
-            "queue_depth": rec.get("queue_depth"),
-            "queue_depth_direct": rec.get("queue_depth_direct"),
-            "queue_depth_ai": rec.get("queue_depth_ai"),
-            "poll_after_ms": rec.get("poll_after_ms"),
-            "recommended_client_concurrency": rec.get("recommended_client_concurrency"),
-        }
-        if rec.get("status") == "done":
-            msg = {"type": "result", "id": job_id, "result": rec.get("result")}
-        elif rec.get("status") == "error":
-            msg = {"type": "error", "id": job_id, "error": rec.get("result") or rec.get("error") or "Unknown error"}
-
-        for q in list(self._subscribers.get(job_id, set())):
-            try:
-                if q.full():
-                    try:
-                        q.get_nowait()
-                    except asyncio.QueueEmpty:
-                        pass
-                q.put_nowait(msg)
-            except Exception:
-                self._subscribers.get(job_id, set()).discard(q)
-
     async def _worker_loop(self, worker_id: int, kind: str) -> None:
         queue = self._queues[kind]
         while True:
             job_id, payload, _owner = await queue.get()
+            # Leaving the queue releases its byte reservation; running payloads
+            # are bounded by the worker count instead.
+            self._queued_bytes.pop(job_id, None)
+            diagnostics.update(writer=diagnostics.writer, trace_id=diagnostics.new_id(),request_id=diagnostics.new_id(),
+                               component="legacy_queue",operation_id="",job_id=job_id)
+            diagnostics.select_job(job_id,kind=kind)
 
             # Skip jobs cancelled while still queued (see cancel()).
             if str((self._jobs.get(job_id) or {}).get("status") or "") == "aborted":
@@ -780,13 +861,10 @@ class JobQueue:
                 queue.task_done()
                 continue
 
-            # Time spent waiting for a WORKER is measured up to here — before
-            # the rate gate. The two waits have completely different causes
-            # (too few workers vs. the provider's requests-per-minute budget)
-            # and folding them into one number made every AI job look like a
-            # queue backlog: a 12-RPM provider paces one job every 5 s, which
-            # showed up as queue_wait_ms climbing 175 s -> 230 s across a batch
-            # while the actual queue was nearly empty.
+            # Time spent waiting for a WORKER is measured up to here, before the
+            # rate gate: the two waits have different causes (too few workers
+            # vs. the provider's requests-per-minute budget) and are reported
+            # separately.
             enqueue_ts = float((self._jobs.get(job_id) or {}).get("ts") or 0.0)
             queue_wait_ms = round(max(0.0, time.time() - enqueue_ts) * 1000, 1) if enqueue_ts else 0.0
 
@@ -959,6 +1037,7 @@ class JobQueue:
     async def _cleanup_loop(self) -> None:
         while True:
             await asyncio.sleep(60)
+            self.release_delivered_images()
             cutoff = time.time() - settings.job_ttl_sec
             dead = [jid for jid, j in self._jobs.items() if float(j.get("ts", 0)) < cutoff]
             for jid in dead:
@@ -967,4 +1046,3 @@ class JobQueue:
                 if idem:
                     self._idempotency.pop(idem, None)
                 self._conditions.pop(jid, None)
-                self._subscribers.pop(jid, None)

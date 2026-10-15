@@ -162,7 +162,7 @@ for (const provider of ["ollama", "lmstudio", "jan", "text-generation-webui", "k
 assert.match(popupEvents, /const pendingEdits = flushPendingAiEditsForSwitch[\s\S]*await pendingEdits[\s\S]*beginProviderTransition/);
 assert.match(popupEvents, /aiModel\.addEventListener\("change"[\s\S]*await flushPendingAiEditsForSwitch[\s\S]*selectModel/);
 assert.match(promptJs, /aiProfilePromptsV1/);
-assert.match(promptHtml, /Saved separately for this Provider, Model and Language\./);
+assert.match(promptHtml, /Saved separately for this provider, model and language\./);
 assert.match(promptJs, /makeProfilePromptKey\(\s*state\.providerIdentity,\s*state\.model/);
 assert.match(promptJs, /if \(state\.dirty\) await saveLanguage\(previous[\s\S]*loadCurrent\(next\)/,
   "language A must auto-save before language B is loaded");

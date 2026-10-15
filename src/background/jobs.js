@@ -9,9 +9,10 @@ import {requireConversationApi} from "../shared/ai/conversation/support.js";
 import {reserveConversationJob, finishConversationJob, enterConversationJob, cancelConversationJobs} from "./ai/translation-paths/order.js";
 import { applyRuntimeCapacityHints } from "./jobs/capacity-policy.js";
 import { isStageBackpressure } from "./jobs/stage-backpressure.js";
-import { reportTranslationFailure } from "../shared/diagnostic-policy.js";
+import { reportTranslationFailure, isPaidAdmissionBlocked } from "../shared/diagnostic-policy.js";
 import { normalizeReasoningPreference } from "../shared/reasoning-preference.js";
 import { repairCoordinator } from "./repair/coordinator.js";
+import { generationFingerprint, resultCache, resultCacheKey } from "./result-cache.js";
 // Orchestrates a translation job from enqueue through submit, result handling and batch finalisation.
 import { createLogger, setLogLevel } from "../shared/logger.js";
 import { setLogShippingEnabled } from "../shared/log-sink.js";
@@ -64,6 +65,7 @@ import { pollJobViaRest } from "./transports/polling.js";
 import { cancelJobsViaRest } from "./transports/cancel.js";
 import { groupParagraphsWithArtifactFallback } from "./transports/groups.js";
 import { fetchLensRawViaRest } from "./transports/lens.js";
+import { isInstallRateLimited, installRetryDelayMs, INSTALL_RETRY_BUDGET_MS, waitInstallLimit } from "./transports/install-header.js";
 import {
   capabilityFailureDetails,
   engineCompatibilityIssue,
@@ -236,6 +238,7 @@ async function runStageInLane(
 ) {
   let accumulatedQueueWaitMs = 0;
   let attempt = 0;
+  let installWaitMs = 0;
   while (true) {
     attempt++;
     const granted = await acquire(key, signal);
@@ -262,7 +265,17 @@ async function runStageInLane(
         releaseFailed(key);
         throw error;
       }
-      const retryAfterMs = Math.max(50, Number(error?.retryAfterMs) || 1000);
+      // This browser install hit the shared API's quota. Wait the
+      // server's Retry-After (≤ 60 s), within a total budget per stage.
+      const installLimited = isInstallRateLimited(error);
+      if (installLimited && installWaitMs >= INSTALL_RETRY_BUDGET_MS) {
+        releaseFailed(key);
+        throw error;
+      }
+      const retryAfterMs = installLimited
+        ? installRetryDelayMs(error)
+        : Math.max(50, Number(error?.retryAfterMs) || 1000);
+      if (installLimited) installWaitMs += retryAfterMs;
       const code = String(error?.code || "");
       if (code === "server_busy" || Number(error?.status) === 429) {
         releaseRejected(key, retryAfterMs);
@@ -289,10 +302,17 @@ async function runStageInLane(
         },
         traceId,
       );
-      await waitForRetry(retryAfterMs, signal);
+      // An install-limit wait is shown in the page status with a countdown.
+      if (installLimited) await waitInstallLimit(retryAfterMs, (ms) => waitForRetry(ms, signal));
+      else await waitForRetry(retryAfterMs, signal);
     }
   }
 }
+
+// Page failure codes (and the raw stream stop codes) of a provider stream that
+// stopped before writing any line; see repairCoordinator.releaseStoppedPage.
+const STREAM_STOP_NO_REPAIR = new Set(["ai_stalled", "ai_thinking_too_long", "ai_stream_ceiling",
+  "ai_provider_stalled"]);
 
 const runLensDirectPath = createLensDirectPath({
   fetchFromUrl: fetchImageDataUriFromUrl,
@@ -308,8 +328,6 @@ const runLensDirectPath = createLensDirectPath({
   log,
 });
 
-const MAX_FIRST_TRY_RETRIES = 2;
-const FIRST_TRY_GAP_MS = 3000;
 const { finalizeBatch } = createBatchRetryCoordinator({
   retryGapMs: 1800,
   batchPassStats,
@@ -327,6 +345,9 @@ const { finalizeBatch } = createBatchRetryCoordinator({
   classifyJobError,
   enqueue,
   onComplete: (batch,label) => completeBatch(batch,label,repairCoordinator),
+  onCompletionError: (error,batch) => log.warn('batch completion failed', {
+    batchId:batch.id, code:error?.code || 'completion_failed',
+  }),
 });
 export { finalizeBatch };
 const { failJobImmediately, handleStaleJob, handleJobError, handleResult, handleProvisionalResult } =
@@ -359,13 +380,22 @@ const { failJobImmediately, handleStaleJob, handleJobError, handleResult, handle
     summarizeResultPresentation,
     traceNote,
     workflow: wf,
-    shouldDeferImageError: ({ batch, imageKey, terminalAiError, error }) =>
-      terminalAiError === true &&
-      String(error?.tpError?.code || error?.code || "").toLowerCase() !== 'local_model_identity_mismatch' &&
-      repairCoordinator.ownsInitialFailure(batch?.id, imageKey),
+    shouldDeferImageError: ({ batch, imageKey, terminalAiError, error }) => {
+      const code = String(error?.tpError?.code || error?.code || "").toLowerCase();
+      if (terminalAiError !== true || code === 'local_model_identity_mismatch' ||
+          !repairCoordinator.ownsInitialFailure(batch?.id, imageKey)) return false;
+      // A provider stream stopped before any line (stalled, thought too long,
+      // safety ceiling) is not repaired automatically: its error shows now.
+      if (STREAM_STOP_NO_REPAIR.has(code)) {
+        repairCoordinator.releaseStoppedPage(batch?.id, imageKey, code);
+        return false;
+      }
+      return true;
+    },
     shouldSuppressPartialNotice: ({ batch, imageKey }) =>
       repairCoordinator.ownsInitialFailure(batch?.id, imageKey),
     onDelivered: (ctx, ok) => repairCoordinator.markDelivered(ctx, ok),
+    resultCache,
     log,
   });
 export { handleStaleJob, handleJobError, handleResult };
@@ -542,6 +572,17 @@ async function processJobInner(payload, tabId, frameId = 0) {
 
   const sessionId = getTabSessionId(tabId) || bumpTabSession(tabId, pageUrl);
 
+  // Result cache (every site except MangaDex, which has its own md
+  // cache): computed after acquisition so blob:/canvas sources can use the
+  // fetched bytes. "" = this image/settings cannot be cached. The key holds
+  // every generation setting itself (no settings epoch), so a page made under
+  // other settings stays cached for them (10493).
+  const epochAtStart = getSettingsEpoch(); // MangaDex md key + repair
+  const cacheKey = mdKeyFromUrl(payload?.src) ? "" :
+    await resultCacheKey(payload, { apiBase: base, normalizeUrl: normImgSrc }).catch(() => "");
+  // MangaDex pages record which generation settings produced them.
+  const generationKey = mdKeyFromUrl(payload?.src) ? await generationFingerprint(payload) : "";
+
   // Builds the context record stored in the registry for this job.
   const makeContext = (extra = {}) => ({
     imgUrl: payload.src,
@@ -556,13 +597,46 @@ async function processJobInner(payload, tabId, frameId = 0) {
     imageKey,
     pageUrl,
     seriesKey: String(payload?.context?.series_key || "").trim(),
+    pageIndex: Number.isInteger(payload?.context?.page_index) ? payload.context.page_index : undefined,
     sessionId: originSession || sessionId,
     workflowId,
     keepCacheOnStale: isMd,
-    settingsEpoch: getSettingsEpoch(),
+    settingsEpoch: epochAtStart,
+    resultCacheKey: cacheKey,
+    generationKey,
     traceId,
     ...extra,
   });
+
+  if (cacheKey) {
+    const hit = resultCache.get(cacheKey);
+    traceNote("background/jobs.js", "resultCache", {
+      outcome: hit ? "hit" : "miss", imageId: imageKey, batchId,
+      identity: cacheKey.slice(0, cacheKey.indexOf(":")), mode: payload?.mode || "",
+      ...(hit ? { imageOmitted: hit.imageOmitted, bytes: hit.bytes, providerCalls: 0, usageRecorded: false } : {}),
+    }, traceId);
+    if (hit) {
+      // Same image + same effective settings: reuse the finished result. No
+      // Lens/AI request, no usage receipt or charge, and no Conversation
+      // history append (the page never reaches the provider path).
+      const jobId = crypto.randomUUID();
+      rememberJob(jobId, makeContext({ startedAt: Date.now(), transport: "result_cache", resultCacheHit: true }));
+      await wf.lensRequested(workflowId, `result-cache:${jobId}`);
+      await wf.lensReady(workflowId);
+      await wf.textReady(workflowId);
+      if (batchId && imageKey) {
+        // Repair has nothing to do for a reused page (a repaired result
+        // replaces the cached text when repair applies it).
+        await repairCoordinator.capture(batchId, { stage: "skipped", imageId: imageKey, jobId, reason: "result_cache_hit" });
+        markBatchInitialAi(batchId, imageKey);
+      }
+      // The cached result carries the first job's ids; this delivery belongs
+      // to the current image/batch.
+      hit.result.metadata = { ...(hit.result.metadata || {}), ...(payload.metadata || {}) };
+      await handleResult(jobId, hit.result);
+      return;
+    }
+  }
 
   // Reuse the trace stamped before acquisition for capability/engine routing.
   setTrace(traceId);
@@ -622,10 +696,8 @@ async function processJobInner(payload, tabId, frameId = 0) {
       batchUpdateToast(batch, "Compatibility error");
       finalizeBatch(batch);
     }
-    // A bare string reaches makeTpError() with no code, matches none of the
-    // legacy patterns, and is rendered to the user as "unknown cause · UNKNOWN"
-    // — the least useful sentence we can put on an image, for the one failure
-    // whose cause we know exactly.
+    // Pass a coded error: a bare string would render as "unknown cause ·
+    // UNKNOWN" for a failure whose cause is known exactly.
     failJobImmediately(
       tabId,
       payload?.src || null,
@@ -724,7 +796,6 @@ async function runSyncTranslate(
   {
     tabId,
     frameId,
-    batch,
     batchId,
     imageKey,
     workflowId = "",
@@ -755,8 +826,8 @@ async function runSyncTranslate(
 
   const plan = aiPlan;
 
-  // The user can put the whole pipeline back on the API. The extension then only
-  // captures the image and inserts the result, exactly as the pre-v2 build did.
+  // The user can put the whole pipeline back on the API; the extension then only
+  // captures the image and inserts the result.
   const apiEngine = payload?.engine === "api";
   const mayUseLensDirect =
     !apiEngine && (payload.source !== "ai" || Boolean(plan));
@@ -765,10 +836,9 @@ async function runSyncTranslate(
 
   await wf.lensRequested(workflowId, `lens-direct:${jobId}`);
   let lensDone = false;
-  // Own failures by the stage that is actually running. The old catch always
-  // reported Lens degradation, even after Lens had succeeded and the local AI
-  // request was already in flight, producing the illegal transition
-  // AI_REQUESTED -> LENS_DEGRADED and hiding the real provider failure.
+  // Own failures by the stage actually running, so a provider failure after Lens
+  // succeeded is not reported as Lens degradation (AI_REQUESTED -> LENS_DEGRADED
+  // is an illegal transition).
   let directStage = "lens";
   try {
     if (!mayUseLensDirect) {
@@ -830,9 +900,7 @@ async function runSyncTranslate(
         // supplied the authoritative units here, so zero translatable units is
         // a terminal skip and needs neither a scheduler slot nor a provider call.
         const preAiUnits = translationUnits(direct.lensDocument);
-        const hasTranslatableAiText = preAiUnits.some(
-          (unit) => unit?.translatable,
-        );
+        const hasTranslatableAiText = preAiUnits.some((unit) => unit?.translatable);
         if (!preAiUnits.length || !hasTranslatableAiText) {
           markNoTranslatableText(
             direct,
@@ -852,6 +920,8 @@ async function runSyncTranslate(
             },
             String(payload?.context?.tp_trace || ""),
           );
+          await repairCoordinator.capture(batchId, {stage:'skipped', imageId:imageKey, jobId,
+            reason:direct.meta.skipped_reason});
           markBatchInitialAi(batchId, imageKey);
           await wf.textReady(workflowId);
           await handleResult(jobId, direct);
@@ -940,9 +1010,7 @@ async function runSyncTranslate(
     if (e?.name === "AbortError") {
       return;
     }
-    // Preserve the structured Local-AI error through the route-decline path.
-    // Keeping only its message used to discard codes such as timeout and
-    // thinking-without-final-answer, so the image badge fell back to UNKNOWN.
+    // Keep the structured failure code for the image badge and admission fence.
     decline.error = e;
     if (!e?.skipDirect) {
       reportFailure("the extension route threw before it could draw", e, {
@@ -973,12 +1041,8 @@ async function runSyncTranslate(
     }
   }
 
-  // The extension engine does not quietly hand a text page to the server. When the
-  // browser cannot draw it, that is a failure with a reason, not a different engine:
-  // a page that silently arrives rendered by the API looks like the engine switch did
-  // nothing, and the grouping failure behind it never gets seen. `lens_images` is unaffected
-  // (its only route has always been `/v1/translate`), and so is the API engine, where
-  // the server owning the whole pipeline is the point.
+  // An extension text route failure stops here. Only the selected API engine
+  // or the image-only Lens mode may send the whole pipeline to the server.
   if (!apiEngine && payload.mode === "lens_text") {
     const reason =
       decline.reason ||
@@ -990,7 +1054,9 @@ async function runSyncTranslate(
       "engineRoute",
       {
         engine: "extension",
-        outcome: "stopped",
+        outcome: isPaidAdmissionBlocked(decline.error) ? "blocked" : "stopped",
+        code: String(decline.error?.tpError?.code || decline.error?.code || ""),
+        owner: /^paid_/i.test(String(decline.error?.tpError?.code || decline.error?.code || "")) ? "control_center" : undefined,
         reason,
         mode: payload.mode,
         source: payload.source,
@@ -1198,6 +1264,6 @@ export function discardBatchResults(batchId, reason = "user_cancelled") {
       continue;
     markImagePhase(bid, key, "cancelled", { lastError: reason });
   }
-  batchUpdateToast(batch, "Cancelled", true);
+  batchUpdateToast(batch, "Cancelled");
   batchStopKeepAlive(batch);
 }

@@ -1,0 +1,404 @@
+{
+  "scope": "Pure actual Extension Local adapters and native metadata normalization; no generation/network. Model names deliberately unknown; aliases compared to current API registry.",
+  "passed": true,
+  "checks": [
+    {
+      "name": "jan/future-model-99: minimum payload stays provider-owned, no guessed cloud controls",
+      "passed": true
+    },
+    {
+      "name": "jan/future-model-99: explicit Off/High without native contract rejects",
+      "passed": true
+    },
+    {
+      "name": "jan/openai-gpt-unknown-2040: minimum payload stays provider-owned, no guessed cloud controls",
+      "passed": true
+    },
+    {
+      "name": "jan/openai-gpt-unknown-2040: explicit Off/High without native contract rejects",
+      "passed": true
+    },
+    {
+      "name": "jan/qwen-oss-reasoner-new: minimum payload stays provider-owned, no guessed cloud controls",
+      "passed": true
+    },
+    {
+      "name": "jan/qwen-oss-reasoner-new: explicit Off/High without native contract rejects",
+      "passed": true
+    },
+    {
+      "name": "textgen/future-model-99: minimum payload stays provider-owned, no guessed cloud controls",
+      "passed": true
+    },
+    {
+      "name": "textgen/future-model-99: explicit Off/High without native contract rejects",
+      "passed": true
+    },
+    {
+      "name": "textgen/openai-gpt-unknown-2040: minimum payload stays provider-owned, no guessed cloud controls",
+      "passed": true
+    },
+    {
+      "name": "textgen/openai-gpt-unknown-2040: explicit Off/High without native contract rejects",
+      "passed": true
+    },
+    {
+      "name": "textgen/qwen-oss-reasoner-new: minimum payload stays provider-owned, no guessed cloud controls",
+      "passed": true
+    },
+    {
+      "name": "textgen/qwen-oss-reasoner-new: explicit Off/High without native contract rejects",
+      "passed": true
+    },
+    {
+      "name": "koboldcpp/future-model-99: minimum payload stays provider-owned, no guessed cloud controls",
+      "passed": true
+    },
+    {
+      "name": "koboldcpp/future-model-99: explicit Off/High without native contract rejects",
+      "passed": true
+    },
+    {
+      "name": "koboldcpp/openai-gpt-unknown-2040: minimum payload stays provider-owned, no guessed cloud controls",
+      "passed": true
+    },
+    {
+      "name": "koboldcpp/openai-gpt-unknown-2040: explicit Off/High without native contract rejects",
+      "passed": true
+    },
+    {
+      "name": "koboldcpp/qwen-oss-reasoner-new: minimum payload stays provider-owned, no guessed cloud controls",
+      "passed": true
+    },
+    {
+      "name": "koboldcpp/qwen-oss-reasoner-new: explicit Off/High without native contract rejects",
+      "passed": true
+    },
+    {
+      "name": "vllm/future-model-99: minimum payload stays provider-owned, no guessed cloud controls",
+      "passed": true
+    },
+    {
+      "name": "vllm/future-model-99: explicit Off/High without native contract rejects",
+      "passed": true
+    },
+    {
+      "name": "vllm/openai-gpt-unknown-2040: minimum payload stays provider-owned, no guessed cloud controls",
+      "passed": true
+    },
+    {
+      "name": "vllm/openai-gpt-unknown-2040: explicit Off/High without native contract rejects",
+      "passed": true
+    },
+    {
+      "name": "vllm/qwen-oss-reasoner-new: minimum payload stays provider-owned, no guessed cloud controls",
+      "passed": true
+    },
+    {
+      "name": "vllm/qwen-oss-reasoner-new: explicit Off/High without native contract rejects",
+      "passed": true
+    },
+    {
+      "name": "llamafile/future-model-99: minimum payload stays provider-owned, no guessed cloud controls",
+      "passed": true
+    },
+    {
+      "name": "llamafile/future-model-99: explicit Off/High without native contract rejects",
+      "passed": true
+    },
+    {
+      "name": "llamafile/openai-gpt-unknown-2040: minimum payload stays provider-owned, no guessed cloud controls",
+      "passed": true
+    },
+    {
+      "name": "llamafile/openai-gpt-unknown-2040: explicit Off/High without native contract rejects",
+      "passed": true
+    },
+    {
+      "name": "llamafile/qwen-oss-reasoner-new: minimum payload stays provider-owned, no guessed cloud controls",
+      "passed": true
+    },
+    {
+      "name": "llamafile/qwen-oss-reasoner-new: explicit Off/High without native contract rejects",
+      "passed": true
+    },
+    {
+      "name": "gpt4all/future-model-99: minimum payload stays provider-owned, no guessed cloud controls",
+      "passed": true
+    },
+    {
+      "name": "gpt4all/future-model-99: explicit Off/High without native contract rejects",
+      "passed": true
+    },
+    {
+      "name": "gpt4all/openai-gpt-unknown-2040: minimum payload stays provider-owned, no guessed cloud controls",
+      "passed": true
+    },
+    {
+      "name": "gpt4all/openai-gpt-unknown-2040: explicit Off/High without native contract rejects",
+      "passed": true
+    },
+    {
+      "name": "gpt4all/qwen-oss-reasoner-new: minimum payload stays provider-owned, no guessed cloud controls",
+      "passed": true
+    },
+    {
+      "name": "gpt4all/qwen-oss-reasoner-new: explicit Off/High without native contract rejects",
+      "passed": true
+    },
+    {
+      "name": "llamacpp/future-model-99: minimum payload stays provider-owned, no guessed cloud controls",
+      "passed": true
+    },
+    {
+      "name": "llamacpp/future-model-99: explicit Off/High without native contract rejects",
+      "passed": true
+    },
+    {
+      "name": "llamacpp/openai-gpt-unknown-2040: minimum payload stays provider-owned, no guessed cloud controls",
+      "passed": true
+    },
+    {
+      "name": "llamacpp/openai-gpt-unknown-2040: explicit Off/High without native contract rejects",
+      "passed": true
+    },
+    {
+      "name": "llamacpp/qwen-oss-reasoner-new: minimum payload stays provider-owned, no guessed cloud controls",
+      "passed": true
+    },
+    {
+      "name": "llamacpp/qwen-oss-reasoner-new: explicit Off/High without native contract rejects",
+      "passed": true
+    },
+    {
+      "name": "Local alias local resolves consistently with API",
+      "passed": true
+    },
+    {
+      "name": "Local alias llama resolves consistently with API",
+      "passed": true
+    },
+    {
+      "name": "Local alias lm-studio resolves consistently with API",
+      "passed": true
+    },
+    {
+      "name": "Local alias lm_studio resolves consistently with API",
+      "passed": true
+    },
+    {
+      "name": "Local alias lms resolves consistently with API",
+      "passed": true
+    },
+    {
+      "name": "Local alias jan.ai resolves consistently with API",
+      "passed": true
+    },
+    {
+      "name": "Local alias text-generation-webui resolves consistently with API",
+      "passed": true
+    },
+    {
+      "name": "Local alias oobabooga resolves consistently with API",
+      "passed": true
+    },
+    {
+      "name": "Local alias ooba resolves consistently with API",
+      "passed": true
+    },
+    {
+      "name": "Local alias kobold resolves consistently with API",
+      "passed": true
+    },
+    {
+      "name": "Local alias koboldai resolves consistently with API",
+      "passed": true
+    },
+    {
+      "name": "Local alias gpt-4-all resolves consistently with API",
+      "passed": true
+    },
+    {
+      "name": "Local alias gpt-4all resolves consistently with API",
+      "passed": true
+    },
+    {
+      "name": "Local alias llama.cpp resolves consistently with API",
+      "passed": true
+    },
+    {
+      "name": "Local alias llama-cpp resolves consistently with API",
+      "passed": true
+    },
+    {
+      "name": "Ollama/future-model-99: native fields only and same prompt",
+      "passed": true
+    },
+    {
+      "name": "Custom/future-model-99: explicit protocol and adapter JSON, no name inference",
+      "passed": true
+    },
+    {
+      "name": "LM Studio/future-model-99: unknown future effort preserves Off proof without guessing order",
+      "passed": true
+    },
+    {
+      "name": "Ollama/openai-gpt-unknown-2040: native fields only and same prompt",
+      "passed": true
+    },
+    {
+      "name": "Custom/openai-gpt-unknown-2040: explicit protocol and adapter JSON, no name inference",
+      "passed": true
+    },
+    {
+      "name": "LM Studio/openai-gpt-unknown-2040: unknown future effort preserves Off proof without guessing order",
+      "passed": true
+    },
+    {
+      "name": "Ollama/qwen-oss-reasoner-new: native fields only and same prompt",
+      "passed": true
+    },
+    {
+      "name": "Custom/qwen-oss-reasoner-new: explicit protocol and adapter JSON, no name inference",
+      "passed": true
+    },
+    {
+      "name": "LM Studio/qwen-oss-reasoner-new: unknown future effort preserves Off proof without guessing order",
+      "passed": true
+    },
+    {
+      "name": "jan: native cache field never imports another provider price",
+      "passed": true
+    },
+    {
+      "name": "textgen: native cache field never imports another provider price",
+      "passed": true
+    },
+    {
+      "name": "koboldcpp: native cache field never imports another provider price",
+      "passed": true
+    },
+    {
+      "name": "vllm: native cache field never imports another provider price",
+      "passed": true
+    },
+    {
+      "name": "llamafile: native cache field never imports another provider price",
+      "passed": true
+    },
+    {
+      "name": "gpt4all: native cache field never imports another provider price",
+      "passed": true
+    },
+    {
+      "name": "llamacpp: native cache field never imports another provider price",
+      "passed": true
+    },
+    {
+      "name": "customlocal: native cache field never imports another provider price",
+      "passed": true
+    },
+    {
+      "name": "Custom cannot impersonate vLLM current max_model_len metadata",
+      "passed": true
+    },
+    {
+      "name": "LM Studio/future-model-99/loaded: native reasoning [\"off\",\"quantum_future\",\"high\"] keeps uncertainty",
+      "passed": true
+    },
+    {
+      "name": "LM Studio/future-model-99/loaded: native reasoning [\"low\",\"quantum_future\",\"high\"] keeps uncertainty",
+      "passed": true
+    },
+    {
+      "name": "LM Studio/future-model-99/loaded: native reasoning [\"quantum_future\"] keeps uncertainty",
+      "passed": true
+    },
+    {
+      "name": "LM Studio/future-model-99/loaded: native reasoning [] keeps uncertainty",
+      "passed": true
+    },
+    {
+      "name": "LM Studio/future-model-99/JIT: native reasoning [\"off\",\"quantum_future\",\"high\"] keeps uncertainty",
+      "passed": true
+    },
+    {
+      "name": "LM Studio/future-model-99/JIT: native reasoning [\"low\",\"quantum_future\",\"high\"] keeps uncertainty",
+      "passed": true
+    },
+    {
+      "name": "LM Studio/future-model-99/JIT: native reasoning [\"quantum_future\"] keeps uncertainty",
+      "passed": true
+    },
+    {
+      "name": "LM Studio/future-model-99/JIT: native reasoning [] keeps uncertainty",
+      "passed": true
+    },
+    {
+      "name": "LM Studio/openai-gpt-unknown-2040/loaded: native reasoning [\"off\",\"quantum_future\",\"high\"] keeps uncertainty",
+      "passed": true
+    },
+    {
+      "name": "LM Studio/openai-gpt-unknown-2040/loaded: native reasoning [\"low\",\"quantum_future\",\"high\"] keeps uncertainty",
+      "passed": true
+    },
+    {
+      "name": "LM Studio/openai-gpt-unknown-2040/loaded: native reasoning [\"quantum_future\"] keeps uncertainty",
+      "passed": true
+    },
+    {
+      "name": "LM Studio/openai-gpt-unknown-2040/loaded: native reasoning [] keeps uncertainty",
+      "passed": true
+    },
+    {
+      "name": "LM Studio/openai-gpt-unknown-2040/JIT: native reasoning [\"off\",\"quantum_future\",\"high\"] keeps uncertainty",
+      "passed": true
+    },
+    {
+      "name": "LM Studio/openai-gpt-unknown-2040/JIT: native reasoning [\"low\",\"quantum_future\",\"high\"] keeps uncertainty",
+      "passed": true
+    },
+    {
+      "name": "LM Studio/openai-gpt-unknown-2040/JIT: native reasoning [\"quantum_future\"] keeps uncertainty",
+      "passed": true
+    },
+    {
+      "name": "LM Studio/openai-gpt-unknown-2040/JIT: native reasoning [] keeps uncertainty",
+      "passed": true
+    },
+    {
+      "name": "LM Studio/qwen-oss-reasoner-new/loaded: native reasoning [\"off\",\"quantum_future\",\"high\"] keeps uncertainty",
+      "passed": true
+    },
+    {
+      "name": "LM Studio/qwen-oss-reasoner-new/loaded: native reasoning [\"low\",\"quantum_future\",\"high\"] keeps uncertainty",
+      "passed": true
+    },
+    {
+      "name": "LM Studio/qwen-oss-reasoner-new/loaded: native reasoning [\"quantum_future\"] keeps uncertainty",
+      "passed": true
+    },
+    {
+      "name": "LM Studio/qwen-oss-reasoner-new/loaded: native reasoning [] keeps uncertainty",
+      "passed": true
+    },
+    {
+      "name": "LM Studio/qwen-oss-reasoner-new/JIT: native reasoning [\"off\",\"quantum_future\",\"high\"] keeps uncertainty",
+      "passed": true
+    },
+    {
+      "name": "LM Studio/qwen-oss-reasoner-new/JIT: native reasoning [\"low\",\"quantum_future\",\"high\"] keeps uncertainty",
+      "passed": true
+    },
+    {
+      "name": "LM Studio/qwen-oss-reasoner-new/JIT: native reasoning [\"quantum_future\"] keeps uncertainty",
+      "passed": true
+    },
+    {
+      "name": "LM Studio/qwen-oss-reasoner-new/JIT: native reasoning [] keeps uncertainty",
+      "passed": true
+    }
+  ],
+  "total": 99,
+  "failed": 0
+}

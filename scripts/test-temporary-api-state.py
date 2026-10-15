@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'api'))
 from backend.ai.translation_paths import store as conversations
 from backend.application.repair_pool import store as repair
 from backend.application.repair_pool import state
-from backend.ai import accounting, rategate
+from backend.ai import accounting
 
 class TemporaryStateTests(unittest.TestCase):
     def test_no_state_file_io_even_with_legacy_paths(self):
@@ -24,7 +24,7 @@ class TemporaryStateTests(unittest.TestCase):
             legacy.write_bytes(b'old user bytes')
             with patch.dict(os.environ, {'TP_CONVERSATION_STATE_FILE':str(legacy),
                     'TP_REPAIR_STATE_FILE':str(legacy), 'TP_USAGE_STATE_FILE':str(legacy),
-                    'TP_RATE_STATE_FILE':str(legacy), 'TP_USAGE_RECEIPTS':'on'}), \
+                    'TP_USAGE_RECEIPTS':'on'}), \
                  patch('sqlite3.connect', side_effect=AssertionError('unexpected SQLite')), \
                  patch.object(Path, 'mkdir', side_effect=AssertionError('unexpected mkdir')), \
                  patch.object(Path, 'read_text', side_effect=AssertionError('unexpected read')), \
@@ -34,9 +34,6 @@ class TemporaryStateTests(unittest.TestCase):
                 pool=repair.RepairStore(legacy);pool.register('run','a'*64,['p'],'caller')
                 self.assertEqual(pool.read('run','a'*64)['id'],'run')
                 accounting._store({'receiptId':'no-disk','usage':{'totalTokens':17}})
-                gate=rategate.RateGate();self.assertEqual(gate._load_state(),{})
-                gate._state_dirty=True;gate._save_state(force=True)
-                self.assertEqual(gate.persistence()['storage'],'process_memory')
             self.assertEqual(legacy.read_bytes(),b'old user bytes')
             self.assertEqual(list(Path(folder).iterdir()),[legacy])
 
@@ -45,12 +42,12 @@ class TemporaryStateTests(unittest.TestCase):
 from backend.ai.translation_paths.store import Store
 from backend.application.repair_pool.store import RepairStore
 from backend.application.repair_pool.state import PoolError
-from backend.ai import accounting,rategate
+from backend.ai import accounting
 s=Store(sys.argv[1]);lease=s.try_acquire("fixed-key")
 p=RepairStore(sys.argv[1]);missing=False
 try:p.read("run","a"*64)
 except PoolError:missing=True
-print(json.dumps([len(lease.history),missing,len(accounting._receipt_cache),rategate.RateGate()._load_state()]))
+print(json.dumps([len(lease.history),missing,len(accounting._receipt_cache)]))
 lease.history=[{"user":"private","assistant":"answer"}];s.release(lease,commit=True)
 p.register("run","a"*64,["p"],"caller")
 accounting._store({"receiptId":"one","usage":{"totalTokens":9}})
@@ -60,7 +57,7 @@ accounting._store({"receiptId":"one","usage":{"totalTokens":9}})
                 done=subprocess.run([sys.executable,'-c',program,str(Path(folder)/'state.db')],
                     capture_output=True,text=True,env={**os.environ,'PYTHONPATH':str(Path(__file__).resolve().parents[1]/'api')})
                 self.assertEqual(done.returncode,0,done.stderr)
-                self.assertEqual(json.loads(done.stdout),[0,True,0,{}])
+                self.assertEqual(json.loads(done.stdout),[0,True,0])
             self.assertEqual(list(Path(folder).iterdir()),[])
 
     def test_live_conversation_capacity_never_evicts_active_scope(self):

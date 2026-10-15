@@ -33,14 +33,14 @@
     const requestId=crypto.randomUUID();
     return new Promise((resolve,reject)=>{
       let finished=false;
-      const stop=()=>{try{chrome.runtime.sendMessage({type:'TP_DOWNLOAD_CANCEL_READ',requestId},()=>void chrome.runtime.lastError);}catch{}};
+      const stop=()=>{try{chrome.runtime.sendMessage({type:'TP_DOWNLOAD_CANCEL_READ',requestId},()=>{try{void chrome.runtime.lastError;}catch{}});}catch{}};
       const done=(err,value)=>{if(finished)return;finished=true;clearTimeout(timer);signal?.removeEventListener('abort',abort);err?reject(err):resolve(value);};
       const abort=()=>{stop();done(abortError());};
       const timer=setTimeout(()=>{stop();done(new Error('Extension image read timed out'));},22_000);
       if(signal?.aborted){abort();return;}
       signal?.addEventListener('abort',abort,{once:true});
       try{chrome.runtime.sendMessage({type:'TP_DOWNLOAD_READ_SOURCE',requestId,url},async result=>{
-        const err=chrome.runtime.lastError;
+        let err;try{err=chrome.runtime.lastError;}catch(error){done(error);return;}
         if(finished)return;
         if(err || !result?.ok){done(new Error(result?.error || err?.message || 'Image source unavailable'));return;}
         try {

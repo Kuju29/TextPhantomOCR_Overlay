@@ -157,8 +157,11 @@ async function occupy(key, n) {
   const apiRoute = (await Promise.all([
     "provider_execution.py", "provider_errors.py", "rate_admission.py", "response_mapping.py",
   ].map((name) => readFile(new URL(`../api/backend/application/ai_translation/${name}`, import.meta.url), "utf8")))).join("\n");
-  assert.match(apiRoute, /run_in_executor\(ctx\.request\.app\.state\.ai_executor, threaded_invoke\)/,
-    "text.ai must use the dedicated AI executor and propagate its wire-trace context");
+  // .84: the dedicated AI executor, or the Login lane's own executor for AI Login.
+  assert.match(apiRoute, /executor = state\.login_executor if login_lane else state\.ai_executor/,
+    "text.ai must use the dedicated AI executor (Login: its own lane)");
+  assert.match(apiRoute, /run_in_executor\(executor, threaded_invoke\)/,
+    "text.ai must propagate its wire-trace context through the selected executor");
   assert.match(apiRoute, /error_payload\([\s\S]*?code="server_busy"[\s\S]*?generationAttempts": 0/,
     "admission backpressure must use the canonical error payload and remain explicitly pre-provider");
   assert.match(apiRoute, /semantics = provider_http_failure\(exc\)[\s\S]*?limited = semantics\.code == "provider_rate_limited"/,
@@ -175,7 +178,6 @@ async function occupy(key, n) {
   const main = await readFile(new URL("../api/backend/main.py", import.meta.url), "utf8");
   const config = await readFile(new URL("../api/backend/config.py", import.meta.url), "utf8");
   const admission = await readFile(new URL("../api/backend/jobs/admission.py", import.meta.url), "utf8");
-  const hfThrottle = await readFile(new URL("../api/backend/ai/throttle.py", import.meta.url), "utf8");
   assert.match(main, /_AI_LIMIT = max\(1, min\(_AI_CONFIGURED, _AI_THREADS\)\)/,
     "AI admission must never exceed the real dedicated executor size");
   assert.match(main, /max_waiters=settings\.sync_ai_max_waiters,[\s\S]*max_wait_sec=settings\.sync_ai_max_wait_sec/,
@@ -190,12 +192,6 @@ async function occupy(key, n) {
     "max_waiters=0 must reject immediately instead of secretly queuing one request per identity");
   assert.match(admission, /def _hard_waiting_cap\(self\)[\s\S]*return self\._max_waiters/,
     "max_waiters must be a literal global waiter cap, not limit + max_waiters");
-  assert.match(config, /HF_AI_MAX_CONCURRENCY", 0/,
-    "HF must not impose a hidden TextPhantom concurrency=1 default");
-  assert.match(config, /HF_AI_MIN_INTERVAL_SEC", 0\.0/,
-    "HF must not impose a hidden 0.8s spacing default");
-  assert.match(hfThrottle, /if gate\.semaphore is None:[\s\S]*return _call\(\)/,
-    "HF throttle must truly bypass its semaphore when no manual cap was configured");
 
   const transport = [
     await readFile(new URL("../src/background/transports/translate.js", import.meta.url), "utf8"),

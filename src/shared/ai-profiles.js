@@ -1,5 +1,6 @@
 import { normalizeModelCapabilities } from "./model-capabilities.js";
 import { normalizeUserReasoningPreference } from "./reasoning-preference.js";
+import { cleanTokenCeiling, validTokenCeiling, TOKEN_CEILING_MIN, TOKEN_CEILING_MAX } from "./token-ceiling.js";
 /** Pure, opt-in Provider + Model profile core. Runtime activation is external. */
 import { normalizePrompt, makeProfilePromptKey } from "./prompt.js";
 import { isLocalAiProvider, isLocalAiTarget } from "./constants.js";
@@ -34,6 +35,9 @@ const PROFILE_FIELDS = new Set([
   "pageImage",
   "memoryMode",
   "styleExamples",
+  "styleExamplesPreferenceVersion",
+  "tokenCeilingEnabled",
+  "tokenCeiling",
   "translationMode",
   "conversationReset",
   "concurrency",
@@ -440,7 +444,25 @@ function mergedProfile(defaults, stored, patch = null) {
     )
   )
     delete output.temperature;
-  output.styleExamples = output.styleExamples !== false;
+  if (Object.hasOwn(change, "styleExamples") && typeof change.styleExamples !== "boolean")
+    throw new TypeError("styleExamples must be a boolean");
+  if (Object.hasOwn(change, "styleExamplesPreferenceVersion") && change.styleExamplesPreferenceVersion !== 1)
+    throw new TypeError("Unsupported styleExamples preference version");
+  // Earlier releases forced/defaulted examples ON without exposing a choice.
+  // Only a scoped preference written by the new toggle can opt in. All other
+  // model settings remain intact when an old profile is first normalized.
+  output.styleExamples = (Object.hasOwn(change, "styleExamples") ||
+    output.styleExamplesPreferenceVersion === 1) && output.styleExamples === true;
+  output.styleExamplesPreferenceVersion = 1;
+  if (Object.hasOwn(change, "tokenCeilingEnabled") && typeof change.tokenCeilingEnabled !== "boolean")
+    throw new TypeError("tokenCeilingEnabled must be a boolean");
+  if (Object.hasOwn(change, "tokenCeiling") && !validTokenCeiling(change.tokenCeiling))
+    throw new TypeError(`tokenCeiling must be an integer from ${TOKEN_CEILING_MIN} to ${TOKEN_CEILING_MAX}`);
+  {
+    const ceiling = cleanTokenCeiling(output);
+    delete output.tokenCeiling; delete output.tokenCeilingEnabled;
+    Object.assign(output, ceiling);
+  }
   // Keep existing saved values for compatibility. The provider-owned picker
   // policy resolves the actual mode for each new job without rewriting history.
   output.translationMode = output.translationMode === "independent"
@@ -609,7 +631,7 @@ export function migrateAiProfiles({
     memoryMode: ["off", "terms", "full"].includes(legacy.aiMemoryMode)
       ? legacy.aiMemoryMode
       : "off",
-    styleExamples: legacy.aiStyleExamples !== false,
+    styleExamples: false,
     translationMode: legacy.aiTranslationMode === "independent"
       ? "independent" : "conversation",
     conversationReset: String(legacy.aiConversationReset || "0"),
@@ -698,7 +720,7 @@ export function buildAiProfileStoragePatch({
     aiThinking: profile.thinking,
     aiPageImage: profile.pageImage,
     aiMemoryMode: profile.memoryMode,
-    aiStyleExamples: profile.styleExamples !== false,
+    aiStyleExamples: profile.styleExamples === true,
     aiTranslationMode: profile.translationMode === "independent"
       ? "independent" : "conversation",
     aiConversationReset: String(profile.conversationReset || "0"),

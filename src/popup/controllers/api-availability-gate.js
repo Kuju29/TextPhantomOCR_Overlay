@@ -1,3 +1,4 @@
+import { createRecoveryBackoff } from "../../shared/retry-backoff.js";
 const DEFAULT_FAILURES_TO_BLOCK = 2;
 const DEFAULT_RECOVERY_POLL_MS = 5000;
 const DEFAULT_SNAPSHOT_MAX_AGE_MS = 60000;
@@ -13,20 +14,30 @@ export function createApiAvailabilityGate({
   checkApi,
   failuresToBlock = DEFAULT_FAILURES_TO_BLOCK,
   recoveryPollMs = DEFAULT_RECOVERY_POLL_MS,
-  setIntervalFn = setInterval,
-  clearIntervalFn = clearInterval,
+  setTimeoutFn = setTimeout,
+  clearTimeoutFn = clearTimeout,
   now = Date.now,
   snapshotMaxAgeMs = DEFAULT_SNAPSHOT_MAX_AGE_MS,
+  events = globalThis,
 }) {
   let state = "unknown";
   let consecutiveFailures = 0;
-  let recoveryTimer = null;
+  // While offline, re-check after 5, 15, 30, then every 60 s (capped), and
+  // at once on the browser 'online' event -- not every 5 s indefinitely.
+  const recovery = createRecoveryBackoff({
+    run: () => checkApi(),
+    delays: [recoveryPollMs, recoveryPollMs * 3, recoveryPollMs * 6, recoveryPollMs * 12],
+    setTimeoutFn, clearTimeoutFn, events,
+  });
   const disabledBeforeGate = new Map();
 
   const gatedControls = () => [els.translatePanel, els.aiPanel]
     .filter(Boolean)
     .flatMap((panel) => [...panel.querySelectorAll("button, input, select, textarea")])
-    .filter((control) => control !== els.apiGateTranslateOpen && control !== els.apiGateAiOpen);
+    .filter((control) => ![
+      els.apiGateTranslateOpen, els.apiGateAiOpen, els.aiService,
+      els.aiPaidCheck, els.aiPaidLogout,
+    ].includes(control));
 
   const render = () => {
     const blocked = state === "offline";
@@ -48,15 +59,8 @@ export function createApiAvailabilityGate({
     }
   };
 
-  const stopRecovery = () => {
-    if (recoveryTimer !== null) clearIntervalFn(recoveryTimer);
-    recoveryTimer = null;
-  };
-
-  const startRecovery = () => {
-    if (recoveryTimer !== null) return;
-    recoveryTimer = setIntervalFn(() => void checkApi(), recoveryPollMs);
-  };
+  const stopRecovery = () => recovery.succeeded();
+  const startRecovery = () => { recovery.failed(); };
 
   const success = () => {
     consecutiveFailures = 0;
@@ -106,7 +110,7 @@ export function createApiAvailabilityGate({
     failure,
     acceptSnapshot,
     apply: render,
-    dispose: stopRecovery,
-    snapshot: () => ({ state, consecutiveFailures, recoveryPolling: recoveryTimer !== null }),
+    dispose: () => recovery.dispose(),
+    snapshot: () => ({ state, consecutiveFailures, recoveryPolling: recovery.pending, recoveryAttempt: recovery.attempt }),
   };
 }

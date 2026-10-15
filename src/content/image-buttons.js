@@ -7,6 +7,9 @@
   const STORAGE_KEY = "imgButtonsEnabled";
   const RESCAN_DEBOUNCE_MS = 400;
   const BTN_SIZE = 30;
+  // Selected-interface-language copy (shared/page-ui-text.js); English without it.
+  const pageText = (source, values) => globalThis.TPPageText ? globalThis.TPPageText.t(source, values)
+    : String(source).replace(/\{([a-z]+)\}/g, (match, name) => values && name in values ? String(values[name]) : match);
 
   let enabled = false;
   let container = null;
@@ -168,32 +171,26 @@
     const srcUrl =
       TP.normUrl(TP.getBestImgUrl(img)) || img.currentSrc || img.src || "";
 
-    chrome.runtime.sendMessage(
-      { type: "TP_RUN_TRANSLATE_ONE", srcUrl },
-      (resp) => {
-        void chrome.runtime.lastError;
-        setTimeout(() => {
-          btn.dataset.busy = "";
-          btn.textContent = "🔍";
-        }, 4000);
-        if (resp && resp.ok === false) {
-          TP.showToast?.(
-            "TextPhantom: " + (resp.error || "translate failed"),
-            4000,
-          );
-        }
-      },
-    );
+    const reset = () => { btn.dataset.busy = ""; btn.textContent = "🔍"; };
+    const unavailable = () => { reset(); TP.showToast?.("TextPhantom: กรุณาโหลดหน้าเว็บใหม่แล้วลองอีกครั้ง", 4000); };
+    try {
+      chrome.runtime.sendMessage({ type: "TP_RUN_TRANSLATE_ONE", srcUrl }, (resp) => {
+        try { if (chrome.runtime.lastError) { unavailable(); return; } } catch { unavailable(); return; }
+        setTimeout(reset, 4000);
+        if (resp?.ok === false) TP.showToast?.("TextPhantom: " + (resp.error || pageText("translate failed")), 4000);
+      });
+    } catch { unavailable(); }
+
   }
 
   function makeButton(img) {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.style.display="none";
-    btn.setAttribute("aria-label","Translate this image");
+    btn.setAttribute("aria-label",pageText("Translate this image"));
     btn.className = "tp-img-btn";
     btn.textContent = "🔍";
-    btn.title = "Translate this image (TextPhantom)";
+    btn.title = pageText("Translate this image (TextPhantom)");
     btn.addEventListener("click", (e) => onButtonClick(img, btn, e));
     btn.addEventListener("mousedown", (e) => e.stopPropagation());
     return btn;
@@ -286,7 +283,7 @@
 
   try {
     chrome.storage.local.get(STORAGE_KEY, (items) => {
-      void chrome.runtime.lastError;
+      try { if (chrome.runtime.lastError) return; } catch { return; }
       if (items && items[STORAGE_KEY]) enable();
     });
     chrome.storage.onChanged.addListener((changes, area) => {

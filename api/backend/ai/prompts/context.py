@@ -94,12 +94,7 @@ def build_speaker_block(speakers: dict | None, *, lang: str = "en") -> str:
     return instruction_pack(lang)["speakers"] + "\n".join(lines)
 
 def build_prev_context_block(prev_context: list | None, limit: int = 6, *, lang: str = "en") -> str:
-    """Render the previous page's SOURCE tail for cross-page flow (R4).
-
-    ``prev_context`` is ``[{"src": ..., "who": ...?}, ...]`` in reading order —
-    source text only (from OCR), so parallel translation never waits on another
-    page's result.  Returns ``""`` when there is nothing usable.
-    """
+    """Bounded prior-story context; include a known translation when available."""
     if not isinstance(prev_context, list) or not prev_context:
         return ""
     lines: list[str] = []
@@ -110,7 +105,9 @@ def build_prev_context_block(prev_context: list | None, limit: int = 6, *, lang:
         if not src:
             continue
         who = str(entry.get("who") or "").strip()
-        lines.append(f"  [{who}] {src}"[:200] if who else f"  {src}"[:200])
+        tgt = str(entry.get("tgt") or "").strip().replace("\n", " ")
+        pair = f"SRC: {src[:240]} | TGT: {tgt[:240]}" if tgt else src[:240]
+        lines.append((f"  [{who}] " if who else "  ") + pair)
     if not lines:
         return ""
     return instruction_pack(lang)["previous"] + "\n".join(lines)

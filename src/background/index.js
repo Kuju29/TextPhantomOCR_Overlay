@@ -1,3 +1,9 @@
+import './login-auth.js';
+import './series-memory-messages.js';
+import './login/endpoint/login_endpoint_background.js';
+import { writeProfileChanges } from '../shared/profile-storage.js';
+import './support.js';
+import { startDiagnosticShipping,configureDiagnosticShipping,acceptDiagnosticEvent } from "./diagnostics-control.js";
 import { readDownloadImage, cancelDownloadRead, cancelTabDownloadReads } from "./download-images.js";
 import { handleReaderReceipt } from "./reader-events.js";
 import { recentDiagnostic, clearRecentDiagnostics } from "./ai/recent-diagnostics.js";
@@ -20,7 +26,7 @@ import { publicTpError } from "../shared/error-contract.js";
 import { resetAdaptiveLearning } from "./scheduler.js";
 
 import { apiHealthSnapshot, getApiBase, healthCache, warmupApi } from "./api.js";
-import { getLastBatchStatus, noteQueueStatus, batchesForTab, restorePersistedBatches } from "./batches.js";
+import { noteQueueStatus, batchesForTab, restorePersistedBatches } from "./batches.js";
 import { blobToDataUri } from "./images.js";
 import {
   setMaxConcurrency,
@@ -59,6 +65,8 @@ import {
   mdCacheKey,
   getCachedResult,
   getCachedDataUri,
+  tabGeneration,
+  forgetTabGenerations,
   stripImageFields,
 } from "./mangadex.js";
 import {
@@ -72,6 +80,7 @@ import { createSessionLifecycle } from "./session-lifecycle.js";
 import { createKeepalivePortLifecycle } from "./keepalive-port-lifecycle.js";
 import { setHandlers } from "./transports/polling.js";
 import { cancelJobsViaRest } from "./transports/cancel.js";
+import { installReady } from "./transports/install-header.js";
 import { onContextMenuClicked, recreateMenus } from "./context-menu.js";
 import { ensureThunderbirdMessageScripts } from "./thunderbird.js";
 import { createLocalDiscoveryController } from "./ai/local-discovery-controller.js";
@@ -80,8 +89,16 @@ import {
   getTraceHandshakeState,
   resetTraceHandshakeIdentity,
 } from "./trace-handshake.js";
+import { installLocalViewerCleanup } from "./local-viewer-cleanup.js";
+import { deleteLocalSession, listLocalSessionSummaries } from "../shared/local-gallery.js";
 
 const log = createLogger("SW");
+// Local viewer images (IndexedDB) are deleted once no viewer tab shows them.
+// Registered here, synchronously, so tabs.onRemoved wakes a stopped worker.
+installLocalViewerCleanup({
+  store: { list: listLocalSessionSummaries, remove: deleteLocalSession },
+  log: createLogger("local-viewer-cleanup"),
+});
 const sessionLifecycle = createSessionLifecycle({
   getTabSessionId,
   cancelTabWork,
@@ -136,22 +153,52 @@ ensureThunderbirdMessageScripts().catch((error) => {
 });
 
 setLogSink(recordLogLine);
+void startDiagnosticShipping().catch(() => {});
+// Read the install id once per service-worker start for work requests.
+void installReady();
 log.info("boot", { build: chrome.runtime.getManifest().version });
 
+let translationServiceMode;
+let translationModeRevision = 0;
+const translationModeReady = getStorage(['aiServiceMode']).then(saved => {
+  if (!translationModeRevision) translationServiceMode = saved.aiServiceMode || 'manual';
+}).catch(() => {});
+
 chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName !== "local" || !changes) return;
-  if (translationSettingsChanged(changes, areaName)) {
-    bumpSettingsEpoch();
-    void repairCoordinator.cancelSettings();
-    traceNote("background/index.js", "translationSettingsChanged", {
-      keys: Object.keys(changes).filter(key => key !== "aiProfileCredentialsV1"),
-      semanticChange: true,
-    });
+  if(areaName === 'session' && (changes.loginSessionId || changes.loginAccountId)) {
+    void getStorage(['paidTranslationSource']).then(values=>{
+      if(translationServiceMode === 'paid' && values.paidTranslationSource === 'login') {
+        // A running job keeps its own saved Login session; only
+        // new jobs use the new one. Reload/navigation/Cancel still stop work.
+        bumpSettingsEpoch();
+        traceNote('background/index.js','loginSessionChanged',{semanticChange:true,keys:Object.keys(changes).filter(key=>['loginSessionId','loginAccountId'].includes(key))});
+      }
+    });return;
   }
+  if (areaName !== "local" || !changes) return;
+  if (changes.aiServiceMode) {
+    translationModeRevision++;
+    translationServiceMode = changes.aiServiceMode.newValue || 'manual';
+  }
+  const invalidate = () => {
+    if (translationSettingsChanged(changes, areaName, translationServiceMode)) {
+      // Owner rule (Manual, Paid, Login): each job runs on the settings
+      // saved when it started. A change applies to NEW jobs and cache keys only;
+      // it never cancels running work or discards its results.
+      bumpSettingsEpoch();
+      traceNote("background/index.js", "translationSettingsChanged", {
+        keys: Object.keys(changes).filter(key => key !== "aiProfileCredentialsV1"),
+        semanticChange: true,
+      });
+    }
+  };
+  if (translationServiceMode == null) void translationModeReady.then(invalidate);
+  else invalidate();
 
 
   if (changes.customApiUrl) {
     resetLogShippingSupport();
+    void startDiagnosticShipping().catch(() => {});
     forgetCapabilities();
     forgetPrompts();
     log.info("api base changed; forgot cached capabilities and prompts");
@@ -207,6 +254,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   cancelTabDownloadReads(tabId);
+  forgetTabGenerations(tabId);
   const active = batchesForTab(tabId).filter(batch => batch.reader && !batch.cancelled);
   if (active.length) log.warn('reader cancellation trigger', {
     source:'tab_closed',tabId,runIds:active.map(batch=>batch.reader.runId),
@@ -230,6 +278,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const type = String(msg?.type || "");
 
   switch (type) {
+    case 'AI_PROFILE_PATCH':
+      if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(chrome.runtime.getURL('')) ||
+          !Array.isArray(msg.changes) || msg.changes.length > 2000) {
+        sendResponse({ok:false, error:'Invalid profile storage request'}); return false;
+      }
+      writeProfileChanges(msg.changes).then(() => sendResponse({ok:true}),
+        () => sendResponse({ok:false, error:'Could not save AI settings'}));
+      return true;
     case "TP_DOWNLOAD_READ_SOURCE":
       readDownloadImage(msg,sender).then(sendResponse);
       return true;
@@ -289,11 +345,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       repairCoordinator.resume().then(() => sendResponse({ok:true}));
       return true;
 
-    case "GET_BATCH_STATUS":
-      // No caller: batch status currently reaches the user only through on-page toasts.
-      sendResponse({ ok: true, batch: getLastBatchStatus() });
-      return true;
-
     case "GET_API_STATUS":
       // Status reads must be side-effect free. Opening the popup is not a
       // request to wake or re-probe the API.
@@ -323,6 +374,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: true });
       return true;
 
+    case "TP_DIAGNOSTICS_CONFIG":
+      if (!trustedUi(sender)) { sendResponse({ok:false}); return true; }
+      configureDiagnosticShipping(msg.apiBase, msg.enabled === true).then(sendResponse, () => sendResponse({ok:false}));
+      return true;
+    case "TP_DIAGNOSTIC_EVENT":
+      if (!trustedUi(sender)) { sendResponse({ok:false}); return true; }
+      acceptDiagnosticEvent(msg.record, msg.apiBase).then(sendResponse, () => sendResponse({ok:false}));
+      return true;
     case "TP_LOG":
       recordLogLine({
         ...(msg.record || {}),
@@ -404,6 +463,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     case "TP_MD_CHAPTER_CHANGED": {
       const tabId = sender?.tab?.id;
       if (Number.isFinite(tabId)) {
+        forgetTabGenerations(tabId);
         sessionLifecycle.onMangaDexChapterChanged(
           tabId,
           sender?.tab?.url || "",
@@ -414,15 +474,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
 
     case "TP_MD_CACHE_GET":
-      sendResponse({ items: collectMdCacheItems(msg) });
+      sendResponse({ items: collectMdCacheItems(msg, sender?.tab?.id) });
       return true;
-
-    case "TP_LOG": {
-      const fn = log[String(msg?.level || "info")] || log.info;
-      fn("[content] " + String(msg?.msg || ""), msg?.data || {});
-      sendResponse({ ok: true });
-      return true;
-    }
 
     case "CANCEL_BATCH": {
       const bid = String(msg.batchId || "");
@@ -518,11 +571,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 });
 
 // Builds the cached-result map answering a `TP_MD_CACHE_GET` message.
-function collectMdCacheItems(msg) {
+function collectMdCacheItems(msg, tabId) {
   const lang = typeof msg?.lang === "string" ? msg.lang : "";
   const mode = typeof msg?.mode === "string" ? msg.mode : "";
   const source = typeof msg?.source === "string" ? msg.source : "";
   if (!lang || !mode) return {};
+  // Translate pressed in this tab: only pages made under that press's
+  // generation settings are reused (10493).
+  const pressed = tabGeneration(tabId, { lang, mode, source });
 
   const includeNewImg = Boolean(msg?.includeNewImg);
   const keys = (Array.isArray(msg?.keys) ? msg.keys : []).slice(
@@ -542,6 +598,7 @@ function collectMdCacheItems(msg) {
     if (!cacheKey) continue;
     const rec = getCachedResult(cacheKey);
     if (!rec) continue;
+    if (pressed && rec.generation !== pressed) continue;
     const newImg =
       rec.newImg ||
       rec?.result?.imageDataUri ||

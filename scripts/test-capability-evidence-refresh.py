@@ -8,9 +8,9 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'api'))
 from backend.ai.provider_bootstrap import ensure_provider_registry
 ensure_provider_registry()
-from backend.ai import provider_resolution as cache, resolve as resolver, probe as probing
+from backend.ai import provider_resolution as cache, resolve as resolver
 from backend.ai.providers import cloud_huggingface as hf
-from backend.ai.provider_contract import GenerationRequest, ModelListResult, ProbeResponse
+from backend.ai.provider_contract import GenerationRequest, ModelListResult
 from backend.ai.clients.base import ChatResult
 from backend.ai.cloud_reasoning import CloudReasoningPreferenceUnavailable, ensure_cloud_reasoning_preflight
 
@@ -24,11 +24,14 @@ class EvidenceRefresh(unittest.TestCase):
         cache._MODEL_CAPABILITIES.clear()
         cache._OFF_CONTRADICTIONS.clear()
         cache._OFF_CONTRADICTIONS_NEXT_SWEEP = 0.0
-        cache._MODEL_PROMOTIONS.clear()
-        probing._PROBE_CACHE.clear()
         self.clock = patch.object(cache.time, 'monotonic', return_value=1000.)
         self.clock_mock = self.clock.start()
         self.addCleanup(self.clock.stop)
+        # A probe also requests selected-model limits now. Keep that read-only
+        # HTTP boundary offline without replacing the capability cache under test.
+        metadata = patch('backend.ai.providers.huggingface_details.refresh', return_value={})
+        metadata.start()
+        self.addCleanup(metadata.stop)
     def refresh(self, models=None, caps=None):
         listed = ModelListResult(models=[MODEL] if models is None else models,
                                  capabilities=caps or {}, status='valid', http_status=200)
@@ -135,13 +138,11 @@ class EvidenceRefresh(unittest.TestCase):
         self.selected()  # New accepted control alone cannot undo the observed violation.
         self.assertEqual(self.evidence()[1]['reasoning']['control'], 'provider')
         # A transient /models error clears the positive catalogue cache. The
-        # observed violation must outlive it and a later control-only probe.
+        # observed violation must outlive it and later accepted control evidence.
         with patch.object(hf.ADAPTER, 'list_models', return_value=ModelListResult(status='unreachable')):
             resolver._enumerate_models_detailed('huggingface', KEY, BASE)
         self.assertEqual(self.evidence()[1]['reasoning']['control'], 'provider')
-        with patch.object(hf.ADAPTER, 'probe', return_value=ProbeResponse(True, 200, capabilities=CAP)):
-            probed = probing.probe({'provider': 'huggingface', 'model': MODEL, 'api_key': KEY})
-        self.assertTrue(probed['ok'])
+        self.selected()
         self.assertEqual(self.evidence()[1]['reasoning']['control'], 'provider')
         with self.assertRaises(CloudReasoningPreferenceUnavailable):
             ensure_cloud_reasoning_preflight('huggingface', MODEL, 'off', 'off',
@@ -155,30 +156,6 @@ class EvidenceRefresh(unittest.TestCase):
         self.evidence(key='unrelated-key')
         self.assertEqual(cache._OFF_CONTRADICTIONS, {})
 
-    def test_cached_probe_returns_current_merged_evidence(self):
-        payload = {'provider': 'huggingface', 'model': MODEL, 'api_key': KEY}
-        self.refresh()
-        with patch.object(hf.ADAPTER, 'probe', return_value=ProbeResponse(True, 200, capabilities=CAP)) as call:
-            first = probing.probe(payload)
-            self.assertTrue(first['ok'])
-            self.refresh()
-            second = probing.probe(payload)
-            self.assertTrue(second['cached'])
-            self.assertEqual(second['model_capabilities'], first['model_capabilities'])
-            self.refresh(caps={MODEL: {'reasoning': {'supported': False}}})
-            third = probing.probe(payload)
-            self.assertIs(third['model_capabilities']['reasoning']['supported'], False)
-            self.assertNotIn('none', third['model_capabilities']['reasoning'].get('supported_efforts', []))
-            self.assertEqual(call.call_count, 1)
-    def test_forgotten_account_does_not_reuse_stale_success(self):
-        payload = {'provider': 'huggingface', 'model': MODEL, 'api_key': KEY}
-        self.refresh()
-        with patch.object(hf.ADAPTER, 'probe', side_effect=[ProbeResponse(True, 200, capabilities=CAP), ProbeResponse(False, 403)]) as call:
-            self.assertTrue(probing.probe(payload)['ok'])
-            cache.forget_model_capabilities('huggingface', BASE, KEY)
-            result = probing.probe(payload)
-            self.assertFalse(result['ok'])
-            self.assertFalse(result['cached'])
-            self.assertEqual(call.call_count, 2)
+    # 10491: the /ai/probe service (and its result cache) no longer exists.
 
 if __name__ == '__main__': unittest.main()

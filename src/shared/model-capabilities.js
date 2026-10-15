@@ -8,7 +8,8 @@ export function normalizeModelCapabilities(value) {
   const limits = normalizeLimits(source.limits);
   if (Object.keys(limits).length) out.limits = limits;
   const reasoning = {};
-  for (const key of ['supported', 'mandatory', 'default_enabled', 'supports_max_tokens', 'dynamic'])
+  for (const key of ['supported', 'mandatory', 'default_enabled', 'supports_max_tokens', 'dynamic',
+    'can_disable', 'minimum_unresolved', 'app_controlled'])
     if (typeof source.reasoning?.[key] === 'boolean') reasoning[key] = source.reasoning[key];
   if (['toggle', 'boolean', 'levels', 'provider'].includes(source.reasoning?.control))
     reasoning.control = source.reasoning.control;
@@ -24,7 +25,10 @@ export function normalizeModelCapabilities(value) {
       reasoning[key] = source.reasoning[key].trim().toLowerCase();
   }
   if (reasoning.mandatory === true) reasoning.supported = true;
+  if (typeof source.reasoning?.source === 'string') reasoning.source = source.reasoning.source.slice(0, 200);
   if (Object.keys(reasoning).length) out.reasoning = reasoning;
+  if (Array.isArray(source.supported_parameters) && source.supported_parameters.every(v => typeof v === 'string'))
+    out.supported_parameters = [...new Set(source.supported_parameters)].sort();
   if (source.vision && typeof source.vision === 'object' &&
       typeof source.vision.supported === 'boolean') {
     out.vision = { supported: source.vision.supported };

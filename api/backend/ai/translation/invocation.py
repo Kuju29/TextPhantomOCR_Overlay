@@ -30,6 +30,10 @@ from backend.ai.translation.result_decode import decode_result
 from backend.ai.reasoning_preference import (
     normalize_reasoning_preference, reasoning_is_active, resolve_reasoning_preference,
 )
+from backend.ai.thinking_state import classify_thinking_state, sends_provider_default
+
+THINKING_PROVIDER_DEFAULT = "provider_default"
+THINKING_NOT_APPLICABLE = "not_applicable_non_reasoning_model"
 
 # This module is also a supported standalone entry point in tests and tooling,
 # outside the API process composition root.
@@ -89,6 +93,19 @@ def _translate_once_impl(
     base_url = resolve_base_url(provider, ai.base_url)
     thinking_requested = normalize_reasoning_preference(getattr(ai, "thinking", None), "off")
     thinking_selected = thinking_requested
+    consumer_endpoint = False
+    website_switch = False
+    if provider == "login":
+        from backend.ai.login.login_translation import authorize_model
+        from backend.ai.login import login_session_store
+        _, login_session, _ = authorize_model(api_key, model)
+        consumer_endpoint = login_session_store.credential_for_session(login_session)["tokens"].get("transport") == "web_endpoint"
+        if consumer_endpoint:
+            # A website with a verified thinking switch (DeepSeek DeepThink)
+            # receives the user's choice; other websites decide themselves.
+            from backend.ai.login import login_native
+            website_switch = getattr(login_native.module(login_session["provider"]), "ENDPOINT_THINKING", False) is True
+    website_managed = consumer_endpoint and not website_switch
 
     assert_ai_base_url_allowed(
         provider, base_url,
@@ -140,6 +157,9 @@ def _translate_once_impl(
     discovery_fresh, server_capabilities = discovered_model_capabilities(
         provider, base_url, model, api_key
     )
+    if provider in {"paid", "login"} and not discovery_fresh:
+        from backend.ai.provider_resolution import refresh_cloud_model_capabilities
+        discovery_fresh, server_capabilities = refresh_cloud_model_capabilities(provider, base_url, model, api_key)
     if provider == "huggingface":
         from backend.ai.provider_resolution import refresh_hf_selected_metadata
         discovery_fresh, server_capabilities = refresh_hf_selected_metadata(provider, base_url, model, api_key)
@@ -159,6 +179,22 @@ def _translate_once_impl(
             # without exposing a credential-bearing upstream exception.
             raise CloudReasoningPreferenceUnavailable(
                 provider, model, thinking_requested) from None
+    if (is_local_provider(provider) and thinking_requested != "default" and not discovery_fresh
+            and provider not in {"ollama", "lmstudio", "vllm", "llamacpp", "koboldcpp"}):
+        # These runtimes have no selected-model probe below. A cold API process
+        # reads the runtime's model list before classifying AI think; a failed
+        # read stays "loading" and is reported instead of sending a default.
+        from backend.ai.provider_resolution import remember_model_capabilities
+        try:
+            listed = provider_registry.require(provider).adapter.list_models(
+                api_key=api_key, base_url=base_url)
+        except Exception:
+            listed = None
+        if listed is not None and listed.status == "valid":
+            remember_model_capabilities(provider, base_url, api_key,
+                dict(listed.capabilities), models=listed.models)
+            discovery_fresh, server_capabilities = discovered_model_capabilities(
+                provider, base_url, model, api_key)
     preplanned = getattr(ai, "_runtime_context_evidence", None)
     prepared = None
     if provider in {"lmstudio", "ollama"}:
@@ -223,7 +259,6 @@ def _translate_once_impl(
         server_capabilities = {"limits": dict(runtime_proof.limits)}
         discovery_fresh = True
     ollama_minimum_unresolved = False
-    ollama_unverified_off_attempt = False
     if provider == "ollama":
         # A 300-second catalogue fact is useful for Settings, but the same
         # Ollama model ID can be reloaded with different Thinking controls.
@@ -250,32 +285,14 @@ def _translate_once_impl(
                 raise error
             from backend.ai.workload import WorkloadBudgetError
             raise WorkloadBudgetError("Selected Ollama model is unavailable from current /api/show metadata")
-        if thinking_requested != "default" and not isinstance(native_reasoning.get("supported"), bool):
-            # A successful /api/show can omit `thinking.values` even when the
-            # installed model accepts /api/chat `think:false`. Saved Off/Lowest
-            # may attempt that native switch; the adapter rejects any returned
-            # thinking without accepting this turn. On/named levels need proof.
-            if thinking_requested in {"off", "minimum"}:
-                ollama_unverified_off_attempt = True
-            else:
-                from backend.ai.translation_paths.store import ConversationError
-                error = ConversationError(
-                    "Ollama cannot verify this model's Thinking controls; no model request was sent")
-                error.code = "ai_local_thinking_unsupported"
-                raise error
         # A fresh probe is authoritative for this request even when the
         # selected-model catalogue chooses not to retain incomplete metadata.
+        # /api/show without `thinking.values` proves no control: the shared
+        # classification below makes that provider default (no `think`).
         server_capabilities = capability
         discovery_fresh = True
-        if (thinking_requested == "minimum" and
-                native_reasoning.get("minimum_unresolved") is True):
-            ollama_minimum_unresolved = True
-        if ollama_minimum_unresolved:
-            from backend.ai.translation_paths.store import ConversationError
-            error = ConversationError(
-                "Ollama cannot identify the lowest Thinking level from the selected model's live metadata")
-            error.code = "ai_local_thinking_unsupported"
-            raise error
+        ollama_minimum_unresolved = (thinking_requested == "minimum" and
+            native_reasoning.get("minimum_unresolved") is True)
     discovered_capabilities = effective_model_capabilities(
         discovery_fresh=discovery_fresh, server=server_capabilities,
         client=getattr(ai, "model_capabilities", {}),
@@ -300,11 +317,42 @@ def _translate_once_impl(
     if native_reasoning:
         reasoning_caps = native_reasoning
         discovered_capabilities = {**discovered_capabilities, "reasoning": native_reasoning}
-    thinking_selected = resolve_thinking_selection(thinking_requested, reasoning_caps)
-    if ollama_unverified_off_attempt:
-        thinking_selected = "off"
+    # One shared classification (mirrored by the extension) decides whether
+    # this exact model offers an AI think control at all.
+    record_fresh = bool(discovery_fresh or native_reasoning)
+    if record_fresh and not native_reasoning and not is_local_provider(provider) and provider != "login":
+        from backend.ai.provider_resolution import selected_model_listed
+        record_fresh = selected_model_listed(provider, base_url, model, api_key) is not False
+    thinking_state = classify_thinking_state(reasoning_caps, fresh=record_fresh)
+    if thinking_state == "loading" and thinking_requested != "default" and not website_managed:
+        # No fresh record: never dispatch a possibly-reasoning model with the
+        # provider default merely because the catalogue was slow or failed.
+        if is_local_provider(provider):
+            from backend.ai.translation_paths.store import ConversationError
+            error = ConversationError(
+                "The selected Local model's AI think details could not be loaded; no model request was sent")
+            error.code = "ai_local_thinking_unsupported"
+            raise error
+        raise CloudReasoningPreferenceUnavailable(provider, model, thinking_requested)
+    # The control is not offered for a no-reasoning model or a model whose
+    # control cannot be proven: keep the saved preference, send no field.
+    thinking_provider_default = (not website_managed and thinking_requested != "default"
+                                 and sends_provider_default(thinking_state))
+    if ollama_minimum_unresolved and not thinking_provider_default:
+        from backend.ai.translation_paths.store import ConversationError
+        error = ConversationError(
+            "Ollama cannot identify the lowest Thinking level from the selected model's live metadata")
+        error.code = "ai_local_thinking_unsupported"
+        raise error
+    thinking_selected = ("default" if website_managed or thinking_provider_default
+                         else resolve_thinking_selection(thinking_requested, reasoning_caps))
+    if (website_switch and not thinking_provider_default
+            and thinking_requested not in {"default", "minimum"} and thinking_selected != thinking_requested):
+        # The website switch cannot express this saved choice: report it
+        # before dispatch instead of silently sending the website default.
+        raise CloudReasoningPreferenceUnavailable(provider, model, thinking_requested)
     provider_managed_minimum = False
-    if is_local_provider(provider) and thinking_requested == "minimum":
+    if is_local_provider(provider) and thinking_requested == "minimum" and not thinking_provider_default:
         nonreasoning_proved = discovery_fresh and reasoning_caps.get("supported") is False
         if provider == "lmstudio" and not nonreasoning_proved and thinking_selected == "default":
             from backend.ai.translation_paths.store import ConversationError
@@ -320,7 +368,7 @@ def _translate_once_impl(
             # may use its default, but cannot report a verified minimum.
             thinking_selected = "default"
             provider_managed_minimum = True
-    if not is_local_provider(provider):
+    if not is_local_provider(provider) and not consumer_endpoint and not thinking_provider_default:
         preflight = ensure_cloud_reasoning_preflight(
             provider, model, thinking_requested, thinking_selected, reasoning_caps,
             capability_verified=discovery_fresh or bool(native_reasoning),
@@ -358,6 +406,9 @@ def _translate_once_impl(
         else capability.selected_contract
     )
     response_schema = markers.translation_schema_ids(ids) if structured_output else None
+    if getattr(ai, "memory_mode", None) == "full" and response_schema is not None:
+        from backend.ai.series_summary import with_summary_schema
+        response_schema = with_summary_schema(response_schema)
 
     # The selected style is owned once by System; User holds the current task.
     selected_style, _style_source = prompts.select_style(
@@ -379,18 +430,25 @@ def _translate_once_impl(
     )
     # Keep the caller's example preference in the first Conversation anchor.
     # Its private scope also separates threads when this preference changes.
-    effective_style_examples = getattr(ai, "style_examples", True)
+    effective_style_examples = getattr(ai, "style_examples", False) is True
     from backend.ai.prompts.localization import (
         HUMAN_STYLE_EXAMPLE_LIMIT, LOCAL_INDEPENDENT_HUMAN_STYLE_EXAMPLE_LIMIT,
     )
-    # These nine Local providers have a stateless Independent API route: a
-    # compact human style anchor is sent each request, never a replayed chat.
-    # The full first anchor stays intact for Conversation and all Cloud routes.
+    # Local Independent repeats a stateless prompt. Its single examples toggle
+    # selects human bootstrap, then bounded accepted pairs from this private run.
     human_example_limit = (
         LOCAL_INDEPENDENT_HUMAN_STYLE_EXAMPLE_LIMIT
         if is_local_provider(provider) and ai.translation_mode == "independent"
         else HUMAN_STYLE_EXAMPLE_LIMIT
     )
+    independent_example_text = None
+    example_selection = None
+    if is_local_provider(provider) and ai.translation_mode == "independent":
+        from backend.ai.translation_paths.independent_examples import selection
+        from backend.ai.prompts.independent_examples import format_story_examples
+        example_selection = selection(ai, target_lang, '\n'.join(source_decoded[0]))
+        if example_selection['source'] != 'human':
+            independent_example_text = format_story_examples(example_selection['pairs'], target_lang)
     user_message = prompts.build_translation_user_message(
         target_lang,
         ai.prompt_editable,
@@ -402,16 +460,17 @@ def _translate_once_impl(
         characters=(
             getattr(ai, "characters", None) if (char_memory or context_frozen) else None
         ),
-        has_image=bool(image_b64),
+        has_image=bool(image_b64 or (conversation_records and ai.send_image)),
         series_state=str(getattr(ai, "series_state", "") or ""),
         speakers=getattr(ai, "speakers", None),
         prev_context=getattr(ai, "prev_context", None),
-        page_context=getattr(ai, "page_context", None),
+        page_context=None if is_retry or (ai.conversation or {}).get("branch") == "repair" else getattr(ai, "page_context", None),
         source_lang=getattr(ai, "source_lang", ""),
-        source_context=getattr(ai, "source_context", None),
+        source_context=None if is_retry or (ai.conversation or {}).get("branch") == "repair" else getattr(ai, "source_context", None),
         repair_reason=getattr(ai, "repair_reason", ""),
         style_examples=effective_style_examples,
         human_example_limit=human_example_limit,
+        independent_examples=independent_example_text,
         memory_mode=getattr(ai, "memory_mode", None),
         conversation_records=conversation_records,
     )
@@ -420,7 +479,16 @@ def _translate_once_impl(
         source_lang=getattr(ai, "source_lang", ""), structured=structured_output,
         examples=effective_style_examples, memory_mode=getattr(ai, "memory_mode", None),
         selected_style=selected_style, conversation_records=conversation_records,
-        human_example_limit=human_example_limit)
+        human_example_limit=human_example_limit, independent_examples=independent_example_text)
+    if example_selection is not None:
+        layout['independentExamples'] = {
+            'source': example_selection['source'], 'scopeStatus': example_selection['scopeStatus'],
+            'availableStoryPairs': example_selection['acceptedPairs'],
+            'includedPairs': len(example_selection['pairs']) if example_selection['source'] == 'story'
+                else human_example_limit if layout['examplesIncluded'] else 0,
+            'exampleChars': layout['exampleChars'], 'storage': 'api_memory',
+            'providerCallsAdded': 0,
+        }
     trace_preview.note("AI style delivery boundary", {
         "styleRole": layout["styleRole"],
         "systemStyleCopies": layout["systemStyleCopies"],
@@ -475,16 +543,18 @@ def _translate_once_impl(
         "model": model,
         "requestedMode": thinking_requested,
         "selectedMode": thinking_selected,
+        "thinkingState": thinking_state,
         "overrideReason": (
-            "requested_off_unverified_metadata" if ollama_unverified_off_attempt
+            "consumer_provider_controls_thinking" if website_managed
+            else "model_has_no_reasoning" if thinking_provider_default and thinking_state == "none"
+            else "model_reasoning_control_unavailable" if thinking_provider_default
             else PROVIDER_MANAGED_UNVERIFIED if provider_managed_minimum
             else "lowest_available_resolved" if thinking_requested == "minimum" and thinking_selected != thinking_requested
             else "mandatory_reasoning_clamp" if thinking_requested == "off" and reasoning_caps.get("mandatory") is True and thinking_selected != "off"
             else "capability_fallback_to_provider_default" if thinking_selected != thinking_requested
             else "none"
         ),
-        "capabilitySource": "ollama_live_metadata_unknown_thinking" if ollama_unverified_off_attempt
-            else "native_verified_model_family" if native_reasoning else "server_account_cache" if discovery_fresh else (
+        "capabilitySource": "native_verified_model_family" if native_reasoning else "server_account_cache" if discovery_fresh else (
             "extension_account_catalogue" if discovered_capabilities else "unknown"
         ),
         "supported": reasoning_caps.get("supported"),
@@ -495,8 +565,8 @@ def _translate_once_impl(
         "supportsMaxTokens": reasoning_caps.get("supports_max_tokens"),
         "defaultEffort": reasoning_caps.get("default_effort"),
         "supportedEfforts": reasoning_caps.get("supported_efforts"),
-        "effectivePolicy": ("off_requested_runtime_check_pending" if ollama_unverified_off_attempt
-                            else "provider_default" if provider_managed_minimum
+        "effectivePolicy": ("website_managed" if website_managed
+                            else "provider_default" if provider_managed_minimum or thinking_provider_default
                             else "reasoning_active" if reasoning_is_active(thinking_selected, reasoning_caps)
                             else "reasoning_off" if thinking_selected == "off"
                             else "provider_default"),
@@ -526,7 +596,20 @@ def _translate_once_impl(
         cache_context={**{key: layout[key] for key in ("staticPrefixSha256", "targetLang", "sourceLang")},
                        "translationMode": ai.translation_mode,
                        "operationId": getattr(ai, "paid_operation_id", ""),
+                       # Provider routing: repair avoidance and attempt grouping.
+                       "routingBatch": getattr(ai, "routing_batch", ""),
+                       "routingRepair": bool(is_retry or (ai.conversation or {}).get("branch") == "repair"
+                                             or str(getattr(ai, "paid_operation_id", "")).startswith("repair:")),
+                       "userRunId": getattr(ai, "paid_user_run_id", ""),
+                       "paidPriceQuoteToken": getattr(ai,"paid_price_quote_token",""),
+                       "webchatRunId": (ai.conversation or {}).get("webchatRunId", ""),
+                       "webchatBranch": (ai.conversation or {}).get("branch", "initial"),
                        "thinkingRequested": thinking_requested,
+                       # A none/default state carries no control. The
+                       # saved preference above is kept; every adapter that
+                       # reads it honors this flag and adds no thinking field.
+                       "thinkingState": thinking_state,
+                       "thinkingProviderDefault": thinking_provider_default,
                        "reasoningCapabilityVerified": discovery_fresh and provider not in {"vllm", "llamacpp", "koboldcpp"}
                            and (provider != "ollama" or isinstance(reasoning_caps.get("supported"), bool)),
                        "minimumProviderManagedUnverified": provider_managed_minimum,
@@ -564,13 +647,33 @@ def _translate_once_impl(
         trace_preview.marked_units("\n\n".join(generation_request.user_parts)),
         selectedContract=selected_wire_contract,
     )
-    result = generate_with_receipt(spec.adapter, generation_request, phase="repair" if is_retry else "initial")
+    from backend.ai import routing as provider_routing
+    with provider_routing.collect() as routing_attempts:
+        result = generate_with_receipt(spec.adapter, generation_request, phase="repair" if is_retry else "initial")
+    endpoint_delivery = (result.usage_details or {}).get("promptDelivery")
+    if isinstance(endpoint_delivery, dict):
+        layout.update(systemDelivery=endpoint_delivery["systemDelivery"],
+                      effectiveWireSystemChars=endpoint_delivery["systemChars"],
+                      effectiveWireUserChars=endpoint_delivery["currentUserChars"],
+                      effectiveWireBootstrapChars=endpoint_delivery["bootstrapUserChars"],
+                      continuationTransport=endpoint_delivery["transport"],
+                      continuationUserOcrOnly=endpoint_delivery["continuationUserOcrOnly"],
+                      repairInstructionChars=0)
+        wire_trace.write_json("03_prompt_layout.json", layout)
+        if not endpoint_delivery["firstTurn"]:
+            wire_trace.write_text("02_system_prompt.txt",
+                "[Login endpoint continuation: System retained by provider; not sent in this request]\n")
     used_model = result.used_model
     # A selected preference does not prove that the adapter sent a native
     # control or that the provider honored it.
     thinking_applied = getattr(result, "thinking_applied", None) or "unverified"
     if provider_managed_minimum:
         thinking_applied = PROVIDER_MANAGED_UNVERIFIED
+    if thinking_provider_default:
+        # Usage/trace show that no control was sent: the model has no AI think
+        # ("none") or its control cannot be set ("default").
+        thinking_applied = (THINKING_NOT_APPLICABLE if thinking_state == "none"
+                            else THINKING_PROVIDER_DEFAULT)
     trace_preview.note("AI diagnostic provider response", {
         "selectedContract": selected_wire_contract,
         "finishReason": result.finish_reason,
@@ -581,16 +684,25 @@ def _translate_once_impl(
         "response": trace_preview.preview(result.text),
     })
 
-    decoded = decode_result(
-        result=result, ids=ids, provider=provider, base_url=base_url,
-        used_model=used_model,
-        target_lang=target_lang, ai=ai, context_frozen=context_frozen,
-        selected_wire_contract=selected_wire_contract, want_memo=want_memo,
-        native_schema=structured_output, contract_selection_reason=("conversation_marker_contract" if conversation_records else capability.reason),
-        image_b64=image_b64, thinking_selected=thinking_selected,
-        thinking_applied=thinking_applied, system_text=system_text,
-        user_parts=list(generation_request.user_parts), capture_request=capture_request, is_retry=is_retry,
-    )
+    from backend.ai.errors import ModelOutputContractError
+    try:
+        decoded = decode_result(
+            result=result, ids=ids, provider=provider, base_url=base_url,
+            used_model=used_model,
+            target_lang=target_lang, ai=ai, context_frozen=context_frozen,
+            selected_wire_contract=selected_wire_contract, want_memo=want_memo,
+            native_schema=structured_output, contract_selection_reason=("conversation_marker_contract" if conversation_records else capability.reason),
+            image_b64=image_b64, thinking_selected=thinking_selected,
+            thinking_applied=thinking_applied, system_text=system_text,
+            user_parts=list(generation_request.user_parts), capture_request=capture_request, is_retry=is_retry,
+        )
+    except ModelOutputContractError as exc:
+        provider_routing.finalize(routing_attempts, contract_outcome(exc))
+        raise
+    # Validation that follows (response mapping, the job validator, or the
+    # extension's script check) finalises these attempts by id or token.
+    decoded["meta"]["routing_attempts"] = list(routing_attempts)
+    decoded["meta"]["thinking_state"] = thinking_state
     if native_linked and capture_request and "debug_request" in decoded.get("meta", {}):
         debug_request = decoded["meta"]["debug_request"]
         debug_request["assembled_system_text"] = debug_request["system_text"]
@@ -613,6 +725,19 @@ def _translate_once_impl(
         "aiTextFull": decoded.get("aiTextFull", ""), "meta": decoded.get("meta", {})
     })
     return decoded
+
+def contract_outcome(exc) -> str:
+    """Routing outcome (contract §2) for a decoded-answer contract failure."""
+    from backend.ai.errors import WrongLanguageOutput
+    if isinstance(exc, WrongLanguageOutput):
+        return "wrong_language"
+    details = getattr(exc, "structural_details", None) or {}
+    if details.get("validatorSubtype") in {"empty_output", "reasoning_only_exhausted"} or \
+            details.get("responseChars") == 0:
+        return "empty"
+    if details.get("missingIds") or details.get("emptyIds"):
+        return "missing_ids"
+    return "format"
 
 def _translate_once(original_text_full, target_lang, ai, **kwargs):
     from backend.ai.translation_paths.store import current
@@ -639,6 +764,13 @@ def translate(
     initial translation on its own request/stream for both Local and Cloud AI.
     """
     expected = markers.expected_ids(original_text_full)
+    from backend.ai.translation.source_filter import prepare_source
+    filtered = prepare_source(original_text_full, ai)
+    if filtered is not None:
+        if not filtered.kept:
+            return filtered.skipped_result()
+        original_text_full = markers.apply([filtered.texts[index] for index in filtered.kept])
+        ai = filtered.config
     from backend.ai.translation_paths.mode import mode
     selected_mode = mode(ai.translation_mode, default="independent")
     if selected_mode == "conversation":
@@ -650,6 +782,8 @@ def translate(
         reference_text_full=reference_text_full, capture_request=capture_request,
         cancel_check=cancel_check,
     )
+    if filtered is not None:
+        result = filtered.restore(result)
     result["meta"].setdefault("sourceUnitCount", len(expected))
     result["meta"].setdefault("batchCount", 1)
     result["meta"].setdefault("batchRanges", [f"0-{len(expected)-1}"] if expected else [])

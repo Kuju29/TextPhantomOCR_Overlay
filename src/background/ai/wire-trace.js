@@ -24,7 +24,7 @@ async function withRelaySlot(work) {
   try { return await work(); }
   finally { releaseRelaySlot(); }
 }
-const secretKey = /^(?:authorization|proxy-authorization|api[-_]?key|x-api-key|cookie|set-cookie|token|access_token|x-tp-run-token|secret)$/i;
+const secretKey = /^(?:authorization|proxy-authorization|api[-_]?key|x-api-key|cookie|set-cookie|token|access_token|x-tp-run-token|secret|price_?quote_?token|aiPaidQuoteToken|paidPriceQuoteToken)$/i;
 const providerCursorKey=/^(?:response_id|previous_response_id)$/i;
 const providerCursorJson=/("(?:response_id|previous_response_id)"\s*:\s*")(resp_[A-Za-z0-9_-]{1,256})(")/g;
 
@@ -126,6 +126,14 @@ export function createAiWireRecorder({ enabled = false, operationId = "", traceI
           try { reason = String(await response.text()).slice(0, 240); } catch {}
           throw new Error(`Direct Local AI trace relay HTTP ${response.status}${reason ? `: ${reason}` : ""}`);
         }
+        if (typeof response.json === "function") {
+          const ack = await response.json();
+          if (ack?.ok === false || ack?.recorded === false) {
+            const error = new Error("Direct Local AI diagnostics storage unavailable");
+            error.code = "diagnostic_storage_unavailable";
+            throw error;
+          }
+        }
       } finally { clearTimeout(timer); }
     });
   };
@@ -144,7 +152,7 @@ export function createAiWireRecorder({ enabled = false, operationId = "", traceI
           disabled = true; queue.length = 0; queuedBytes = 0;
           traceNote("background/ai/wire-trace.js", "relayDisabled", {
             operationId, traceId, executionKey, recordKind: fullIdentity.recordKind, stage: event.stage,
-            reason: "transport_failure", timeoutMs: relayTimeoutMs,
+            reason: error?.code || "transport_failure", timeoutMs: relayTimeoutMs,
             droppedEvents: 1 + pendingCount,
           });
         }

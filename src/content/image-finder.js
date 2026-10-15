@@ -78,7 +78,6 @@
     true,
   );
 
-  const getLastRightClick = () => lastRightClick;
 
   // Returns the recently right-clicked image only when the request names that same element.
   function getFreshRightClickImageForTarget(request, now = Date.now()) {
@@ -369,7 +368,9 @@
       msg && typeof msg === "object"
         ? `${String(msg.userMessage || "เกิดข้อผิดพลาด")} · ${String(msg.code || "PROCESSING_FAILED")}${msg.detail ? ` · ${String(msg.detail).slice(0,200)}` : ''}`
         : String(msg || "PROCESSING_FAILED");
-    const short = shortImageError(msg?.schema === "tp.error/1" ? msg : full);
+    // Short English labels are shown in the selected interface language.
+    const shortSource = shortImageError(msg?.schema === "tp.error/1" ? msg : full);
+    const short = globalThis.TPPageText?.display?.(shortSource) ?? shortSource;
     let badge = imageErrorBadges.get(img);
     if (!badge || !badge.isConnected) {
       badge = document.createElement("button");
@@ -444,7 +445,6 @@
     shouldShowReplaceError,
     setReplaceState,
     rememberImgUrls,
-    getLastRightClick,
     getFreshRightClickImageForTarget,
     setLastRightClick,
     findTargetImage,

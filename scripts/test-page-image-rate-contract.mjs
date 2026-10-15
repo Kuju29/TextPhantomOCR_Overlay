@@ -23,7 +23,7 @@ assert.equal(modelVisionSupport(normalizeModelCapabilities({
   vision: { supported: true, source: "live catalogue" },
 })), true);
 assert.throws(() => assertPageImageSupported(true, {}),
-  (error) => error.code === "AI_PAGE_IMAGE_UNVERIFIED" && /AI option > Page image/.test(error.message));
+  (error) => error.code === "AI_PAGE_IMAGE_UNVERIFIED" && /AI settings > Send page image/.test(error.message));
 assert.throws(() => assertPageImageSupported(true, { vision: { supported: false } }),
   (error) => error.code === "AI_PAGE_IMAGE_UNSUPPORTED");
 assert.doesNotThrow(() => assertPageImageSupported(true, { vision: { supported: true } }));

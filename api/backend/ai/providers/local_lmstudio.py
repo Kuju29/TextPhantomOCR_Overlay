@@ -138,12 +138,17 @@ class LocalLmStudioAdapter(LocalOpenAIChatAdapter):
                     "source": "lmstudio_native_jit_catalogue" if jit else "lmstudio_native_loaded_instance"}
             reasoning = info.get("reasoning") if isinstance(info.get("reasoning"), dict) else {}
             options = reasoning.get("allowed_options")
-            if isinstance(options, list) and all(isinstance(option, str) and
-                    option in ("off", "on", "low", "medium", "high") for option in options):
-                allowed = list(dict.fromkeys(options))
-                cap["reasoning"] = {"supported": bool(allowed), "mandatory": bool(allowed) and "off" not in allowed,
-                    "control": "toggle" if set(allowed) <= {"off", "on"} else "levels",
+            if isinstance(options, list) and all(isinstance(option, str) for option in options):
+                allowed = list(dict.fromkeys(option for option in options
+                    if option in ("off", "on", "low", "medium", "high")))
+                unknown = len(allowed) < len(set(options))
+                cap["reasoning"] = {"supported": bool(allowed) if allowed or not options else None,
+                    "mandatory": bool(options) and "off" not in allowed,
+                    "control": "none" if not options else
+                        "toggle" if not unknown and set(allowed) <= {"off", "on"} else "levels",
                     "supported_efforts": allowed}
+                if unknown and "off" not in allowed:
+                    cap["reasoning"]["minimum_unresolved"] = True
                 native_default = reasoning.get("default")
                 if isinstance(native_default, str) and native_default in allowed:
                     cap["reasoning"].update(default_effort=native_default,
@@ -223,9 +228,10 @@ class LocalLmStudioAdapter(LocalOpenAIChatAdapter):
         capability = request.model_capabilities.get("reasoning")
         capability = capability if isinstance(capability, dict) else {}
         verified = request.cache_context.get("reasoningCapabilityVerified") is True
-        requested = normalize_reasoning_preference(
-            request.cache_context.get("providerThinkingPreference",
-                                      request.cache_context.get("thinkingRequested", thinking)), "off")
+        requested = ("default" if request.cache_context.get("thinkingProviderDefault") is True
+                     else normalize_reasoning_preference(
+                         request.cache_context.get("providerThinkingPreference",
+                                                   request.cache_context.get("thinkingRequested", thinking)), "off"))
         if (requested == "off" and (not verified or thinking != "off")):
             from backend.ai.translation_paths.store import ConversationError
             error = ConversationError("LM Studio cannot verify the selected Thinking preference for this model")
@@ -274,7 +280,8 @@ class LocalLmStudioAdapter(LocalOpenAIChatAdapter):
         result = execute_lmstudio_chat(url=url, headers=headers,
             payload=body, model=request.model, expected_ids=request.expected_ids,
             cancel_check=request.cancel_check,
-            reject_observed_thinking=normalize_reasoning_preference(
+            reject_observed_thinking=request.cache_context.get("thinkingProviderDefault") is not True and
+                normalize_reasoning_preference(
                 request.cache_context.get("providerThinkingPreference",
                     request.cache_context.get("thinkingRequested", request.thinking)), "off") == "off")
         if "context_length" in body:

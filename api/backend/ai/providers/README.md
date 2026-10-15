@@ -14,17 +14,22 @@ Local (9): Ollama, LM Studio, Jan, text-generation-webui, KoboldCpp,
 vLLM, llamafile, GPT4All, llama.cpp.
 
 The picker has a tenth Local option, Custom local adapter, implemented only
-in the Extension. The [19-provider request/cache/Thinking/image audit](../../../../docs/AI_PROVIDER_MATRIX_2026_09_27.md)
-lists exactly what each named endpoint proves; a provider leaf alone is not
-evidence of stored conversation or an actual cache hit.
+in the Extension. The [API provider-boundary regressions](../../../../scripts/test-api-provider-boundary-matrix.py)
+and [extension catalogue regressions](../../../../scripts/test-cloud-provider-catalog.mjs)
+exercise the named adapters. A provider leaf alone is not evidence of stored
+conversation, verified Thinking controls or an actual cache hit.
 
 ## Policy
 
 - OpenRouter is the only named provider that receives OpenRouter `provider`
   routing preferences. Direct providers never inherit them.
-- Hugging Face Router stays on automatic fastest/failover routing unless the
-  user explicitly selects a `model:provider` suffix. Observed upstream headers
-  are telemetry, not sticky routing instructions.
+- .86 provider routing (`backend/ai/routing`, contract in the Center's
+  `docs/routing-stats-contract.md`): Manual OpenRouter orders endpoints and an
+  unqualified Hugging Face model gets a `model:<provider>` suffix chosen from
+  measured results (stats), the .83 cheapest-cache order (auto) or the admin's
+  list (manual). A user-selected HF `model:provider` or policy suffix and a
+  caller-chosen OpenRouter order/only are always respected. Paid stays decided
+  by the Center; the API only reports validation outcomes and `avoid_host`.
 - Direct cloud providers use their own native API or their provider-owned
   OpenAI-compatible leaf. TextPhantom does not silently cross-provider fallback
   because doing so can change credentials, billing, and model semantics.
@@ -35,8 +40,10 @@ evidence of stored conversation or an actual cache hit.
   loaded-model, usage, and thinking metadata that generic OpenAI compatibility
   would hide.
 - Reasoning controls are sent only when the exact provider/model contract proves
-  the wire field. Unknown Lowest dispatches with provider-managed behavior and
-  an unverified trace; unknown explicit Off stops before generation. The UI has
+  the wire field. Manual Cloud rejects an unverified Lowest setting before
+  generation; Paid forwards the user's intent to Center's model contract.
+  Local provider-managed fallback, where permitted by its native adapter,
+  remains explicitly unverified. Unknown explicit Off stops before generation. The UI has
   no Provider default choice. OpenAI-compatible response shape alone cannot
   prove a thinking control.
 - Model discovery/probing is bounded and separate from inference. Opening UI

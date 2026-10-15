@@ -398,7 +398,7 @@ for (const target of targets) {
 const sourceEntries = [];
 const SOURCE_SKIP_DIRS = new Set([
   ".git", ".pytest_cache", ".ruff_cache", ".venv", "venv",
-  "__pycache__", "build", "dist", "models", "logs", "state",
+  "__pycache__", "build", "dist", "models", "logs", "state", "data", "node_modules",
 ]);
 async function walkSourceFiles(root, prefix = "", include = () => true) {
   const entries = await readdir(root, { withFileTypes: true });
@@ -407,7 +407,7 @@ async function walkSourceFiles(root, prefix = "", include = () => true) {
     if (entry.isDirectory() && SOURCE_SKIP_DIRS.has(entry.name)) continue;
     const absolute = path.join(root, entry.name);
     const relative = path.posix.join(prefix, entry.name);
-    if (/^api\/(?:tests|logs|state)(?:\/|$)/i.test(relative)) continue;
+    if (/^api\/(?:tests|logs|state|data)(?:\/|$)/i.test(relative)) continue;
     if (isPrivateRuntimeArtifact(relative)) continue;
     if (!include(relative, { directory: entry.isDirectory() })) continue;
     if (entry.isDirectory()) {
@@ -419,34 +419,21 @@ async function walkSourceFiles(root, prefix = "", include = () => true) {
   }
   return files;
 }
+// .72 public source package: application code only. Release notes, internal
+// docs and tests that need the private service's source are kept outside it.
+const PRIVATE_SCRIPTS = new Set([
+  "scripts/test-account-layout-1031.py", "scripts/test-hf-center-link-10415.py",
+  "scripts/test-paid-center-contract.py", "scripts/test-paid-forward-diagnostics-10446.py",
+  "scripts/test-paid-image-idempotency.py", "scripts/test-paid-stream-e2e-10467.py",
+  "scripts/test-paid-version-pair-10463.py",
+]);
+const publicSource = (relative) => !PRIVATE_SCRIPTS.has(relative) && !/^api\/docs(?:\/|$)/.test(relative);
 for (const directory of ["src", "platform", "scripts", "api"]) {
-  for (const file of await walkSourceFiles(path.join(projectRoot, directory), directory)) {
+  for (const file of await walkSourceFiles(path.join(projectRoot, directory), directory, publicSource)) {
     sourceEntries.push({ absolute: file.absolute, name: file.relative });
   }
 }
-for (const filename of [
-  "README.md",
-  "README-TH.md",
-  "STORE-CHECKLIST-TH.md",
-  "PROJECT_CONTEXT.md",
-  "RELEASE_NOTES.md",
-  "docs/IMAGE_DECODER_SUPPORT.md",
-  "docs/E2E_AUDIT_2026_9_26.md",
-  "docs/AI_CONVERSATION_CACHE_DECISIONS_2026_09_27.md",
-  "docs/AI_PROVIDER_MATRIX_2026_09_27.md",
-  "docs/LOCAL_TOKEN_AUDIT_2026_09_27.md",
-  "docs/HISTORICAL_AI_LOG_REGRESSION_2026_09_28.md",
-  "STREAMING_CONTRACT.md",
-  "docs/diagnostics-12.5.md",
-  "ENGINE_MODES.md",
-  "CONCURRENCY.md",
-  "DIAGNOSIS.md",
-  "CODE_STYLE.md",
-  "roadmap.md",
-  "package.json",
-  "build.bat",
-  "build.sh",
-]) {
+for (const filename of ["README.md", "package.json", "build.bat", "build.sh"]) {
   const absolute = path.join(projectRoot, filename);
   // Optional docs (README-TH / STORE-CHECKLIST-TH) may be absent — skip any
   // file that does not exist so the source bundle never fails the whole build.
@@ -455,7 +442,7 @@ for (const filename of [
   } catch {
     continue;
   }
-  sourceEntries.push({ absolute, name: filename });
+  if (!sourceEntries.some(entry => entry.name === filename)) sourceEntries.push({ absolute, name: filename });
 }
 for (const file of builtPackages) {
   sourceEntries.push({

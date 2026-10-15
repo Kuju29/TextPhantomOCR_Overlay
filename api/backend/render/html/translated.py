@@ -1,7 +1,7 @@
 """Presentation-only Translated HTML using the target tree's own layout groups."""
 from __future__ import annotations
 import math
-from backend.render.components.typography import escape_attr, escape_text, fit_paragraph_font_size_horizontal
+from backend.render.components.typography import escape_attr, escape_text
 from backend.render.html.lens import _render_item_horizontal
 from backend.render.relayout import target_orientation_for_lang
 from backend.render.translated_groups import translated_item_axis, presentation_size, fit_translated_block_font, translated_document, translated_layout_groups

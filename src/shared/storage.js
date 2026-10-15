@@ -9,14 +9,23 @@ function localStorageArea() {
 }
 
 function runtimeError() {
-  const error = globalThis.chrome?.runtime?.lastError;
-  return error
-    ? new Error(error.message || "Extension storage operation failed")
-    : null;
+  try {
+    const error = globalThis.chrome?.runtime?.lastError;
+    return error
+      ? new Error(error.message || "Extension storage operation failed")
+      : null;
+  } catch (error) {
+    return error instanceof Error ? error : new Error(String(error));
+  }
 }
 
 function invoke(method, args, fallback) {
-  const area = localStorageArea();
+  let area;
+  try {
+    area = localStorageArea();
+  } catch (error) {
+    return Promise.reject(error);
+  }
   // Explicit non-extension behavior keeps pure modules and test runners usable.
   if (!area || typeof area[method] !== "function")
     return Promise.resolve(fallback);

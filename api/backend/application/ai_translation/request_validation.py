@@ -12,9 +12,10 @@ from backend.application import ai_request
 from backend.ai.credentials import request_api_key
 from backend.ai.provider_resolution import normalize_model_capabilities
 from backend.ai.reasoning_preference import normalize_reasoning_preference
+from backend.ai.user_run import identifier as user_run_identifier
 
 # Abuse guard matches the Lens document paragraph bound, not a batching policy.
-# Short units may exceed the historical 200-row cap under a character target.
+# Many short units can fit under a character target, so the row cap is generous.
 MAX_UNITS = 2000
 MAX_UNIT_CHARS = 4000
 MAX_TOTAL_CHARS = 60000
@@ -46,6 +47,7 @@ def build_config(payload: dict) -> AiConfig:
     if not isinstance(planned_contract, str) or planned_contract not in ("", SCHEMA_OBJECT, COMPACT_MARKERS):
         raise ValueError("Invalid planned translation output contract")
     from backend.ai.translation_paths.mode import mode, descriptor
+    from backend.ai.translation_paths.independent_examples import descriptor as example_scope
     selected_mode = mode(payload.get("translationMode"))
     conversation = descriptor(payload.get("conversation"), context=payload.get("context"))
     if selected_mode == "conversation" and conversation.get("origins"):
@@ -54,9 +56,25 @@ def build_config(payload: dict) -> AiConfig:
         validate_source_order(conversation["origins"], source_ids)
     if isinstance(payload.get("repair"), dict) and payload["repair"].get("branch") == "repair":
         conversation["branch"] = "repair"
+    paid_run_id = ""
+    paid_quote_token = ""
+    if provider_id.lower() == "paid":
+        paid_quote_token = provider.get('priceQuoteToken') or ''
+        if not isinstance(paid_quote_token,str) or len(paid_quote_token)>8192:
+            raise ValueError('Invalid Paid price quote')
+        run = payload.get("userRunId")
+        # Only absent/null/empty optional values use the legacy click ID. An
+        # explicit malformed Paid owner must never normalize to another owner.
+        paid_run_id = user_run_identifier(payload.get("batchId")
+            if run is None or run == "" else run)
     config = AiConfig(
         translation_mode=selected_mode, conversation=conversation,
+        independent_scope=example_scope(payload.get("context"), {"batch_id": payload.get("batchId")},
+            (payload.get("conversation") or {}).get("documentId", "")),
         paid_operation_id=str(payload.get("operationId") or "")[:160],
+        routing_batch=str(payload.get("batchId") or payload.get("userRunId") or "")[:160],
+        paid_user_run_id=paid_run_id,
+        paid_price_quote_token=paid_quote_token,
         api_key=request_api_key(provider_id, base_url, user_key),
         user_key=bool(user_key) and not is_local_target(provider_id, base_url), provider=provider_id,
         model=str(provider.get("model") or "auto").strip() or "auto", base_url=base_url,
@@ -70,7 +88,7 @@ def build_config(payload: dict) -> AiConfig:
         characters=memory.get("characters") if isinstance(memory.get("characters"), list) else [],
         char_memory=bool(memory.get("enabled")) or bool(memory.get("characters")),
         memory_mode=memory.get("mode") if memory.get("mode") in ("off", "terms", "full") else None,
-        style_examples=memory.get("styleExamples", True) is not False,
+        style_examples=memory.get("styleExamples", False) is True,
         series_state=str(memory.get("seriesState") or "").strip(),
         prev_context=(memory.get("previousContext")
                       if isinstance(memory.get("previousContext"), list) else []),

@@ -30,7 +30,11 @@ for (const targetLang of ['th', 'en', 'ja']) for (const structured of [false, tr
     const estimated = estimateRequest(units, initialProfile(), { contract: kind, limits: {},
       reasoningActive: false, fixedInput: 0, estimateFixedInput: values => estimator(values, page) });
     assert.ok(estimated.estimatedInput >= actualWeight, `${targetLang}/${kind}/${prompt || 'builtin'}/${memory}: undercount`);
-    assert.ok(estimator(units, page) > estimator(units, units), 'neighbor source must reserve input');
+    if (ai.repair_reason) {
+      assert.equal(estimator(units, page), estimator(units, units), 'repair source omits neighbor context from both prompt and budget');
+    } else {
+      assert.ok(estimator(units, page) > estimator(units, units), 'neighbor source must reserve input');
+    }
     checks++;
   }
 }
@@ -62,10 +66,10 @@ assert.ok(conversationAnchor >= independentNoExamples, 'Conversation record prot
 const oneRecord = [{id:'I1_P0',text:'HELLO'}];
 const narrowConversation = estimateRequest(oneRecord,initialProfile(),{
   contract:'compact_records',limits:{contextTokens:8192,maxOutputTokens:4096},reasoningActive:false,
-  fixedInput:0,estimateFixedInput:createPromptInputEstimator({ai:{translation_mode:'conversation'},targetLang:'th'})});
+  fixedInput:0,estimateFixedInput:createPromptInputEstimator({ai:{translation_mode:'conversation',style_examples:true},targetLang:'th'})});
 assert.equal(narrowConversation.fitsHard,false,'a verified narrow context must reject the full fixed anchor before provider dispatch');
 const tooSmall = estimateRequest(page, initialProfile(), { contract: 'compact_records',
   limits: { maxInputTokens: 1000 }, reasoningActive: false, fixedInput: 0,
-  estimateFixedInput: createPromptInputEstimator({ targetLang: 'th' }) });
+  estimateFixedInput: createPromptInputEstimator({ ai:{style_examples:true},targetLang: 'th' }) });
 assert.equal(tooSmall.fitsHard, false, 'small input ceiling rejects before dispatch even when ai.prompt is empty');
 console.log(`PASS ${checks} composed prompt budget cases across TH/EN/JA, marker/JSON, built-in/custom, memory/repair; context and small-window guards.`);

@@ -18,16 +18,22 @@ def map_result(*, result: dict, units: list[dict], payload: dict, target_lang: s
     extracted_pair = markers.extract_paragraphs(text_full, len(units))
     extracted = list(extracted_pair[0]) if extracted_pair else []
     meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
-    omitted = {str(item) for item in (meta.get("omitted_ids") or [])}
-    uncertain = {str(item) for item in (meta.get("alignment_uncertain_ids") or [])}
+    wire_ids = ([uid for row in (config.conversation or {}).get('origins', []) for uid in row['unitIds']]
+                if config.translation_mode == 'conversation' else [])
+    if not wire_ids:
+        wire_ids = [f'P{i}' for i in range(len(units))]
+    public_ids = {wire: unit['id'] for wire, unit in zip(wire_ids, units)}
+    omitted = {str(public_ids.get(str(item), item)) for item in (meta.get("omitted_ids") or [])}
+    uncertain = {str(public_ids.get(str(item), item)) for item in (meta.get("alignment_uncertain_ids") or [])}
+    skipped_indices = set(meta.get('skipped_source_indices') or [])
     translations, missing, declined, passthrough = [], [], [], []
     for index, unit in enumerate(units):
         translated = markers.normalize_unit_text(
             extracted[index] if index < len(extracted) else ""
         )
-        if str(unit["id"]) in uncertain:
+        if str(unit["id"]) in uncertain and index not in skipped_indices:
             translated = ""
-        elif ai_request.language_neutral_unit(unit["text"]):
+        elif not markers.has_translatable_text(unit["text"]):
             translated = markers.normalize_unit_text(unit["text"])
             passthrough.append(unit["id"])
         if translated:
@@ -39,13 +45,19 @@ def map_result(*, result: dict, units: list[dict], payload: dict, target_lang: s
                 declined.append(unit["id"])
     glossary = []
     for unit, translated in zip(units, extracted):
+        if not markers.has_translatable_text(unit.get('text', '')):
+            continue
         src, tgt = str(unit.get("text") or "").strip(), markers.normalize_unit_text(translated)
         if prompts.looks_like_term(src, tgt):
             glossary.append({"src": src, "tgt": tgt})
         if len(glossary) >= 12:
             break
-    generations = max(1, int(meta.get("generationAttempts") or 1))
-    providers = max(generations, int(meta.get("providerAttempts") or generations))
+    skipped = meta.get('skipped') is True and meta.get('skipped_reason') == 'no_translatable_text'
+    replayed = (resolved_provider == 'paid' and meta.get('centerOperationReplayed') is True
+                and meta.get('requestDispatched') is False
+                and meta.get('generationAttempts') == 0 and meta.get('providerAttempts') == 0)
+    generations = 0 if skipped or replayed else max(1, int(meta.get("generationAttempts") or 1))
+    providers = 0 if skipped or replayed else max(generations, int(meta.get("providerAttempts") or generations))
     rate_state = ({"gated": False, "adaptive": False, "unlimited": True,
                    "rpm": 0, "burst": 0} if unlimited else
                   ({"gated": False, "adaptive": False, "pinned": False,
@@ -74,9 +86,10 @@ def map_result(*, result: dict, units: list[dict], payload: dict, target_lang: s
                 "decodedResponseShape", "parserId", "formatSwitch")},
             "requestedOutputTokens": meta.get("requested_output_tokens"),
             "upstreamProvider": meta.get("upstream_provider") or "",
-            "alignmentUncertainIds": list(meta.get("alignment_uncertain_ids") or []),
+            "alignmentUncertainIds": list(dict.fromkeys(public_ids.get(str(uid), uid) for uid in meta.get("alignment_uncertain_ids") or [])),
             "alignmentStatus": meta.get("alignment_status", "not_semantically_verified"),
             "contractDiagnostics": {"redundantClosingDelimiterChars":meta.get("redundant_closing_delimiter_chars",0),
+                "recordHeaderRecoveryCount":meta.get("record_header_recovery_count",0),
                 "formattingWhitespaceChars":meta.get("formatting_whitespace_chars",0),
                 "unexpectedProseChars":meta.get("unexpected_prose_chars",0), "duplicateIds": meta.get("duplicate_output_ids") or [],
                 "ignoredUnknownIds": meta.get("ignored_output_ids") or [],
@@ -86,24 +99,34 @@ def map_result(*, result: dict, units: list[dict], payload: dict, target_lang: s
             "dt_ms": round((time.perf_counter() - started) * 1000, 1),
             "rateWaitMs": rate_wait_ms, "admissionWaitMs": admission_wait_ms,
             "providerMs": meta.get("provider_ms"),
+            "providerTimingScope": (meta.get('usage') or {}).get('providerTimingScope', 'provider_round_trip'),
+            "centerTiming": (meta.get('usage') or {}).get('centerTiming'),
             "firstContentMs": meta.get("first_content_ms"),
             "generationInvocationMs": provider_ms,
             "cacheWaitMs": (meta.get("cacheCoordination") or {}).get("waitMs", 0),
             "parseMs": round((time.perf_counter() - parse_started) * 1000, 1),
             **route_identity, "rateMode": rate["mode"], "markersFound": bool(extracted_pair),
             "vision": bool(config.image_b64), "passthroughUnits": len(passthrough),
+            'sourceUnitCount': meta.get('sourceUnitCount', len(units)),
+            'translatableUnitCount': meta.get('translatableUnitCount', len(units) - len(passthrough)),
+            'skippedSourceUnitCount': meta.get('skippedSourceUnitCount', len(passthrough)),
+            'skippedUnitIds': [units[index]['id'] for index in sorted(skipped_indices)
+                               if isinstance(index, int) and 0 <= index < len(units)],
             "outputContract": meta.get("output_contract", ""),
             "responseShape": meta.get("response_shape", ""),
             "acceptedLosslessly": bool(meta.get("accepted_losslessly", False)),
             "contentModified": bool(meta.get("content_modified", False)),
-            "omittedIds": list(meta.get("omitted_ids") or []), "declinedIds": declined,
+            "omittedIds": list(dict.fromkeys(public_ids.get(str(uid), uid) for uid in meta.get("omitted_ids") or [])), "declinedIds": declined,
             "rate": rate_state, "providerAttempts": providers, "generationAttempts": generations,
-            "httpAttempts": 1, "providerHttpStatuses": [200],
+            "httpAttempts": 1, "providerHttpStatuses": [] if replayed else (meta.get("usage") or {}).get("providerHttpStatuses", [200]),
+            **({'centerOperationReplayed': True, 'requestDispatched': False} if replayed else {}),
             "automaticContentRetry": False, "automaticTransportRetry": False,
             "modelFallback": False, "schemaFallback": False,
             "aiFlow": meta.get("ai_flow", ""), **(meta.get("prompt_audit") or prompt_meta),
         },
     }
+    if replayed:
+        body['replayed'] = True
     from backend.ai.request_diagnostics import request_diagnostics
     body["meta"]["diagnostics"] = request_diagnostics(body["meta"], workload=config.workload, rate=rate, missing=len(missing))
     wire_trace.write_json("07_request_diagnostics.json", body["meta"]["diagnostics"])

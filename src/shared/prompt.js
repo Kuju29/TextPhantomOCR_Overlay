@@ -1,20 +1,10 @@
 /**
- *
- * AI prompt helpers.
- *
- * Editable per-language style prompts are stored under a `lang::model` key so
- * the user can tune the wording independently for each target language and
- * model.  This module owns the key format, normalisation and migration of the
- * legacy (lang-only) storage shape — plus a browser-like per-key edit HISTORY
- * (back / forward) shared by the popup editor and the Prompt Studio.
+ * AI prompt helpers: per-language editable style prompts (key format,
+ * normalisation, migration of older storage shapes) plus a browser-like
+ * per-key edit history shared by the popup editor and the Prompt Studio.
  */
 
 import { getStorage, setStorage } from "./storage.js";
-import {
-  AI_PROFILE_PROMPT_HISTORY_BUDGET,
-  AI_PROFILE_PROMPT_HISTORY_KEY,
-  AI_PROFILE_PROMPT_HISTORY_PER_KEY,
-} from "./ai-profile-schema.js";
 
 // Generous cap so the full-page Prompt Studio can hold long, detailed style
 // prompts (the small popup textarea is just a quick-edit view of the same
@@ -29,10 +19,8 @@ export function normalizeAiModel(model) {
 
 /** Build the storage key for a (language, model) prompt entry. */
 export function makePromptKey(lang, _model) {
-  // Prompts are keyed by LANGUAGE ONLY. The model used to be part of the key,
-  // which made a saved prompt "disappear" whenever the resolved model changed
-  // (or could not be resolved while offline). The model argument is accepted so
-  // existing call sites keep working, but it is intentionally ignored.
+  // Prompts are keyed by LANGUAGE ONLY: a model in the key made a saved prompt
+  // vanish whenever the resolved model changed. `_model` is ignored.
   return String(lang || "").trim() || "en";
 }
 
@@ -55,73 +43,7 @@ export function makeProfilePromptKey(providerIdentity, model, lang) {
     .join("::");
 }
 
-function utf8Bytes(value) {
-  return new TextEncoder().encode(JSON.stringify(value)).byteLength;
-}
 
-/** Pure global-LRU compaction; prompt text only, no credential fields. */
-export function compactProfilePromptHistory(
-  input,
-  byteBudget = AI_PROFILE_PROMPT_HISTORY_BUDGET,
-) {
-  const entries = Object.entries(
-    input && typeof input === "object" ? input : {},
-  )
-    .map(([key, value]) => {
-      const stack = Array.isArray(value?.stack)
-        ? value.stack
-            .slice(-AI_PROFILE_PROMPT_HISTORY_PER_KEY)
-            .map((item) => normalizePrompt(item))
-        : [];
-      const clean = stack.filter(Boolean);
-      return [
-        key,
-        {
-          stack: clean,
-          idx: clean.length
-            ? Math.min(Math.max(Number(value?.idx) || 0, 0), clean.length - 1)
-            : -1,
-          touchedAt: Number.isFinite(Number(value?.touchedAt))
-            ? Number(value.touchedAt)
-            : 0,
-        },
-      ];
-    })
-    .filter(([, value]) => value.stack.length)
-    .sort((a, b) => b[1].touchedAt - a[1].touchedAt);
-  const output = {};
-  for (const [key, value] of entries) {
-    output[key] = value;
-    while (utf8Bytes(output) > byteBudget && output[key]?.stack.length) {
-      output[key].stack.shift();
-      output[key].idx = Math.max(-1, output[key].idx - 1);
-    }
-    if (!output[key].stack.length) delete output[key];
-  }
-  return output;
-}
-
-export async function profilePromptHistoryPush(key, text, now = Date.now()) {
-  const stored = await getStorage([AI_PROFILE_PROMPT_HISTORY_KEY]);
-  const map =
-    stored[AI_PROFILE_PROMPT_HISTORY_KEY] &&
-    typeof stored[AI_PROFILE_PROMPT_HISTORY_KEY] === "object"
-      ? stored[AI_PROFILE_PROMPT_HISTORY_KEY]
-      : {};
-  const current =
-    map[key] && typeof map[key] === "object"
-      ? map[key]
-      : { stack: [], idx: -1 };
-  const value = normalizePrompt(text);
-  const stack = Array.isArray(current.stack)
-    ? current.stack.slice(0, Number(current.idx) + 1)
-    : [];
-  if (!stack.length || stack[stack.length - 1] !== value) stack.push(value);
-  map[key] = { stack, idx: stack.length - 1, touchedAt: now };
-  const compacted = compactProfilePromptHistory(map);
-  await setStorage({ [AI_PROFILE_PROMPT_HISTORY_KEY]: compacted });
-  return compacted[key] || null;
-}
 
 /**
  * Normalise prompt text: CRLF → LF, trimmed, clamped to `maxChars`.
@@ -137,8 +59,8 @@ export function normalizePrompt(text, maxChars = AI_PROMPT_MAX_CHARS) {
 }
 
 /**
- * Migrate a stored prompt map to the `lang::model` key shape.
- * Legacy entries keyed by language only are re-keyed to `lang::auto`.
+ * Migrate a stored prompt map to language-only keys (older `lang::model` keys
+ * collapse to `lang`).
  * @param {Record<string,string>} input
  * @returns {{map: Record<string,string>, changed: boolean}}
  */
@@ -168,14 +90,12 @@ export function migratePromptMap(input) {
   return { map, changed };
 }
 
-// Prompt edit history (browser-like back / forward)
-// Stored in chrome.storage.local under `aiPromptHistory`:
-//   { [lang::model]: { stack: string[], idx: number } }
-// `idx` points at the CURRENT version. Going back moves idx left; committing
-// a new version truncates everything to the right of idx (like a browser
-// history branch) and appends. Persisted so history survives popup closes.
+// Prompt edit history (browser-like back / forward), persisted in
+// chrome.storage.local `aiPromptHistory`: { [promptKey]: { stack, idx } }.
+// `idx` is the CURRENT version; committing a new version truncates everything
+// right of idx and appends.
 
-export const AI_PROMPT_HISTORY_MAX = 30;
+const AI_PROMPT_HISTORY_MAX = 30;
 
 async function readPromptHistoryMap() {
   const it = await getStorage(["aiPromptHistory"]);

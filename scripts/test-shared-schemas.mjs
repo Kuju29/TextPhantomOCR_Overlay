@@ -67,7 +67,8 @@ const { isLocalAiProvider, isLocalAiTarget, isLocalHostUrl } = await import("../
   assert.equal(report.ok, true);
   assert.equal(report.eligibleParagraphCount, 4);
   assert.equal(report.excludedBlankParagraphCount, 1);
-  assert.deepEqual(report.expectedRequestIds, ["g0", "g1", "g2"]);
+  assert.deepEqual(report.expectedRequestIds, ["g0", "g2"], "the standalone CJK character remains owned but is deliberately excluded from AI");
+  assert.equal(units[1].translatable, false);
 
   const lost = translationConservation(adjacentGroups, units.slice(1));
   assert.equal(lost.ok, false);
@@ -90,11 +91,11 @@ const { isLocalAiProvider, isLocalAiTarget, isLocalHostUrl } = await import("../
 
 // --- the translatable rule, mirrored in api/backend/ai/markers.py ----------
 {
-  for (const text of ["สวัสดี", "ヒヤ", "A", "hello", "日本語", "ก1"]) {
-    assert.equal(hasTranslatableText(text), true, `${text} has a letter`);
+  for (const text of ["สวัสดี", "ヒヤ", "ดี", "มี", "ที่", "hello", "日本語", "ก1"]) {
+    assert.equal(hasTranslatableText(text), true, `${text} has meaningful source characters`);
   }
-  for (const text of ["", "   ", "①②③", "2026", "!?", "...", "12 %", "—", "###"]) {
-    assert.equal(hasTranslatableText(text), false, `${text} has no letter`);
+  for (const text of ["", "   ", "A", "L", "-", "A\u0301", " \u200bA\u200d ", "我", "ก", "①②③", "2026", "!?", "...", "12 %", "—", "###"]) {
+    assert.equal(hasTranslatableText(text), false, `${text} is a standalone character or noise`);
   }
 }
 

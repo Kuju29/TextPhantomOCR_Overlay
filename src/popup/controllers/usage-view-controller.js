@@ -6,17 +6,27 @@ import { bangkokDate, convertThb, refreshUsdThb } from "../../shared/ai/pricing/
 import { displayMoney, money } from "../../shared/ai/pricing/money.js";
 import { rateKey, routeRateKey, selectRate } from "../../shared/ai/pricing/providers.js";
 import { fetchLiveRate } from "../../shared/ai/pricing/live.js";
+import { setUiParts, setUiTemplate, setUiText } from "../../shared/ui-template.js";
 
 const number = value => value == null ? "—" : Number(value).toLocaleString("en-US");
 const time = value => value ? new Date(value).toLocaleString("en-GB", {timeZone:"Asia/Bangkok",hour12:false}) : "Unknown";
 const costStatus = price => price?.status === "byok_upstream_separate" ? "OpenRouter fee only; upstream billed separately" :
+  price?.status === "cost_conflict" ? "Conflicting provider costs; review the receipt (not free)" :
+  price?.status === 'unsupported_price_conditions' ? 'Catalogue has unsupported pricing conditions; use the provider-reported cost' :
+  price?.status === 'missing_price_request_time' ? 'Request time unavailable for the catalogue tariff; cost cannot be calculated' :
+  price?.status === 'unknown_per_request_tier' ? 'Per-request pricing tier is unavailable; cost cannot be calculated' :
+  price?.status === 'catalogue_price_unavailable' ? 'Current catalogue price unavailable; use the provider-reported cost' :
   price?.source === "provider" ? "Provider reported" :
   price?.source === "local_api_free" ? "Local API fee (hardware excluded)" :
   price?.source === "paid_credits" ? "TextPhantom credits (separate)" :
   price?.status === "unpriced" ? "No verified price for this model/route (not free)" :
   price?.status === "missing_cache_rate" ? "Cache-read price unavailable (not free)" :
+  ["missing_cache_write_total", "missing_cache_write_usage"].includes(price?.status) ? "Cache-write usage is incomplete; cost cannot be calculated" :
+  price?.status === "missing_cache_write_duration" ? "Cache-write duration is unknown; cost cannot be calculated" :
+  price?.status === "missing_cache_write_rate" ? "Cache-write price unavailable (not free)" :
+  price?.status === "inconsistent_cache_duration" ? "Cache-write counters disagree; cost cannot be calculated" :
   price?.status === "missing_usage" ? "Provider usage is incomplete; cost cannot be calculated" :
-  price?.status === "upper_bound_tariff_calendar_unverified" ? "Upper bound: weekday peak tariff; China holiday calendar unavailable" :
+  price?.status === "upper_bound_tariff_calendar_unverified" ? "Upper bound: tariff calendar or price-change timezone unavailable" :
   price?.status === "estimate_excludes_extras" ? "Estimated tokens; provider may add request/image fees" :
   price?.status === "cache_write_duration_unknown" ? "Estimate uses 5-minute cache write rate; 1-hour writes may cost more" :
   price?.status === "estimated_posthoc" ? "Estimated using catalogue price fetched later the same day" :
@@ -24,6 +34,10 @@ const costStatus = price => price?.status === "byok_upstream_separate" ? "OpenRo
   price?.status === "estimated_failed_request" ? "Estimated usage on a failed request; billing may differ" :
   price?.status === "upper_bound_cache_unreported" ? "Estimated upper bound; cache count unavailable" :
   price?.usd != null ? "Estimated at saved rate" : "Price unavailable";
+export const TRIGGER_MIN_MS = 60000;
+export const USAGE_MIN_MS = 5 * 60000;
+export const PASSIVE_OPENROUTER_MS = 60 * 60000;
+const PASSIVE_CATALOGUE_MS = 12 * 60 * 60000;
 const paragraph = (parent, value, className = "ai-usage-stat") => {
   const div = document.createElement("div"); div.className = className;
   div.textContent = value; parent.appendChild(div); return div;
@@ -32,18 +46,43 @@ const paragraph = (parent, value, className = "ai-usage-stat") => {
 export function createUsageViewController({els,state,isLocalProvider,getStorage,storageKey,
   currentUsage,historyRows,detailedRows=historyRows,flushUsage=null,persistPricingSettings=null}) {
   const target = (modelOverride=null) => {
+    if (state.paidActive && state.paidTranslationSource === "login") return {runtime:"cloud",provider:"login",model:String(modelOverride ?? state.loginDispatchModel ?? "auto")};
+    if (state.paidActive) return {runtime: "cloud", provider: "paid",
+      model: String(modelOverride ?? state.paidModel ?? "auto").trim() || "auto"};
     const provider = String(els.aiProvider?.value || "").trim();
     return {runtime:isLocalProvider(provider) ? "local" : "cloud",provider:provider || "unknown",
       model:String(modelOverride ?? els.aiModel?.value ?? state.desiredAiModel ?? "auto").trim() || "auto"};
   };
-  let refreshSequence = 0, fxTask = null, lastFxAttempt = 0, rateTask = null;
+  let refreshSequence = 0, fxTask = null, lastFxAttempt = 0, presentedRateValues = null,disposed=false;
+  const rateTasks = new Map();
   const lastRateAttempt = new Map();
+  const listeners=[];
+  const listen=(element,event,fn)=>{element?.addEventListener?.(event,fn);listeners.push(()=>element?.removeEventListener?.(event,fn));};
+  let rateScopeRevision=0;
+  // No 60 s timer. A model/provider change reads the selected model's
+  // catalogue price at once; key/base edits only invalidate in-flight reads.
+  for(const [key,event]of [['aiModel','change'],['aiProvider','change'],['apiUrl','input'],['aiBaseUrl','input'],['aiKey','input']])
+    listen(els[key],event,()=>{++rateScopeRevision;if(event==='change')void refreshImpl(false,[],'model');});
+  // Private request scope only; never retained in the public rate cache.
+  const rateContext = selected => JSON.stringify([selected,els.apiUrl?.value||'',els.aiBaseUrl?.value||'',els.aiKey?.value||'']);
+  const rateValues = () => ['aiPriceInput','aiPriceCached','aiPriceWrite','aiPriceOutput','aiPriceFx'].map(key=>els[key]?.value??'');
+  const priceRefreshEligible=()=>!disposed&&!state.paidActive&&globalThis.document?.visibilityState!=='hidden'&&
+    (!els.mode||els.mode.value==='lens_text')&&(!els.sources||els.sources.value==='ai')&&
+    ['openrouter','featherless','huggingface'].includes(target().provider.toLowerCase());
+  function dispose(){disposed=true;++rateScopeRevision;++refreshSequence;for(const remove of listeners.splice(0))remove();}
+  listen(globalThis.window,'pagehide',dispose);
   const routeFor = (ledger,selected,model=selected.model) => {
     const entries = normalizeUsageLedger(ledger).models;
     const matching = Object.values(entries).filter(v => v.provider?.toLowerCase() === selected.provider.toLowerCase() &&
       pricingModel(v).toLowerCase() === pricingModel({...selected,model}).toLowerCase());
     return matching.flatMap(v => v.sessions || []).flatMap(s => s.deltas || [])
       .sort((a,b) => (b.timestamp||0)-(a.timestamp||0)).find(d => d.upstreamProvider)?.upstreamProvider || "";
+  };
+  const latestRequestAt = (ledger,selected,model) => {
+    const entries = normalizeUsageLedger(ledger).models;
+    return Object.values(entries).filter(v => v.provider?.toLowerCase() === selected.provider.toLowerCase() &&
+      pricingModel(v).toLowerCase() === String(model||'').toLowerCase())
+      .flatMap(v => v.sessions || []).flatMap(s => s.deltas || []).reduce((max,d) => Math.max(max, Number(d.timestamp)||0), 0);
   };
   const thb = (usd, price, fx) => price?.thb ?? convertThb(usd, fx);
   const charge = (row, fx) => {
@@ -56,6 +95,8 @@ export function createUsageViewController({els,state,isLocalProvider,getStorage,
     return { usd, thb: converted, unpriced };
   };
   const costLine = (row, fx) => {
+    if (row?.provider === "login") return "Own AI account quota · No TP charge";
+    if (row?.provider === "paid") return "Paid credits: view the final TP charge in Account details. Reservations are separate.";
     const cost = charge(row, fx);
     return `API cost ${displayMoney(cost.usd,"USD")} · ≈ ${displayMoney(cost.thb,"THB")}` +
       (cost.unpriced ? ` · ${number(cost.unpriced)} unpriced call${cost.unpriced === 1 ? "" : "s"}` : "") +
@@ -66,9 +107,9 @@ export function createUsageViewController({els,state,isLocalProvider,getStorage,
     const fx = ledger ? normalizeUsageLedger(ledger).pricing?.fx : null;
     const cost = charge(row, fx);
     els.aiUsageWrap.style.display = row.provider === "unknown" ? "none" : "";
-    if (els.aiUsageKind) els.aiUsageKind.textContent = row.runtime === "local" ? "Local" : "Cloud";
+    if (els.aiUsageKind) els.aiUsageKind.textContent = row.provider === "login" ? "Login" : row.provider === "paid" ? "Paid" : row.runtime === "local" ? "Local" : "Cloud";
     if (els.aiUsageModel) {
-      els.aiUsageModel.textContent = `${row.provider} / ${row.model}`;
+      els.aiUsageModel.textContent = `${row.provider} / ${row.provider === "login" ? row.model.replace(/^lgs_[a-f0-9]{48}\//, "") : row.model}`;
       els.aiUsageModel.title = `${row.provider} / ${row.model}`;
     }
     els.aiUsageCounts.textContent = formatUsageLines(row) +
@@ -77,6 +118,11 @@ export function createUsageViewController({els,state,isLocalProvider,getStorage,
     els.aiUsageCounts.title = "Current provider/model session since the last switch or reset. Cached input and reasoning are already included in token totals.";
     if (els.aiUsageLabel) els.aiUsageLabel.textContent = formatUsageLabel(row);
     if (els.aiUsageTotal) {
+      if (["paid", "login"].includes(row.provider)) {
+        els.aiUsageTotal.textContent = formatUsageSummary(row);
+        els.aiUsageTotal.title = costLine(row, fx);
+        return;
+      }
       const amount = cost.thb == null ? displayMoney(cost.usd,"USD") : displayMoney(cost.thb,"THB");
       const amountLabel = cost.unpriced && cost.usd == null ? "unpriced" : `${amount}${cost.unpriced ? " · partial" : ""}`;
       els.aiUsageTotal.textContent = `${formatUsageSummary(row)}  ≈ ${amountLabel}`;
@@ -93,25 +139,54 @@ export function createUsageViewController({els,state,isLocalProvider,getStorage,
       return persistPricingSettings(prior => ({...prior,fx:prior.fx?.manualRate ? prior.fx : fx}));
     }).catch(() => {}).finally(() => { fxTask=null; });
   };
-  const maybeRefreshRate = (ledger,selected) => {
-    if (!persistPricingSettings || rateTask || !["featherless","huggingface"].includes(selected.provider.toLowerCase())) return;
+  // When a catalogue price is read again.
+  //  - 'open' (rates dialog) / 'model' (model changed): if older than TRIGGER_MIN_MS;
+  //  - 'usage' (a request of this model finished after the stored read): if older
+  //    than USAGE_MIN_MS, so a long translation reads at most once per 5 min;
+  //  - otherwise ('passive', e.g. popup open): OpenRouter after 1 h (its /models
+  //    list is a large download), the per-model catalogues after 12 h.
+  const maybeRefreshRate = (ledger,selected,trigger='passive') => {
+    if (!persistPricingSettings || !priceRefreshEligible() || !["openrouter","featherless","huggingface"].includes(selected.provider.toLowerCase())) return;
     const actual = currentUsage(ledger,selected);
     const model = pricingModel({...selected, model:selected.model === "auto" ? actual?.model : selected.model});
     const upstream = selected.provider.toLowerCase() === "huggingface" ? routeFor(ledger,selected,model) : "";
     if (!model || model === "auto" || (selected.provider.toLowerCase() === "huggingface" && !upstream)) return;
     const key = routeRateKey(selected.provider,model,upstream);
+    const context=rateContext(selected),revision=rateScopeRevision,taskKey=JSON.stringify([context,revision]),openrouter=selected.provider.toLowerCase()==='openrouter';
+    if(rateTasks.has(taskKey))return;
     const existing = normalizeUsageLedger(ledger).pricing.liveRates[key];
-    if (existing?.fetchedAt && Date.now()-existing.fetchedAt < 12*60*60*1000) return;
-    if (Date.now()-(lastRateAttempt.get(key)||0) < 60*60*1000) return;
-    lastRateAttempt.set(key,Date.now());
-    rateTask = fetchLiveRate(selected.provider,model,upstream).then(rate => {
-      if (!rate) return;
-      return persistPricingSettings(prior => ({...prior,liveRates:{...prior.liveRates,[key]:rate}}));
-    }).catch(() => {}).finally(() => { rateTask=null; });
+    const age=Date.now()-(existing?.fetchedAt||0);
+    let floor=trigger==='open'||trigger==='model'?TRIGGER_MIN_MS:openrouter?PASSIVE_OPENROUTER_MS:PASSIVE_CATALOGUE_MS;
+    if(trigger==='usage'){
+      const last=latestRequestAt(ledger,selected,model);
+      floor=last>(existing?.fetchedAt||0)?USAGE_MIN_MS:(openrouter?PASSIVE_OPENROUTER_MS:PASSIVE_CATALOGUE_MS);
+    }
+    if(existing?.fetchedAt&&age>=0&&age<floor)return;
+    const attemptKey=JSON.stringify([key,els.apiUrl?.value||'',els.aiBaseUrl?.value||'',revision]);
+    if (Date.now()-(lastRateAttempt.get(attemptKey)||0) < Math.min(floor,USAGE_MIN_MS)) return;
+    lastRateAttempt.set(attemptKey,Date.now());
+    const isCurrent=()=>!disposed&&rateScopeRevision===revision&&rateContext(target())===context;
+    const task=fetchLiveRate(selected.provider,model,upstream).then(async rate => {
+      if (!isCurrent()) return;
+      await persistPricingSettings(prior => {
+        if(!isCurrent())return prior;
+        const previous=prior.liveRates?.[key];
+        const next=rate||(openrouter&&previous?{...previous,syncStatus:'stale',checkedAt:Date.now()}:null);
+        return next?{...prior,liveRates:{...prior.liveRates,[key]:next}}:prior;
+      });
+      if(!isCurrent())return;
+      // The current rates dialog can stay open through a quiet refresh. Preserve
+      // any rates the user has started editing while the request was pending.
+      if(els.aiUsageDetailedDialog?.open&&JSON.stringify(rateValues())===JSON.stringify(presentedRateValues)){
+        const updated=(await getStorage({[storageKey]:null}))[storageKey];
+        if(isCurrent()&&JSON.stringify(rateValues())===JSON.stringify(presentedRateValues))populateRates(updated);
+      }
+    }).catch(() => {}).finally(() => { if(rateTasks.get(taskKey)===task)rateTasks.delete(taskKey); });
+    rateTasks.set(taskKey,task);
   };
-  const refreshImpl = async (recover,snapshots) => {
+  const refreshImpl = async (recover,snapshots,trigger=snapshots.length?'usage':'passive') => {
     const sequence = ++refreshSequence;
-    if (!els.aiUsageWrap) return;
+    if (!els.aiUsageWrap||disposed) return;
     const selected = target();
     if (recover && !snapshots.length && flushUsage) await flushUsage({recover:true});
     const ledger = snapshots.length ? snapshots[0] : (await getStorage({[storageKey]:null}))[storageKey];
@@ -119,7 +194,7 @@ export function createUsageViewController({els,state,isLocalProvider,getStorage,
     if (sequence !== refreshSequence || current.runtime !== selected.runtime || current.provider !== selected.provider || current.model !== selected.model) return;
     render(currentUsage(ledger,selected),ledger);
     maybeRefreshFx(ledger);
-    maybeRefreshRate(ledger,selected);
+    maybeRefreshRate(ledger,selected,trigger);
   };
   const refresh = async (...snapshots) => refreshImpl(true,snapshots);
   const refreshPassive = async (...snapshots) => refreshImpl(false,snapshots);
@@ -130,10 +205,13 @@ export function createUsageViewController({els,state,isLocalProvider,getStorage,
   function renderRequest(parent,delta,fx) {
     const box = document.createElement("details"), summary = document.createElement("summary");
     box.className="ai-usage-request";
-    summary.textContent=`${time(delta.timestamp)} · ${delta.failures ? "Failed" : "Completed"} · ${number(delta.totalTokens)} tokens · ${displayMoney(delta.price?.usd,"USD")}`;
+    const login = delta.price?.source === "own_login_account";
+    const paid = delta.price?.source === "paid_credits" || login;
+    summary.textContent=`${time(delta.timestamp)} · ${delta.reason === "repair" ? "Repair · " : ""}${delta.failures ? "Failed" : "Completed"} · ${number(delta.totalTokens)} tokens${paid ? "" : ` · ${displayMoney(delta.price?.usd,"USD")}`}`;
     box.appendChild(summary);
     const p = delta.price || {};
-    paragraph(box,`Input ${number(delta.inputTokens)} (cached read ${number(delta.cachedInputTokens)}, cache write ${number(delta.cacheWriteInputTokens)})\nOutput ${number(delta.outputTokens)} (reasoning ${number(delta.thinkingTokens)})\n${costStatus(p)} · ${displayMoney(p.usd,"USD")} · ≈ ${displayMoney(thb(p.usd,p,fx),"THB")}`);
+    paragraph(box,`Input ${number(delta.inputTokens)} (cached read ${number(delta.cachedInputTokens)}, cache write ${number(delta.cacheWriteInputTokens)})\nOutput ${number(delta.outputTokens)} (reasoning ${number(delta.thinkingTokens)})\n`+
+      (login ? "Own AI account quota · No TP charge" : paid ? "Final TP charge is recorded in Account details." : `${costStatus(p)} · ${displayMoney(p.usd,"USD")} · ≈ ${displayMoney(thb(p.usd,p,fx),"THB")}`));
     if (p.status === "byok_upstream_separate")
       paragraph(box,`OpenRouter fee ${displayMoney(p.providerFeeUsd,"USD")} · upstream inference ${displayMoney(p.upstreamInferenceCostUsd,"USD")} (separate bill); total is not verified`);
     if (p.parts) paragraph(box,`Input ${displayMoney(p.parts.ordinaryUsd,"USD")} + cache read ${displayMoney(p.parts.cacheReadUsd,"USD")} + cache write ${displayMoney(p.parts.cacheWriteUsd,"USD")} + output ${displayMoney(p.parts.outputUsd,"USD")}`);
@@ -147,20 +225,30 @@ export function createUsageViewController({els,state,isLocalProvider,getStorage,
   function populateRates(ledger) {
     if (!els.aiPriceInput) return;
     const selected=target(),model=selected.model==="auto"?currentUsage(ledger,selected)?.model:selected.model;
+    if (els.aiPriceSettings) els.aiPriceSettings.hidden = ["paid", "login"].includes(selected.provider);
+    if (["paid", "login"].includes(selected.provider)) {
+      if (els.aiPriceProviderRates) els.aiPriceProviderRates.hidden = true;
+      if (els.aiPriceStatus) els.aiPriceStatus.textContent = "Paid prices are shown below the model. Final TP charges are recorded in Account details.";
+      return;
+    }
     if (els.aiPriceProviderRates) els.aiPriceProviderRates.hidden = selected.runtime === "local";
     const pricing=normalizeUsageLedger(ledger).pricing,rate=selectRate(selected.provider,model,pricing.overrides,routeFor(ledger,selected,model),pricing.liveRates);
     for(const [key,val] of [["aiPriceInput",rate?.input],["aiPriceCached",rate?.cached],["aiPriceWrite",rate?.cacheWrite],["aiPriceOutput",rate?.output]])
       if(els[key]) els[key].value=val??"";
     if(els.aiPriceFx) els.aiPriceFx.value=pricing.fx?.manualRate||"";
-    if(els.aiPriceStatus) els.aiPriceStatus.textContent=selected.runtime === "local"
+    presentedRateValues=rateValues();
+    if(els.aiPriceStatus&&selected.runtime!=="local"&&!rate) setUiTemplate(els.aiPriceStatus,"{model}: no verified rate; enter input and output for future requests.",{model:`${selected.provider}/${model}`});
+    else if(els.aiPriceStatus) setUiText(els.aiPriceStatus,selected.runtime === "local"
       ? "Local AI uses your own computer: provider API charge $0. Hardware and electricity are excluded."
       : rate
-      ? `${selected.provider}/${model}: ${rate.origin==="user"?"Custom":rate.origin==="live_catalogue"?`Live catalogue ${rate.asOf}`:`Provider snapshot ${rate.asOf}`} · ${rate.url||""}`
-      : `${selected.provider}/${model}: no verified rate; enter input and output for future requests.`;
+      ? `${selected.provider}/${model}: ${rate.origin==="user"?"Custom":rate.origin==="live_catalogue"?`${rate.syncStatus==='stale'?'Prior':'Live'} catalogue ${rate.asOf}${rate.syncStatus==='stale'?' · current price unavailable':''}`:`Provider snapshot ${rate.asOf}`} · ${rate.url||""}`+
+        (selected.provider.toLowerCase()==='openrouter'&&rate.origin==='live_catalogue'?' · Base estimate; routed provider, conditional prices and extra fees can change the final OpenRouter charge.':'')
+      : `${selected.provider}/${model}: no verified rate; enter input and output for future requests.`);
   }
   async function saveRates() {
     if(!persistPricingSettings || !els.aiPriceStatus) return;
     const ledger=await load(),selected=target(),model=selected.model==="auto"?currentUsage(ledger,selected)?.model:selected.model;
+    if (["paid", "login"].includes(selected.provider)) return;
     const read=key=>els[key]?.value?.trim()??"";
     const input=read("aiPriceInput"),cached=read("aiPriceCached"),write=read("aiPriceWrite"),output=read("aiPriceOutput"),manualRate=read("aiPriceFx");
     if(selected.runtime!=="local" && (input||output||cached||write) && (!model||model==="auto"||money(input)===null||money(output)===null||
@@ -181,18 +269,19 @@ export function createUsageViewController({els,state,isLocalProvider,getStorage,
     els.aiPriceStatus.textContent="Saved. Existing request prices stay fixed.";
     await refreshPassive();
   }
-  els.aiPriceSave?.addEventListener?.("click",()=>void saveRates().catch(e=>{if(els.aiPriceStatus) els.aiPriceStatus.textContent=`Could not save: ${e.message}`;}));
+  els.aiPriceSave?.addEventListener?.("click",()=>void saveRates().catch(e=>{if(els.aiPriceStatus) setUiParts(els.aiPriceStatus,"Could not save: ",e.message);}));
   els.aiPriceRestore?.addEventListener?.("click",()=>void (async()=>{
     if(!persistPricingSettings) return;
     const ledger=await load(),selected=target(),model=selected.model==="auto"?currentUsage(ledger,selected)?.model:selected.model;
+    if (["paid", "login"].includes(selected.provider)) return;
     if(!model||model==="auto") {els.aiPriceStatus.textContent="Choose a specific model first.";return;}
     await persistPricingSettings(prior=>{
       const overrides={...prior.overrides};delete overrides[rateKey(selected.provider,model)];
       return {...prior,overrides};
     });
     populateRates(await load());
-    els.aiPriceStatus.textContent+= " · Custom rate cleared for future requests.";
-  })().catch(e=>{if(els.aiPriceStatus) els.aiPriceStatus.textContent=`Could not restore: ${e.message}`;}));
+    setUiText(els.aiPriceStatus, els.aiPriceStatus.textContent + " · Custom rate cleared for future requests.");
+  })().catch(e=>{if(els.aiPriceStatus) setUiParts(els.aiPriceStatus,"Could not restore: ",e.message);}));
   async function openDetailed() {
     if(!els.aiUsageDetailedList) return;
     const selected=target(),ledger=await load();
@@ -202,20 +291,22 @@ export function createUsageViewController({els,state,isLocalProvider,getStorage,
     const session=detailedRows(ledger).find(item=>item.current&&item.runtime===selected.runtime&&
       item.provider.toLowerCase()===selected.provider.toLowerCase()&&item.model.toLowerCase()===row.model.toLowerCase());
     const groups=requestGroups(session?[session]:[]);
-    paragraph(list,`${row.runtime==="local"?"Local":"Cloud"} · ${row.provider} / ${row.model}\n`+
+    paragraph(list,`${row.provider==="paid"?"Paid":row.runtime==="local"?"Local":"Cloud"} · ${row.provider} / ${row.model}\n`+
       `${row.startedAt?time(row.startedAt):"No current session"} — Current · ${number(row.requests)} AI calls · ${number(row.failures)} failed · ${formatUsageSummary(row)} tokens\n${costLine(row,fx)}`);
     if(groups.reduce((n,g)=>n+g.requests,0)<row.requests) paragraph(list,"Some older individual calls are no longer retained; the session totals above still include them.");
     if(!groups.length) paragraph(list,"No calls in this session yet.");
     for(const group of groups) {
       const item=document.createElement("article");item.className="ai-usage-history-item";
       paragraph(item,`${time(group.startedAt)}\n${number(group.imageRequests)} image requests · ${number(group.requests)} AI calls · ${number(group.failures)} failed · ${number(group.totalTokens)} tokens · `+
+        (group.provider === "login" ? "Own AI account quota · No TP charge" : group.provider === "paid" ? "Final TP charges: Account details" :
         `${group.unpricedRequests===group.requests?"Price unavailable":`Priced subtotal ${displayMoney(group.usd,"USD")}`}`+
-        `${group.unpricedRequests?` · ${group.unpricedRequests} unpriced`:""}`+
+        `${group.unpricedRequests?` · ${group.unpricedRequests} unpriced`:""}`)+
         `${group.byokRequests?" · BYOK OpenRouter fee/upstream excluded; see individual requests":""}`);
       for(const delta of group.deltas) renderRequest(item,delta,fx);
       list.appendChild(item);
     }
     populateRates(ledger);show(els.aiUsageDetailedDialog);
+    maybeRefreshRate(ledger,selected,'open');
   }
   async function openHistory() {
     if(!els.aiUsageHistoryList) return;
@@ -236,7 +327,7 @@ export function createUsageViewController({els,state,isLocalProvider,getStorage,
       if(row.requests>(row.deltas||[]).reduce((n,d)=>n+(d.requests||1),0)) paragraph(item,"Newest 200 individual calls retained; session totals include older calls.");
       if(row.deltas?.length) {
         const calls=document.createElement("details"),summary=document.createElement("summary");
-        calls.className="ai-usage-request";summary.textContent=`Individual requests (${number(row.deltas.length)} records)`;
+        calls.className="ai-usage-request";setUiTemplate(summary,"Individual requests ({count} records)",{count:number(row.deltas.length)});
         calls.appendChild(summary);
         for(const delta of row.deltas) renderRequest(calls,delta,fx);
         item.appendChild(calls);
@@ -245,5 +336,5 @@ export function createUsageViewController({els,state,isLocalProvider,getStorage,
     }
     show(els.aiUsageHistoryDialog);
   }
-  return {target,render,refresh,refreshPassive,openDetailed,closeDetailed:()=>close(els.aiUsageDetailedDialog),openHistory,closeHistory:()=>close(els.aiUsageHistoryDialog)};
+  return {target,render,refresh,refreshPassive,openDetailed,closeDetailed:()=>close(els.aiUsageDetailedDialog),openHistory,closeHistory:()=>close(els.aiUsageHistoryDialog),dispose};
 }

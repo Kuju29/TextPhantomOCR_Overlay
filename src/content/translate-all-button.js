@@ -4,6 +4,9 @@
   if(!TP || TP.bail || window.top!==window)return;
   const KEY='translateAllButtonEnabled';
   let host=null,cleanup=null;
+  // Selected-interface-language copy (shared/page-ui-text.js); English without it.
+  const pageText=(source, values) => globalThis.TPPageText ? globalThis.TPPageText.t(source, values)
+    : String(source).replace(/\{([a-z]+)\}/g, (match, name) => values && name in values ? String(values[name]) : match);
   function show(){
     if(host?.isConnected || !document.documentElement)return;
     const owner=document.createElement('div');host=owner;owner.id='tp-translate-all-control';
@@ -22,10 +25,10 @@
       button:disabled{opacity:.7;cursor:wait}@media(prefers-reduced-motion:reduce){.drawer{transition:none}}`;
     const drawer=document.createElement('div');drawer.className='drawer';
     const handle=document.createElement('button');handle.type='button';handle.className='handle';
-    handle.title='Open TextPhantom';handle.setAttribute('aria-label','Open translation controls');
+    handle.title=pageText('Open TextPhantom');handle.setAttribute('aria-label',pageText('Open translation controls'));
     handle.setAttribute('aria-controls','translate-all-action');
     const button=document.createElement('button');button.type='button';button.className='action';button.id='translate-all-action';
-    button.textContent='🔍 Translate all';button.setAttribute('aria-label','Translate all images on this page');
+    button.textContent=pageText('🔍 Translate all');button.setAttribute('aria-label',pageText('Translate all images on this page'));
     let busy=false;
     const open=value=>{drawer.setAttribute('data-open',String(value));handle.setAttribute('aria-expanded',String(value));button.tabIndex=value?0:-1;};
     open(false);
@@ -41,19 +44,26 @@
     button.addEventListener('mousedown',event=>event.stopPropagation());
     button.addEventListener('click',event=>{
       event.preventDefault();event.stopPropagation();if(busy)return;
-      busy=true;button.disabled=true;button.textContent='⏳ Finding images';
-      const reset=()=>{busy=false;button.disabled=false;button.textContent='🔍 Translate all';};
+      busy=true;button.disabled=true;button.textContent=pageText('⏳ Finding images');
+      const reset=()=>{busy=false;button.disabled=false;button.textContent=pageText('🔍 Translate all');};
       try{chrome.runtime.sendMessage({type:'TP_RUN_TRANSLATE_ALL'},response=>{
-        const error=chrome.runtime.lastError;
+        let error;try{error=chrome.runtime.lastError;}catch{reset();return;}
         if(error || response?.ok===false)TP.showToast?.(`TextPhantom: ${response?.error || error?.message || 'Cannot start translation'}`,5000);
         reset();
       });}catch(error){TP.showToast?.(`TextPhantom: ${error.message}`,5000);reset();}
     });
     drawer.append(handle,button);shadow.append(style,drawer);document.documentElement.append(owner);
+    const relabel=()=>{
+      handle.title=pageText('Open TextPhantom');handle.setAttribute('aria-label',pageText('Open translation controls'));
+      button.setAttribute('aria-label',pageText('Translate all images on this page'));
+      if(!busy)button.textContent=pageText('🔍 Translate all');
+    };
+    const stopRelabel=globalThis.TPPageText?.onChange?.(relabel);
+    const previous=cleanup;cleanup=()=>{previous?.();stopRelabel?.();};
   }
   function setEnabled(value){if(value)show();else{cleanup?.();cleanup=null;host?.remove();host=null;}}
   try{
-    chrome.storage.local.get(KEY,items=>{void chrome.runtime.lastError;if(items?.[KEY])show();});
+    chrome.storage.local.get(KEY,items=>{try{if(chrome.runtime.lastError)return;}catch{return;}if(items?.[KEY])show();});
     chrome.storage.onChanged.addListener((changes,area)=>{if(area==='local' && changes[KEY])setEnabled(Boolean(changes[KEY].newValue));});
   }catch{}
 })();

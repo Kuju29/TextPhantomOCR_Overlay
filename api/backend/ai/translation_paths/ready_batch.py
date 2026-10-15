@@ -25,9 +25,29 @@ def emit(value):
     wire_trace.write_json('03_conversation_batch.json',value)
 
 
+def paid_batch_identity(rows):
+    """Stable for the same owned unit partition, even after process restart.
+
+    Text/history is intentionally not part of the identity: the Center must
+    reject conflicting reuse rather than silently treating it as a new sale.
+    Changing the partition is a new provider operation; HTTP ingress owns page
+    replay before planning. This is not a durable cross-process job-resume log.
+    """
+    items = [(str(getattr(row['ticket'].ai, 'paid_operation_id', '') or ''), row['index'])
+             for row in rows]
+    if not items or any(not key for key, _ in items):
+        raise ValueError('Paid Conversation requires owned image operation IDs')
+    return 'paid-batch-' + hashlib.sha256(json.dumps(items, separators=(',', ':')).encode()).hexdigest()
+
+
 def dispatch(rows,estimate,reason,profile):
     owners=list(dict.fromkeys(r['ticket'] for r in rows));first=owners[0]
-    ai=type(first.ai)(**{f.name:copy.deepcopy(getattr(first.ai,f.name)) for f in fields(first.ai)});batch_id=str(uuid.uuid4());texts=[r['text'] for r in rows]
+    ai=type(first.ai)(**{f.name:copy.deepcopy(getattr(first.ai,f.name)) for f in fields(first.ai)})
+    batch_id=paid_batch_identity(rows) if str(ai.provider).lower() == 'paid' else str(uuid.uuid4())
+    texts=[r['text'] for r in rows]
+    # A combined provider generation owns its own billing identity, not the
+    # first page identity shared with later batches.
+    ai.paid_operation_id = batch_id
     # Private metadata never enters workload, wire trace, or the page result.
     # The READY planner owns this exact server/account/model evidence.
     estimate=dict(estimate)
@@ -42,7 +62,7 @@ def dispatch(rows,estimate,reason,profile):
         d=t.ai.conversation or {};own=[(i,r) for i,r in enumerate(rows) if r['ticket'] is t]
         origins.append({**{k:d[k] for k in ('pageId','pageIndex','pageOrder') if k in d},
           'pageId':d.get('pageId') or f'page-{t.order}',
-          'unitIds':[r['id'] for i,r in own],'originalIds':[f"P{r['index']}" for i,r in own],
+          'unitIds':[r['id'] for _,r in own],'originalIds':[f"P{r['index']}" for _,r in own],
           'sourceFingerprint':hashlib.sha256(json.dumps(t.units,ensure_ascii=False).encode()).hexdigest()})
     ai.conversation={**ai.conversation,'origins':origins,'planner':'conversation_cross_page','batchId':batch_id,'orderPolicy':'request_arrival'}
     ai.workload={k:v for k,v in estimate.items() if k!='baseOutput'};ai.repair_enabled=False

@@ -9,7 +9,6 @@ foreground colour.  Both jobs live here.
 from __future__ import annotations
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
-import numpy as np, cv2
 
 RGB = tuple[int, int, int]
 RGBA = tuple[int, int, int, int]
@@ -163,33 +162,3 @@ def sample_bg_color_from_quad(
     med = median_rgba(samples)
     return med[:3] if med else sample_bg_color(base_rgb, rect, margin_px)
 
-def sample_bg_color_from_quad_ring(
-    base_rgb: Image.Image,
-    quad: Quad,
-    rect: Rect,
-    ring_px: int = 4,
-) -> RGB | None:
-    """Median colour of a dilated ring *around* a quad (OpenCV path).
-
-    Returns ``None`` when there aren't enough ring pixels to be reliable.
-    """
-    l, t, r, b = rect
-    w, h = r - l, b - t
-    if w <= 0 or h <= 0:
-        return None
-
-    mask = np.zeros((h, w), dtype=np.uint8)
-    pts = np.array([[(x - l, y - t) for x, y in quad]], dtype=np.int32)
-    cv2.fillPoly(mask, pts, 255)
-
-    rp = int(max(1, ring_px or 1))
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (rp * 2 + 1, rp * 2 + 1))
-    dilated = cv2.dilate(mask, kernel, iterations=1)
-    ring = cv2.bitwise_and(dilated, cv2.bitwise_not(mask))
-
-    rgb = np.array(base_rgb.crop((l, t, r, b)).convert("RGB"), dtype=np.uint8)
-    selected = rgb[ring > 0]
-    if selected.size < 24:
-        return None
-    med = np.median(selected, axis=0)
-    return int(med[0]), int(med[1]), int(med[2])

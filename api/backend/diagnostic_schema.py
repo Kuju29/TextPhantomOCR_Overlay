@@ -61,7 +61,7 @@ def _part(v, depth=0):
         elif k in ('persistence','decisionStatus'): out[k]=x if isinstance(x,str) and x in _TABLE['states'] else 'unknown'
         elif k in ('sourceKind','engine','route','thinking','direction','effectiveFrom'):
             allowed={'sourceKind':('original','translated','ai'),'engine':('extension','api'),
-                'route':('direct-local','server','api','extension'),'thinking':('on','off','auto','default','minimum','minimal','low','medium','high','xhigh','max','ultra','unknown'),
+                'route':('direct-local','server','api','extension'),'thinking':('on','off','auto','default','minimum','minimal','low','medium','high','xhigh','extra','max','ultra','unknown'),
                 'direction':('h','v','tilted','unknown'),'effectiveFrom':('next_request','current_request','current_image','next_job','unknown')}
             out[k]=x if isinstance(x,str) and x in allowed[k] else 'unknown'
         elif k in ('hidden','hiddenAtStart','hiddenAtFinish','replayed','deduplicated','idempotent','contextVerified','requestDispatched','ready','reused','retryable','metadataOnly','wholePage','hardFits','reliabilityFits','cacheReported','examplesEnabled','changed','complete','pageImage','memoryEnabled','traceEnabled','rotated','eraseEnabled','unlimited'): out[k]=x if type(x) is bool else None

@@ -71,7 +71,10 @@ for spec in cloud:
         model_capabilities={'limits':{'contextTokens':131072},'reasoning':{'supported':False}})
     def plan(caps,profile=None):
         config=replace(ai,model_capabilities=caps)
-        with patch('backend.ai.provider_resolution.discovered_model_capabilities',return_value=(True,caps)):
+        # Missing limits must remain unknown in this planner comparison. Mock
+        # only the newer read-only HF metadata boundary, never the planner.
+        with patch('backend.ai.provider_resolution.discovered_model_capabilities',return_value=(True,caps)), \
+             patch('backend.ai.providers.huggingface_details.refresh',return_value={}):
             return select_rows(rows,config,'th',profile or {})
     known,estimate,_=plan(ai.model_capabilities)
     unknown,old,_=plan({'reasoning':{'supported':False}})

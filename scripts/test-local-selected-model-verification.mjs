@@ -70,11 +70,13 @@ try {
   assert.equal(jitReady.settings.aiModelCapabilities.limits.scope,'request');
   assert.equal(posts,0,'JIT readiness performs no throw-away generation');
   delete state.nativeModels[0].capabilities.reasoning;
-  await assert.rejects(ensureLocalAiBatchReady({aiProvider:'lmstudio',aiBaseUrl:listed.baseUrl,
+  // 10488 owner decision: without native reasoning options the model has no
+  // AI think control (state "default"). The saved Off is kept, the control is
+  // disabled in the popup and the chat sends the provider default.
+  assert.equal((await ensureLocalAiBatchReady({aiProvider:'lmstudio',aiBaseUrl:listed.baseUrl,
     aiModel:'selected',aiLocalThinking:'off',localAiAdapter:listed},
-    {get:async()=>store,set:async patch=>Object.assign(store,patch),emitTrace:()=>{}}),
-    error=>error.code==='LOCAL_MODEL_THINKING_UNSUPPORTED'&&error.requestDispatched===false,
-    'cold JIT cannot promise Off without native model reasoning options');
+    {get:async()=>store,set:async patch=>Object.assign(store,patch),emitTrace:()=>{}})).audit.thinking,
+    'off','cold JIT without reasoning options is admitted with the provider default');
   assert.equal((await ensureLocalAiBatchReady({aiProvider:'lmstudio',aiBaseUrl:listed.baseUrl,
     aiModel:'selected',aiLocalThinking:'minimum',localAiAdapter:listed},
     {get:async()=>store,set:async patch=>Object.assign(store,patch),emitTrace:()=>{}})).audit.availabilityStatus,
@@ -144,9 +146,11 @@ try {
   assert.equal(unknownOnly.capability.models.selected.reasoning.supported,null,
     'an unknown-only list must not become verified non-reasoning');
   assert.equal(unknownOnly.capability.models.selected.reasoning.minimum_unresolved,true);
-  await assert.rejects(caller('off'),error=>error.code==='LOCAL_MODEL_THINKING_UNSUPPORTED'&&
-    error.requestDispatched===false,'unknown-only options cannot authorize Thinking Off');
-  assert.equal(nativeChats,1,'Off must stop before a native chat request');
+  // 10488: unknown-only options prove no selectable control (state "default"):
+  // Off is not sent; the batch is admitted with the provider default.
+  assert.equal((await caller('off')).audit.thinking,'off',
+    'unknown-only options: saved Off kept, provider default admitted');
+  assert.equal(nativeChats,1,'readiness itself never sends a chat request');
   state.nativeModels[0].capabilities.reasoning.allowed_options=['off','on'];
   const ready=await ensureLocalAiBatchReady({aiProvider:'lmstudio',aiBaseUrl:listed.baseUrl,
     aiModel:'selected',aiLocalThinking:'off',localAiAdapter:listed},
@@ -319,29 +323,15 @@ try {
     {headers:{'content-type':'application/x-ndjson'}});
   };
   try{
+    // 10488 owner decision: /api/show without thinking.values proves no AI
+    // think control (state "default"). Lowest is kept but not sent: no `think`.
     const result=await translate('minimum',{ai:unknownAi});
     assert.equal(result.translations[0].text,'คำแปล');
-    assert.equal(unknownWire.think,false,'unknown Lowest must request native Off');
-    assert.ok(unknownWire.options.num_predict<8192,'unknown Lowest no longer reserves 8192 hidden tokens');
-    assert.equal(result.meta.thinkingApplied,'requested_off_unverified_metadata');
-  }finally{globalThis.fetch=realMetadataFetch;}
-  globalThis.fetch=async(url,init)=>{
-    if(!String(url).endsWith('/api/chat'))return realMetadataFetch(url,init);
-    assert.equal(JSON.parse(init.body).think,false);
-    return new Response(JSON.stringify({model:'qwen3:8b',message:{thinking:'hidden',content:'<<TP_P0:wrong>>'},
-      done:true,done_reason:'stop',prompt_eval_count:80,eval_count:12})+'\n',
-      {headers:{'content-type':'application/x-ndjson'}});
-  };
-  try{
-    const wire=[];
-    await assert.rejects(translate('minimum',{ai:unknownAi,
-      wireTrace:(stage,value)=>wire.push({stage,value})}),error=>
-      error.code==='local_model_thinking_unsupported'&&error.requestDispatched===true&&
-      error.diagnostics?.validatorSubtype==='reasoning_reported_with_thinking_off');
-    const response=wire.find(event=>event.stage==='providerResponse')?.value;
-    assert.equal(response?.chunkCount,1,'the first thinking frame ends the attempted request');
-    assert.deepEqual(response?.chunks,[],'raw reasoning is hidden from custom diagnostics');
-    assert.equal(JSON.stringify(wire).includes('hidden'),false);
+    assert.equal('think' in unknownWire,false,'unknown thinking metadata sends the provider default');
+    // The provider default may think, so the output budget keeps its hidden
+    // reasoning reserve (unlike a requested Off).
+    assert.ok(Number.isSafeInteger(unknownWire.options.num_predict) && unknownWire.options.num_predict>0);
+    assert.equal(result.meta.thinkingApplied,'provider_default');
   }finally{globalThis.fetch=realMetadataFetch;}
   let sentUnverified=0;
   globalThis.fetch=async(url,init)=>{

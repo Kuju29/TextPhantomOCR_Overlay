@@ -7,7 +7,6 @@ stream usage replaces the snapshot, it is never summed across SSE frames.
 from __future__ import annotations
 import contextvars
 import json
-import logging
 import os
 from collections import OrderedDict
 import time
@@ -15,7 +14,6 @@ import threading
 import uuid
 from .usage import normalize_usage, finalize_usage
 
-_log = logging.getLogger(__name__)
 _schema_lock = threading.Lock()
 _active = contextvars.ContextVar('tp_provider_receipt', default=None)
 _scope = contextvars.ContextVar('tp_usage_scope', default={})
@@ -184,7 +182,7 @@ def generate_with_receipt(adapter, request, *, phase='initial'):
         normalized['provider'] = request.provider
         normalized['model'] = result.used_model
         ctx['usage'] = normalized
-        ctx['state'] = 'provider_complete' if normalized.get('usageStatus') == 'reported' else 'usage_pending_review'
+        ctx['state'] = 'own_account_complete' if normalized.get('billingAuthority') == 'own_login_account' else 'provider_complete' if normalized.get('usageStatus') == 'reported' else 'usage_pending_review'
         _finish(ctx)
         return result._replace(usage_details=dict(ctx['usage']))
     except Exception as exc:
@@ -216,7 +214,7 @@ def _finish(ctx: dict) -> None:
                  engine=ctx.get('engine', 'standalone'), operationId=ctx.get('operationId',''),
                  provider=ctx['provider'], model=usage.get('model') or ctx['model'],
                  requestedModel=ctx['model'],
-                 customerChargeStatus='not_assessed')
+                 customerChargeStatus='not_applicable' if usage.get('billingAuthority')=='own_login_account' else 'center_settled' if usage.get('billingAuthority')=='center_paid' and str(usage.get('chargedTp','')).isdigit() else 'not_assessed')
     # Server receipt proves observation, NOT authorization to debit a customer.
     usage['billingEligible'] = False
     ctx['usage'] = usage
@@ -232,4 +230,3 @@ def _finish(ctx: dict) -> None:
                 break
         else:
             observations.append(dict(usage))
-

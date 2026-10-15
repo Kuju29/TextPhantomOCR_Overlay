@@ -6,8 +6,11 @@ import threading
 import time
 import httpx
 from backend.ai import accounting, content_stream, wire_trace
-from backend.ai.clients.base import ProviderGenerationCancelled
+from backend.ai.clients.base import LineCompletionDetector, ProviderGenerationCancelled
 from backend.ai.transports.stream_timing import StreamTiming
+from backend.ai.transports.stream_progress import (
+    StreamProgress, current_line_ids, reasoning_budget_from_payload, report_sink,
+)
 from backend.ai.clients.provider_error import ProviderTransportError, safe_http_error
 
 
@@ -22,6 +25,19 @@ class NativeResponse:
         self.parts = []
         self.blocks = {}
         self.terminal = False
+        # Phase evidence; set by post_native_stream.
+        self.guard = None
+        self.lines = LineCompletionDetector(None)
+        self.visible = []
+        self.tail = ""
+
+    def thinking(self):
+        if self.guard is not None:
+            self.guard.thinking()
+
+    def idle(self):
+        if self.guard is not None:
+            self.guard.keepalive()
 
     def publish(self, text):
         if text and self.first_content_ms is None:
@@ -33,6 +49,13 @@ class NativeResponse:
             }, file=self.trace_file)
         if text:
             self.timing.content()
+            self.visible.append(text)
+            if self.guard is not None:
+                boundary = self.tail + text
+                self.tail = boundary[-1:]
+                count = (self.lines.closed_count("".join(self.visible)) if ">>" in boundary
+                         else None)
+                self.guard.writing(count)
         with self.timing.measure("deltaCallback"):
             content_stream.emit(text)
 
@@ -52,15 +75,26 @@ class NativeResponse:
                 candidate = candidates[0]
                 target = self.data.setdefault('candidates', [{}])[0]
                 target.update({k: v for k, v in candidate.items() if k != 'content'})
+                progressed = False
                 for part in (candidate.get('content') or {}).get('parts') or []:
                     self.parts.append(part)
                     if not part.get('thought') and isinstance(part.get('text'), str):
                         self.publish(part['text'])
+                        progressed = progressed or bool(part['text'])
+                    elif part.get('thought'):
+                        self.thinking()
+                        progressed = True
+                if not progressed:
+                    self.idle()
                 target['content'] = {'parts': self.parts}
                 self.terminal = self.terminal or bool(candidate.get('finishReason'))
+            else:
+                self.idle()
             self.terminal = self.terminal or bool((event.get('promptFeedback') or {}).get('blockReason'))
         else:
             kind = event.get('type')
+            if kind == 'ping':
+                self.idle()  # Anthropic keep-alive: the socket, not the model.
             if kind == 'message_start':
                 self.data = dict(event.get('message') or {})
             elif kind == 'content_block_start':
@@ -68,6 +102,8 @@ class NativeResponse:
                 self.blocks[event['index']] = block
                 if block.get('type') == 'text' and block.get('text'):
                     self.publish(block['text'])
+                elif block.get('type') in ('thinking', 'redacted_thinking'):
+                    self.thinking()
             elif kind == 'content_block_delta':
                 block = self.blocks.get(event.get('index'))
                 if block is None:
@@ -79,8 +115,10 @@ class NativeResponse:
                     self.publish(text)
                 elif delta.get('type') == 'thinking_delta':
                     block['thinking'] = block.get('thinking', '') + (delta.get('thinking') or '')
+                    self.thinking()
                 elif delta.get('type') == 'signature_delta':
                     block['signature'] = block.get('signature', '') + (delta.get('signature') or '')
+                    self.thinking()
             elif kind == 'message_delta':
                 self.data.update(event.get('delta') or {})
                 self.data['usage'] = {**self.data.get('usage', {}), **event.get('usage', {})}
@@ -97,26 +135,53 @@ class NativeResponse:
         raise ProviderTransportError(f'{self.provider} stream {code}', provider=self.provider, model=self.model)
 
 
-def post_native_stream(url, *, json: dict, headers, timeout, cancel_check, provider, model, trace_file):
+def post_native_stream(url, *, json: dict, headers, timeout, cancel_check, provider, model, trace_file,
+                       expected_ids=None):
     if cancel_check and cancel_check():
         raise ProviderGenerationCancelled(f'{provider} generation was cancelled')
+    budget = (float(timeout) if isinstance(timeout, (int, float)) and not isinstance(timeout, bool)
+              and float(timeout) > 0 else None)
+    if budget is not None:
+        # Not a per-read timeout: pings would keep such a stream alive forever.
+        # Socket reads are bounded like the OpenAI-compatible path; the phase
+        # guard (stream_progress) bounds the generation.
+        timeout = httpx.Timeout(connect=min(10.0, budget), read=min(30.0, budget),
+                                write=min(30.0, budget), pool=min(10.0, budget))
     client = httpx.Client(timeout=timeout)
     stop = threading.Event()
     cancelled = threading.Event()
+    state = NativeResponse(provider, model, trace_file)
+    started = state.started
+    expected_ids = list(expected_ids or ()) or current_line_ids()
+    state.lines = LineCompletionDetector(expected_ids or None)
+    guard = StreamProgress(started=started, budget_sec=budget, model=model,
+                           reasoning_budget_tokens=reasoning_budget_from_payload(json),
+                           lines_total=len(expected_ids) if expected_ids else None,
+                           report=report_sink(), enforce=budget is not None)
+    state.guard = guard
+    stopped = [None]
+    current = [None]
+    def abort():
+        for target in (current[0], client):
+            try:
+                if target is not None:
+                    target.close()
+            except Exception:
+                pass
     def watch():
         while not stop.wait(0.05):
             if cancel_check and cancel_check():
                 cancelled.set()
-                try:
-                    client.close()
-                except Exception:
-                    pass
+                abort()
                 return
-    watcher = threading.Thread(target=watch, daemon=True) if cancel_check else None
+            stop_now = guard.check()
+            if stop_now is not None:
+                stopped[0] = stop_now
+                abort()
+                return
+    watcher = threading.Thread(target=watch, daemon=True) if cancel_check or budget is not None else None
     if watcher:
         watcher.start()
-    state = NativeResponse(provider, model, trace_file)
-    started = time.perf_counter()
     fields = []
     def dispatch():
         if fields:
@@ -135,6 +200,7 @@ def post_native_stream(url, *, json: dict, headers, timeout, cancel_check, provi
     try:
         accounting.mark_dispatched()
         with client.stream('POST', url, json=json, headers=headers) as response:
+            current[0] = response
             from backend import trace
             trace.note(f'{provider}.generate.response_headers', {
                 'stage': 'provider_response_headers', 'provider': provider, 'model': model,
@@ -143,17 +209,24 @@ def post_native_stream(url, *, json: dict, headers, timeout, cancel_check, provi
             if not response.is_success:
                 response.read()
                 return response
+            guard.opened()
             for line in response.iter_lines():
                 with state.timing.frame():
                     if cancelled.is_set() or (cancel_check and cancel_check()):
                         raise ProviderGenerationCancelled(f'{provider} generation was cancelled')
+                    if stopped[0] is not None:
+                        raise stopped[0]
                     if line == '':
                         dispatch()
                     elif line.startswith('data:'):
                         fields.append(line[5:].lstrip(' '))
+                    elif line.startswith(':'):
+                        guard.keepalive()
             dispatch()
             if cancelled.is_set() or (cancel_check and cancel_check()):
                 raise ProviderGenerationCancelled(f"{provider} generation was cancelled")
+            if stopped[0] is not None:
+                raise stopped[0]
             if not state.terminal:
                 state.fail('ended_without_terminal')
             return httpx.Response(response.status_code, json=state.data,
@@ -161,6 +234,16 @@ def post_native_stream(url, *, json: dict, headers, timeout, cancel_check, provi
     except Exception as exc:
         if cancelled.is_set() or (cancel_check and cancel_check()):
             raise ProviderGenerationCancelled(f'{provider} generation was cancelled') from exc
+        if stopped[0] is not None:
+            from backend import trace
+            trace.note(f'{provider}.generate.stream_stopped', {
+                'stage': 'provider_stream_stopped', 'provider': provider,
+                'elapsedMs': round((time.perf_counter() - started) * 1000, 1),
+                **getattr(stopped[0], 'stream_stop', {}),
+            }, file=trace_file)
+            if stopped[0] is exc:
+                raise
+            raise stopped[0] from exc
         raise
     finally:
         state.timing.finish()

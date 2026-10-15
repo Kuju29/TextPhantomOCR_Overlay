@@ -1,14 +1,11 @@
 /**
- *
- * Reading the user's stored settings.
- *
- * Two readers are exported because the service worker and the content script
- * need different slices:
- * - `readCoreSettings` — mode/lang/sources/aiKey (used by the content script).
+ * Reading the user's stored settings:
+ * - `readCoreSettings` — mode/lang/sources/aiKey (content script).
  * - `readFullSettings` — also resolves the editable AI prompt + concurrency
- *   (used by the service worker when dispatching a job).
+ *   (service worker, when dispatching a job).
  */
 
+import { readLoginState } from './login-session.js';
 import { getStorage, setStorage } from "./storage.js";
 import {
   DEFAULT_LANG,
@@ -38,11 +35,10 @@ import { classifyAiRuntime } from "./ai-settings-contract.js";
 import { normalizeEngineModePreference } from "./engine-mode.js";
 import { normalizeUserReasoningPreference } from "./reasoning-preference.js";
 
-// aiProfilesV1 is intentionally not read here yet. readFullSettings() remains
-// the compatibility boundary until the popup/background activation stage.
+// aiProfilesV1 is not read here; readFullSettings() is the compatibility boundary.
 
 /** @returns {"lens_images"|"lens_text"} */
-export function normalizeMode(value) {
+function normalizeMode(value) {
   const v = String(value || "").trim();
   return v === "lens_images" || v === "lens_text" ? v : DEFAULT_MODE;
 }
@@ -76,7 +72,7 @@ function readCount(value, fallback) {
  * Canvas upload encoding. See DEFAULT_UPLOAD_FORMAT in constants.js for why
  * the default moved off PNG.
  */
-export function normalizeUploadFormat(value) {
+function normalizeUploadFormat(value) {
   const v = String(value || "")
     .trim()
     .toLowerCase();
@@ -84,7 +80,7 @@ export function normalizeUploadFormat(value) {
 }
 
 /** Quality is a 0-1 canvas fraction; anything outside that is not a quality. */
-export function normalizeUploadQuality(value) {
+function normalizeUploadQuality(value) {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 && n <= 1 ? n : DEFAULT_UPLOAD_QUALITY;
 }
@@ -115,16 +111,14 @@ export async function readCoreSettings() {
 
 /**
  * Full settings slice used by the service worker, including the resolved
- * editable AI prompt for the current language/model.
- *
- * Side effect: migrates the legacy prompt map shape and persists it back when
- * it changed (matching the original behaviour).
+ * editable AI prompt for the current language/model. Side effect: migrates the
+ * legacy prompt map shape and persists it back when it changed.
  *
  * @returns {Promise<{mode:string, lang:string, sources:string, maxConcurrency:number,
  *   aiKey:string, aiModel:string, aiPrompt:string}>}
  */
 export async function readFullSettings(options = {}) {
-  const it = await getStorage([
+  const it = await readLoginState([
     "mode",
     "lang",
     "sources",
@@ -152,6 +146,7 @@ export async function readFullSettings(options = {}) {
     "aiPromptByLang",
     "aiPrompt",
     "relayoutTranslated",
+    "paidRateLimitEnabled", "paidRateProfile", "paidRateRpm", "paidRateBurst",
     "rateLimitEnabled",
     "rateProfile",
     "rateRpm",
@@ -168,8 +163,15 @@ export async function readFullSettings(options = {}) {
     "paidSessionToken",
     "paidModel",
     "paidApiBase",
+    "paidAiProfilesV1", "loginAiProfilesV1", "paidTranslationSource", "loginProvider", "loginModel", "loginSessionId", "loginAccountId", "loginConnectionsV2",
   ]);
 
+  if (it.aiServiceMode === 'paid') {
+    for (const key of ['rateLimitEnabled', 'rateProfile', 'rateRpm', 'rateBurst']) {
+      const paidKey = 'paid' + key[0].toUpperCase() + key.slice(1);
+      if (Object.hasOwn(it, paidKey)) it[key] = it[paidKey];
+    }
+  }
   // A caller such as Auto translate may choose a per-request language without
   // rewriting the popup's global language. Resolve the editable prompt against
   // that effective language too; otherwise an Auto Thai request can silently
@@ -267,13 +269,22 @@ export async function readFullSettings(options = {}) {
     paidSessionToken: typeof it.paidSessionToken === "string" ? it.paidSessionToken : "",
     paidModel: typeof it.paidModel === "string" ? it.paidModel : "",
     paidApiBase: typeof it.paidApiBase === "string" ? it.paidApiBase : "",
+    paidAiProfilesV1: it.paidAiProfilesV1 || {},
+    loginAiProfilesV1: it.loginAiProfilesV1 || {},
+    paidTranslationSource: it.paidTranslationSource === "login" ? "login" : "tp",
+    loginProvider: typeof it.loginProvider === "string" ? it.loginProvider : "",
+    loginModel: typeof it.loginModel === "string" ? it.loginModel : "",
+    loginSessionId: typeof it.loginSessionId === "string" ? it.loginSessionId : "",
+    loginAccountId: typeof it.loginAccountId === "string" ? it.loginAccountId : "",
+    loginConnectionsV2: it.loginConnectionsV2 || {},
+    loginMemoryStorageError: it.loginMemoryStorageError || "",
     aiBaseUrl: typeof it.aiBaseUrl === "string" ? it.aiBaseUrl : "",
     localAiAdapter,
     aiGlossary: Array.isArray(it.aiGlossary) ? it.aiGlossary : [],
     aiCharMemory: it.aiCharMemory === true, // legacy boolean (Full == true)
     // Series-memory mode: "off" (default) | "terms" (glossary only) | "full"
     // (glossary + character sheet). Migrates the old boolean when unset.
-    aiStyleExamples: it.aiStyleExamples !== false,
+    aiStyleExamples: it.aiStyleExamples === true,
     // Preserve legacy saved mode without treating it as the active route.
     // The selected provider resolves the effective mode when a job starts.
     aiTranslationMode: it.aiTranslationMode === "independent"
@@ -294,13 +305,11 @@ export async function readFullSettings(options = {}) {
     // translation, close to what Lens already gave, so selecting it for someone
     // who chose the AI layer would be a downgrade they did not request.
     aiOnDevice: it.aiOnDevice === true,
-    // Draw the overlay in the page instead of using the server's markup.
-    // Off until compared against the server output on real pages: the local
-    // renderer is new, and the schema it draws from carries only the ORIGINAL
-    // layer's geometry.
+    // Draw the overlay in the page instead of the server's markup. Opt-in: the
+    // schema it draws from carries only the ORIGINAL layer's geometry.
     localRender: it.localRender === true,
-    // Text overlays are extension-first. Ignore the hidden legacy false value;
-    // it caused an entire batch to fall back to server erase/render/PNG.
+    // Text overlays are extension-first; a stored false is ignored (it would send
+    // whole batches to server erase/render).
     clientBackground: true,
     // Preserve the provider-neutral reasoning preference. Exact selected-model
     // capability later resolves an unsupported/stale preference to Provider
@@ -315,13 +324,15 @@ export async function readFullSettings(options = {}) {
       it.relayoutTranslated,
       DEFAULT_RELAYOUT_TRANSLATED,
     ),
-    // Optional AI pacing. 0 for rpm/burst = provider-managed; no TextPhantom RPM cap.
-    rateLimitEnabled: readBool(it.rateLimitEnabled, DEFAULT_RATE_LIMIT_ENABLED),
-    // "extension" is the current engine; "api" restores the pre-v2 split where
-    // the server ran Lens, Lens graph grouping, AI and rendering.
+    // Optional AI pacing; 0 rpm/burst = provider-managed. The per-model token
+    // ceiling replaces the request-rate cap, so a saved cap must not keep pacing
+    // invisibly.
+    rateLimitEnabled: false,
+    // "extension" is the current engine; "api" lets the server run Lens, Lens
+    // graph grouping, AI and rendering.
     engineMode: normalizeEngineModePreference(it.engineMode),
     // Separate Local request pacing; the Cloud cap never changes with a Local provider.
-    aiLocalRateLimitEnabled: it.aiLocalRateLimitEnabled === true,
+    aiLocalRateLimitEnabled: false,
     // Preserve an invalid enabled cap for the job boundary to reject. A
     // positive default would silently replace the user's selected limit.
     aiLocalRateRpm: it.aiLocalRateLimitEnabled === true

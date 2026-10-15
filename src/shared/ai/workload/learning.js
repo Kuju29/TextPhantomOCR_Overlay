@@ -1,5 +1,5 @@
 import { cloudProviderSpec } from "../providers/cloud-registry.js";
-import { initialProfile, normalizeLimits, positive, WORKLOAD_POLICY } from './model.js';
+import { initialProfile, normalizeLimits, positive, quantile, WORKLOAD_POLICY } from './model.js';
 const normalFinish = /^(stop|end_turn|eos|completed|complete)$/i;
 const array = (v) => Array.isArray(v) ? v : [];
 const count = (v) => Number.isInteger(v) && v >= 0 ? v : null;
@@ -231,6 +231,17 @@ export function learnWorkload(profile, observation, now = Date.now()) {
       // Do not reduce the token estimate: this is reliability evidence, not length.
     } else if (o.outcome === 'length') {
       p.structureStreak = 0;
+      // Dynamic reply gap: a reply that reached its token limit is a lower
+      // bound for the reply/source ratio. Recording it widens the gap reserved
+      // for the next request's reply; later clean replies narrow it again.
+      // Hidden reasoning is measured separately and is not a reply-size sample.
+      // Never narrows: at least 25% above the gap that just proved too small.
+      const out = count(o.providerOutputTokens);
+      if (!(o.reasoningTokens > 0) && positive(o.plan.baseOutput)) {
+        const current = quantile(p.ratios, .9, 1.5);
+        const ratio = Math.max(out ? out * 1.1 / o.plan.baseOutput : 0, current * 1.25);
+        if (ratio >= .05 && ratio <= 32) p.ratios = [...p.ratios, ratio].slice(-64);
+      }
       p.target = Math.max(WORKLOAD_POLICY.minimumOutputTarget, Math.floor(p.target * .8));
       p.lastDecision = 'reduce_next_workload_after_truncation';
     }

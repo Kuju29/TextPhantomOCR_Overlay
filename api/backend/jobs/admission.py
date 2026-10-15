@@ -1,26 +1,11 @@
 """Admission control for the synchronous translate endpoint.
 
-The queue this replaces
------------------------
-``JobQueue`` accepted up to ``TP_MAX_QUEUE_SIZE`` (2000) payloads, held every
-result in a process-local dict until the extension polled for it, and lost all
-of it on restart. That design forced three other things to exist: job ids,
-long-polling, and a client that had to keep asking "is it done yet".
-
-It also did not actually protect anything. A queue that deep does not shed
-load — it *hides* it: the client sees an accepted job and waits, while the
-work sits behind two thousand others. The user-visible symptom is a progress
-bar that has silently stopped moving, which is exactly what the long comments
-in ``transport.js`` were written to work around.
-
-What replaces it
-----------------
-A gate, not a queue. A request either gets a slot within a short, bounded wait
-or is told to come back — with a ``Retry-After`` the client can respect. There
-is no server-side backlog, so there is nothing to lose on restart and nothing
-to poll for. The extension holds the work it has not submitted yet, which is
-where the state belongs: it is the only party that knows whether the user is
-still looking at that page.
+A gate, not a queue: a deep queue hides load (an accepted job silently stalls
+behind thousands of others). A request either gets a slot within a short,
+bounded wait or is told to come back with a ``Retry-After``. There is no
+server-side backlog to lose on restart or poll for; the extension holds the
+work it has not submitted yet, because only it knows whether the user is still
+looking at that page.
 
 The two limits mean different things:
 
@@ -32,12 +17,8 @@ The two limits mean different things:
 
 Capacity is shared between PEOPLE, not requests
 -----------------------------------------------
-One gate for the whole server meant one person's chapter was everybody's
-outage. Measured 2026-08-07 against this class: user A opened a 60-page
-chapter, user B arrived 50 ms later asking for a SINGLE page, and B was the
-one who got the 503 — ``A=60 served, B=0``.
-
-So slots are handed out per identity, max-min fair:
+One server-wide gate would let one person's chapter starve a single page
+from someone else, so slots are handed out per identity, max-min fair:
 
 * one identity active  -> it may use every slot;
 * a second one appears -> each may hold ``limit // 2``, and the first shrinks
@@ -60,7 +41,7 @@ from __future__ import annotations
 
 import hashlib, asyncio, time
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 ANONYMOUS = "anon"
 
@@ -190,12 +171,9 @@ class AdmissionGate:
     def _waiting_share(self) -> int:
         """How many of one identity's requests may queue for a slot.
 
-        The waiting list needs the same rule as the running slots, and for a
-        sharper reason: sharing the SLOTS is pointless if one person's batch
-        can fill the QUEUE, because the second person is then turned away
-        before the fairness rule ever gets to look at them. Measured
-        2026-08-07 with the running slots already shared: A held 15 running
-        plus all 8 waiting, and B's single page was still refused.
+        Sharing the SLOTS is pointless if one person's batch can fill the
+        QUEUE: the second person would be turned away before the fairness
+        rule ever looks at them.
         """
         # Running capacity may be fully borrowed by one user when nobody else
         # is active. Waiting capacity is different: deferred work adds no
@@ -304,13 +282,10 @@ class AdmissionGate:
         """Take a slot for ``identity``, or raise :class:`AdmissionRejected`.
 
         The fast path decides and reserves with no ``await`` in between, which
-        is what makes it correct under a burst. The previous version asked
-        ``asyncio.Semaphore.locked()``, and a semaphore is not decremented
-        until the coroutine that acquires it actually runs — so sixty requests
-        arriving in one event-loop tick ALL saw an unlocked semaphore, all
-        queued, and ``max_waiters=8`` bounded nothing. Measured 2026-08-07:
-        peak waiting was 45 for a burst of 60, versus 3 for the same 60 spread
-        5 ms apart. A burst is the only case this limit exists for.
+        is what makes it correct under a burst: ``asyncio.Semaphore.locked()``
+        is not updated until the acquiring coroutine runs, so a burst arriving
+        in one event-loop tick would all see a free slot and ``max_waiters``
+        would bound nothing.
         """
         identity = identity or ANONYMOUS
 
@@ -327,14 +302,10 @@ class AdmissionGate:
                 1,
             )
 
-        # Two ceilings, and they answer different questions.
-        #
-        # The per-identity one is the fairness rule: it stops one person's
-        # batch from owning the queue. The absolute one is the safety rule:
-        # identity comes from the request, so a client that invents a new tab
-        # session per image would otherwise mint unlimited identities and, with
-        # them, an unlimited waiting list — the exact 2000-deep queue this
-        # class exists to delete, rebuilt by accident.
+        # Two ceilings: the per-identity share is the fairness rule; the
+        # absolute cap is the safety rule, because identity comes from the
+        # request and a client minting a new tab session per image would
+        # otherwise get an unlimited waiting list.
         mine_waiting = self._waiting_by.get(identity, 0)
         if mine_waiting >= self._waiting_share() or self._waiting >= self._hard_waiting_cap:
             raise AdmissionRejected(
@@ -379,11 +350,9 @@ class AdmissionGate:
     def release(self, identity: str = ANONYMOUS, *, run_sec: float | None = None) -> None:
         """Give the slot back and fold the run time into the estimate.
 
-        ``run_sec`` is keyword-only, and a non-string identity is a TypeError,
-        because this signature used to be ``release(run_sec)``. A stale
-        positional call would otherwise bind a float as the identity: the total
-        count would still look right while the per-identity count leaked, and
-        the fairness rule would quietly stop working with nothing to see.
+        ``run_sec`` is keyword-only and a non-string identity is a TypeError, so
+        a stale positional ``release(run_sec)`` call cannot bind a float as the
+        identity and silently leak the per-identity count.
         """
         if not isinstance(identity, str):
             raise TypeError(

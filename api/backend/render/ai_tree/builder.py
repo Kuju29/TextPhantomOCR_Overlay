@@ -7,8 +7,7 @@ import unicodedata, math
 from backend.lens.languages import normalize as normalize_lang
 from backend.render.fonts import budoux_parser
 from backend.render.layout import distribute_to_template, pad_lines, font_size_minimum_for_image
-from backend.render.region import direction_preset, is_cjk_text, resolve_text_direction
-# from backend.render.components.typography import fit_item_font_size
+from backend.render.region import direction_preset, is_cjk_text
 from backend.render.ai_tree.geometry import canvas_for_source, item_aabb, item_aabb_from_bounds_px, make_box_from_bounds_px, make_item_box
 from backend.render.ai_tree.orientation import detect_image_orientation, is_axis_aligned_group, is_furigana_paragraph, is_single_set_group, is_vertical_source_paragraph, should_preserve_vertical_run
 from backend.render.ai_tree.spans import build_item_spans, join_line_tokens
@@ -65,7 +64,6 @@ def build_ai_tree(bubble_groups: list[dict], ai_group_texts: list[str], original
         is_single_set = is_single_set_group(bg)
         is_axis_aligned = is_axis_aligned_group(bg)
         preserve_vertical_run = should_preserve_vertical_run(bg, img_w, img_h)
-        # residual_tilt = (avg_rot + 45.0) % 90.0 - 45.0
         is_decorative_label = not is_axis_aligned
         if is_axis_aligned:
             direction = target_orientation
@@ -90,10 +88,8 @@ def build_ai_tree(bubble_groups: list[dict], ai_group_texts: list[str], original
                     direction = 'h'
                     direction_change = False
         _bb = bg.get('bubble_bounds_px')
-        # prefer_bb = True
         if isinstance(_bb, (list, tuple)) and len(_bb) == 4:
             _key = tuple((round(float(v), 1) for v in _bb))
-            # prefer_bb = bb_count.get(_key, 1) == 1
         aabb, use_per_item_rotation, source_rot_deg = canvas_for_source(
             bg, direction_change, direction, all_para_bounds, is_tilted, is_curved, avg_rot, img_w, img_h)
         if aabb is None:

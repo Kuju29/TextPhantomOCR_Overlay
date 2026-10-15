@@ -48,37 +48,6 @@ def make_box_from_bounds_px(x1: float, y1: float, w_px: float, h_px: float, rot:
     left, top, width, height = (x1 / iw, y1 / ih, w_px / iw, h_px / ih)
     return {'left': left, 'top': top, 'width': width, 'height': height, 'left_pct': left * 100.0, 'top_pct': top * 100.0, 'width_pct': width * 100.0, 'height_pct': height * 100.0, 'rotation_deg': rot, 'rotation_deg_css': rot, 'center': {'x': left + width / 2.0, 'y': top + height / 2.0}}
 
-def bubble_canvas(bg: dict, img_w: int, img_h: int, prefer_bounds: bool = True) -> tuple[float, float, float, float] | None:
-    if prefer_bounds:
-        bb = bg.get('bubble_bounds_px')
-        if isinstance(bb, (list, tuple)) and len(bb) == 4:
-            x1, y1, x2, y2 = (float(v) for v in bb)
-            w, h = (x2 - x1, y2 - y1)
-            if w > 0 and h > 0:
-                return (x1, y1, w, h)
-    aabb = item_aabb_from_bounds_px(bg)
-    if aabb is not None:
-        return aabb
-    aabb = item_aabb(bg, img_w, img_h)
-    if aabb is not None:
-        return aabb
-    if not prefer_bounds:
-        bb = bg.get('bubble_bounds_px')
-        if isinstance(bb, (list, tuple)) and len(bb) == 4:
-            x1, y1, x2, y2 = (float(v) for v in bb)
-            w, h = (x2 - x1, y2 - y1)
-            if w > 0 and h > 0:
-                return (x1, y1, w, h)
-    return None
-
-def estimate_n_lines(text: str, canvas_w_px: float, canvas_h_px: float, font_px: float, direction: str) -> int:
-    char_count = sum((1 for char in text if not char.isspace()))
-    if not char_count:
-        return 1
-    extent = canvas_h_px if direction == 'v' else canvas_w_px
-    glyph = font_px if direction == 'v' else font_px * 0.65
-    chars_per_line = max(1.0, extent / max(1.0, glyph))
-    return max(1, min(20, math.ceil(char_count / chars_per_line)))
 
 def make_item_box(line_idx: int, n_lines: int, canvas_left: float, canvas_top: float, canvas_w: float, canvas_h: float, font_px: float, direction: str, img_w: int, img_h: int, source_rot_deg: float = 0.0) -> dict:
     iw, ih = (float(max(1, img_w)), float(max(1, img_h)))
@@ -104,39 +73,6 @@ def make_item_box(line_idx: int, n_lines: int, canvas_left: float, canvas_top: f
     cy_n = top_n + h_n / 2.0
     return {'left': left_n, 'top': top_n, 'width': w_n, 'height': h_n, 'left_pct': left_n * 100.0, 'top_pct': top_n * 100.0, 'width_pct': w_n * 100.0, 'height_pct': h_n * 100.0, 'rotation_deg': rot, 'rotation_deg_css': rot, 'center': {'x': cx_n, 'y': cy_n}}
 
-def source_rotation_canvas(bg: dict) -> tuple[float, float, float, float, float] | None:
-    items = [it for it in bg.get('items') or [] if str(
-        it.get('text') or '').strip()]
-    if not items:
-        return None
-    rots = [float((it.get('box') or {}).get('rotation_deg') or 0.0)
-            for it in items]
-    avg_rot = sum(rots) / len(rots)
-    if max(rots) - min(rots) > 20.0:
-        return None
-    lefts: list[float] = []
-    tops: list[float] = []
-    rights: list[float] = []
-    bots: list[float] = []
-    for it in items:
-        box = it.get('box') or {}
-        l = float(box.get('left') or 0.0)
-        t = float(box.get('top') or 0.0)
-        w = float(box.get('width') or 0.0)
-        h = float(box.get('height') or 0.0)
-        if w > 0 and h > 0:
-            lefts.append(l)
-            tops.append(t)
-            rights.append(l + w)
-            bots.append(t + h)
-    if not lefts:
-        return None
-    l0, t0 = (min(lefts), min(tops))
-    w0 = max(rights) - l0
-    h0 = max(bots) - t0
-    if w0 <= 0 or h0 <= 0:
-        return None
-    return (l0, t0, w0, h0, avg_rot)
 
 def expand_canvas_for_rotation(src_aabb: tuple[float, float, float, float], other_bounds: list[tuple[float, float, float, float]], target_direction: str, img_w: int, img_h: int, aspect_target: float = 1.5, margin: float = 2.0) -> tuple[float, float, float, float]:
     sx, sy, sw, sh = src_aabb

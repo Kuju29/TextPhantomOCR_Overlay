@@ -15,7 +15,14 @@
     "scripts/test-geometry-invariants.py",
     "scripts/test-settings-wire-matrix.mjs",
     "scripts/test-repair-stability-regressions.mjs",
-    "scripts/test-gemini-thinking.py"
+    "scripts/test-gemini-thinking.py",
+    "scripts/test-support-client-10421.mjs",
+    "scripts/test-support-background-10421.mjs",
+    "scripts/test-support-listener-10421.mjs",
+    "scripts/test-support-relay-10421.py",
+    "scripts/test-trace-runtime-isolation-10421.py",
+    "scripts/test-support-background-10422.mjs",
+    "scripts/test-support-config-10422.mjs"
   ],
   "nested": {
     "scripts/test-ai-thinking-reporting.py": "scripts/test-local-ai-config.mjs"
@@ -23,14 +30,28 @@
   "separate": {
     "browser": {
       "reason": "Requires a local Chromium executable; offline real DOM/canvas gate, not live provider.",
-      "command": "npm run test:browser-display && python scripts/test-repair-browser.py --browser /path/to/chromium --out /tmp/tp-repair && npm run test:browser-status && npm run test:browser-usage && npm run test:browser-conversation",
+      "command": "npm run test:browser-display && python scripts/test-repair-browser.py --browser /path/to/chromium --out /tmp/tp-repair && npm run test:browser-status && npm run test:browser-usage && npm run test:browser-conversation && python scripts/test-account-layout-1031.py && python scripts/test-cancel-recovery-1033.py && python scripts/test-compact-usage-browser.py && python scripts/test-conversation-browser.py && python scripts/test-display-browser.py && python scripts/test-download-browser-2725.py && python scripts/test-download-formats-storage-2726.py && python scripts/test-image-status-browser.py && python scripts/test-native-axis-browser.py && python scripts/test-paid-controls-browser-102.py && python scripts/test-paid-customer-browser-103.py && python scripts/test-paid-popup-sizing-106.py && python scripts/test-paid-session-expiry-1034.py && python scripts/test-payment-races-1032.py && python scripts/test-payment-resume-1036.py && python scripts/test-provider-selection-browser-2722.py && python scripts/test-reader-sources-browser.py && npm run test:browser-ui-language && npm run test:browser-support",
       "files": [
-        "scripts/test-display-browser.py",
-        "scripts/test-native-axis-browser.py",
-        "scripts/test-repair-browser.py",
-        "scripts/test-image-status-browser.py",
+        "scripts/test-account-layout-1031.py",
+        "scripts/test-cancel-recovery-1033.py",
         "scripts/test-compact-usage-browser.py",
-        "scripts/test-conversation-browser.py"
+        "scripts/test-conversation-browser.py",
+        "scripts/test-display-browser.py",
+        "scripts/test-download-browser-2725.py",
+        "scripts/test-download-formats-storage-2726.py",
+        "scripts/test-image-status-browser.py",
+        "scripts/test-native-axis-browser.py",
+        "scripts/test-paid-controls-browser-102.py",
+        "scripts/test-paid-customer-browser-103.py",
+        "scripts/test-paid-popup-sizing-106.py",
+        "scripts/test-paid-session-expiry-1034.py",
+        "scripts/test-payment-races-1032.py",
+        "scripts/test-payment-resume-1036.py",
+        "scripts/test-provider-selection-browser-2722.py",
+        "scripts/test-reader-sources-browser.py",
+        "scripts/test-repair-browser.py",
+        "scripts/test-ui-language-browser-10411.py",
+        "scripts/test-support-drafts-browser-10423.py"
       ]
     },
     "windows": {
@@ -42,6 +63,28 @@
       "reason": "Paid opt-in repeated trials and human semantic assessment; never an implicit npm test call.",
       "command": "Follow scripts/provider-quality-plan.md after setting a call/token/cost ceiling.",
       "files": []
+    },
+    "support_browser": {
+      "reason": "Requires Playwright Chromium; tests real DOM with mockchrome/offline API, not installed extension runtime.",
+      "command": "npm run test:browser-support",
+      "files": [
+        "scripts/test-support-browser-10422.py",
+        "scripts/test-chat-composer-browser-10425.py"
+      ]
+    },
+    "support_dock_lifecycle": {
+      "reason": "Native DOM with explicitly simulated Chrome boundaries; requires Chromium/runtime libs/font config.",
+      "command": "python scripts/test-support-dock-lifecycle-browser-10424.py --source src/content/support-dock.js --browser /path/to/chromium --runtime-lib /path/to/runtime --font-config /path/to/fonts.conf --out /tmp/tp-dock",
+      "files": [
+        "scripts/test-support-dock-lifecycle-browser-10424.py"
+      ]
+    },
+    "support_installed": {
+      "reason": "Requires full Chromium/Chrome for Testing with actual unpacked MV3 runtime and UNIX sockets; blocked in this execution environment.",
+      "command": "python scripts/test-support-installed-browser-10424.py --extension dist/chrome --browser /path/to/full-chromium --out /tmp/tp-installed",
+      "files": [
+        "scripts/test-support-installed-browser-10424.py"
+      ]
     }
   }
 }

@@ -6,10 +6,19 @@ const context={provider:'ollama',localIndependent:true,contract:'compact_records
 const batch=takeWorkloadBatch(rows,0,measured,context);
 assert.equal(batch.units.length,24);
 assert.equal(takeWorkloadBatch(rows,0,measured,{...context,localIndependent:false}).units.length<24,true,'old conservative target fragments this exact fixture');
-assert.equal(takeWorkloadBatch(rows,0,initialProfile(),context).units.length<24,true,'cold/unverified runtime unchanged');
+// .67 owner rule: Local Independent fills the live model window on every
+// request. Cold, structure-restricted and slow profiles no longer shrink it;
+// hidden reasoning is reserved inside the window; an unknown window is never
+// guessed (old learned target).
+const within=b=>b.estimate.estimatedInput+b.estimate.predictedOutput+b.estimate.reasoningReserve+128<=8192;
+for(const [p,label] of [[initialProfile(),'cold runtime fills the window'],
+  [{...measured,reliabilityRestricted:true},'structure trouble is repaired, not shrunk'],
+  [{...measured,latencyOutputTarget:160},'latency does not cap a Local Independent window']]){
+  const b=takeWorkloadBatch(rows,0,p,context);assert.equal(b.units.length,24,label);assert.ok(within(b),label);
+}
+const thinking=takeWorkloadBatch(rows,0,{...measured,reasoning:[0,500]},context);
+assert.ok(thinking.units.length===24&&thinking.estimate.reasoningReserve>=500&&within(thinking),'hidden reasoning is reserved inside the window');
 assert.equal(takeWorkloadBatch(rows,0,measured,{...context,limits:{}}).units.length<24,true,'unknown context is not enlarged');
-assert.equal(takeWorkloadBatch(rows,0,{...measured,reliabilityRestricted:true},context).units.length<24,true,'known structure trouble does not upscale');
-assert.equal(takeWorkloadBatch(rows,0,{...measured,latencyOutputTarget:160},context).units.length<24,true,'latency cap still wins');
-assert.equal(takeWorkloadBatch(rows,0,{...measured,reasoning:[0,500]},context).units.length<24,true,'hidden reasoning remains conservative');
-assert.equal(batch.estimate.fitsHard,true);assert.ok(batch.estimate.target<=2048);
-console.log('PASS measured Local context-only batching: 24 same-page units fit after 2 zero-reasoning successes; cold/unknown/latency/reliability/hidden-reasoning guards preserved');
+assert.equal(batch.estimate.fitsHard,true);
+assert.equal(batch.estimate.target,batch.estimate.completionAvailable-batch.estimate.reasoningReserve,'target = live window remainder');
+console.log('PASS Local Independent fills the live window (.67): cold/restricted/slow profiles do not shrink; reasoning reserved; unknown window not guessed');

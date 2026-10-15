@@ -1,0 +1,12 @@
+import assert from 'node:assert/strict';
+import {readFile} from 'node:fs/promises';
+import {fileURLToPath} from 'node:url';
+import {assertAccessibleModuleGraph} from './lib/accessible-module-graph.mjs';
+const root=fileURLToPath(new URL('../src/',import.meta.url));
+const manifest=JSON.parse(await readFile(new URL('../platform/base.json',import.meta.url),'utf8'));
+const modules=await assertAccessibleModuleGraph(root,manifest,'processors/render/renderer.js');
+assert(modules.includes('shared/ai-source-filter.js'));
+const damaged=structuredClone(manifest);
+for(const rule of damaged.web_accessible_resources)rule.resources=rule.resources.filter(value=>value!=='shared/ai-source-filter.js');
+await assert.rejects(assertAccessibleModuleGraph(root,damaged,'processors/render/renderer.js'),/not web-accessible: shared\/ai-source-filter\.js/);
+console.log(`PASS renderer transitive web exposure: ${modules.length} modules; missing shared dependency rejected`);

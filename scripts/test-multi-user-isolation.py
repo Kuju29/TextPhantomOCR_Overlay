@@ -10,6 +10,7 @@ sys.path.insert(0, str(ROOT / "api"))
 
 from backend import cancellation
 from backend.ai.provider_resolution import _capability_scope
+from backend.ai.translation.contracts import AiConfig
 from backend.ai.translation_paths.mode import scope_material
 from backend.api.routes.repair_runs import caller_scope
 from backend.jobs.admission import identity_of
@@ -23,13 +24,15 @@ class Request:
 
 
 def ai(*, owner: str, key: str, document: str = "doc"):
-    return SimpleNamespace(
+    # The real request contract, not a hand-built namespace: a namespace went
+    # stale when AiConfig gained translation_mode and the matrix stopped
+    # running at the result-cache step. New fields now get their defaults.
+    return AiConfig(
+        api_key=key, user_key=True, provider="openrouter", model="fixture/model",
+        base_url="https://openrouter.ai/api/v1", source_lang="ja", prompt_editable="STYLE",
+        prompt_mode="replace", memory_mode="off", thinking="off", output_contract="markers",
+        translation_mode="conversation",
         conversation={"owner": owner, "documentId": document, "reset": "automatic"},
-        provider="openrouter", model="fixture/model", base_url="https://openrouter.ai/api/v1",
-        api_key=key, source_lang="ja", prompt_editable="STYLE", prompt_mode="replace",
-        memory_mode="off", thinking="off", send_image=False, image_b64="", output_contract="markers",
-        style_examples=False, series_state="", speakers={}, prev_context=[], page_context=[],
-        source_context=[], glossary=[], characters=[], char_memory=False,
     )
 
 
@@ -56,6 +59,11 @@ def main():
     key_a = build_cache_key("image", "th", "text", "ai", a, owner_scope="tab-a")
     key_b = build_cache_key("image", "th", "text", "ai", b_owner, owner_scope="tab-b")
     assert key_a != key_b
+    # Same request content, different owner scope or credential: never shared.
+    assert key_a != build_cache_key("image", "th", "text", "ai", a, owner_scope="tab-b")
+    assert key_a != build_cache_key("image", "th", "text", "ai", b_key, owner_scope="tab-a")
+    assert key_a == build_cache_key("image", "th", "text", "ai", ai(owner="owner-a", key="key-a"),
+                                    owner_scope="tab-a")
 
     # Provider capability/probe memory is account scoped even for same model/endpoint.
     assert _capability_scope("openrouter", "https://openrouter.ai/api/v1", "key-a") != \

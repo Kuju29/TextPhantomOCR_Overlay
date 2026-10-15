@@ -1,19 +1,13 @@
 import { getStorage, setStorage } from "./storage.js";
 
 /**
- *
- * Derive a stable per-series key from a reader page URL.
- *
- * Goal: pages of the SAME series/chapter run share one key, so the AI
- * character sheet + translation memory follow the series automatically and
- * a new series starts with a fresh memory.
- *
- * Heuristic: keep the host plus leading path segments that look like a
- * series slug, and stop at the first segment that looks like a chapter /
- * episode / page marker, a pure number, or a UUID-ish hash.
+ * Derive a stable per-series key from a reader page URL, so the AI character
+ * sheet and translation memory follow the series. Keeps the host plus leading
+ * series-slug segments and stops at the first chapter/episode/page marker,
+ * pure number or UUID-ish hash:
  *
  *   host/manga/solo-leveling/chapter-12  -> host/manga/solo-leveling
- *   host/title/1234/some-name/ch-3       -> host/title
+ *   host/title/1234/some-name/ch-3       -> host/title/1234
  *   mangadex.org/chapter/<uuid>          -> mangadex.org  (site-level fallback)
  */
 /**
@@ -22,21 +16,25 @@ import { getStorage, setStorage } from "./storage.js";
  * Almost every reader puts the series name in the document title, e.g.
  * "Solo Leveling - Chapter 12 | SomeSite".
  */
-export function seriesSlugFromTitle(rawTitle) {
+export function seriesSlugFromTitle(rawTitle, host = "") {
   let t = String(rawTitle || "").trim();
   if (!t) return "";
   // Strip chapter / episode markers with their numbers (multi-language).
   t = t.replace(
-    /(chapter|chap\.?|ch\.?|ep(isode)?\.?|ตอนที่|ตอน|第\s*[\d.]+\s*[話话回]|vol(ume)?\.?|#)\s*[\d.\-]*/gi,
+    /\b(?:chapter|chap\.?|ch\.?|episode|ep\.?|vol(?:ume)?\.?)\s*(?:\d[\d.-]*|(?=$|[|•·—–:]))|(?:ตอนที่|ตอน)\s*[0-9๐-๙]+|第\s*[\d一二三四五六七八九十百千.]+\s*[話话回]|#\s*\d+/gi,
     " ",
   );
-  // Split on common separators; the series name is usually the longest chunk.
+  // A long site brand is not series authority. Prefer the first non-generic
+  // title part and exclude the known hostname/reader labels.
+  const site = String(host).split(".")[0].toLowerCase();
+  const hostname = String(host).toLowerCase();
   const parts = t
     .split(/[|•·—–:]+|\s-\s/)
     .map((s) => s.trim())
-    .filter(Boolean);
-  if (parts.length)
-    t = parts.reduce((a, b) => (b.length > a.length ? b : a), "");
+    .filter((part) => part && part.toLowerCase() !== site && part.toLowerCase() !== hostname &&
+      !GENERIC_READER_ROUTES.has(part.toLowerCase()) &&
+      !SERIES_ROUTES.has(part.toLowerCase()));
+  t = parts[0] || "";
   const slug = t
     .toLowerCase()
     .normalize("NFC")
@@ -52,9 +50,31 @@ export function seriesSlugFromTitle(rawTitle) {
  */
 export function refineSeriesKeyWithTitle(baseKey, title) {
   const key = String(baseKey || "").trim() || "default";
-  if (key === "default" || key.includes("/")) return key;
-  const slug = seriesSlugFromTitle(title);
+  if (key === "default" || seriesIdentityKnown(key)) return key;
+  const slug = seriesSlugFromTitle(title, key.split("/")[0]);
   return slug ? `${key}/t/${slug}` : key;
+}
+
+const SERIES_ROUTES = new Set([
+  "title", "manga", "manhwa", "manhua", "series", "book", "comic", "novel",
+]);
+const GENERIC_READER_ROUTES = new Set([
+  "read", "reader", "chapter", "chapters", "episode", "episodes", "page", "pages", "view", "home", "loading",
+]);
+
+export function seriesIdentityKnown(seriesKey) {
+  const parts = String(seriesKey || "").split("/");
+  if (parts.length < 2 || parts[0] === "default") return false;
+  return !(parts.length === 2 && (SERIES_ROUTES.has(parts[1]) || GENERIC_READER_ROUTES.has(parts[1])));
+}
+
+// Legacy records have no target identity. Keep them stored, but never guess
+// their language when attaching memory to a newly scoped translation.
+export function seriesMemoryKey(seriesKey, targetLang = "") {
+  const key = String(seriesKey || "default");
+  const language = String(targetLang || "").trim().toLowerCase();
+  if (!language) return key;
+  return `tp-memory-v2:${language}:${key}`;
 }
 
 const MD_MAP_KEY = "mdChapterSeriesMap";
@@ -116,6 +136,14 @@ export function seriesKeyFromUrl(url) {
     const kept = [];
     for (const seg of u.pathname.split("/").filter(Boolean)) {
       const t = decodeURIComponent(seg).toLowerCase();
+      // A numeric/UUID segment immediately after an explicit series route is
+      // the series identity, not a chapter ID. Stop here so optional title
+      // slugs cannot change the identity across chapters.
+      const seriesId = SERIES_ROUTES.has(kept.at(-1));
+      if (seriesId && (/^\d+([._-]\d+)*$/.test(t) || /^[0-9a-f-]{16,}$/i.test(t))) {
+        kept.push(t);
+        break;
+      }
       // UUID / long hex-ish hash → not a stable series slug.
       if (/^[0-9a-f-]{16,}$/i.test(t) && /\d/.test(t)) break;
       // Pure number (chapter/page id).

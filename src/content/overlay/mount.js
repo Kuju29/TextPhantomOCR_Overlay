@@ -55,11 +55,20 @@
   }
 
   // Returns the image's box relative to a positioned parent.
-  function getOverlayBoxFromParent(img, parent) {
+  function getOverlayBoxFromParent(img, parent, fixed = false) {
     const r = img.getBoundingClientRect();
-    if (parent === document.body || parent === document.documentElement)
-      return { r, left: r.left, top: r.top };
+    // A fixed portal host is placed in viewport coordinates.
+    if (fixed) return { r, left: r.left, top: r.top };
     if (!parent) return { r, left: 0, top: 0 };
+    // <body>/<html> become the positioned parent (see
+    // ensureOverlayHostMountedNearImage): offset from their padding box. Their
+    // box already moves with the page scroll, so no scroll term; viewport
+    // coordinates here drifted by the body offset (collapsed margins) and by
+    // the scroll position.
+    if (parent === document.body || parent === document.documentElement) {
+      const pr = parent.getBoundingClientRect();
+      return { r, left: r.left - pr.left - (parent.clientLeft || 0), top: r.top - pr.top - (parent.clientTop || 0) };
+    }
     const pr = parent.getBoundingClientRect();
     return {
       r,
@@ -217,7 +226,7 @@
         continue;
       }
 
-      const { r, left, top } = getOverlayBoxFromParent(img, parent);
+      const { r, left, top } = getOverlayBoxFromParent(img, parent, rec.fixedPortal === true);
       if (r.width < 2 || r.height < 2) {
         setOverlayStyleIfChanged(host, "display", "none", readerKey ? "important" : "");
         rec.img = img;
@@ -378,6 +387,7 @@
     for (const [key, rec] of Array.from(htmlOverlaysByKey.entries())) {
       disconnectOverlayResizeObserver(rec);
       TP.overlayBackground.release(rec);
+      TP.overlayFontScale?.unregister(rec.scope);
       if (rec.rasterBlobUrl?.startsWith("blob:")) {
         try {
           URL.revokeObjectURL(rec.rasterBlobUrl);
@@ -437,6 +447,7 @@
     if (!rec) return;
     disconnectOverlayResizeObserver(rec);
     TP.overlayBackground.release(rec);
+    TP.overlayFontScale?.unregister(rec.scope);
     if (rec.rasterBlobUrl?.startsWith('blob:')) {
       try { URL.revokeObjectURL(rec.rasterBlobUrl); } catch {}
     }

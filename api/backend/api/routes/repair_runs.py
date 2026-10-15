@@ -23,11 +23,11 @@ def token(request: Request) -> str:
 def caller_scope(request: Request) -> str:
     """Opaque per-extension-workflow quota identity for repair registration.
 
-    The random tab session is the same fairness identity already used by Lens,
-    Grouping and AI admission.  Falling back to IP+origin keeps old clients
-    compatible, but current clients behind one NAT/proxy no longer consume one
-    another's 64-run repair quota.  This scope is quota-only; the 256-bit run
-    token remains the authorization boundary for every repair read/mutation.
+    The random tab session is the fairness identity also used by Lens, Grouping
+    and AI admission, so clients behind one NAT/proxy do not share a 64-run
+    quota; old clients fall back to IP+origin. This scope is quota-only; the
+    256-bit run token remains the authorization boundary for every repair
+    read/mutation.
     """
     session = str(request.headers.get("x-tp-tab-session") or "").strip()[:160]
     origin = str(request.headers.get("origin") or "")[:256]
@@ -58,14 +58,15 @@ async def call(fn, *args):
     try:
         return await asyncio.to_thread(fn, *args)
     except state.PoolError as error:
+        if error.status == 429:
+            raise HTTPException(429, detail={"code": error.code, "retryable": True},
+                                headers={"Retry-After": "30"}) from error
         raise HTTPException(error.status, detail={"code": error.code, "retryable": False}) from error
 
 async def change(request: Request, run_id: str, action):
     value = await call(store.transact, run_id, token(request), action)
-    # Activity mode reports a repair run once at a meaningful transition. Page
-    # enqueue/claim polling is expected success traffic and previously produced
-    # dozens of phase=null lines that looked like separate incidents. Full mode
-    # retains the old per-mutation evidence.
+    # Activity mode logs a repair run only at a meaningful transition; page
+    # enqueue/claim polling is expected traffic. Full mode logs every mutation.
     phase = str(value.get("phase") or "")
     unresolved = int(value.get("unresolved") or 0)
     signature = (phase, len(value.get("pending", [])), int(value.get("repaired") or 0), unresolved)
@@ -84,7 +85,9 @@ async def change(request: Request, run_id: str, action):
 @router.post("")
 async def register(request: Request):
     data = await body(request)
-    return await call(store.register, data.get("runId"), token(request), data.get("manifest"), caller_scope(request))
+    from backend.api.ingress import current_identity
+    return await call(store.register, data.get("runId"), token(request), data.get("manifest"),
+                      caller_scope(request), current_identity())
 
 @router.get("/{run_id}")
 async def status(run_id: str, request: Request):
@@ -135,6 +138,10 @@ async def translate(run_id: str, task_id: str, request: Request):
     payload = await body(request)
     run_token = token(request)
     current = await call(store.read, run_id, run_token)
+    # Cancellation deliberately erases source text and receipts. Check the
+    # authenticated run lifecycle before projecting its source for dispatch.
+    if current.get('phase') == 'cancelled':
+        raise HTTPException(409, detail={"code": "repair_run_cancelled", "retryable": False})
     task = next((x for x in current["tasks"] if x["id"] == task_id), None)
     if not task or task["route"] != "server":
         raise HTTPException(409, detail={"code": "repair_task_route_mismatch"})
@@ -162,8 +169,24 @@ async def translate(run_id: str, task_id: str, request: Request):
         repair_wire_to_alias = dict(zip(wire_ids, alias_ids))
     elif payload.get("units") != expected:
         raise HTTPException(409, detail={"code": "repair_task_source_mismatch"})
-    begun = await call(store.transact, run_id, run_token,
-                       lambda run: state.begin(run, task_id, task["executor"]))
+    incoming_provider = payload.get("provider") if isinstance(payload.get("provider"), dict) else {}
+    login_identity = None
+    if incoming_provider.get("id") == "login":
+        from backend.ai.login.login_translation import authorize_model
+        owner, session, base_model = await asyncio.to_thread(authorize_model,
+            str(incoming_provider.get("apiKey") or ""), str(incoming_provider.get("model") or ""))
+        login_identity = hashlib.sha256((owner + "\0" + session["id"] + "\0" + base_model).encode()).hexdigest()
+    def begin_bound(run):
+        current_task = run["tasks"].get(task_id)
+        if not current_task:
+            raise state.PoolError("repair_task_missing", 404)
+        saved = current_task.get("login_identity")
+        if saved and saved != login_identity:
+            raise HTTPException(403, detail={"code": "login_repair_account_mismatch"})
+        if login_identity:
+            current_task["login_identity"] = login_identity
+        return state.begin(run, task_id, task["executor"])
+    begun = await call(store.transact, run_id, run_token, begin_bound)
     if not begun["dispatch"]:
         if begun.get("answer"):
             result = begun["answer"]
@@ -210,7 +233,7 @@ async def translate(run_id: str, task_id: str, request: Request):
                     "missing": [map_id(value) for value in (result.get("missing") or [])]}
                 if isinstance(result.get("meta"), dict):
                     meta = dict(result["meta"])
-                    for key in ("omittedIds", "declinedIds", "wrongLanguageIds", "alignmentUncertainIds"):
+                    for key in ("omittedIds", "declinedIds", "wrongLanguageIds", "alignmentUncertainIds", 'skippedUnitIds'):
                         if isinstance(meta.get(key), list):
                             meta[key] = [map_id(value) for value in meta[key]]
                     result["meta"] = meta

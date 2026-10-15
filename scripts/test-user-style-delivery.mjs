@@ -98,6 +98,8 @@ with tempfile.TemporaryDirectory(prefix='tp-style-log-') as temp:
    assert a.status_code==200 and a.json()['written']==1,a.text
    assert b.status_code==200 and b.json()['written']==0,b.text
  asyncio.run(run());trace.flush()
+ with trace._LOCK:
+  trace._reset_handle_locked()
  text='\n'.join(p.read_text() for p in Path(temp).glob('trace-*.jsonl'))
  records=[json.loads(line) for line in text.splitlines() if line]
  rows=[r for r in records if r.get('fn')=='style-layout-regression']
@@ -108,6 +110,7 @@ with tempfile.TemporaryDirectory(prefix='tp-style-log-') as temp:
   assert data[key]==payload['records'][0]['d'][key],(key,data)
  assert 'STYLE_SECRET_SENTINEL' not in text and 'hf_0123456789abcdefgh' not in text
  print(json.dumps({'written':len(rows),'duplicateWritten':0,'styleRole':data['styleRole'],'userStyleCopies':data['userStyleCopies'],'privacy':'pass'}))
+ trace._release_trace_leases()  # Close fixture leases before Windows removes its temp directory.
 `],{cwd:root,input:JSON.stringify(shipments[0]),encoding:'utf8'});
 assert.equal(child.status,0,child.stderr||child.stdout);
 console.log(`PASS ${checks+5} System-style single-owner invariants: static prefixes, custom/default, TH/EN/JA/fallback, repair and source scope, exact style budget and UI. Trace transport: ${child.stdout.trim()}`);

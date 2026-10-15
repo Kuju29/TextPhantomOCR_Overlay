@@ -75,8 +75,6 @@ def f32(b4: bytes) -> float:
     """Decode a little-endian 32-bit float."""
     return struct.unpack("<f", b4)[0]
 
-def to_hex(b: bytes) -> str:
-    return b.hex()
 
 def get_float_field(fields: list[ProtoField], field_num: int) -> float | None:
     """Return the value of the first 32-bit float field numbered ``field_num``."""
@@ -119,26 +117,6 @@ def get_points_from_geom(
         return pts[0], pts[-1], height
     return None, None, None
 
-def get_polyline_from_geom(
-    geom_bytes: bytes,
-) -> tuple[list[tuple[float, float]], float | None]:
-    """Return the *full* polyline + height from a geometry sub-message.
-
-    Used by the renderer when an exact curve trace is needed.  Returns
-    ``([], None)`` when the message isn't a geometry block.
-    """
-    pts: list[tuple[float, float]] = []
-    height: float | None = None
-    for f, w, v in parse(geom_bytes):
-        if f == 1 and w == 2:
-            p_fields = parse(v)  # type: ignore[arg-type]
-            x = get_float_field(p_fields, 1)
-            y = get_float_field(p_fields, 2)
-            if x is not None and y is not None:
-                pts.append((x, y))
-        elif f == 3 and w == 5:
-            height = f32(v)  # type: ignore[arg-type]
-    return pts, height
 
 def looks_like_geom(geom_bytes: bytes) -> bool:
     """True if ``geom_bytes`` has >=2 points and a height field."""

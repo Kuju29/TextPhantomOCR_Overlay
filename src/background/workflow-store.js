@@ -18,6 +18,10 @@ const STORE = "workflows";
 
 const TERMINAL_TTL_MS = 10 * 60 * 1000;
 const STRANDED_AFTER_MS = 60 * 1000;
+// A non-terminal record untouched this long belongs to a worker that
+// died mid-job (the job registry also drops contexts after 6 h); nothing can
+// advance it any more, so sweep() deletes it instead of keeping it forever.
+const STRANDED_EXPIRE_MS = 6 * 60 * 60 * 1000;
 
 let dbPromise = null;
 
@@ -157,13 +161,13 @@ export async function cancelTab(tabId, reason = "navigation", workflowIds = null
   return mine.length;
 }
 
-// Deletes terminal records past their TTL and returns how many were removed.
+// Deletes terminal records past their TTL (and long-stranded active ones) and returns how many were removed.
 export async function sweep(now = Date.now()) {
   const all = await runTransaction("readonly", (store) =>
     request(store, "getAll"),
   );
   const stale = (all || []).filter(
-    (r) => isTerminal(r.state) && now - (r.updatedAt || 0) > TERMINAL_TTL_MS,
+    (r) => now - (r.updatedAt || 0) > (isTerminal(r.state) ? TERMINAL_TTL_MS : STRANDED_EXPIRE_MS),
   );
   if (!stale.length) return 0;
   await runTransaction("readwrite", (store) => {

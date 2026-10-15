@@ -1,4 +1,9 @@
-import { renderReasoningSelect } from "./reasoning-select.js";
+import { AI_PROMPT_MAX_CHARS } from "../../shared/prompt.js";
+import { LOGIN_PROFILE_KEY, loginEntry, putLoginEntry, loginPromptKey } from "../../shared/login-profile.js";
+import { PAID_PROFILE_KEY, paidEntry, putPaidEntry, paidPromptKey } from "../../shared/paid-profile.js";
+import { setThinkingPreference } from "./reasoning-select.js";
+import { defaultTokenCeiling, validTokenCeiling } from "../../shared/token-ceiling.js";
+import { uiTemplate } from "../../shared/ui-template.js";
 import { normalizeModelCapabilities } from "../../shared/model-capabilities.js";
 import {
   buildAiProfileStoragePatch,
@@ -24,13 +29,13 @@ function safeEndpointForProvider(provider, endpoint) {
   const normalizedEndpoint = String(endpoint || "").trim();
   const localSpec = localProviderSpec(normalizedProvider);
   if (localSpec) {
-    // Older popup builds could persist the previously-selected Cloud endpoint
-    // under a named Local Provider identity. Repair only registered presets;
-    // Custom Local remains fail-closed so an invalid user adapter is visible.
+    // A named Local Provider can carry a previously selected Cloud endpoint.
+    // Repair only registered presets; Custom Local stays fail-closed so an
+    // invalid user adapter is visible.
     if (!normalizedEndpoint) return localSpec.baseUrl;
     if (isLocalHostUrl(normalizedEndpoint)) return normalizedEndpoint;
-    // Only a syntactically-valid public HTTP(S) endpoint matches the stale
-    // Cloud-profile bug. Other malformed input remains visible to validation.
+    // Only a valid public HTTP(S) endpoint is treated as that stale Cloud
+    // endpoint; other malformed input stays visible to validation.
     try {
       const parsed = new URL(normalizedEndpoint);
       if (["http:", "https:"].includes(parsed.protocol)) return localSpec.baseUrl;
@@ -180,7 +185,7 @@ function defaultsFor(provider) {
     temperature: null,
     pageImage: "off",
     memoryMode: "off",
-    styleExamples: true,
+    styleExamples: false,
     translationMode: local ? "independent" : "conversation",
     conversationReset: "0",
     concurrency: { mode: "auto", max: 0 },
@@ -201,6 +206,166 @@ export function createAiProfileController({
   let currentIdentity = "";
   let providerTransitionRevision = 0;
   let latestProviderPatch = null;
+  let loginStored = {};
+  let paidStored = {}, paidSeed = {}, paidContext = null, paidSignature = "";
+  let serviceProfilesSeeded=false;
+  function seedServiceProfiles(stored={}) {
+    if(serviceProfilesSeeded)return;
+    // Paid/Login paint before Manual migration finishes. Their existing scoped
+    // choices must be present before setPaidContext can persist a first entry.
+    paidSeed=structuredClone(stored);
+    paidStored=structuredClone(stored[PAID_PROFILE_KEY]||{});
+    loginStored=structuredClone(stored[LOGIN_PROFILE_KEY]||{});
+    serviceProfilesSeeded=true;
+  }
+  const paidActive = () => Boolean(paidContext?.active);
+  const serviceProfileReady = () => paidContext?.source !== "login" || Boolean(
+    paidContext.provider && paidContext.accountScope && paidContext.model && paidContext.model !== "auto");
+  const paidKey = (api, model, language) => paidContext?.source === "login"
+    ? loginPromptKey(api, paidContext.provider, paidContext.accountScope, model, language) : paidPromptKey(api, model, language);
+  const selectedEntry = (language) => paidContext?.source === "login"
+    ? loginEntry({[LOGIN_PROFILE_KEY]:loginStored}, paidContext.apiBase, paidContext.provider, paidContext.accountScope, paidContext.model, language)
+    : paidEntry({[PAID_PROFILE_KEY]:paidStored}, paidContext.apiBase, paidContext.model, language);
+  const paidSelection = () => paidContext?.source === "login" ? selectedEntry(languageValue()) : paidEntry({...paidSeed, aiProfilesV1: profiles || paidSeed.aiProfilesV1, aiProfilePromptsV1: prompts, [PAID_PROFILE_KEY]: paidStored},
+    paidContext.apiBase, paidContext.model, languageValue());
+  function putPaid(entry) {
+    if (paidContext?.source === "login") {
+      loginStored = putLoginEntry(loginStored, paidContext.apiBase, paidContext.provider, paidContext.accountScope, paidContext.model, entry);
+      return {[LOGIN_PROFILE_KEY]: structuredClone(loginStored)};
+    }
+    paidStored = putPaidEntry(paidStored, paidContext.apiBase, paidContext.model, entry);
+    return {[PAID_PROFILE_KEY]: structuredClone(paidStored)};
+  }
+  function persistPaidSelection(entry) {
+    const patch = putPaid(entry);
+    const failed = () => {
+      state.aiProfileBlocked = true; state.aiProfileErrorCode = "AI_PROFILE_SAVE_FAILED";
+      if (els.aiPaidStatus) els.aiPaidStatus.textContent = "Could not save AI settings. Check browser storage and try again.";
+    };
+    try { Promise.resolve(setStorage(patch)).then(() => {
+      if (state.aiProfileErrorCode === "AI_PROFILE_SAVE_FAILED") {state.aiProfileBlocked=false;state.aiProfileErrorCode="";}
+    }, failed); } catch { failed(); }
+  }
+  function paidPromptMap(entry) {
+    return Object.fromEntries(Object.entries(entry.prompts).map(([lang, record]) =>
+      [paidKey(paidContext.apiBase, paidContext.model, lang), record]));
+  }
+  // Per-model token ceiling: OFF shows the model's default; ON uses the
+  // user's number for this model (Paid, Manual Cloud and Local; not Login).
+  function setTemplate(element, phrase, values) {
+    if (!element) return;
+    if (typeof element.replaceChildren === "function" && typeof document !== "undefined" &&
+        typeof element.ownerDocument?.createDocumentFragment === "function") {
+      element.replaceChildren(uiTemplate(phrase, values));
+      return;
+    }
+    element.textContent = phrase.replace(/\{(\w+)\}/g, (_, key) => String(values[key] ?? "—"));
+  }
+  function tokenCeilingProfile() {
+    if (paidActive()) return serviceProfileReady() ? paidSelection().profile : {};
+    try { return resolveAiProfile(profiles, currentRequest()).profile || {}; } catch { return {}; }
+  }
+  const localLimitsFor = hint => hint ? {...(hint.limits || {}),
+    contextTokens: hint.limits?.contextTokens ?? (Number.isSafeInteger(hint.contextLength) ? hint.contextLength : undefined)} : null;
+  function tokenCeilingDefault(profile = tokenCeilingProfile()) {
+    // Login: OFF keeps the current automatic size (no published window).
+    if (paidActive()) return paidContext?.source === "login" ? {tokens:null, source:"login"}
+      : defaultTokenCeiling({service:"paid", paidCeiling:paidContext?.requestCeiling});
+    const local = isLocalAiProvider(providerValue());
+    const model = modelValue();
+    return defaultTokenCeiling({local, modelCapabilities:profile.providerOptions?.modelCapabilities,
+      localLimits: local ? localLimitsFor(state.localAiCapability?.models?.[model]) : null});
+  }
+  function renderTokenCeiling(profile = tokenCeilingProfile()) {
+    if (!els.aiTokenCeilingEnabled || !els.aiTokenCeiling) return;
+    const info = tokenCeilingDefault(profile);
+    const saved = validTokenCeiling(profile.tokenCeiling) ? profile.tokenCeiling : null;
+    const enabled = profile.tokenCeilingEnabled === true && saved !== null;
+    const focused = typeof document !== "undefined" ? document.activeElement : null;
+    // "pending": switched ON but no valid number saved yet (user is typing).
+    if (els.aiTokenCeilingEnabled.dataset?.pending !== "1") els.aiTokenCeilingEnabled.checked = enabled;
+    els.aiTokenCeiling.disabled = !els.aiTokenCeilingEnabled.checked;
+    // OFF shows the size actually used (the default), not the stored
+    // number; the stored number comes back when the switch is turned on.
+    if (focused !== els.aiTokenCeiling)
+      els.aiTokenCeiling.value = els.aiTokenCeilingEnabled.checked && saved !== null ? String(saved)
+        : els.aiTokenCeilingEnabled.checked || !info?.tokens ? (saved !== null ? String(saved) : "") : String(info.tokens);
+    els.aiTokenCeiling.placeholder = info?.tokens ? String(info.tokens) : "";
+    const model = paidActive() ? String(paidContext?.model || "") : modelValue();
+    if (els.aiTokenCeilingDefault) {
+      if (info?.source === "login") setTemplate(els.aiTokenCeilingDefault,
+        "Default for {model}: automatic size, about 3–5 images per request.", {model: model || "auto"});
+      else if (!info?.tokens) els.aiTokenCeilingDefault.textContent =
+        "Default: the context loaded in your Local app (shown after the model is checked).";
+      else setTemplate(els.aiTokenCeilingDefault, info.source === "center"
+        ? "Default for {model}: {tokens} tokens (Control Center model ceiling)."
+        : info.source === "model"
+          ? "Default for {model}: {tokens} tokens (context loaded in your Local app)."
+          : "Default for {model}: {tokens} tokens (application default).",
+        {model: model || "auto", tokens: info.tokens.toLocaleString("en-US")});
+    }
+    if (els.aiTokenCeilingWarning) {
+      const typed = Math.floor(Number(els.aiTokenCeiling.value));
+      const loginLimit = info?.source === "login" ? 8192 : null;
+      const above = els.aiTokenCeilingEnabled.checked && (info?.tokens || loginLimit) && Number.isFinite(typed) &&
+        typed > (info?.tokens || loginLimit);
+      const missing = els.aiTokenCeilingEnabled.checked && !validTokenCeiling(typed);
+      els.aiTokenCeilingWarning.hidden = !(above || missing);
+      if (missing) els.aiTokenCeilingWarning.textContent = "Enter the number of tokens for each AI request.";
+      else if (above && loginLimit) setTemplate(els.aiTokenCeilingWarning,
+        "Web chats publish no limit. Above {tokens} tokens a reply can be cut off and translation can fail.",
+        {tokens: loginLimit.toLocaleString("en-US")});
+      else if (above) setTemplate(els.aiTokenCeilingWarning,
+        "Above the default of {tokens} tokens. If a reply no longer fits, translation can fail.",
+        {tokens: info.tokens.toLocaleString("en-US")});
+    }
+  }
+  function renderPaid() {
+    const entry = paidSelection(), profile = entry.profile;
+    renderTokenCeiling(serviceProfileReady() ? profile : {});
+    const editable=serviceProfileReady();
+    // The saved value only: the popup controller owns the AI think state for
+    // the current selection (an older catalogue cannot overwrite it here).
+    setThinkingPreference(els.aiThinking, profile.thinking);
+    for(const field of [els.aiPageImage,els.aiMemoryMode,els.aiStyleExamples,els.aiPrompt])
+      if(field)field.disabled=!editable;
+    if(!editable&&els.aiThinking)els.aiThinking.disabled=true;
+    if (els.aiPageImage) els.aiPageImage.checked = profile.pageImage === "always";
+    if (els.aiMemoryMode) els.aiMemoryMode.value = profile.memoryMode;
+    if (els.aiTranslationMode) els.aiTranslationMode.value = "conversation";
+    if (els.aiStyleExamplesWrap) els.aiStyleExamplesWrap.style.display = "";
+    if (els.aiStyleExamples) els.aiStyleExamples.checked = profile.styleExamples === true;
+    const key = paidKey(paidContext.apiBase, paidContext.model, languageValue());
+    state.aiPromptByLang = {...prompts, ...paidPromptMap(entry)};
+    if (els.aiPrompt && !state.aiPromptDirtyByLang?.[key]) els.aiPrompt.value = entry.prompts[languageValue()].text;
+    if (els.aiPromptCount) els.aiPromptCount.textContent = `${String(els.aiPrompt?.value || "").length}/${AI_PROMPT_MAX_CHARS}`;
+    return {key, value: entry.prompts[languageValue()].text, promptMode: "replace"};
+  }
+  function setPaidContext(context) {
+    const signature = JSON.stringify([!!context.active, context.source || "tp", context.provider || "", context.accountScope || "", context.apiBase || "", context.model || "auto", languageValue()]);
+    const changed = signature !== paidSignature;
+    if (changed) state.promptSeq = (Number(state.promptSeq) || 0) + 1;
+    if (changed && paidActive() && serviceProfileReady()) {
+      const key = paidKey(paidContext.apiBase, paidContext.model, paidContext.language);
+      if (state.aiPromptDirtyByLang?.[key]) {
+        const entry = selectedEntry(paidContext.language);
+        entry.prompts[paidContext.language] = {text: String(els.aiPrompt?.value || ""), mode: "replace"};
+        persistPaidSelection(entry);
+        state.aiPromptDirtyByLang[key] = false;
+      }
+    }
+    const wasPaid = paidActive();
+    paidContext = {...context, language: languageValue()}; paidSignature = signature;
+    if (paidActive() && changed) {
+      const entry = paidSelection();
+      // Persist a first selection once, so later Manual changes cannot reseed it.
+      if(serviceProfileReady())persistPaidSelection(entry);
+      return renderPaid();
+    }
+    if (!paidActive() && wasPaid && profiles) {
+      return render(resolveAiProfile(profiles, currentRequest()).profile);
+    }
+  }
 
   const providerValue = () =>
     String(els.aiProvider?.value || "")
@@ -239,6 +404,7 @@ export function createAiProfileController({
     model = modelValue(),
     identity = currentIdentity,
   ) {
+    if (paidActive()) return paidKey(paidContext.apiBase, paidContext.model, lang);
     return makeProfilePromptKey(
       identity || makeProviderIdentity(providerValue(), endpointValue()),
       model,
@@ -247,18 +413,21 @@ export function createAiProfileController({
   }
 
   function render(profile) {
-    renderReasoningSelect(els.aiThinking, profile.providerOptions?.modelCapabilities?.reasoning,
-      profile.thinking || "minimum");
+    if (paidActive()) return renderPaid();
+    renderTokenCeiling(profile);
+    for(const field of [els.aiPageImage,els.aiMemoryMode,els.aiStyleExamples,els.aiPrompt])
+      if(field)field.disabled=false;
+    setThinkingPreference(els.aiThinking, profile.thinking || "minimum");
     if (els.aiPageImage)
       els.aiPageImage.checked = profile.pageImage === "always";
     if (els.aiMemoryMode) els.aiMemoryMode.value = profile.memoryMode || "off";
     const local = isLocalAiProvider(providerValue());
     const translationMode = local ? localProviderTranslationMode(providerValue()) : "conversation";
     if (els.aiStyleExamples) {
-      els.aiStyleExamples.checked = profile.styleExamples !== false;
-      els.aiStyleExamples.disabled = translationMode === "conversation";
+      els.aiStyleExamples.checked = profile.styleExamples === true;
+      els.aiStyleExamples.disabled = false;
     }
-    if (els.aiStyleExamplesWrap) els.aiStyleExamplesWrap.style.display = translationMode === "conversation" ? "none" : "";
+    if (els.aiStyleExamplesWrap) els.aiStyleExamplesWrap.style.display = "";
     if (els.aiTranslationMode) els.aiTranslationMode.value = translationMode;
     if (els.aiLocalCapacityMode)
       els.aiLocalCapacityMode.value = profile.concurrency?.mode || "auto";
@@ -275,6 +444,7 @@ export function createAiProfileController({
   }
 
   function select(overrides = {}, { create = true } = {}) {
+    state.promptSeq = (Number(state.promptSeq) || 0) + 1;
     const request = currentRequest(overrides);
     if (create) {
       profiles = updateAiProfile(profiles, {
@@ -300,7 +470,7 @@ export function createAiProfileController({
     return {
       ...(local ? { aiLocalThinking: profile.thinking || "minimum" } : {}),
       aiCharMemory: profile.memoryMode === "full",
-      aiStyleExamples: profile.styleExamples !== false,
+      aiStyleExamples: profile.styleExamples === true,
       // The profile owns this selection; Cloud always renders Conversation.
       aiTranslationMode: local ? localProviderTranslationMode(providerValue()) : "conversation",
       aiConversationReset: String(profile.conversationReset || "0"),
@@ -364,6 +534,8 @@ export function createAiProfileController({
   }
 
   async function initialize(stored) {
+    setStorage.seed?.(stored);
+    seedServiceProfiles(stored);
     const providerHint =
       String(stored.aiProvider || "auto")
         .trim()
@@ -390,9 +562,10 @@ export function createAiProfileController({
     profiles = migrated.state;
     credentials = migrated.credentials;
     prompts = migrated.prompts;
+    paidSeed = {...stored, ...(migrated.effective || {}), aiProfilesV1: profiles, aiProfilePromptsV1: prompts};
     // A valid canonical profile is authoritative. Flat legacy keys are only
-    // migration input; letting them win here made the popup visibly jump back
-    // to an older Provider/Model on every open.
+    // migration input; letting them win would make the popup jump back to an
+    // older Provider/Model on every open.
     const effective = migrated.effective || {};
     const provider =
       String(
@@ -574,6 +747,7 @@ export function createAiProfileController({
     // remain empty and must never be overwritten by the auto profile.
     if (
       selectedModel !== "auto" &&
+      profiles?.active?.model === "auto" &&
       !Object.prototype.hasOwnProperty.call(prompts, destinationKey) &&
       Object.prototype.hasOwnProperty.call(prompts, autoKey)
     ) {
@@ -618,6 +792,12 @@ export function createAiProfileController({
   }
 
   async function saveProfile(patch) {
+    if (paidActive()) {
+      if(!serviceProfileReady()){renderPaid();return;}
+      const entry = paidSelection(); entry.profile = {...entry.profile, ...patch};
+      await setStorage(putPaid(entry));
+      return;
+    }
     const request = currentRequest();
     profiles = updateAiProfile(profiles, {
       ...request,
@@ -650,9 +830,15 @@ export function createAiProfileController({
     return true;
   }
 
-  async function savePrompt(lang, text, mode = null) {
+  async function savePrompt(lang, text) {
+    if (paidActive()) {
+      if(!serviceProfileReady()){renderPaid();return;}
+      const entry = paidSelection(); entry.prompts[lang] = {text: String(text || ""), mode: "replace"};
+      const patch = putPaid(entry);
+      state.aiPromptByLang = {...prompts, ...paidPromptMap(entry)};
+      await setStorage(patch); return;
+    }
     const key = promptKey(lang);
-    const current = getAiProfilePrompt(prompts, key);
     prompts = setAiProfilePrompt(prompts, key, {
       text: String(text || ""),
       mode: "replace",
@@ -698,9 +884,15 @@ export function createAiProfileController({
     language,
     model,
     prompt,
-    promptMode,
     savePrompt: saveText = false,
   } = {}) {
+    if (paidActive()) {
+      if(!serviceProfileReady())return {};
+      const entry = paidSelection();
+      if (saveText) entry.prompts[language || languageValue()] = {text: String(prompt || ""), mode: "replace"};
+      state.aiPromptByLang = {...prompts, ...paidPromptMap(entry)};
+      return putPaid(entry); // Never persist the hidden Manual credential from a Paid close.
+    }
     if (!currentIdentity) throw new TypeError("No active Provider identity");
     const provider = profiles?.providers?.[currentIdentity];
     if (!provider) throw new TypeError("Unknown active Provider identity");
@@ -747,6 +939,9 @@ export function createAiProfileController({
   const credentialForCurrent = () => credentials[currentIdentity] || "";
   const currentProviderIdentity = () => currentIdentity;
   return {
+    seedServiceProfiles,
+    whenIdle: () => setStorage.whenIdle?.() || Promise.resolve(),
+    setPaidContext,
     beginProviderTransition,
     bindConnection,
     buildClosePatch,
@@ -757,6 +952,9 @@ export function createAiProfileController({
     saveConnection,
     saveCredential,
     saveProfile,
+    renderTokenCeiling: () => renderTokenCeiling(),
+    tokenCeilingDefault: () => tokenCeilingDefault(),
+    savedTokenCeiling: () => { const p = tokenCeilingProfile(); return validTokenCeiling(p.tokenCeiling) ? p.tokenCeiling : null; },
     activateResolvedModel,
     saveModelCapabilities,
     savePrompt,

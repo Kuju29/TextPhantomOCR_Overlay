@@ -2,9 +2,10 @@
 
 import { requestFromTabEnsured } from "./tabs-messaging.js";
 import { attachTpError } from "../shared/error-contract.js";
+import { MAX_API_IMAGE_BYTES } from "../shared/constants.js";
 
 // Base64-encodes a Uint8Array in 32 KB chunks.
-export function bytesToBase64(bytes) {
+function bytesToBase64(bytes) {
   let binary = "";
   const chunk = 0x8000;
   for (let i = 0; i < bytes.length; i += chunk) {
@@ -63,7 +64,7 @@ export async function fetchImageDataUriFromUrl(url, pageUrl, signal = null, opti
 
   const blob = await res.blob();
   if (blob.size < 64) throw new Error("Image too small");
-  if (blob.size > 25 * 1024 * 1024) throw new Error("Image too large");
+  if (blob.size > MAX_API_IMAGE_BYTES) throw new Error("Image too large");
   const prepared=options.onResponse ? await options.onResponse(blob,res) : blob;
   if(verifiedBinary&&!/^image\//i.test(prepared.type))
     throw new Error('Encoded source did not decode to an image');
@@ -129,6 +130,9 @@ export function classifyJobError(msg, context = {}) {
   if (m.includes("no image data")) return { permanent: true };
   if (/\b(401|403|404|410)\b/.test(m)) return { permanent: true };
   if (m.includes("not an image")) return { permanent: true };
+  // Above the API's 24 MiB image cap: a retry downloads the same bytes, and
+  // only the permanent path reports IMG_TOO_LARGE (otherwise IMG_READ_FAILED).
+  if (m.includes("image too large")) return { permanent: true };
   if (
     m.includes("cannot identify image") ||
     m.includes("image file is truncated")

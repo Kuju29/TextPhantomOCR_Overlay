@@ -8,7 +8,7 @@ from fastapi import HTTPException, Request
 
 import time, asyncio
 
-from backend import cancellation, trace, logfile
+from backend import cancellation, trace, logfile, diagnostics
 from backend.application import translate_failures, translate_request, translate_response
 from backend.config import settings
 from backend.ai.provider_resolution import resolve_provider
@@ -106,7 +106,7 @@ async def capability_snapshot(request: Request) -> dict:
             # diagnostic files are off. Older extensions ignore the field.
             "logFile": logfile.is_enabled(),
         },
-        # Both lanes, because "the server is busy" now has two answers and a
+        # Both lanes, because "the server is busy" has two answers and a
         # client that cannot tell them apart will back off the wrong one.
         "capacity": stats.as_dict(),
         "capacityAi": {
@@ -146,6 +146,46 @@ async def capability_snapshot(request: Request) -> dict:
     return snapshot
 
 async def execute(payload: dict[str, Any], request: Request) -> dict:
+    """Replay Paid image requests before OCR/planning can create another billable batch."""
+    ai = payload.get("ai") if isinstance(payload.get("ai"), dict) else {}
+    service_provider = str(ai.get("provider") or "").lower()
+    if service_provider not in {"paid", "login"}:
+        return await _execute(payload, request)
+    raw_key = str(payload.get("idempotency_key") or request.headers.get("Idempotency-Key")
+                  or request.headers.get("X-TP-Request-Id") or "").strip()
+    if not raw_key or len(raw_key) > 160:
+        raise HTTPException(status_code=400, detail={"code": "paid_operation_id_required",
+            "message": "Paid image requests require a stable idempotency_key (1-160 characters).",
+            "retryable": False, "requestDispatched": False})
+    from backend.application.ai_translation import idempotency_session
+    from backend.application.legacy_translation import semantic_fingerprint
+    owned = {**payload, "idempotency_key": raw_key}
+    # Reuse the existing credential-scoped, bounded HTTP replay ledger. The
+    # image fingerprint includes render/language/OCR/AI options, not just pixels.
+    identity = {"provider": {"id": service_provider, "model": str(ai.get("model") or ""), "apiKey": str(ai.get("api_key") or "")},
+                "context": payload.get("context"), "image": semantic_fingerprint(owned)}
+    try:
+        reservation = await idempotency_session.reserve(request, identity, "runsapi:" + raw_key)
+    except idempotency_session.IdempotencyConflict as exc:
+        raise HTTPException(status_code=409, detail={"code": "idempotency_conflict",
+            "message": str(exc), "retryable": False, "requestDispatched": False}) from exc
+    if reservation.replay is not None:
+        if service_provider == "login":
+            import asyncio
+            from backend.ai.login.login_translation import authorize_model
+            await asyncio.to_thread(authorize_model, str(ai.get("api_key") or ""), str(ai.get("model") or ""))
+            return reservation.replay
+        from backend.paid_center import authorize_replay
+        from backend.api.errors import merged_request_correlation
+        await authorize_replay(str(ai.get("api_key") or ""),
+                               correlation=merged_request_correlation(request, {"operationId": raw_key}))
+        return reservation.replay
+    body = await _execute(owned, request)
+    idempotency_session.store(reservation, body)
+    return body
+
+
+async def _execute(payload: dict[str, Any], request: Request) -> dict:
     """Run one translation and return its result."""
     raw_context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
     raw_metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
@@ -267,9 +307,9 @@ async def execute(payload: dict[str, Any], request: Request) -> dict:
 
         wire_folder = wire_trace.active_folder()
         prepared = replace(prepared, wire_folder=wire_folder)
-        run_pipeline = translate_request.pipeline_callable(
+        run_pipeline = diagnostics.bind_context(translate_request.pipeline_callable(
             prepared, admission_unlimited=unlimited
-        )
+        ))
     except BaseException as exc:
         detail = exc.detail if isinstance(exc, HTTPException) and isinstance(exc.detail, dict) else {}
         stage = failure_stage

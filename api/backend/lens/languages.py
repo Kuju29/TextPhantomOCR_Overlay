@@ -155,7 +155,3 @@ def normalize(lang: str | None) -> str:
         return _LENS_CASE_MAP[low]
     return low
 
-def is_cjk(lang: str) -> bool:
-    """True for codes that need CJK fonts (Japanese / Chinese / Korean)."""
-    n = normalize(lang)
-    return n in {"ja", "ko", "zh", "zh-cn", "zh-tw"}

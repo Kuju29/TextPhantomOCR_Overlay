@@ -1,4 +1,6 @@
+import { loginIdentity } from "../../shared/login-profile.js";
 import { normalizeUrl } from "../../shared/url.js";
+import { validTokenCeiling, TOKEN_CEILING_MIN, TOKEN_CEILING_MAX } from "../../shared/token-ceiling.js";
 import { ensureApiDefaults } from "../../shared/api-defaults.js";
 import { getStorage, setStorage } from "../../shared/storage.js";
 import { effectiveEngineMode } from "../../shared/engine-mode.js";
@@ -17,6 +19,9 @@ import { isLocalHostUrl } from "../../shared/ai/providers/local-spec.js";
 import { createTab } from "../../shared/browser-api.js";
 import { broadcast } from "../../shared/messaging.js";
 import { isLocalAiProvider } from "../../shared/constants.js";
+import {
+  MANUAL_MODEL_BLOCKS_KEY, clearManualModelBlock, clearManualModelBlocks,
+} from "../../shared/ai/manual-model-block.js";
 import { normalizeReasoningPreference } from "../../shared/reasoning-preference.js";
 import {
   AI_PROMPT_MAX_CHARS,
@@ -45,7 +50,6 @@ export function bindPopupEvents(deps) {
     refreshPromptHistoryButtons,
     resetPromptForLang,
     updateAiPromptWarning,
-    updateAiPromptModeHint,
     updatePromptCount,
     fieldMessageType,
     setFieldMessage,
@@ -78,8 +82,7 @@ export function bindPopupEvents(deps) {
   let modelSelectionRevision = 0;
   const invalidateProviderRequests = () => {
     state.aiMetaSeq = (state.aiMetaSeq || 0) + 1;
-    state.aiProbeSeq = (state.aiProbeSeq || 0) + 1;
-    state.lastAiProbe = null;
+    state.manualModelBlock = null;
     state.aiModelBlocked = true;
     providerMetaController.cancelSchedule();
     toggleUi();
@@ -89,13 +92,15 @@ export function bindPopupEvents(deps) {
   );
 
   // Expand / collapse the prompt editor for comfortable long-prompt editing.
-  els.aiPromptStudio?.addEventListener("click", () => {
+  els.aiPromptStudio?.addEventListener("click", async () => {
+    const flushed = await flushPendingAiEditsForSwitch(state.desiredLang, state.desiredAiModel);
+    if (flushed?.ok === false) { setFieldMessage(els.aiPromptWrap, "error", "Could not save the current prompt. The editor was not opened."); return; }
     const lang = encodeURIComponent(els.lang.value || "en");
     const model = encodeURIComponent(
-      state.desiredAiModel || els.aiModel?.value || "auto",
+      state.paidActive ? (state.paidTranslationSource === "login" ? state.loginModel || "auto" : state.paidModel || "auto") : state.desiredAiModel || els.aiModel?.value || "auto",
     );
     const identity = encodeURIComponent(
-      profileController.currentProviderIdentity(),
+      state.paidActive ? (state.paidTranslationSource === "login" ? loginIdentity(els.apiUrl?.value, state.loginProvider, state.loginAccountId) : `paid:${normalizeUrl(els.apiUrl?.value || "")}`) : profileController.currentProviderIdentity(),
     );
     chrome.tabs?.create?.({
       url: chrome.runtime.getURL(
@@ -123,6 +128,7 @@ export function bindPopupEvents(deps) {
     state.modelDirty = false;
     toggleUi();
     await applyPromptForLang(state.desiredLang);
+    void refreshSeriesMemory();
     providerMetaController.refresh();
   });
 
@@ -134,6 +140,7 @@ export function bindPopupEvents(deps) {
     await setStorage({ lang: state.desiredLang });
     state.modelDirty = false;
     await applyPromptForLang(state.desiredLang);
+    void refreshSeriesMemory();
     toggleUi();
     providerMetaController.refresh();
   });
@@ -169,7 +176,8 @@ export function bindPopupEvents(deps) {
     state.pendingCredentialSave = true;
     state.modelDirty = false;
     state.lastAiResolve = null;
-    state.lastAiProbe = null;
+    // A changed key clears every "model failed for this key" mark (10491).
+    void clearManualModelBlocks().catch(() => {});
     validateAiKey();
     scheduleSaveAi();
     providerMetaController.schedule();
@@ -216,7 +224,7 @@ export function bindPopupEvents(deps) {
     const previousProvider = state.activeAiProvider;
     state.activeAiProvider = provider;
     state.lastAiResolve = null;
-    state.lastAiProbe = null;
+    if (provider !== previousProvider) void clearManualModelBlocks().catch(() => {});
     if (els.aiLocalStatus)
       els.aiLocalStatus.textContent = local
         ? "Loading installed Local AI models automatically…"
@@ -256,12 +264,9 @@ export function bindPopupEvents(deps) {
     }
     if (els.aiLocalAdapter && preset)
       els.aiLocalAdapter.value = JSON.stringify(preset, null, 2);
-    // Render the selected Provider + Model profile before any persistence or
-    // network work. This prevents a slow discovery reply from showing options
-    // belonging to the previous provider.
-    // Provider-dependent controls must match the dropdown before the first
-    // asynchronous storage operation. This also removes stale Local controls
-    // immediately when switching Ollama -> OpenRouter.
+    // Render the selected Provider + Model and its controls before any storage or
+    // network work, so a slow discovery reply cannot show the previous
+    // provider's options or leave stale Local controls on screen.
     toggleUi();
     traceProviderTransition("pending", { provider, revision, local });
     let transition = null;
@@ -381,7 +386,6 @@ export function bindPopupEvents(deps) {
     );
     clearLocalCapacitySnapshot();
     state.lastAiResolve = null;
-    state.lastAiProbe = null;
     if (els.aiLocalStatus)
       els.aiLocalStatus.textContent =
         "URL changed — model discovery will refresh automatically.";
@@ -452,6 +456,7 @@ export function bindPopupEvents(deps) {
     await profileController.saveProfile({
       pageImage: els.aiPageImage.checked ? "always" : "off",
     });
+    toggleUi();
   });
 
   // Reading direction + rate limit
@@ -513,12 +518,12 @@ export function bindPopupEvents(deps) {
     // never reload the runtime, re-list installed models, or invalidate a fresh
     // availability snapshot. The exact leaf adapter maps the saved preference
     // when the first real translation is dispatched.
-    if (els.aiProvider?.value === "lmstudio") {
+    if (!state.paidActive && els.aiProvider?.value === "lmstudio") {
       state.aiModelBlocked = true;
       toggleUi();
     }
     await profileController.saveProfile({ thinking: value });
-    localConnectionController.refreshThinkingCompatibility?.();
+    if (!state.paidActive) localConnectionController.refreshThinkingCompatibility?.();
     toggleUi();
   });
 
@@ -527,11 +532,44 @@ export function bindPopupEvents(deps) {
     await profileController.saveProfile({ styleExamples: els.aiStyleExamples.checked === true });
   });
 
+  // Per-model token ceiling. OFF keeps the number but uses the default.
+  const typedTokenCeiling = () => {
+    const raw = Math.floor(Number(String(els.aiTokenCeiling?.value || "").trim()));
+    return Number.isFinite(raw) && raw > 0 ? Math.min(TOKEN_CEILING_MAX, Math.max(TOKEN_CEILING_MIN, raw)) : null;
+  };
+  els.aiTokenCeilingEnabled?.addEventListener("change", async () => {
+    const on = els.aiTokenCeilingEnabled.checked === true;
+    // Turning ON restores the user's saved number (the OFF field shows the default).
+    const stored = profileController.savedTokenCeiling?.() ?? null;
+    const value = (on && validTokenCeiling(stored) ? stored : null) ?? typedTokenCeiling()
+      ?? profileController.tokenCeilingDefault?.()?.tokens ?? null;
+    if (on && !validTokenCeiling(value)) {
+      // No default known yet (Local before the model check): let the user type.
+      els.aiTokenCeilingEnabled.dataset.pending = "1";
+      if (els.aiTokenCeiling) { els.aiTokenCeiling.disabled = false; els.aiTokenCeiling.focus?.(); }
+      profileController.renderTokenCeiling?.();
+      return;
+    }
+    delete els.aiTokenCeilingEnabled.dataset.pending;
+    await profileController.saveProfile(on ? { tokenCeilingEnabled: true, tokenCeiling: value }
+      : { tokenCeilingEnabled: false });
+    profileController.renderTokenCeiling?.();
+  });
+  els.aiTokenCeiling?.addEventListener("change", async () => {
+    const value = typedTokenCeiling();
+    if (!validTokenCeiling(value)) { profileController.renderTokenCeiling?.(); return; }
+    els.aiTokenCeiling.value = String(value);
+    const on = els.aiTokenCeilingEnabled?.checked === true;
+    if (els.aiTokenCeilingEnabled) delete els.aiTokenCeilingEnabled.dataset.pending;
+    await profileController.saveProfile({ tokenCeilingEnabled: on, tokenCeiling: value });
+    profileController.renderTokenCeiling?.();
+  });
+  els.aiTokenCeiling?.addEventListener("input", () => profileController.renderTokenCeiling?.());
+
   els.aiMemoryMode?.addEventListener("change", async () => {
     const mode = ["off", "terms", "full"].includes(els.aiMemoryMode.value)
       ? els.aiMemoryMode.value
       : "off";
-    // Keep the legacy boolean in sync so older code paths still behave.
     await profileController.saveProfile({ memoryMode: mode });
   });
 
@@ -550,10 +588,10 @@ export function bindPopupEvents(deps) {
     const previousBlock = state.aiModelBlocked;
     invalidateProviderRequests();
     const switchingLocal = isLocalAiProvider(els.aiProvider?.value);
-    if (switchingLocal) {
-      state.aiModelBlocked = true;
-      toggleUi();
-    }
+    if (switchingLocal) state.aiModelBlocked = true;
+    // The previous model's AI think options never stay clickable for
+    // the new model; the control shows "Checking model…" until its record loads.
+    toggleUi();
     const flushed = await flushPendingAiEditsForSwitch(
       state.desiredLang,
       prevModel,
@@ -592,7 +630,11 @@ export function bindPopupEvents(deps) {
       return;
     }
     if (!isCurrent()) return;
-    state.lastAiProbe = null;
+    // Selecting a model again is the user's retry after a deterministic
+    // failure on a real translation; clear that mark before re-reading it.
+    if (!isLocalAiProvider(els.aiProvider?.value))
+      await clearManualModelBlock({ provider: providerAtSelection, model: nextModel }).catch(() => {});
+    if (!isCurrent()) return;
     renderLocalCapacityHint();
     await persistSelectedLocalCapacityHint();
     if (!isCurrent()) return;
@@ -650,22 +692,26 @@ export function bindPopupEvents(deps) {
   });
 
   els.aiPromptBack?.addEventListener("click", async () => {
+    const revision = ++state.promptSeq;
     const key = profileController.promptKey(
       state.desiredLang,
       state.desiredAiModel,
     );
-    const res = await promptHistoryBack(key, String(els.aiPrompt.value || ""));
-    if (res) await applyPromptHistoryResult(key, res);
+    const originalText = String(els.aiPrompt.value || "");
+    const res = await promptHistoryBack(key, originalText);
+    if (res) await applyPromptHistoryResult(key, res, originalText, revision);
     else await refreshPromptHistoryButtons();
   });
 
   els.aiPromptForward?.addEventListener("click", async () => {
+    const revision = ++state.promptSeq;
     const key = profileController.promptKey(
       state.desiredLang,
       state.desiredAiModel,
     );
+    const originalText = String(els.aiPrompt.value || "");
     const res = await promptHistoryForward(key);
-    if (res) await applyPromptHistoryResult(key, res);
+    if (res) await applyPromptHistoryResult(key, res, originalText, revision);
     else await refreshPromptHistoryButtons();
   });
   els.aiPrompt.addEventListener("blur", async () => {
@@ -698,6 +744,11 @@ export function bindPopupEvents(deps) {
   // Auto translate: its own full-page tab, with its own saved mode/language/source.
   els.openAutoTranslate?.addEventListener("click", async () => {
     await createTab({ url: chrome.runtime.getURL("auto/auto.html") });
+    window.close();
+  });
+  // Visual user guide: an extension page, opened like Auto translate.
+  els.openGuide?.addEventListener("click", async () => {
+    await createTab({ url: chrome.runtime.getURL("guide/guide.html") });
     window.close();
   });
   els.resetApi.addEventListener("click", () => {
@@ -796,6 +847,8 @@ export function bindPopupEvents(deps) {
       void refreshSeriesMemory();
     }
     if (changes[AI_USAGE_STORAGE_KEY]) void renderAiUsage(changes[AI_USAGE_STORAGE_KEY].newValue);
+    // The background marked (or the popup cleared) a Manual model after a real translation.
+    if (changes[MANUAL_MODEL_BLOCKS_KEY]) void providerMetaController.refreshBlock?.();
     // Prompt Studio edits the canonical Provider+Model prompt map.
     if (changes.aiProfilePromptsV1) {
       const next = changes.aiProfilePromptsV1.newValue;

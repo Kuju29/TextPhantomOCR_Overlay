@@ -3,13 +3,13 @@
 import { isLocalAiProvider, isLocalHostUrl } from "./constants.js";
 import { sameLocalAdapterEndpoint } from "./ai/providers/local-registry.js";
 
-export const AI_SETTINGS_UI_PATHS = Object.freeze({
-  provider: "[AI option > Provider]",
-  model: "[AI option > Model]",
-  prompt: "[AI option > Set prompt]",
-  key: "[AI option > API key]",
+const AI_SETTINGS_UI_PATHS = Object.freeze({
+  provider: "[AI settings > Provider]",
+  model: "[AI settings > Model]",
+  prompt: "[AI settings > Set prompt]",
+  key: "[AI settings > API key]",
   apiUrl: "[Tools > Custom API URL]",
-  localUrl: "[AI option > Local server URL]",
+  localUrl: "[AI settings > Local server URL]",
 });
 
 const configurationIssue = (code, message, path) => ({

@@ -94,7 +94,12 @@
     };
   }
 
+  // Messages owned by other content scripts must not get an answer here: Chrome
+  // keeps only the FIRST answer, so replying to unknown types would pre-empt e.g.
+  // the ChatGPT Login page check (TP_LOGIN_WEBCHAT_DOM) and time it out.
+  const FOREIGN = /^TP_(LOGIN_WEBCHAT_|SUPPORT_)/;
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+    if (FOREIGN.test(String(msg?.type || ""))) return false;
     (async () => {
       const type = String(msg?.type || "");
 
@@ -125,6 +130,11 @@
         TP.keepAlive.stop(msg?.batchId);
         return sendResponse({ ok: true });
       }
+      if (type === "TP_PAID_CREDIT_CONFIRM") {
+        // Only the top frame asks; the answer decides whether the run starts.
+        if (window.top !== window || typeof TP.confirmPaidCredits !== "function") return sendResponse(null);
+        return sendResponse({ proceed: (await TP.confirmPaidCredits(msg?.estimate || {})) === true });
+      }
       if (type === "TP_TOAST") {
         TP.showToast(msg?.text || msg?.message || "", msg?.ms ?? 1600, msg?.progress);
         return sendResponse({ ok: true });
@@ -135,6 +145,11 @@
       }
       if (type === "API_STATUS_UPDATE") {
         return sendResponse({ ok: true });
+      }
+      if (type === 'GET_IMAGE_ERROR_TARGET') {
+        const img = TP.getFreshRightClickImageForTarget?.({srcUrl:msg?.srcUrl,
+          clickedSrcUrl:msg?.clickedSrcUrl}) || TP.findTargetImage?.(msg?.srcUrl);
+        return sendResponse({ok:Boolean(img),generation:img ? TP.generationFor?.(img) || null : null});
       }
       if (type === "TP_BULK_INSERT") {
         const r = await TP.applyInsertBatch?.(msg?.items || [], {
@@ -265,7 +280,8 @@
           const ab = await res.arrayBuffer();
           const bytes = new Uint8Array(ab);
           if (bytes.length < 64) return fail('Image too small');
-          if (bytes.length > 25 * 1024 * 1024) {
+          // The API accepts images up to 24 MiB (MAX_API_IMAGE_BYTES).
+          if (bytes.length > 24 * 1024 * 1024) {
             return fail('Image too large');
           }
           if(msg?.diagnosticId) TP.scanDiag?.emit('content.blob_fetch_result', {

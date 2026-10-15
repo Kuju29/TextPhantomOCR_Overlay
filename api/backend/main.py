@@ -1,9 +1,6 @@
-"""FastAPI application entry point for the TextPhantom OCR API.
+"""FastAPI entry point: routers, middleware, executors and admission gates.
 
-Wires the routers, CORS, the custom access log, and the async job queue
-together.  Run with::
-
-    uvicorn backend.main:app --host 0.0.0.0 --port 7860
+Run with ``uvicorn backend.main:app --host 0.0.0.0 --port 7860 --no-proxy-headers``.
 """
 
 from __future__ import annotations
@@ -50,9 +47,8 @@ from backend.api.routes import (
     translate,
     translate_v1,
 )
-from backend import logfile, trace, trace_install
+from backend import logfile, trace, trace_install, diagnostics
 from backend.ai import wire_trace
-from backend.ai.rategate import rate_gate
 from backend.jobs.admission import AdmissionGate
 from backend.jobs import stage_admission
 from backend.config import settings, lens_concurrency_limit
@@ -77,24 +73,11 @@ async def _warm_at_boot() -> None:
     except Exception as e:  # noqa: BLE001 - warmup must never block startup
         event("warmup.boot", {"error": str(e)[:200]}, ok=False)
 
-async def _cookie_refresh_loop() -> None:
-    """Keep the Lens cookie fresh in the background.
-
-    ``cookie.get`` refreshes lazily when its TTL expires, which makes the
-    unlucky request that hits the stale window pay for the Firebase fetch.
-    Polling it once a minute is free while the cookie is fresh (a dict-cache
-    hit) and moves the refresh cost off the request path.
-    """
-    while True:
-        await asyncio.sleep(60)
-        try:
-            await asyncio.to_thread(lens_cookie.get, settings.firebase_url)
-        except Exception:
-            pass  # transient Firebase errors — next tick retries
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Start the job queue's worker pool when the server boots."""
+    from backend.paid_center import gateway_key
+    gateway_key()  # A configured but unreadable gateway key must fail at startup.
     configure_uvicorn_access_log()
     stage_admission.configure(
         asyncio.get_running_loop(),
@@ -135,8 +118,10 @@ async def lifespan(app: FastAPI):
         print("[TextPhantom][api] AI rate memory: current process only; restart begins empty", flush=True)
 
     logfile.startup_banner()
-    # Printing a path that is never written to is how someone ends up grepping
-    # an empty folder for an hour. Say which of the two states this run is in.
+    diagnostics.writer.emit("service.started", center_configured=bool(settings.center_url),
+        lens_slots=app.state.admission_gate.stats().limit, grouping_slots=app.state.grouping_admission_gate.stats().limit,
+        ai_slots=app.state.ai_admission_gate.stats().limit, log_file=logfile.is_enabled())
+    # Say whether logs are written, so an empty folder is not mistaken for lost logs.
     if logfile.is_enabled():
         print(f"[TextPhantom][api] diagnostic logs -> {logfile.log_dir()}", flush=True)
     else:
@@ -146,12 +131,8 @@ async def lifespan(app: FastAPI):
             flush=True,
         )
 
-    # Whether the function trace took effect, said at boot.
-    #
-    # Setting the variable is the one step that fails SILENTLY: the bash form
-    # `TP_TRACE=1 uvicorn ...` is not valid in PowerShell or cmd, so the server
-    # starts perfectly, writes nothing, and reads as a broken feature. One line
-    # here turns "the trace does not work" into "the variable did not arrive".
+    # Report whether TP_TRACE took effect: the bash form `TP_TRACE=1 uvicorn`
+    # silently does nothing in PowerShell/cmd.
     if trace.enabled():
         print(
             f"[TextPhantom][api] trace: {trace.mode()} -> {trace.path()} "
@@ -184,14 +165,13 @@ async def lifespan(app: FastAPI):
         # traced while silently discarding the operator's diagnostic record.
         raise
 
-    # Security posture, stated at boot. Each of these silently degraded the
-    # service or widened its attack surface before, and none of them was
-    # visible anywhere at runtime.
-    if not settings.firebase_url:
+    # Security posture, stated at boot: each of these silently weakens the
+    # service and is otherwise invisible at runtime.
+    if not lens_cookie.configured():
         print(
-            "[TextPhantom][api] WARNING: FIREBASE_URL is set to an empty value "
-            "— every Google Lens request will fail. Unset it to use the "
-            "built-in cookie jar, or point it at your own.",
+            "[TextPhantom][api] WARNING: no Google Lens cookie source — "
+            "TP_LENS_COOKIE_SOURCE=firebase needs FIREBASE_URL. Every Lens request "
+            "will fail until one is configured (default: direct-first).",
             flush=True,
         )
     print(f"[TextPhantom][api] AI endpoint policy: {settings.ai_endpoint_policy}; "
@@ -208,35 +188,61 @@ async def lifespan(app: FastAPI):
     if "*" in settings.allowed_origins:
         print(
             "[TextPhantom][api] note: CORS is open to all origins without "
-            "credentials. Set TP_ALLOWED_ORIGINS to lock it down.",
+            "credentials. Unset TP_ALLOWED_ORIGINS to admit extension origins only.",
             flush=True,
         )
+    from backend.ai.login.login_routes import shared_cookie_login_blocked
+    if shared_cookie_login_blocked():
+        print("[TextPhantom][api] shared/public deployment: Gemini and DeepSeek Login "
+              "(website session cookies) are disabled; TP_ALLOW_SHARED_COOKIE_LOGIN=1 "
+              "re-enables them", flush=True)
+    from backend.api.ingress import image_body_limit, job_body_limit, json_body_limit
+    print(f"[TextPhantom][api] request body caps: job routes {job_body_limit()} B, "
+          f"image routes {image_body_limit()} B, other JSON {json_body_limit()} B", flush=True)
+    # No periodic Lens-cookie poll: lens_cookie.state() refreshes lazily with a
+    # singleflight, and warmup/first use start a non-blocking refresh when the
+    # jar is near expiry (lens_cookie.prefetch). An idle Space makes no
+    # cookie-source requests at all.
     background_tasks = {
         asyncio.create_task(_warm_at_boot(), name="tp-warmup"),
-        asyncio.create_task(_cookie_refresh_loop(), name="tp-cookie-refresh"),
     }
     try:
         yield
     finally:
+        from backend.ai.login.login_auth import shutdown as login_shutdown
+        await asyncio.to_thread(login_shutdown)
         for task in background_tasks:
             task.cancel()
         if background_tasks:
             await asyncio.gather(*background_tasks, return_exceptions=True)
+        diagnostics.writer.emit("service.stopping")
         await queue.shutdown(timeout=5.0)
         stage_admission.clear()
         # Thread work already executing cannot be force-killed safely. Cancel
         # only futures that never started and do not hold ASGI shutdown open.
         for name in (
-            "ai_executor", "lens_executor", "grouping_executor",
+            "ai_executor", "login_executor", "lens_executor", "grouping_executor",
             "pipeline_executor",
         ):
             executor = getattr(app.state, name, None)
             if executor is not None:
                 executor.shutdown(wait=False, cancel_futures=True)
         await asyncio.to_thread(close_lens_session)
+        from backend.ai.center_http import close as close_center_http
+        await asyncio.to_thread(close_center_http)
         trace.flush()
 
 app = FastAPI(title="TextPhantom OCR API", version="2.0", lifespan=lifespan)
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+from backend.paid_center import trusted_proxy_hosts
+from backend.api.ingress import BodyLimitMiddleware, IdentityQuotaMiddleware
+# Order (outermost first): diagnostics, access log, CORS, proxy headers, body
+# limit, identity quota, routes. Both ingress guards sit inside the proxy
+# middleware so they see the trusted client address, and inside CORS/access log
+# so their 413/429 answers are readable by the extension and logged.
+app.add_middleware(IdentityQuotaMiddleware)
+app.add_middleware(BodyLimitMiddleware)
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=trusted_proxy_hosts())
 
 @app.exception_handler(HTTPException)
 async def tp_http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
@@ -315,35 +321,24 @@ async def tp_unhandled_exception_handler(request: Request, exc: Exception) -> JS
     return JSONResponse(status_code=500, content={"detail": detail},
                         headers={"X-TP-Error-Schema": ERROR_SCHEMA})
 
-# Provider SDKs are synchronous. Give them their own executor instead of the
-# process-wide asyncio default pool that Lens, warmup and miscellaneous
-# to_thread() work also use. Most importantly, the AI admission gate below is
-# never allowed to exceed this worker count, so submitting an admitted AI call
-# can start immediately rather than disappearing into ThreadPoolExecutor's FIFO
-# backlog behind another user's requests.
+# Provider SDKs are synchronous and get their own executor. The AI admission
+# gate never exceeds its worker count, so an admitted call starts immediately
+# instead of waiting in the executor FIFO behind another user's requests.
 _AI_THREADS = max(1, int(settings.ai_thread_workers))
 app.state.ai_executor = ThreadPoolExecutor(
     max_workers=_AI_THREADS,
     thread_name_prefix="tp-ai-http",
 )
 
-# /v1/translate runs without a queue: a bounded gate, and a 503 when it is full.
-# Built HERE rather than in the lifespan on purpose — `/v1/capabilities` reads
-# it, and a capabilities probe that arrives before startup finished (or under an
-# ASGI runner that skips lifespan) would otherwise 500 on a missing attribute.
-# The legacy JobQueue still starts in the lifespan; it needs a running loop.
-# TP_ADAPTIVE remains available to legacy/internal gates, but public Lens/AI
-# admission is pinned to real executor capacity in this build. Provider/client
-# feedback controls request pacing; server latency must not manufacture capacity.
+# /v1/translate runs without a queue: a bounded gate, 503 when full. Built here,
+# not in the lifespan, because /v1/capabilities reads it and may arrive before
+# startup (or under a runner that skips lifespan). Public Lens/AI admission is
+# pinned to executor capacity; TP_ADAPTIVE only affects legacy/internal gates.
 _ADAPTIVE = str(os.environ.get("TP_ADAPTIVE", "1")).strip().lower() not in ("0", "false", "no", "off")
-_LENS_CONFIGURED = max(1, settings.sync_max_concurrency or settings.max_workers)
 _LENS_LIMIT = lens_concurrency_limit(settings)
 app.state.adaptive_gates = _ADAPTIVE
-# Lens is synchronous remote I/O. Keep its executor and admission limit exactly
-# aligned so an admitted upload can start immediately instead of entering an
-# invisible ThreadPoolExecutor FIFO. A separate upstream ceiling protects Google
-# Lens from the cold-burst latency cliff observed when 15 uploads fan out at once.
-# TP_LENS_UPSTREAM_MAX_CONCURRENCY can override the measured-safe default.
+# Lens executor and admission limit match, so an admitted upload starts
+# immediately. TP_LENS_UPSTREAM_MAX_CONCURRENCY caps upstream fan-out.
 app.state.lens_executor = ThreadPoolExecutor(
     max_workers=_LENS_LIMIT,
     thread_name_prefix="tp-lens-http",
@@ -382,15 +377,27 @@ app.state.ai_admission_gate = AdmissionGate(
     _AI_LIMIT,
     max_waiters=settings.sync_ai_max_waiters,
     max_wait_sec=settings.sync_ai_max_wait_sec,
-    # Provider latency is NOT evidence of server overload. The old adaptive gate
-    # halved AI capacity when Gemini/HF got slower, even though CPU was idle.
-    # Provider 429/503 is already handled per API-key by the extension lane, so
-    # this gate stays pinned to the real executor capacity.
+    # Provider latency is not server overload, and provider 429/503 is handled
+    # per key by the extension lane, so this gate stays at executor capacity.
     adaptive=False,
     limit_min=_AI_LIMIT,
     limit_max=_AI_LIMIT,
 )
 app.state.ai_executor_workers = _AI_THREADS
+# Separate lane for AI Login (see config.login_thread_workers).
+_LOGIN_THREADS = max(1, int(settings.login_thread_workers))
+app.state.login_executor = ThreadPoolExecutor(
+    max_workers=_LOGIN_THREADS,
+    thread_name_prefix="tp-login-ai",
+)
+app.state.login_admission_gate = AdmissionGate(
+    _LOGIN_THREADS,
+    max_waiters=settings.sync_ai_max_waiters,
+    max_wait_sec=settings.sync_ai_max_wait_sec,
+    adaptive=False,
+    limit_min=_LOGIN_THREADS,
+    limit_max=_LOGIN_THREADS,
+)
 
 # runs:API owns a whole synchronous image pipeline per worker. This transport
 # pool is deliberately wider than any one stage: it must not become a fourth
@@ -424,26 +431,55 @@ async def root_head() -> RedirectResponse:
     """Answer hosting availability probes without producing a 405 error."""
     return RedirectResponse(url="/docs")
 
-# CORS. The extension does not rely on CORS at all — it fetches under its host
-# permissions — so the wildcard exists only for browser-based callers and the
-# docs page. `allow_origins=["*"]` together with `allow_credentials=True` is a
-# combination browsers reject anyway, and it invited cookie-bearing calls from
-# any page; credentials are therefore only enabled for an explicit origin list.
-_origins = [o.strip() for o in settings.allowed_origins.split(",") if o.strip()] or ["*"]
+# CORS. Chromium extension pages and the service worker fetch under their
+# host permissions and do not need CORS; Firefox/Thunderbird do when the user
+# has not granted host access. The default therefore admits browser-extension
+# origins only (any id: store builds and Firefox per-install UUIDs differ), so
+# an arbitrary web page cannot drive this API from a visitor's browser.
+# TP_ALLOWED_ORIGINS replaces the default with an explicit list ("*" = any page,
+# never with credentials). Server-to-server callers (curl, CLI) are unaffected.
+from backend.config import EXTENSION_ORIGIN_REGEX
+_origins = [o.strip() for o in settings.allowed_origins.split(",") if o.strip()]
 _wildcard = "*" in _origins
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_origins,
-    allow_credentials=not _wildcard,
+    allow_origin_regex=None if _origins else EXTENSION_ORIGIN_REGEX,
+    # Credentials only for an explicit origin list; the extension authenticates
+    # with Authorization headers, not cookies.
+    allow_credentials=bool(_origins) and not _wildcard,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Request-ID", "X-TP-Trace-ID", "X-TP-Center-Request-ID", "Retry-After"],
 )
 app.middleware("http")(access_log_middleware)
+app.add_middleware(diagnostics.DiagnosticsMiddleware, writer=diagnostics.writer)
+diagnostics.writer.emit("service.configured", center_configured=bool(settings.center_url),
+    log_file=logfile.is_enabled(), trace_enabled=trace.enabled())
 
 # Each router owns one concern; see the module docstrings for details.
 app.include_router(health.router)
 app.include_router(meta.router)
 app.include_router(paid.router)
+from backend.ai.login.login_routes import router as login_router
+app.include_router(login_router)
+from backend.ai.login.login_provider_registry import LoginError
+
+@app.exception_handler(LoginError)
+async def login_error(request, error):
+    from backend.ai.login.login_routes import failure_response
+    from backend.ai.login import login_observability as login_diagnostic
+    with login_diagnostic.context(operation="inference", trace_id=request.headers.get("x-tp-trace-id", "")):
+        response = failure_response(error, request)
+        # Existing translation clients consume detail; Login UI consumes error.
+        import json
+        body = json.loads(response.body)
+        body["detail"] = {**body["error"], "userMessage": str(error),
+            "requestDispatched": error.requestDispatched,
+            "providerAttempts": int(error.requestDispatched), "generationAttempts": int(error.requestDispatched)}
+        response.body = json.dumps(body).encode()
+        response.headers["content-length"] = str(len(response.body))
+        return response
 app.include_router(translate.router)
 app.include_router(translate_v1.router)
 app.include_router(ai.router)

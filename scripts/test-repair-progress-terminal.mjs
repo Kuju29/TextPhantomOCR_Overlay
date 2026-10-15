@@ -9,7 +9,7 @@ for (const initial of ['done','error']) {
  p=mergeProgressDetail(p,{repairPhase:'applying',pending:1},5);
  assert.equal(p.insert.state,'running');
  p=mergeProgressDetail(p,{repairPhase:'done',pending:1},6);
- assert.equal(p.overall.state,'done');assert.equal(p.result.state,'error');assert.match(p.result.detail,/1 unresolved/);
+ assert.equal(p.overall.state,'error');assert.equal(p.ai.state,'error');assert.equal(p.insert.state,'error');assert.equal(p.result.state,'error');assert.match(p.result.detail,/1 unresolved/);
  p=mergeProgressDetail(p,{repairPhase:'done',pending:0},7);
  assert.equal(p.result.state,'done');
 }

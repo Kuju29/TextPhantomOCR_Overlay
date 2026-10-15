@@ -22,7 +22,7 @@ answer in the source rather than in someone's memory.
 
 from __future__ import annotations
 
-import pkgutil, importlib
+import importlib
 
 from backend import trace
 
@@ -63,7 +63,6 @@ MODULES: tuple[str, ...] = (
     "backend.ai.parsing",
     "backend.ai.markers",
     "backend.ai.rategate",
-    "backend.ai.throttle",
     "backend.ai.provider_registry",
     "backend.ai.transports.openai_chat",
     "backend.ai.providers.local_openai_runtime",
@@ -85,7 +84,6 @@ MODULES: tuple[str, ...] = (
     "backend.render.patch",
     "backend.render.region",
     "backend.render.relayout",
-    "backend.render.text_metrics",
     "backend.render.text_utils",
     "backend.render.components.typography",
     "backend.render.html.ai",
@@ -100,7 +98,26 @@ MODULES: tuple[str, ...] = (
 
 # Modules left out on purpose, with the reason. The test reads this.
 SKIP_MODULES: dict[str, str] = {
+    "backend.ai.login.login_auth": "Login has explicit metadata-only stage diagnostics; generic argument/return tracing could expose OAuth credentials",
+    "backend.ai.login.login_entitlement": "Login has explicit metadata-only stage diagnostics; generic argument/return tracing could expose OAuth credentials",
+    "backend.ai.login.login_http": "Login has explicit metadata-only stage diagnostics; generic argument/return tracing could expose OAuth credentials",
+    "backend.ai.login.login_native": "Login has explicit metadata-only stage diagnostics; generic argument/return tracing could expose OAuth credentials",
+    "backend.ai.login.login_oauth_common": "Login has explicit metadata-only stage diagnostics; generic argument/return tracing could expose OAuth credentials",
+    "backend.ai.login.login_observability": "Login has explicit metadata-only stage diagnostics; generic argument/return tracing could expose OAuth credentials",
+    "backend.ai.login.login_profiles": "Login has explicit metadata-only stage diagnostics; generic argument/return tracing could expose OAuth credentials",
+    "backend.ai.login.login_provider_chatgpt": "Login has explicit metadata-only stage diagnostics; generic argument/return tracing could expose OAuth credentials",
+    "backend.ai.login.login_provider_claude": "Login has explicit metadata-only stage diagnostics; generic argument/return tracing could expose OAuth credentials",
+    "backend.ai.login.login_provider_contract": "Login has explicit metadata-only stage diagnostics; generic argument/return tracing could expose OAuth credentials",
+    "backend.ai.login.login_provider_deepseek": "Login has explicit metadata-only stage diagnostics; generic argument/return tracing could expose OAuth credentials",
+    "backend.ai.login.login_provider_gemini": "Login has explicit metadata-only stage diagnostics; generic argument/return tracing could expose OAuth credentials",
+    "backend.ai.login.login_provider_huggingface": "Login has explicit metadata-only stage diagnostics; generic argument/return tracing could expose OAuth credentials",
+    "backend.ai.login.login_provider_openrouter": "Login has explicit metadata-only stage diagnostics; generic argument/return tracing could expose OAuth credentials",
+    "backend.ai.login.login_provider_registry": "Login has explicit metadata-only stage diagnostics; generic argument/return tracing could expose OAuth credentials",
+    "backend.ai.login.login_routes": "Login has explicit metadata-only stage diagnostics; generic argument/return tracing could expose OAuth credentials",
+    "backend.ai.login.login_session_store": "Login has explicit metadata-only stage diagnostics; generic argument/return tracing could expose OAuth credentials",
+    "backend.ai.login.login_translation": "Login has explicit metadata-only stage diagnostics; generic argument/return tracing could expose OAuth credentials",
     "backend.trace": "the tracer cannot trace itself without recursing",
+    "backend.diagnostic_retention": "trace storage accounting cannot trace its own writes without recursing",
     "backend.trace_install": "this file",
     "backend.log": "the logger; tracing it would trace every trace",
     "backend.logfile": "writes the other log file; same recursion risk",
@@ -110,12 +127,9 @@ SKIP_MODULES: dict[str, str] = {
     "backend.cancellation": "small state holder; routes trace cancellation decisions",
 }
 
-# Per-module functions that would flood the file or expose private text. Each
-# entry says why, and
-# every name is checked against the real module by `tests/test_trace.py` —
-# because the first version of this list was written from memory and NINE of
-# its ten names did not exist. A skip list of imaginary functions silently
-# skips nothing, and the flood it was meant to prevent arrives anyway.
+# Per-module functions that would flood the file or expose private text; each
+# entry says why. Names must exist in the module: a stale name silently skips
+# nothing.
 HOT_FUNCTIONS: dict[str, tuple[str, ...]] = {
     # Prompt composition, provider payloads and their text returns are private
     # page/series content. Explicit route notes retain model, timings, hashes,
@@ -130,8 +144,7 @@ HOT_FUNCTIONS: dict[str, tuple[str, ...]] = {
         "build_system_text", "build_system_split", "build_user_parts",
     ),
     "backend.ai.parsing": (
-        "strip_wrappers", "parse_json", "parse_character_memo",
-        "parse_speaker_pairs", "parse_text",
+        "parse_character_memo",
     ),
     "backend.ai.markers": (
         "apply", "expected_count", "translation_schema",
@@ -140,7 +153,6 @@ HOT_FUNCTIONS: dict[str, tuple[str, ...]] = {
         "has_meaningful_text", "clamp_runaway_repeats",
         "clamp_output_repeats",
     ),
-    "backend.ai.throttle": ("generate_with_backoff",),
     "backend.ai.transports.openai_chat": ("execute_chat_completion",),
     "backend.ai.providers.cloud_gemini": ("generate",),
     "backend.ai.providers.cloud_anthropic": ("generate",),
@@ -150,9 +162,7 @@ HOT_FUNCTIONS: dict[str, tuple[str, ...]] = {
     # put AEC/NID values under the generic key `ret`, bypassing name-based
     # secret redaction. Route/stage notes still record cookie refresh outcome.
     "backend.lens.cookie": ("get",),
-    # One call PER CHARACTER of every string measured. Measured 2026-08-07 on
-    # one 11-paragraph page: 90 of the 215 render trace lines were `is_rtl_char`
-    # alone, and that page has almost no text.
+    # One call PER CHARACTER of every string measured; would dominate the trace.
     "backend.render.text_utils": ("is_thai_char", "is_rtl_char"),
     # Per item/glyph fitting helpers. A 14-minute diagnostic run produced over
     # 100,000 lines from these helpers alone. The enclosing group/layout/render
@@ -165,18 +175,11 @@ HOT_FUNCTIONS: dict[str, tuple[str, ...]] = {
     "backend.render.colors": (
         "relative_luminance", "contrast_ratio", "pick_bw_text_color", "median_rgba",
     ),
-    # The protobuf decoder, called per FIELD and per BYTE. Measured on a real
-    # 26-image run: 64,464 lines from `read_varint` and 10,384 from `parse` —
-    # 36% of a 43 MB file — and every one of them said the same thing. Worse,
-    # they were actively misleading: a child's "entered" line is written on the
-    # parent's clock, so `parse` appeared to cost 17.4 ms per call while
-    # `read_varint` itself showed 0.0 s, and the file read as "the protobuf
-    # parser is 70% of the runtime". It is not. That was the tracer.
-    #
-    # What anyone actually needs is the RESULT of the decode, and `lens/tree.py`
-    # is still traced, so the paragraphs and items that came out are all there.
+    # The protobuf decoder, called per FIELD and per BYTE: it would dominate
+    # the file, and tracer overhead lands on the parent's clock. The decoded
+    # RESULT is still visible because `lens/tree.py` is traced.
     "backend.lens.proto": (
-        "read_varint", "parse", "f32", "to_hex", "get_float_field",
+        "read_varint", "parse", "f32", "get_float_field",
         "looks_like_span", "looks_like_geom", "is_item_message",
         "extract_span", "extract_item_geom_spans", "get_points_from_geom",
         "extract_items_from_paragraph",
@@ -200,13 +203,3 @@ def install() -> dict[str, int]:
                 {"modules": len(wrapped), "functions": sum(wrapped.values())})
     return wrapped
 
-def all_backend_modules() -> set[str]:
-    """Every module under ``backend`` — what the coverage test compares against."""
-    import backend
-
-    found = set()
-    for info in pkgutil.walk_packages(backend.__path__, prefix="backend."):
-        if info.ispkg:
-            continue
-        found.add(info.name)
-    return found

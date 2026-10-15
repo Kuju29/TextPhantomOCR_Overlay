@@ -1,22 +1,17 @@
 /**
- *
- * Popup DOM references + pure render helpers.
- *
- * Everything here is stateless: it reads/writes the DOM but holds no app
- * state. The orchestrator (`popup.js`) owns the state and calls these.
+ * Popup DOM references + pure render helpers. Stateless: the orchestrator
+ * (`popup.js`) owns the state and calls these.
  */
 
 import { isLocalAiProvider } from "../shared/constants.js";
-import {
-  localProviderCatalog,
-} from "../shared/ai/providers/local-registry.js";
-import {
-  cloudProviderCatalog,
-} from "../shared/ai/providers/cloud-registry.js";
+import { setUiText } from "../shared/ui-template.js";
+import { localProviderCatalog } from "../shared/ai/providers/local-registry.js";
+import { cloudProviderCatalog } from "../shared/ai/providers/cloud-registry.js";
 
 /** All the elements the popup interacts with, looked up once. */
 export const els = {
   updateBanner: document.getElementById("update-banner"),
+  openGuide: document.getElementById("open-guide"),
   mode: document.getElementById("mode"),
   lang: document.getElementById("lang"),
   sources: document.getElementById("sources"),
@@ -37,8 +32,21 @@ export const els = {
   aiServiceWrap: document.getElementById("ai-service-wrap"),
   aiService: document.getElementById("ai-service"),
   aiPaidPanel: document.getElementById("ai-paid-panel"),
+  aiPaidConnectionMessage: document.getElementById(
+    "ai-paid-connection-message",
+  ),
+  aiPaidTitle: document.getElementById("ai-paid-title"),
+  aiPaidSubtitle: document.getElementById("ai-paid-subtitle"),
+  aiPaidEmailStep: document.getElementById("ai-paid-email-step"),
+  aiPaidCodeStep: document.getElementById("ai-paid-code-step"),
+  aiPaidCodeEmail: document.getElementById("ai-paid-code-email"),
+  aiPaidChangeEmail: document.getElementById("ai-paid-change-email"),
+  aiPaidResend: document.getElementById("ai-paid-resend"),
+  aiPaidHeld: document.getElementById("ai-paid-held"),
+  aiPaidAccountState: document.getElementById("ai-paid-account-state"),
   aiPaidUnavailable: document.getElementById("ai-paid-unavailable"),
   aiPaidLogin: document.getElementById("ai-paid-login"),
+  aiPaidInline: document.getElementById("ai-paid-inline"),
   aiPaidAccount: document.getElementById("ai-paid-account"),
   aiPaidEmail: document.getElementById("ai-paid-email"),
   aiPaidCode: document.getElementById("ai-paid-code"),
@@ -48,6 +56,16 @@ export const els = {
   aiPaidEmailLabel: document.getElementById("ai-paid-email-label"),
   aiPaidCredits: document.getElementById("ai-paid-credits"),
   aiPaidModel: document.getElementById("ai-paid-model"),
+  aiPaidModelPicker: document.getElementById("ai-paid-model-picker"),
+  aiPaidModelName: document.getElementById("ai-paid-model-name"),
+  aiPaidModelOptions: document.getElementById("ai-paid-model-options"),
+  aiPaidModelSearch: document.getElementById("ai-paid-model-search"),
+  aiPaidModelEmpty: document.getElementById("ai-paid-model-empty"),
+  aiPaidModelInput: document.getElementById("ai-paid-model-input"),
+  aiPaidModelOutput: document.getElementById("ai-paid-model-output"),
+  aiPaidModelPriceStatus: document.getElementById("ai-paid-model-price-status"),
+  aiPaidBuy: document.getElementById("ai-paid-buy"),
+  aiPaidDetails: document.getElementById("ai-paid-details"),
   aiPaidRefresh: document.getElementById("ai-paid-refresh"),
   aiPaidLogout: document.getElementById("ai-paid-logout"),
   aiPaidStatus: document.getElementById("ai-paid-status"),
@@ -56,6 +74,22 @@ export const els = {
   aiUsageWrap: document.getElementById("ai-usage-wrap"),
   aiUsageKind: document.getElementById("ai-usage-kind"),
   aiUsageModel: document.getElementById("ai-usage-model"),
+  aiPaidSourceWrap: document.getElementById("ai-paid-source-wrap"),
+  aiPaidSource: document.getElementById("ai-paid-source"),
+  aiPaidTpModel: document.getElementById("ai-paid-tp-model"),
+  aiLoginPanel: document.getElementById("ai-login-panel"),
+  aiLoginProvider: document.getElementById("ai-login-provider"),
+  aiLoginProjectWrap: document.getElementById("ai-login-project-wrap"),
+  aiLoginProject: document.getElementById("ai-login-project"),
+  aiLoginConnect: document.getElementById("ai-login-connect"),
+  aiLoginRefresh: document.getElementById("ai-login-refresh"),
+  aiLoginCancel: document.getElementById("ai-login-cancel"),
+  aiLoginLogout: document.getElementById("ai-login-logout"),
+  aiLoginAccount: document.getElementById("ai-login-account"),
+  aiLoginSupport: document.getElementById("ai-login-support"),
+  aiLoginModelWrap: document.getElementById("ai-login-model-wrap"),
+  aiLoginModel: document.getElementById("ai-login-model"),
+  aiLoginStatus: document.getElementById("ai-login-status"),
   aiUsageCounts: document.getElementById("ai-usage-counts"),
   aiUsageReset: document.getElementById("ai-usage-reset"),
   aiUsageHistory: document.getElementById("ai-usage-history"),
@@ -64,6 +98,7 @@ export const els = {
   aiUsageDetailedClose: document.getElementById("ai-usage-detailed-close"),
   aiUsageDetailedList: document.getElementById("ai-usage-detailed-list"),
   aiPriceInput: document.getElementById("ai-price-input"),
+  aiPriceSettings: document.getElementById("ai-price-settings"),
   aiPriceProviderRates: document.getElementById("ai-price-provider-rates"),
   aiPriceCached: document.getElementById("ai-price-cached"),
   aiPriceWrite: document.getElementById("ai-price-write"),
@@ -90,9 +125,16 @@ export const els = {
   aiStyleExamplesWrap: document.getElementById("ai-style-examples-wrap"),
   aiStyleExamples: document.getElementById("ai-style-examples"),
   aiTranslationMode: document.getElementById("ai-translation-mode"),
+  aiTranslationModeWrap: document.getElementById("ai-translation-mode-wrap"),
   aiPageImageWrap: document.getElementById("ai-page-image-wrap"),
   aiPageImage: document.getElementById("ai-page-image"),
   aiRateWrap: document.getElementById("ai-rate-wrap"),
+  // Per-model token ceiling (replaces the request-rate cap UI).
+  aiTokenCeilingWrap: document.getElementById("ai-token-ceiling-wrap"),
+  aiTokenCeilingEnabled: document.getElementById("ai-token-ceiling-enabled"),
+  aiTokenCeiling: document.getElementById("ai-token-ceiling"),
+  aiTokenCeilingDefault: document.getElementById("ai-token-ceiling-default"),
+  aiTokenCeilingWarning: document.getElementById("ai-token-ceiling-warning"),
   aiLocalRateWrap: document.getElementById("ai-local-rate-wrap"),
   aiLocalRateEnabled: document.getElementById("ai-local-rate-enabled"),
   aiLocalRateRpm: document.getElementById("ai-local-rate-rpm"),
@@ -138,7 +180,9 @@ export const els = {
   apiGateTranslateOpen: document.getElementById("api-gate-translate-open"),
   apiGateAi: document.getElementById("api-gate-ai"),
   apiGateAiOpen: document.getElementById("api-gate-ai-open"),
-  translateAllButtonToggle: document.getElementById("translate-all-button-toggle"),
+  translateAllButtonToggle: document.getElementById(
+    "translate-all-button-toggle",
+  ),
   imgButtonsToggle: document.getElementById("img-buttons-toggle"),
   downloadImagesToggle: document.getElementById("download-images-toggle"),
   fontScaleRange: document.getElementById("font-scale-range"),
@@ -156,7 +200,7 @@ export const els = {
   resetDefaultsStatus: document.getElementById("reset-defaults-status"),
 };
 
-export function renderProviderOptions() {
+function renderProviderOptions() {
   const cloud = document.getElementById("ai-cloud-provider-options");
   if (cloud) {
     cloud.replaceChildren(
@@ -243,22 +287,34 @@ export function orderLanguages(list, pinnedCodes = []) {
  */
 export function setModelOptions(
   models,
-  { keepValue = "", placeholder = "Select model…", selectFirst = true, showUnknownHint = true,
-    clearPrevious = false } = {},
+  {
+    keepValue = "",
+    placeholder = "Select model…",
+    selectFirst = true,
+    showUnknownHint = true,
+    clearPrevious = false,
+  } = {},
 ) {
-  const prev = String(keepValue || (!clearPrevious && els.aiModel.value) || "").trim();
+  const prev = String(
+    keepValue || (!clearPrevious && els.aiModel.value) || "",
+  ).trim();
   els.aiModel.innerHTML = "";
 
   const candidates = new Map();
   for (const value of Array.isArray(models) ? models : []) {
     const item = value && typeof value === "object" ? value : { id: value };
     const id = String(item.id || "").trim();
-    const eligibility = ["usable", "unknown", "blocked"].includes(item.eligibility)
-      ? item.eligibility : "unknown";
-    if (id && eligibility !== "blocked") candidates.set(id, { ...item, id, eligibility });
+    const eligibility = ["usable", "unknown", "blocked"].includes(
+      item.eligibility,
+    )
+      ? item.eligibility
+      : "unknown";
+    if (id && eligibility !== "blocked")
+      candidates.set(id, { ...item, id, eligibility });
   }
   const ids = [...candidates.keys()].sort((a, b) =>
-    a.localeCompare(b, undefined, { sensitivity: "base" }));
+    a.localeCompare(b, undefined, { sensitivity: "base" }),
+  );
 
   const ph = document.createElement("option");
   ph.value = "";
@@ -270,14 +326,18 @@ export function setModelOptions(
     const opt = document.createElement("option");
     opt.value = id;
     const candidate = candidates.get(id);
-    opt.textContent = candidate.label || (candidate.eligibility === "unknown" && showUnknownHint
-      ? `${id} — verify before use` : id);
+    opt.textContent =
+      candidate.label ||
+      (candidate.eligibility === "unknown" && showUnknownHint
+        ? `${id} — verify before use`
+        : id);
     opt.dataset.eligibility = candidate.eligibility;
-    if (candidate.evidence) opt.dataset.evidence = String(candidate.evidence).slice(0, 120);
+    if (candidate.evidence)
+      opt.dataset.evidence = String(candidate.evidence).slice(0, 120);
     els.aiModel.appendChild(opt);
   }
 
-  const next = ids.includes(prev) ? prev : (selectFirst ? ids[0] || "" : "");
+  const next = ids.includes(prev) ? prev : selectFirst ? ids[0] || "" : "";
   els.aiModel.value = next;
   els.aiModel.disabled = ids.length === 0;
 }
@@ -323,7 +383,9 @@ export function setFieldMessage(wrap, type, text) {
     wrap.appendChild(el);
   }
   el.dataset.type = type || "info";
-  el.textContent = text;
+  // Registered copy, registered templates (values kept as written) and
+  // " · "/" • " separated parts become translatable; the text is unchanged.
+  setUiText(el, text);
 }
 
 /** The current message type on a field wrapper, or "" when none. */
@@ -339,12 +401,8 @@ export function updatePromptCount(maxChars, text = null) {
   els.aiPromptCount.textContent = `${s.length}/${maxChars}`;
 }
 
-/**
- * Show/hide the language / sources / AI fields for the current mode+source.
- * @param {{hasEnvKey:boolean}} ctx
- */
 // Returns whether a custom API URL points at this machine or the local network.
-export function isLocalApiUrl(url) {
+function isLocalApiUrl(url) {
   const raw = String(url || "").trim();
   if (!raw) return false;
   let host = "";
@@ -367,11 +425,11 @@ export function isLocalApiUrl(url) {
   return false;
 }
 
-export function isLocalProvider(provider) {
+function isLocalProvider(provider) {
   return isLocalAiProvider(provider);
 }
 
-export function toggleUi({ hasEnvKey }) {
+export function toggleUi() {
   const isText = (els.mode.value || "lens_text") === "lens_text";
   els.sourcesWrap.style.display = isText ? "" : "none";
 
@@ -395,6 +453,11 @@ export function toggleUi({ hasEnvKey }) {
 
   const showAi = isText && source === "ai";
   if (els.aiGroup) els.aiGroup.style.display = showAi ? "" : "none";
+  // Paid hides these controls. Explicit Manual restores them on the next render.
+  if (els.aiProviderWrap)
+    els.aiProviderWrap.style.display = showAi ? "" : "none";
+  if (els.aiTranslationModeWrap)
+    els.aiTranslationModeWrap.style.display = showAi ? "" : "none";
 
   // The whole "Ai option" tab only exists when Source is AI. If it was the
   // active tab when the source changed away from AI, fall back to Translate.
@@ -428,8 +491,7 @@ export function toggleUi({ hasEnvKey }) {
   // always visible for Source=AI so selecting a Provider immediately shows its
   // known models; a valid key then upgrades that list to the provider's LIVE
   // models. The remaining controls still require a usable engine.
-  const canConfigureAi =
-    local || (els.aiKey.value || "").trim().length > 0;
+  const canConfigureAi = local || (els.aiKey.value || "").trim().length > 0;
   els.aiModelWrap.style.display = showAi ? "" : "none";
   if (els.aiLocalModelHint)
     els.aiLocalModelHint.style.display = showAi && local ? "" : "none";
@@ -445,8 +507,7 @@ export function toggleUi({ hasEnvKey }) {
   // accepts a thinking control. The controller reveals this only after an
   // exact capability result is available.
   if (els.aiThinkingWrap) {
-    els.aiThinkingWrap.style.display =
-      "none";
+    els.aiThinkingWrap.style.display = "none";
   }
   if (els.aiThinking && els.aiThinkingHint) {
     for (const option of els.aiThinking.options) {
@@ -459,17 +520,22 @@ export function toggleUi({ hasEnvKey }) {
   if (els.aiCharactersWrap)
     els.aiCharactersWrap.style.display = showAi && canConfigureAi ? "" : "none";
   if (els.aiMemoryHint) {
-    els.aiMemoryHint.textContent = "Off: no story data. Terms: names and terms. Full: includes story and characters.";
+    els.aiMemoryHint.textContent = "Full also includes story and characters.";
   }
   if (els.aiPageImageWrap)
     els.aiPageImageWrap.style.display = showAi && canConfigureAi ? "" : "none";
+  // One per-model token ceiling for Manual Cloud and Local (Paid shows it
+  // from the Paid controller; Login has no provider ceiling to set).
+  if (els.aiTokenCeilingWrap)
+    els.aiTokenCeilingWrap.style.display = showAi && canConfigureAi ? "" : "none";
   // Cloud and Local request caps have separate switches and stored values.
   if (els.aiRateWrap) {
     els.aiRateWrap.style.display =
       showAi && canConfigureAi && !local ? "" : "none";
   }
-  if (els.aiLocalRateWrap) els.aiLocalRateWrap.style.display =
-    showAi && canConfigureAi && local ? "" : "none";
+  if (els.aiLocalRateWrap)
+    els.aiLocalRateWrap.style.display =
+      showAi && canConfigureAi && local ? "" : "none";
   for (const el of [els.aiLocalRateRpm, els.aiLocalRateBurst])
     if (el) el.disabled = !els.aiLocalRateEnabled?.checked;
   // Local API unlimited is separate from the Local AI control under Model.

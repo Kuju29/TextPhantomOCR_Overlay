@@ -6,6 +6,7 @@
  * the exact provider + endpoint + model and its capability metadata before
  * admitting a Local AI batch. No dummy generation is allowed here.
  */
+import { classifyThinkingState } from "../shared/thinking-state.js";
 import { getStorage, setStorage } from "../shared/storage.js";
 import { classifyAiRuntime } from "../shared/ai-settings-contract.js";
 import { normalizeReasoningPreference } from "../shared/reasoning-preference.js";
@@ -308,9 +309,12 @@ export async function ensureLocalAiBatchReady(settings, {
       thinking,
       checkedAt,
     });
+    // Merge into the CURRENT map: `records` was read before the network check,
+    // and writing it back would erase another provider's snapshot saved meanwhile.
+    const latest = (await get([LOCAL_CAPABILITY_SNAPSHOTS_KEY]))?.[LOCAL_CAPABILITY_SNAPSHOTS_KEY];
     await set({
       [LOCAL_CAPABILITY_SNAPSHOTS_KEY]: {
-        ...records,
+        ...(latest && typeof latest === "object" ? latest : records),
         [identity]: record,
       },
       aiLocalCapabilityHint: hint,
@@ -356,7 +360,11 @@ export async function ensureLocalAiBatchReady(settings, {
   // caller. A concurrent On request must never approve another caller's Off.
   const nativeOllama = provider === "ollama" ||
     provider === "customlocal" && settings?.localAiAdapter?.protocol === "ollama";
-  if ((provider === "lmstudio" || nativeOllama) && thinking === "off") {
+  // A model whose live metadata proves no control is sent with the
+  // provider default (no field), so a saved Off has nothing to verify. A
+  // "no reasoning" claim still needs the native provenance checked below.
+  const offState = classifyThinkingState(evidence.hint?.modelCapabilities?.reasoning, { fresh: true });
+  if ((provider === "lmstudio" || nativeOllama) && thinking === "off" && offState !== "default") {
     const reasoning = evidence.hint?.modelCapabilities?.reasoning;
     // A supported:false claim is safe only when verified against the selected
     // runtime and loaded model immediately before this batch begins.

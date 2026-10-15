@@ -6,8 +6,14 @@ export function summarizeExecutionTiming(results = []) {
     typeof result?.meta?.[field] === "number" && Number.isFinite(result.meta[field]) && result.meta[field] >= 0)
     ? generated.reduce((sum, result) => sum + result.meta[field], 0) : null;
   const providerMs = sumKnown("providerMs");
+  const samples = generated.map(result => result?.meta?.providerTimingScope === 'center_round_trip'
+    ? result.meta.centerTiming?.upstreamMs : result?.meta?.providerMs);
+  const providerLearningMs = samples.length && samples.every(value =>
+    typeof value === 'number' && Number.isFinite(value) && value >= 0)
+    ? samples.reduce((sum,value)=>sum+value,0) : null;
   return {
     providerMs,
+    providerLearningMs,
     providerSamples: generated.length,
     providerLearningEligible: results.length === 1 && generated.length === 1 &&
       generated[0]?.failed !== true && Number(generated[0]?.meta?.generationAttempts) === 1,
@@ -20,7 +26,8 @@ export function summarizeExecutionTiming(results = []) {
 }
 
 export function providerLearningSample(timing, { repaired = false } = {}) {
+  const value = Object.hasOwn(timing || {}, 'providerLearningMs') ? timing.providerLearningMs : timing?.providerMs;
   return !repaired && timing?.replayed !== true && timing?.providerSamples === 1 && timing?.providerLearningEligible === true &&
-    timing?.providerTimingComplete === true && Number.isFinite(timing?.providerMs) && timing.providerMs > 0
-    ? timing.providerMs : 0;
+    timing?.providerTimingComplete === true && Number.isFinite(value) && value > 0
+    ? value : 0;
 }

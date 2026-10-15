@@ -26,13 +26,15 @@
     "scopeStatus": [
       "ready",
       "scope_missing",
-      "expired_lane_recovered"
+      "expired_lane_recovered",
+      "history_evicted"
     ],
     "rolloverReason": [
       "none",
       "prefix_changed",
       "request_profile_changed",
       "context_budget",
+      "paid_transport_budget",
       "history_storage_budget",
       "source_changed",
       "source_replayed",

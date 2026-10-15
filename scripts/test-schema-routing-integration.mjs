@@ -26,12 +26,13 @@ function ai(modelCapabilities) {
     local_adapter: { protocol: "ollama", baseUrl: "http://localhost:11434" },
     prompt: "STYLE SENTINEL",
     promptMode: "replace",
+    style_examples: true,
     thinking: "default",
     model_capabilities: modelCapabilities,
   };
 }
 
-async function run({ modelCapabilities, answer, units = [{ id: "g0", text: "原文" }] }) {
+async function run({ modelCapabilities, answer, memoryMode = "off", units = [{ id: "g0", text: "原文" }] }) {
   const requests = [];
   const wire = [];
   globalThis.fetch = async (url, init = {}) => {
@@ -46,7 +47,7 @@ async function run({ modelCapabilities, answer, units = [{ id: "g0", text: "原�
     }), { status: 200, headers: { "Content-Type": "application/json" } });
   };
   const result = await translateWithLocalOpenAi(units, {
-    ai: ai(modelCapabilities), canonicalPrompt: plan, targetLang: "th",
+    ai: {...ai(modelCapabilities),memory_mode:memoryMode}, canonicalPrompt: plan, targetLang: "th",
     wireTrace: async (stage, value) => wire.push({ stage, value }),
   });
   return { result, requests, wire };
@@ -61,6 +62,12 @@ try {
       reason: "ollama_format_schema_supported",
     },
   };
+  const full = await run({modelCapabilities:supportedCapabilities,memoryMode:"full",
+    answer:JSON.stringify({P0:"คำแปล",TP_MEMO:"พระเอกพบกุญแจ"})});
+  assert.equal(full.requests.length,1);
+  assert(full.requests[0].body.format.required.includes("TP_MEMO"));
+  assert.equal(full.result.meta.seriesSummary,"พระเอกพบกุญแจ");
+  assert.equal(full.result.translations[0].text,"คำแปล");
   const schema = await run({
     modelCapabilities: supportedCapabilities,
     units: [{ id: "g0", text: "一" }, { id: "g1", text: "二" }, { id: "g2", text: "三" }],

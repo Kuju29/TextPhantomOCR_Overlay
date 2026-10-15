@@ -74,8 +74,9 @@ def _ai_context_signature(ai_cfg: AiConfig) -> str:
             "page": getattr(ai_cfg, "page_context", None) or [],
             "captured": getattr(ai_cfg, "source_context", None) or [],
             "sourceLang": getattr(ai_cfg, "source_lang", ""),
-            "styleExamples": getattr(ai_cfg, "style_examples", True),
+            "styleExamples": getattr(ai_cfg, "style_examples", False) is True,
             "memoryMode": getattr(ai_cfg, "memory_mode", None),
+            "seriesSummaryContract": "same_call_footer_10457" if getattr(ai_cfg,"memory_mode",None) == "full" else None,
             "glossary": getattr(ai_cfg, "glossary", None) or [],
             "characters": getattr(ai_cfg, "characters", None) or [],
         },
@@ -94,7 +95,7 @@ def build_cache_key(
     source: str,
     ai_cfg: AiConfig | None,
     layout: dict[str, Any] | None = None,
-    *, owner_scope: str = "",
+    *, owner_scope: str = "", independent_examples_signature: str | None = None,
 ) -> str:
     """Build a deterministic cache key for one translation request.
 
@@ -121,7 +122,7 @@ def build_cache_key(
                 (ai_cfg.base_url or "").strip(),
                 _ai_prompt_signature(ai_cfg.prompt_editable),
                 LOCALIZATION_POLICY_VERSION,
-                f"examples_{getattr(ai_cfg, 'style_examples', True) is not False}",
+                f"examples_{getattr(ai_cfg, 'style_examples', False) is True}",
                 f"memory_{getattr(ai_cfg, 'memory_mode', None)}",
                 # Vision / character-memory settings produce different results.
                 # send_image may be False / True / "always" / "auto".
@@ -129,9 +130,18 @@ def build_cache_key(
                 "memo" if getattr(ai_cfg, "char_memory", True) else "",
                 # Thinking mode changes the answer -> separate cache entries.
                 f"think_{str(getattr(ai_cfg, 'thinking', '') or 'off').lower()}",
+                # 10493: how the prompt is applied and which translation path
+                # asks the AI change the request as well.
+                f"pm_{str(getattr(ai_cfg, 'prompt_mode', '') or '').lower()}",
+                f"path_{str(getattr(ai_cfg, 'translation_mode', '') or '').lower()}",
             ]
         )
         # Never reuse a private translation across different contexts, even
         # before a caller freezes its memory snapshot.
         parts.append("ctx_" + _ai_context_signature(ai_cfg))
+        from backend.ai.translation_paths.independent_examples import cache_signature
+        signature = (cache_signature(ai_cfg, lang) if independent_examples_signature is None
+                     else independent_examples_signature)
+        if signature:
+            parts.append("examples_pool_" + signature)
     return "|".join(p for p in parts if p is not None)

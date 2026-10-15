@@ -1,30 +1,12 @@
 import "./diagnostic-schema.js";
 /**
- *
- * Function-level trace, browser side. Ships to the API's ONE trace file.
- *
- * Why this is not `logger.js`
- * `logger.js` records decisions and writes them to the console as well as the
- * file. This records the PATH — every function entered, what it got, what it
- * returned — and never touches the console. Two reasons, both learned:
- *
- * 1. A trace on the console is unusable: one image is hundreds of lines and it
- *    buries the handful of warnings that matter.
- * 2. A trace that annoys people gets switched off, and a switched-off trace
- *    answers nothing.
- *
- * The file lives on the API (`POST /v1/trace`), interleaved with the server's
- * own lines by `trace` id, so ONE file holds the whole journey — click,
- * request, pipeline, response, insertion — in order. That is the point: the
- * bug this was built for (a client renderer that had refused 100% of images
- * since it shipped) was invisible precisely because the browser half and the
- * server half were never in the same place.
- *
- * One switch, on the server
- * There is no separate extension setting. `features.trace` from
- * `/v1/capabilities` decides. Two switches would let a run produce half a
- * trace, and a missing half reads as "that function was never called" — which
- * is the exact wrong conclusion, and the one that cost this project a day.
+ * Function-level trace, browser side. Shipped to the API's single trace file
+ * (`POST /v1/trace`) and interleaved with server lines by `trace` id, so one file
+ * holds the whole journey from click to insertion. Unlike `logger.js` it records
+ * the PATH and never writes to the console (a console trace buries the warnings
+ * that matter). The only switch is `features.trace` from `/v1/capabilities`: a
+ * second switch could produce half a trace, and a missing half reads as
+ * "never called".
  */
 
 const MAX_BUFFER = 4000;
@@ -212,8 +194,8 @@ export function setTracingEnabled(
 
 export const isTracing = () => enabled === true;
 export const getTraceDetail = () => detail;
-// Despite the historical name, this gates privacy-safe diagnostic metadata
-// (counts, hashes and timings), never OCR/prompt/provider text previews.
+// Gates privacy-safe diagnostic metadata (counts, hashes, timings) despite the
+// name; never OCR/prompt/provider text previews.
 export const diagnosticPreviewsEnabled = () => enabled === true;
 export const diagnosticContentEnabled = () => contentDiagnostics === true;
 
@@ -557,13 +539,9 @@ export const note = (file, fn, data, traceId = undefined) =>
   traceLine(file, fn, "..", data, traceId);
 
 /**
- * Buffer a line produced in the PAGE, verbatim.
- *
- * Not `traceLine`: that stamps the service worker's own trace id and counter,
- * which would overwrite the page's — and the page's id is the whole reason a
- * click and the request it caused end up in the same story. The page's clock
- * (`t`) is kept for the same reason the log sink keeps it: the moment this
- * worker saw the line is not the moment the page produced it.
+ * Buffer a line produced in the PAGE, verbatim. Not `traceLine`, which would
+ * overwrite the page's trace id (the link between a click and its request) and
+ * its clock `t` with the worker's.
  */
 export function traceRelay(record) {
   if (enabled === false || !record || typeof record !== "object") return;
@@ -742,22 +720,7 @@ export async function flushTrace() {
   }
 }
 
-// Why the service worker is hand-placed, not wrapped
-//
-// The page context gets wrapped automatically: content scripts register their
-// helpers on `window.__TP`, so one pass over that object covers every function
-// crossing a file boundary (see content/trace.js). The API gets wrapped
-// automatically too (backend/trace_install.py, 207 functions).
-//
-// The service worker cannot. Its files are ES modules, and an `import` is a
-// live binding to the exporting module's variable — it cannot be reassigned
-// from outside, so there is no object to walk. Doing it anyway would mean a
-// build-time source transform, which needs an AST parser this project
-// deliberately does not have (zero dependencies) and would put a rewriting
-// step between the code being read and the code being run.
-//
-// So the worker's ~15 waypoints carry a hand-placed `note()` instead: the job
-// starting, the request going out, the reply coming back, the insert. That is
-// a real gap and it is written here rather than left to be discovered — a
-// function of the worker that does not appear in the trace was not
-// necessarily skipped; it may simply never have been given a line.
+// The service worker is traced by hand-placed `note()` calls, not by wrapping:
+// page helpers on `window.__TP` and the API are wrapped automatically, but ES
+// module imports are live bindings that cannot be reassigned. A worker function
+// missing from the trace may simply have no note; it was not necessarily skipped.

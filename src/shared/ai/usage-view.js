@@ -24,7 +24,7 @@ export function formatUsageLines(row) {
   if (row.providerCostUsd != null && row.runtime !== 'local') lines.push([
     String(row.provider || '').toLowerCase() === 'openrouter' && row.byokRequests > 0
       ? row.byokRequests < row.requests ? 'Reported OpenRouter charges (BYOK upstream excluded)'
-        : 'Reported OpenRouter fee (BYOK upstream separate)' : 'Reported cost',
+        : 'Reported OpenRouter fee (BYOK upstream separate)' : row.provider === 'paid' ? 'Provider cost (USD)' : 'Reported cost',
     `$${row.providerCostUsd}${row.costReportedRequests < row.requests ? ' (incomplete)' : ''}`]);
   return lines.map(([label, text]) => `${label}: ${text}`).join('\n');
 }

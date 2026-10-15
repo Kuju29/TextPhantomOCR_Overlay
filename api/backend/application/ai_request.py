@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-import hashlib, unicodedata, json
+import hashlib, json
 from backend.ai.prompts.localization import LOCALIZATION_POLICY_VERSION
 
 def request_fingerprint(payload: dict[str, Any]) -> str:
@@ -19,7 +19,7 @@ def request_fingerprint(payload: dict[str, Any]) -> str:
         "prompt": payload.get("prompt"),
         "provider": {
             key: provider.get(key)
-            for key in ("id", "model", "baseUrl", "thinking")
+            for key in ("id", "model", "baseUrl", "thinking", "outputContract")
             if key in provider
         },
         "memory": payload.get("memory"),
@@ -47,11 +47,6 @@ def extension_owns_repair(payload: dict[str, Any]) -> bool:
 def unit_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
-def language_neutral_unit(text: str) -> bool:
-    visible = [ch for ch in str(text or "") if not ch.isspace()]
-    return bool(visible) and all(
-        unicodedata.category(ch)[0] in ("N", "P", "S") for ch in visible
-    )
 
 def validate_units(
     raw: Any, *, max_units: int, max_unit_chars: int, max_total_chars: int

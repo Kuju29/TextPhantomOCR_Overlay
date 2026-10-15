@@ -151,15 +151,11 @@ with tempfile.TemporaryDirectory(prefix="tp-wire-api-fail-") as temp:
     previous = {key: os.environ.get(key) for key in ("TP_AI_WIRE_TRACE", "TP_AI_WIRE_TRACE_DIR")}
     os.environ.update(TP_AI_WIRE_TRACE="1", TP_AI_WIRE_TRACE_DIR=str(blocker))
     try:
-        for action in (
-            wire_trace.start_session,
-            lambda: wire_trace.begin({"traceId": "trace", "operationId": "operation"}),
-        ):
-            try:
-                action()
-                raise AssertionError("unwritable trace destination must fail visibly")
-            except wire_trace.AiWireTraceWriteError as exc:
-                assert exc.code == "AI_WIRE_TRACE_WRITE_FAILED"
+        session = wire_trace.start_session()
+        assert session['incomplete'] and session['enabled'] is False
+        token = wire_trace.begin({"traceId": "trace", "operationId": "operation"})
+        assert wire_trace.active_folder() is None
+        wire_trace.end(token)
     finally:
         for key, value in previous.items():
             if value is None:
@@ -326,13 +322,13 @@ for failure_kind in ("missing_executor", "submission_rejected"):
                 if value is None: os.environ.pop(key, None)
                 else: os.environ[key] = value
 
-# A timing artifact failure must propagate, but it must not strand the resumed
-# executor ContextVar after process_payload has returned.
+# A timing artifact failure must degrade diagnostics without masking successful
+# work or stranding the resumed executor ContextVar.
 with tempfile.TemporaryDirectory(prefix="tp-wire-timing-cleanup-") as temp:
     previous = {key: os.environ.get(key) for key in ("TP_AI_WIRE_TRACE", "TP_AI_WIRE_TRACE_DIR")}
     os.environ.update(TP_AI_WIRE_TRACE="1", TP_AI_WIRE_TRACE_DIR=temp)
     old_pipeline_module = sys.modules.get("backend.jobs.pipeline")
-    original_write_json = wire_trace.write_json
+    original_write_json = wire_trace._write_bytes_locked
     try:
         token = wire_trace.begin({"traceId": "trace-timing", "operationId": "timing"})
         folder = wire_trace.active_folder()
@@ -340,11 +336,11 @@ with tempfile.TemporaryDirectory(prefix="tp-wire-timing-cleanup-") as temp:
         fake_pipeline = types.ModuleType("backend.jobs.pipeline")
         fake_pipeline.process_payload = lambda *_args, **_kwargs: {"ok": True}
         sys.modules["backend.jobs.pipeline"] = fake_pipeline
-        def fail_timing(name, value):
+        def fail_timing(folder, name, value, **kwargs):
             if name == "09_timing.json":
                 raise wire_trace.AiWireTraceWriteError("forced timing failure")
-            return original_write_json(name, value)
-        wire_trace.write_json = fail_timing
+            return original_write_json(folder, name, value, **kwargs)
+        wire_trace._write_bytes_locked = fail_timing
         context = __import__(
             "backend.application.translate_request", fromlist=["TranslationRequest"]
         ).TranslationRequest(
@@ -353,16 +349,13 @@ with tempfile.TemporaryDirectory(prefix="tp-wire-timing-cleanup-") as temp:
             mode="image", source="original", identity="test", started=time.perf_counter(),
             wire_folder=folder,
         )
-        try:
-            __import__(
+        result = __import__(
                 "backend.application.translate_request", fromlist=["pipeline_callable"]
             ).pipeline_callable(context)()
-            raise AssertionError("timing write failure must remain visible")
-        except wire_trace.AiWireTraceWriteError:
-            pass
+        assert result == {"ok": True}
         assert wire_trace.active_folder() is None
     finally:
-        wire_trace.write_json = original_write_json
+        wire_trace._write_bytes_locked = original_write_json
         if old_pipeline_module is None:
             sys.modules.pop("backend.jobs.pipeline", None)
         else:
@@ -493,7 +486,7 @@ with tempfile.TemporaryDirectory(prefix="tp-local-wire-relay-") as temp:
         local_wire_relay.receive({"identity": identity, "stage": "failure", "value": {
             "stage": "validation", "code": "wrong_language_output",
             "terminal": False, "state": "succeeded"}})
-        folder = next(Path(temp).iterdir())
+        folder = next(item for item in Path(temp).iterdir() if item.is_dir())
         assert json.loads((folder / "00_identity.json").read_text("utf-8"))["runtime"] == "direct-local"
         assert (folder / "02_system_prompt.txt").read_text("utf-8") == "SYSTEM exact"
         assert "TP_P0:原文" in (folder / "04_provider_request.json").read_text("utf-8")
@@ -577,7 +570,7 @@ with tempfile.TemporaryDirectory(prefix="tp-local-wire-ttl-") as temp:
         local_wire_relay.receive({"identity": identity, "stage": "terminal", "value": {
             "state": "partial", "terminal": False,
         }})
-        terminal = json.loads((next(Path(temp).iterdir()) / "11_terminal.json").read_text("utf-8"))
+        terminal = json.loads((next(item for item in Path(temp).iterdir() if item.is_dir()) / "11_terminal.json").read_text("utf-8"))
         assert terminal["terminal"] is True and terminal["state"] == "partial"
         assert all("--ttl--ttl" not in key for key in local_wire_relay._operation_sizes)
     finally:
@@ -618,7 +611,7 @@ with tempfile.TemporaryDirectory(prefix="tp-local-wire-http-") as temp:
                 "stage": stage, "value": value,
             })
             assert response.status_code == 202, (stage, response.status_code, response.text)
-        folder = next(Path(temp).iterdir())
+        folder = next(item for item in Path(temp).iterdir() if item.is_dir())
         assert str(folder) not in local_wire_relay._operation_sizes
         rejected = client.post(cap["path"], headers=headers, json={
             "schema": "tp.ai-wire-trace/1", "identity": identity,

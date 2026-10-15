@@ -3,7 +3,7 @@ const metric = n => typeof n === 'number' && Number.isFinite(n) ? n.toLocaleStri
 const results = {complete_at_contract_boundary:'Text checks passed', incomplete_ids:'Missing text',
   wrong_language:'Wrong language',output_truncated:'Answer cut short',cancelled:'Cancelled',rate_limited:'Rate limited',
   input_budget_rejected:'Not sent: input limit',transport_failure:'Request failed',protocol_failure:'Invalid response',unverified:'Not verified'};
-export function formatRequestStatus(row) {
+function formatRequestStatus(row) {
   if (!row) return '';
   return row.result ? results[row.result.resultStatus] || 'Not verified' : 'Awaiting result';
 }

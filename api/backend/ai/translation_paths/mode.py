@@ -5,7 +5,7 @@ import json
 from collections.abc import Mapping
 
 MODES = ("independent", "conversation")
-POLICY = "conversation-image-records-2026.9.27.8"
+POLICY = "conversation-bootstrap-once-2026.10.4.36"
 
 
 def mode(value=None, *, default="conversation") -> str:
@@ -33,6 +33,12 @@ def descriptor(value=None, *, context=None, metadata=None, caller="") -> dict:
            "branch": "repair" if value.get("branch") == "repair" else "initial",
            "pageId": str(value.get("pageId") or metadata.get("image_id") or "")[:160],
            "orderPolicy": "request_arrival"}
+    run = value.get("webchatRunId")
+    if run is not None:
+        import re
+        if not isinstance(run, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", run):
+            raise ValueError("conversation.webchatRunId is invalid")
+        out["webchatRunId"] = run
     if value.get("orderPolicy") == "document_enqueue":
         out["orderPolicy"] = "document_enqueue"
     for key in ("pageIndex", "pageOrder"):
@@ -51,10 +57,14 @@ def scope_material(ai, target_lang: str) -> str | None:
     if not d.get("documentId") or not d.get("owner"):
         return None  # unscoped tools get a fresh, explicitly reported conversation
     return json.dumps({"owner": d["owner"], "document": d["documentId"], "reset": d.get("reset", "0"),
+        **({"webchatRunId":d["webchatRunId"]} if d.get("webchatRunId") else {}),
         "provider": ai.provider, "model": ai.model, "endpoint": ai.base_url,
-        "key": ai.api_key, "target": target_lang, "source": ai.source_lang,
+        # OCR detection can differ between a single page and a multi-page batch.
+        # The same document/run still owns one thread; prompt compatibility below
+        # separates any actual change to the instruction bytes.
+        "key": ai.api_key, "target": target_lang,
         "prompt": ai.prompt_editable, "promptMode": ai.prompt_mode,
-        "examples": "human20" if getattr(ai, "style_examples", True) is not False else "none",
+        "examples": "human20" if getattr(ai, "style_examples", False) is True else "none",
         "memoryMode": ai.memory_mode,
         "thinking": ai.thinking, "image": bool(ai.send_image or ai.image_b64),
         "contract": ai.output_contract, "policy": POLICY}, sort_keys=True, ensure_ascii=False)

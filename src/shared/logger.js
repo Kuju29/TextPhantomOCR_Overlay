@@ -1,10 +1,7 @@
 /**
- *
  * Tiny namespaced console logger shared by the service worker, popup and viewer.
- *
- * Defaults to warnings/errors. The API capability response may raise it for a
- * deliberate diagnostics session; ordinary browsing must not become a second
- * trace console.
+ * Defaults to warnings/errors; the API capability response may raise it for a
+ * deliberate diagnostics session.
  */
 
 import "./log-serialization.js";

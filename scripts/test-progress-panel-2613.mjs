@@ -29,7 +29,7 @@ created=0;
 page.__TP.updateBatchProgress(running);
 await new Promise(resolve=>setTimeout(resolve,120));
 assert.equal(created,0,'a collapsed board must not rebuild hundreds of grid cells for each status');
-assert.match(host.text.textContent,/inserted 1\/3.*AI request receiving response \(3p\/45u turn\)/,
+assert.match(host.text.textContent,/inserted 1\/3.*AI request receiving response \(pages 1–3\)/,
   'shown pages and the still-open request must be distinguishable');
 host.details.scrollTop=115;
 host.toggle.fire('click');

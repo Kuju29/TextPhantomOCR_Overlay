@@ -127,7 +127,8 @@ class GroqAdapter(OpenAIProviderAdapter):
         effort = _native_effort(request)
         if effort:
             payload["reasoning_effort"] = effort
-            if effort == "none":
+            from backend.ai.providers.provider_helpers import accepts_optional_parameter
+            if effort == "none" and accepts_optional_parameter(request.model_capabilities, "temperature"):
                 payload.setdefault("temperature", POLICY.temperature)
         result = execute_chat_completion(
             url=request.base_url.rstrip("/") + "/chat/completions",

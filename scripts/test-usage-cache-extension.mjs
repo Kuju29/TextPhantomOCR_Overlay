@@ -151,9 +151,10 @@ try{
  await waitUntil(()=>Boolean(releaseImmutable));assert.equal(capturedReceipt.operationId,'immutable-op');assert.equal(capturedReceipt.usage.receiptId,'before');
  assert.equal(Object.isFrozen(capturedReceipt),true);assert.equal(Object.isFrozen(capturedReceipt.usage),true);releaseImmutable();await immutableDone;
  checks++;console.log('PASS queued accounting event is an immutable snapshot');
- const ctx={serverQueued:true,idempotencyKey:'queued-api',settingsEpoch:0,tabId:1,imgUrl:'https://image.test/1.jpg'};
+ const ctx={serverQueued:true,idempotencyKey:'queued-api',settingsEpoch:0,tabId:1,imgUrl:'https://image.test/1.jpg',sessionId:'before-reload'};
  let discarded=false;
- const delivery=createResultDelivery({pendingByJob:new Map([['q',ctx]]),findContext:()=>ctx,getTabSessionId:()=>'',getSettingsEpoch:()=>1,
+ // .70: a settings change no longer makes a result stale; a reload (new tab session) does.
+ const delivery=createResultDelivery({pendingByJob:new Map([['q',ctx]]),findContext:()=>ctx,getTabSessionId:()=>'after-reload',getSettingsEpoch:()=>1,
    removeJob:()=>{discarded=true},finalizeBatch:()=>{},traceNote:()=>{},log:{warn:()=>{}}});
  await delivery.handleResult('q',{Ai:{meta:{provider:'openrouter',model:'m',usage:{...complete,receiptId:'queued'}}}});
  await delivery.flushAccounting();await flushUsageReceiptJournal();

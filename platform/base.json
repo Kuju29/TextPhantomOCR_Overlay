@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TextPhantom — แปลข้อความในภาพมังงะ มังฮวา",
-  "version": "2026.9.27.26",
+  "version": "2026.10.4.93",
   "description": "🧠 Right-click any image → translate images",
   "host_permissions": [
     "<all_urls>"
@@ -17,6 +17,7 @@
         "content/namespace.js",
         "shared/diagnostic-schema.js",
         "shared/image-status-view.js",
+        "shared/page-ui-text.js",
         "content/trace.js",
         "content/image-scan-diagnostics.js",
         "content/keepalive.js",
@@ -56,6 +57,7 @@
         "content/download/job.js",
         "content/download/panel-style.js",
         "content/download/panel.js",
+        "content/credit-confirm.js",
         "content/messaging.js",
         "content/index.js"
       ],
@@ -73,6 +75,16 @@
       "run_at": "document_start",
       "all_frames": true,
       "world": "MAIN"
+    },
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content/support-dock.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
     }
   ],
   "web_accessible_resources": [
@@ -81,7 +93,9 @@
         "processors/*.js",
         "processors/render/*.js",
         "shared/lens-document.js",
-        "shared/ai-markers.js"
+        "shared/ai-markers.js",
+        "shared/ai-source-filter.js",
+        "support/chat.html"
       ],
       "matches": [
         "<all_urls>"
@@ -93,5 +107,8 @@
     "32": "icons/32.png",
     "48": "icons/48.png",
     "128": "icons/128.png"
-  }
+  },
+  "optional_permissions": [
+    "cookies"
+  ]
 }

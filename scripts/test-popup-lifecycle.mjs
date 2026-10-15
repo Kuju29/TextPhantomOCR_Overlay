@@ -17,8 +17,8 @@ const makeEls = (provider = "openrouter", model = "saved-model") => ({
 function metaController({ provider = "openrouter", model = "saved-model", fetch }) {
   const els = makeEls(provider, model);
   const state = {
-    aiMetaSeq: 0, aiProbeSeq: 0, localConnectSeq: 0, localConnectInFlight: null,
-    desiredAiModel: model, lastAiResolve: null, lastAiProbe: null,
+    aiMetaSeq: 0, localConnectSeq: 0, localConnectInFlight: null,
+    desiredAiModel: model, lastAiResolve: null,
   };
   let profileWrites = 0;
   let storageWrites = 0;
@@ -32,7 +32,7 @@ function metaController({ provider = "openrouter", model = "saved-model", fetch 
       sendMessage: async () => { throw new Error("unexpected local discovery"); },
       localPreset: () => ({}), normalizeLocalAdapter: (x) => x,
     },
-    constants: { paths: { AI_RESOLVE: "/resolve", AI_PROBE: "/probe" }, metaTimeout: 100, probeTimeout: 100 },
+    constants: { paths: { AI_RESOLVE: "/resolve" }, metaTimeout: 100 },
     provider: { isLocal: (id) => id === "ollama", label: (id) => id, protocolLabel: () => "test" },
     profile: { selectModel: () => profileWrites++, persist: async () => profileWrites++, saveCredential: async () => profileWrites++ },
     prompt: { render: async () => {}, scheduleSave: () => {} },
@@ -66,9 +66,10 @@ function metaController({ provider = "openrouter", model = "saved-model", fetch 
     "a saved verification must not suppress a fresh connection check");
 }
 
-// Concurrent/repeated Cloud refreshes share one live catalogue request and
-// one selected-model probe. Both results are TTL-cached for an unchanged
-// provider/account/model; metadata refresh must not write profile/storage.
+// Concurrent/repeated Cloud refreshes share one live catalogue request, which
+// is TTL-cached for an unchanged provider/account/model; no selected-model
+// generation probe is sent (10491); metadata refresh must not write
+// profile/storage.
 {
   let resolveCalls = 0;
   let probeCalls = 0;
@@ -90,19 +91,20 @@ function metaController({ provider = "openrouter", model = "saved-model", fetch 
       ],
     };
   } });
-  const first = t.controller.refresh();
-  const second = t.controller.refresh();
+  const first = t.controller.refresh({automatic:true});
+  const second = t.controller.refresh({automatic:true});
   release();
   await Promise.all([first, second]);
   assert.equal(resolveCalls, 1);
-  assert.equal(probeCalls, 1);
+  assert.equal(probeCalls, 0);
   assert.equal(t.els.aiModel.value, "saved-model");
-  assert.equal(t.state.lastAiProbe?.status, "passed");
+  assert.equal(t.state.aiModelBlocked, false, "a listed usable model is usable without a probe");
   assert.deepEqual(t.writes(), { profileWrites: 0, storageWrites: 0, fallbackCalls: 0, connectCalls: 0 });
-  await t.controller.refresh();
+  await t.controller.refresh({automatic:true});
   assert.equal(resolveCalls, 1, "TTL cache did not suppress an unchanged resolve");
-  assert.equal(probeCalls, 1, "TTL cache did not suppress an unchanged selected-model probe");
-  assert.equal(t.state.lastAiProbe?.cached, true);
+  await t.controller.refresh();
+  assert.equal(resolveCalls,2,'Explicit user refresh must request the current model catalogue.');
+  assert.equal(probeCalls,0,'Explicit user refresh sends no generation probe.');
 }
 
 // Debounced AI saving is strictly dirty-only. Scheduling with unchanged UI
@@ -180,12 +182,12 @@ const hydrationSource = await readFile(new URL(
 ), "utf8");
 assert.match(hydrationSource, /translationActive && usageViewController\.refreshPassive/);
 assert.match(hydrationSource, /if \(translationActive\) providerMetaController\.renderStatus/);
-assert.match(hydrationSource, /else providerMetaController\.refresh\(\)/);
+assert.match(hydrationSource, /else providerMetaController\.refresh\(\{automatic:true\}\)/);
 {
   let writes = 0;
   let dispatches = 0;
   let message = "";
-  const state = { lastAiResolve: { stale: true }, lastAiProbe: { stale: true } };
+  const state = { lastAiResolve: { stale: true }, manualModelBlock: { stale: true } };
   const result = await activateAiProfileSafely({
     profileController: {
       initialize: async () => {
@@ -233,8 +235,10 @@ assert.match(hydrationSource, /else providerMetaController\.refresh\(\)/);
     els.aiLocalTest, els.aiPrompt,
     els.aiPromptMode, els.aiPromptReset, els.aiPromptStudio])
     assert.equal(control.disabled, false, "profile recovery control must remain enabled");
-  assert.equal(els.aiThinking.disabled, false,
-    "unknown capability must not disable the user's saved reasoning policy");
+  // 10488: no model record yet → disabled "Checking model…"; the saved value stays.
+  assert.equal(els.aiThinking.disabled, true,
+    "unknown capability shows the loading state instead of guessing controls");
+  assert.equal(els.aiThinking.value, "off", "the saved reasoning policy is kept");
   assert.equal(els.translateAllButtonToggle.disabled, false,
     "the display preference can be saved while AI needs configuration");
   els.sources.value = "translated";

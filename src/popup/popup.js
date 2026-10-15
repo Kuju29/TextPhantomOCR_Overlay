@@ -1,7 +1,15 @@
 import { normalizeUrl } from "../shared/url.js";
 import { getStorage, removeStorage, setStorage as writeStorage } from "../shared/storage.js";
 import { createAiProfileStorageWriter } from "./controllers/ai-profile-storage-writer.js";
-const setStorage = createAiProfileStorageWriter(writeStorage);
+const setStorage = createAiProfileStorageWriter(writeStorage, {
+  onError: () => {
+    state.aiProfileBlocked = true; state.aiProfileErrorCode = "AI_PROFILE_SAVE_FAILED";
+    setEmojiStatus("error", "Could not save AI settings. Your edits are retained; try saving again.");
+  },
+  onSaved: () => {
+    if (state.aiProfileErrorCode === "AI_PROFILE_SAVE_FAILED") {state.aiProfileBlocked=false;state.aiProfileErrorCode="";}
+  },
+});
 import { ensureApiDefaults } from "../shared/api-defaults.js";
 import {
   AI_USAGE_STORAGE_KEY,
@@ -49,7 +57,6 @@ import {
   fetchDefaultPrompt,
   HEALTH_TIMEOUT_MS,
   AI_META_TIMEOUT_MS,
-  AI_PROBE_TIMEOUT_MS,
   RETRY_DELAYS_MS,
 } from "./api.js";
 import { createAiUsageController } from "./controllers/ai-usage-controller.js";
@@ -74,7 +81,6 @@ import { createUpdateBannerController } from "./controllers/update-banner-contro
 import { createPaidServiceController } from "./controllers/paid-service-controller.js";
 import {
   protocolLabel,
-  providerFromKey,
   providerLabel,
 } from "./controllers/provider-model-display.js";
 const state = {
@@ -85,9 +91,8 @@ const state = {
   metaCache: null,
   modelDirty: false,
   aiMetaSeq: 0,
-  aiProbeSeq: 0,
   lastAiResolve: null,
-  lastAiProbe: null,
+  manualModelBlock: null,
   promptSeq: 0,
   lastResolvedProvider: "",
   lastResolvedKey: "",
@@ -144,6 +149,7 @@ const localPickerController = createLocalPickerController({
   runtimeUrl: (path) => chrome.runtime.getURL(path),
   closeWindow: () => window.close(),
   randomId: () => crypto.randomUUID(),
+  notifyBackground: (message) => void sendRuntimeMessage(message),
 });
 const seriesMemoryController = createSeriesMemoryController({
   els,
@@ -151,6 +157,7 @@ const seriesMemoryController = createSeriesMemoryController({
   getStorage,
   setStorage,
   queryTabs,
+  sendMessage: sendRuntimeMessage,
 });
 const resetDefaultsController = createResetDefaultsController({ els,
   remove: async keys => { await setStorage.whenIdle(); await removeStorage(keys); },
@@ -183,14 +190,22 @@ const popupUiController = createPopupUiController({
   applyPaidMode: () => paidServiceController?.applyVisibility(),
 });
 const toggleUi = popupUiController.toggle;
+let rateSettingsController;
 paidServiceController = createPaidServiceController({
   els, state, getStorage, setStorage, toggleUi,
+  onProfileContext: context => { profileController.setPaidContext(context); rateSettingsController?.setContext(context.active); },
+  beforeSwitch: () => settingsPersistenceController.flushPendingAiEditsForSwitch(state.desiredLang, state.desiredAiModel),
+  onUsageSelection: async () => {
+    await usageController.select(selectedUsageTarget(), selectedUsageTarget);
+    await usageViewController.refreshPassive();
+  },
+  recheckApi: () => apiHealthController?.check(els.apiUrl?.value),
 });
 const traceProviderTransition = popupUiController.traceProviderTransition;
 const setProviderTransitionPending =
   popupUiController.setProviderTransitionPending;
 
-const rateSettingsController = createRateSettingsController({
+rateSettingsController = createRateSettingsController({
   els,
   constants: {
     presets: RATE_PRESETS,
@@ -206,6 +221,8 @@ const rateSettingsController = createRateSettingsController({
 
 const localCapacityController = createLocalCapacityController({
   els,
+  // The Local token ceiling default is the loaded context of this model.
+  onRender: () => profileController.renderTokenCeiling?.(),
   state,
   isLocalProvider: isLocalAiProvider,
   persist: setStorage,
@@ -232,8 +249,8 @@ const promptController = createPromptController({
   setFieldMessage,
   fieldMessageType,
   keyForPrompt: (lang, model) => profileController.promptKey(lang, model),
-  saveProfilePrompt: (lang, text, mode) =>
-    profileController.savePrompt(lang, text, mode),
+  saveProfilePrompt: (lang, text) =>
+    profileController.savePrompt(lang, text),
 });
 const applyPromptForLang = promptController.applyForLang;
 const applyPromptHistoryResult = promptController.applyHistoryResult;
@@ -273,7 +290,7 @@ apiHealthController = createApiHealthController({
   persist: setStorage,
   toggleUi,
   availabilityGate: apiAvailabilityGate,
-  paidAvailability: (available, base) => paidServiceController.setAvailability(available, base),
+  paidAvailability: (available, base, details) => paidServiceController.setAvailability(available, base, details),
 });
 
 const localConnectionController = createLocalConnectionController({
@@ -304,7 +321,6 @@ const providerMetaController = createProviderMetaController({
   constants: {
     paths: API_PATHS,
     metaTimeout: AI_META_TIMEOUT_MS,
-    probeTimeout: AI_PROBE_TIMEOUT_MS,
   },
   provider: { isLocal: isLocalAiProvider, label: providerLabel, protocolLabel },
   profile: profileController,
@@ -402,6 +418,7 @@ void loadPopupSettings({
   usageViewController,
   providerMetaController,
   apiHealthController,
+  paidServiceController,
   refreshPromptHistoryButtons,
   toggleUi,
   localConnectionController,
@@ -414,6 +431,10 @@ void loadPopupSettings({
     String(error?.message || "Unknown settings error"));
   setEmojiStatus("error", "Settings could not be loaded. Reopen the popup.");
 });
-void paidServiceController.initialize();
+window.addEventListener("pagehide", () => {
+  paidServiceController.dispose();
+  apiHealthController.dispose();
+  apiAvailabilityGate.dispose();
+}, { once: true });
 
 void updateBannerController.refresh();

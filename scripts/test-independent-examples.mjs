@@ -24,7 +24,7 @@ const read=async key=>({[key]:structuredClone(disk[key])});
 const write=async patch=>Object.assign(disk,structuredClone(patch));
 const examples=createIndependentExampleStore({read,write});
 const workload=createWorkloadController({read,write,emit:()=>{}});
-const server=http.createServer(async(request,response)=>{
+const handler=async(request,response)=>{
   let raw=''; for await (const part of request) raw+=part;
   const body=JSON.parse(raw);requests.push(body);
   const current=body.messages.at(-1).content;
@@ -39,9 +39,20 @@ const server=http.createServer(async(request,response)=>{
   response.writeHead(200,{'content-type':'application/x-ndjson'});
   response.end(JSON.stringify({model:body.model,message:{role:'assistant',content:'<<TP_P0:สวัสดี>>'},done:false})+'\n'+
     JSON.stringify({model:body.model,done:true,done_reason:'stop',prompt_eval_count:240,eval_count:22,total_duration:1e7})+'\n');
-});
-server.listen(0,'127.0.0.1');await once(server,'listening');
-const url=`http://127.0.0.1:${server.address().port}`;
+};
+const server=http.createServer(handler), originalFetch=globalThis.fetch;
+const inProcess=process.env.TP_TEST_INPROCESS_HTTP==='1';
+if(!inProcess){server.listen(0,'127.0.0.1');await once(server,'listening');}
+const url=inProcess?'http://127.0.0.1:39876':`http://127.0.0.1:${server.address().port}`;
+if(inProcess)globalThis.fetch=async(target,options={})=>{
+  assert(String(target).startsWith(url),'offline fixture must never use an external endpoint');
+  const value=await new Promise((resolve,reject)=>{
+    options.signal?.addEventListener('abort',()=>reject(new DOMException('Aborted','AbortError')),{once:true});
+    handler({async *[Symbol.asyncIterator](){yield options.body;}},
+      {writeHead(){},end:resolve}).catch(reject);
+  });
+  return new Response(value,{status:200,headers:{'content-type':'application/x-ndjson'}});
+};
 const service=createTranslationService({directLocal:(units,options)=>translateDirectLocal(units,
   {...options,canonicalPrompt:BUNDLED_CANONICAL_PROMPT_PLANS.th,
     wireTrace:(event,value)=>diagnostics.push([event,structuredClone(value)])})});

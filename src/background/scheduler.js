@@ -15,11 +15,9 @@ import {
 
 const MIN_WINDOW = 1;
 const DEFAULT_MAX_WINDOW = 32;
-// Fallback only when the API has not published executable capacity yet.
-// In provider-managed mode, setLaneCapacityHint() starts a fresh key at the
-// server's REAL active-worker capacity immediately. There is no benefit in
-// making ready work sit in a browser queue while both server and provider are
-// idle. A real provider 429/503 still halves this exact key/model lane.
+// Fallback only until the API publishes executable capacity: provider-managed
+// keys start at the server's real worker capacity (setLaneCapacityHint). A real
+// provider 429/503 still halves this exact key/model lane.
 const AI_START_WINDOW = 8;
 const AI_MAX_WINDOW = 64;
 const BACKOFF_FACTOR = 0.5;
@@ -29,10 +27,9 @@ const LOCAL_AUTO_MAX_LATENCY_RATIO = 1.75;
 const LOCAL_AUTO_REPROBE_SUCCESSES = 12;
 const LOCAL_AUTO_LEARNING_VERSION = 1;
 
-// Learned concurrency is local to the user's browser and contains only the
-// already-hashed lane id, never the API key. Two hours is long enough to avoid
-// re-learning on every chapter while short enough to follow provider quota/load
-// changes.
+// Learned concurrency stays in this browser and holds only the hashed lane id,
+// never the API key. Two hours follows provider quota/load changes without
+// re-learning on every chapter.
 const AI_LEARNING_STORAGE_KEY = "aiConcurrencyLearningV1";
 const AI_LEARNING_TTL_MS = 2 * 60 * 60 * 1000;
 const AI_LEARNING_MAX_ENTRIES = 128;
@@ -54,7 +51,6 @@ function auditCapacity(l, reason, evidence = null) {
     ...(evidence ? {evidence} : {}), effectiveFrom:"next_request",persistence:"memory_only"});
 }
 
-// Returns the initial and maximum window for a lane key.
 function lanePolicy(key) {
   const id = String(key || "default").toLowerCase();
   if (!id.startsWith("ai:")) {
@@ -63,7 +59,6 @@ function lanePolicy(key) {
   return { initialWindow: AI_START_WINDOW, maxWindow: AI_MAX_WINDOW };
 }
 
-// Builds a fresh lane record for a key.
 function makeLane(key) {
   const policy = lanePolicy(key);
   return {
@@ -89,11 +84,9 @@ function makeLane(key) {
     learnedUpdatedAt: 0,
     lastPersistedWindow: 0,
     lastPersistedCooldown: 0,
-    // Fresh lanes without a server capacity hint still use slow start. Once
-    // a provider has pushed back we permanently switch this lane to additive
-    // recovery, so a recovered key never jumps straight back into the overload
-    // that just rejected it. Provider-managed lanes with a real capacity hint
-    // start at that capacity immediately.
+    // Slow start until a provider pushes back; afterwards additive recovery, so
+    // a recovered key never jumps straight back into the overload. Lanes with a
+    // server capacity hint start at that capacity.
     slowStart: true,
     unlimited: false,
     localCapacity: null,
@@ -118,12 +111,10 @@ function makeLane(key) {
   };
 }
 
-// Applies the local-runtime capacity policy without changing time/RPM pacing.
-// Auto starts at one and widens only after successful provider execution. Its
-// browser-capacity ceiling is a resource bound, never initial burst permission.
-// Runtime metadata is telemetry, not a second hard cap. Safe remains one;
-// Manual remains explicitly 1-4.
-export function setLocalCapacityPolicy(key, config = {}) {
+// Local-runtime capacity policy (time/RPM pacing unchanged). Auto starts at one
+// and widens only after successful execution; its ceiling is a resource bound,
+// not burst permission. Safe stays at one; Manual is the user's 1-4.
+function setLocalCapacityPolicy(key, config = {}) {
   const l = lane(key);
   const mode = ["auto", "safe", "manual"].includes(config.mode)
     ? config.mode
@@ -275,9 +266,8 @@ async function ensureLearningLoaded(l) {
     }
     const restored = restoredLocalAutoLearning(saved, effectiveMax(l));
     if (!restored.valid) {
-      // Pre-.54 Local Auto learned from successful completions alone. Those
-      // windows can be badly over-wide for a large local model, so never treat
-      // them as throughput-proven after upgrading. Cloud learning is untouched.
+      // Saved Local Auto windows without throughput evidence can be far too wide
+      // for a large local model; start over. Cloud learning is untouched.
       l.learnedWindow = 0;
       l.learnedUpdatedAt = 0;
       l.window = MIN_WINDOW;
@@ -298,14 +288,13 @@ async function ensureLearningLoaded(l) {
     l.localAuto.cooldownSuccesses = 0;
     if (!l.backpressured) l.window = restored.window;
   } else if (!l.backpressured && !l.localCapacity && l.userCeiling <= 0) {
-    // Cloud/provider-managed learning keeps its existing behavior.
     l.window = Math.min(effectiveMax(l), Math.max(MIN_WINDOW, learned));
   }
   auditCapacity(l,"stored_capacity");
 }
 
-// Pure seam used by restore and regression tests. Safe/Manual are explicit
-// choices and never borrow an old Auto window. Unknown Auto has ceiling=1.
+// Safe/Manual are explicit choices and never borrow an old Auto window.
+// Unknown Auto has ceiling=1.
 export function restoredWindowForPolicy(mode, ceiling, learned) {
   const cap = Math.max(MIN_WINDOW, Math.floor(Number(ceiling) || 1));
   if (String(mode) !== "auto") return cap;
@@ -353,7 +342,6 @@ function persistLearning(l, { force = false } = {}) {
     .catch(() => {});
 }
 
-// Returns the lane for a key, creating it when absent.
 function lane(key) {
   const id = String(key || "default");
   let found = lanes.get(id);
@@ -402,7 +390,6 @@ export function setLaneUnlimited(key, on) {
   return l.unlimited;
 }
 
-// Waits for a slot in a lane and resolves when the caller may proceed.
 export async function acquire(key, signal = null) {
   const l = lane(key);
   await ensureLearningLoaded(l);
@@ -571,10 +558,9 @@ function localAutoSuccess(l, latency) {
   pump(l, "local_throughput_no_gain", evidence);
 }
 
-// Returns a slot after a successful round trip and widens the window. Cloud
-// lanes remain provider-backpressure driven. Local Auto additionally learns
-// machine+endpoint+model throughput so a successful-but-saturated model does
-// not keep widening merely because it eventually answered.
+// Returns a slot after a successful round trip and widens the window. Local Auto
+// also learns machine+endpoint+model throughput, so a saturated model does not
+// keep widening merely because it eventually answered.
 export function releaseSuccess(key, ms = 0, { sampleWindow = null, sampleWorkload = null } = {}) {
   const l = lane(key);
   if (consumeResetRelease(l)) return;
@@ -688,22 +674,11 @@ export function releaseDeferred(key, retryAfterMs = 0) {
   pump(l,"server_admission_defer");
 }
 
-// Returns a slot after the API's own rate gate refused a token: waits out the
-// gate's advertised delay WITHOUT narrowing the window.
-//
-// A provider 429 and a rate-gate 429 arrive as the same status code and mean
-// opposite things. The provider is complaining about CONCURRENCY, and halving
-// the window is the right answer. The gate is reporting that this API key's
-// token bucket is empty, which is a RATE, and no window is narrow enough to
-// make a bucket refill faster — the delay it hands back already is the answer.
-//
-// Treating them alike cost more than the extra latency. `releaseRejected` also
-// sets `backpressured`, which then needs four clean round trips to clear, so a
-// batch big enough to saturate the gate drove its own window down to 1 and
-// stayed there; the server-side gate then saw too little clean traffic to earn
-// a rate increase, and both sides settled at the slowest rate either could
-// justify. Measured on trace-20260819-191505: 330 s of 478 s of AI time spent
-// waiting for tokens, with the server otherwise idle 88% of the session.
+// Returns a slot after the API's own rate gate refused a token: wait out the
+// advertised delay WITHOUT narrowing the window. A provider 429 means too much
+// concurrency (halve the window); a gate 429 means this key's token bucket is
+// empty, which no narrower window refills. Treating them alike drove large
+// batches down to a window of 1 and kept them there.
 export function releaseGated(key, retryAfterMs = 0) {
   const l = lane(key);
   if (consumeResetRelease(l)) return;
@@ -765,9 +740,8 @@ export function releaseLocalFailure(key, error, retryAfterMs = 0) {
   return "failed";
 }
 
-// Backward-compatible observer for older call sites. Server RPM is already
-// enforced by the API rate gate and must not become a second client throttle.
-// Direct capacity hints use setLaneSlotCeiling instead.
+// Server RPM is enforced by the API rate gate and must not become a second
+// client throttle; direct capacity hints use setLaneSlotCeiling.
 export function setLaneCeiling(key, rpm, providerMs) {
   const l = lane(key);
   void rpm;
@@ -820,7 +794,6 @@ export function setLaneCapacityHint(key, slots, burst = 0) {
   return l.capacityTarget;
 }
 
-// Returns a snapshot of one lane, or of every lane when no key is given.
 export function describe(key = "") {
   if (key) {
     const l = lanes.get(String(key));
@@ -859,7 +832,6 @@ export function describe(key = "") {
   return Array.from(lanes.keys()).map((k) => describe(k));
 }
 
-// Clears every lane.
 export function reset() {
   lanes.clear();
 }
@@ -919,7 +891,6 @@ function aiKeyLane(apiKey) {
   return hash.toString(36);
 }
 
-// Returns the scheduler lane a job payload belongs to.
 export function laneKeyFor(payload) {
   const mode = String(payload?.mode || "")
     .trim()

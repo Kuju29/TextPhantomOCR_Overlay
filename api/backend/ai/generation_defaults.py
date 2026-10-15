@@ -26,6 +26,32 @@ class GenerationDefaults:
 
 DEFAULT_GENERATION = GenerationDefaults()
 
+# Hidden reasoning shares the completion ceiling with the visible answer.
+# A reasoning cap keeps at least ANSWER_FLOOR_TOKENS and two thirds of the
+# completion for the translated lines, never exceeds REASONING_CAP_MAX_TOKENS
+# (the 4096-token reasoning reserve below is the most the estimate ever adds;
+# half of it is ample for translation), and never goes below the smallest
+# budget providers accept for an enabled thinking mode.
+REASONING_CAP_MIN_TOKENS = 256
+REASONING_CAP_MAX_TOKENS = 2048
+REASONING_CAP_SHARE_DIVISOR = 3
+ANSWER_FLOOR_TOKENS = 768
+REASONING_RESERVE_MAX_TOKENS = 4096
+
+
+def reasoning_reserve(units: int, prompt_chars: int) -> int:
+    """Completion tokens the estimate adds for hidden reasoning."""
+    return min(REASONING_RESERVE_MAX_TOKENS, 768 + max(1, int(units)) * 128 + int(int(prompt_chars) * 0.04))
+
+
+def reasoning_token_cap(completion_budget: int) -> int:
+    """Bound for a provider's reasoning-budget field, derived from the same
+    completion budget output_token_budget produced (answer + reasoning
+    reserve). Used only where the provider has a real token-budget control."""
+    total = int(completion_budget)
+    return max(REASONING_CAP_MIN_TOKENS,
+               min(REASONING_CAP_MAX_TOKENS, total // REASONING_CAP_SHARE_DIVISOR, total - ANSWER_FLOOR_TOKENS))
+
 def output_token_budget(
     user_parts: tuple[str, ...] | list[str],
     system_text: str = "",
@@ -43,11 +69,8 @@ def output_token_budget(
         int(unit_count or len([part for part in user_parts if str(part or "").strip()])),
     )
     answer_reserve = int(chars * 2.2) + units * 112 + 384
-    reasoning_reserve = (
-        min(4096, 768 + units * 128 + int(prompt_chars * 0.04))
-        if reasoning
-        else 0
-    )
-    return max(1024, min(int(ceiling), answer_reserve + reasoning_reserve))
+    hidden = reasoning_reserve(units, prompt_chars) if reasoning else 0
+    return max(1024, min(int(ceiling), answer_reserve + hidden))
 
-__all__ = ["DEFAULT_GENERATION", "GenerationDefaults", "output_token_budget"]
+__all__ = ["ANSWER_FLOOR_TOKENS", "DEFAULT_GENERATION", "GenerationDefaults", "REASONING_CAP_MAX_TOKENS",
+           "REASONING_CAP_MIN_TOKENS", "output_token_budget", "reasoning_reserve", "reasoning_token_cap"]

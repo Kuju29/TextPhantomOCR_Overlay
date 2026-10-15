@@ -30,7 +30,11 @@ with sync_playwright() as pw:
 }''',url)
  def check(name,passed,value=None):
   report['checks'].append({'name':name,'passed':bool(passed),'value':value});assert passed,(name,value)
- height=page.locator('#fixture').bounding_box()['height'];check('Usage panel is compact, total height <= 50px',height<=50,height)
+ # Measure the production panel, not the screenshot wrapper's artificial
+ # 10px padding on each side and the panel's bottom margin.
+ layout=page.evaluate('''()=>{const panel=document.getElementById('ai-usage-wrap'),fixture=document.getElementById('fixture'),style=getComputedStyle(fixture);return {panelHeight:panel.getBoundingClientRect().height,fixtureHeight:fixture.getBoundingClientRect().height,fixturePaddingTop:style.paddingTop,fixturePaddingBottom:style.paddingBottom,panelMarginBottom:getComputedStyle(panel).marginBottom};}''')
+ report['layout']=layout
+ check('Collapsed production usage panel height <= 50px',0<layout['panelHeight']<=50,layout)
  page.locator('#fixture').screenshot(path=str(a.out/'compact-closed.png'))
  page.locator('#ai-usage-wrap > summary').click();check('Usage expands by user action',page.locator('#ai-usage-wrap').get_attribute('open') is not None)
  text=page.locator('#ai-usage-counts').inner_text();check('English labels despite Thai target',not re.search(r'[\u0e00-\u0e7f]',text),text)

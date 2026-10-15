@@ -41,9 +41,7 @@ INSTRUCTION_PACKS = {'en': {'identity': 'You are a manga and manhwa translator a
                         'Return only the JSON object required by the supplied schema. Its keys must be exactly '
                         "{ids}; each value is that unit's complete non-empty translation. Do not add, omit, "
                         'merge, split or rename records. Do not insert manual line breaks for visual layout.',
-        'image': 'PAGE IMAGE: the page is attached as context. Use it only to clarify visible action, mood, '
-                 'speaker flow and reading order. Appearance alone is not proof of gender. Keep every '
-                 'translation attached to its source ID.',
+        'image': 'PAGE IMAGES: Some user turns may include a page image with the source records. When an image is actually supplied, use it only to clarify visible action, mood, speaker flow and reading order. Appearance alone is not proof of gender. Keep every translation attached to its source ID.',
         'glossary': 'TRANSLATION MEMORY (names, places, skills, items from earlier pages — use the SAME target '
                     'wording for the SAME source term). This binds recurring names/terms only; everyday '
                     'sentences are not fixed translation templates:\n',
@@ -64,8 +62,7 @@ INSTRUCTION_PACKS = {'en': {'identity': 'You are a manga and manhwa translator a
                   'This is not approved translation wording. Do not restate or translate this context):\n',
         'speakers': 'SPEAKER MAP (supplied associations, not inferred from adjacent IDs; do not assign a voice '
                     'where the association is unknown):\n',
-        'previous': 'PREVIOUS PAGE (source text tail, context only — the conversation may continue from here; '
-                    'do NOT translate or output these lines):\n',
+        'previous': 'PRIOR STORY CONTEXT (source and available translation pairs, reference only; do not translate or return these lines):\n',
         'page': 'SAME PAGE — READ ONLY: These are nearby source units outside this request. They may clarify a '
                 'continuation, reference or reply. Array proximity is not verified reading order or speaker '
                 'identity; do not invent either. Translate only SOURCE TEXT target IDs, never these context '
@@ -77,15 +74,7 @@ INSTRUCTION_PACKS = {'en': {'identity': 'You are a manga and manhwa translator a
                     'exchanges; never combine their speakers or scenes. Neither adjacency nor an ID verifies '
                     'reading order or speaker identity. Use this evidence to understand the failed lines; '
                     'return only SOURCE TEXT target IDs.',
-        'repair': 'REPAIR — WRONG TARGET LANGUAGE\n'
-                  'The previous response for these failed units was rejected because it used the wrong target '
-                  'language.\n'
-                  '{target}\n'
-                  'Translate the supplied failed units afresh, including titles and dialogue. Render '
-                  'source-script names in the target writing system when appropriate. Do not echo the source '
-                  'or leave foreign-script prose in the translation.\n'
-                  'Keep every supplied ID exactly once and obey the existing output contract. Return '
-                  'translations only, with no explanation of the repair.'},
+        'repair': ''},
  'th': {'identity': 'คุณคือนักแปลและบรรณาธิการมังงะและมังฮวา สไตล์ต่อไปนี้คือแนวทางการแปลของคุณ',
         'styleHeading': 'สไตล์การแปล',
         'taskHeading': 'งานแปล',
@@ -122,8 +111,7 @@ INSTRUCTION_PACKS = {'en': {'identity': 'You are a manga and manhwa translator a
                         'ตอบเฉพาะวัตถุ JSON ตาม schema ที่ให้ โดยมีคีย์ตรงตาม {ids} '
                         'ทุกค่าเป็นคำแปลครบของหน่วยนั้นและไม่ว่าง ห้ามเพิ่ม ละ รวม แบ่ง หรือเปลี่ยน ID '
                         'ห้ามขึ้นบรรทัดเพื่อจัดวางภายในคำแปล',
-        'image': 'ภาพหน้าปัจจุบัน: แนบภาพมาเป็นบริบท ใช้ช่วยเข้าใจการกระทำ อารมณ์ ลำดับผู้พูด '
-                 'และลำดับอ่านที่มองเห็นเท่านั้น รูปลักษณ์ไม่ใช่หลักฐานเพศ คงคำแปลที่ ID ต้นทาง',
+        'image': 'บางข้อความผู้ใช้อาจแนบภาพหน้ามังงะพร้อมต้นฉบับ หากแนบภาพมาจริง ให้ใช้ช่วยเข้าใจการกระทำ อารมณ์ ลำดับผู้พูดและลำดับอ่านเท่านั้น รูปลักษณ์ไม่ใช่หลักฐานยืนยันเพศ คงคำแปลให้ตรงกับ ID ต้นฉบับ',
         'glossary': 'ศัพท์และชื่อจากความจำเรื่อง — ใช้คำแปลเดียวกันกับศัพท์เดิม กำหนดเฉพาะชื่อ สถานที่ ทักษะ '
                     'และสิ่งของ ไม่ใช่ประโยคทั่วไปสำเร็จรูป:\n',
         'characters': 'ข้อมูลตัวละคร — เป็นหลักฐานจากเรื่อง '
@@ -141,8 +129,7 @@ INSTRUCTION_PACKS = {'en': {'identity': 'You are a manga and manhwa translator a
                   'ไม่ใช่คำแปลที่ยืนยันสำนวนแล้ว ไม่ต้องทวนหรือแปลส่วนนี้:\n',
         'speakers': 'ผู้พูดตามข้อมูลที่ให้ — ไม่อนุมานจาก ID ที่อยู่ติดกัน '
                     'ไม่กำหนดน้ำเสียงเมื่อยังไม่ทราบผู้พูด:\n',
-        'previous': 'หน้าก่อนหน้า — ส่วนท้ายข้อความต้นฉบับ ใช้เข้าใจบทสนทนาที่อาจต่อกันเท่านั้น '
-                    'ไม่ต้องแปลหรือส่งบรรทัดเหล่านี้กลับ:\n',
+        'previous': 'บริบทเรื่องที่เคยแปล — ต้นฉบับและคำแปลที่มี ใช้อ้างอิงเท่านั้น ไม่ต้องแปลหรือส่งรายการเหล่านี้กลับ:\n',
         'page': 'ข้อความรอบข้างในภาพเดียวกัน — อ่านเท่านั้น เป็นหน่วยต้นฉบับที่อยู่นอกงานรอบนี้ '
                 'ใช้ช่วยเข้าใจประโยคต่อ การอ้างถึง หรือคำตอบ '
                 'การอยู่ใกล้กันในรายการไม่ยืนยันลำดับอ่านหรือผู้พูด ห้ามเดาทั้งสองอย่าง แปลเฉพาะ ID '
@@ -152,12 +139,7 @@ INSTRUCTION_PACKS = {'en': {'identity': 'You are a manga and manhwa translator a
                     'ระบุว่ามาจากคำขอแรกหรือจุดบันทึกของหน้า ต่างกลุ่มอาจเป็นคนละภาพหรือบทสนทนา '
                     'ห้ามรวมผู้พูดหรือฉาก การอยู่ติดกันหรือ ID ไม่ยืนยันลำดับอ่านหรือผู้พูด '
                     'ใช้เข้าใจบรรทัดที่เสีย แล้วตอบเฉพาะ ID ที่ขอแปล',
-        'repair': 'ซ่อมคำแปล — ผิดภาษาปลายทาง\n'
-                  'คำตอบก่อนหน้าของหน่วยเหล่านี้ถูกปฏิเสธเพราะใช้ภาษาปลายทางไม่ถูกต้อง\n'
-                  '{target}\n'
-                  'แปลหน่วยที่เสียใหม่ รวมชื่อเรื่องและบทพูด เขียนชื่อด้วยระบบอักษรปลายทางเมื่อเหมาะสม '
-                  'ไม่คัดลอกต้นฉบับหรือทิ้งข้อความร้อยแก้วเป็นภาษาอื่น\n'
-                  'คงทุก ID ครั้งเดียวและใช้รูปแบบคำตอบเดิม ตอบเฉพาะคำแปล ไม่อธิบายการซ่อม'},
+        'repair': ''},
  'ja': {'identity': 'あなたは漫画・マンファの翻訳者兼ローカライズ編集者です。以下の翻訳方針を自分の翻訳スタイルとしてください。',
         'styleHeading': '翻訳方針',
         'taskHeading': '翻訳作業',
@@ -183,7 +165,7 @@ INSTRUCTION_PACKS = {'en': {'identity': 'You are a manga and manhwa translator a
         'schemaOutput': '出力形式 — tp.translation.schema-object/1\n'
                         '指定schemaに従うJSONオブジェクトだけを返す。キーは正確に {ids} '
                         'とし、各値は対応する単位の空でない完全な訳とする。項目を追加・省略・結合・分割・改名しない。表示用の手動改行を入れない。',
-        'image': 'ページ画像: 画像が文脈として添付されている。見える動作、雰囲気、話者の流れ、読む順序を明確にするためだけに使う。外見だけで性別を決めない。訳は元のIDに対応させる。',
+        'image': 'ユーザーの一部の要求には原文と一緒にページ画像が添付される場合がある。実際に画像がある場合だけ、動作・雰囲気・話者の流れ・読む順序の理解に使う。外見だけで性別を決めない。訳は元のIDに対応させる。',
         'glossary': '用語・名称の記憶 — 同一の原語には既定の訳を使う。人物、場所、技、物品などの名称に限り、日常文の定型訳ではない:\n',
         'characters': '人物情報 — 作品から蓄積した根拠として使うが、今回の明確な原文を優先する:\n',
         'characterRules': '\n'
@@ -193,16 +175,12 @@ INSTRUCTION_PACKS = {'en': {'identity': 'You are a manga and manhwa translator a
         'note': '注記',
         'series': '物語の記憶 — 原文に根拠のある作品文脈。今回の明確な原文を優先する。承認済みの訳文表現ではない。この文脈を繰り返したり翻訳したりしない:\n',
         'speakers': '話者対応表 — 提供された対応関係であり、隣接IDから推測しない。話者不明の箇所に声を割り当てない:\n',
-        'previous': '前のページ — 原文末尾の参照資料。会話が続く場合の理解にのみ使い、これらの行は訳さず返さない:\n',
+        'previous': '既訳の作品文脈 — 原文と利用できる訳文の対。参照専用で、これらの行を訳したり返したりしない:\n',
         'page': '同じページの周辺原文 — '
                 '参照専用。この要求の対象外の原文であり、続き・指示対象・応答の理解に使う。配列上の近さで読む順序や話者を確定しない。要求された原文IDだけを訳し、参照項目は訳さず、その内容を訳文へコピーしない。',
         'captured': '保存された原文 — '
                     '参照専用。各グループは列挙された対象IDにだけ適用する。承認済みの訳ではなく原文資料であり、evidence欄は初回要求またはページの保存点を示す。別グループは別ページ・別会話かもしれないため話者や場面を混ぜない。隣接やIDは読む順序・話者の証明ではない。失敗した行の理解に使い、要求された原文IDだけを返す。',
-        'repair': '訳文の修復 — 訳先言語の誤り\n'
-                  'これらの単位の前回の応答は訳先言語が違うため却下された。\n'
-                  '{target}\n'
-                  '題名や台詞を含め、失敗した単位を新たに訳す。名称は適切なら訳先の文字体系で表す。原文をそのまま返したり、他言語の文章を訳文に残したりしない。\n'
-                  '各IDを一度だけ保持し、既存の出力形式に従う。修復の説明なしで訳文だけを返す。'}}
+        'repair': ''}}
 
 def instruction_locale(lang):
     code = normalize(str(lang or "en")).lower()

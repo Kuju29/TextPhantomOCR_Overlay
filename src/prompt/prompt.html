@@ -7,14 +7,16 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <link rel="stylesheet" href="../shared/theme.css" />
   <link rel="stylesheet" href="prompt.css" />
+<link rel="stylesheet" href="../shared/ui-language.css" />
 </head>
 
 <body>
   <header class="ps-head">
-    <div class="ps-title">
+    <a class="ps-title tp-brand-link" href="https://kuju29.com/" target="_blank" rel="noopener noreferrer" aria-label="TextPhantom website">
       <h1>Prompt Studio</h1>
       <span class="ps-sub">Set the AI translation prompt for each language</span>
-    </div>
+    </a>
+    <div data-tp-language-host></div>
     <div class="ps-head-actions">
       <span id="ps-status" class="ps-status" aria-live="polite"></span>
     </div>
@@ -23,10 +25,10 @@
   <main class="ps-main">
     <aside class="ps-side">
       <div class="ps-field">
-        <label for="ps-lang">Language</label>
-        <select id="ps-lang" aria-label="Language"></select>
+        <label for="ps-lang">Prompt language</label>
+        <select id="ps-lang" data-tp-ui-private aria-label="Prompt language"></select>
       </div>
-      <div class="ps-hint">Saved separately for this Provider, Model and Language.</div>
+      <div class="ps-hint">Saved separately for this provider, model and language.</div>
       <div class="ps-actions">
         <button type="button" id="ps-load-default" class="ps-btn">Reload built-in style</button>
         <button type="button" id="ps-clear" class="ps-btn ghost">Clear</button>
@@ -50,8 +52,8 @@
 
     <section class="ps-editor">
       <div class="ps-editor-bar">
-        <span id="ps-key" class="ps-key">en</span>
-        <span id="ps-count" class="ps-count">0</span>
+        <span id="ps-key" data-tp-ui-private class="ps-key">en</span>
+        <span id="ps-count" data-tp-ui-private class="ps-count">0</span>
       </div>
       <textarea id="ps-text" spellcheck="false"
         placeholder="Set translation instructions. Load the built-in default if this is empty."></textarea>
@@ -59,7 +61,8 @@
   </main>
 
   <script src="../shared/compat.js"></script>
-  <script type="module" src="prompt.js"></script>
+  <script type="module" src="../shared/ui-language-entry.js"></script>
+<script type="module" src="prompt.js"></script>
 </body>
 
 </html>

@@ -1,34 +1,17 @@
 /**
- * Minimal protobuf wire-format reader for Google Lens responses.
+ * Minimal protobuf wire-format reader for Google Lens responses: a byte-for-byte
+ * port of `api/backend/lens/proto.py`, pinned to a shared fixture
+ * (`scripts/test-lens-tree.mjs`, `api/tests/test_lens_tree.py`) so the two
+ * readers cannot drift. Lens embeds unschematised protobuf in its JSON, so the
+ * wire format (varint 0, 64-bit 1, length-delimited 2, 32-bit 5) is walked
+ * directly and "item" messages are recognised by shape (geometry + spans).
  *
- *
- * This is a byte-for-byte port of `api/backend/lens/proto.py`. The two are
- * pinned to a shared fixture (`scripts/test-lens-tree.mjs` and
- * `api/tests/test_lens_tree.py`) because `README.md#architecture-and-ownership` puts the
- * decode in the service worker and leaves Python owning the same reader for
- * the `/v1/lens/fallback` path — two readers of the same bytes drift within a
- * release or two unless something asserts they agree.
- *
- * Google Lens returns OCR geometry as nested, *unschematised* protobuf
- * messages embedded inside the JSON response. We only need a handful of
- * fields, so instead of compiling `.proto` files we walk the wire format
- * directly.
- *
- * Wire types handled: varint (0), 64-bit (1), length-delimited (2), 32-bit (5).
- *
- * The `looksLike*` / `isItemMessage` heuristics exist because the message
- * layout is not documented — we identify "item" sub-messages by their *shape*
- * (a geometry block plus one or more span blocks).
- *
- * ON FAILURE THIS THROWS. It does not return a partial parse. Google changing
- * the encoding is permanent until this adapter is updated, and a reader that
- * returned the fields it managed to read would produce a page with some of its
- * text in the wrong place — a rendering bug, investigated in the renderer, for
- * as long as anyone cares to look.
+ * On failure this throws rather than returning a partial parse: partial fields
+ * would put some text in the wrong place and look like a renderer bug.
  */
 
 /** Thrown when the wire format is not what this reader speaks. */
-export class LensProtoError extends Error {}
+class LensProtoError extends Error {}
 
 /** A decoded field: `{ field, wire, value }`. */
 
@@ -41,7 +24,7 @@ export class LensProtoError extends Error {}
  * than truncated to whatever fits — a silently truncated offset would slice
  * the wrong substring out of the page text.
  */
-export function readVarint(buf, i) {
+function readVarint(buf, i) {
   let shift = 0;
   let result = 0;
   for (;;) {
@@ -63,7 +46,7 @@ export function readVarint(buf, i) {
 }
 
 /** Decode every top-level field in `buf[start:end]`. */
-export function parse(buf, start = 0, end = null) {
+function parse(buf, start = 0, end = null) {
   const stop = end === null ? buf.length : end;
   let i = start;
   const out = [];
@@ -111,7 +94,7 @@ export function f32(b4) {
 }
 
 /** The value of the first 32-bit float field numbered `fieldNum`, or null. */
-export function getFloatField(fields, fieldNum) {
+function getFloatField(fields, fieldNum) {
   for (const { field, wire, value } of fields) {
     if (field === fieldNum && wire === 5) return f32(value);
   }
@@ -121,19 +104,10 @@ export function getFloatField(fields, fieldNum) {
 // Shape heuristics
 
 /**
- * Extract `{ p1, p2, height }` from a geometry sub-message.
- *
- * Lens encodes free-angle / curved text as a *polyline*: up to 6 points
- * tracing the text along its baseline. The renderer treats the line as a
- * straight chord from the first point to the last point — so the returned
- * `p1` / `p2` are the polyline's endpoints, not the first two points. Using
- * `pts[0]` / `pts[1]` (the previous behaviour) under-counts the baseline
- * length dramatically — a 6-point polyline spanning ~110px decodes to ~17px,
- * which then makes every span box ~6x too narrow to fit its text.
- *
- * p1/p2 are the baseline endpoints (normalised 0..1); `height` is the
- * normalised text height. Returns nulls when the message isn't a geometry
- * block.
+ * Extract `{ p1, p2, height }` (normalised 0..1) from a geometry sub-message.
+ * Lens encodes free-angle text as a baseline polyline of up to 6 points and the
+ * renderer draws its chord, so p1/p2 are the polyline's ENDPOINTS (the first two
+ * points would make span boxes far too narrow). Nulls when not a geometry block.
  */
 export function getPointsFromGeom(geomBytes) {
   const { points, height } = getPolylineFromGeom(geomBytes);
@@ -150,7 +124,7 @@ export function getPointsFromGeom(geomBytes) {
  * null }` when the message isn't a geometry block — an honest empty, not a
  * substitute: the caller checks the length and skips.
  */
-export function getPolylineFromGeom(geomBytes) {
+function getPolylineFromGeom(geomBytes) {
   const points = [];
   let height = null;
   for (const { field, wire, value } of parse(geomBytes)) {
@@ -167,7 +141,7 @@ export function getPolylineFromGeom(geomBytes) {
 }
 
 /** True if `geomBytes` has >=2 points and a height field. */
-export function looksLikeGeom(geomBytes) {
+function looksLikeGeom(geomBytes) {
   let points = 0;
   let hasHeight = false;
   for (const { field, wire, value } of parse(geomBytes)) {
@@ -186,7 +160,7 @@ export function looksLikeGeom(geomBytes) {
 }
 
 /** True if `spanBytes` has both a t0/t1 float pair and a start/end range. */
-export function looksLikeSpan(spanBytes) {
+function looksLikeSpan(spanBytes) {
   let hasT = false;
   let hasRange = false;
   for (const { field, wire } of parse(spanBytes)) {
@@ -197,7 +171,7 @@ export function looksLikeSpan(spanBytes) {
 }
 
 /** True if `msgBytes` is an OCR "item" (geometry + >=1 span). */
-export function isItemMessage(msgBytes) {
+function isItemMessage(msgBytes) {
   let geomOk = false;
   let spanOk = 0;
   for (const { field, wire, value } of parse(msgBytes)) {
@@ -216,14 +190,9 @@ function bytesKey(bytes) {
 }
 
 /**
- * Find every item sub-message inside a paragraph message.
- *
- * The shallow pass is the normal case. The deep walk is a documented
- * compatibility path for a nesting Lens has used before, bounded at depth 4
- * and 20,000 nodes — and it is NOT silent: `deep` in the return value says
- * which pass produced the answer, because a build where Lens started nesting
- * everything one level down would otherwise look identical to one where it
- * did not, until the node budget ran out on a dense page.
+ * Find every item sub-message inside a paragraph message. The deep walk covers
+ * an older Lens nesting (bounded at depth 4 and 20,000 nodes); `deep` in the
+ * result says which pass answered, so a nesting change is visible.
  */
 export function extractItemsFromParagraph(parBytes) {
   const shallow = [];

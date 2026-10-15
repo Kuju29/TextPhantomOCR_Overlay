@@ -1,4 +1,10 @@
 /** Resolves one immutable Provider + Model settings snapshot per job batch. */
+import { loginEntry, loginModelUnavailable } from "../shared/login-profile.js";
+import { loginAuthScope } from "../shared/login-auth.js";
+import { paidEntry } from "../shared/paid-profile.js";
+import { activeTokenCeiling } from "../shared/token-ceiling.js";
+import { normalizeModelCapabilities } from "../shared/model-capabilities.js";
+import { diagnosticFetch, recordDiagnostic } from "../shared/diagnostics.js";
 import { classifyAiRuntime } from "../shared/ai-settings-contract.js";
 import {
   AI_PROFILES_SCHEMA_VERSION,
@@ -19,7 +25,6 @@ import {
 } from "../shared/ai/providers/local-registry.js";
 import { resolveApiBase } from "../shared/api-defaults.js";
 import { normalizeUrl } from "../shared/url.js";
-import { BUNDLED_CANONICAL_PROMPT_PLANS } from "../generated/canonical-prompt-plans.js";
 
 function stableString(value) {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
@@ -55,7 +60,7 @@ function canonicalDefaults(local) {
     temperature: null,
     pageImage: "off",
     memoryMode: "off",
-    styleExamples: true,
+    styleExamples: false,
     translationMode: local ? "independent" : "conversation",
     conversationReset: "0",
     concurrency: {
@@ -160,7 +165,9 @@ async function resolveManualJobAiProfile(settings, { language = "en" } = {}) {
     aiPromptMode: activated.promptMode,
     aiPageImage: profile.pageImage || "off",
     aiMemoryMode: profile.memoryMode || "off",
-    aiStyleExamples: profile.styleExamples !== false,
+    aiStyleExamples: profile.styleExamples === true,
+    // User token ceiling for this model; null = the model/app default.
+    aiTokenCeiling: activeTokenCeiling(profile),
     aiTranslationMode: local ? localProviderTranslationMode(selectedSettings.aiProvider) : "conversation",
     aiConversationReset: String(profile.conversationReset || "0"),
     aiThinking: profile.thinking || "minimum",
@@ -201,6 +208,23 @@ async function resolveManualJobAiProfile(settings, { language = "en" } = {}) {
   return immutableCopy({ settings: effective, audit });
 }
 
+// Share only an in-flight read; no cached wallet can authorize a later job.
+const paidProfileReads = new Map();
+async function paidProfileRead(url, options, fetcher) {
+  const key = JSON.stringify([url, options.headers?.Authorization || '']);
+  let pending = paidProfileReads.get(key);
+  if (!pending) {
+    pending = (async () => {
+      const response = await fetcher(url, options);
+      return {ok:response.ok,status:response.status,data:response.ok ? await response.json() : null};
+    })();
+    paidProfileReads.set(key, pending);
+    const clear = () => { if (paidProfileReads.get(key) === pending) paidProfileReads.delete(key); };
+    pending.then(clear, clear);
+  }
+  return structuredClone(await pending);
+}
+
 export async function resolveJobAiProfile(settings, { language = "en" } = {}) {
   if (settings.aiServiceMode !== "paid")
     return resolveManualJobAiProfile(settings, { language });
@@ -212,11 +236,11 @@ export async function resolveJobAiProfile(settings, { language = "en" } = {}) {
   }
   let advertised;
   try {
-    const response = await fetch(base.replace(/\/+$/, "") + "/meta", {
+    const response = await paidProfileRead(base.replace(/\/+$/, "") + "/meta", {
       cache: "no-store", signal: AbortSignal.timeout(6000),
-    });
+    }, fetch);
     if (!response.ok) throw new Error("API metadata unavailable");
-    advertised = await response.json();
+    advertised = response.data;
   } catch {
     const error = new Error("Cannot verify the Paid service on this API");
     error.code = "PAID_CENTER_UNAVAILABLE";
@@ -229,21 +253,125 @@ export async function resolveJobAiProfile(settings, { language = "en" } = {}) {
   }
   const token = String(settings.paidSessionToken || "").trim();
   const model = String(settings.paidModel || "").trim();
-  if (!token || !model || normalizeUrl(settings.paidApiBase) !== normalizeUrl(base)) {
+  if (!token || (settings.paidTranslationSource !== "login" && !model) || normalizeUrl(settings.paidApiBase) !== normalizeUrl(base)) {
     const error = new Error("Sign in and select a Paid model in AI option");
     error.code = "PAID_LOGIN_REQUIRED";
     throw error;
   }
-  let manual = null;
-  try { manual = await resolveManualJobAiProfile(settings, { language }); }
-  catch { /* Paid accounts can work before a Manual Provider is configured. */ }
-  const prompt = manual?.settings?.aiPrompt || settings.aiPrompt ||
-    BUNDLED_CANONICAL_PROMPT_PLANS?.[language]?.pieces?.editableStyle || "";
+  const response = await paidProfileRead(base.replace(/\/+$/, "") + "/paid/me", {
+    method: "GET", cache: "no-store", credentials: "omit", redirect: "error",
+    headers: {Authorization: "Bearer " + token}, signal: AbortSignal.timeout(16000),
+  }, diagnosticFetch).catch(() => { const error = new Error("Cannot verify your Paid account. No translation was started."); error.code = "PAID_CENTER_UNAVAILABLE"; throw error; });
+  if (!response.ok) {
+    const error = new Error("Paid account verification failed. Refresh your account in AI option.");
+    error.code = response.status === 401 ? "PAID_LOGIN_REQUIRED" : "PAID_CENTER_UNAVAILABLE";
+    throw error;
+  }
+  const account = response.data;
+  if (settings.paidTranslationSource === "login") {
+    if (settings.loginMemoryStorageError) throw Object.assign(new Error("Login session storage is unavailable."), {code:"login_memory_storage_unavailable", stage:"browser_session_storage"});
+    if (!account.addons?.entitlements?.some(x => x.code === "ai_login" && x.status === "active")) throw Object.assign(new Error("AI Login access is inactive. Contact support."), {code:"LOGIN_ADDON_REQUIRED"});
+    const provider = String(settings.loginProvider || "");
+    if (!/^login_(chatgpt|claude|gemini|deepseek|openrouter|huggingface)$/.test(provider)) throw Object.assign(new Error("Select a Login provider."), {code:"LOGIN_SESSION_REQUIRED"});
+    const connectionKey = await loginAuthScope(base, token) + ":" + provider;
+    const connection = settings.loginConnectionsV2?.[connectionKey];
+    let sessionId = connection?.session?.provider === provider ? String(connection.session.id || "") : "";
+    let loginModel = connection ? String(connection.model || settings.loginModel || "") : String(settings.loginModel || "");
+    const apiRoot = base.replace(/\/+$/, "");
+    const discover = async () => {
+      // Discover the selected provider under the authenticated Center owner.
+      // Popup hydration is presentation, never a prerequisite for translation.
+      const response = await diagnosticFetch(apiRoot + "/login/providers", {
+        method:"GET",cache:"no-store",credentials:"omit",redirect:"error",headers:{Authorization:"Bearer "+token},signal:AbortSignal.timeout(16000)});
+      const discovered = await response.json();
+      if (!response.ok) throw Object.assign(new Error(discovered?.error?.message || "Could not verify Login connections."), {code:discovered?.error?.code || "LOGIN_UNAVAILABLE"});
+      const current = discovered.providers?.find(row => row.id === provider)?.session;
+      if (current?.provider !== provider || !/^lgs_[a-f0-9]{48}$/.test(current?.id || "")) throw Object.assign(new Error("The " + provider.replace(/^login_/, "") + " Login connection ended (sign-in expired or the API restarted). Open TextPhantom and press Login once."), {code:settings.loginSessionId || connection ? "LOGIN_SESSION_EXPIRED" : "LOGIN_SESSION_REQUIRED"});
+      return current.id;
+    };
+    const readModels = async id => {
+      const res = await diagnosticFetch(apiRoot + "/login/providers/" + provider + "/models?session_id=" + encodeURIComponent(id), {
+        method:"GET",cache:"no-store",credentials:"omit",redirect:"error",headers:{Authorization:"Bearer "+token},signal:AbortSignal.timeout(16000)});
+      return {res, data: await res.json()};
+    };
+    const fromStorage = /^lgs_[a-f0-9]{48}$/.test(sessionId);
+    if (!fromStorage) sessionId = await discover();
+    let {res, data} = await readModels(sessionId);
+    if (fromStorage && res.status === 401 && data?.error?.code === "login_session_expired") {
+      // A stored handle can outlive its API session (restart, reconnect
+      // in another window). Ask the API for this owner's current session once
+      // instead of requiring the popup; never invent or reuse another owner.
+      recordDiagnostic("login.session.rediscover", {provider, reason:"stored_session_expired"}, base);
+      sessionId = await discover();
+      ({res, data} = await readModels(sessionId));
+    }
+    if (!res.ok) throw Object.assign(new Error(data?.error?.message || "AI Login is unavailable."), {code:data?.error?.code || "LOGIN_UNAVAILABLE"});
+    if (!loginModel) loginModel = data.models?.find(x => !loginModelUnavailable(x))?.id || "";
+    const selected = data.models?.find(x => x.id === loginModel);
+    if (!selected || data.session?.id !== sessionId || data.session?.provider !== provider) throw Object.assign(new Error("The Login model is unavailable. Refresh your connection."), {code:"LOGIN_MODEL_UNAVAILABLE"});
+    // The website already refused this model for this account; nothing is sent.
+    if (loginModelUnavailable(selected)) throw Object.assign(new Error("Your account on the website cannot use this model (it may need an upgraded plan). Choose another model in AI settings. Nothing was sent."), {code:"LOGIN_MODEL_ACCESS_DENIED", requestDispatched:false});
+    const entry = loginEntry(settings, base, provider, data.session.account_id, loginModel, language);
+    const profile = entry.profile;
+    const scopedModel = sessionId + "/" + loginModel;
+    const websiteThinking = ["browser_webchat","web_endpoint"].includes(data.session.transport) &&
+      selected.model_capabilities?.reasoning?.app_controlled !== true;
+    return immutableCopy({settings:{...settings, aiProvider:"login",aiModel:scopedModel,aiBaseUrl:"",aiKey:token,
+      aiPrompt:entry.prompts[language].text,aiPromptMode:"replace",aiPageImage:profile.pageImage,aiMemoryMode:profile.memoryMode,
+      aiCharMemory:profile.memoryMode === "full",aiStyleExamples:profile.styleExamples === true,aiConversationReset:profile.conversationReset,
+      aiTranslationMode:"conversation",aiModelCapabilities:normalizeModelCapabilities(selected.model_capabilities || {}),
+      aiTokenCeiling:activeTokenCeiling(profile),
+      // A web chat with a verified switch (DeepSeek DeepThink) uses the
+      // user's choice; other web chats keep the website's own default.
+      aiThinking:websiteThinking ? "default" : profile.thinking,
+      aiLocalThinking:websiteThinking ? "default" : profile.thinking},
+      audit:{version:AI_PROFILES_SCHEMA_VERSION,source:"login_profile",runtime:"cloud",provider:"login",model:scopedModel,
+      profileHash:await shortHash(stableString(profile)),identityHash:await shortHash(base+provider+data.session.account_id),credentialOwner:"customer_provider_account",unsupported:[]}});
+  }
+  if (account.paid_restriction?.blocked === true) {
+    recordDiagnostic("paid.preflight.blocked", {error_code: account.paid_restriction.code || "PAID_ACCOUNT_RESTRICTED", reason: account.paid_restriction.reason || "refund_dispute_review", provider_dispatched: false, credit_reserved: false}, base);
+    const error = new Error(account.paid_restriction.reason === "refund_pending" ? "Paid is temporarily paused while your refund is calculated and confirmed. Your account and history remain available." : "Paid is restricted while the operator reviews a refund/dispute. Contact the operator. Your account and history remain available.");
+    error.code = account.paid_restriction.code || "PAID_ACCOUNT_RESTRICTED"; throw error;
+  }
+  if (account.paid_paused === true || account.paid_status?.state === "paused") {
+    recordDiagnostic("paid.preflight.blocked", {error_code: "PAID_PAUSED", reason: account.paid_status?.reason || "unknown", provider_dispatched: false, credit_reserved: false}, base);
+    const error = new Error("Paid translation is temporarily paused. No new translation was started.");
+    error.code = "PAID_PAUSED"; throw error;
+  }
+  const selected = account.models?.find(item => item.id === model);
+  if (!selected) { const error = new Error("The selected Paid model is not enabled. Refresh your Paid account."); error.code = "PAID_MODEL_NOT_ALLOWED"; throw error; }
+  if (selected.availability?.available === false) throw Object.assign(new Error("This Paid model is temporarily paused. Choose a different model or try again later."), {code:"PAID_MODEL_PAUSED"});
+  // Display metadata is not admission authority. Current prices and credit
+  // admission are checked by the API/Center for each actual AI operation.
+  // Migrate only intent, not credentials. The canonical Manual profile remains independent.
+  let stored = settings;
+  try {
+    const migration = await ensureAiProfileStorageV2(settings);
+    stored = {...settings, ...(migration.effective || {}), aiProfilesV1: migration.state, aiProfilePromptsV1: migration.prompts};
+  } catch { /* Paid does not require a configured Manual credential/profile. */ }
+  const entry = paidEntry(stored, base, model, language);
+  const profile = entry.profile;
+  const caps = normalizeModelCapabilities(selected.model_capabilities || {});
+  // The API obtains a current options-bound quote after checking the owned
+  // operation receipt. A click-time quote duplicated that work and is not used.
+  const paidSettings = {...settings};
+  delete paidSettings.aiPaidQuoteToken;
+  delete paidSettings.aiPaidPricing;
   return immutableCopy({
-    settings: { ...(manual?.settings || settings), aiProvider: "paid", aiModel: model,
-      aiBaseUrl: "", aiKey: token, aiPrompt: prompt, aiPageImage: "off",
-      aiModelCapabilities: {}, aiThinking: "off", aiLocalThinking: "off" },
-    audit: { version: AI_PROFILES_SCHEMA_VERSION, source: "paid_customer_session",
-      provider: "paid", model, runtime: "cloud", configurationConflict: false },
+    settings: {...paidSettings, aiProvider: "paid", aiModel: model, aiBaseUrl: "", aiKey: token,
+      // Center's configured per-request ceiling for this model (planning only).
+      aiPaidRequestBudget: Number.isSafeInteger(selected.max_output) && selected.max_output >= 256 ? selected.max_output : 8192,
+      aiPrompt: entry.prompts[language].text, aiPromptMode: "replace",
+      aiPageImage: profile.pageImage, aiMemoryMode: profile.memoryMode,
+      aiCharMemory: profile.memoryMode === "full", aiStyleExamples: profile.styleExamples === true,
+      aiTokenCeiling: activeTokenCeiling(profile),
+      aiConversationReset: profile.conversationReset, aiTranslationMode: "conversation",
+      aiModelCapabilities: caps, aiThinking: profile.thinking, aiLocalThinking: profile.thinking,
+      // Click-time credit check only (never sent to the API or a provider).
+      aiPaidCreditCheck: {apiBase: base, availableTp: account.credits?.available ?? null,
+        pricing: selected.pricing ? {input_tp: selected.pricing.input_tp ?? null, output_tp: selected.pricing.output_tp ?? null} : null}},
+    audit: {version: AI_PROFILES_SCHEMA_VERSION, source: "paid_profile", runtime: "cloud",
+      provider: "paid", model, profileHash: await shortHash(stableString(profile)),
+      identityHash: await shortHash(base), credentialOwner: "control_center", unsupported: []},
   });
 }

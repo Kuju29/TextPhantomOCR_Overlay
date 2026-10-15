@@ -26,6 +26,15 @@ _lock = threading.Lock()
 _operation_sizes: dict[str, tuple[int, float]] = {}
 OPERATION_TTL_SECONDS = 60 * 60
 MAX_TRACKED_OPERATIONS = 1024
+# A process-wide limit also covers callers that rotate operation IDs or IPs.
+# Relay capabilities negotiate a process, not customer/admin authorization.
+MAX_RELAY_BYTES_PER_MINUTE = 64 * 1024 * 1024
+MAX_RELAY_EVENTS_PER_MINUTE = 4096
+_ingress_budget = [0.0, 0, 0]
+
+
+class WireTraceRateLimited(RuntimeError):
+    """Diagnostic traffic exceeded the shared ingress budget."""
 
 STAGE_FILES = {
     "units": ("json", "01_units.json"),
@@ -83,6 +92,14 @@ def receive(payload: dict[str, Any]) -> Path:
     size_key = str(folder)
     now = time.monotonic()
     with _lock:
+        global _ingress_budget
+        if now - _ingress_budget[0] > 60:
+            _ingress_budget = [now, 0, 0]
+        if (_ingress_budget[1] + 1 > MAX_RELAY_EVENTS_PER_MINUTE or
+                _ingress_budget[2] + event_size > MAX_RELAY_BYTES_PER_MINUTE):
+            raise WireTraceRateLimited("diagnostic relay rate limit")
+        _ingress_budget[1] += 1
+        _ingress_budget[2] += event_size
         expired = [key for key, (_, touched) in _operation_sizes.items()
                    if now - touched > OPERATION_TTL_SECONDS]
         for key in expired:
@@ -144,8 +161,12 @@ def receive(payload: dict[str, Any]) -> Path:
             })
         else:
             wire_trace.write_json_in(folder, name, value)
+    except (OSError, wire_trace.AiWireTraceWriteError):
+        cleanup = True
+        raise
     finally:
         if cleanup:
             with _lock:
                 _operation_sizes.pop(size_key, None)
+            wire_trace.finish_in(folder)
     return folder

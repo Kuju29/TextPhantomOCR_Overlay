@@ -2,7 +2,7 @@ import { normalizeModelCapabilities } from '../../model-capabilities.js';
 import { selectLocalOutputContract } from '../direct-local/output-contract.js';
 
 /** Canonical identities; display names/transport aliases must not reset learning. */
-export function workloadContract(value) {
+function workloadContract(value) {
   if (['schema_object', 'json_schema_object_v1', 'tp.translation.schema-object/1'].includes(value))
     return 'json_schema_object_v1';
   if (['compact_records', 'compact_markers_v1', 'plain_records_v1', 'tp.translation.compact-records/1'].includes(value))
@@ -23,18 +23,13 @@ export function workloadSelection(ai, route) {
   const caps = route === 'direct-local'
     ? ai.model_capabilities || ai.modelCapabilities || {}
     : serverModelCapabilities(ai.modelCapabilities ?? ai.model_capabilities);
-  // The server enforces provider.outputContract before generation. Markers need
-  // no native-schema capability, so unknown discovery can use an explicit marker
-  // plan without falsely declaring structured_output.supported=false. This keeps
-  // planning/dispatch stable even when the server catalogue later refreshes.
-  // Conversation owns one append-only marker grammar regardless of a model's
-  // native structured-output support.  Letting a schema-capable model select
-  // JSON here while dispatch later forces I#_P# markers creates two workload
-  // identities for the same request and can reset/poison learned capacity.
-  // LM Studio's named native chat transport accepts marker records only,
-  // including Independent. An old capability hint advertising JSON schema
-  // cannot change the request contract after this plan has been admitted.
-  // Other Independent providers retain their capability-driven contract.
+  // The server enforces provider.outputContract before generation; markers need
+  // no native-schema capability, so unknown discovery can use a marker plan
+  // without claiming structured_output.supported=false. Conversation always uses
+  // one append-only marker grammar (a schema-capable model choosing JSON while
+  // dispatch forces I#_P# markers would give one request two workload identities
+  // and poison learned capacity). LM Studio's native chat transport accepts
+  // marker records only; other Independent providers follow their capabilities.
   const conversation = ai?.translation_mode === 'conversation';
   const nativeLmStudio = String(ai?.provider || '').trim().toLowerCase() === 'lmstudio';
   const contract = conversation || nativeLmStudio ? 'compact_markers_v1'

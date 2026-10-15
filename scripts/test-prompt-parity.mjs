@@ -83,7 +83,7 @@ try {
   system = call.body.messages[0].content;
   assert.match(system, /\nสไตล์การแปล\nภาษาปลายทาง: ภาษาไทย\nKeep Captain as กัปตัน\.$/);
   assert.doesNotMatch(call.body.messages[1].content, /Keep Captain/);
-  assert.match(call.body.messages[1].content, /ข้อมูลนำเข้า[\s\S]*บริบทประกอบ[\s\S]*ความจำเนื้อเรื่อง[\s\S]*ข้อมูลตัวละคร[\s\S]*ศัพท์และชื่อจากความจำเรื่อง[\s\S]*หน้าก่อนหน้า[\s\S]*รูปแบบคำตอบ —/);
+  assert.match(call.body.messages[1].content, /ข้อมูลนำเข้า[\s\S]*บริบทประกอบ[\s\S]*ความจำเนื้อเรื่อง[\s\S]*ข้อมูลตัวละคร[\s\S]*ศัพท์และชื่อจากความจำเรื่อง[\s\S]*บริบทเรื่องที่เคยแปล[\s\S]*รูปแบบคำตอบ —/);
   assert.doesNotMatch(system, /STORY SO FAR|CHARACTER SHEET|PREVIOUS PAGE/);
   assert.doesNotMatch(system, /BUILT-IN STYLE SENTINEL|SERIES NOTES SENTINEL/);
 
@@ -95,9 +95,9 @@ try {
   assert.doesNotMatch(system, /BUILT-IN STYLE SENTINEL|SERIES NOTES SENTINEL/);
 
   const withoutImage = await run();
-  assert.doesNotMatch(JSON.stringify(withoutImage.body.messages), /ภาพหน้าปัจจุบัน:/);
+  assert.doesNotMatch(JSON.stringify(withoutImage.body.messages), /บางข้อความผู้ใช้อาจแนบภาพ/);
   const withImage = await run({}, { imageDataUri: "data:image/png;base64,aW1hZ2U=" });
-  assert.match(withImage.body.messages[1].content, /ภาพหน้าปัจจุบัน:/);
+  assert.match(withImage.body.messages[1].content, /บางข้อความผู้ใช้อาจแนบภาพ/);
 
   calls.length = 0;
   globalThis.fetch = async (url, init = {}) => {

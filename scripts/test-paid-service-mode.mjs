@@ -47,10 +47,11 @@ await controller.initialize();
 assert.equal(els.aiServiceWrap.style.display, "none", "No Center means old controls only");
 assert.equal(els.aiProviderWrap.style.display, "");
 controller.setAvailability(true, "http://127.0.0.1:7860");
-assert.equal(els.aiServiceWrap.style.display, "none", "A default API URL is not a user-configured Paid URL");
-state.lastSavedApiUrl = els.apiUrl.value;
+assert.equal(els.aiServiceWrap.style.display, "none", "An unsaved field without a stored default cannot select a Paid API");
+state.apiDefaults = { defaultApiUrl: els.apiUrl.value };
+state.lastSavedApiUrl = "";
 controller.setAvailability(true, "http://127.0.0.1:7860");
-assert.equal(els.aiServiceWrap.style.display, "");
+assert.equal(els.aiServiceWrap.style.display, "", "The saved managed default supports Paid with no custom override");
 els.aiService.value = "paid";
 await els.aiService.listeners.change();
 await settle();
@@ -80,15 +81,16 @@ assert.equal(storage.paidSessionToken, "customer-session");
 assert.equal(storage.paidApiBase, "http://localhost:7860");
 assert.equal(storage.paidModel, "qa/test");
 assert.equal(state.paidReady, true);
-assert.match(els.aiPaidCredits.textContent, /8000 TP/);
+assert.match(els.aiPaidCredits.textContent, /8,000 TP/);
 controller.setAvailability(false, "http://127.0.0.1:7860");
 assert.equal(storage.aiServiceMode, "paid", "Paid choice remains explicit while Center is unavailable");
 assert.equal(els.aiService.value, "paid");
-assert.equal(els.aiServiceWrap.style.display, "none");
-assert.equal(els.aiPaidPanel.style.display, "none");
+assert.equal(els.aiServiceWrap.style.display, "", "Recovery keeps the Manual switch visible");
+assert.equal(els.aiPaidPanel.style.display, "", "A saved Paid selection keeps its sign-in panel");
 assert.equal(els.aiPaidUnavailable.style.display, "");
 assert.equal(state.paidReady, false);
-assert.match(els.aiPaidStatus.textContent, /Select Manual/);
+assert.match(els.aiPaidUnavailable.textContent, /choose Manual/i);
+assert.ok(!els.aiPaidUnavailable.textContent.includes('TP_CENTER_URL'));
 controller.setAvailability(true, "http://127.0.0.1:7860");
 await settle();
 assert.equal(requests.at(-1).options.headers.Authorization, "Bearer customer-session");
@@ -115,18 +117,32 @@ controller.setAvailability(false, "");
 const beforeRestore = requests.length;
 await controller.initialize();
 assert.equal(storage.aiServiceMode, "paid", "a saved Paid profile stays owned by the user");
-assert.equal(els.aiServiceWrap.style.display, "none", "Paid controls cannot appear before an explicit URL");
-assert.equal(els.aiPaidPanel.style.display, "none");
+assert.equal(els.aiServiceWrap.style.display, "", "Saved Paid users can switch to Manual even without a URL");
+assert.equal(els.aiPaidPanel.style.display, "", "Show recovery, but do not send to an unverified URL");
 assert.equal(els.aiPaidUnavailable.style.display, "", "the user sees a separate recovery notice");
 assert.equal(requests.length, beforeRestore, "restoring Paid without an API URL must not contact the Center");
+controller.dispose();
 const { resolveJobAiProfile } = await import("../src/background/ai-profile-resolver.js");
+const { PAID_PROFILE_KEY, putPaidEntry } = await import("../src/shared/paid-profile.js");
 globalThis.chrome = { storage: { local: { get(_keys, callback) {
   callback({ customApiUrl: "http://127.0.0.1:7999", apiDefaultsFetchedAt: Date.now() });
 } } } };
-globalThis.fetch = async () => ({ ok: true, json: async () => ({ paid: { available: true } }) });
+globalThis.fetch = async (url) => ({ ok: true, json: async () => String(url).endsWith("/paid/me") ? ({paid_paused:false, models:[{id:"qa/test"}]}) : ({ paid: { available: true } }) });
 await assert.rejects(() => resolveJobAiProfile({ aiServiceMode: "paid",
   paidSessionToken: "old-session", paidModel: "qa/test",
   paidApiBase: "http://localhost:7860" }), error => error.code === "PAID_LOGIN_REQUIRED");
+const paidProfile = await resolveJobAiProfile({ aiServiceMode: "paid",
+  paidSessionToken: "valid-customer-session", paidModel: "qa/test",
+  paidApiBase: "http://localhost:7999", aiTranslationMode: "independent", aiThinking: "high",
+  [PAID_PROFILE_KEY]: putPaidEntry({}, "http://localhost:7999", "qa/test", {profile:{thinking:"off"},prompts:{}}) });
+assert.equal(paidProfile.settings.aiThinking, "off", "Paid preserves intent; Center verifies whether Off is executable before billing");
+assert.equal(paidProfile.settings.aiTranslationMode, "conversation", "Paid keeps the cloud Conversation policy");
+assert.equal(paidProfile.settings.aiKey, "valid-customer-session", "Only the customer session goes to the API");
+assert.deepEqual(paidProfile.settings.aiModelCapabilities, {}, "Manual model metadata cannot prove Paid controls");
+const freshProfile = await resolveJobAiProfile({ aiServiceMode: "paid",
+  paidSessionToken: "valid-customer-session", paidModel: "qa/test",
+  paidApiBase: "http://localhost:7999", aiThinking: "off" });
+assert.equal(freshProfile.settings.aiThinking, "minimum", "An unseen Paid model uses Lowest, independently of flat Manual settings");
 globalThis.fetch = async () => ({ ok: true, json: async () => ({ paid: { available: false } }) });
 await assert.rejects(() => resolveJobAiProfile({ aiServiceMode: "paid",
   paidSessionToken: "old-session", paidModel: "qa/test",

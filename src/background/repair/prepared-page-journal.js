@@ -4,13 +4,21 @@
 // barrier folds these durable page rows into the canonical run exactly once.
 import { noteSessionStorageFailure } from '../session-storage-diagnostics.js';
 import { compactDeliveredPage } from './page-checkpoint.js';
-export const TRANSLATION_PREPARED_PAGE_PREFIX = 'tpTranslationPreparedPageV1:';
+import { translationSessions } from '../translation-session-store.js';
+const TRANSLATION_PREPARED_PAGE_PREFIX = 'tpTranslationPreparedPageV1:';
 const enc = value => encodeURIComponent(String(value || ''));
 export const translationPreparedPageKey = (runId, pageId) =>
   `${TRANSLATION_PREPARED_PAGE_PREFIX}${enc(runId)}:${enc(pageId)}`;
 const clone = value => value == null ? value : structuredClone(value);
+const entryBytes = (key, value) => new TextEncoder().encode(JSON.stringify(key)).length + 1 +
+  new TextEncoder().encode(JSON.stringify(value)).length;
 
-export function createPreparedPageJournal({area = () => globalThis.chrome?.storage?.session, now = Date.now} = {}) {
+// `budget` is the run checkpoint budget of translation-session-store:
+// journal bytes count against the same storage.session budget as run rows, and
+// admission evicts old finished/stopped runs first. Without a budget (tests,
+// custom areas) writes are unbounded as before.
+export function createPreparedPageJournal({area = () => globalThis.chrome?.storage?.session, now = Date.now,
+  budget = null} = {}) {
   const cache = new Map();
   const requireArea = () => {
     const storage = area();
@@ -31,11 +39,17 @@ export function createPreparedPageJournal({area = () => globalThis.chrome?.stora
     // immutable write; after a worker restart recovery consumes the existing
     // key instead of re-dispatching the page.
     const safe = clone(page);
+    const entry = {version:1,runId:String(runId),pageId:String(pageId),createdAt:now(),page:safe};
+    // Admission may refuse (session_checkpoint_limit): the source checkpoint is
+    // repair's only authority, so it is never written partially or dropped
+    // silently; the caller disables repair for this run instead.
+    const undo = budget ? await budget.admit(runId, key, entryBytes(key, entry)) : null;
     cache.set(key, safe);
     try {
-      await requireArea().set({[key]:{version:1,runId:String(runId),pageId:String(pageId),createdAt:now(),page:safe}});
+      await requireArea().set({[key]:entry});
     } catch (error) {
       cache.delete(key);
+      undo?.();
       noteSessionStorageFailure('prepared_page',error);
       throw error;
     }
@@ -67,8 +81,10 @@ export function createPreparedPageJournal({area = () => globalThis.chrome?.stora
     if (stored.page.compacted) return false;
     const next = compactDeliveredPage({...stored.page,...state});
     if (!next.compacted) return false;
-    try { await requireArea().set({[key]:{...stored,page:next}}); }
-    catch (error) {noteSessionStorageFailure('prepared_page',error);throw error;}
+    const entry = {...stored,page:next};
+    const undo = budget ? await budget.admit(runId, key, entryBytes(key, entry)) : null;
+    try { await requireArea().set({[key]:entry}); }
+    catch (error) {undo?.();noteSessionStorageFailure('prepared_page',error);throw error;}
     cache.set(key,next);
     return true;
   }
@@ -76,6 +92,7 @@ export function createPreparedPageJournal({area = () => globalThis.chrome?.stora
     const key = translationPreparedPageKey(runId,pageId);
     cache.delete(key);
     await requireArea().remove?.(key);
+    budget?.forget(runId, key);
   }
   async function clearRun(runId) {
     const prefix = `${TRANSLATION_PREPARED_PAGE_PREFIX}${enc(runId)}:`;
@@ -83,8 +100,15 @@ export function createPreparedPageJournal({area = () => globalThis.chrome?.stora
     const keys = Object.keys(all || {}).filter(key => key.startsWith(prefix));
     for (const key of keys) cache.delete(key);
     if (keys.length) await requireArea().remove?.(keys);
+    budget?.forget(runId, keys);
   }
-  return {record,get,listRun,compactDelivered,remove,clearRun};
+  async function removeMany(runId, pageIds) {
+    const keys = pageIds.map(pageId => translationPreparedPageKey(runId,pageId));
+    if (keys.length) await requireArea().remove?.(keys);
+    for (const key of keys) cache.delete(key);
+    budget?.forget(runId, keys);
+  }
+  return {record,get,listRun,compactDelivered,remove,removeMany,clearRun};
 }
 
-export const conversationPreparedPages = createPreparedPageJournal();
+export const conversationPreparedPages = createPreparedPageJournal({budget:translationSessions.journalBudget});

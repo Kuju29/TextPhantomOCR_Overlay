@@ -14,6 +14,7 @@ from backend.api.routes import repair_runs
 from backend.jobs.admission import AdmissionGate
 from backend.ai.provider_registry import provider_registry
 from backend.ai.clients.base import ChatResult
+from backend.ai.provider_contract import ModelListResult
 from backend.ai.providers.openai_provider_runtime import build_messages
 from backend.application.repair_pool.store import RepairStore
 from backend.application.repair_pool.state import source_hash
@@ -29,7 +30,13 @@ class ReleaseHttp(unittest.IsolatedAsyncioTestCase):
    ids=list(request.expected_ids) or [f'P{i}' for i in range(request.unit_count)]
    answer='\n'.join((f'<<{uid}:คำแปล{i}>>' if uid.startswith('I') else f'<<TP_{uid}:คำแปล{i}>>') for i,uid in enumerate(ids))
    return ChatResult(text=answer,used_model=request.model,input_tokens=1000,output_tokens=20*len(ids),total_tokens=1000+20*len(ids),thinking_tokens=0,terminal_completed=True,terminal_evidence='provider_done',finish_reason='stop',cached_input_tokens=0)
-  for p in [patch.object(provider_registry.require('huggingface').adapter,'generate',side_effect=generate),patch('backend.ai.provider_resolution.discovered_model_capabilities',return_value=(False,{})),patch.object(repair_runs,'store',RepairStore(Path(self.temp.name)/'repair.sqlite'))]:p.start();self.addCleanup(p.stop)
+  def discovered(provider,base_url,model,api_key):
+   # Current account metadata proves this synthetic model has no reasoning.
+   # Browser hints and another endpoint/account/model must not supply that proof.
+   if (provider,base_url,model,api_key)==('huggingface','https://router.huggingface.co/v1','fixture','FAKE_TEST_KEY'):
+    return True,{'reasoning':{'supported':False},'limits':{'contextTokens':65536}}
+   return False,{}
+  for p in [patch.object(provider_registry.require('huggingface').adapter,'generate',side_effect=generate),patch('backend.ai.provider_resolution.discovered_model_capabilities',side_effect=discovered),patch.object(repair_runs,'store',RepairStore(Path(self.temp.name)/'repair.sqlite'))]:p.start();self.addCleanup(p.stop)
   self.pool=ThreadPoolExecutor(max_workers=4);self.addCleanup(self.pool.shutdown)
   self.app=FastAPI();self.app.include_router(ai_router);self.app.include_router(repair_runs.router)
   self.app.state.ai_admission_gate=AdmissionGate(4,max_waiters=16,max_wait_sec=3);self.app.state.ai_executor=self.pool
@@ -45,6 +52,17 @@ class ReleaseHttp(unittest.IsolatedAsyncioTestCase):
    'conversation':{'documentId':self.temp.name,'pageId':origins[0]['pageId'],'branch':branch,'origins':origins}}
  async def post(self,url,payload):
   return await self.client.post(url,json=payload,headers=self.headers)
+ async def test_client_off_hint_without_server_evidence_never_dispatches(self):
+  origins=[{'pageId':'page-a','pageIndex':0,'unitIds':['I1_P0'],'originalIds':['g0'],'sourceFingerprint':'a'*64}]
+  request=self.payload([('I1_P0','Original')],origins)
+  request['provider']['modelCapabilities']={'reasoning':{'supported':False},'limits':{'contextTokens':65536}}
+  adapter=provider_registry.require('huggingface').adapter
+  with patch('backend.ai.provider_resolution.discovered_model_capabilities',return_value=(False,{})),patch('backend.ai.providers.huggingface_details.refresh',return_value={}),patch.object(adapter,'list_models',return_value=ModelListResult(status='invalid_key',http_status=401)) as discovery:
+   response=await self.post('/v2/engine/runsextension/ai/translate',request)
+  self.assertEqual(response.status_code,409,response.text)
+  error=response.json()['detail'];self.assertEqual(error['code'],'ai_thinking_off_unavailable')
+  self.assertFalse(error['requestDispatched']);self.assertEqual(error['providerAttempts'],0)
+  self.assertEqual(len(self.calls),0);self.assertEqual(discovery.call_count,1)
  async def test_two_page_repair_waits_for_all_main_and_preserves_exact_chat(self):
   origins=[{'pageId':'page-a','pageIndex':0,'unitIds':['I1_P0'],'originalIds':['g0'],'sourceFingerprint':'a'*64}, {'pageId':'page-b','pageIndex':1,'unitIds':['I2_P0'],'originalIds':['g0'],'sourceFingerprint':'b'*64}]
   main=self.payload([('I1_P0','First original'),('I2_P0','Second original')],origins)

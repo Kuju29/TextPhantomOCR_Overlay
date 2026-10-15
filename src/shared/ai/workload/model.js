@@ -29,19 +29,20 @@ export const WORKLOAD_POLICY = Object.freeze({
   window: 64, safety: 1.25, contextReserve: 128, applicationCompletionCeiling: 8192,
 });
 export const positive = (value) => Number.isSafeInteger(value) && value > 0 ? value : null;
+const fraction = (value, min, max) => Number.isFinite(value) && value >= min && value <= max ? value : null;
 export const quantile = (values, q, fallback) => {
   const sorted = (values || []).filter(Number.isFinite).sort((a, b) => a - b);
   return sorted.length ? sorted[Math.min(sorted.length - 1, Math.ceil(q * sorted.length) - 1)] : fallback;
 };
-export function observedInputScale(samples = [], safety = 2) {
+export function observedInputScale(samples = [], safety = 2, cold = 1, floor = .45) {
   const ratios=(Array.isArray(samples)?samples:[]).slice(-8)
     .filter(row=>Number.isSafeInteger(row?.actual)&&row.actual>=256&&
       Number.isSafeInteger(row?.raw)&&row.raw>0)
     .map(row=>row.actual/row.raw);
-  return ratios.length ? Math.min(1,Math.max(.45,safety*Math.max(...ratios))) : 1;
+  return ratios.length ? Math.min(1,Math.max(floor,safety*Math.max(...ratios))) : cold;
 }
 /** Telemetry only, never a batching target. */
-export const sourceCharacters = value => Array.from(String(value ?? "")).length;
+const sourceCharacters = value => Array.from(String(value ?? "")).length;
 export function textWeight(value) {
   let weight = 0;
   for (const char of String(value ?? '')) {
@@ -97,7 +98,7 @@ export function validProfile(raw, now = Date.now()) {
   clean.lastDecision = String(raw.lastDecision || '').slice(0, 80);
   return clean;
 }
-export function outputFeatures(units, contract = '') {
+function outputFeatures(units, contract = '') {
   // The fixed per-record cost accounts for JSON keys or TP delimiters.
   const recordCost = /schema|json/i.test(contract) ? 8 : 12;
   const sourceWeight = units.reduce((n, u) => n + textWeight(u.text), 0);
@@ -153,18 +154,26 @@ export function estimateRequest(units, profile, context) {
     advertisedLimits.source === 'lmstudio_native_loaded_instance';
   const inputSampleCount = context.allowInputCalibration ? profile.inputSamples.length : 0;
   const inputUnverified = lmStudioRuntimeWindow && inputSampleCount === 0;
+  // For Local Independent: every request (prompt + source +
+  // expected reply) fills the live model window the user loaded. No app 8K
+  // cap, no cold 160-token target, no latency/structure shrinking; only the
+  // learned reply gap (ratio quantile x safety) and hidden-reasoning reserve.
+  // A user ceiling for this model replaces the loaded window as the target.
+  const userWindow = context.localIndependent === true ? positive(context.userTokenCeiling) : null;
+  const localFill = context.localIndependent === true && (positive(advertisedLimits.contextTokens) > 0 || userWindow > 0);
   // Start with a bounded estimate, then use measured usage after the first
-  // request. This multilingual character estimate is not a tokenizer count.
+  // request (this multilingual character estimate is not a tokenizer count).
+  // LM Studio keeps a cold 0.6 prior: a Thai prompt's raw estimate alone can
+  // exceed an 8K window, and measured real/raw ratios run about 0.3-0.6.
   const inputEstimateScale = inputUnverified ? .6 : context.allowInputCalibration
-    ? observedInputScale(profile.inputSamples, lmStudioRuntimeWindow ? 1.25 : 2) : 1;
+    ? observedInputScale(profile.inputSamples, lmStudioRuntimeWindow || localFill ? 1.25
+      : fraction(context.inputCalibrationSafety, 1, 2) || 2, fraction(context.coldInputScale, .25, 1) || 1,
+      fraction(context.inputScaleFloor, .2, .45) || .45) : 1;
   const estimatedInput = Math.ceil(rawEstimatedInput * inputEstimateScale);
-  // The completion window pays for both the translated text and hidden
-  // reasoning. A small page's reasoning count cannot predict a 200-unit turn:
-  // the same OpenRouter model may use the entire 8K output window on thinking
-  // even after it accepted Thinking Off. Give a proven reasoning consumer a
-  // fixed half-window allowance before admitting whole pages. Cap large past
-  // samples at that allowance so a single exhausted call does not prevent
-  // every later page (including repair) from fitting at all.
+  // The completion window pays for the translation and hidden reasoning, and a
+  // model may spend all of it thinking even after accepting Thinking Off. A
+  // proven reasoning consumer gets a fixed half-window allowance; larger past
+  // samples are capped at it so one exhausted call cannot block every later page.
   const reasoningWindow = Math.min(
     positive(context.applicationCompletionCeiling) || WORKLOAD_POLICY.applicationCompletionCeiling,
     advertisedLimits.maxOutputTokens || Infinity,
@@ -185,12 +194,14 @@ export function estimateRequest(units, profile, context) {
   // LM Studio's REST API does not expose an exact templated prompt token count
   // before generation. Bound the cold request by the estimate and label it
   // unverified; after generation use the provider-reported input count.
-  const contextAvailable = positive(limits.contextTokens)
-    ? limits.contextTokens - estimatedInput - WORKLOAD_POLICY.contextReserve : Infinity;
-  const applicationCompletionCeiling = positive(context.applicationCompletionCeiling) || WORKLOAD_POLICY.applicationCompletionCeiling;
+  const fillWindow = userWindow || positive(limits.contextTokens);
+  const contextAvailable = fillWindow
+    ? fillWindow - estimatedInput - WORKLOAD_POLICY.contextReserve : Infinity;
+  const applicationCompletionCeiling = localFill ? Infinity
+    : positive(context.applicationCompletionCeiling) || WORKLOAD_POLICY.applicationCompletionCeiling;
   const completionAvailable = Math.min(applicationCompletionCeiling, limits.maxOutputTokens || Infinity,
     context.userMaxOutput || Infinity,
-    inputUnverified && context.nativeLmStudioOff
+    inputUnverified && context.nativeLmStudioOff && !localFill
       ? Math.min(Math.floor(limits.contextTokens * .4), contextAvailable)
       : contextAvailable);
   const capacityFailureSeen = (context.localIndependent === true ? profile.outcomes.slice(-4) : profile.outcomes)
@@ -240,7 +251,14 @@ export function estimateRequest(units, profile, context) {
   // their learned reliability limit until a real generation proves capacity.
   const nativeOffWindow = context.nativeLmStudioOff && lmStudioRuntimeWindow &&
     Number.isFinite(completionAvailable) && completionAvailable > 0;
-  const requestTarget = nativeOffWindow
+  // Login with a user ceiling: the turn budget sizes the request (web chats
+  // publish no window, so there is no other confirmed limit to plan against).
+  const userTurnTarget = context.userSizedTurn === true && positive(context.turnBudgetCeiling)
+    ? positive(context.turnBudgetCeiling) : null;
+  const requestTarget = userTurnTarget ? userTurnTarget
+    : localFill && Number.isFinite(completionAvailable)
+    ? Math.max(WORKLOAD_POLICY.minimumOutputTarget, Math.floor(completionAvailable) - reasoningReserve)
+    : nativeOffWindow
     ? Math.max(WORKLOAD_POLICY.minimumOutputTarget, Math.min(
       Math.floor(completionAvailable * (capacityFailureSeen ? .65 : .8)),
       // The loaded window is known, but the first prompt's true tokenizer
@@ -259,6 +277,17 @@ export function estimateRequest(units, profile, context) {
     context.userMaxOutput || Infinity);
   const fitsHard = Number.isFinite(estimatedInput) && estimatedInput <= (limits.maxInputTokens || Infinity) &&
     predictedOutput + reasoningReserve <= physicalAvailable;
+  // Conversation turn budget: one request's NEW input plus
+  // its expected reply shares the ceiling. The first turn sends the prompt,
+  // so it carries little source (e.g. 8192 = ~7000 in + ~1000 out); later
+  // turns send only new source, so source and reply split the ceiling.
+  // Replayed history is context the provider already saw, not new work.
+  const turnBudget = context.conversationTurnBudget === true
+    ? (positive(context.turnBudgetCeiling) || (Number.isFinite(completionAvailable) && completionAvailable > 0
+      ? Math.floor(completionAvailable) : null)) : null;
+  const turnInput = turnBudget ? (context.conversationContinuation === true
+    ? Math.ceil((features.sourceWeight + units.length * 30) * 1.25 * inputEstimateScale) : estimatedInput) : null;
+  const turnFits = !turnBudget || turnInput + predictedOutput + reasoningReserve <= turnBudget;
   return { ...features, predictedOutput, reasoningReserve, estimatedInput,rawEstimatedInput,inputEstimateScale,
     totalReserve: predictedOutput + reasoningReserve,
     completionAvailable: Number.isFinite(completionAvailable) ? Math.max(0, completionAvailable) : null,
@@ -266,8 +295,10 @@ export function estimateRequest(units, profile, context) {
     hardReason: estimatedInput > (limits.maxInputTokens || Infinity) ? 'input_limit'
       : predictedOutput + reasoningReserve > contextAvailable ? 'context_window'
       : predictedOutput + reasoningReserve > physicalAvailable ? 'output_budget' : null,
-    reliabilityReason: predictedOutput > requestTarget ? 'output_reliability_estimate' : null,
-    fitsHard, fitsTarget: predictedOutput <= requestTarget,
+    reliabilityReason: !turnFits ? 'conversation_turn_budget' : predictedOutput > requestTarget ? 'output_reliability_estimate' : null,
+    fitsHard, fitsTarget: predictedOutput <= requestTarget && turnFits,
+    ...(turnBudget ? {turnBudget:{ceiling:turnBudget,turnInput,turnOutput:predictedOutput + reasoningReserve,
+      firstTurn:context.conversationContinuation !== true,fits:turnFits}} : {}),
     target: requestTarget, unconstrainedTarget, latencyOutputTarget, recordTarget: effectiveRecords, samples: profile.samples, revision: profile.revision,
     ...(sizedConversationWindow ? {conversationCapacity:recentLength ? 'continuation_reliability_restricted' :
       applicationWindow ? 'application_context_bounded' : context.conversationContinuation ? 'continuation_token_budget' : 'anchor'} : {}),

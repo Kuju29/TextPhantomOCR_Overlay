@@ -130,7 +130,9 @@ class TogetherAdapter(OpenAIProviderAdapter):
         payload = build_payload(request, request.model, POLICY)
         control = _native_control(request)
         payload.update(control)
-        if control.get("reasoning") == {"enabled": False}:
+        from backend.ai.providers.provider_helpers import accepts_optional_parameter
+        if (control.get("reasoning") == {"enabled": False}
+                and accepts_optional_parameter(request.model_capabilities, "temperature")):
             payload.setdefault("temperature", POLICY.temperature)
         result = execute_chat_completion(
             url=request.base_url.rstrip("/") + "/chat/completions",

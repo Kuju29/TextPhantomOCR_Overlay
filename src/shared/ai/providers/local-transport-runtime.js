@@ -2,6 +2,7 @@ import { observeLocalPrefix } from "../cache-coordination.js";
 import { completedLineContract } from "../contracts/marker-completion.js";
 import { decodedLines } from "../direct-local/stream-reader.js";
 import { LocalAiError } from "../direct-local/error.js";
+import { closedLineCount } from "../stream-phase.js";
 
 function emitWire(wireTrace, stage, value) {
   try { Promise.resolve(wireTrace?.(stage, value)).catch(() => {}); } catch {}
@@ -83,6 +84,7 @@ export async function readProviderResponse(response, adapter, {
     tailAfterContentMs: lastContentMs == null ? null : endedAt - started - lastContentMs,
     frameProcessingMs, maxFrameProcessingMs, deltaCallbackMs, maxDeltaCallbackMs});
   let reasoningChars = 0, reasoningObserved = false, terminal = false, providerDone = false;
+  let linesDone = 0, contentTail = "";
   let completionEvidence = "", firstAllIdsMs = null, earlyCompletionMs = null;
   let drainDeadline = null, drainStatus = null, drainElapsedMs = null;
   let malformedFrameCount = 0, providerStreamErrorCode = null;
@@ -127,9 +129,13 @@ export async function readProviderResponse(response, adapter, {
       if (lastContentMs != null) maxInterContentGapMs = Math.max(maxInterContentGapMs, contentAt - lastContentMs);
       lastContentMs = contentAt; contentChunks += 1;
       if (emitTranslationDeltas) deliverProgress({ state: "translation_delta", text: event.content });
+      // Translated lines closed so far (status "Translating n/N lines").
+      if (/>>|"/.test(contentTail + event.content)) linesDone = closedLineCount(content, expectedIds);
+      contentTail = event.content.slice(-1);
+      const lines = { linesDone, ...(expectedIds.length ? { linesTotal: expectedIds.length } : {}) };
       if (firstContentMs == null) { firstContentMs = contentAt;
-        progress("first_response", { chunks, firstContentMs: Math.round(firstContentMs) }, true); }
-      else progress("generating", { chunks });
+        progress("first_response", { chunks, firstContentMs: Math.round(firstContentMs), ...lines }, true); }
+      else progress("generating", { chunks, ...lines });
     } else if (firstContentMs == null) progress(event.reasoning ? "thinking" : "waiting_for_model", { chunks });
   };
   let cancel = null, streamFailure = null;

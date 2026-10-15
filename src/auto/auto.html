@@ -7,17 +7,19 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <link rel="stylesheet" href="../shared/theme.css" />
   <link rel="stylesheet" href="auto.css" />
+<link rel="stylesheet" href="../shared/ui-language.css" />
 </head>
 
 <body>
   <header class="bar">
-    <div class="brand">
+    <a class="brand tp-brand-link" href="https://kuju29.com/" target="_blank" rel="noopener noreferrer" aria-label="TextPhantom website">
       <img class="brand-icon" src="../icons/48.png" alt="" />
       <div>
         <div class="brand-name">Auto translate</div>
         <div class="brand-sub">Drop, paste or upload one image — it translates itself</div>
       </div>
-    </div>
+    </a>
+    <div data-tp-language-host></div>
 
     <div class="controls">
       <label class="ctl">
@@ -25,12 +27,12 @@
         <select id="auto-mode" aria-label="Mode"></select>
       </label>
       <label class="ctl" id="auto-source-wrap">
-        <span>Text</span>
-        <select id="auto-source" aria-label="Text overlay source"></select>
+        <span>Text output</span>
+        <select id="auto-source" aria-label="Text output"></select>
       </label>
       <label class="ctl" id="auto-lang-wrap">
-        <span>Language</span>
-        <select id="auto-lang" aria-label="Language"></select>
+        <span>Target language</span>
+        <select id="auto-lang" data-tp-ui-private aria-label="Target language"></select>
       </label>
       <div class="ctl zoom">
         <span>Size</span>
@@ -45,13 +47,13 @@
 
   <div class="statusbar">
     <span id="auto-status" class="status" role="status" aria-live="polite">Waiting for an image.</span>
-    <span id="auto-meta" class="status-meta"></span>
+    <span id="auto-meta" data-tp-ui-private class="status-meta"></span>
   </div>
 
   <main class="stage" id="auto-stage">
     <!-- Empty state: the upload panel. -->
     <section class="uploader" id="auto-uploader">
-      <h1>Search any image with TextPhantom</h1>
+      <h1>Translate an image</h1>
       <div class="dropbox" id="auto-dropbox">
         <div class="dropbox-icon" aria-hidden="true">🖼️</div>
         <p class="dropbox-text">
@@ -71,7 +73,7 @@
     </section>
 
     <!-- Loaded state: the image plus its overlay. -->
-    <section class="canvas" id="auto-canvas" hidden>
+    <section class="canvas" id="auto-canvas" data-tp-ui-private hidden>
       <div class="image-wrap" id="auto-image-wrap">
         <img id="auto-image" alt="" decoding="sync" draggable="false" />
       </div>
@@ -80,13 +82,13 @@
 
   <!-- Click-a-block helper, positioned over the picked bubble. -->
   <div id="auto-pick" class="pick-bubble" hidden>
-    <span id="auto-pick-text" class="pick-text"></span>
+    <span id="auto-pick-text" data-tp-ui-private class="pick-text"></span>
     <button type="button" id="auto-pick-copy" class="btn small">Copy</button>
   </div>
 
   <aside class="rawpanel" id="auto-raw" hidden aria-label="Raw data">
     <div class="rawhead">
-      <div class="rawtabs" role="tablist">
+      <div class="rawtabs" role="tablist" translate="no">
         <button type="button" class="rawtab" data-raw-tab="raw" role="tab" aria-selected="true">lens.raw</button>
         <button type="button" class="rawtab" data-raw-tab="tree" role="tab" aria-selected="false">tree</button>
       </div>
@@ -95,8 +97,8 @@
         <button type="button" id="auto-raw-close" class="btn small">Hide</button>
       </div>
     </div>
-    <div class="rawnote" id="auto-raw-note"></div>
-    <pre class="rawbody" id="auto-raw-body"></pre>
+    <div class="rawnote" id="auto-raw-note" data-tp-ui-private></div>
+    <pre class="rawbody" id="auto-raw-body" data-tp-ui-private></pre>
   </aside>
 
   <div class="dropveil" id="auto-dropveil" hidden><span>Drop to translate</span></div>
@@ -112,6 +114,7 @@
   <script src="../content/namespace.js"></script>
   <script src="../shared/diagnostic-schema.js"></script>
   <script src="../shared/image-status-view.js"></script>
+  <script src="../shared/page-ui-text.js"></script>
   <script src="../content/trace.js"></script>
   <script src="../content/keepalive.js"></script>
   <script src="../content/dom-utils.js"></script>
@@ -147,7 +150,8 @@
   <script src="../content/download/panel.js"></script>
   <script src="../content/messaging.js"></script>
   <script src="../content/index.js"></script>
-  <script type="module" src="auto.js"></script>
-</body>
+  <script type="module" src="../shared/ui-language-entry.js"></script>
+<script type="module" src="auto.js"></script>
+<script src="../content/support-dock.js"></script></body>
 
 </html>

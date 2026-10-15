@@ -6,9 +6,11 @@ import { createPromptInputEstimator } from "../../shared/ai/workload/prompt-inpu
 import { getStorage, setStorage } from '../../shared/storage.js';
 import { workloadSelection, normalizedWorkloadIdentity } from '../../shared/ai/workload/contract.js';
 import { initialProfile, normalizeLimits, validProfile, reasoningIsActive,
-  takeWorkloadBatch, WORKLOAD_VERSION } from '../../shared/ai/workload/model.js';
+  takeWorkloadBatch, estimateRequest, WORKLOAD_VERSION } from '../../shared/ai/workload/model.js';
 import {resolveReasoningPreference} from '../../shared/reasoning-preference.js';
 import { learnWorkload, observeWorkload } from '../../shared/ai/workload/learning.js';
+import { cloudProviderSpec } from '../../shared/ai/providers/cloud-registry.js';
+import { validTokenCeiling } from '../../shared/token-ceiling.js';
 export const WORKLOAD_STORAGE_KEY = 'aiWorkloadProfilesV1';
 const MAX_PROFILES = 128;
 function stable(value) {
@@ -43,7 +45,7 @@ export function createWorkloadController({ read = getStorage, write = setStorage
   const event = data => { try { emit({schema:"tp.audit/1",...data}); } catch {} };
   const storageState = key => !persistence ? 'memory_only' :
     (profileVersion[key] || 0) === (persistedVersion[key] || 0) ? 'persisted' : 'pending';
-  let loaded = null, persistence = false, storageReadConfirmed = false, profiles = {}, writes = Promise.resolve(), writing = false, dirty = false;
+  let loaded = null, persistence = false, storageReadConfirmed = false, profiles = {}, writing = false, dirty = false;
   async function load() {
     if (!loaded) loaded = (async () => {
       const saved = await bounded(read(WORKLOAD_STORAGE_KEY), null);
@@ -62,9 +64,8 @@ export function createWorkloadController({ read = getStorage, write = setStorage
             else loadedCount += 1;
           }
         }
-        // Bulk restore used to emit one trace write per profile on the AI hot
-        // path. A single summary keeps observability without making cold-start
-        // latency proportional to up to 128 historical profiles.
+        // One summary event instead of a trace write per profile, so cold-start
+        // latency does not grow with the number of saved profiles (up to 128).
         event({event:'workload_profile',reason:'loaded_summary',
           counts:{loaded:loadedCount,reset:resetCount},after:{},
           persistence:resetCount?'pending':'persisted'});
@@ -119,7 +120,7 @@ export function createWorkloadController({ read = getStorage, write = setStorage
       persistence = false; settleFlushes();
       event({event:'workload_persisted',reason:'storage_write_unconfirmed',persistence:'memory_only'});
     }, 800);
-    writes = task.then(() => {
+    task.then(() => {
       const recovered = !persistence;
       persistence = true; storageFailures = 0; retryAt = 0;
       for (const [key, version] of Object.entries(versions)) {
@@ -164,7 +165,7 @@ export function createWorkloadController({ read = getStorage, write = setStorage
         endpoint: ai.base_url, account: ai.api_key || '', sourceLang, targetLang, contract,
         ...(ai.translation_mode === 'conversation' ? { translationPath: 'conversation-image-records-2026.9.14.17' } : {}),
         thinking: ai.thinking, temperature: ai.temperature, style: ai.prompt,
-        memory: ai.memory_mode, styleExamples: ai.style_examples !== false, image, localAdapter: ai.local_adapter,
+        memory: ai.memory_mode, styleExamples: ai.style_examples === true, image, localAdapter: ai.local_adapter,
         ...(nativeOllama ? { contextPolicy: OLLAMA_CONTEXT_POLICY.version, modelContext: limits.modelContextTokens } : {}),
         maxOutput: ai.max_output_tokens, revision: limits.modelRevision, context: nativeOllama ? {
           ceiling:planOllamaContext(limits)?.evidence.contextCeiling, configured:limits.configuredContextTokens
@@ -197,15 +198,33 @@ export function createWorkloadController({ read = getStorage, write = setStorage
         after:metrics(opened),persistence:expectedIdentity ? storageState(key) : 'memory_only',
         effective:{contract:selection.contract || 'unconfirmed'}});
       prune(key);
+      const largeCloudText = (ai.provider === 'paid' || Boolean(cloudProviderSpec(ai.provider))) && route !== 'direct-local' &&
+        Number.isSafeInteger(limits.contextTokens) && limits.contextTokens >= 32768 &&
+        !image && !/schema|json/i.test(String(contract));
       const context = { contract, limits, provider:ai.provider, configureContext: nativeOllama ? planOllamaContext : null, reasoningActive: reasoningIsActive(ai, caps),
         nativeLmStudioOff: nativeOff === true, nativeOffControl: nativeOff || nativeOllamaOff,
         localIndependent: route === 'direct-local' && ai.translation_mode === 'independent',
         allowInputCalibration:(nativeLmStudio && limits.source === 'lmstudio_native_loaded_instance' && !image) ||
           ['openrouter','openai'].includes(ai.provider) &&
           Number.isSafeInteger(limits.contextTokens) && limits.contextTokens<=16384 &&
-          !image && !/schema|json/i.test(String(contract)),
+          !image && !/schema|json/i.test(String(contract)) ||
+          // The request ceiling must be filled with real token counts.
+          // Local Independent learns from the runtime's prompt count (safety
+          // 1.25 in the planner); large-context Cloud/Paid Conversation too.
+          (route === 'direct-local' && ai.translation_mode === 'independent' && !image) ||
+          largeCloudText,
+        // Large-context Cloud/Paid: the binding limit is the reply ceiling, so
+        // the input side may use measured counts with a small margin. Measured
+        // real/estimated input runs about 0.3-0.7 (Thai is estimated at ~1
+        // token/char; Qwen measured 0.29), so the floor is below Local's 0.45.
+        // the estimate, so the measured floor is lower than Local's 0.45.
+        ...(largeCloudText ? {inputCalibrationSafety:1.1, coldInputScale:.7, inputScaleFloor:.25} : {}),
         reasoningSupported: nativeOff ? false : caps?.reasoning?.supported, singleRequest: singleRequest === true, wholePageFirst: wholePageFirst === true, phase,
         userMaxOutput: Number.isSafeInteger(ai.max_output_tokens) && ai.max_output_tokens > 0 ? ai.max_output_tokens : null,
+        paidRequestBudget: ai.provider === 'paid' && Number.isSafeInteger(ai.paid_request_budget) &&
+          ai.paid_request_budget >= 256 && ai.paid_request_budget <= 32768 ? ai.paid_request_budget : null,
+        // The user's per-model ceiling replaces the default when switched on.
+        userTokenCeiling: validTokenCeiling(ai.token_ceiling) ? ai.token_ceiling : null,
         fixedInput: 0 };
       let estimateFixedInput = createPromptInputEstimator({ ai, route, targetLang, sourceLang, image, contract });
       const currentProfile = checkedProfile;
@@ -234,6 +253,36 @@ export function createWorkloadController({ read = getStorage, write = setStorage
           return planConversationBatch({ rows, pageSizes, conversationState,
             profileSnapshot: currentProfile(), context, capabilities: caps, estimateFixedInput,
             sourceContext: ai.source_context, contract: selection.contract, planningDecision });
+        },
+        // Local Independent cross-page: whole ready pages in webpage order
+        // while prompt + source + expected reply fit the live model window.
+        // The first page that does not fit waits for the next request; only a
+        // single page larger than the window is split (as before).
+        nextIndependentReady(rows, pageSizes = []) {
+          if (ai.translation_mode !== 'independent' || route !== 'direct-local')
+            throw new Error('Cross-page Independent planning is Local Independent only');
+          const planning = { ...context, wholePageFirst:true, singleRequest:false,
+            estimateFixedInput: units => estimateFixedInput(units, units, ai.source_context) };
+          const profile = currentProfile();
+          const stamp = chunk => { if (chunk.estimate) { chunk.estimate.planningContract = selection.contract || 'unconfirmed';
+            chunk.estimate.profileDecision = planningDecision; } return chunk; };
+          let cursor = 0, selected = [], estimate = null, pages = 0, splitReason = 'ready_queue_drained';
+          for (const size of (Array.isArray(pageSizes) ? pageSizes : []).map(Number)) {
+            if (!Number.isSafeInteger(size) || size <= 0) break;
+            const page = rows.slice(cursor, cursor + size); cursor += size;
+            if (page.length !== size) break;
+            const candidate = estimateRequest([...selected, ...page], profile, planning);
+            if (!(candidate.fitsHard && candidate.fitsTarget)) {
+              if (selected.length) { splitReason = 'local_window_before_page'; break; }
+              const part = takeWorkloadBatch(page, 0, profile, planning);
+              part.splitReason = part.units.length === page.length ? 'whole_page_fits' : 'local_window_partial_page';
+              part.pageCount = 1; part.wholePages = part.units.length === page.length ? 1 : 0;
+              return stamp(part);
+            }
+            selected = [...selected, ...page]; estimate = candidate; pages++;
+          }
+          if (!selected.length) return stamp(takeWorkloadBatch(rows, 0, profile, planning));
+          return stamp({ units:selected, estimate, splitReason, pageCount:pages, wholePages:pages });
         },
         nextRepair(rows, repairSourceContext = sourceContextForUnits) {
           return planConversationBatch({ rows, conversationState: { continuation: true },

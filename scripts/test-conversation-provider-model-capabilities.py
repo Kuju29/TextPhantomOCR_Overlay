@@ -15,7 +15,9 @@ from unittest.mock import patch
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'api'))
 h=runpy.run_path(str(ROOT/'scripts/test-api-provider-boundary-matrix.py'),run_name='capability_helpers')
-registry=list(h['compose_providers'](h['ProviderRegistry']()))
+registry=[spec for spec in h['compose_providers'](h['ProviderRegistry']())
+          if spec.provider_id not in {'paid','login'}]
+assert len(registry)==18
 Client=h['BoundaryClient'];NativeClient=h['NativeLmStudioClient'];Response=h['Response'];gemini=h['cloud_gemini'];anthropic=h['cloud_anthropic']
 GenerationRequest=h['GenerationRequest']
 
@@ -75,7 +77,7 @@ count=0
 for spec in registry:
     for scenario,caps,thinking in SCENARIOS:
         req=GenerationRequest(
-            provider=spec.provider_id,model=spec.default_model,api_key='fixture',
+            provider=spec.provider_id,model=spec.default_model or "fixture-model",api_key='fixture',
             base_url=spec.default_base_url,system_text='SYSTEM_FIXED',
             user_parts=(CURRENT,),unit_count=1,expected_ids=('I2_P0',),
             # Local compatibility snapshots in this test are synthetic, not

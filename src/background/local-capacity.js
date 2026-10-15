@@ -1,8 +1,7 @@
 import { isLocalAiProvider, isLocalHostUrl } from "../shared/constants.js";
 
-export const LOCAL_CAPACITY_DEFAULT_MODE = "auto";
-export const LOCAL_CAPACITY_MAX = 4;
-export const LOCAL_PROVIDER_MANAGED_MAX = 24;
+const LOCAL_CAPACITY_MAX = 4;
+const LOCAL_PROVIDER_MANAGED_MAX = 24;
 
 function integer(value, fallback = 0) {
   const n = Math.floor(Number(value) || 0);
@@ -73,7 +72,7 @@ export function localCapacityConfig(payload) {
   };
 }
 
-export function normalizeLocalEndpoint(raw) {
+function normalizeLocalEndpoint(raw) {
   const value = String(raw || "").trim();
   try {
     const url = new URL(value || "http://localhost");

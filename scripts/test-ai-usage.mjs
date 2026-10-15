@@ -284,8 +284,9 @@ assert.doesNotMatch(directTransport + serverTransport, /persistUsageEvent/, "run
 assert.doesNotMatch(serverTranslation, /persistUsageEvent/, "runsapi uses the canonical provider-generation boundary");
 const popupSource = fs.readFileSync(new URL("../src/popup/popup.js", import.meta.url), "utf8");
 assert.doesNotMatch(popupSource, /recordProviderGeneration|persistProviderGeneration/, "popup/model discovery never records translation usage");
-const probeSource = fs.readFileSync(new URL("../api/backend/ai/probe.py", import.meta.url), "utf8");
-assert.doesNotMatch(probeSource, /aiUsageV1|recordProviderGeneration|persistProviderGeneration/, "provider probe is explicitly outside translation usage");
+// 10491: the selected-model generation probe (/ai/probe) no longer exists.
+assert.equal(fs.existsSync(new URL("../api/backend/ai/probe.py", import.meta.url)), false,
+  "no selected-model generation probe can spend provider quota outside translation usage");
 const popupControllerUrl = new URL("../src/popup/controllers/ai-usage-controller.js", import.meta.url);
 if (fs.existsSync(popupControllerUrl)) {
   const controller = await import(popupControllerUrl.href);

@@ -30,7 +30,7 @@ def preclassify_ruby(nodes: tuple[VerticalNode, ...]):
     for node in nodes:
         if not _kana_only(node.text):
             continue
-        x1, y1, x2, y2 = node.bounds
+        x1, y1, _x2, y2 = node.bounds
         bases = []
         for base in nodes:
             if base is node or not _kanji(base.text):
@@ -38,7 +38,7 @@ def preclassify_ruby(nodes: tuple[VerticalNode, ...]):
             if (node.container_id is not None and base.container_id is not None
                     and node.container_id != base.container_id):
                 continue
-            bx1, by1, bx2, by2 = base.bounds
+            _bx1, by1, bx2, by2 = base.bounds
             overlap = max(0., min(y2, by2) - max(y1, by1))
             glyph = node.glyph_px
             if (base.glyph_px >= 1.75 * glyph and
@@ -118,8 +118,3 @@ def classify_candidate(
                        if node.role == "unknown")
     return tuple(roles), tuple(attachments), unresolved
 
-
-def classify_and_attach_ruby(nodes: tuple[VerticalNode, ...]):
-    """Compatibility wrapper for the original two-value internal API."""
-    classified, attachments, _unresolved = classify_candidate(nodes)
-    return classified, attachments

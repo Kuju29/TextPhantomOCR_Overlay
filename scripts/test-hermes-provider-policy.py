@@ -46,11 +46,14 @@ EXPECTED_LOCAL = {
 }
 
 registry = list(compose_providers(ProviderRegistry()))
-cloud = {spec.provider_id for spec in registry if not spec.local}
+services = {spec.provider_id for spec in registry if spec.provider_id in {'paid', 'login'}}
+named = [spec for spec in registry if spec.provider_id not in services]
+cloud = {spec.provider_id for spec in named if not spec.local}
 local = {spec.provider_id for spec in registry if spec.local}
 assert cloud == EXPECTED_CLOUD, cloud
 assert local == EXPECTED_LOCAL, local
-assert len(registry) == 18
+assert len(named) == 18
+assert len(registry) == 18 + len(services)
 assert all(spec.adapter is not None for spec in registry)
 
 # OpenRouter routing belongs only to the official OpenRouter endpoint.

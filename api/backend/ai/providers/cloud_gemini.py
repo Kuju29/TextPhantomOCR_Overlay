@@ -3,13 +3,13 @@
 from __future__ import annotations
 from typing import TypedDict
 
-import os, re, time, httpx
+import re, time, httpx
 from backend.ai import wire_trace, accounting, content_stream
 from backend.ai.workload import guard_output_budget
 
 from backend.ai.generation_defaults import DEFAULT_GENERATION, output_token_budget
 from backend.ai.clients.base import (
-    ChatResult, ProviderGenerationCancelled, provider_output_error, token_usage,
+    ChatResult, ProviderGenerationCancelled, provider_output_error,
 )
 from backend.ai.clients.provider_error import ProviderTransportError, safe_http_error
 from backend.ai.transports.cancellable_http import post_json
@@ -39,7 +39,6 @@ MODEL_ALIASES = {
     "gemini-1.5-flash-8b": "gemini-2.5-flash-lite",
     "gemini-1.5-pro": "gemini-2.5-pro",
 }
-RATE_POLICY = {"rpm": 12.0, "burst": 4, "rpm_min": 4.0, "rpm_max": 300.0}
 _MODEL_EXCLUDE_FRAGMENTS = (
     "-tts", "-image", "computer-use", "deep-research", "antigravity",
     "embedding", "imagen", "veo", "aqa", "-live-", "learnlm", "gemini-1.0", "gemini-1.5",
@@ -211,6 +210,12 @@ class GeminiAdapter:
         return ProbeResponse(True, response.status_code)
 
     def generate(self, request: GenerationRequest) -> ChatResult:
+        # The stream reports translated lines n/N against these IDs.
+        from backend.ai.transports.stream_progress import expected_lines
+        with expected_lines(request.expected_ids):
+            return self._generate(request)
+
+    def _generate(self, request: GenerationRequest) -> ChatResult:
         return generate(
             request.api_key, request.model, request.system_text, list(request.user_parts),
             system_sections=request.system_sections, image_b64=request.image_b64,
@@ -237,10 +242,6 @@ SPEC = ProviderSpec(
 
 # Gemini 2.5 uses thinkingBudget; Gemini 3 uses thinkingLevel. Pro and unknown
 # models retain provider defaults because disabling thinking is unsupported.
-_THINKING_DEFAULT = (os.environ.get("TP_GEMINI_THINKING", "off") or "off").strip().lower()
-
-_THINKING_OFF_MODES = ("off", "fast", "none", "0", "false", "no")
-
 def _thinking_state(model: str, mode: str = "", model_capabilities=None) -> tuple[bool, dict | None, str]:
     mode = (mode or "").strip().lower() or "default"
     m = (model or "").strip().lower()
@@ -423,7 +424,9 @@ def generate(
             "responseMimeType": "text/plain",
         },
     }
-    if _accepts_sampling_parameters(model):
+    from backend.ai.providers.provider_helpers import accepts_optional_parameter
+    if (_accepts_sampling_parameters(model)
+            and accepts_optional_parameter(model_capabilities, "temperature")):
         payload["generationConfig"]["temperature"] = DEFAULT_GENERATION.temperature
     use_schema = bool(response_schema) and _supports_native_schema(model)
     if use_schema:
@@ -438,6 +441,12 @@ def generate(
                 response_schema
             )
     if thinking_cfg is not None:
+        if thinking_cfg.get("thinkingBudget") == -1:
+            # -1 is Gemini's dynamic (unbounded) budget. A toggle "On"
+            # gets the shared cap derived from this request's output budget.
+            from backend.ai.generation_defaults import reasoning_token_cap
+            thinking_cfg = {**thinking_cfg, "thinkingBudget": reasoning_token_cap(
+                payload["generationConfig"]["maxOutputTokens"])}
         payload["generationConfig"]["thinkingConfig"] = thinking_cfg
 
     wire_trace.provider_request(

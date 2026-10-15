@@ -6,6 +6,9 @@ from typing import Any
 import time, threading
 
 _TTL = 30 * 60.0
+# Bound the marks too (TTL alone lets a burst of distinct batch ids grow
+# without limit for 30 min on a shared API). Oldest mark is dropped first.
+_MAX_BATCHES = 10_000
 _lock = threading.Lock()
 _batches: dict[tuple[str, str], float] = {}
 
@@ -37,7 +40,11 @@ def mark_batch(batch_id: str, scope: str = "") -> None:
         for key in list(_batches):
             if now - _batches[key] > _TTL:
                 _batches.pop(key, None)
-        _batches[(str(scope or ""), value)] = now
+        key = (str(scope or ""), value)
+        _batches.pop(key, None)
+        _batches[key] = now
+        while len(_batches) > _MAX_BATCHES:
+            _batches.pop(next(iter(_batches)))
 
 def is_cancelled(payload: dict[str, Any]) -> bool:
     value = batch_id_of(payload)

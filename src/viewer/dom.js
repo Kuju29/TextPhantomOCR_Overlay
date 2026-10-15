@@ -1,9 +1,6 @@
 /**
- *
- * Local-viewer DOM references + pure helpers.
- *
- * Stateless utilities only: element lookups, formatting, and small DOM
- * queries. The orchestrator (`viewer.js`) owns the session/page state.
+ * Local-viewer DOM references + pure helpers (lookups, formatting, small DOM
+ * queries). The orchestrator (`viewer.js`) owns the session/page state.
  */
 
 /** Elements the viewer interacts with. */

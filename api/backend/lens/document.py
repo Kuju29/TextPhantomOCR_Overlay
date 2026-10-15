@@ -36,10 +36,8 @@ _PRECISION = 5
 def _round(value: Any) -> float | None:
     """Round to the wire precision, or ``None`` when there is no number here.
 
-    This used to substitute ``0.0``. Zero is a real coordinate — the top-left
-    corner of the page — so a missing ``x`` became an item pinned to the corner
-    and the page read as a layout bug. Returning ``None`` lets the caller drop
-    the item and COUNT it, which is what the ``warnings`` list is for.
+    Not ``0.0``: zero is a real coordinate (the page's top-left corner).
+    ``None`` lets the caller drop the item and count it in ``warnings``.
     """
     try:
         rounded = round(float(value), _PRECISION)
@@ -171,19 +169,9 @@ def build(
         items, dropped = _items(para_id, raw.get("items"))
         dropped_items += dropped
 
-        # The TRANSLATED layer's own lines, not just its concatenated string.
-        #
-        # Lens breaks its machine translation across the same paragraph into
-        # its own items, each with its own baseline and its own text — and this
-        # builder used to keep only `text`, throwing that geometry away. The
-        # renderer then had nothing to draw a multi-line translation with and
-        # refused every page that had one, which on a real chapter is every
-        # page: measured 2026-08-07, "1 to 12 paragraph(s) span several lines"
-        # on every single image of a 37-page run.
-        #
-        # A translation does not break where the source did, so the original
-        # layer's items cannot stand in for it. These are the translated
-        # layer's OWN items, so the layer is now exact rather than approximated.
+        # The TRANSLATED layer's own items (baseline + text per line), not just
+        # its string: the renderer needs them for multi-line translations, and
+        # a translation does not break where the source did.
         lens_text = ""
         lens_items: list[dict[str, Any]] = []
         if index < len(translated_paras) and isinstance(translated_paras[index], dict):
@@ -199,17 +187,9 @@ def build(
                 "lensText": lens_text,
                 "items": items,
                 "lensItems": lens_items,
-                # Does this paragraph sit on a DARK background?
-                #
-                # The server samples the erased image and flips its own markup
-                # to white-text-on-dark-halo via `.tp-on-dark`. The client has
-                # the identical CSS class — and had no way to know when to use
-                # it, because this flag was not in the document. The moment the
-                # client renderer started actually running (2026-08-07) every
-                # dark page came out as near-black text on black: legible in
-                # the server's markup, unreadable in ours, from the same data.
-                #
-                # Set by `_annotate_text_light` BEFORE this builder runs.
+                # Dark background: the client applies the same `.tp-on-dark`
+                # class as the server markup. Set by `_annotate_text_light`
+                # BEFORE this builder runs.
                 "textLight": bool(raw.get("text_light")),
             }
         )
@@ -297,29 +277,6 @@ def attach_ai_layer(document: dict | None, ai_tree: dict | None) -> int:
     if not warnings:
         document.pop("warnings", None)
     return attached
-
-def translation_units(document: dict | None) -> list[dict[str, Any]]:
-    """The text worth sending to a translator, as addressable units.
-
-    Paragraphs with no source text are skipped: they cost tokens, come back
-    empty, and then look like a translation failure. Each unit keeps the ids of
-    the paragraphs it came from so the answer can be patched back exactly.
-    """
-    units: list[dict[str, Any]] = []
-    for para in (document or {}).get("paragraphs") or []:
-        if not isinstance(para, dict):
-            continue
-        text = str(para.get("sourceText") or "").strip()
-        if not text:
-            continue
-        units.append(
-            {
-                "id": f"g{len(units)}",
-                "text": text,
-                "paragraphIds": [str(para.get("id") or "")],
-            }
-        )
-    return units
 
 
 def build_translated(translated_tree, *, width, height, source_lang="", target_lang=""):

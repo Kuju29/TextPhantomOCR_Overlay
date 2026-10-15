@@ -1,6 +1,6 @@
 import { instructionPack } from "./prompt-language.js";
 // Source-only evidence from immutable initial request checkpoints, not translation memory.
-import { SOURCE_CONTEXT_HEADER, MAX_CONTEXT_GROUPS, MAX_CONTEXT_UNITS, MAX_CONTEXT_CHARS } from '../../generated/source-context-policy.js';
+import { MAX_CONTEXT_GROUPS, MAX_CONTEXT_UNITS, MAX_CONTEXT_CHARS } from '../../generated/source-context-policy.js';
 
 const contextError = code => Object.assign(new Error(code), { code, attempted: false });
 

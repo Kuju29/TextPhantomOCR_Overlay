@@ -1,3 +1,5 @@
+import { uiTemplate } from "../../shared/ui-template.js";
+
 export function createRateSettingsController({
   els,
   constants,
@@ -5,10 +7,49 @@ export function createRateSettingsController({
   toggleUi,
 }) {
   const { presets, fallback, rpmMin, rpmMax, burstMin, burstMax } = constants;
+  const write = persist;
+  let paid = false, initialized = false, scopes = {};
+  const keys = ['rateLimitEnabled', 'rateProfile', 'rateRpm', 'rateBurst'];
+  const paidKey = key => 'paid' + key[0].toUpperCase() + key.slice(1);
+  persist = async patch => {
+    const mapped = {};
+    for (const [key, value] of Object.entries(patch)) {
+      if (keys.includes(key)) {
+        if (initialized) scopes[paid ? 'paid' : 'manual'][key] = value;
+        mapped[paid ? paidKey(key) : key] = value;
+      } else mapped[key] = value;
+    }
+    if (paid && initialized && keys.some(k => Object.hasOwn(patch, k)))
+      for (const k of keys) mapped[paidKey(k)] = scopes.paid[k];
+    return write(mapped);
+  };
+  const setContext = (active, force = false) => {
+    const changed = paid !== Boolean(active);
+    paid = Boolean(active);
+    if (!initialized || !changed && !force) return;
+    const saved = scopes[paid ? 'paid' : 'manual'];
+    if (els.rateLimitEnabled) els.rateLimitEnabled.checked = saved.rateLimitEnabled === true;
+    if (els.rateProfile) els.rateProfile.value = saved.rateProfile || 'auto';
+    if (els.rateRpm) els.rateRpm.value = saved.rateRpm > 0 ? String(saved.rateRpm) : '';
+    if (els.rateBurst) els.rateBurst.value = saved.rateBurst > 0 ? String(saved.rateBurst) : '';
+    renderHint();
+  };
+  const initialize = async stored => {
+    const manual = {rateLimitEnabled: els.rateLimitEnabled?.checked === true,
+      rateProfile: els.rateProfile?.value || 'auto', rateRpm: Number(els.rateRpm?.value || 0),
+      rateBurst: Number(els.rateBurst?.value || 0)};
+    // One-time compatibility seed: both modes start with the pre-upgrade cap.
+    // After a Paid edit, only Paid's keys change.
+    scopes = {manual, paid:Object.fromEntries(keys.map(k => [k, stored[paidKey(k)] ?? manual[k]]))};
+    initialized = true;
+    setContext(paid, true);
+    await write(Object.fromEntries(keys.map(k => [paidKey(k), scopes.paid[k]])));
+  };
+
 
   const providerPreset = () =>
     presets[
-      String(els.aiProvider?.value || "")
+      String(els.aiService?.value === "paid" ? "paid" : els.aiProvider?.value || "")
         .trim()
         .toLowerCase()
     ] || null;
@@ -28,9 +69,37 @@ export function createRateSettingsController({
         : "";
     const incomplete = !Number(els.rateRpm?.value || 0) || !Number(els.rateBurst?.value || 0);
     const capInvalid = els.rateLimitEnabled?.checked && (incomplete || els.rateProfile?.value === "auto");
-    els.ratePresetHint.textContent = `${prefix}: ${value.rpm}/min, burst ${value.burst}${note}.${warning}` +
-      (capInvalid ? " Manual cap incomplete: enter RPM and burst or turn the cap off before translating." :
-        incomplete ? " Manual cap off: enter RPM and burst, then turn it on." : "");
+    if (els.aiService?.value === "paid") {
+      els.ratePresetHint.textContent = !els.rateLimitEnabled?.checked
+        ? "Optional Paid request pacing is off. Service limits still apply."
+        : capInvalid
+          ? "Paid request pacing is incomplete. Enter RPM and burst or turn pacing off."
+          : `Paid request pacing: ${rpm}/min, burst ${Number(els.rateBurst?.value)}. Service limits still apply.`;
+      if (els.rateLimitEnabled?.checked && !capInvalid &&
+          typeof els.ratePresetHint.replaceChildren === "function" &&
+          typeof els.ratePresetHint.ownerDocument?.createDocumentFragment === "function") {
+        els.ratePresetHint.replaceChildren(uiTemplate(
+          "Paid request pacing: {rpm}/min, burst {burst}. Service limits still apply.",
+          { rpm, burst: Number(els.rateBurst?.value) },
+        ));
+      }
+      els.ratePresetHint.dataset.warn = capInvalid ? "1" : "0";
+      return;
+    }
+    const suffix = capInvalid ? " Manual cap incomplete: enter RPM and burst or turn the cap off before translating." :
+      incomplete ? " Manual cap off: enter RPM and burst, then turn it on." : "";
+    const doc = els.ratePresetHint.ownerDocument;
+    if (typeof els.ratePresetHint.replaceChildren === "function" &&
+        typeof doc?.createDocumentFragment === "function" && typeof doc.createTextNode === "function") {
+      // Same copy as below, split so authored phrases translate and numbers stay protected.
+      els.ratePresetHint.replaceChildren(...[
+        uiTemplate(preset ? "Manual reference for this provider: {rpm}/min, burst {burst}"
+          : "Manual reference for an unlisted provider: {rpm}/min, burst {burst}", { rpm: value.rpm, burst: value.burst }),
+        note && " — ", note && preset.note, ".",
+        warning && " ", warning && uiTemplate("⚠️ {rpm}/min is well above that. Pages may fail with 429.", { rpm }),
+        suffix && " ", suffix.trim(),
+      ].filter(Boolean).map((part) => typeof part === "string" ? doc.createTextNode(part) : part));
+    } else els.ratePresetHint.textContent = `${prefix}: ${value.rpm}/min, burst ${value.burst}${note}.${warning}` + suffix;
     els.ratePresetHint.dataset.warn = warning ? "1" : "";
   };
   const renderLocalHint = () => {
@@ -53,13 +122,14 @@ export function createRateSettingsController({
     element.value = value > 0 ? String(value) : "";
     const incomplete = value === 0 && els.rateLimitEnabled?.checked;
     if (incomplete) els.rateLimitEnabled.checked = false;
-    await persist({ [key]: value, ...(incomplete ? { rateLimitEnabled: false } : {}) });
+    const patch = { [key]: value, ...(incomplete ? { rateLimitEnabled: false } : {}) };
     const rpm = Number(els.rateRpm?.value || 0);
     const burst = Number(els.rateBurst?.value || 0);
     if (rpm > 0 && burst > rpm && els.rateBurst) {
       els.rateBurst.value = String(rpm);
-      await persist({ rateBurst: rpm });
+      patch.rateBurst = rpm;
     }
+    await persist(patch);
     renderHint();
     if (incomplete) toggleUi();
   };
@@ -161,5 +231,5 @@ export function createRateSettingsController({
     );
   };
 
-  return { bind, renderHint, renderLocalHint };
+  return { bind, renderHint, renderLocalHint, initialize, setContext };
 }

@@ -4,7 +4,7 @@ const release=()=>{for(const finish of heldWrites.splice(0))finish();};
 const tick=()=>new Promise(r=>setImmediate(r));
 globalThis.chrome={runtime:{getManifest:()=>({version:'test'})},storage:{local:{
  get(k,cb){cb(Array.isArray(k)?Object.fromEntries(k.map(x=>[x,state[x]])):{...k,...structuredClone(state)});},
- set(v,cb){const finish=()=>{if(failWrite){chrome.runtime.lastError={message:'quota'};cb();delete chrome.runtime.lastError;}else{Object.assign(state,structuredClone(v));cb();}};if(holdWrite)heldWrites.push(finish);else finish();},
+ set(v,cb){const finish=()=>{if(failWrite){chrome.runtime.lastError={message:failWrite===true?'synthetic storage IO failure':failWrite};cb();delete chrome.runtime.lastError;}else{Object.assign(state,structuredClone(v));cb();}};if(holdWrite)heldWrites.push(finish);else finish();},
  remove(keys,cb){for(const key of keys)delete state[key];cb();}
 }}};
 const {translateViaServer}=await import('../src/background/ai/transports/server.js');
@@ -27,6 +27,13 @@ console.log('PASS cancellation during pending storage cannot dispatch HTTP');
 failWrite=true;await assert.rejects(translateViaServer(input,opts('storage-failed')));failWrite=false;
 assert.equal(wire.length,2);assert(events.some(e=>e.name==='requestTiming'&&e.data.reason==='persistence_failed'&&e.data.timing.httpAttempts===0));checks++;
 console.log('PASS failed persistence stays before HTTP; no fake provider attempt');
+// .10485 owner rule: a FULL usage ledger (quota) never blocks translation. Old
+// receipts/history are evicted and the write retried once; if storage is still
+// full the request proceeds without a usage receipt (traced, display incomplete).
+failWrite='QUOTA_BYTES quota exceeded';
+const quotaResult=await translateViaServer(input,opts('storage-quota'));failWrite=false;
+assert.equal(quotaResult.translations[0].text,'ทดสอบ');assert.equal(wire.length,3,'quota-full usage storage still dispatches once');checks++;
+console.log('PASS full usage storage (quota) degrades usage history instead of blocking translation');
 const phases=events.filter(e=>e.name==='requestTiming').map(e=>e.data.reason);
 assert(phases.includes('http_headers')&&phases.includes('response_complete'));assert(progress.includes('validating'));checks++;
 console.log('PASS ready / persistence / HTTP / headers / response separated with monotonic durations');

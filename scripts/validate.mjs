@@ -3,6 +3,7 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { isForbiddenProjectArchiveEntry } from "./source-package-policy.mjs";
+import { assertAccessibleModuleGraph } from "./lib/accessible-module-graph.mjs";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const testRunId = String(process.env.TEXTPHANTOM_BUILD_TEST_RUN_ID || "");
@@ -106,6 +107,7 @@ for (const target of targets) {
   }
 
   const permissions = new Set(manifest.permissions || []);
+  assert(permissions.has("scripting"), `${target}: dock recovery requires scripting`);
   if (["firefox", "thunderbird"].includes(target)) {
     const overlay = JSON.parse(await readFile(path.join(projectRoot, "platform", `${target}.json`), "utf8"));
     assert(manifest.browser_specific_settings?.gecko?.id === overlay.browser_specific_settings?.gecko?.id,
@@ -116,7 +118,7 @@ for (const target of targets) {
     assert(!manifest.background?.scripts, `${target}: background.scripts is forbidden`);
     assert(!manifest.browser_specific_settings, `${target}: Gecko settings are forbidden`);
     assert(!manifest.message_display_action, `${target}: Thunderbird action is forbidden`);
-    for (const permission of ["menus", "messagesRead", "scripting"]) {
+    for (const permission of ["menus", "messagesRead"]) {
       assert(!permissions.has(permission), `${target}: ${permission} is forbidden`);
     }
   }
@@ -125,7 +127,7 @@ for (const target of targets) {
     assert(Boolean(manifest.background?.scripts), "firefox: background.scripts missing");
     assert(!manifest.background?.service_worker, "firefox: service_worker is forbidden");
     assert(!manifest.message_display_action, "firefox: Thunderbird action is forbidden");
-    for (const permission of ["messagesRead", "scripting"]) {
+    for (const permission of ["messagesRead"]) {
       assert(!permissions.has(permission), `firefox: ${permission} is forbidden`);
     }
   }
@@ -166,6 +168,7 @@ for (const target of targets) {
     }
   }
 
+  await assertAccessibleModuleGraph(root, manifest, "processors/render/renderer.js");
   const files = await walk(root);
   for (const file of files) {
     const relative = path.relative(root, file).replaceAll("\\", "/");

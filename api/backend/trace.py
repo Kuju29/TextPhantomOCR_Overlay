@@ -3,20 +3,9 @@
 Compact tracing uses ``TP_TRACE=1``; full function tracing uses
 ``TP_TRACE=full``.
 
-Why this is separate from ``logfile.py``
----------------------------------------
-``logfile.py`` records what the system decided. This records what it DID —
-every function entered, what it was handed, what it gave back. They are
-different jobs and mixing them would ruin both: a decision log full of function
-entries is unreadable, and a call trace filtered down to decisions cannot
+``logfile.py`` records what the system decided; this records what it DID —
+every function entered, what it was handed, what it gave back — so a trace can
 answer "which function did this value come from".
-
-It exists because of a specific failure. The extension shipped a client-side
-renderer, every test passed, the pages looked right, and it had refused to run
-on 100% of images since the day it landed. The only evidence was one WARN line
-in a console nobody was watching, and the assistant reading the code — twice —
-concluded it was working. A trace of the actual path would have answered that
-in one grep on day one.
 
 Three rules
 -----------
@@ -50,6 +39,8 @@ from pathlib import Path
 from typing import Any, Callable, TypeVar
 
 import time, atexit, threading, re, os, math, json, inspect, functools
+
+from backend import diagnostic_retention as retention
 
 _TZ = timezone(timedelta(hours=7))
 
@@ -87,33 +78,32 @@ _NAMING = (os.environ.get("TP_TRACE_NAMING") or "session").strip().lower()
 if _NAMING not in ("session", "daily"):
     _NAMING = "session"
 
-# A session is one API process lifetime.  The old daily filename made every
-# restart reset `seq` to one while appending to yesterday's story, so a day of
-# repeated testing looked like one internally contradictory run.  Colons are
-# deliberately absent: these files are most often produced and opened on
-# Windows.
+# A session is one API process lifetime, so a restart (which resets `seq`)
+# starts a new file. No colons: these files are often opened on Windows.
 _SESSION_STARTED = datetime.now(_TZ)
 _SESSION_STAMP = _SESSION_STARTED.strftime("%Y%m%d-%H%M%S")
 _session_path: Path | None = None
 _session_id = _SESSION_STAMP
 _header_paths: set[Path] = set()
 _active_day = _SESSION_STARTED.strftime("%Y%m%d")
+_daily_segment_path: Path | None = None
+_daily_segment_day = ""
+_trace_leases: dict[Path, retention.Lease] = {}
 _PATH_LOCK = threading.Lock()
 
-try:
-    _KEEP_DAYS = max(0, int(os.environ.get("TP_TRACE_KEEP_DAYS") or "0"))
-except (TypeError, ValueError):
-    _KEEP_DAYS = 0
+_KEEP_DAYS = retention.positive_env("TP_TRACE_KEEP_DAYS", retention.DEFAULT_KEEP_DAYS)
+_MAX_BYTES = retention.positive_env("TP_TRACE_MAX_BYTES", retention.DEFAULT_MAX_BYTES)
+_FILE_MAX_BYTES = min(_MAX_BYTES, retention.positive_env("TP_TRACE_FILE_MAX_BYTES", 16 * 1024 * 1024))
+_MAX_FILES = retention.positive_env("TP_TRACE_MAX_FILES", retention.DEFAULT_MAX_FILES)
+_MAX_ACTIVE_FILES = retention.positive_env("TP_TRACE_MAX_ACTIVE_FILES", retention.DEFAULT_MAX_ACTIVE)
 
 # A trace line is a debugging aid, not a data export: long values are cut hard.
 # The first characters are what identify a value; the rest is what makes the
 # file unreadable.
 _MAX_STR = 200
 _MAX_ITEMS = 12
-# Dicts get a bigger allowance than lists. A flat metrics dict — `perf`, with
-# one key per pipeline stage — is exactly the thing a reader came for, and
-# cutting it at twelve hid `ai_ms` behind "+25 more keys" in the one line that
-# was supposed to answer where the time went.
+# Dicts get a bigger allowance than lists: a flat metrics dict such as `perf`
+# (one key per pipeline stage) is exactly what a reader came for.
 _MAX_DICT_ITEMS = 48
 
 # Anything whose name looks like a credential is replaced, never truncated.
@@ -169,19 +159,10 @@ _seq = 0
 _local = threading.local()
 
 # --- Buffered writing --------------------------------------------------------
-# The first version did mkdir + open + write + flush on EVERY line, under one
-# global lock. On Linux that is 0.045 ms and invisible. On the user's Windows
-# machine it measured 2.8 ms — sixty times worse — and it did not merely slow
-# the server down, it moved the measurement: `read_varint` showed a self-time
-# of 0.0 s across 64,464 calls while its caller `parse` showed 17.4 ms per
-# call, because a child's "entered" line is written on the PARENT's clock. The
-# trace was reporting its own cost as the parser's, and nearly sent the fix to
-# the wrong file.
-#
-# So: one file handle, opened once. Lines buffer in memory and go out in
-# batches. `flush()` is called when a request finishes and at process exit, so
-# the file is complete for anything short of a hard kill — and a hard kill was
-# never going to leave a clean file anyway.
+# One file handle, opened once; lines buffer in memory and go out in batches.
+# A write per line is slow on Windows (~2.8 ms) and that cost would be charged
+# to the PARENT function's clock, distorting the timings. `flush()` runs when a
+# request finishes and at process exit.
 _BUFFER_LINES = 512
 _MAX_PENDING_LINES = 8192
 _FLUSH_AFTER_SEC = 1.0
@@ -219,8 +200,8 @@ def _allocate_session_path() -> Path:
         try:
             _ROOT.mkdir(parents=True, exist_ok=True)
         except OSError:
-            # Keep tracing best-effort. `_open()` will fail silently as it did
-            # before, but a read-only log directory must never stop the API.
+            # Keep tracing best-effort: a read-only log directory must never
+            # stop the API (`_open()` fails silently).
             _session_path = _ROOT / f"{_NAME}-{_SESSION_STAMP}.jsonl"
             return _session_path
         for number in range(1, 10_000):
@@ -229,8 +210,19 @@ def _allocate_session_path() -> Path:
             try:
                 # Reserve atomically.  Two starts in the same second must not
                 # discover the same free name and then both append to it.
-                fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                os.close(fd)
+                with retention.guard(_ROOT, "trace"):
+                    _register_trace_prefix_locked()
+                    if retention.active_count(_ROOT, "trace") >= _MAX_ACTIVE_FILES:
+                        raise OSError("active compact trace retention capacity exceeded")
+                    _prune_trace_locked(candidate, budget=_MAX_BYTES - 2 * retention.ALLOCATION_UNIT,
+                                        file_budget=_MAX_FILES - 2)
+                    total, files = retention.usage(_ROOT, "trace", _trace_usage)
+                    if total + 2 * retention.ALLOCATION_UNIT > _MAX_BYTES or files + 2 > _MAX_FILES:
+                        raise OSError("compact trace retention capacity occupied by protected evidence")
+                    retention.store_usage(_ROOT, "trace", total + 2 * retention.ALLOCATION_UNIT, files + 2)
+                    fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                    os.close(fd)
+                    _trace_leases[candidate] = retention.retain(_ROOT, "trace", candidate)
                 _session_path = candidate
                 _session_id = f"{_SESSION_STAMP}{suffix}"
                 return candidate
@@ -246,8 +238,13 @@ def _allocate_session_path() -> Path:
         return _session_path
 
 def path() -> Path:
+    global _daily_segment_path, _daily_segment_day
     if _NAMING == "daily":
-        return _ROOT / f"{_NAME}-{datetime.now(_TZ).strftime('%Y%m%d')}.jsonl"
+        day = datetime.now(_TZ).strftime('%Y%m%d')
+        if day != _daily_segment_day or _daily_segment_path is None:
+            _daily_segment_path = _ROOT / f"{_NAME}-{day}.jsonl"
+            _daily_segment_day = day
+        return _daily_segment_path
     return _allocate_session_path()
 
 def session_id() -> str:
@@ -275,46 +272,119 @@ def file_name() -> str:
 def _write_latest_pointer(target: Path) -> None:
     """Atomically point humans at the active file; never affects tracing."""
     try:
-        _ROOT.mkdir(parents=True, exist_ok=True)
-        temporary = _ROOT / f"trace-latest-{os.getpid()}.tmp"
-        temporary.write_text(target.name + "\n", encoding="utf-8")
-        os.replace(temporary, _ROOT / "trace-latest.txt")
+        with retention.guard(_ROOT, "trace"):
+            temporary = _ROOT / "_trace-latest.tmp"
+            if temporary.exists() or temporary.is_symlink():
+                temporary.unlink()
+            with temporary.open("x", encoding="utf-8") as handle:
+                handle.write(target.name + "\n")
+            os.replace(temporary, _ROOT / "trace-latest.txt")
     except Exception:  # noqa: BLE001 - a convenience pointer cannot break work
         pass
 
 def _apply_retention(current: Path) -> int:
-    """Delete old trace files only when the operator explicitly opted in."""
-    if _KEEP_DAYS <= 0:
-        return 0
+    """Keep bounded compact evidence, excluding every worker's open files."""
+    with retention.guard(_ROOT, "trace"):
+        return _prune_trace_locked(current)
+
+
+def _trace_inventory() -> list[tuple[float, Path, int]]:
+    rows = []
+    seen = set()
+    for prefix in _trace_prefixes():
+        for candidate in _ROOT.glob(f"{prefix}-*.jsonl"):
+            if candidate in seen or candidate.is_symlink() or not candidate.is_file():
+                continue
+            seen.add(candidate)
+            info = candidate.stat()
+            rows.append((info.st_mtime, candidate, retention.charge(info.st_size)))
+    return rows
+
+
+def _trace_prefixes() -> set[str]:
+    manifest = _ROOT / "_trace-prefixes.json"
+    if not manifest.exists():
+        return {_NAME}
+    if manifest.is_symlink() or manifest.stat().st_size > 65536:
+        raise OSError("invalid trace prefix registry")
+    try:
+        names = json.loads(manifest.read_text("utf-8"))
+    except (ValueError, TypeError) as exc:
+        raise OSError("invalid trace prefix registry") from exc
+    if (not isinstance(names, list) or len(names) > 256
+            or any(not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", name) for name in names)):
+        raise OSError("invalid trace prefix registry")
+    return {*names, _NAME}
+
+
+def _register_trace_prefix_locked() -> None:
+    manifest = _ROOT / "_trace-prefixes.json"
+    names = _trace_prefixes()
+    if manifest.exists() and _NAME in json.loads(manifest.read_text("utf-8")):
+        return
+    if len(names) > 256:
+        raise OSError("trace prefix registry capacity exceeded")
+    body = json.dumps(sorted(names)).encode("utf-8")
+    previous_charge = retention.charge(manifest.stat().st_size) if manifest.exists() else 0
+    growth = max(0, retention.charge(len(body)) - previous_charge)
+    temporary = _ROOT / "_trace-prefixes.tmp"
+    reserved = growth + retention.charge(len(body))
+    new_files = 1 + int(not manifest.exists())
+    _prune_trace_locked(_path_without_allocation(), budget=_MAX_BYTES - reserved, file_budget=_MAX_FILES - new_files)
+    total, files = retention.usage(_ROOT, "trace", _trace_usage)
+    if total + reserved > _MAX_BYTES or files + new_files > _MAX_FILES:
+        raise OSError("trace prefix registry retention capacity exceeded")
+    if temporary.exists() or temporary.is_symlink():
+        temporary.unlink()
+    try:
+        with temporary.open("xb") as handle:
+            handle.write(body)
+        os.replace(temporary, manifest)
+    finally:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+    retention.store_usage(_ROOT, "trace", total + growth, files + int(previous_charge == 0))
+
+
+def _path_without_allocation() -> Path:
+    """The registry is created inside filename allocation; do not recurse."""
+    return _session_path or _daily_segment_path or _ROOT / f"{_NAME}-{_SESSION_STAMP}.jsonl"
+
+
+def _trace_usage() -> tuple[int, int]:
+    total, files = retention.metadata_usage(_ROOT, "trace")
+    # Reserve the atomic latest-pointer pair even before the first write.
+    total += 2 * retention.ALLOCATION_UNIT
+    files += 2
+    rows = _trace_inventory()
+    return total + sum(row[2] for row in rows), files + len(rows)
+
+
+def _prune_trace_locked(current: Path, *, budget: int | None = None, file_budget: int | None = None) -> int:
     removed = 0
     cutoff = time.time() - (_KEEP_DAYS * 24 * 60 * 60)
-    previous_latest: Path | None = None
-    try:
-        latest_name = (
-            _ROOT / "trace-latest.txt").read_text(encoding="utf-8").strip()
-        if latest_name:
-            previous_latest = _ROOT / \
-                latest_name.replace("\\", "/").rsplit("/", 1)[-1]
-    except OSError:
-        previous_latest = None
-    try:
-        for candidate in _ROOT.glob(f"{_NAME}-*.jsonl"):
-            try:
-                if (
-                    candidate == current
-                    or candidate == previous_latest
-                    or candidate.is_symlink()
-                    or not candidate.is_file()
-                ):
-                    continue
-                if candidate.stat().st_mtime >= cutoff:
-                    continue
-                candidate.unlink()
-                removed += 1
-            except OSError:
-                continue
-    except OSError:
-        return removed
+    retention.active_count(_ROOT, "trace")
+    rows = _trace_inventory()
+    total, files = _trace_usage()
+    maximum = _MAX_BYTES if budget is None else max(0, budget)
+    max_files = _MAX_FILES if file_budget is None else max(0, file_budget)
+    protected = {item[0] for item in _buffer} | {current}
+    if _handle_path is not None:
+        protected.add(_handle_path)
+    for touched, candidate, size in sorted(rows, key=lambda row: (row[0], row[1].name)):
+        if (candidate in protected or (touched >= cutoff and total <= maximum and files <= max_files)
+                or retention.active(_ROOT, "trace", candidate)):
+            continue
+        try:
+            candidate.unlink()
+            total -= size
+            files -= 1
+            removed += 1
+        except OSError:
+            continue
+    retention.store_usage(_ROOT, "trace", total, files, checked_at=time.time())
     return removed
 
 def _session_header(target: Path, retention_deleted: int = 0) -> dict[str, Any]:
@@ -338,6 +408,10 @@ def _session_header(target: Path, retention_deleted: int = 0) -> dict[str, Any]:
             "file": target.name,
             "naming": _NAMING,
             "retentionDays": _KEEP_DAYS,
+            "retentionMaxBytes": _MAX_BYTES,
+            "fileMaxBytes": _FILE_MAX_BYTES,
+            "retentionMaxFiles": _MAX_FILES,
+            "retentionMaxActiveFiles": _MAX_ACTIVE_FILES,
             "retentionDeleted": retention_deleted,
         }),
     }
@@ -574,6 +648,8 @@ def _open(target: Path):
         _handle = None
     try:
         _ROOT.mkdir(parents=True, exist_ok=True)
+        if target.is_symlink() or (target.exists() and target.stat().st_nlink != 1):
+            raise OSError("compact trace must be a regular private file")
         _handle = open(target, "a", encoding="utf-8")
         _handle_path = target
     except Exception:  # noqa: BLE001 - tracing must not break a request
@@ -591,18 +667,81 @@ def _reset_handle_locked() -> None:
     _handle = None
     _handle_path = None
 
+
+def _rotate_locked(target: Path) -> Path:
+    """Continue the same session/sequence in a collision-safe bounded segment."""
+    global _session_path, _daily_segment_path
+    _reset_handle_locked()
+    stem = re.sub(r"-part\d+(?:-p\d+)?$", "", target.stem)
+    with retention.guard(_ROOT, "trace"):
+        retention.release(_trace_leases.pop(target, None))
+        if retention.active_count(_ROOT, "trace") >= _MAX_ACTIVE_FILES:
+            raise OSError("active compact trace retention capacity exceeded")
+        for number in range(2, 1_000_000):
+            suffix = f"-part{number:04d}" + (f"-p{os.getpid()}" if _NAMING == "daily" else "")
+            candidate = target.with_name(f"{stem}{suffix}.jsonl")
+            try:
+                _prune_trace_locked(candidate, budget=_MAX_BYTES - 2 * retention.ALLOCATION_UNIT,
+                                    file_budget=_MAX_FILES - 2)
+                total, files = retention.usage(_ROOT, "trace", _trace_usage)
+                if total + 2 * retention.ALLOCATION_UNIT > _MAX_BYTES or files + 2 > _MAX_FILES:
+                    raise OSError("compact trace retention capacity occupied by protected evidence")
+                retention.store_usage(_ROOT, "trace", total + 2 * retention.ALLOCATION_UNIT, files + 2)
+                descriptor = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                os.close(descriptor)
+            except FileExistsError:
+                continue
+            _trace_leases[candidate] = retention.retain(_ROOT, "trace", candidate)
+            break
+        else:
+            raise OSError("diagnostic rotation names exhausted")
+        for index, (pending_target, text, header) in enumerate(_buffer):
+            if pending_target == target:
+                _buffer[index] = (candidate, text, header)
+    if _NAMING == "daily":
+        _daily_segment_path = candidate
+    else:
+        _session_path = candidate
+    # Every row includes its session identity. Avoid inserting a synthetic
+    # header ahead of queued records and reversing their global sequence.
+    _header_paths.add(candidate)
+    _write_latest_pointer(candidate)
+    return candidate
+
 def _drain_locked() -> bool:
     """Write the buffer out. Caller holds _LOCK."""
     global _last_flush, _buffer_dropped, _seq
     if not _buffer:
         return True
     target = _buffer[0][0]
+    try:
+        current_size = target.stat().st_size if target.exists() else 0
+    except OSError:
+        return False
+    first_size = len(_buffer[0][1].encode("utf-8"))
+    if first_size > _FILE_MAX_BYTES:
+        # A malformed override or huge record cannot grow a file past its cap.
+        # Tracing remains best-effort and reports dropped records on recovery.
+        del _buffer[0]
+        _buffer_dropped += 1
+        return _drain_locked() if _buffer else True
+    if current_size + first_size > _FILE_MAX_BYTES:
+        try:
+            _rotate_locked(target)
+            return _drain_locked()
+        except OSError:
+            return False
     count = 0
     parts: list[str] = []
+    batch_bytes = 0
     for pending_target, text, _is_header in _buffer:
         if pending_target != target:
             break
+        text_bytes = len(text.encode("utf-8"))
+        if current_size + batch_bytes + text_bytes > _FILE_MAX_BYTES:
+            break
         parts.append(text)
+        batch_bytes += text_bytes
         count += 1
     reports_overflow = count == len(_buffer) and _buffer_dropped > 0
     if reports_overflow:
@@ -622,12 +761,43 @@ def _drain_locked() -> bool:
             "d": {"apiRecordsDroppedBeforeRecovery": _buffer_dropped},
         }, ensure_ascii=False) + "\n")
     batch = "".join(parts)
-    handle = _open(target)
-    if handle is None:
-        return False
+    # The overflow marker itself must fit the segment budget too.
+    if current_size + len(batch.encode("utf-8")) > _FILE_MAX_BYTES:
+        reports_overflow = False
+        batch = "".join(parts[:-1])
     try:
-        handle.write(batch)
-        handle.flush()
+        with retention.guard(_ROOT, "trace"):
+            _register_trace_prefix_locked()
+            actual_size = target.stat().st_size if target.exists() else 0
+            if actual_size + len(batch.encode("utf-8")) > _FILE_MAX_BYTES:
+                # Another daily-mode worker appended since the initial check.
+                # Leave the batch queued; the next drain can rotate safely.
+                return False
+            if target not in _trace_leases:
+                if retention.active_count(_ROOT, "trace") >= _MAX_ACTIVE_FILES:
+                    return False
+                total, files = retention.usage(_ROOT, "trace", _trace_usage)
+                if total + retention.ALLOCATION_UNIT > _MAX_BYTES or files + 1 > _MAX_FILES:
+                    return False
+                retention.store_usage(_ROOT, "trace", total + retention.ALLOCATION_UNIT, files + 1)
+                _trace_leases[target] = retention.retain(_ROOT, "trace", target)
+            total, files = retention.usage(_ROOT, "trace", _trace_usage)
+            exists = target.exists()
+            previous_charge = retention.charge(actual_size) if exists else 0
+            new_charge = retention.charge(actual_size + len(batch.encode("utf-8")))
+            growth = max(0, new_charge - previous_charge)
+            new_files = int(not exists)
+            if total + growth > _MAX_BYTES or files + new_files > _MAX_FILES:
+                _prune_trace_locked(target, budget=_MAX_BYTES - growth, file_budget=_MAX_FILES - new_files)
+                total, files = retention.usage(_ROOT, "trace", _trace_usage)
+            if total + growth > _MAX_BYTES or files + new_files > _MAX_FILES:
+                return False
+            retention.store_usage(_ROOT, "trace", total + growth, files + new_files)
+            handle = _open(target)
+            if handle is None:
+                return False
+            handle.write(batch)
+            handle.flush()
     except Exception:  # noqa: BLE001 - keep the batch and retry on next flush
         _reset_handle_locked()
         return False
@@ -645,10 +815,6 @@ def _emit_locked(text: str, target: Path | None = None) -> None:
     if len(_buffer) >= _BUFFER_LINES or (time.monotonic() - _last_flush) >= _FLUSH_AFTER_SEC:
         _drain_locked()
 
-# def _emit(text: str, target: Path | None = None) -> None:
-#     """Buffer one line; write a batch out when it is time."""
-#     with _LOCK:
-#         _emit_locked(text, target)
 
 def flush() -> None:
     """Write out whatever is buffered. Called per request and at process exit."""
@@ -728,10 +894,8 @@ def traced(fn: F) -> F:
 
     @functools.wraps(fn)
     def run(*args, **kwargs):
-        # Positional args by NAME. `process_image(path, lang, mode)` reading as
-        # `{"image_path": ..., "target_lang": "th", "mode": "lens_text"}` is the
-        # difference between a trace that answers questions and a list of
-        # values in an order the reader has to look up.
+        # Positional args by NAME, so a line reads as
+        # `{"image_path": ..., "target_lang": "th", "mode": "lens_text"}`.
         given: dict[str, Any] = {}
         for index, value in enumerate(args[: len(params)]):
             given[params[index]] = value
@@ -847,4 +1011,16 @@ def client(records: list[dict[str, Any]]) -> int:
 
 # A trace file missing its last batch because the process ended is a trace
 # file that stops mid-sentence exactly when something went wrong.
+atexit.register(flush)
+
+
+def _release_trace_leases() -> None:
+    for lease in list(_trace_leases.values()):
+        retention.release(lease)
+    _trace_leases.clear()
+
+
+# Flush runs first at shutdown, while its file is still protected.
+atexit.unregister(flush)
+atexit.register(_release_trace_leases)
 atexit.register(flush)

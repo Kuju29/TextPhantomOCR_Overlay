@@ -7,7 +7,6 @@ PREFIX: Final[str] = "<<TP_P"
 SUFFIX: Final[str] = ">>"
 END_MARKER: Final[str] = "<<TP_END>>"
 DONE_MARKER: Final[str] = "<<TP_DONE>>"
-LINE_CONTRACT_VERSION: Final[str] = "plain_records_v1"
 
 _MARKER_RE: Final[re.Pattern[str]] = re.compile(r"<<TP_P(\d+)>>")
 _CONVERSATION_ID_RE: Final[re.Pattern[str]] = re.compile(r"I[1-9][0-9]{0,6}_P[0-9]{1,6}")
@@ -83,9 +82,6 @@ def apply_schema_source(paragraphs: list[str]) -> str:
     """Encode schema-bound source with legacy Pn IDs."""
     return apply_schema_source_ids(paragraphs, [f"P{i}" for i in range(len(paragraphs))])
 
-def expected_count(marked_text: str) -> int:
-    """Return N only for a contiguous, once-only P0..P(N-1) sequence."""
-    return len(expected_ids(marked_text))
 
 def expected_ids(marked_text: str) -> list[str]:
     """Return exact P0..Pn IDs only for a valid, once-only input sequence."""

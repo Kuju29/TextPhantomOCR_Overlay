@@ -174,22 +174,25 @@ assert.equal(thinkingEls.aiThinkingWrap.style.display, "");
 selectedCapability.models.selected.reasoning = { supported: false, control: "none" };
 thinkingUi.toggle();
 assert.equal(thinkingEls.aiThinkingWrap.style.display, "");
-assert.equal(thinkingEls.aiThinking.disabled, false,
-  "a model with verified no-reasoning support must keep the Off selector usable");
+// 10488 owner decision: no reasoning → the control is not clickable and says so.
+assert.equal(thinkingEls.aiThinking.disabled, true,
+  "a model with verified no-reasoning support shows a disabled provider-default control");
+assert.equal(thinkingEls.aiThinking.dataset?.thinkingState ?? "none", "none");
 assert.equal(thinkingEls.aiThinking.value, "off",
   "capability refresh must keep the user's saved Off intent visible");
 selectedCapability.models.selected.reasoning = { supported: true, mandatory: true, control: "levels" };
 thinkingUi.toggle();
 assert.equal(thinkingEls.aiThinkingWrap.style.display, "");
-assert.equal(thinkingEls.aiThinking.disabled, false,
-  "known reasoning without a verified effort vocabulary must not rewrite or lock the saved user intent");
+assert.equal(thinkingEls.aiThinking.disabled, true,
+  "known reasoning without a verified effort vocabulary is provider default (disabled), saved intent kept");
+assert.equal(thinkingEls.aiThinking.value, "off");
 thinkingEls.aiModel.value = "other";
 thinkingUi.toggle();
 assert.equal(thinkingEls.aiThinkingWrap.style.display, "",
   "unknown thinking capability must be distinguishable from unsupported");
-assert.equal(thinkingEls.aiThinking.disabled, false);
+assert.equal(thinkingEls.aiThinking.disabled, true, "no record yet: Checking model…");
 assert.equal(thinkingEls.aiThinking.value, "off");
-assert.match(thinkingEls.aiThinkingHint.textContent, /not verified/i);
+assert.match(thinkingEls.aiThinkingHint.textContent, /appear after the selected model is checked/i);
 
 const geminiReasoning = { supported: true, mandatory: false, default_enabled: true, dynamic: true, control: "toggle" };
 const cloudThinkingEls = {
@@ -206,7 +209,7 @@ cloudThinkingUi.toggle();
 assert.equal(cloudThinkingEls.aiThinkingWrap.style.display, "",
   "Gemini 2.5 Flash must expose AI thinking after exact-model capability discovery");
 assert.equal(cloudThinkingEls.aiThinking.disabled, false);
-assert.match(cloudThinkingEls.aiThinkingHint.textContent, /Lowest available.*default/i);
+assert.equal(cloudThinkingEls.aiThinkingHint.textContent, "", "verified toggle does not repeat the selected control description");
 cloudThinkingState.lastAiResolve.model_capabilities.reasoning = { supported: true, mandatory: true, default_enabled: true, dynamic: true, control: "toggle" };
 cloudThinkingUi.toggle();
 assert.equal(cloudThinkingEls.aiThinking.options.some((option) => option.value === "off"), true,
@@ -215,8 +218,9 @@ assert.equal(cloudThinkingEls.aiThinking.value, "off");
 cloudThinkingState.lastAiResolve.model_capabilities.reasoning = { supported: true, mandatory: true, default_enabled: true, dynamic: true, control: "levels" };
 cloudThinkingUi.toggle();
 assert.equal(cloudThinkingEls.aiThinkingWrap.style.display, "");
-assert.equal(cloudThinkingEls.aiThinking.disabled, false,
-  "level-only Cloud reasoning must not rewrite the saved user selection");
+assert.equal(cloudThinkingEls.aiThinking.disabled, true,
+  "level-only Cloud reasoning without levels is provider default (10488), saved selection kept");
+assert.equal(cloudThinkingEls.aiThinking.value, "off");
 cloudThinkingState.lastAiResolve.model_capabilities.reasoning = {
   supported: true, mandatory: false, dynamic: true, control: "levels",
   supported_efforts: ["none", "low"],
@@ -225,7 +229,9 @@ cloudThinkingUi.toggle();
 assert.equal(cloudThinkingEls.aiThinkingWrap.style.display, "",
   "selected-model levels with verified native none + on effort must expose Thinking");
 assert.equal(cloudThinkingEls.aiThinking.disabled, false);
-assert.match(cloudThinkingEls.aiThinkingHint.textContent, /Verified levels.*none, low/i);
+assert.equal(cloudThinkingEls.aiThinkingHint.textContent, "");
+assert.ok(cloudThinkingEls.aiThinking.options.some(option => option.value === "low"), "verified named level remains selectable");
+assert.equal(cloudThinkingEls.aiThinking.value, "off", "verified modes never rewrite the saved Off choice");
 cloudThinkingState.lastAiResolve.model_capabilities.reasoning = {
   supported: true, mandatory: false, default_enabled: true, control: "levels", can_disable: true,
   supported_efforts: ["max", "high", "low"],
@@ -251,7 +257,9 @@ assert.deepEqual(
   cloudThinkingEls.aiThinking.options.map((option) => option.value),
   ["minimum", "minimal", "low", "medium", "high"],
 );
-assert.match(cloudThinkingEls.aiThinkingHint.textContent, /Verified levels.*minimal, low, medium, high/i);
+assert.equal(cloudThinkingEls.aiThinkingHint.textContent, "");
+assert.equal(cloudThinkingEls.aiThinking.value, "minimum");
+for (const effort of ["low", "medium", "high"]) assert.ok(cloudThinkingEls.aiThinking.options.some(option => option.value === effort), "verified effort remains selectable: " + effort);
 assert.match(popupHtml, /option value="minimum" selected/i,
   "Thinking must default to Lowest available until the user chooses another policy");
 const thinkingSelectHtml = popupHtml.match(/<select id="ai-thinking"[\s\S]*?<\/select>/i)?.[0] || "";
@@ -259,12 +267,12 @@ assert.doesNotMatch(thinkingSelectHtml, /option value="default"/i,
   "Provider default is an internal fallback, not a user choice");
 assert.doesNotMatch(thinkingSelectHtml, /option value="auto"/i,
   "Thinking Auto must not be present in the selector");
-assert.match(popupHtml, /For vision models\. Uses more time and memory/,
+assert.match(popupHtml, /Images may increase time and cost/,
   "page-image guidance stays short and capability-focused");
-assert.match(popupHtml, /Models load automatically when Local AI is selected/,
-  "Local UI must explain that discovery no longer requires repeated Connect clicks");
-assert.match(popupHtml, /Choosing a model checks its runtime metadata automatically/,
-  "changing the selected Local model must trigger a metadata check automatically");
+assert.match(popupHtml, /id="ai-local-status"/,
+  "Local discovery retains live status without duplicate instructions");
+assert.match(popupHtml, /id="ai-model"/,
+  "Local model picker remains available after removing duplicate instructions");
 assert.doesNotMatch(popupHtml, /ai-local-model-id/,
   "the redundant exact Local model ID field must be removed");
 const popupSource = await readFile(new URL("../src/popup/popup.js", import.meta.url), "utf8");

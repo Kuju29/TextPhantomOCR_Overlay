@@ -1,5 +1,4 @@
 from __future__ import annotations
-# from backend.render.region import box_rotation_deg, classify_item_axis, paragraph_reading_axis
 from backend.render.ai_tree.geometry import item_aabb, item_aabb_from_bounds_px
 
 def count_text_items(bg: dict) -> int:
@@ -17,7 +16,6 @@ def is_furigana_paragraph(bg: dict, bubble_groups: list[dict], img_w: int, img_h
     mx1, my1, mw, mh = my
     if mw <= 0:
         return False
-    mx2 = mx1 + mw
     my2 = my1 + mh
     for other in bubble_groups:
         if other is bg:

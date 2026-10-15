@@ -1,12 +1,13 @@
 /** Client implementation of `tp.lens-document/1`; coordinates are normalized 0..1. */
 
 import { normalizeAiUnitText } from "./ai-markers.js";
+import { hasMeaningfulAiSource } from "./ai-source-filter.js";
 
 export const LENS_DOCUMENT_SCHEMA = "tp.lens-document/1";
 export const CANONICAL_ORIGINAL_TREE_SCHEMA = "tp.canonical-original-tree/1";
 
 // Reject crafted documents before they can expand into excessive DOM nodes.
-export const LENS_DOCUMENT_LIMITS = Object.freeze({
+const LENS_DOCUMENT_LIMITS = Object.freeze({
   paragraphs: 2000,
   groups: 2000,
   itemsPerParagraphLayer: 256,
@@ -19,7 +20,7 @@ export const LENS_DOCUMENT_LIMITS = Object.freeze({
 });
 
 /** Thrown when a document cannot be trusted. Never returns a partial doc. */
-export class LensDocumentError extends Error {}
+class LensDocumentError extends Error {}
 
 /** Require the structured Lens hand-off used by local AI. */
 export function requireAiLensDocument(result) {
@@ -30,16 +31,6 @@ export function requireAiLensDocument(result) {
     );
   }
   return doc;
-}
-
-function isFiniteNumber(value) {
-  return typeof value === "number" && Number.isFinite(value);
-}
-
-function isPoint(value) {
-  return (
-    Array.isArray(value) && value.length === 2 && value.every(isFiniteNumber)
-  );
 }
 
 function assertUniqueParagraphIds(paragraphs) {
@@ -56,31 +47,8 @@ function assertUniqueParagraphIds(paragraphs) {
   }
 }
 
-function assertDisjointGroupMemberships(groups, memberKey) {
-  const owner = new Map();
-  groups.forEach((group, groupIndex) => {
-    const local = new Set();
-    const members = Array.isArray(group?.[memberKey]) ? group[memberKey] : [];
-    for (const rawMember of members) {
-      const member = String(rawMember);
-      if (local.has(member)) {
-        throw new LensDocumentError(
-          `group ${groupIndex} contains duplicate paragraph membership ${JSON.stringify(member)}`,
-        );
-      }
-      local.add(member);
-      if (owner.has(member)) {
-        throw new LensDocumentError(
-          `paragraph ${JSON.stringify(member)} belongs to both group ${owner.get(member)} and group ${groupIndex}`,
-        );
-      }
-      owner.set(member, groupIndex);
-    }
-  });
-}
-
 /** Empty string when safe; otherwise a stable reason suitable for fallback logs. */
-export function documentCardinalityReason(doc) {
+function documentCardinalityReason(doc) {
   if (doc?.paragraphs !== undefined && !Array.isArray(doc.paragraphs)) {
     return "paragraphs is not an array";
   }
@@ -188,120 +156,6 @@ export function documentCardinalityReason(doc) {
     }
   }
   return "";
-}
-
-/** Validate a wire document. Invalid geometry is rejected, never repaired. */
-export function validateLensDocument(doc) {
-  if (!doc || typeof doc !== "object") {
-    throw new LensDocumentError("lens document is not an object");
-  }
-  if (doc.schema !== LENS_DOCUMENT_SCHEMA) {
-    throw new LensDocumentError(
-      `unsupported schema ${JSON.stringify(doc.schema)}; this build speaks ${LENS_DOCUMENT_SCHEMA}`,
-    );
-  }
-  const w = Number(doc.image?.width);
-  const h = Number(doc.image?.height);
-  if (!(w > 0) || !(h > 0)) {
-    throw new LensDocumentError(
-      `lens document has no usable image size (${w}x${h})`,
-    );
-  }
-  if (!Array.isArray(doc.paragraphs)) {
-    throw new LensDocumentError("lens document has no paragraphs array");
-  }
-  const cardinalityReason = documentCardinalityReason(doc);
-  if (cardinalityReason) {
-    throw new LensDocumentError(
-      `lens document exceeds local render budget: ${cardinalityReason}`,
-    );
-  }
-
-  assertUniqueParagraphIds(doc.paragraphs);
-
-  doc.paragraphs.forEach((para, index) => {
-    if (!para || typeof para !== "object") {
-      throw new LensDocumentError(`paragraph ${index} is not an object`);
-    }
-    if (!para.id) throw new LensDocumentError(`paragraph ${index} has no id`);
-    if (!Array.isArray(para.items)) {
-      throw new LensDocumentError(`paragraph ${para.id} has no items array`);
-    }
-    // `lensItems` / `aiItems` are the translated and AI layers' OWN lines.
-    // Optional — a document built before the AI finished has no `aiItems`, and
-    // a page Lens could not machine-translate has no `lensItems` — but when
-    // present they are held to exactly the same standard as `items`, because
-    // they are drawn by the same code.
-    for (const key of ["items", "lensItems", "aiItems"]) {
-      const list = para[key];
-      if (list === undefined) continue;
-      if (!Array.isArray(list)) {
-        throw new LensDocumentError(
-          `paragraph ${para.id} has a non-array ${key}`,
-        );
-      }
-      for (const item of list) {
-        if (!isPoint(item?.baseline?.[0]) || !isPoint(item?.baseline?.[1])) {
-          throw new LensDocumentError(
-            `item ${item?.id || "?"} in ${key} has a malformed baseline`,
-          );
-        }
-        if (!isFiniteNumber(item.height) || item.height <= 0) {
-          throw new LensDocumentError(
-            `item ${item?.id || "?"} in ${key} has a non-positive height`,
-          );
-        }
-        if (item.spans !== undefined) {
-          if (!Array.isArray(item.spans)) {
-            throw new LensDocumentError(
-              `item ${item?.id || "?"} in ${key} has non-array spans`,
-            );
-          }
-          for (const span of item.spans) {
-            if (
-              !isFiniteNumber(span?.t0) ||
-              !isFiniteNumber(span?.t1) ||
-              span.t0 < 0 ||
-              span.t1 > 1 ||
-              !(span.t1 > span.t0)
-            ) {
-              throw new LensDocumentError(
-                `item ${item?.id || "?"} in ${key} has a malformed span`,
-              );
-            }
-          }
-        }
-      }
-    }
-  });
-
-  if (doc.groups !== undefined) {
-    if (!Array.isArray(doc.groups)) {
-      throw new LensDocumentError("lens document has non-array groups");
-    }
-    assertDisjointGroupMemberships(doc.groups, "paragraphIds");
-    for (const group of doc.groups) {
-      if (group?.boundsPx === undefined) continue;
-      const bounds = group.boundsPx;
-      if (
-        !Array.isArray(bounds) ||
-        bounds.length !== 4 ||
-        !bounds.every(isFiniteNumber) ||
-        bounds[0] < 0 ||
-        bounds[1] < 0 ||
-        bounds[2] > w ||
-        bounds[3] > h ||
-        !(bounds[2] > bounds[0]) ||
-        !(bounds[3] > bounds[1])
-      ) {
-        throw new LensDocumentError(
-          `group ${group?.id || "?"} has malformed boundsPx`,
-        );
-      }
-    }
-  }
-
-  return doc;
 }
 
 /** Warnings the producer attached — surfaced, never dropped. */
@@ -547,15 +401,13 @@ export function attachCanonicalOriginalTree(doc, canonicalOriginalTree) {
   return { ...doc, canonicalOriginalTree };
 }
 
-const LETTER_RE = /\p{L}/u;
-
-// Returns whether a string holds prose a translator can act on, i.e. at least one letter.
+// Shared pre-AI filter. Single visible characters and OCR noise are passthrough.
 export function hasTranslatableText(text) {
-  return LETTER_RE.test(String(text || ""));
+  return hasMeaningfulAiSource(text);
 }
 
 // Returns the document's text as addressable translation units, one per bubble group or paragraph.
-// `translatable` is false for units Lens read as digits, punctuation or symbols only.
+// `translatable` is false for standalone characters, digits and symbol-only noise.
 export function translationUnits(doc) {
   const units = [];
   const paragraphs = Array.isArray(doc?.paragraphs) ? doc.paragraphs : [];

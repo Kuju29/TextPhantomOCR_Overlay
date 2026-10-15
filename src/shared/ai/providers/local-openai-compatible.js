@@ -3,7 +3,7 @@ import { LocalAiError } from "../direct-local/error.js";
 import { assertPrivateCredentialFreeEndpoint, localOpenAiBase } from "../direct-local/endpoint.js";
 import { dispatchProviderRequest, getProviderJson } from "./local-transport-runtime.js";
 
-export const OPENAI_CHAT_PATH = "/chat/completions";
+const OPENAI_CHAT_PATH = "/chat/completions";
 // Sanity bound for malformed runtime metadata; it is not a model limit.
 export const LOCAL_CONTEXT_METADATA_MAX = 100_000_000;
 
@@ -80,10 +80,11 @@ export function openAiCompatibleCapabilityHints(modelIds = [], nativeModels = nu
     // context is chosen per translation request from its prompt size.
     const requestedContext = jitLoadable ? maxContext : null;
     const downloadedOptions = nativeEntry?.capabilities?.reasoning?.allowed_options;
-    const provenDownloadedOptions = jitLoadable && Array.isArray(downloadedOptions) &&
-      downloadedOptions.length > 0 && downloadedOptions.every(value =>
-        ["off", "on", "low", "medium", "high"].includes(value))
-      ? [...new Set(downloadedOptions)] : null;
+    const knownDownloadedOptions = ["off", "on", "low", "medium", "high"];
+    const provenDownloadedOptions = jitLoadable && Array.isArray(downloadedOptions)
+      ? [...new Set(downloadedOptions.filter(value => knownDownloadedOptions.includes(value)))] : null;
+    const unknownDownloadedOption = provenDownloadedOptions !== null &&
+      downloadedOptions.some(value => !knownDownloadedOptions.includes(value));
     const nonChat = Array.isArray(nativeModels) && type !== "llm";
     return [id, {
       recommendedMax: 1,
@@ -96,10 +97,13 @@ export function openAiCompatibleCapabilityHints(modelIds = [], nativeModels = nu
       jitLoadable,
       ...(reasoningById.has(id) ? {reasoning:reasoningById.get(id)} :
         provenDownloadedOptions ? {reasoning: {
-          supported: true, mandatory: !provenDownloadedOptions.includes("off"),
-          control: provenDownloadedOptions.every(value => value === "off" || value === "on")
+          supported: downloadedOptions.length === 0 ? false : provenDownloadedOptions.length ? true : null,
+          mandatory: downloadedOptions.length > 0 && !provenDownloadedOptions.includes("off"),
+          control: downloadedOptions.length === 0 ? "none" :
+            !unknownDownloadedOption && provenDownloadedOptions.every(value => value === "off" || value === "on")
             ? "toggle" : "levels",
           supported_efforts: provenDownloadedOptions,
+          ...(unknownDownloadedOption && !provenDownloadedOptions.includes("off") ? {minimum_unresolved: true} : {}),
           source: "lmstudio_native_downloaded_model",
         }} : {}),
       ...(runtimeContext ? {
@@ -355,11 +359,7 @@ export function createOpenAiCompatibleAdapter(settings = {}) {
   return adapter;
 }
 
-export async function generateWithOpenAiCompatible(settings, request, context) {
-  return dispatchProviderRequest(createOpenAiCompatibleAdapter(settings), request, context);
-}
-
-export function buildOpenAiCompatibleGeneration({ model, messages, outputTokens, thinkingMode, thinking, responseSchema = null, includeUsage = false }) {
+function buildOpenAiCompatibleGeneration({ model, messages, outputTokens, thinkingMode, thinking, responseSchema = null, includeUsage = false }) {
   const body = { model, messages, stream: true, max_tokens: outputTokens };
   if (includeUsage) body.stream_options = { include_usage: true };
   if (responseSchema) body.response_format = { type: "json_schema", json_schema: {
@@ -379,7 +379,7 @@ function contentPartsText(value) {
   }).join("");
 }
 
-export function openAiStreamFrame(item) {
+function openAiStreamFrame(item) {
   const choice = item?.choices?.[0];
   return {
     content: contentPartsText(choice?.delta?.content ?? choice?.message?.content ?? ""),
@@ -388,7 +388,7 @@ export function openAiStreamFrame(item) {
   };
 }
 
-export function normalizeOpenAiLine(line) {
+function normalizeOpenAiLine(line) {
   let value = String(line || "").trim();
   if (!value) return { kind: "empty" };
   if (value.startsWith(":")) return { kind: "empty" };

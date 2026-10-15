@@ -12,13 +12,10 @@ from .model import BoundaryEvidence, VerticalNode
 def prepare_pixels(image: Any):
     """Convert the page once; boundary probes reuse the same grayscale view.
 
-    Lens grouping used to call NumPy ``mean(axis=2)`` over the full RGB page,
-    which allocates a float64 image and costs hundreds of milliseconds on
-    manga-sized pages. Production images arrive as Pillow RGB objects, so use
-    Pillow's C implementation with equal RGB weights. The result differs from
-    the former arithmetic mean only by the unavoidable <= 1/3 grayscale
-    rounding step, while avoiding the large float allocation. ndarray/test
-    inputs keep the exact legacy path.
+    Pillow RGB images use Pillow's C conversion with equal RGB weights, which
+    avoids NumPy's float64 ``mean(axis=2)`` allocation (hundreds of ms on
+    manga pages) and differs only by <= 1/3 grayscale rounding. ndarray/test
+    inputs keep the exact mean.
     """
     if image is None:
         return None
@@ -48,8 +45,8 @@ def _corridor(image: Any, right: VerticalNode, left: VerticalNode) -> tuple[bool
         arr = np.asarray(image)
         if arr.ndim == 3:
             arr = arr[..., :3].mean(axis=2)
-        rx1, ry1, rx2, ry2 = right.bounds
-        lx1, ly1, lx2, ly2 = left.bounds
+        rx1, ry1, _rx2, ry2 = right.bounds
+        _lx1, ly1, lx2, ly2 = left.bounds
         # Overlapping envelopes have no empty inter-column corridor. Sorting
         # these endpoints instead would probe their glyphs as a separator.
         if rx1 <= lx2:

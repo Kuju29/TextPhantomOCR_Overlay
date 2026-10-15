@@ -220,7 +220,8 @@ class LocalOpenAIChatAdapter:
         """
         requested = normalize_reasoning_preference(
             request.cache_context.get("thinkingRequested", request.thinking), "off")
-        if requested == "default":
+        if requested == "default" or request.cache_context.get("thinkingProviderDefault") is True:
+            # No control is offered for this model; nothing was sent.
             return "provider_default"
         verified = request.cache_context.get("reasoningCapabilityVerified") is True
         reasoning = request.model_capabilities.get("reasoning")

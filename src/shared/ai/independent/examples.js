@@ -2,9 +2,9 @@
 // first-turn anchor and must never read this policy or its history.
 import {STYLE_EXAMPLES} from '../../../generated/localization-content.js';
 import {normalizeLanguageCode} from '../../../generated/language-code-aliases.js';
-export const INDEPENDENT_EXAMPLE_LIMIT = 20;
-export const INDEPENDENT_REQUEST_EXAMPLE_LIMIT = 4;
-export const INDEPENDENT_REQUEST_EXAMPLE_CHARS = 600;
+const INDEPENDENT_EXAMPLE_LIMIT = 20;
+const INDEPENDENT_REQUEST_EXAMPLE_LIMIT = 4;
+const INDEPENDENT_REQUEST_EXAMPLE_CHARS = 600;
 
 export function humanExampleCount(selection) {
   const count = selection?.humanExampleCount;

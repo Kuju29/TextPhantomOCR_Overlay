@@ -9,12 +9,16 @@ def request_diagnostics(meta, *, workload=None, rate=None, missing=0):
     w = workload if isinstance(workload, Mapping) else {}
     r = rate if isinstance(rate, Mapping) else {}
     limits = meta.get('modelLimits') if isinstance(meta.get('modelLimits'), Mapping) else {}
-    cached = _count(usage.get('cachedInputTokens'))
-    output, reasoning = _count(usage.get('outputTokens')), _count(usage.get('thinkingTokens'))
+    replayed = (meta.get('provider') == 'paid' and meta.get('centerOperationReplayed') is True
+                and meta.get('requestDispatched') is False
+                and meta.get('generationAttempts') == 0 and meta.get('providerAttempts') == 0)
+    cached = 0 if replayed else _count(usage.get('cachedInputTokens'))
+    output, reasoning = (0, 0) if replayed else (_count(usage.get('outputTokens')), _count(usage.get('thinkingTokens')))
     finish = str(meta.get('finishReason') or '')
     truncated = finish in ('length','max_tokens','max_output_tokens','truncated')
     return {'schema':'tp.request_diagnostics/1',
         'boundary':'api_response_mapping', 'httpStatus':200,
+        **({'centerOperationReplayed': True, 'usageScope': 'retained_paid_operation'} if replayed else {}),
         'instructionLayout':{key: meta.get('promptLayout', {}).get(key) for key in (
             'policyVersion', 'styleRole', 'systemStyleCopies', 'userStyleCopies',
             'styleChars', 'styleSha256', 'systemChars', 'userStaticChars', 'userPersistentStaticChars',
@@ -29,9 +33,9 @@ def request_diagnostics(meta, *, workload=None, rate=None, missing=0):
         'contractStatus':'partial' if missing else 'complete',
         'languageStatus':'pending_extension_validation','placementStatus':'not_started',
         'outputLimitReached':truncated,'outputTruncated':truncated and missing>0,'finishReason':finish or None,
-        'inputActual':_count(usage.get('inputTokens')),'outputActual':output,'reasoningActual':reasoning,
+        'inputActual':0 if replayed else _count(usage.get('inputTokens')),'outputActual':output,'reasoningActual':reasoning,
         'visibleOutputActual':output-reasoning if output is not None and reasoning is not None and reasoning<=output else None,
-        'cache':{'status':'not_reported' if cached is None else 'reported_hit' if cached>0 else 'reported_zero',
+        'cache':{'status':'not_requested' if replayed else 'not_reported' if cached is None else 'reported_hit' if cached>0 else 'reported_zero',
                  'inputTokens':cached,'hit':None if cached is None else cached>0,
                  'support':'unknown','interpretation':'provider_report_not_support_probe'},
         'requestBudget':{'scope':'per_request','estimatedInput':_count(w.get('estimatedInput')),

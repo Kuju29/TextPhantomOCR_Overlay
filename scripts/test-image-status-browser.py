@@ -7,8 +7,8 @@ r=Path(__file__).resolve().parents[1];a.out.mkdir(parents=True,exist_ok=True)
 run=subprocess.run(['node','scripts/test-image-status.mjs'],cwd=r,capture_output=True,text=True)
 assert run.returncode==0,run.stderr
 checks=[]
-def check(name,ok):
-    checks.append(dict(name=name,pass_=bool(ok)));print(('PASS ' if ok else 'FAIL ')+name,flush=True)
+def check(name,ok,value=None):
+    checks.append(dict(name=name,pass_=bool(ok),value=value));print(('PASS ' if ok else 'FAIL ')+name,flush=True)
 with sync_playwright() as pw:
     browser=pw.chromium.launch(executable_path=a.browser,headless=True,args=['--no-sandbox','--disable-dev-shm-usage'])
     ctx=browser.new_context(viewport={'width':850,'height':800},locale='th-TH')
@@ -25,13 +25,14 @@ with sync_playwright() as pw:
     page.add_script_tag(content=(r/'src/content/progress-panel.js').read_text())
     page.evaluate("()=>{__TP.showToast('TextPhantom: collecting images…',60000);window.toastBefore=document.querySelector('#tp-toast');}")
     now=page.evaluate('Date.now()')
-    batch={"id":"b1","total":2,"active":1,"terminal":1,"stage":"AI processing","stats":{"finished":1,"total":2,"error":0,"skipped":0,"scanSkipped":0},"items":[
-      {"label":"Image 1","terminal":False,"progress":{"overall":{"state":"running","startedAt":now-2100,"detail":"Processing"},"lens":{"state":"done","startedAt":now-1900,"finishedAt":now-1500,"detail":"Lens complete"},"grouping":{"state":"done","startedAt":now-1450,"finishedAt":now-1200,"detail":"Grouping complete"},"ai":{"state":"running","startedAt":now-1000,"queueWaitMs":240,"detail":"Request sent · waiting response","function":"waiting_response","pageCount":2,"unitCount":19,"queuedPageCount":0,"turn":2,"conversation":True},"insert":{"state":"idle"},"result":{"state":"pending","detail":""}}},
-      {"label":"Image 2","terminal":True,"progress":{"overall":{"state":"done","startedAt":now-3000,"finishedAt":now-500,"detail":"Complete"},"lens":{"state":"done","startedAt":now-2900,"finishedAt":now-2500},"grouping":{"state":"skipped","finishedAt":now-2400,"detail":"Not needed"},"ai":{"state":"done","startedAt":now-2300,"finishedAt":now-800},"insert":{"state":"done","startedAt":now-750,"finishedAt":now-500},"result":{"state":"done","detail":"Done"}}}
+    batch={"id":"b1","sequence":1,"startedAt":now,"lifecycle":"processing","processingComplete":False,"total":2,"active":1,"terminal":1,"stage":"AI processing","stats":{"finished":1,"total":2,"error":0,"skipped":0,"scanSkipped":0},"items":[
+      {"label":"Image 1","terminal":False,"inserted":False,"progress":{"overall":{"state":"running","startedAt":now-2100,"detail":"Processing"},"lens":{"state":"done","startedAt":now-1900,"finishedAt":now-1500,"detail":"Lens complete"},"grouping":{"state":"done","startedAt":now-1450,"finishedAt":now-1200,"detail":"Grouping complete"},"ai":{"state":"running","startedAt":now-1000,"queueWaitMs":240,"detail":"Request sent · waiting response","function":"waiting_response","pageCount":2,"unitCount":19,"queuedPageCount":0,"turn":2,"conversation":True},"insert":{"state":"idle"},"result":{"state":"pending","detail":""}}},
+      {"label":"Image 2","terminal":True,"inserted":True,"progress":{"overall":{"state":"done","startedAt":now-3000,"finishedAt":now-500,"detail":"Complete"},"lens":{"state":"done","startedAt":now-2900,"finishedAt":now-2500},"grouping":{"state":"skipped","finishedAt":now-2400,"detail":"Not needed"},"ai":{"state":"done","startedAt":now-2300,"finishedAt":now-800},"insert":{"state":"done","startedAt":now-750,"finishedAt":now-500},"result":{"state":"done","detail":"Done"}}}
     ]}
     page.evaluate('(b)=>__TP.updateBatchProgress(b)',batch);page.wait_for_timeout(140)
     check('progress reuses exactly the original TextPhantom toast box',page.evaluate("document.querySelectorAll('#tp-toast').length===1&&document.querySelector('#tp-toast')===window.toastBefore&&document.querySelectorAll('#tp-progress-board').length===0"))
-    check('collapsed toast hides completed/inactive lanes and keeps only live function status',page.evaluate("(()=>{const t=document.querySelector('#tp-toast > div:first-child > span').textContent;return t.startsWith('TextPhantom: 1/2')&&t.includes('AI waiting response 2p/19u')&&!t.includes('Lens')&&!t.includes('Group')&&!t.includes('Insert')&&!t.includes('Result')&&!t.includes('|');})()"))
+    compact=page.evaluate("document.querySelector('#tp-toast > div:first-child > span').textContent")
+    check('collapsed toast shows acknowledged insertions and only the live Conversation function',compact.startswith('TextPhantom: inserted 1/2 · AI request waiting response (page 1)') and not any(part in compact for part in ('Lens','Group','Insert','Result','|')),compact)
     check('detail table is hidden by default and plus toggle is inside the same toast',page.evaluate("(()=>{const b=document.querySelector('#tp-toast');const btn=b.querySelector('button');return btn.textContent==='+'&&btn.getAttribute('aria-expanded')==='false'&&b.querySelector(':scope > div:nth-child(2)').style.display==='none';})()"))
     check('collapsed status uses function-level wording and no image-number ranges',page.evaluate("(()=>{const t=document.querySelector('#tp-toast > div:first-child > span').textContent;return t.includes('waiting response')&&!t.includes('#1')&&!t.includes('queue');})()"))
     total_before=page.evaluate("document.querySelector('#tp-toast > div:first-child > span').textContent")
@@ -55,6 +56,21 @@ with sync_playwright() as pw:
     page.evaluate("document.querySelector('#tp-toast button').click()")
     page.evaluate("document.querySelector('#tp-toast button').click()")
     check('minus collapses details back into the original one-line toast',page.evaluate("document.querySelector('#tp-toast button').textContent==='+'&&document.querySelector('#tp-toast > div:nth-child(2)').style.display==='none'"))
+
+    # Canonical snapshots distinguish completed AI from acknowledged placement.
+    # A saved offscreen result must not falsely increase the inserted count.
+    completed=json.loads(json.dumps(batch));completed.update(sequence=2,lifecycle='completed',processingComplete=True,active=0,terminal=2,completedAt=page.evaluate('Date.now()'),placement={'released':True,'waiting':1,'placed':1})
+    completed['stats']['finished']=2
+    first=completed['items'][0];first['terminal']=True
+    for lane in ('overall','ai','result'):first['progress'][lane].update(state='done',finishedAt=completed['completedAt'])
+    page.evaluate('(b)=>__TP.updateBatchProgress(b)',completed);page.wait_for_timeout(140)
+    saved=page.evaluate("document.querySelector('#tp-toast > div:first-child > span').textContent")
+    check('processed offscreen result stays separate from inserted count and keeps saved-for-display status',saved.startswith('TextPhantom: inserted 1/2') and '2/2 pages processed · 1 saved for display' in saved and 'AI finished in' in saved and 'AI request' not in saved and page.locator('#tp-toast').is_visible(),saved)
+    page.screenshot(path=str(a.out/'processed-awaiting-placement.png'))
+    completed['sequence']=3;completed['placement'].update(waiting=0,placed=2);first['inserted']=True;first['progress']['insert'].update(state='done',startedAt=completed['completedAt'],finishedAt=completed['completedAt'])
+    page.evaluate('(b)=>__TP.updateBatchProgress(b)',completed);page.wait_for_timeout(140)
+    placed=page.evaluate("document.querySelector('#tp-toast > div:first-child > span').textContent")
+    check('acknowledged final placement shows inserted 2/2 and no stale live AI or saved-for-display status',placed.startswith('TextPhantom: inserted 2/2 · done ') and '2/2 pages processed' in placed and 'AI request' not in placed and 'saved for display' not in placed,placed)
 
     # Even legacy/current progress packets must be harmless and create no DOM.
     packet={"original":page.evaluate('img.src'),"generation":page.evaluate('gen'),"status":{"batchId":"b1","sequence":1,"startedAt":1,"phase":"repair_applying","total":12,"accepted":11,"applied":10,"pending":2}}

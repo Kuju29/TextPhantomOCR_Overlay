@@ -1,0 +1,21 @@
+import assert from 'node:assert/strict';
+import {createAiProfileStorageWriter} from '../src/popup/controllers/ai-profile-storage-writer.js';
+import {paidModelRates} from '../src/popup/controllers/paid-model-pricing.js';
+let fails=true,changes=[];
+globalThis.chrome={runtime:{id:'fixture',sendMessage:(msg,callback)=>{if(fails)return callback({ok:false,error:'write failed'});changes.push(msg);callback({ok:true})}}};
+const writer=createAiProfileStorageWriter(async()=>{});writer.seed({paidAiProfilesV1:{entries:{a:{profile:{thinking:'off'}}}}});
+const intent={paidAiProfilesV1:{entries:{a:{profile:{thinking:'high'}}}}};
+await assert.rejects(writer(intent),/write failed/);await assert.rejects(writer.whenIdle(),/write failed/);
+fails=false;await writer(intent);await writer.whenIdle();
+assert(changes.length===1);assert(JSON.stringify(changes).includes('high'));delete globalThis.chrome;
+const model={pricing:{status:'estimated',unit:'TP_PER_1000_TOKENS',input_tp:'123.4',output_tp:'0.6'}};
+const rates=paidModelRates(model);assert(!JSON.stringify(rates).includes('123.4'));assert(JSON.stringify(rates).includes('<1'));
+console.log('PASS failed intent retries identical snapshot; integer price display; no billing mutation');
+
+const {readLoginState}=await import('../src/shared/login-session.js');
+globalThis.chrome={runtime:{},storage:{local:{get:(_keys,cb)=>cb({aiModel:'saved-manual-model'}),remove:(_keys,cb)=>cb()},session:{get:()=>{throw new Error('RAM storage unavailable')}}}};
+const settings=await readLoginState(['aiModel','loginSessionId']);
+assert.equal(settings.aiModel,'saved-manual-model');
+assert.equal(settings.loginMemoryStorageError,'login_memory_storage_unavailable');
+assert.equal(settings.loginSessionId,undefined);delete globalThis.chrome;
+console.log('PASS session storage failure stays distinct and Manual settings survive');

@@ -10,8 +10,8 @@ import { classifyAiRuntime } from "./ai-settings-contract.js";
 import { BUNDLED_CANONICAL_PROMPT_PLANS } from "../generated/canonical-prompt-plans.js";
 
 export const AI_PROFILE_STORAGE_VERSION = 4;
-export const AI_PROFILE_STORAGE_VERSION_KEY = "aiProfileStorageVersion";
-export const AI_PROFILE_STORAGE_KEYS = [
+const AI_PROFILE_STORAGE_VERSION_KEY = "aiProfileStorageVersion";
+const AI_PROFILE_STORAGE_KEYS = [
   AI_PROFILE_STORAGE_VERSION_KEY,
   "aiProfilesV1",
   "aiProfileCredentialsV1",
@@ -24,7 +24,7 @@ let migrationInFlight = null;
 // It is not a pattern or a generic fallback: only that immutable historical
 // default may be advanced to the current bundled default. User-authored text
 // remains authoritative, including text that differs by a single byte.
-export const HISTORICAL_THAI_BUILTIN_SHA256 =
+const HISTORICAL_THAI_BUILTIN_SHA256 =
   "63dab12ca8e9f67b8b765542b72eaed4efd66e9d265d177719e35fc163b3ccff";
 
 async function sha256Text(value) {

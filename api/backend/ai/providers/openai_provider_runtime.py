@@ -11,6 +11,7 @@ import httpx
 from backend.ai.generation_defaults import DEFAULT_GENERATION, output_token_budget
 from backend.ai.provider_contract import GenerationRequest, ModelListResult, ProbeRequest, ProbeResponse
 from backend.ai.providers.probe_support import openai_chat_probe
+from backend.ai.providers.provider_helpers import accepts_optional_parameter
 from backend.ai.transports.openai_chat import execute_chat_completion
 
 ModelFilter = Callable[[Sequence[object]], list[str]]
@@ -94,7 +95,8 @@ def build_payload(request: GenerationRequest, model: str, policy: OpenAIProvider
         or reasoning.get("default_enabled") is True
         or request.thinking == "on"
     )
-    if policy.temperature is not None and not reasoning_active:
+    if (policy.temperature is not None and not reasoning_active
+            and accepts_optional_parameter(request.model_capabilities, "temperature")):
         payload["temperature"] = policy.temperature
     if policy.output_budget_field is not None:
         payload[policy.output_budget_field] = output_token_budget(

@@ -8,10 +8,17 @@ from fastapi import Request
 
 _HEADER = "x-tp-local-unlimited"
 
+_FORWARDED = ("x-forwarded-for", "forwarded", "x-real-ip")
+
+# On a Hugging Face Space every visitor arrives through HF's private-address
+# proxy, so "the peer is local" would let anyone skip the shared gates. A Space
+# (SPACE_ID / SPACE_HOST set) defaults to off; an operator may still set
+# TP_ALLOW_LOCAL_UNLIMITED=1 explicitly.
 def _enabled() -> bool:
-    return str(os.environ.get("TP_ALLOW_LOCAL_UNLIMITED", "1")).strip().lower() not in (
-        "0", "false", "no", "off",
-    )
+    raw = os.environ.get("TP_ALLOW_LOCAL_UNLIMITED")
+    if raw is None:
+        return not (os.environ.get("SPACE_ID") or os.environ.get("SPACE_HOST"))
+    return str(raw).strip().lower() not in ("0", "false", "no", "off")
 
 # Whether the peer is this machine or the local network. A client's own claim is
 # never enough: the gates exist to share a public server, so only a caller that
@@ -19,6 +26,9 @@ def _enabled() -> bool:
 def is_local_peer(request: Request) -> bool:
     host = getattr(getattr(request, "client", None), "host", "") or ""
     if host in ("", "testclient"):
+        return False
+    # Came through a proxy: the original caller is unknown, so it is not local.
+    if any(request.headers.get(name) for name in _FORWARDED):
         return False
     try:
         addr = ipaddress.ip_address(host)

@@ -1,4 +1,4 @@
-export class GroupingResultContractError extends Error {
+class GroupingResultContractError extends Error {
   constructor(code, details = {}) {
     super(String(code));
     this.name = "GroupingResultContractError";

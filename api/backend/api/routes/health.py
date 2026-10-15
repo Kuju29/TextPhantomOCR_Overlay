@@ -6,7 +6,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from backend.ai.rategate import rate_gate
-from backend.config import settings
+from backend.release import RELEASE
 
 router = APIRouter()
 
@@ -36,7 +36,7 @@ def _readiness(request: Request) -> dict:
         "queue": {"ready": queue is not None},
         "lens": {
             **lane("admission_gate", "lens_executor_workers"),
-            "configured": bool(settings.firebase_url),
+            "configured": lens_cookie_configured(),
         },
         "ai": {
             **lane("ai_admission_gate", "ai_executor_workers"),
@@ -51,6 +51,10 @@ def _readiness(request: Request) -> dict:
         "components": components,
     }
 
+def lens_cookie_configured() -> bool:
+    from backend.lens import cookie
+    return cookie.configured()
+
 @router.get("/ready")
 async def ready(request: Request):
     """Operational detail only; performs no paid/network provider probes."""
@@ -59,5 +63,5 @@ async def ready(request: Request):
 
 @router.get("/version")
 async def version() -> dict:
-    """Compatibility marker retained for launchers; no release number is tracked."""
-    return {"ok": True, "core": "backend.rewrite"}
+    """Compatibility marker and actual API build for mixed-version diagnosis."""
+    return {"ok": True, "core": "backend.rewrite", "release": RELEASE}

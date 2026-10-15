@@ -1,5 +1,5 @@
 """Cache hints for verified API families; never a result cache or extra call.
-Docs checked 2026-09-28. Unknown custom endpoints remain unmodified. A hint is
+Docs checked 2026-10-06. Unknown custom endpoints remain unmodified. A hint is
 not a cache hit: only returned usage can establish a read/write or actual cost.
 TP_PROMPT_CACHE controls application hints, not automatic provider-side caching.
 """
@@ -48,13 +48,15 @@ def cache_policy(provider: str, model: str, base_url: str) -> dict:
         # Groq's automatic GPT-OSS prefix cache still requires resending the
         # same history. This reports availability, never a guaranteed hit.
         strategy, support = 'automatic', 'model_dependent'
+    elif host == 'api.featherless.ai' and scheme == 'https' and provider == 'featherless':
+        strategy, support = 'automatic', 'model_dependent'
     elif provider in {'ollama', 'lmstudio', 'vllm', 'gpt4all', 'jan', 'koboldcpp', 'llamacpp', 'llamafile', 'textgen'} or provider.startswith('local'):
         strategy, support = 'local_runtime', 'runtime_dependent'
     result = {'strategy': strategy if enabled() else 'disabled', 'support': support,
-              'hit': None, 'discountGuaranteed': False, 'documentationDate': '2026-09-28'}
-    if provider == 'together' and strategy == 'automatic':
-        # Disabling the application hint cannot disable Together's automatic
-        # cache. Only response usage may demonstrate a hit.
+              'hit': None, 'discountGuaranteed': False, 'documentationDate': '2026-10-06'}
+    if strategy in {'automatic', 'implicit', 'router_automatic'}:
+        # Disabling an application hint cannot disable automatic upstream
+        # caching. Only response usage may demonstrate a hit.
         result['providerCacheUncontrolled'] = True
     return result
 
@@ -94,4 +96,7 @@ def apply_chat_cache(payload: dict, *, provider: str, model: str, url: str,
         system['content'] = [{'type': 'text', 'text': system['content'],
                               'cache_control': {'type': 'ephemeral'}}]
         policy['breakpoint'] = 'system_prefix_only'
+        if provider == 'openrouter' and model.lower().startswith('anthropic/claude-') and result.get('session_id'):
+            result['cache_control'] = {'type': 'ephemeral'}
+            policy['breakpoint'] = 'system_and_conversation'
     return result, policy

@@ -12,54 +12,8 @@ from backend.ai.errors import ModelOutputContractError, WrongLanguageOutput
 from backend.ai.translation.contracts import AiConfig
 from backend.ai.translation.invocation import translate as ai_translate
 from backend.lens.languages import normalize as normalize_lang
-# from backend.lens.tree import iter_paragraphs
-from backend.log import dbg, event
+from backend.log import event
 
-# def _restore_unanswered_paragraphs(
-#     out: dict[str, Any],
-#     original_tree: dict | None,
-#     source_img: "Image.Image | None",
-#     base_img: "Image.Image | None",
-#     *,
-#     client_background: bool,
-#     stages: dict[str, Any],
-# ) -> int:
-#     """Undo the erase for paragraphs the model did not answer.
-
-#     The page is erased before the AI replies, so a partial answer leaves the
-#     unanswered bubbles blank — the reader loses text that was there before the
-#     translation ran. The extension already refuses to erase what it cannot
-#     replace; this is the same rule on the server. Returns how many paragraphs
-#     were restored.
-#     """
-#     meta = ((out.get("Ai") or {}).get("meta") or {})
-#     indices = meta.get("missing_paragraph_indices") or []
-#     if not indices:
-#         return 0
-#     tokens = spans_for_paragraphs(original_tree, indices)
-#     if not tokens:
-#         return 0
-
-#     if client_background:
-#         # The client paints the boxes: simply do not send the ones whose text
-#         # is staying on screen.
-#         keep = spans_for_paragraphs(
-#             original_tree,
-#             [i for i, _ in iter_paragraphs(original_tree) if i not in set(indices)],
-#         )
-#         out["eraseBoxes"] = erase_boxes_mod.build(keep)
-#     elif base_img is not None and source_img is not None:
-#         _t = time.perf_counter()
-#         restore_token_regions(base_img, source_img, tokens)
-#         if settings.lens_direct_png:
-#             out["imageDataUri"] = _encode_bg_data_uri(base_img)
-#         stages["ai_partial_restore_ms"] = round((time.perf_counter() - _t) * 1000, 1)
-#     else:
-#         return 0
-
-#     stages["ai_partial_restored_paragraphs"] = len(indices)
-#     dbg("ai.partial.restored", {"paragraphs": indices})
-#     return len(indices)
 
 def _script_name(ch: str) -> str:
     """Return a stable, privacy-safe script label for one Unicode letter."""
@@ -146,8 +100,20 @@ def _target_script_diagnostic(text: str, target_lang: str, source_text: str = ""
     source_value = str(source_text or "")
     trimmed = value.strip()
     source_trimmed = source_value.strip()
+    attribution_prose = {"THIS", "THAT", "THE", "MY", "YOUR", "OUR", "NO", "YES", "NOT", "STOP", "START", "NEXT", "NEW", "LAST", "PREVIOUS", "ANY", "SOME", "NEED", "WANT"}
+    def attribution_identity(text):
+        # Mirror the source-owned ASCII credit gate. Case/spacing cannot alter
+        # its name, token order, singular/plural, optional suffix or plus count.
+        if not text or not all(0x20 <= ord(ch) <= 0x7E for ch in text):
+            return None
+        match = re.fullmatch(r"(\+*)\s*([A-Z0-9_.-]{2,40})\s+(TRANSLATIONS?|SCANLATIONS?)(?:\s+([A-Z]))?", text.upper())
+        return match.groups() if match and match[2] not in attribution_prose else None
+    attribution = attribution_identity(trimmed)
+    preserved_credit = attribution is not None and attribution == attribution_identity(source_trimmed)
     is_preserved_identifier = (
-        re.match(r"^(?:https?://|www\.)\S+$", trimmed, re.I) is not None
+        attribution is not None
+        or re.fullmatch(r"@[a-z0-9_][a-z0-9_.-]{0,63}", trimmed, re.I) is not None
+        or re.match(r"^(?:https?://|www\.)\S+$", trimmed, re.I) is not None
         or re.match(r"^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$", trimmed, re.I) is not None
         or re.match(r"^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:[a-z]{2}|com|net|org|edu|gov|mil|int|info|biz|name|mobi|app|dev|xyz|online|site|store|tech|cloud|space)(?::\d+)?(?:/\S*)?$", trimmed, re.I) is not None
         or re.match(r"^(?:[a-z]:[\\/]|\\\\|/)(?:[^\\/\s]+[\\/])*[^\\/\s]*$", trimmed, re.I) is not None
@@ -157,9 +123,8 @@ def _target_script_diagnostic(text: str, target_lang: str, source_text: str = ""
         or re.match(r"^(?:v?\d+)(?:\.\d+)+(?:[-_][a-z0-9]+)?$", trimmed, re.I) is not None
     )
     preserved_identifier = (
-        bool(trimmed) and trimmed == source_trimmed
-        and all(0x21 <= ord(ch) <= 0x7E for ch in trimmed)
-        and is_preserved_identifier
+        bool(trimmed) and (preserved_credit or trimmed == source_trimmed and is_preserved_identifier)
+        and all(0x20 <= ord(ch) <= 0x7E for ch in trimmed)
     )
     target_script = "thai" if target == "th" else "hangul"
     if preserved_identifier:
@@ -243,14 +208,15 @@ def _ai_answer_state(result: dict, expected: int, target_lang: str, source_units
     if extracted is None or not markers.has_complete_sequence(text, expected):
         return {"valid": False, "reason": "malformed", "text": text, "units": []}
     units, clean = extracted
-    missing = [i for i, value in enumerate(units) if not str(value or "").strip()]
+    skipped = set((result.get('meta') or {}).get('skipped_source_indices') or [])
+    missing = [i for i, value in enumerate(units) if i not in skipped and not str(value or "").strip()]
     # Judge each attributable unit independently. Combining a short foreign
     # name/SFX with neighbouring Thai dialogue can manufacture a false page-
     # level ratio and spend the repair on a valid answer.
     sources = list(source_units or [])
     language_diagnostics = [_target_script_diagnostic(
         value, target_lang, sources[index] if index < len(sources) else "", f"P{index}"
-    ) for index, value in enumerate(units)]
+    ) for index, value in enumerate(units) if index not in skipped]
     wrong_script = any(row["decision"] == "reject" for row in language_diagnostics)
     return {
         "valid": not missing and not wrong_script,
@@ -261,6 +227,24 @@ def _ai_answer_state(result: dict, expected: int, target_lang: str, source_units
         "missing": missing,
         "languageDiagnostics": language_diagnostics,
     }
+
+def _routing_outcome(result: dict, state: dict, expected: int) -> None:
+    """Finalise the provider attempts of this answer with the validator's verdict
+    (contract §2 outcomes) so routing statistics learn which host answered well."""
+    attempts = (result.get("meta") or {}).get("routing_attempts") or []
+    if not attempts:
+        return
+    reason = state.get("reason")
+    if state.get("valid"):
+        outcome = "ok"
+    elif reason == "wrong_target_script":
+        outcome = "wrong_language"
+    elif reason == "missing_or_empty":
+        outcome = "empty" if len(state.get("missing") or []) >= expected > 0 else "missing_ids"
+    else:
+        outcome = "format"
+    from backend.ai import routing
+    routing.finalize(attempts, outcome)
 
 def translate_with_one_repair(
     source_text: str,
@@ -317,38 +301,70 @@ def translate_with_one_repair(
         })
         raise RuntimeError("cancelled")
 
+    def owned_paid_replay(meta: dict) -> bool:
+        return (meta.get('provider') == 'paid' and meta.get('centerOperationReplayed') is True
+                and meta.get('requestDispatched') is False
+                and type(meta.get('generationAttempts')) is int and meta['generationAttempts'] == 0
+                and type(meta.get('providerAttempts')) is int and meta['providerAttempts'] == 0
+                and isinstance(meta.get('usage'), dict)
+                and meta['usage'].get('centerOperationReplayed') is True)
+
+    def new_attempts(meta: dict) -> int:
+        return 0 if owned_paid_replay(meta) else max(1, int(meta.get('generationAttempts')
+            or meta.get('generation_attempts') or 1))
+
+    def retained_failure_meta(meta: dict) -> dict:
+        if not owned_paid_replay(meta):
+            return dict(meta)
+        from backend.ai.usage import aggregate_usage
+        historical = dict(meta['usage'])
+        usage = aggregate_usage([])
+        usage.update(retainedGenerations=[historical], centerOperationReplayed=True,
+                     inputTokens=0, outputTokens=0, totalTokens=0,
+                     source=None, usageStatus='not_dispatched')
+        return {**meta, 'usage': usage, 'generation_attempts': 0, 'provider_attempts': 0}
+
     def combined_generation_meta(first_meta: dict, repair_meta: dict) -> dict:
-        """Combine two real provider generations exactly once."""
+        """Combine new dispatches; retain earlier settled evidence separately."""
         a = first_meta.get("usage") if isinstance(first_meta.get("usage"), dict) else {}
         b = repair_meta.get("usage") if isinstance(repair_meta.get("usage"), dict) else {}
+        phases = [(first_meta, a), (repair_meta, b)]
+        active = [(meta, usage) for meta, usage in phases if not owned_paid_replay(meta)]
+        retained = [usage for meta, usage in phases if owned_paid_replay(meta)]
+        attempts = sum(new_attempts(meta) for meta, _ in phases)
 
         def sum_nullable(*values: Any) -> float | None:
             known = [float(value) for value in values if isinstance(value, (int, float))]
             return sum(known) if known else None
 
         from backend.ai.usage import aggregate_usage
-        usage = aggregate_usage([a, b])
+        usage = aggregate_usage([usage for _, usage in active])
+        if retained:
+            usage['retainedGenerations'] = retained
+            usage['centerOperationReplayed'] = not active
+            if not active:
+                usage.update(inputTokens=0, outputTokens=0, totalTokens=0,
+                             source=None, usageStatus='not_dispatched')
         return {
             **first_meta,
             **repair_meta,
             "usage": usage,
             "provider_ms": sum_nullable(
-                first_meta.get("provider_ms", first_meta.get("providerMs")),
-                repair_meta.get("provider_ms", repair_meta.get("providerMs")),
+                *(meta.get("provider_ms", meta.get("providerMs")) for meta, _ in active),
             ),
             "provider_parse_ms": sum_nullable(
-                first_meta.get("provider_parse_ms", first_meta.get("providerParseMs")),
-                repair_meta.get("provider_parse_ms", repair_meta.get("providerParseMs")),
+                *(meta.get("provider_parse_ms", meta.get("providerParseMs")) for meta, _ in active),
             ),
-            "generation_usage": [a, b],
+            "generation_usage": [usage for _, usage in active],
             "provider_http_statuses": [
-                *list(first_meta.get("provider_http_statuses") or first_meta.get("providerHttpStatuses") or []),
-                *list(repair_meta.get("provider_http_statuses") or repair_meta.get("providerHttpStatuses") or []),
+                status for meta, _ in active
+                for status in (meta.get("provider_http_statuses") or meta.get("providerHttpStatuses") or [])
             ],
-            "generationAttempts": 2,
-            "generation_attempts": 2,
-            "providerAttempts": 2,
-            "provider_attempts": 2,
+            "generationAttempts": attempts,
+            "generation_attempts": attempts,
+            "providerAttempts": attempts,
+            "provider_attempts": attempts,
+            **({'centerOperationReplayed': not active, 'requestDispatched': bool(active)} if retained else {}),
         }
     try:
         raise_if_cancelled("initial_dispatch")
@@ -357,7 +373,12 @@ def translate_with_one_repair(
             is_retry=False, capture_request=capture_request,
             cancel_check=cancel_check,
         )
+        if (first.get('meta') or {}).get('skipped_reason') == 'no_translatable_text':
+            first.setdefault('meta', {}).update(repair_attempted=False,
+                repair_skipped=True, generation_attempts=0, provider_attempts=0)
+            return first
         first_state = _ai_answer_state(first, expected, target_lang, source_units)
+        _routing_outcome(first, first_state, expected)
         first_diagnostics = list(first_state.get("languageDiagnostics") or [])
         wire_trace.write_json("07_validation.json", {
             "generationAttempt": 1,
@@ -370,8 +391,7 @@ def translate_with_one_repair(
         })
         if first_state["valid"]:
             first_meta = first.setdefault("meta", {})
-            actual_attempts = max(1, int(first_meta.get("generationAttempts")
-                                         or first_meta.get("generation_attempts") or 1))
+            actual_attempts = new_attempts(first_meta)
             first_meta.update({"generation_attempts": actual_attempts,
                                "provider_attempts": max(actual_attempts, int(first_meta.get("providerAttempts") or actual_attempts)),
                                "repair_attempted": False})
@@ -390,7 +410,10 @@ def translate_with_one_repair(
     reason = str((first_state or {}).get("reason") or "malformed")
     if getattr(config, "repair_enabled", True) is False:
         if first is not None and first_state is not None:
+            first_meta = first.get('meta') or {}
+            actual_attempts = new_attempts(first_meta)
             if reason == "wrong_target_script":
+                generation_meta = retained_failure_meta(first_meta)
                 language_diagnostics = list(first_state.get("languageDiagnostics") or [])
                 wrong_ids = [row["id"] for row in language_diagnostics if row.get("decision") == "reject"]
                 failure = WrongLanguageOutput(
@@ -401,23 +424,19 @@ def translate_with_one_repair(
                     languageDiagnostics=language_diagnostics[:10],
                     resolvedProvider=first.get("meta", {}).get("provider"),
                     resolvedModel=first.get("meta", {}).get("model"),
-                    generationAttempts=int(first.get("meta", {}).get("generationAttempts")
-                                           or first.get("meta", {}).get("generation_attempts") or 1),
-                    generationMeta=dict(first.get("meta", {})),
+                    generationAttempts=actual_attempts,
+                    generationMeta=generation_meta,
                 )
-                failure.generationMeta = dict(first.get("meta", {}))
-                failure.generationAttempts = int(
-                    first.get("meta", {}).get("generationAttempts")
-                    or first.get("meta", {}).get("generation_attempts") or 1
-                )
-                failure.providerAttempts = int(
-                    first.get("meta", {}).get("providerAttempts")
-                    or first.get("meta", {}).get("provider_attempts")
-                    or failure.generationAttempts
-                )
+                failure.generationMeta = generation_meta
+                failure.generationAttempts = actual_attempts
+                failure.providerAttempts = (0 if owned_paid_replay(first_meta) else int(
+                    first_meta.get("providerAttempts") or first_meta.get("provider_attempts") or actual_attempts))
+                if owned_paid_replay(first_meta):
+                    failure.requestDispatched = False
                 raise failure
             first.setdefault("meta", {}).update({
-                "generation_attempts": 1,
+                "generation_attempts": actual_attempts,
+                "provider_attempts": actual_attempts,
                 "repair_attempted": False,
                 "repair_enabled": False,
                 "repair_skipped": True,
@@ -427,9 +446,16 @@ def translate_with_one_repair(
             })
             return first
         if first_error is not None:
+            retained = owned_paid_replay(first_failure_meta)
+            if retained:
+                generation_meta = retained_failure_meta(first_failure_meta)
+                first_error.generationMeta = generation_meta
+                first_error.generationAttempts = first_error.providerAttempts = 0
+                first_error.requestDispatched = False
+                first_error.structural_details['generationMeta'] = generation_meta
             first_error.structural_details.update({
-                "generationAttempts": int(first_error.structural_details.get("generationAttempts")
-                                          or getattr(first_error, "generationAttempts", 1) or 1),
+                "generationAttempts": (0 if retained else int(first_error.structural_details.get("generationAttempts")
+                                          or getattr(first_error, "generationAttempts", 1) or 1)),
                 "repairAttempted": False,
                 "repairEnabled": False,
                 "repairSkipped": True,
@@ -495,10 +521,12 @@ def translate_with_one_repair(
             cancel_check=cancel_check,
         )
         repair_generated = True
+        repair_failure_meta = dict(repaired.get('meta') or {})
         raise_if_cancelled("repair_validation")
         repaired_state = _ai_answer_state(
             repaired, len(repair_source_units), target_lang, repair_source_units
         )
+        _routing_outcome(repaired, repaired_state, len(repair_source_units))
         repair_diagnostics = list(repaired_state.get("languageDiagnostics") or [])
         wire_trace.write_json("07_validation.json", {
             "generationAttempt": 2,
@@ -528,7 +556,7 @@ def translate_with_one_repair(
                     first_failure_meta, repaired.get("meta") or {}
                 )
             repaired.setdefault("meta", {}).update({
-                "generation_attempts": 2,
+                "generation_attempts": new_attempts(repaired.get('meta') or {}),
                 "repair_attempted": True,
                 "repair_accepted": True,
                 "repair_reason": reason,
@@ -568,7 +596,7 @@ def translate_with_one_repair(
                 first["meta"] = combined_generation_meta(first_meta, repair_failure_meta)
                 first_meta = first["meta"]
             first_meta.update({
-                "generation_attempts": 2 if repair_generated else 1,
+                "generation_attempts": new_attempts(first_meta),
                 "repair_attempted": True,
                 "repair_accepted": False,
                 "repair_reason": reason,
@@ -581,22 +609,25 @@ def translate_with_one_repair(
     if first_error is not None:
         failure_meta = (combined_generation_meta(first_failure_meta, repair_failure_meta)
                         if repair_generated else first_failure_meta)
+        attempts = new_attempts(failure_meta)
         failure = ModelOutputContractError(
             "AI repair failed after malformed model output",
             response_shape="repair_failed", repairReason="malformed",
-            generationAttempts=2 if repair_generated else 1,
+            generationAttempts=attempts,
             repairAttempted=True, generationMeta=failure_meta,
         )
         failure.generationMeta = failure_meta
-        failure.generationAttempts = 2 if repair_generated else 1
-        failure.providerAttempts = 2 if repair_generated else 1
+        failure.generationAttempts = attempts
+        failure.providerAttempts = attempts
         raise failure from first_error
-    failure_meta = (combined_generation_meta(first.get("meta") or {}, repair_failure_meta)
-                    if repair_generated and first is not None else repair_failure_meta)
+    initial_meta = (first.get('meta') or {}) if first is not None else first_failure_meta
+    failure_meta = (combined_generation_meta(initial_meta, repair_failure_meta)
+                    if repair_generated else initial_meta)
+    attempts = new_attempts(failure_meta)
     failure = ModelOutputContractError(
         f"AI repair failed after {reason}",
         response_shape="repair_failed", repairReason=reason,
-        generationAttempts=2 if repair_generated else 1,
+        generationAttempts=attempts,
         repairAttempted=True, generationMeta=failure_meta,
         wrongLanguageIds=[
             row.get("id") for row in (repaired_state.get("languageDiagnostics") or [])
@@ -605,6 +636,6 @@ def translate_with_one_repair(
         languageDiagnostics=list(repaired_state.get("languageDiagnostics") or [])[:10],
     )
     failure.generationMeta = failure_meta
-    failure.generationAttempts = 2 if repair_generated else 1
-    failure.providerAttempts = 2 if repair_generated else 1
+    failure.generationAttempts = attempts
+    failure.providerAttempts = attempts
     raise failure

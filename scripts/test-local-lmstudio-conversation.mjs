@@ -241,9 +241,10 @@ try {
   const unknownLowest=await send(11,'Unknown Lowest',{owner:'unknown-lowest',thinking:'minimum',
     reasoning:{supported:null,source:'lmstudio_native_loaded_instance'}});
   assert.equal(unknownLowest.meta.conversation.commitStatus,'committed');
-  assert.equal(unknownLowest.meta.thinkingApplied,'provider_managed_unverified');
-  assert.equal(wireContracts.at(-1)?.thinkingApplied,'provider_managed_unverified',
-    'native wire trace records the unverified provider-managed Lowest plan');
+  // 10488: no published control → AI think state "default" (provider default).
+  assert.equal(unknownLowest.meta.thinkingApplied,'provider_default');
+  assert.equal(wireContracts.at(-1)?.thinkingApplied,'provider_default',
+    'native wire trace records the provider-default plan');
   assert.equal(requests.length,beforeUnknown+1);
   assert.equal(requests.at(-1).reasoning,undefined);
   const beforeOllama=requests.length;

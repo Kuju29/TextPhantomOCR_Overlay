@@ -4,13 +4,17 @@ import { repairCoordinator } from "./repair/coordinator.js";
 // Creates the context-menu items and turns a click on them into job payloads enqueued as one batch.
 
 import { createLogger } from "../shared/logger.js";
+import "../shared/page-ui-text.js";
 import { readFullSettings } from "../shared/settings.js";
+import { validTokenCeiling } from "../shared/token-ceiling.js";
+import { paidRunEstimate } from "./paid-credit-estimate.js";
 import { effectiveEngineMode } from "../shared/engine-mode.js";
 import { isLocalAiProvider } from "../shared/constants.js";
 import { localProviderTranslationMode } from "../shared/ai/providers/local-registry.js";
 import { AI_PROMPT_MODE } from "../shared/ai-prompt-policy.js";
 import { normalizeReasoningPreference } from "../shared/reasoning-preference.js";
 import { attachTpError, publicTpError } from "../shared/error-contract.js";
+import { imageErrorMessage } from './error-message.js';
 import {
   aiConfigurationIssueForError,
   autoAiSettingsIssue,
@@ -26,6 +30,8 @@ import {
 } from "../shared/series.js";
 import { getApiBase } from "./api.js";
 import { getSeriesMemory, selectPromptMemory } from "./series-memory.js";
+import { generationFingerprint } from "./result-cache.js";
+import { rememberTabGeneration } from "./mangadex.js";
 import { ensureBatch, batchUpdateToast, batchStopKeepAlive, registerBatchPayload } from "./batches.js";
 import { fetchImageDataUriFromTab } from "./images.js";
 import { describeLimits } from "./job-queue.js";
@@ -33,6 +39,7 @@ import { imageKeyFromPayload } from "./job-keys.js";
 import { enqueue, setCurrentBatchId } from "./jobs.js";
 import { getSettingsEpoch } from "./jobs/lifecycle.js";
 import { resolveJobAiProfile } from "./ai-profile-resolver.js";
+import { waitForLoginConnect, resolveWithAutoConnect } from "./login/login-ready-gate.js";
 import { ensureLocalAiBatchReady } from "./local-ai-preflight.js";
 import { getTrace, note as traceNote } from "../shared/trace.js";
 import { chooseCanonicalImageSource } from "./right-click-target.js";
@@ -104,14 +111,6 @@ function showAiConfigurationError(menuInfo, tab, error) {
   });
   const frameId = Number(menuInfo?.frameId) || 0;
   sendToastToTab(tab.id, frameId, `TextPhantom: ${issue.message} ยังไม่ได้เริ่มแปล`, 12000);
-  if (menuInfo?.menuItemId === "img_one" && menuInfo?.srcUrl) {
-    void sendToTab(tab.id, {
-      type: "IMAGE_ERROR",
-      original: menuInfo.srcUrl,
-      message: issue.message,
-      error: publicTpError(safeError),
-    }, frameId);
-  }
   return safeError;
 }
 
@@ -154,6 +153,13 @@ const overrideSource = (v) => {
 };
 
 let menusRebuilding = false;
+const pageText = globalThis.TPPageText;
+// Menu titles follow the interface language selected in the popup.
+pageText.onChange(() => {
+  if (menusRebuilding) return;
+  for (const [id, title] of [["img_one", "🔍 Translate this image"], ["img_all", "🔍 Translate all images on page"]])
+    try { chrome.contextMenus?.update?.(id, { title: pageText.t(title) }, ignoreMenuError); } catch {}
+});
 
 // Recreates the context-menu items, ignoring overlapping calls.
 export function recreateMenus() {
@@ -164,7 +170,7 @@ export function recreateMenus() {
     chrome.contextMenus.create(
       {
         id: "img_one",
-        title: "🔍 Translate this image",
+        title: pageText.t("🔍 Translate this image"),
         contexts: ["image"],
       },
       ignoreMenuError,
@@ -172,7 +178,7 @@ export function recreateMenus() {
     chrome.contextMenus.create(
       {
         id: "img_all",
-        title: "🔍 Translate all images on page",
+        title: pageText.t("🔍 Translate all images on page"),
         contexts: ["page", "selection"],
       },
       ignoreMenuError,
@@ -182,13 +188,13 @@ export function recreateMenus() {
 }
 
 // Builds the `ai` sub-object of a payload from the user's settings and the series' memory, or null for non-AI jobs.
-export async function buildAiPayload(mode, source, settings, seriesKey) {
+export async function buildAiPayload(mode, source, settings, seriesKey, targetLang = settings.lang, chapterURL = "") {
   if (mode !== "lens_text" || source !== "ai") return null;
-  const memory = selectPromptMemory(await getSeriesMemory(seriesKey));
   const sendImage = pageImageEnabled(settings.aiPageImage);
   const memMode = ["off", "terms", "full"].includes(settings.aiMemoryMode)
     ? settings.aiMemoryMode
     : "off";
+  const memory = selectPromptMemory(memMode === "off" ? null : await getSeriesMemory(seriesKey, targetLang, memMode === "full" ? chapterURL : ""));
   const useGlossary = memMode === "terms" || memMode === "full";
   const useChars = memMode === "full";
   const local = isLocalAiProvider(settings.aiProvider);
@@ -201,6 +207,10 @@ export async function buildAiPayload(mode, source, settings, seriesKey) {
     String(storedCapability.model || "").trim() === String(settings.aiModel || "").trim();
   return {
     api_key: settings.aiKey || "",
+    ...(settings.aiProvider==='paid'&&settings.aiPaidQuoteToken?{price_quote_token:settings.aiPaidQuoteToken}:{}),
+    ...(settings.aiProvider==='paid'&&Number.isSafeInteger(settings.aiPaidRequestBudget)?{paid_request_budget:settings.aiPaidRequestBudget}:{}),
+    // User token ceiling for this model (planning only; never sent to a provider).
+    ...(validTokenCeiling(settings.aiTokenCeiling)?{token_ceiling:settings.aiTokenCeiling}:{}),
     on_device: settings.aiOnDevice === true,
     model: settings.aiModel || "auto",
     provider: settings.aiProvider || "",
@@ -213,7 +223,7 @@ export async function buildAiPayload(mode, source, settings, seriesKey) {
     prev_context: useChars ? memory.prevContext || [] : [],
     char_memory: useChars,
     memory_mode: memMode,
-    style_examples: local ? settings.aiStyleExamples !== false : true,
+    style_examples: settings.aiStyleExamples === true,
     translation_mode: local ? localProviderTranslationMode(settings.aiProvider) : "conversation",
     conversation_reset: String(settings.aiConversationReset || "0"),
     send_image: sendImage,
@@ -368,7 +378,25 @@ function buildMetadata({ existing, imageId, batchId, sourceUrl, stage }) {
   };
 }
 
-// Handles a click on `img_one` by building the clicked image's payload and enqueuing it.
+// If the Paid balance may not cover this run, ask on the page first. Yes =
+// translate as far as the credits go (the Center refuses, before AI, any request
+// it cannot cover; those images show "not enough credits").
+export async function confirmPaidCredits(ctx, tab, frameId, images) {
+  const check = ctx?.paidCreditCheck;
+  if (!check) return true;
+  let estimate;
+  try {
+    estimate = await paidRunEstimate({apiBase: check.apiBase, model: check.model, images,
+      availableTp: check.availableTp, pricing: check.pricing});
+  } catch { return true; } // No estimate: the Center still checks every request.
+  traceNote("background/context-menu.js", "paidCreditEstimate", estimate, getTrace());
+  if (estimate.sufficient) return true;
+  const resp = await requestFromTab(tab.id, {type: "TP_PAID_CREDIT_CONFIRM", estimate}, frameId);
+  traceNote("background/context-menu.js", "paidCreditConfirm", {proceed: resp?.proceed === true,
+    shown: resp != null}, getTrace());
+  return resp?.proceed === true;
+}
+
 async function handleTranslateOne(menuInfo, tab, ctx) {
   const {
     mode,
@@ -479,8 +507,8 @@ async function handleTranslateOne(menuInfo, tab, ctx) {
         chrome.action?.setBadgeBackgroundColor?.({ color: "#c0392b" });
         chrome.action?.setTitle?.({
           tabId: tab.id,
-          title:
-            'TextPhantom: enable "Allow access to file URLs" in chrome://extensions to translate local images',
+          title: pageText.t(
+            'TextPhantom: enable "Allow access to file URLs" in chrome://extensions to translate local images'),
         });
       } catch {}
     }
@@ -495,6 +523,7 @@ async function handleTranslateOne(menuInfo, tab, ctx) {
     { type: "TP_KEEPALIVE_START", ms: KEEPALIVE_MS, batchId },
     frameId,
   );
+  if (!(await confirmPaidCredits(ctx, tab, frameId, 1))) return {cancelledBy: "paid_credits"};
 
   const batch = ensureBatch(batchId, tab.id, frameId);
   batch.total1 = 1;
@@ -671,6 +700,7 @@ async function handleTranslateAll(menuInfo, tab, ctx) {
     { type: "TP_KEEPALIVE_START", ms: KEEPALIVE_MS, batchId },
     imagesFrameId,
   );
+  if (!(await confirmPaidCredits(ctx, tab, imagesFrameId, payloads.length))) return {cancelledBy: "paid_credits"};
 
   const batch = ensureBatch(batchId, tab.id, imagesFrameId);
   batch.total1 = payloads.length;
@@ -689,15 +719,11 @@ async function handleTranslateAll(menuInfo, tab, ctx) {
 }
 
 /**
- * Handles a context-menu click: reads settings, resolves the series key and dispatches to the single or all-images flow.
- *
- * `options.overrides` runs ONE request on a caller-supplied mode/language/
- * source instead of the shared settings, without writing them to storage —
- * used by the Auto translate tab, which is deliberately independent of the
- * popup. Everything else about the job (AI key, engine, pacing) still comes
- * from the user's real settings, because those are not per-tab preferences.
- * `options.debug.raw` asks the extension route to carry the Lens material it
- * would otherwise drop once decoded.
+ * Handles a context-menu click: reads settings, resolves the series key and
+ * dispatches to the single or all-images flow. `options.overrides` runs ONE
+ * request on a caller-supplied mode/language/source without writing them to
+ * storage (Auto translate tab); AI key, engine and pacing still come from the
+ * user's settings. `options.debug.raw` keeps the Lens material after decoding.
  *
  * @param {object} menuInfo
  * @param {object} tab
@@ -706,6 +732,7 @@ async function handleTranslateAll(menuInfo, tab, ctx) {
  */
 async function dispatchContextMenuClick(menuInfo, tab, options = {}) {
   let startingBatch = null;
+  let errorGeneration = null;
   const diagnosticId=menuInfo?.menuItemId==='img_all' ? crypto.randomUUID() : '';
   const diagnosticTrigger=menuInfo?.diagnosticTrigger==='page_action'?'page_action':'context_menu';
   if (!tab?.id) return;
@@ -713,6 +740,17 @@ async function dispatchContextMenuClick(menuInfo, tab, options = {}) {
   log.info("menu click", menuInfo.menuItemId);
   try {
     const contentReady=await ensureContentScript(tab.id);
+    // Capture only the image identity before asynchronous account/model checks.
+    // No image bytes or OCR are needed, and a later navigation cannot borrow
+    // the old request's error badge for a new image at the same URL.
+    if (menuInfo?.menuItemId === 'img_one' && menuInfo?.srcUrl && contentReady) {
+      const target = await requestFromTab(tab.id, {type:'GET_IMAGE_ERROR_TARGET',
+        srcUrl:menuInfo.srcUrl,clickedSrcUrl:menuInfo.clickedSrcUrl || menuInfo.srcUrl},
+        Number(menuInfo.frameId) || 0).catch(() => null);
+      if (target?.ok === true && typeof target.generation?.pageInstanceId === 'string' && target.generation.pageInstanceId &&
+          typeof target.generation?.targetInstanceId === 'string' && target.generation.targetInstanceId)
+        errorGeneration = target.generation;
+    }
     if(diagnosticId){
       startImageScanDiagnostics(diagnosticId,tab.id,0);
       await reportImageScan(diagnosticId,'dispatch_start',{trigger:diagnosticTrigger});
@@ -737,8 +775,17 @@ async function dispatchContextMenuClick(menuInfo, tab, options = {}) {
         ? overrideSource(overrides?.source) || flatSettings.sources || "translated"
         : "translated";
     const usesAi = mode === "lens_text" && preliminarySource === "ai";
+    // A Login connect still in progress is waited for, with a visible
+    // "connecting" status, instead of starting work that can only fail.
+    const loginNotify = (text, ms) => sendToastToTab(tab.id, menuInfo.menuItemId === "img_all" ? 0 : Number(menuInfo.frameId) || 0, text, ms);
+    if (usesAi) {
+      await waitForLoginConnect(flatSettings, { notify: loginNotify });
+    }
+    // A website Login that is not connected connects by itself (open tab
+    // reused, or opened), then the translation starts.
     let profileSnapshot = usesAi
-      ? await resolveJobAiProfile(flatSettings, { language: lang })
+      ? await resolveWithAutoConnect(flatSettings, () => resolveJobAiProfile(flatSettings, { language: lang }),
+        { notify: loginNotify })
       : null;
     let resolvedSettings = profileSnapshot?.settings || flatSettings;
     let settings = {
@@ -801,11 +848,16 @@ async function dispatchContextMenuClick(menuInfo, tab, options = {}) {
       await resolveSeriesKey(tab?.url || ""),
       tab?.title || "",
     );
-    const aiPayload = await buildAiPayload(mode, source, settings, seriesKey);
+    const aiPayload = await buildAiPayload(mode, source, settings, seriesKey, lang, tab?.url || "");
     const layoutPayload = buildLayoutPayload(mode, settings);
     const ratePayload = buildRatePayload(mode, source, settings);
     const limitsPayload = buildLimitsPayload(settings);
     const engineMode = effectiveEngineMode(settings.engineMode);
+    // 10493: this press's generation settings (same hash every job of the
+    // press records), so cached MangaDex pages made under other settings
+    // are translated again instead of reused.
+    rememberTabGeneration(tab.id, { lang, mode, source }, await generationFingerprint({
+      mode, lang, source, engine: engineMode, ai: aiPayload }));
 
     if (profileSnapshot) {
       traceNote(
@@ -843,6 +895,9 @@ async function dispatchContextMenuClick(menuInfo, tab, options = {}) {
       debug,
       diagnosticId,
       diagnosticTrigger,
+      // Click-time Paid credit check (Manual/Local/Login have none).
+      paidCreditCheck: usesAi && settings.aiProvider === "paid" && settings.aiPaidCreditCheck
+        ? {...settings.aiPaidCreditCheck, model: settings.aiModel} : null,
     };
     sendToastToTab(
       tab.id,
@@ -877,6 +932,12 @@ async function dispatchContextMenuClick(menuInfo, tab, options = {}) {
 
     const result = menuInfo.menuItemId === "img_one" ? await handleTranslateOne(menuInfo,tab,ctx)
       : menuInfo.menuItemId === "img_all" ? await handleTranslateAll(menuInfo,tab,ctx) : null;
+    if (result?.cancelledBy === "paid_credits") {
+      startingBatch.lifecycle = "cancelled"; startingBatch.completedAt = Date.now();
+      batchUpdateToast(startingBatch, "Cancelled: not enough credits. Nothing was sent or charged.", true);
+      await batchStopKeepAlive(startingBatch);
+      return null;
+    }
     if (!result && !startingBatch.items.size) {
       startingBatch.lifecycle='empty';startingBatch.completedAt=Date.now();
       batchUpdateToast(startingBatch,'No eligible images',true);
@@ -918,9 +979,11 @@ async function dispatchContextMenuClick(menuInfo, tab, options = {}) {
       sendToastToTab(tab?.id, Number(menuInfo?.frameId) || 0,
         `TextPhantom: ${shown.userMessage} · ${shown.code}`, 12000);
     }
-    // Browser context-menu clicks historically report errors through logging,
-    // toast/image messages. Programmatic callers need the rejected Promise so
-    // they can leave their busy state and show the immediate start failure.
+    if (menuInfo?.menuItemId === 'img_one' && menuInfo?.srcUrl && errorGeneration)
+      await sendToTab(tab.id, imageErrorMessage({imgUrl:menuInfo.srcUrl,
+        generation:errorGeneration,traceId:getTrace()}, e), Number(menuInfo.frameId) || 0);
+    // Context-menu clicks report errors through logs, toasts and image messages;
+    // programmatic callers need the rejection to leave their busy state.
     if (options?.propagateErrors === true) throw e;
   }
 }

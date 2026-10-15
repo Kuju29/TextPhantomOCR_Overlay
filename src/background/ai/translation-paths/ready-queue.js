@@ -5,18 +5,24 @@ import {createStreamRecords} from './stream-records.js';
 import {checkedOrigins} from '../../../shared/ai/conversation/origins.js';
 import {conversationTicket,conversationTickets,onConversationReady,fenceConversationBilling,fenceConversationConfiguration} from './order.js';
 import {isProviderBillingFailure} from '../../../shared/error-contract.js';
+import {hasMeaningfulAiSource,sourceUnitOrdinal} from '../../../shared/ai-source-filter.js';
 const abortError=()=>new DOMException('Conversation page cancelled','AbortError');
-export function createReadyQueue({choose,dispatch,trace=()=>{}}) {
+const conversationOrdering={ticketFor:conversationTicket,list:conversationTickets,onReady:onConversationReady,
+  fenceBilling:fenceConversationBilling,fenceConfiguration:fenceConversationConfiguration};
+// mode 'independent': Local Independent whole pages packed into one
+// stateless request (prompt sent every request); no history, no native cursor.
+export function createReadyQueue({choose,dispatch,trace=()=>{},mode='conversation',ordering=conversationOrdering,afterRequest=null}) {
   const groups=new Map(); let scheduled=false;
+  const planner=mode==='independent'?'independent_cross_page':'conversation_cross_page';
   const wake=()=>{if(scheduled)return;scheduled=true;queueMicrotask(()=>{scheduled=false;for(const g of groups.values())pump(g);});};
-  const detach=onConversationReady(wake);
+  const detach=ordering.onReady(wake);
   function waiting(e,reason) {
     const now=performance.now();
     if(e.waitReason===reason)return;
     if(e.waitReason==='waiting_for_previous_turn')e.previousWait+=now-e.waitSince;
     if(e.waitReason==='waiting_for_source_order')e.sourceWait+=now-e.waitSince;
     e.waitReason=reason;e.waitSince=now;
-    if(reason)trace({schema:'tp.conversation_batch/1',phase:'queued',planner:'conversation_cross_page',
+    if(reason)trace({schema:'tp.conversation_batch/1',phase:'queued',planner,
       queueReason:reason,pageCount:1,unitCount:e.units.length-e.offset,firstOrder:e.ticket.order,lastOrder:e.ticket.order,
       legacyFallback:false,providerCallsAdded:0},e.options);
   }
@@ -26,12 +32,14 @@ export function createReadyQueue({choose,dispatch,trace=()=>{}}) {
     entry.signal?.removeEventListener('abort',entry.abort);
     entry.group.entries.delete(entry.ticket);
     if(error)entry.reject(error);
-    else (entry.provisionalTask || Promise.resolve()).then(()=>entry.resolve({schema:'tp.ai.result/1',translations:entry.units.flatMap(u=>entry.translated.has(String(u.id))?[{id:u.id,text:entry.translated.get(String(u.id))}]:[]),
+    else (entry.provisionalTask || Promise.resolve()).then(()=>entry.resolve({schema:'tp.ai.result/1',translations:entry.sourceUnits.flatMap(u=>entry.skippedIds.has(String(u.id))?[{id:u.id,text:u.text}]:entry.translated.has(String(u.id))?[{id:u.id,text:entry.translated.get(String(u.id))}]:[]),
       missing:entry.units.filter(u=>!entry.translated.has(String(u.id))).map(u=>String(u.id)),
-      memoryDelta:{characters:[],glossary:[]},meta:{route:entry.options.route,translationMode:'conversation',
-        planner:'conversation_cross_page',usageScope:'shared_request_references',sharedRequestRefs:entry.refs,
+      memoryDelta:entry.memoryDelta||{characters:[],glossary:[]},meta:{route:entry.options.route,translationMode:mode,
+        planner,usageScope:'shared_request_references',sharedRequestRefs:entry.refs,
+        seriesSummaryRecords:entry.seriesSummaryRecords||[],seriesSummaries:(entry.seriesSummaryRecords||[]).map(row=>row.text),
         // No full-request usage in a page projection. The transport committed it once.
         generationAttempts:entry.refs.length,providerAttempts:entry.refs.length,omittedIds:[],declinedIds:[],
+        ...(entry.skippedIds.size?{skippedUnitIds:[...entry.skippedIds]}:{}),
         conversation:entry.conversation,streamFailure:entry.streamFailure||null,automaticContentRetry:false}}));
     wake();
   }
@@ -45,11 +53,14 @@ export function createReadyQueue({choose,dispatch,trace=()=>{}}) {
     // a terminal reservation disappears, so cancelled/no-text pages cannot block it.
     const candidates=[...g.entries.values()].filter(e=>!e.settled);
     const ready=[];g.waitReason="ready";
-    for(const ticket of conversationTickets(g.key)){
+    for(const ticket of ordering.list(g.key)){
       const e=g.entries.get(ticket);
       if(!e){g.waitReason='waiting_for_source_order';break;}
       if(e.signal?.aborted){finish(e,abortError());continue;}
       if(!e.units.length){finish(e);continue;}
+      // One Paid provider operation must belong to exactly one user click.
+      // Keep the document/session ordering; only split the ready data prefix.
+      if(ready.length && e.options.ai?.provider==='paid' && e.options.batchId!==ready[0].options.batchId){g.waitReason='user_run_boundary';break;}
       if(ready.length && (e.compat!==ready[0].compat || e.options.imageDataUri || ready[0].options.imageDataUri)){g.waitReason=e.compat!==ready[0].compat?'context_boundary':'image_boundary';break;}
       if(ready.some(r=>r.pageId===e.pageId)){g.waitReason='repeated_page_boundary';break;}
       ready.push(e);
@@ -58,12 +69,12 @@ export function createReadyQueue({choose,dispatch,trace=()=>{}}) {
     if(!ready.length){if(!g.entries.size)groups.delete(g.key);return;}
     g.running=true;let cleanup=()=>{};
     try {
-      const rows=ready.flatMap(e=>e.units.slice(e.offset).map((u,localIndex)=>({
-        entry:e, originalId:String(u.id), text:String(u.text||''),
-        // Stable for the life of this document Conversation. The image ordinal
-        // comes from the reserved document order, never from the current request.
-        id:`I${e.ticket.order}_P${e.offset+localIndex}`
-      })));
+      const rows=ready.flatMap(e=>e.units.slice(e.offset).map((u,localIndex)=>{
+        const sourceOrdinal=sourceUnitOrdinal(u,e.sourceOrdinals.get(String(u.id))??e.offset+localIndex);
+        return {entry:e,originalId:String(u.id),text:String(u.text||''),sourceOrdinal,
+          // Wire IDs use this document's reserved order; memory uses pageIndex.
+          id:`I${e.ticket.order}_P${sourceOrdinal}`};
+      }));
       const mapped=rows;
       const pageSizes=ready.map(e=>e.units.length-e.offset);
       const planningStarted=performance.now();
@@ -94,7 +105,7 @@ export function createReadyQueue({choose,dispatch,trace=()=>{}}) {
         previousProviderMs:Number(g.lastTurnMs)||0,updatedAt:Date.now()});}catch{}
       const origins=checkedOrigins(pages.map(e=>({pageId:e.pageId,pageIndex:e.pageIndex,pageOrder:e.ticket.order,
         sourceFingerprint:e.sourceFingerprint,unitIds:picked.filter(r=>r.entry===e).map(r=>r.id),originalIds:picked.filter(r=>r.entry===e).map(r=>r.originalId)})), picked.map(r=>r.id));
-      const evidence={schema:'tp.conversation_batch/1',mappingStatus:'validated',idPolicy:'conversation_image_unit_v1',planner:'conversation_cross_page',phase:'dispatch',batchId,
+      const evidence={schema:'tp.conversation_batch/1',mappingStatus:'validated',idPolicy:'conversation_image_unit_v1',planner,phase:'dispatch',batchId,
         pageCount:pages.length,unitCount:picked.length,readyPageCount:ready.length,readyUnitCount:mapped.length,
         splitReason:plan.splitReason==='end_of_page'?'ready_queue_drained':plan.splitReason,
         schedulingPolicy:'webpage_order',queueReason:g.waitReason||'ready',firstOrder:pages[0].ticket.order,lastOrder:pages.at(-1).ticket.order,
@@ -115,7 +126,7 @@ export function createReadyQueue({choose,dispatch,trace=()=>{}}) {
       let answer,error;
       const stream=createStreamRecords(picked.map(({id,text})=>({id,text})));
       // Both Extension and API LM Studio paths use a retained native cursor.
-      const statefulLmStudio=ready[0].options.ai?.provider==='lmstudio';
+      const statefulLmStudio=mode==='conversation'&&ready[0].options.ai?.provider==='lmstudio';
       // Ollama can stream reasoning despite think:false. Wait for its terminal
       // evidence before showing translation deltas under explicit Thinking off.
       const deferProvisional=statefulLmStudio||ready[0].options.route==='direct-local'&&
@@ -187,7 +198,7 @@ export function createReadyQueue({choose,dispatch,trace=()=>{}}) {
         providerRequestCount:Number.isInteger(error.providerAttempts)?error.providerAttempts:null,checkpointBeforeMs,providerRoundTripMs,
         batchTotalMs:performance.now()-started},ready[0].options);
       if(isProviderBillingFailure(error)) {
-        fenceConversationBilling(pages.find(e=>!e.settled&&!e.ticket.done)?.ticket);
+        ordering.fenceBilling?.(pages.find(e=>!e.settled&&!e.ticket.done)?.ticket,error);
         for(const e of [...g.entries.values()]) {
           if(pages.includes(e))finish(e,error);
           else if((e.ticket.billingFailure||e.ticket.configurationFailure))finish(e,(e.ticket.billingFailure||e.ticket.configurationFailure));
@@ -195,7 +206,7 @@ export function createReadyQueue({choose,dispatch,trace=()=>{}}) {
         return;
       }
       if (isControlPreflightFailure(error)) {
-        fenceConversationConfiguration(pages.find(e=>!e.settled&&!e.ticket.done)?.ticket,error);
+        ordering.fenceConfiguration?.(pages.find(e=>!e.settled&&!e.ticket.done)?.ticket,error);
         for (const e of [...g.entries.values()]) {
           if (pages.includes(e)) finish(e,error);
           else if (e.ticket.configurationFailure) finish(e,e.ticket.configurationFailure);
@@ -206,13 +217,18 @@ export function createReadyQueue({choose,dispatch,trace=()=>{}}) {
         for(const e of pages)finish(e,error);return;
       }
       let recoverable=!statefulLmStudio&&error&&(error.requestDispatched===true||Number(error.generationAttempts||error.providerAttempts)>0)&&
-        /invalid_model_output|output_budget_exhausted|wrong_language|output_contract|invalid_result_schema|provider_stream_incomplete/i.test(String(error.code||''))&&
+        /invalid_model_output|output_budget_exhausted|wrong_language|output_contract|invalid_result_schema|provider_stream_incomplete|ai_provider_stalled|ai_output_no_progress|ai_stream_ceiling/i.test(String(error.code||''))&&
         !(error.code==='output_budget_exhausted'&&
           ['reasoning_only_exhausted','empty_output'].includes(error.diagnostics?.validatorSubtype));
+      // A stream stopped by a progress rule while writing keeps the
+      // lines that already closed; the missing ones go to the repair pool.
       if(error&&stream.revision>0&&recoverable){
         answer={translations:[...stream.accepted].map(([id,text])=>({id,text})),meta:{streamFailure:{code:String(error.code||'provider_stream_failed'),message:String(error.message||error)}}};
         recoverable=true;
       }
+      // A recoverable stop before any line (e.g. a stalled stream) still names
+      // why the page has no text; without it the page reads as malformed output.
+      const streamFailure=answer?.meta?.streamFailure||(error&&recoverable?{code:String(error.code||'provider_stream_failed'),message:String(error.message||error)}:null);
       const conversationState=answer?.meta?.conversation||error?.generationMeta?.conversation||error?.structuralDetails?.generationMeta?.conversation||error?.diagnostics?.conversation||{};
       // Earlier history does not imply this provider turn was accepted.
       // Preserve the legacy history-only inference only when no commit status
@@ -225,12 +241,10 @@ export function createReadyQueue({choose,dispatch,trace=()=>{}}) {
         // Capacity should react to AI/transport time, not storage/projection overhead.
         g.lastTurnMs=Math.max(0,providerRoundTripMs);
       }
-      // Never retry an entire anchor merely because a few units are missing or fail
-      // target-script validation.  The Conversation owner now commits structurally
-      // usable provider replies and page defects flow to the normal repair pool.
-      // If a truly malformed anchor cannot be committed, distribute/fail only this
-      // request and let the next source page establish a fresh anchor; never cascade
-      // one page failure across every queued page.
+      // Never retry an entire anchor because a few units are missing or fail
+      // target-script validation: structurally usable replies are committed and
+      // page defects go to the repair pool. A truly malformed anchor fails only
+      // this request; the next source page establishes a fresh anchor.
       const actualInput=conversationState.actualInputTokens == null ? null : Number(conversationState.actualInputTokens);
       const cachedInput=conversationState.cachedInputTokens == null ? null : Number(conversationState.cachedInputTokens);
       const resolvedUpstream=String(conversationState.resolvedUpstreamProvider||'').trim();
@@ -258,12 +272,20 @@ export function createReadyQueue({choose,dispatch,trace=()=>{}}) {
         const own=picked.filter(r=>r.entry===e);e.offset+=own.length;
         e.refs.push({operationId:batchId,requestUnits:picked.length,pageUnits:own.length,receiptShared:pages.length>1});
         e.conversation=answer?.meta?.conversation;
-        if(answer?.meta?.streamFailure)e.streamFailure=answer.meta.streamFailure;
+        // Same-call memory (glossary/characters) belongs to the request once.
+        if(e===pages[0]&&answer?.memoryDelta)e.memoryDelta={characters:[...(e.memoryDelta?.characters||[]),...(answer.memoryDelta.characters||[])],
+          glossary:[...(e.memoryDelta?.glossary||[]),...(answer.memoryDelta.glossary||[])]};
+        if (e===pages[0] && !error && answer?.meta?.seriesSummaryRecords?.length &&
+            picked.every(r=>Number.isInteger(r.entry.pageIndex)&&r.entry.pageIndex>=0&&r.entry.pageIndex<10000000&&Number.isSafeInteger(r.sourceOrdinal)&&r.sourceOrdinal>=0)) {
+          const sourceIds=picked.map(r=>`I${r.entry.pageIndex}_P${r.sourceOrdinal}`);
+          e.seriesSummaryRecords=[...(e.seriesSummaryRecords||[]),...answer.meta.seriesSummaryRecords.map(row=>({...row,sourceIds,requestOrder:e.refs.length-1}))].slice(-24);
+        }
+        if(streamFailure)e.streamFailure=streamFailure;
         if(e.signal?.aborted||e.settled){cancelled+=own.length;finish(e,abortError());continue;}
         if(!error||recoverable)for(const r of own){if(!duplicates.has(r.id)&&returned.get(r.id)?.trim()){e.translated.set(r.originalId,returned.get(r.id));applied++;}}
         if(error&&!answer&&!recoverable){finish(e,error);continue;}
         const data={batchId,translations:own.flatMap(r=>e.translated.has(r.originalId)?[{id:r.originalId,text:e.translated.get(r.originalId)}]:[]),
-          streamFailure:answer?.meta?.streamFailure||null,missing:own.filter(r=>!e.translated.has(r.originalId)).map(r=>r.originalId),units:own.map(r=>({id:r.originalId,text:r.text}))};
+          streamFailure,missing:own.filter(r=>!e.translated.has(r.originalId)).map(r=>r.originalId),units:own.map(r=>({id:r.originalId,text:r.text}))};
         // Pages in one Conversation request are independent projections of the
         // same provider response. Run their durable progress checkpoints together
         // so the per-run session store can coalesce the burst into one write
@@ -274,6 +296,9 @@ export function createReadyQueue({choose,dispatch,trace=()=>{}}) {
         })());
       }
       const projectionResults=await Promise.all(projections);
+      // Accepted-result hooks run after every page checkpoint committed.
+      if(afterRequest){try{await afterRequest({pages,picked,answer,error,options:ready[0].options});}
+        catch(hookError){trace({...evidence,phase:'after_request_failed',failureCode:String(hookError?.code||'after_request_failed')},ready[0].options);}}
       const batchTotalMs=performance.now()-started;
       trace({...evidence,phase:'distributed',mappedUnits:applied,cancelledUnits:cancelled,missingUnits:picked.length-applied-cancelled,
         providerCallsAdded:1,requestMs:batchTotalMs,batchTotalMs,checkpointBeforeMs,providerRoundTripMs,
@@ -283,24 +308,34 @@ export function createReadyQueue({choose,dispatch,trace=()=>{}}) {
         else if(e.offset===e.units.length)finish(e);
       }
     } catch(error) {
-      if (isControlPreflightFailure(error)) fenceConversationConfiguration(ready[0].ticket,error);
+      if (isControlPreflightFailure(error)) ordering.fenceConfiguration?.(ready[0].ticket,error);
       finish(ready[0],error);
     }
     finally{cleanup();g.running=false;wake();}
   }
   return {
     submit(units,options) {
-      const ticket=conversationTicket(options.payload);
-      if(!ticket)return Promise.reject(Object.assign(new Error('Conversation source has no owner/document reservation'),{code:'ai_conversation_scope_missing',requestDispatched:false}));
+      const ticket=ordering.ticketFor(options.payload);
+      if(!ticket)return Promise.reject(Object.assign(new Error(mode==='independent'?'Local Independent source has no run/document reservation':'Conversation source has no owner/document reservation'),{code:'ai_conversation_scope_missing',requestDispatched:false}));
       if(ticket.billingFailure||ticket.configurationFailure){ticket.consumed=true;return Promise.reject(ticket.billingFailure||ticket.configurationFailure);}
       let group=groups.get(ticket.key);if(!group){group={key:ticket.key,entries:new Map(),running:false,readySequence:0,hasCommittedTurn:false,cacheConfirmed:false,cacheRatio:0,cacheMissStreak:0,turnIndex:0,lastCommittedUnits:0,lastTurnMs:0,upstreamProvider:''};groups.set(ticket.key,group);}
       if(group.entries.has(ticket))return Promise.reject(new Error('Page already queued for conversation'));
       return new Promise((resolve,reject)=>{
-        const e={ticket,group,units,options,resolve,reject,signal:options.signal,offset:0,translated:new Map(),refs:[],settled:false,
+        // Old checkpoints can carry translatable:true for a singleton. Decide
+        // from the owned source before planning, so skips add no request/history.
+        const eligible=units.filter(u=>hasMeaningfulAiSource(u?.text));
+        const skippedIds=new Set(units.filter(u=>!hasMeaningfulAiSource(u?.text)).map(u=>String(u.id)));
+        const e={ticket,group,units:eligible,sourceUnits:units,skippedIds,
+          sourceOrdinals:new Map(units.map((u,index)=>[String(u.id),index])),
+          options,resolve,reject,signal:options.signal,offset:0,translated:new Map(),refs:[],settled:false,
           pageId:String(options.imageId||''),pageIndex:options.ai.conversation?.pageIndex,
           waitReason:'',waitSince:performance.now(),sourceWait:0,previousWait:0,inFlight:false,
-          sourceFingerprint:options.sourceFingerprint||'',readyOrder:++group.readySequence,compat:JSON.stringify([options.route,options.targetLang,options.sourceLang,
-            options.ai.glossary,options.ai.characters,options.ai.series_state,options.ai.prev_context,options.ai.speakers,
+          // Series memory (glossary, characters, summary, previous page)
+          // changes as pages finish. It is request context, not a reason to
+          // split ready pages: Conversation sends it in the first turn only and
+          // Local Independent re-reads it when each request is planned.
+          sourceFingerprint:options.sourceFingerprint||'',readyOrder:++group.readySequence,compat:JSON.stringify([options.route,options.targetLang,
+            options.ai.memory_mode||'off',options.ai.speakers,
             options.ai.source_context,options.ai.context_frozen,options.ai.output_contract,options.ai.model_capabilities]),created:performance.now()};
         e.abort=()=>finish(e,abortError());group.entries.set(ticket,e);
         if(e.signal?.aborted)e.abort();else e.signal?.addEventListener('abort',e.abort,{once:true});

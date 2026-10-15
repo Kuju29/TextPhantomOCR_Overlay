@@ -10,12 +10,16 @@ function callbackPromise(register, fallback) {
   return new Promise((resolve, reject) => {
     try {
       register((value) => {
-        const error = chrome.runtime?.lastError;
-        if (error) {
-          reject(new Error(error.message || String(error)));
-          return;
+        try {
+          const error = chrome.runtime?.lastError;
+          if (error) {
+            reject(new Error(error.message || String(error)));
+            return;
+          }
+          resolve(value ?? fallback);
+        } catch (error) {
+          reject(error);
         }
-        resolve(value ?? fallback);
       });
     } catch (error) {
       reject(error);

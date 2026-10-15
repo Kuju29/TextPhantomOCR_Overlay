@@ -148,7 +148,9 @@ await test('only valid provider output calibrates token estimates',()=>{
 await test('truncated completion is censored, not a small successful answer',()=>{
   const p=initialProfile();const rows=units(10);const answer=result(rows,{finishReason:'length'});answer.translations.pop();
   const next=learnWorkload(p,observation(p,{answer}));
-  assert.equal(next.ratios.length,0);assert.ok(next.target<p.target);assert.equal(next.successes,0);
+  // .67 dynamic gap: a censored reply only WIDENS the reply gap (never a small ratio).
+  assert.equal(next.ratios.length,1);assert.ok(next.ratios[0]>=1.5*1.25);
+  assert.ok(next.target<p.target);assert.equal(next.successes,0);
 });
 await test('one wrong-language answer does not assert a token ceiling',()=>{
   const p=initialProfile();const next=learnWorkload(p,observation(p,{defects:{wrongLanguage:['P0']}}));
@@ -262,7 +264,12 @@ await test('Conversation packs complete pages by content budget, not unit count/
   const anchor=session.nextReady(anchorRows,[9],{continuation:false,cacheConfirmed:false,cacheRatio:0});
   assert.equal(anchor.units.length,9);
   assert.equal(anchor.wholePages,1);
+  // .67 turn budget: the first turn carries the whole prompt. Large-context
+  // Cloud input starts at 0.7 of the script estimate (measured 0.29-0.63).
   assert.equal(anchor.splitReason,'ready_queue_drained');
+  assert.equal(anchor.estimate.turnBudget.firstTurn,true);
+  assert.equal(anchor.estimate.turnBudget.fits,true);
+  assert.equal(anchor.estimate.inputEstimateScale,.7);
   assert.equal(anchor.estimate.conversationCapacity,'anchor');
 
   // Many short vertical-text units must not hit a record-count gate. All three
@@ -322,7 +329,10 @@ await test('Conversation main and repair use content budgets despite slow genera
   const session=await c.open({route:'server',ai,sourceLang:'en',targetLang:'th'});
   const make=(n,start=0)=>Array.from({length:n},(_,i)=>({id:`S${start+i}`,text:'This is a short translated dialogue line.'}));
   const firstRows=make(26), first=session.nextReady(firstRows,[13,13],{});
+  // .67: both pages fit prompt + source + reply within the 8K turn budget.
   assert.equal(first.pageCount,2);
+  assert.equal(first.estimate.turnBudget.firstTurn,true);
+  assert.ok(first.estimate.turnBudget.turnInput+first.estimate.turnBudget.turnOutput<=8192);
   session.observe({units:first.units,plan:first.estimate,answer:{translations:first.units.map(u=>({id:u.id,text:'คำแปล'})),missing:[],meta:{
     finishReason:'stop',model:'fixture',selectedContract:'tp.translation.lines/1',terminalCompleted:true,
     providerMs:20000,firstContentMs:1200,usage:{inputTokens:1200,outputTokens:450,thinkingTokens:0,source:'provider'}}}});

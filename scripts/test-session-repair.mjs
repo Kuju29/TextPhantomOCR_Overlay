@@ -12,6 +12,8 @@ const {createAiProfiles,updateAiProfile}=await import('../src/shared/ai-profiles
 const {executeRepairPool,acceptedRepairIds}=await import('../src/background/repair/executor.js');
 const {createWorkloadController}=await import('../src/background/ai/workload-controller.js');
 const {createRepairCoordinator}=await import('../src/background/repair/coordinator.js');
+const {createPreparedPageJournal}=await import('../src/background/repair/prepared-page-journal.js');
+const {createDispatchJournal}=await import('../src/background/repair/dispatch-journal.js');
 const {ensureBatch}=await import('../src/background/batches.js');
 const {translationUnits}=await import('../src/shared/lens-document.js');
 const {buildPatchedResult,makePageCheckpoint}=await import('../src/background/repair/page-checkpoint.js');
@@ -165,7 +167,7 @@ function erase(count=3){return {schema:'tp.erase-boxes/1',boxes:Array.from({leng
   const batch=ensureBatch('coordinator',777,0);batch.total1=4;
   const payloads=Array.from({length:4},(_,i)=>({engine:'extension',mode:'lens_text',source:'ai',lang:'th',src:`http://fixture/${i}.png`,metadata:{image_id:`page${i}`},context:{},ai:{}}));
   for(const p of payloads)batch.items.set(p.metadata.image_id,{attempt:1,status:'queued',phase:'waiting',payload:p});
-  const coordinator=createRepairCoordinator({sessions,api:b.api,getBase:async()=> 'http://fixture',
+  const coordinator=createRepairCoordinator({sessions,preparedPages:createPreparedPageJournal({area:()=>area}),dispatchJournal:createDispatchJournal({area:()=>area}),api:b.api,getBase:async()=> 'http://fixture',
    refreshLocalAiCapabilities:async ai=>ai,
    currentEpoch:()=>7,currentSession:()=> 'tab-session',getContext:id=>contexts.get(id),getCapabilitiesFor:async()=>({}),
    insert:async(_tab,msg)=>{if(msg.type==='OVERLAY_HTML')rendered.push(msg);return {ok:true,applied:true}},emit:(ev,data)=>trace.push({ev,data}),
@@ -200,7 +202,7 @@ function erase(count=3){return {schema:'tp.erase-boxes/1',boxes:Array.from({leng
   const payload={engine:'extension',mode:'lens_text',source:'ai',lang:'th',src:'http://fixture/gateway.png',metadata:{image_id:'gateway-page'},context:{},ai:{}};
   batch.items.set('gateway-page',{attempt:1,status:'queued',phase:'waiting',payload});
   let run;
-  const coordinator=createRepairCoordinator({sessions,api:b.api,getBase:async()=> 'http://fixture',
+  const coordinator=createRepairCoordinator({sessions,preparedPages:createPreparedPageJournal({area:()=>area}),dispatchJournal:createDispatchJournal({area:()=>area}),api:b.api,getBase:async()=> 'http://fixture',
    refreshLocalAiCapabilities:async ai=>ai,
    currentEpoch:()=>7,currentSession:()=> 'tab-session',getContext:id=>contexts.get(id),getCapabilitiesFor:async()=>({}),
    insert:async(_tab,msg)=>{if(msg.type==='OVERLAY_HTML')rendered.push(msg);return {ok:true,applied:true}},

@@ -64,30 +64,15 @@ def render_tree_overlay(
         return chunk
 
     if is_ai_layer:
-        # AI layer: two rendering paths based on canvas geometry.
-        #
-        # 1. **Flat paragraphs** (canvas_rotation_deg ≈ 0°) — speech bubbles
-        #    whose text is roughly horizontal.  A single block div with
-        #    word-wrap keeps the translation readable even when it is longer
-        #    than the original.  Uses _render_ai_paragraph.
-        #
-        # 2. **Tilted paragraphs** (|canvas_rotation_deg| > 1°) — diagonal
-        #    manga labels, sound effects, status-screen text drawn at an angle.
-        #    Rendered per-item via _render_item_horizontal, which applies
-        #    transform:rotate() from item.box.rotation_deg.  This also
-        #    naturally supports *curved* text: each item can carry a slightly
-        #    different rotation angle, letting the line of items follow a curve
-        #    exactly as Lens detected it in the original art.
+        # AI layer: flat paragraphs (canvas rotation ≈ 0°) render as one
+        # word-wrapped block (_render_ai_paragraph); tilted ones (> 1°) render
+        # per item with each item's own rotation (_render_item_horizontal),
+        # which also follows curved text.
         ai_paras = [p for _, p in iter_paragraphs(tree) if str(p.get("text") or "").strip()]
 
-        # Spec \u00a717 (font consistency inside one bubble) for the AI layer.
-        # Flat paragraphs that genuinely share one detected speech bubble must
-        # render at ONE shared size.  We bucket flat paragraphs by
-        # ``bubble_bounds_px`` and average their pre-computed fonts.  A bucket
-        # of size 1 is left untouched; blob-collisions where build_ai_tree gave
-        # paragraphs distinct ``bounds_px`` outside the shared blob are NOT
-        # forced equal (their bounds don't fall inside the common bubble), so a
-        # caption/watermark wrongly sharing a blob keeps its own size.
+        # Spec \u00a717: flat paragraphs sharing one detected bubble render at
+        # ONE size (bucketed by ``bubble_bounds_px``, fonts averaged). Members
+        # whose own bounds fall outside the shared bubble keep their own size.
         shared_ai_fs: dict[int, int] = {}
         flat_bucket: dict[tuple[float, ...], list[dict]] = {}
         for p in ai_paras:
@@ -155,23 +140,10 @@ def render_tree_overlay(
         parts.append("</div></div>")
         return "".join(parts) if has_any else ""
 
-    # Non-AI layers (Original / Translated) — Lens-direct rendering.
-    # Lens already chose the correct layout (rotation, line boxes) for each
-    # item; we render every item exactly as received, one <div> per item.
-    #
-    # Vertical and horizontal source paragraphs go down SEPARATE paths:
-    #
-    #   • horizontal paragraphs (rotation ≈ 0°) use the horizontal per-item
-    #     fit (``_shared_horizontal_font_size``) — height is the ceiling,
-    #     width is the soft constraint;
-    #   • vertical paragraphs (rotation ≈ ±90°) use the vertical fit
-    #     (``_shared_vertical_font_size``) — every glyph is square so font
-    #     size is derived from the column's actual area.
-    #
-    # Bubble-shared font then bucketises by (bubble_key, orientation), so a
-    # vertical column inside a bubble shares its size with the OTHER
-    # vertical columns in the same bubble (not with a horizontal caption
-    # that happens to fall inside the same blob).
+    # Non-AI layers: Lens-direct, one <div> per item exactly as received.
+    # Horizontal paragraphs use ``_shared_horizontal_font_size`` (height is the
+    # ceiling); vertical ones use ``_shared_vertical_font_size`` (square glyphs,
+    # sized by column area). Bubble-shared fonts bucket by (bubble, orientation).
     paragraphs_in_order = [p for _, p in iter_paragraphs(tree) if _para_full_text(p)]
     para_vertical: dict[int, bool] = {
         id(p): _paragraph_source_is_vertical(p) for p in paragraphs_in_order
@@ -220,23 +192,13 @@ def render_tree_overlay(
             return own
         return own
 
-    # Rendering is **Lens-direct**: every item keeps the rotation,
-    # position and writing-mode Lens chose.  The only change versus the
-    # raw Lens layout is the font size — shared across every item in the
-    # same speech bubble (spec §17), and vertical paragraphs get a
-    # vertical-specific fit so a column of CJK glyphs is sized by its
-    # actual area rather than by horizontal width × height.
-    #
     # ORIGINAL layer only — browser-translate DUAL LAYER.
     #
-    # Lesson learned the hard way (see chat 2026-07-20): Chrome's built-in
-    # Google Translate segments by LAYOUT, not by tag — absolutely-positioned
-    # elements are each their own segment, so per-line divs AND per-line
-    # spans inside one wrapper both translate word-by-word ("ISN'T THAT" →
-    # "ไม่ใช่อย่างนั้น" per box).  Merging lines into one visible block (the
-    # v1.0.1 shape) translates correctly but shifts the source layout.
+    # Chrome's built-in Google Translate segments by LAYOUT, not by tag:
+    # absolutely-positioned per-line elements translate word-by-word, while
+    # one merged visible block translates correctly but shifts the layout.
     #
-    # So the Original layer now emits BOTH, and pure CSS swaps them when
+    # So the Original layer emits BOTH, and pure CSS swaps them when
     # Chrome translates the page (html.translated-ltr/rtl — see overlay_css):
     #
     #   .tp-src    — the pixel-exact per-line divs, translate="no"/
@@ -248,13 +210,10 @@ def render_tree_overlay(
 
     # BUBBLE-LEVEL translate targets.
     #
-    # Chrome segments by layout, so ONE .tp-gtext per Lens paragraph means one
-    # translation segment per paragraph. That is fine for horizontal text, where
-    # a Lens paragraph IS the sentence — but vertical Japanese comes back as one
-    # paragraph PER COLUMN, so a single bubble was handed to Google as several
-    # unrelated fragments, in Lens's order rather than reading order. The result
-    # is a bubble whose translated lines are shuffled and translated without
-    # each other's context.
+    # Chrome segments by layout, so ONE .tp-gtext per Lens paragraph is one
+    # translation segment per paragraph. Vertical Japanese comes back as one
+    # paragraph PER COLUMN, which would hand Google a bubble as unrelated
+    # fragments in Lens order rather than reading order.
     #
     # ``tree["bubble_groups"]`` from the canonical Lens graph contract
     # already carries the columns of one utterance joined into ``text`` in
@@ -292,8 +251,7 @@ def render_tree_overlay(
             gi = group_of_para.get(int(para.get("para_index", -1)))
             gtext = ""
             if gi is None:
-                # No explicit group covers this paragraph —
-                # per-paragraph target, the original behaviour.
+                # No explicit group covers this paragraph: per-paragraph target.
                 gtext = _render_original_gtext_block(
                     para, img_w, img_h,
                     override_fs=shared_fs,

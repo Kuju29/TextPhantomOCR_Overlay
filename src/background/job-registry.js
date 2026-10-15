@@ -2,6 +2,7 @@
 
 // Imports nothing so transport.js and jobs.js can both use it without a circular import.
 import { noteSessionStorageFailure } from './session-storage-diagnostics.js';
+import { persistableSource } from './job-keys.js';
 
 const STORAGE_KEY = "tpPendingJobsV2";
 const PERSIST_DEBOUNCE_MS = 250;
@@ -20,7 +21,13 @@ function storageArea() {
 
 function serializableContext(ctx) {
   if (!ctx || typeof ctx !== "object") return {};
-  return JSON.parse(JSON.stringify(ctx));
+  const out = JSON.parse(JSON.stringify(ctx));
+  // A restored "sync" job is only traced and removed (never resent or
+  // delivered), so its data: URI is not needed; keep a compact marker. A REST
+  // job keeps its full source: after a restart its result is still delivered
+  // to that exact image.
+  if (out.transport === "sync" && typeof out.imgUrl === "string") out.imgUrl = persistableSource(out.imgUrl);
+  return out;
 }
 
 function schedulePersist() {

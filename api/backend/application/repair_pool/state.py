@@ -6,6 +6,7 @@ import json
 import re
 import time
 from typing import Any
+from backend.ai.source_filter import has_translatable_text
 
 MAX_PAGES = 512
 MAX_UNITS = 4096
@@ -169,7 +170,13 @@ def claim(run: dict, body: dict) -> dict:
     return task_view(run, task)
 
 def task_view(run: dict, task: dict) -> dict:
-    return {**task, "units": [dict(run["units"][x]) for x in task["ids"]]}
+    projected = dict(task)
+    if task.get('state') in ('answered', 'done') and isinstance(task.get('answer'), dict):
+        # Project older receipts through the current owned-source rule before
+        # the UI validates them. Reads preserve the stored receipt and its hash;
+        # answer_task/complete own the canonical write/replay transition.
+        projected['answer'] = normalized_answer(task['answer'], task['ids'], run['units'])
+    return {**projected, "units": [dict(run["units"][x]) for x in task["ids"]]}
 
 def begin(run: dict, task_id: str, executor: str) -> dict:
     check_active(run)
@@ -181,7 +188,7 @@ def begin(run: dict, task_id: str, executor: str) -> dict:
     task.update(state="running", startedAt=time.time())
     return {"dispatch": True, **task_view(run, task)}
 
-def normalized_answer(answer: dict, ids: list[str]) -> dict:
+def normalized_answer(answer: dict, ids: list[str], source_units: dict | None = None) -> dict:
     if not isinstance(answer, dict):
         raise PoolError("invalid_repair_answer", 400)
     rows = answer.get("translations", [])
@@ -206,6 +213,35 @@ def normalized_answer(answer: dict, ids: list[str]) -> dict:
             raise PoolError("invalid_repair_alignment", 400)
         safe_meta["alignmentUncertainIds"] = list(dict.fromkeys(uncertain))
         safe_meta["alignmentStatus"] = "uncertain" if uncertain else "not_semantically_verified"
+    skipped = meta.get('skippedUnitIds', [])
+    if (not isinstance(skipped, list) or len(skipped) > len(ids)
+            or any(not isinstance(uid, str) or uid not in ids for uid in skipped)
+            or len(set(skipped)) != len(skipped)):
+        raise PoolError('invalid_repair_skip', 400)
+    skipped_set = set(skipped)
+    if skipped_set:
+        # A client may report a filter decision, but the server's owned source
+        # must independently prove it. No caller-supplied skip can discard real
+        # dialogue, rescue quarantined output, or invent a source translation.
+        if (not isinstance(source_units, dict)
+                or any(uid not in source_units or has_translatable_text(source_units[uid].get('text', ''))
+                       for uid in skipped)
+                or skipped_set.intersection(safe_meta.get('alignmentUncertainIds', []))):
+            raise PoolError('invalid_repair_skip', 400)
+    if isinstance(source_units, dict):
+        # Older answered checkpoints carry no filter metadata. Reclassify only
+        # from the immutable owned source; quarantined records retain their old
+        # uncertainty and cannot be rescued by this new input rule.
+        uncertain_ids = set(safe_meta.get('alignmentUncertainIds', []))
+        skipped_set.update(uid for uid in ids if uid in source_units and uid not in uncertain_ids
+            and not has_translatable_text(source_units[uid].get('text', '')))
+    if skipped_set:
+        safe_meta['skippedUnitIds'] = [uid for uid in ids if uid in skipped_set]
+        safe_meta['skippedSourceUnitCount'] = len(skipped_set)
+        clean = [row for row in clean if row['id'] not in skipped_set]
+        if len(skipped_set) == len(ids):
+            safe_meta.setdefault('generationAttempts', 0)
+            safe_meta.setdefault('providerAttempts', 0)
     diagnostic = meta.get("contractDiagnostics")
     if isinstance(diagnostic, dict):
         # Retain bounded structural evidence for recovered receipts, not source text.
@@ -214,7 +250,7 @@ def normalized_answer(answer: dict, ids: list[str]) -> dict:
                 if isinstance(uid, str) and re.fullmatch(r"(?:I[1-9][0-9]{0,6}_P[0-9]{1,6}|P[0-9]{1,6})", uid)))[:2000]
             for key in ("ignoredUnknownIds", "duplicateIds") if isinstance(diagnostic.get(key), list)}
     return {"schema": "tp.ai.result/1", "translations": clean,
-            "missing": [x for x in ids if x not in seen], "meta": safe_meta}
+            "missing": [x for x in ids if x not in seen and x not in skipped_set], "meta": safe_meta}
 
 def answer_task(run: dict, task_id: str, answer: dict) -> dict:
     task = run["tasks"].get(identifier(task_id))
@@ -222,11 +258,13 @@ def answer_task(run: dict, task_id: str, answer: dict) -> dict:
         raise PoolError("repair_task_not_found", 404)
     if run["phase"] == "cancelled":
         return {"accepted": False, "cancelled": True}
-    clean = normalized_answer(answer, task["ids"])
+    clean = normalized_answer(answer, task["ids"], run['units'])
     digest = fingerprint(clean)
     if task.get("answerHash"):
-        if task["answerHash"] != digest:
+        stored = normalized_answer(task['answer'], task['ids'], run['units'])
+        if fingerprint(stored) != digest:
             raise PoolError("repair_answer_conflict")
+        task.update(answer=stored, answerHash=digest)
         return task_view(run, task)
     if task["state"] != "running":
         raise PoolError("repair_task_not_running")
@@ -243,23 +281,32 @@ def complete(run: dict, task_id: str, body: dict) -> dict:
     accepted = body.get("accepted", [])
     if not isinstance(accepted, list) or any(not isinstance(x, str) for x in accepted) or len(set(accepted)) != len(accepted):
         raise PoolError("invalid_repair_acceptance", 400)
-    uncertain = set(((task.get("answer") or {}).get("meta") or {}).get("alignmentUncertainIds", []))
+    answer = (normalized_answer(task['answer'], task['ids'], run['units'])
+              if isinstance(task.get('answer'), dict) else {})
+    uncertain = set((answer.get('meta') or {}).get("alignmentUncertainIds", []))
     if uncertain.intersection(accepted):
         raise PoolError("repair_alignment_uncertain", 409)
-    returned = {x["id"]: x["text"] for x in (task.get("answer") or {}).get("translations", [])}
+    skipped = set((answer.get('meta') or {}).get('skippedUnitIds', []))
+    accepted = [uid for uid in accepted if uid not in skipped]
+    returned = {x["id"]: x["text"] for x in answer.get("translations", [])}
     if any(x not in task["ids"] or not returned.get(x, "").strip() for x in accepted):
         raise PoolError("invalid_repair_acceptance", 400)
     accepted = sorted(accepted)
     if task["state"] == "done":
-        if task["accepted"] != accepted:
+        if sorted(uid for uid in task['accepted'] if uid not in skipped) != accepted:
             raise PoolError("repair_commit_conflict")
+        task.update(accepted=accepted, answer=answer, answerHash=fingerprint(answer))
+        for alias in skipped:
+            run['units'][alias]['state'] = 'skipped'
+            run['units'][alias].pop('translation', None)
         return view(run)
     if task["state"] != "answered":
         raise PoolError("repair_answer_unavailable")
-    task.update(state="done", accepted=accepted, completedAt=time.time())
+    task.update(state="done", accepted=accepted, completedAt=time.time(),
+                answer=answer, answerHash=fingerprint(answer))
     for alias in task["ids"]:
         row = run["units"][alias]
-        row["state"] = "repaired" if alias in accepted else "unresolved"
+        row["state"] = "skipped" if alias in skipped else "repaired" if alias in accepted else "unresolved"
         if alias in accepted:
             row["translation"] = returned[alias]
     settle(run)
@@ -281,7 +328,7 @@ def fail(run: dict, task_id: str, reason: str, unknown: bool = False) -> dict:
     return view(run)
 
 def settle(run: dict) -> None:
-    if run["phase"] == "repairing" and all(x["state"] in ("repaired", "unresolved", "unknown") for x in run["units"].values()):
+    if run["phase"] == "repairing" and all(x["state"] in ("repaired", "skipped", "unresolved", "unknown") for x in run["units"].values()):
         run["phase"] = "done"
 
 def cancel(run: dict) -> dict:
@@ -305,6 +352,8 @@ def view(run: dict) -> dict:
             "unverified": sum(x["unverified"] for x in run["pages"].values()),
             "pending": [dict(x) for x in rows if x["state"] == "pending"],
             "results": [dict(x) for x in rows if x["state"] == "repaired"],
+            'skipped': [dict(x) for x in rows if x['state'] == 'skipped'],
+            'skippedUnits': sum(x['state'] == 'skipped' for x in rows),
             "unresolved": sum(x["state"] in ("unresolved", "unknown") for x in rows),
             "failedUnits": len(rows), "repaired": sum(x["state"] == "repaired" for x in rows),
             "tasks": [task_view(run, x) for x in run["tasks"].values()]}

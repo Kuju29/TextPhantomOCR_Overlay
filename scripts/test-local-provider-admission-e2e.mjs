@@ -84,13 +84,16 @@ try {
       canonicalPrompt, targetLang: "th", sourceLang: "en",
     };
     if(spec.id !== "lmstudio") {
-      await assert.rejects(
-        translateWithLocalOpenAi([{ id: "P0", text: "Hello" }], {
-          ...request, ai: {...request.ai, thinking:"off"},
-        }),
-        error => error?.code === "local_model_thinking_unsupported",
-      );
-      assert.equal(posts, 0, `${spec.id}: unverified Off must not dispatch`);
+      // 10488 owner decision: this runtime publishes no AI think control, so a
+      // saved Off is kept but the request uses the provider default (no field).
+      const off = await translateWithLocalOpenAi([{ id: "P0", text: "Hello" }], {
+        ...request, ai: {...request.ai, thinking:"off"},
+      });
+      assert.equal(off.meta.thinkingApplied, "provider_default", spec.id);
+      assert.equal(posts, 1, `${spec.id}: provider-default Off issues one chat request`);
+      for (const field of ["reasoning", "reasoning_effort", "think", "enable_thinking"])
+        assert.equal(Object.hasOwn(body, field), false, `${spec.id}: no ${field} sent`);
+      posts = 0;
     }
     const answer = await translateWithLocalOpenAi([{ id: "P0", text: "Hello" }], request);
     assert.equal(answer.translations[0].text, "สวัสดี", spec.id);

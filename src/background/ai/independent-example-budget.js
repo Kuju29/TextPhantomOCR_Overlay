@@ -5,7 +5,7 @@ import {boundedIndependentPairs,humanExampleCount,selectIndependentStoryExamples
  * A failure with one example is reported as a budget error, never converted
  * into an unannounced request without the user's chosen style examples.
  */
-export function planIndependentExamples(session, rows, offset, selection) {
+export function planIndependentExamples(session, rows, offset, selection, plan = () => session.next(rows, offset)) {
   const available = selection?.source === 'human' ? humanExampleCount(selection)
     : selection?.source === 'story' ? boundedIndependentPairs(selection.pairs).length : 0;
   // The first unsent unit is guaranteed to enter the next batch. Later units
@@ -19,7 +19,7 @@ export function planIndependentExamples(session, rows, offset, selection) {
     : selectIndependentStoryExamples(selection,currentSource,count);
   session.setIndependentExamples(chosen);
   try {
-    return {chunk:session.next(rows,offset),selection:chosen,availableExamplePairs:available,
+    return {chunk:plan(),selection:chosen,availableExamplePairs:available,
       includedExamplePairs:total};
   } catch (original) {
     if (original?.code !== 'ai_workload_budget_insufficient' ||
@@ -29,7 +29,7 @@ export function planIndependentExamples(session, rows, offset, selection) {
       const count=Math.floor((low+high)/2), candidate=withCount(count);
       session.setIndependentExamples(candidate);
       try {
-        const chunk=session.next(rows,offset);
+        const chunk=plan();
         best={chunk,selection:candidate,availableExamplePairs:available,
           includedExamplePairs:candidate.source === 'human' ? count : candidate.pairs.length};
         low=count+1;

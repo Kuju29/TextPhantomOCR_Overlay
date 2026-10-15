@@ -1,17 +1,19 @@
+import { uiMessage } from '../../shared/ui-language.js';
 /** User-editable configuration only. Usage, prompt history, traces and repair sessions are preserved. */
 export const SETTINGS_RESET_KEYS = Object.freeze([
-  "mode", "lang", "sources", "maxConcurrency",
+  "mode", "lang", "sources", "maxConcurrency", "uiLanguageV1",
   "customApiUrl", "apiUrlDefault", "apiUrlReset", "apiDefaultsFetchedAt",
   "latestVersion", "updateUrl",
   "aiKey", "aiCloudKey", "aiModel", "aiProvider", "aiBaseUrl",
   "localAiAdapter", "aiGlossary", "aiCharMemory", "aiMemoryMode", "aiStyleExamples", "aiTranslationMode", "aiConversationReset",
   "aiSendImage", "aiPageImage", "aiOnDevice", "aiThinking", "aiLocalThinking",
   "aiPrompt", "aiPromptByLang", "relayoutTranslated",
+  "paidRateLimitEnabled", "paidRateProfile", "paidRateRpm", "paidRateBurst",
   "rateLimitEnabled", "rateProfile", "rateRpm", "rateBurst",
   "aiLocalRateLimitEnabled", "aiLocalRateRpm", "aiLocalRateBurst",
   "aiLocalCapacityMode", "aiLocalManualConcurrency", "aiLocalCapabilityHint",
   "aiLocalCapabilitySnapshotsV1", "aiConcurrencyLearningV1", "apiLocalUnlimited", "engineMode",
-  "aiProfilesV1", "aiProfileStorageVersion", "aiProfileCredentialsV1",
+  "paidAiProfilesV1", "loginAiProfilesV1", "aiProfilesV1", "aiProfileStorageVersion", "aiProfileCredentialsV1",
   "aiProfilePromptsV1", "fontScale", "imgButtonsEnabled", "translateAllButtonEnabled", "downloadImagesEnabled", "downloadImageFormat", "downloadImageQuality", "downloadSelectedTab", "downloadIndividualExpanded",
   "uploadFormat", "uploadQuality",
   "autoMode", "autoLang", "autoSource", "autoShowRaw", "autoRawTab", "autoWidth",
@@ -25,7 +27,7 @@ export function createResetDefaultsController({
   reload = () => globalThis.location.reload(),
 } = {}) {
   async function reset() {
-    if (!confirmReset("Reset all TextPhantom settings to current defaults?")) return false;
+    if (!confirmReset(uiMessage("Reset all TextPhantom settings to current defaults?"))) return false;
     if (els.resetDefaults) els.resetDefaults.disabled = true;
     if (els.resetDefaultsStatus) els.resetDefaultsStatus.textContent = "Resetting…";
     try {

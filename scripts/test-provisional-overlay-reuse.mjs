@@ -18,7 +18,7 @@ function fixture(){
  vm.runInNewContext(script,{window:{__TP:TP},WeakMap,JSON,Number,Boolean,String,Array,Set,setTimeout(){},URL:{revokeObjectURL(){}}});
  const result={lensDocument:{paragraphs:[{id:'p',text:'ไทย'}]},eraseBoxes:[{x:1}],backgroundMode:'boxes',sourceImageDataUri:'source',layout:{relayout_translated:true}};
  const apply=(value,owner='generation-A',guard=()=>true)=>TP.applyHtmlOverlay(img,value,'ai',true,'/image',guard,'trace',owner);
- return {counts,routes,rec,img,result,apply};
+ return {counts,routes,rec,img,result,apply,TP};
 }
 {
  const f=fixture();await f.apply({...f.result,meta:{provisional:true}});
@@ -49,4 +49,18 @@ for(const mutation of ['text','boxes','source','layout','css','owner','detached'
  const response=await f.apply(f.result,'generation-A',()=>false);
  assert.equal(response.stale,true);assert.equal(f.counts.build,1);assert.equal(f.counts.announced,0);checks+=3;
 }
-console.log(`PASS ${checks} actual overlay reuse checks; final notification retained, changed geometry/content/generation reconciled, cancelled DOM rejected`);
+{
+ const f=fixture();f.TP.overlayLocalRender.build=async()=>{throw new TypeError('module load failed')};
+ await assert.rejects(f.apply({...f.result,meta:{provisional:true}}),e=>e.code==='translation_overlay_render_failed');checks++;
+ assert.equal(f.counts.announced,0);assert.equal(f.rec.scope.firstChild,null);checks+=2;
+ await assert.rejects(f.apply(f.result),e=>e.code==='translation_overlay_render_failed');checks++;
+ assert.equal(f.counts.announced,0);assert.equal(f.rec.scope.firstChild,null);checks+=2;
+ const route=f.routes.findLast(d=>d.ev==='route decided');assert.equal(route.outcome,'failed');checks++;
+}
+{
+ const f=fixture();f.TP.overlayLocalRender.build=async()=>{throw new TypeError('module load failed')};
+ const response=await f.apply({...f.result,Ai:{aihtml:'<div>Translated</div>'}});
+ assert.equal(response.drawn,true);assert.equal(f.rec.scope.firstChild.html,'<div>Translated</div>');checks+=2;
+ assert.equal(f.counts.announced,1);checks++;
+}
+console.log(`PASS ${checks} actual overlay checks; provisional reuse, failed empty render rejected, real markup fallback retained`);

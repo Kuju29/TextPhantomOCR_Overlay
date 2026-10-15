@@ -3,14 +3,13 @@ from __future__ import annotations
 import hashlib
 from .source_context import build_source_context_block
 from .instruction_packs import instruction_pack
-from .localization import (HUMAN_STYLE_EXAMPLE_LIMIT, TRANSLATOR_IDENTITY_BASE,
-                           TASK_GUIDANCE, build_style_examples)
+from .localization import HUMAN_STYLE_EXAMPLE_LIMIT, build_style_examples
 
 from backend.lens.languages import normalize as _normalize_lang
 from backend.ai.provider_contract import SystemPromptSection
 from .context import build_page_context_block, build_character_block, build_glossary_block, build_prev_context_block, build_series_block, build_speaker_block
 from .languages import target_language_priority
-from .styles import CANONICAL_PROMPT_CONTRACT_VERSION, CHARACTER_MEMO_INSTRUCTION, IMAGE_HINT, OCR_SEMANTIC_GUIDANCE, SERIES_NOTES_HEADING, SYSTEM_BASE, lang_style, select_style
+from .styles import CANONICAL_PROMPT_CONTRACT_VERSION, IMAGE_HINT, SERIES_NOTES_HEADING, SYSTEM_BASE, lang_style, select_style
 
 STYLE_PRIORITY = (
     "Use the Style prompt below to determine the target language and translation principles, "
@@ -300,9 +299,10 @@ def conversation_record_contract(lang: str, *, structured_output: bool = False) 
             "Previous turns are context only. Do not repeat old IDs or add JSON, markdown, commentary or explanations.")
 
 def build_static_user_prefix(lang: str, *, structured_output: bool = False,
-                             source_lang: str = "", style_examples: bool = True,
+                             source_lang: str = "", style_examples: bool = False,
                              selected_style: str | None = None, conversation_records: bool = False,
-                             human_example_limit: int = HUMAN_STYLE_EXAMPLE_LIMIT) -> str:
+                             human_example_limit: int = HUMAN_STYLE_EXAMPLE_LIMIT,
+                             independent_examples: str | None = None) -> str:
     """Task/protocol/examples only; the selected style is owned by System."""
     pack = instruction_pack(lang)
     style = select_style(lang)[0] if selected_style is None else str(selected_style).strip()
@@ -312,9 +312,10 @@ def build_static_user_prefix(lang: str, *, structured_output: bool = False,
               pack["dataHeading"] + "\n" + pack["task"]]
     if not conversation_records:
         blocks.append(pack["schemaInput" if structured_output else "markerInput"])
-    if style_examples is not False:
-        examples = build_style_examples(lang, [], structured_output=structured_output,
-                                        source_lang=source_lang, example_limit=human_example_limit)
+    if style_examples is True:
+        examples = (independent_examples if independent_examples is not None else
+            build_style_examples(lang, [], structured_output=structured_output,
+                                 source_lang=source_lang, example_limit=human_example_limit))
         if examples:
             blocks.append(examples)
     # Conversation keeps the I#_P# contract final immediately before SOURCE.
@@ -330,9 +331,10 @@ def build_translation_user_message(
     structured_output: bool = False, prompt_mode: str = "replace",
     glossary=None, characters=None, has_image=False, series_state="", speakers=None,
     prev_context=None, page_context=None, source_lang="", source_context=None,
-    repair_reason="", style_examples: bool = True, memory_mode: str | None = None,
+    repair_reason="", style_examples: bool = False, memory_mode: str | None = None,
     conversation_records: bool = False,
     human_example_limit: int = HUMAN_STYLE_EXAMPLE_LIMIT,
+    independent_examples: str | None = None,
 ) -> str:
     """Static prefix first; dynamic source evidence last. IDs are output locations.
 
@@ -351,23 +353,25 @@ def build_translation_user_message(
         build_glossary_block(glossary, lang=lang),
         build_speaker_block(speakers, lang=lang),
         build_prev_context_block(prev_context, lang=lang),
-        build_page_context_block(page_context, lang=lang),
-        build_source_context_block(source_context, lang=lang),
+        build_page_context_block(page_context, lang=lang) if not repair_reason else "",
+        build_source_context_block(source_context, lang=lang) if not repair_reason else "",
     )))
     selected_style, _ = select_style(lang, prompt_override, prompt_mode)
     blocks = [build_static_user_prefix(lang, structured_output=structured_output,
                                        source_lang=source_lang, style_examples=style_examples,
                                        selected_style=selected_style, conversation_records=conversation_records,
-                                       human_example_limit=human_example_limit)]
+                                       human_example_limit=human_example_limit,
+                                       independent_examples=independent_examples)]
     # No dynamic ID list, context, image or repair reason before this point.
     if runtime:
         blocks.append(pack["contextHeading"] + "\n" + runtime)
     if not conversation_records:
         blocks.append(exact_request_output_contract(expected_ids, structured_output=structured_output, lang=lang))
-    from .repair import wrong_language_repair_instruction
-    repair = wrong_language_repair_instruction(target_language_priority(lang), repair_reason, lang=lang)
-    if repair:
-        blocks.append(repair)
+    if memory_mode == "full":
+        from backend.ai.series_summary import instruction
+        blocks.append(instruction(lang, structured_output))
+    # A repair is an ordinary turn containing only the remaining source IDs.
+    # Its reason stays diagnostic metadata and never becomes another instruction.
     blocks.append(pack["sourceHeading"] + "\n" + str(original_text_full or ""))
     return "\n\n".join(blocks)
 
@@ -436,7 +440,7 @@ def canonical_prompt_contract(lang: str, *, want_memo: bool = True) -> dict:
         "compositionOrder": [
             "system.identity", "system.editableStyle", "user.task", "user.dataScope",
             "user.sourceInputContract", "user.examplesIfEnabled", "user.runtimeContext",
-            "user.outputContract", "user.repairIfNeeded", "user.source",
+            "user.outputContract", "user.source",
         ],
         "styleRole": "system",
         "editableStylePolicy": {

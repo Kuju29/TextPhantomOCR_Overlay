@@ -1,34 +1,27 @@
 /**
- *
- * Paragraph-marker protocol, client side.
- *
- * One model call carries many paragraphs; the markers are what make the answer
- * separable again:
+ * Paragraph-marker protocol, client side. One model call carries many
+ * paragraphs; the markers make the answer separable again:
  *
  *     <<TP_P0>>
  *     paragraph zero
  *     <<TP_P1>>
  *     paragraph one
  *
- * A direct port of `api/backend/ai/markers.py`, pinned to the same fixture
- * (`scripts/test-ai-markers.mjs`, `api/tests/test_markers_parity.py`). Both
- * sides must agree exactly: when the extension calls a provider itself and the
- * server calls the same provider for another page of the same chapter, a
- * difference in how the answer is split shows up as one page silently
- * mis-aligned against its bubbles.
+ * A port of `api/backend/ai/markers.py`, pinned to the same fixture
+ * (`scripts/test-ai-markers.mjs`, `api/tests/test_markers_parity.py`): a split
+ * difference between extension and server would silently mis-align one page
+ * of a chapter against its bubbles.
  */
 
-export const MARKER_PREFIX = "<<TP_P";
-export const MARKER_SUFFIX = ">>";
+const MARKER_PREFIX = "<<TP_P";
+const MARKER_SUFFIX = ">>";
 
 const MARKER_RE = /<<TP_P(\d+)>>/g;
 export const MEMO_MARKER = "<<TP_MEMO>>";
 
-// Thai prose normally does not separate words with ASCII whitespace. Keep the
-// provider's text intact in LensDocument and collapse those gaps only at the
-// layout boundary, matching the legacy server renderer. This matters because
-// stored AI text is semantic data; changing it while parsing a provider answer
-// makes later exports/debugging disagree with the answer that was received.
+// Thai prose normally has no ASCII spaces between words. The provider's text is
+// kept intact in the LensDocument (it is semantic data) and these gaps are
+// collapsed only at the layout boundary, as the server renderer does.
 const THAI_WORD_GAP_RE =
   /([\u0E01-\u0E2E\u0E30-\u0E3A\u0E40-\u0E45\u0E47-\u0E4E])\s+(?=[\u0E01-\u0E2E\u0E30-\u0E3A\u0E40-\u0E45\u0E47-\u0E4E])/gu;
 
@@ -45,30 +38,13 @@ export function normalizeAiUnitText(text) {
     .trim();
 }
 
-/** Encode paragraphs as `<<TP_Pn>>\n<text>` blocks. */
-export function applyMarkers(paragraphs) {
-  if (!Array.isArray(paragraphs) || !paragraphs.length) return "";
-  return paragraphs
-    .map(
-      (text, i) =>
-        `${MARKER_PREFIX}${i}${MARKER_SUFFIX}\n${String(text ?? "").trim()}`,
-    )
-    .join("\n\n");
-}
-
 /**
- * Split a marked answer back into paragraphs.
- *
- * Returns `{ paragraphs, cleanText }` with `paragraphs.length === expected`
- * (missing slots are empty strings), or `null` when there are no markers at
- * all.
- *
- * `null` and "all slots empty" mean different things and must not be conflated:
- * the first says the protocol broke and the answer is unusable, the second says
- * the model had nothing to say. A caller that treats them the same reports a
- * broken integration as an empty page.
+ * Split a marked answer back into paragraphs: `{ paragraphs, cleanText }` with
+ * `paragraphs.length === expected` (missing slots are ""), or `null` when there
+ * are no markers at all. `null` means the protocol broke; all-empty means the
+ * model had nothing to say. Do not conflate them.
  */
-export function extractParagraphs(text, expected) {
+function extractParagraphs(text, expected) {
   const source = String(text || "");
   if (!source || !(expected > 0) || !source.includes(MARKER_PREFIX))
     return null;
@@ -95,14 +71,11 @@ export function extractParagraphs(text, expected) {
 }
 
 /**
- * Parse a browser-direct answer while keeping an unexpected memory block out
- * of the last bubble.
- *
- * Direct translation deliberately requests `want_memo=false`, but providers
- * can ignore instructions or a mixed-version API can return the older prompt.
- * A well-formed trailing memo is stripped. A memo appearing before the last
- * expected paragraph (or followed by another paragraph marker) is refused:
- * guessing around a broken protocol could attribute character notes to text.
+ * Parse a browser-direct answer while keeping an unexpected memory block out of
+ * the last bubble. Direct requests ask for `want_memo=false`, but providers may
+ * ignore it: a well-formed trailing memo is stripped, and a memo before the last
+ * expected paragraph (or followed by a marker) is refused rather than guessed
+ * around, so character notes are never attributed to text.
  */
 export function extractDirectParagraphs(text, expected) {
   const source = String(text || "");
@@ -128,17 +101,3 @@ export function extractDirectParagraphs(text, expected) {
   };
 }
 
-/**
- * Which expected indices the model failed to answer.
- *
- * This identifies an incomplete answer. The workflow uses it as evidence to
- * retry the complete ordered page context, never as permission to send only
- * the missing fragments.
- */
-export function missingIndices(text, expected) {
-  const found = extractParagraphs(text, expected);
-  if (!found) return Array.from({ length: expected }, (_, i) => i);
-  const missing = [];
-  for (let i = 0; i < expected; i++) if (!found.paragraphs[i]) missing.push(i);
-  return missing;
-}

@@ -15,8 +15,8 @@ export function assertPageImageSupported(enabled, capabilities) {
   const supported = modelVisionSupport(capabilities);
   if (supported === true) return;
   const message = supported === false
-    ? "[AI option > Page image to AI] is unavailable for the selected model"
-    : "[AI option > Page image to AI] requires verified image support for the selected model";
+    ? "[AI settings > Send page image to AI] is unavailable for the selected model"
+    : "[AI settings > Send page image to AI] requires verified image support for the selected model";
   const error = new Error(message);
   error.code = supported === false
     ? "AI_PAGE_IMAGE_UNSUPPORTED"

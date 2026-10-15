@@ -26,8 +26,9 @@ assert w.folder_name({**base,'operationId':'a:b'}) != w.folder_name({**base,'ope
 long={**base,'traceId':'t'*80,'operationId':'o'*80}
 assert len(w.folder_name(long,'e'*80)) <= 120
 assert w.folder_name(long,'e'*79+'a') != w.folder_name(long,'e'*79+'b')
-# Verify the supplied Windows installation path, not arbitrary path depths.
-windows_root = r'C:\Users\plan2\Downloads\bot\test\F\TextPhantom-v2\extension\api\logs\ai-wire'
+# A deep Windows installation path (same length class as a real Downloads
+# folder), not arbitrary path depths.
+windows_root = r'C:\Users\example\Downloads\bot\test\F\TextPhantom-v2\extension\api\logs\ai-wire'
 longest_artifact = '01_conversation_origin_validation.json'
 assert len(windows_root + '\\' + w.folder_name(long, 'e'*80) + '\\' + longest_artifact) <= 259
 

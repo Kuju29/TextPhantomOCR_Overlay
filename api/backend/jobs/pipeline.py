@@ -31,6 +31,11 @@ def process_payload(payload: dict, *, admission_identity: str | None = None, adm
         raise RuntimeError("cancelled")
 
     ai_cfg = build_ai_config(payload, mode, source)
+    from backend.ai.translation_paths.independent_examples import cache_signature, cache_snapshot
+    examples_before = ''
+    if ai_cfg and ai_cfg.provider == "login":
+        from backend.ai.login.login_translation import authorize_model
+        authorize_model(ai_cfg.api_key, ai_cfg.model)
     from backend.ai.translation_paths import ready_batch
     reservation = ready_batch.reserve(ai_cfg, lang)
     try:
@@ -69,13 +74,18 @@ def process_payload(payload: dict, *, admission_identity: str | None = None, adm
             # The relayout switches change the rendered geometry, so they MUST be
             # part of the key — otherwise flipping a toggle would serve the old
             # layout back from cache and look like the switch did nothing.
+            example_snapshot = cache_snapshot(ai_cfg, lang)
+            examples_before = example_snapshot['signature']
             cache_key = cache_mod.build_cache_key(
-                img_hash, lang, mode, cache_source, ai_cfg, layout=layout, owner_scope=stage_identity
+                img_hash, lang, mode, cache_source, ai_cfg, layout=layout, owner_scope=stage_identity,
+                independent_examples_signature=examples_before,
             )
             cache = cache_mod.ai_result_cache if source == "ai" else cache_mod.result_cache
             if cancel_check():
                 raise RuntimeError("cancelled")
-            cached = cache.get(cache_key)
+            # A hit must not bypass a preceding request's pending accepted-pair
+            # commit. Concurrent OCR remains outside the per-run AI reservation.
+            cached = None if example_snapshot['busy'] else cache.get(cache_key)
             if cached:
                 cached["perf"] = {
                     "cache": "hit",
@@ -127,7 +137,10 @@ def process_payload(payload: dict, *, admission_identity: str | None = None, adm
                     "cancelRequestedAt": time.time(), "staleDrawPrevented": True,
                 })
                 raise RuntimeError("cancelled")
-            if cache_used and cache_key and result_worth_caching(mode, source, out):
+            # Selection happens after concurrent OCR, inside the private AI lane.
+            # Never cache new example-context output under the pre-OCR pool key.
+            examples_unchanged = examples_before == cache_signature(ai_cfg, lang)
+            if cache_used and cache_key and examples_unchanged and result_worth_caching(mode, source, out):
                 cache = cache_mod.ai_result_cache if source == "ai" else cache_mod.result_cache
                 cache.set(cache_key, out)
             return out

@@ -1,30 +1,26 @@
 /**
- * Auto translate tab.
+ * Auto translate tab: one image at a time, translated as soon as it arrives
+ * (drop, paste, upload or link). The content-script modules loaded by
+ * auto.html own the overlay and messaging; this file picks the image and asks
+ * the service worker to translate it.
  *
- * One image at a time, translated the moment it arrives — dropped, pasted,
- * uploaded or fetched from a link. The translation itself is not reimplemented
- * here: the content-script modules loaded by `auto.html` own the overlay and
- * the messaging exactly as they do on a web page, and this file only decides
- * WHICH image is on screen and asks the service worker to translate it.
- *
- * Two things make this page different from the popup:
- *
- * 1. Its mode / language / text source are its own (`autoMode`, `autoLang`,
- *    `autoSource`). They travel with the request as overrides, so translating
- *    here never rewrites the settings the popup uses for real web pages.
- * 2. It asks for the Lens material the extension normally drops after decoding
- *    (`debug.raw`), so the raw panel can show `lens.raw` — still encoded,
- *    exactly as Google answered — beside the tree the decoder built from it.
+ * Mode/language/source are this page's own (`autoMode`, `autoLang`,
+ * `autoSource`) and travel as request overrides, so the popup's settings are
+ * never rewritten. Runs request `debug.raw` so the raw panel can show
+ * `lens.raw` beside the decoded tree.
  */
 
 import {
   API_PATHS,
   FALLBACK_LANGS,
   FALLBACK_SOURCES,
+  canonicalSourceNames,
   MODES,
   PINNED_LANG_CODES,
+  MAX_API_IMAGE_BYTES,
 } from "../shared/constants.js";
 import { getStorage, setStorage } from "../shared/storage.js";
+import { setUiTemplate } from "../shared/ui-template.js";
 import { effectiveEngineMode } from "../shared/engine-mode.js";
 import { resolveApiBase } from "../shared/api-defaults.js";
 import { dropEntriesFrom, isImageFile } from "../shared/local-gallery.js";
@@ -123,8 +119,10 @@ const state = {
 
 const TP = () => window.__TP;
 
-function setStatus(text, kind = "") {
-  els.status.textContent = String(text || "");
+// values: `text` is a registered UI template; runtime values stay protected.
+function setStatus(text, kind = "", values = null) {
+  if (values) setUiTemplate(els.status, text, values);
+  else els.status.textContent = String(text || "");
   els.status.className = `status ${kind}`.trim();
 }
 
@@ -362,12 +360,8 @@ function applyRawVisibility() {
 }
 
 /**
- * The decoded tree that belongs to the text source now selected.
- *
- * Lens decodes exactly two trees. The AI layer is not a third one — it is
- * patched into the LensDocument — so asking for AI shows the document as well,
- * and says why, instead of quietly handing back the original tree as if it were
- * the AI's.
+ * The decoded tree for the selected text source. AI is patched into the
+ * LensDocument (there is no third tree), so AI shows the document and says why.
  */
 function treeForSource(debugLens, result) {
   if (state.source === "original") {
@@ -466,10 +460,8 @@ function pickBlock(line) {
   clearPick();
   const scope = line.closest(".tp-ol-scope");
   const paraId = String(line.dataset.tpPara || "");
-  // Lines drawn by this extension carry the paragraph they came from, so one
-  // click takes the whole bubble. Markup rendered by the API server does not,
-  // and there the click takes the one line it landed on rather than guessing
-  // which neighbours belong with it.
+  // Lines drawn by the extension carry their paragraph, so one click takes the
+  // whole bubble; API-rendered markup does not, so the click takes one line.
   const block =
     paraId && scope
       ? [
@@ -498,7 +490,7 @@ async function copyText(text, button) {
     button.textContent = "Copied";
   } catch (error) {
     button.textContent = "Copy failed";
-    setStatus(`Could not copy: ${error?.message || String(error)}`, "bad");
+    setStatus("Could not copy: {error}", "bad", { error: error?.message || String(error) });
   }
   setTimeout(() => {
     button.textContent = label;
@@ -528,13 +520,21 @@ const signatureOf = (blob, name) =>
 
 /** Replace and translate an image; optionally ignore duplicate drop/paste events. */
 async function useImageBlob(blob, name, { repeatIsAccident = false } = {}) {
-  // Same test the local viewer's pickers use: the MIME type when the OS gave
-  // one, the file extension when it did not (Windows reports nothing for .webp
-  // and .avif often enough to matter).
+  // MIME type when the OS gives one, otherwise the extension (Windows often
+  // reports nothing for .webp/.avif).
   if (!blob || !isImageFile({ type: blob.type, name })) {
     setStatus(
-      `That is not an image${blob?.type ? ` (${blob.type})` : ""}. This page takes image files only.`,
-      "bad",
+      blob?.type ? "That is not an image ({type}). This page takes image files only."
+        : "That is not an image. This page takes image files only.",
+      "bad", { type: blob?.type || "" },
+    );
+    return;
+  }
+  // The API accepts images up to 24 MiB; say so here, not as an HTTP 413.
+  if (blob.size > MAX_API_IMAGE_BYTES) {
+    setStatus(
+      "That image is {size} MB — too large to translate here.",
+      "bad", { size: Math.round(blob.size / 1048576) },
     );
     return;
   }
@@ -542,7 +542,7 @@ async function useImageBlob(blob, name, { repeatIsAccident = false } = {}) {
   const signature = signatureOf(blob, name);
   if (repeatIsAccident && state.objectUrl && signature === state.signature) {
     setStatus(
-      `That is the image already open — nothing re-run. Use Re-translate to run it again, or change the language or mode.`,
+      "That is the image already open — nothing re-run. Use Re-translate to run it again, or change the language or mode.",
     );
     return;
   }
@@ -580,7 +580,7 @@ async function useImageBlob(blob, name, { repeatIsAccident = false } = {}) {
   await translate();
 }
 
-const MAX_URL_IMAGE_BYTES = 25 * 1024 * 1024;
+const MAX_URL_IMAGE_BYTES = MAX_API_IMAGE_BYTES;
 
 /** Load a public image URL without credentials and reject non-image responses. */
 async function useImageUrl(rawUrl) {
@@ -590,7 +590,7 @@ async function useImageUrl(rawUrl) {
     setStatus("An image link has to start with http:// or https://", "bad");
     return;
   }
-  setStatus(`Fetching ${url}…`, "working");
+  setStatus("Fetching {url}…", "working", { url });
   try {
     const response = await fetch(url, {
       credentials: "omit",
@@ -600,9 +600,9 @@ async function useImageUrl(rawUrl) {
     if (!response.ok) {
       setStatus(
         response.status === 401 || response.status === 403
-          ? `That link needs a login (HTTP ${response.status}). Save the image and drop it in instead.`
-          : `Could not fetch that link: HTTP ${response.status}.`,
-        "bad",
+          ? "That link needs a login (HTTP {status}). Save the image and drop it in instead."
+          : "Could not fetch that link: HTTP {status}.",
+        "bad", { status: response.status },
       );
       return;
     }
@@ -612,24 +612,25 @@ async function useImageUrl(rawUrl) {
       .toLowerCase();
     if (!mime.startsWith("image/")) {
       setStatus(
-        `That link is not an image${mime ? ` (${mime})` : ""}; nothing was loaded.`,
-        "bad",
+        mime ? "That link is not an image ({type}); nothing was loaded."
+          : "That link is not an image; nothing was loaded.",
+        "bad", { type: mime },
       );
       return;
     }
     const declared = Number(response.headers.get("content-length"));
     if (Number.isFinite(declared) && declared > MAX_URL_IMAGE_BYTES) {
       setStatus(
-        `That image is ${Math.round(declared / 1048576)} MB — too large to translate here.`,
-        "bad",
+        "That image is {size} MB — too large to translate here.",
+        "bad", { size: Math.round(declared / 1048576) },
       );
       return;
     }
     const blob = await response.blob();
     if (blob.size > MAX_URL_IMAGE_BYTES) {
       setStatus(
-        `That image is ${Math.round(blob.size / 1048576)} MB — too large to translate here.`,
-        "bad",
+        "That image is {size} MB — too large to translate here.",
+        "bad", { size: Math.round(blob.size / 1048576) },
       );
       return;
     }
@@ -639,8 +640,8 @@ async function useImageUrl(rawUrl) {
     );
   } catch (error) {
     setStatus(
-      `Could not fetch that link: ${error?.message || String(error)}`,
-      "bad",
+      "Could not fetch that link: {error}",
+      "bad", { error: error?.message || String(error) },
     );
   }
 }
@@ -697,10 +698,8 @@ function rememberResult(kind, detail) {
 }
 
 /**
- * Re-apply a finished run without touching the network.
- *
- * This hands the content script the very message the service worker would have
- * sent, so the overlay is drawn by the same code that drew it the first time.
+ * Re-apply a finished run without the network, by handing the content script
+ * the same message the service worker sent the first time.
  */
 async function applyCachedResult(entry) {
   const tp = TP();
@@ -733,8 +732,8 @@ async function applyCachedResult(entry) {
     // rather than leaving the page on the previous image's overlay.
     resultCache.delete(cacheKey());
     setStatus(
-      `Could not redraw the saved run (${error?.message || String(error)}). Press Re-translate to run it again.`,
-      "bad",
+      "Could not redraw the saved run ({error}). Press Re-translate to run it again.",
+      "bad", { error: error?.message || String(error) },
     );
   }
 }
@@ -800,8 +799,9 @@ async function translate({ force = false } = {}) {
   els.retranslate.disabled = true;
   const modeName = MODES.find((m) => m.id === state.mode)?.name || state.mode;
   setStatus(
-    `Translating with ${modeName}${state.mode === "lens_text" ? ` · ${state.source}` : ""} → ${state.lang}…`,
-    "working",
+    state.mode === "lens_text" ? "Translating with {mode} · {source} → {language}…"
+      : "Translating with {mode} → {language}…",
+    "working", { mode: modeName, source: state.source, language: state.lang },
   );
 
   const response = await sendBg({
@@ -842,10 +842,10 @@ function onTranslated(detail, kind) {
   const paragraphs = state.result?.lensDocument?.paragraphs?.length || 0;
   if (fromCache) {
     setStatus(
-      kind === "image"
-        ? "Shown from this page's saved runs — no new request."
-        : `Shown from this page's saved runs — no new request${paragraphs ? ` · ${paragraphs} paragraph(s)` : ""}.`,
-      "ok",
+      kind !== "image" && paragraphs
+        ? "Shown from this page's saved runs — no new request · {count} paragraph(s)."
+        : "Shown from this page's saved runs — no new request.",
+      "ok", { count: paragraphs },
     );
     if (state.showRaw) renderRaw();
     return;
@@ -854,18 +854,22 @@ function onTranslated(detail, kind) {
     // The job ran and finished; it simply put no text on the image. Saying
     // "Translated" here would be a lie the raw panel would then contradict.
     setStatus(
-      `Finished with nothing to draw${detail?.note ? ` — ${detail.note}` : ""}. ` +
-        (state.showRaw
-          ? "The raw panel below shows what Lens returned."
-          : "Turn on raw data to see what Lens returned."),
-      "bad",
+      detail?.note
+        ? state.showRaw
+          ? "Finished with nothing to draw — {note}. The raw panel below shows what Lens returned."
+          : "Finished with nothing to draw — {note}. Turn on raw data to see what Lens returned."
+        : state.showRaw
+          ? "Finished with nothing to draw. The raw panel below shows what Lens returned."
+          : "Finished with nothing to draw. Turn on raw data to see what Lens returned.",
+      "bad", { note: detail?.note || "" },
     );
   } else {
     setStatus(
       kind === "image"
         ? "Translated — the picture above is the translated one."
-        : `Translated${paragraphs ? ` · ${paragraphs} paragraph(s)` : ""}. Click any line to select its whole bubble.`,
-      "ok",
+        : paragraphs ? "Translated · {count} paragraph(s). Click any line to select its whole bubble."
+          : "Translated. Click any line to select its whole bubble.",
+      "ok", kind === "image" ? null : { count: paragraphs },
     );
   }
   if (state.showRaw) renderRaw();
@@ -876,8 +880,8 @@ function onTranslateError(detail) {
   state.busy = false;
   els.retranslate.disabled = false;
   setStatus(
-    `Not translated: ${detail?.message || "the job ended without an overlay"}`,
-    "bad",
+    detail?.message ? "Not translated: {message}" : "Not translated: the job ended without an overlay",
+    "bad", { message: detail?.message || "" },
   );
   if (state.showRaw) renderRaw();
 }
@@ -1021,9 +1025,8 @@ window.addEventListener("drop", async (event) => {
   const file = firstImageFile(event.dataTransfer);
   if (droppedFolders.length && !file) {
     setStatus(
-      `“${droppedFolders.join(", ")}” is a folder. This page translates one image at a time — ` +
-        `open the Local viewer for a whole folder.`,
-      "bad",
+      "“{folder}” is a folder. This page translates one image at a time — open the Local viewer for a whole folder.",
+      "bad", { folder: droppedFolders.join(", ") },
     );
     return;
   }
@@ -1073,7 +1076,7 @@ async function refreshLanguagesFromApi() {
       });
     }
     if (Array.isArray(data.sources) && data.sources.length) {
-      fillSelect(els.source, autoTranslateSources(data.sources), {
+      fillSelect(els.source, autoTranslateSources(canonicalSourceNames(data.sources)), {
         valueKey: "id",
         labelKey: "name",
         keep: state.source,

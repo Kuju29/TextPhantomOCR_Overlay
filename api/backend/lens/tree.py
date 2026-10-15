@@ -82,10 +82,8 @@ def _empty_diagnostics() -> dict[str, Any]:
 def _slice_text(full_text: str, start: int | None, end: int | None) -> str | None:
     """Slice ``full_text[start:end]``, or ``None`` when the range is unusable.
 
-    This used to return ``""`` on a bad range, which is what made a bad Lens
-    offset indistinguishable from a genuinely empty paragraph. The rendered
-    result is the same empty string either way; the difference is that the
-    caller can now count it and say so.
+    Not ``""``: a bad Lens offset must stay distinguishable from a genuinely
+    empty paragraph so the caller can count it.
     """
     if start is None or end is None:
         return None
@@ -390,19 +388,6 @@ def flatten_spans(tree: dict | None) -> list[dict]:
             spans.extend(it.get("spans") or [])
     return spans
 
-
-def spans_for_paragraphs(tree: dict | None, indices) -> list[dict]:
-    """Every span node belonging to these paragraph indices."""
-    want = {int(i) for i in (indices or [])}
-    if not want:
-        return []
-    spans: list[dict] = []
-    for index, para in iter_paragraphs(tree):
-        if index not in want:
-            continue
-        for item in para.get("items") or []:
-            spans.extend(item.get("spans") or [])
-    return spans
 
 def paragraph_texts(tree: dict | None) -> list[str]:
     """Return one text string per paragraph.

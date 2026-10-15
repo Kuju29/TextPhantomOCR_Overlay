@@ -1,16 +1,9 @@
 /**
- *
- * Script detection and font fitting.
- *
- * A direct port of the pure-math half of `api/backend/render/tp_html.py`
- * (`_classify_text`, `_is_cjk_dominant`, `fit_item_font_size`, …) and
- * `render/text_utils.py` (`contains_rtl`).
- *
- * Pinned to `api/tests/fixtures/text_metrics.json`, which the Python side
- * generates and both sides assert. The failure this prevents is specific: the
- * server renders page 1 of a chapter and the extension renders page 2, and the
- * two pick different font sizes for identical bubbles. Nothing errors. The
- * chapter simply looks inconsistent, and the cause is invisible.
+ * Script detection and font fitting: a port of the pure-math half of
+ * `api/backend/render/tp_html.py` (`_classify_text`, `_is_cjk_dominant`,
+ * `fit_item_font_size`, …) and `render/text_utils.py` (`contains_rtl`), pinned to
+ * `api/tests/fixtures/text_metrics.json` so server- and extension-rendered pages
+ * of one chapter pick the same font sizes.
  */
 
 // Average glyph width as a fraction of font size, per script.
@@ -76,7 +69,7 @@ function* codePoints(text) {
   for (const ch of String(text || "")) yield ch.codePointAt(0);
 }
 
-export function isCjkChar(ch) {
+function isCjkChar(ch) {
   if (!ch) return false;
   return inRanges(ch.codePointAt(0), CJK_RANGES);
 }
@@ -87,7 +80,7 @@ export function containsRtl(text) {
 }
 
 /** Cheap script bucket used to pick a glyph-width ratio. */
-export function classifyText(text) {
+function classifyText(text) {
   if (!text) return "latin";
   let cjk = 0;
   let thai = 0;
@@ -131,15 +124,6 @@ export function visibleCharCount(text) {
   return n;
 }
 
-/**
- * Font size for one horizontal item, from its box and its text.
- *
- * Height is the hard ceiling — text taller than its line looks cramped. Width
- * is the soft one — the line shrinks to fit. Sizes are in whole pixels and
- * rounded the same way as Python's `round()`, which is banker's rounding: see
- * `roundHalfEven`. Using JS's `Math.round` here would disagree with the server
- * on every exact .5, and those land often because box sizes are quantised.
- */
 // Closed-form size for an UPRIGHT CJK column in an axis-aligned box.
 // Port of `fit_item_font_size_vertical` in api/backend/render/tp_html.py.
 // A CJK glyph is about fs x fs, so n glyphs fit when n * fs^2 <= w * h.
@@ -170,6 +154,12 @@ export function fitColumnFontSize(boxWidthPct, boxHeightPct, text, imgW, imgH) {
   return fitColumnFontSizePx(wPx, hPx, text);
 }
 
+/**
+ * Font size for one horizontal item. Height is the hard ceiling, width the soft
+ * one. Whole pixels rounded half-to-even like Python's `round()`
+ * (`roundHalfEven`): `Math.round` would disagree with the server on every
+ * exact .5, which box quantisation makes common.
+ */
 export function fitItemFontSize(boxWidthPct, boxHeightPct, text, imgW, imgH) {
   const wPx = (Math.max(0, boxWidthPct) / 100) * Math.max(1, Math.trunc(imgW));
   const hPx = (Math.max(0, boxHeightPct) / 100) * Math.max(1, Math.trunc(imgH));
@@ -222,13 +212,9 @@ export function roundHalfEven(value) {
 }
 
 /**
- * One font size shared by every item in a paragraph.
- *
- * Each Lens item in a bubble has its own box, and per-item fitting picks a
- * different size for each — so one speech bubble ends up with a line at 18px
- * and the next at 32px purely because Lens measured the heights slightly
- * differently. Averaging keeps the bubble visually consistent; `overflow:
- * visible` lets glyphs spill a few px rather than reflow.
+ * One font size shared by every item in a paragraph: per-item fitting gives
+ * lines of one bubble different sizes purely from Lens height noise.
+ * `overflow: visible` lets glyphs spill a few px rather than reflow.
  */
 export function sharedParagraphFontSize(items, imgW, imgH) {
   const sizes = [];
@@ -246,91 +232,3 @@ export function sharedParagraphFontSize(items, imgW, imgH) {
   return Math.max(MIN_FONT_PX, roundHalfEven(avg));
 }
 
-/**
- * Make neighbouring vertical translated boxes use the largest font in their
- * local text set.
- *
- * Records may carry an explicit group id (strong evidence).  Without one we
- * require close parallel columns, substantial vertical overlap and compatible
- * scale.  The component-wide scale guard prevents a 12→17→23px chain from
- * pulling a nearby title/sign into dialogue merely through transitivity.
- *
- * @param {Array<{id:string,fontPx:number,glyphPx:number,left:number,top:number,
- *   right:number,bottom:number,groupId?:string}>} records
- * @returns {Map<string, number>}
- */
-export function harmonizeVerticalFontRecords(records) {
-  const rows = (Array.isArray(records) ? records : []).filter(
-    (row) =>
-      row &&
-      row.id &&
-      Number(row.fontPx) > 0 &&
-      Number(row.glyphPx) > 0 &&
-      Number(row.right) > Number(row.left) &&
-      Number(row.bottom) > Number(row.top),
-  );
-  const parent = rows.map((_row, index) => index);
-  const minFont = rows.map((row) => Number(row.fontPx));
-  const maxFont = [...minFont];
-  const minGlyph = rows.map((row) => Number(row.glyphPx));
-  const maxGlyph = [...minGlyph];
-  const find = (index) => {
-    while (parent[index] !== index) {
-      parent[index] = parent[parent[index]];
-      index = parent[index];
-    }
-    return index;
-  };
-  const edges = [];
-  for (let i = 0; i < rows.length; i++) {
-    for (let j = i + 1; j < rows.length; j++) {
-      const a = rows[i];
-      const b = rows[j];
-      const aGroup = String(a.groupId || "");
-      const bGroup = String(b.groupId || "");
-      if ((aGroup || bGroup) && aGroup !== bGroup) continue;
-
-      const overlap = Math.max(
-        0,
-        Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top),
-      );
-      const shorter = Math.max(1, Math.min(a.bottom - a.top, b.bottom - b.top));
-      const horizontalGap = Math.max(a.left - b.right, b.left - a.right, 0);
-      const glyph = Math.max(Number(a.glyphPx), Number(b.glyphPx), 1);
-      const explicitGroup = Boolean(aGroup && aGroup === bGroup);
-      if (overlap / shorter < (explicitGroup ? 0.25 : 0.4)) continue;
-      if (horizontalGap > (explicitGroup ? 3.2 : 1.8) * glyph) continue;
-      if (Math.max(a.fontPx, b.fontPx) / Math.min(a.fontPx, b.fontPx) > 1.55)
-        continue;
-      // Fitted translated text can make a huge title and normal dialogue both
-      // land near 20px.  Source glyph scale is the independent evidence that
-      // they are different typographic sets.
-      if (
-        Math.max(a.glyphPx, b.glyphPx) / Math.min(a.glyphPx, b.glyphPx) >
-        1.55
-      )
-        continue;
-      edges.push([horizontalGap / glyph, i, j]);
-    }
-  }
-  edges.sort((a, b) => a[0] - b[0]);
-  for (const [, i, j] of edges) {
-    const ri = find(i);
-    const rj = find(j);
-    if (ri === rj) continue;
-    const nextMin = Math.min(minFont[ri], minFont[rj]);
-    const nextMax = Math.max(maxFont[ri], maxFont[rj]);
-    const nextMinGlyph = Math.min(minGlyph[ri], minGlyph[rj]);
-    const nextMaxGlyph = Math.max(maxGlyph[ri], maxGlyph[rj]);
-    if (nextMax / nextMin > 1.55) continue;
-    if (nextMaxGlyph / nextMinGlyph > 1.55) continue;
-    parent[rj] = ri;
-    minFont[ri] = nextMin;
-    maxFont[ri] = nextMax;
-    minGlyph[ri] = nextMinGlyph;
-    maxGlyph[ri] = nextMaxGlyph;
-  }
-  const out = new Map();
-  rows.forEach((row, index) => out.set(String(row.id), maxFont[find(index)]));
-  return out;
-}

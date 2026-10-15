@@ -29,20 +29,8 @@ function expandDirectionChangeCanvas(
   let height = (block.heightPct / 100) * imgH;
   const area = width * height;
   // Every neighbour gets HALF the whitespace between the two blocks, and no
-  // block ever shrinks below its own ink.
-  //
-  // The previous rule clamped only against a peer whose far edge already
-  // cleared this block (`px2 <= left && px2 > nextLeft`), which is false for
-  // the common case — a peer sitting a whole column of whitespace away — so
-  // two neighbouring bubbles both expanded into the SAME gap and their
-  // translations were drawn through each other. It then recomputed the width
-  // as `max(width, nextRight - nextLeft)` while assigning `left = nextLeft`,
-  // so a block squeezed from both sides kept its original width and simply
-  // slid sideways, out of its own bubble.
-  //
-  // Splitting the gap is stable without ordering the entries: A stops at the
-  // midpoint between A and B, and B stops at the same midpoint, so the two
-  // canvases meet and never overlap however the list is traversed.
+  // block ever shrinks below its own ink. Splitting the gap needs no ordering:
+  // A and B both stop at their midpoint, so the canvases meet and never overlap.
   if (targetDirection === "h" && height > width) {
     const ideal = Math.max(width, Math.sqrt(area * 1.5));
     const inkLeft = left;

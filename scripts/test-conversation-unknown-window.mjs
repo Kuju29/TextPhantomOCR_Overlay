@@ -5,21 +5,37 @@ import { planConversationBatch } from '../src/shared/ai/workload/conversation-ba
 
 const rows=Array.from({length:100},(_,i)=>({id:`I${Math.floor(i/10)+1}_P${i%10}`,text:'ก'.repeat(35)}));
 const limits={contextTokens:1310720,outputHintTokens:943718};
-const plan=({provider='openrouter',window=limits,profile=initialProfile(),userMaxOutput=null,ready=rows}={})=>
-  planConversationBatch({rows:ready,pageSizes:Array(ready.length/10).fill(10),profileSnapshot:profile,
+const plan=({provider='openrouter',window=limits,profile=initialProfile(),userMaxOutput=null,ready=rows,continuation=false,fixed=400}={})=>
+  planConversationBatch({rows:ready,pageSizes:Array(ready.length/10).fill(10),profileSnapshot:profile,conversationState:{continuation},
     context:{limits:window,provider,contract:'compact_markers_v1',reasoningActive:false,userMaxOutput},
-    capabilities:{reasoning:{supported:false,supports_max_tokens:true}},estimateFixedInput:()=>400});
+    capabilities:{reasoning:{supported:false,supports_max_tokens:true}},estimateFixedInput:()=>fixed});
 
+// .67 owner rule: one Conversation turn's NEW input plus its reply share the
+// 8K ceiling. Output alone no longer fills 90% of the window.
+const within=(p,ceiling=8192)=>p.estimate.turnBudget.turnInput+p.estimate.turnBudget.turnOutput<=ceiling;
 const first=plan();
-assert.equal(first.estimate.target,7372,'use 90% of the 8K application ceiling on the first request');
-assert.equal(first.pageCount,8,'send eight complete ready images without a warmup');
-assert.deepEqual(first.units,rows.slice(0,80),'preserve source order and whole images');
+assert.equal(first.estimate.target,7372,'the output reliability target itself is unchanged');
+assert.equal(first.estimate.turnBudget.ceiling,8192);
+assert.ok(within(first),'first turn input (prompt + source) plus reply fits the ceiling');
+assert.equal(first.pageCount,4,'whole images are added only while input + reply fit');
+assert.equal(first.splitReason,'conversation_page_output_target');
+assert.deepEqual(first.units,rows.slice(0,40),'preserve source order and whole images');
 assert.equal(plan({ready:rows.slice(80)}).pageCount,2,'remaining two ready images follow in one request');
 assert.equal(plan({ready:rows.slice(0,30)}).pageCount,3,'three fitting images all go together');
-assert.equal(plan({userMaxOutput:4096}).pageCount,4,'honor a narrower user cap');
-assert.equal(plan({window:{...limits,outputHintTokens:4096}}).pageCount,8,
+const bigPrompt=plan({fixed:6500});
+assert.equal(bigPrompt.pageCount,1,'a large first-turn prompt leaves room for one complete image only');
+assert.equal(bigPrompt.estimate.turnBudget.firstTurn,true);
+const later=plan({fixed:6500,continuation:true});
+assert.equal(later.estimate.turnBudget.firstTurn,false);
+assert.ok(later.estimate.turnBudget.turnInput<later.estimate.estimatedInput,
+  'replayed prompt/history is not counted as new turn input');
+assert.ok(within(later)&&later.pageCount>bigPrompt.pageCount,'later turns split the ceiling between new source and reply');
+assert.equal(plan({userMaxOutput:4096}).estimate.turnBudget.ceiling,4096,'a narrower user cap is the turn ceiling');
+assert.ok(within(plan({userMaxOutput:4096}),4096));
+assert.equal(plan({window:{...limits,outputHintTokens:4096}}).pageCount,first.pageCount,
   'a routing hint does not establish the selected model\'s output ceiling');
-assert.equal(plan({window:{...limits,maxOutputTokens:4096}}).pageCount,4,'honor an explicit model output cap');
+assert.equal(plan({window:{...limits,maxOutputTokens:4096}}).estimate.turnBudget.ceiling,4096,'honor an explicit model output cap');
+assert.equal(plan({provider:'claude-web'}).estimate.turnBudget,undefined,'Login web chat keeps its own sizing');
 assert.equal(plan({provider:'groq'}).estimate.target,7372,'verified large context uses the same bounded Cloud policy');
 assert.equal(plan({provider:'groq',window:{}}).estimate.target,1536,'unknown context stays conservative');
 assert.equal(plan({window:{contextTokens:8192}}).estimate.target,1536,'small context does not use application 8K');
@@ -60,5 +76,5 @@ const observation=observeWorkload({units:[unit],plan:first.estimate,ai:{provider
     usage:{source:'provider',outputTokens:160,thinkingTokens:0}}}});
 assert.equal(observation.requestedOutputTokens,2048,'read cloud receipt telemetry in snake case');
 assert.equal(observation.limits.contextTokens,limits.contextTokens,'read cloud model limits in snake case');
-assert.equal(plan().pageCount,8,'the request count is not trained up one call at a time');
-console.log('PASS 8K whole-page packing, reasoning/answer headroom, recovery after truncated thinking, provider isolation and receipts');
+assert.equal(plan().pageCount,first.pageCount,'the request count is not trained up one call at a time');
+console.log('PASS 8K turn budget (input + reply), whole-page packing, reasoning/answer headroom, recovery after truncated thinking, provider isolation and receipts');

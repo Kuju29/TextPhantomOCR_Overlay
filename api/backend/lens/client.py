@@ -25,23 +25,12 @@ _REQUEST_HEADERS = {
 }
 
 # --- Connection pool ---------------------------------------------------------
-# Every Lens call is two requests to the same host, and a `with httpx.Client()`
-# around each one meant every request opened a fresh TCP + TLS connection.
-# Counted on 2026-08-07: ten images cost TWENTY handshakes; a pooled client
-# costs one. Each handshake is two network round trips (TCP, then TLS 1.3), so
-# on a 3.0 s Lens call this is pure latency that buys nothing.
-#
-# ONE client per cookie jar, not one per request:
-#   * httpx 0.28 deprecated per-request `cookies=` (the persistence rules are
-#     ambiguous), so the jar has to live on the client;
-#   * the jar changes only when the Firebase cookie is refreshed, which a
-#     background task does about once an hour — so in practice one client
-#     serves every request.
-#
-# The default `keepalive_expiry` of 5 s is deliberately left alone: requests
-# within one image (and across a batch) are milliseconds apart and reuse the
-# connection, while an idle connection is dropped by us long before Google
-# would drop it — which is what makes a stale-socket error impossible here.
+# Every Lens call is two requests to the same host; a pooled client avoids a
+# fresh TCP + TLS handshake per request. ONE client per cookie jar: httpx 0.28
+# deprecated per-request `cookies=`, and the jar changes only on a cookie
+# refresh. The default 5 s `keepalive_expiry` is kept: requests within a batch
+# reuse the connection, and an idle one is dropped long before Google would
+# drop it, so stale-socket errors cannot happen.
 _client_lock = threading.Lock()
 _client: httpx.Client | None = None
 _client_jar_key = ""
@@ -98,7 +87,9 @@ def close_session() -> None:
 # Sized for translated->AI passes over large batches (100+ images); entries
 # are Lens JSON dicts, typically tens of KB each. Override via env if needed.
 _LENS_CACHE_MAX = max(8, int(os.environ.get("TP_LENS_CACHE_MAX", "256")))
-_LENS_CACHE_TTL_SEC = 600.0
+# Entries live 30 min since their last use, so re-running the same pages a few
+# minutes apart keeps hitting the cache.
+_LENS_CACHE_TTL_SEC = float(os.environ.get("TP_LENS_CACHE_TTL_SEC", "1800"))
 _lens_cache: OrderedDict[str, tuple[float, dict[str, Any]]] = OrderedDict()
 _lens_cache_lock = threading.Lock()
 
@@ -133,6 +124,7 @@ def _lens_cache_get(key: str) -> dict[str, Any] | None:
         if time.time() - ts > _LENS_CACHE_TTL_SEC:
             _lens_cache.pop(key, None)
             return None
+        _lens_cache[key] = (time.time(), data)
         _lens_cache.move_to_end(key)
         # Deep-copy out so callers can never mutate the cached response.
         return copy.deepcopy(data)

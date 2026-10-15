@@ -25,6 +25,7 @@ from backend.ai.clients.base import ChatResult
 from backend.ai.provider_contract import ModelListResult
 from backend.ai.translation import invocation
 from backend.ai.translation.contracts import AiConfig
+assert AiConfig(api_key="").style_examples is False
 calls=[]
 def generate(request):
     calls.append(request)
@@ -36,7 +37,8 @@ with patch.object(type(adapter), "generate", side_effect=generate), patch.object
             "limits":{"contextTokens":8192,"source":"lmstudio_native_loaded_instance"}}})), patch.object(invocation, "assert_ai_base_url_allowed"):
     invocation._translate_once(markers.apply([${JSON.stringify(source)}]), "th", AiConfig(
         api_key="", provider="lmstudio", model="test-model", base_url="http://localhost:1234/v1",
-        prompt_editable=${JSON.stringify(style)}, prompt_mode="replace", thinking="default", char_memory=False))
+        prompt_editable=${JSON.stringify(style)}, prompt_mode="replace", thinking="default", char_memory=False,
+        style_examples=True))
 assert len(calls)==1
 print(json.dumps({"system": calls[0].system_text, "user": calls[0].user_parts[0],
                   "schema": calls[0].response_schema}, ensure_ascii=False))
@@ -91,6 +93,7 @@ try {
         prompt: style,
         promptMode: "replace",
         thinking: "default",
+        style_examples: true,
       },
       canonicalPrompt: plan,
       targetLang: "th",
@@ -151,7 +154,7 @@ try {
     await translateWithLocalOpenAi([{ id: "unit", text: source }], {
       ai: { provider: variant.provider, model: "custom-model",
         base_url: variant.adapter.baseUrl, local_adapter: variant.adapter,
-        prompt: style, promptMode: "replace", thinking: "default" },
+        prompt: style, promptMode: "replace", thinking: "default", style_examples:true },
       canonicalPrompt: plan, targetLang: "th",
     });
     assert.equal(calls.length, 1, `${variant.name} dispatches exactly once`);

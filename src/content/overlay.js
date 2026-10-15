@@ -15,7 +15,9 @@
   // Builds a small status badge element for a given label.
   function createOverlayBadge(label) {
     const badge = document.createElement("div");
-    badge.textContent = label || "No AI key";
+    // Status labels are shown in the selected interface language.
+    const text = label || "No AI key";
+    badge.textContent = globalThis.TPPageText?.display?.(text) ?? text;
     Object.assign(badge.style, {
       position: "absolute",
       left: "6px",
@@ -334,6 +336,19 @@
       reportTiming("stale_discard");
       return { stale: true };
     }
+    // A failed local render with no server markup cannot acknowledge a drawn
+    // translation. Keep the source pixels intact and let the delivery owner
+    // display the existing placement error instead of committing an empty DOM.
+    if (localFailure && !html) {
+      if (preparedLocalBackground?.url) {
+        try { URL.revokeObjectURL(preparedLocalBackground.url); } catch {}
+      }
+      reportRoute("failed", "local_renderer_unavailable");
+      reportTiming("failed");
+      const error = new Error("Translated text could not be displayed. Reload this page and try again.");
+      error.code = "translation_overlay_render_failed";
+      throw error;
+    }
     const domApplyStarted = clock();
     const rec = ops.upsert("html");
     if (isTextMode && localBg) {
@@ -351,9 +366,7 @@
       reportRoute("new", "", fontStats(builtRoot.innerHTML));
     } else {
       if (localFailure) reportRoute("fell-back", localFailure);
-      // Not "old": the scope is replaced with the server's markup on the next
-      // line. Calling this "old" made a working API-engine page read as a
-      // page that had kept its previous overlay.
+      // Not "old": the scope is replaced with the server's markup on the next line.
       else
         reportRoute(
           "server",
@@ -371,7 +384,7 @@
     nudgeOverlay(imgElement, ops.schedule);
     announce(true);
     timing.domApplyMs = clock() - domApplyStarted;
-    reportTiming(localFailure ? "failed" : "success");
+    reportTiming(localFailure ? "fallback_success" : "success");
     return {drawn:true};
   }
   Object.assign(TP, {

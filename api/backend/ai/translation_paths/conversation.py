@@ -7,8 +7,7 @@ import math
 
 from .mode import POLICY
 from .origins import current_origins, branch_history, boundaries
-from .store import current, execution_scope, MAX_HISTORY_CHARS, cancelled
-from .messages import history_parts
+from .store import current, execution_scope, MAX_HISTORY_CHARS
 from backend.ai import wire_trace, trace_preview
 from backend.ai.workload import estimate_provider_input, observed_input_scale, positive
 
@@ -16,12 +15,6 @@ INTRO = {
     "th": "นี่คือการแปลต่อเนื่องในเอกสารเดียวกัน ตอบเฉพาะ ID ในข้อความผู้ใช้ล่าสุด หากมีคำแปลก่อนหน้าที่สำเร็จอยู่ในประวัตินี้ ให้ใช้เป็นหลักเพื่อคงศัพท์ น้ำเสียง และรูปแบบให้ต่อเนื่อง แต่ต้นฉบับปัจจุบันที่ชัดเจนมีน้ำหนักเหนือกว่าเสมอ",
     "ja": "同じ文書の翻訳を続けます。最後のユーザーメッセージのIDだけを返してください。この履歴に成功した以前の訳がある場合だけ、用語・口調・表現の一貫性の主な基準として使い、現在の明確な原文を常に優先してください。",
     "en": "Continue translating this document. Return only IDs in the latest user message. When successful prior translations are present in this history, use them as the primary consistency reference for terminology, voice and phrasing, while always giving clear current source text precedence.",
-}
-
-REPAIR_NOTE = {
-    "th": "นี่คือรอบซ่อมของเอกสารเดียวกัน ตอบเฉพาะ ID ในข้อความผู้ใช้ล่าสุด ใช้ประวัติคำแปลก่อนหน้าก็ต่อเมื่อมีอยู่จริงในคำขอนี้ มิฉะนั้นให้ยึดบริบทที่แนบและต้นฉบับปัจจุบัน ห้ามสมมติว่ามีประวัติที่ไม่ได้ส่งมา ID ที่ส่งมาซ่อมอาจมีเลขขาดช่วง ให้คัดลอก ID แต่ละรายการตามต้นฉบับและแปลเฉพาะข้อความที่อยู่ใน marker เดียวกัน ห้ามเรียงเลขใหม่ ห้ามเลื่อนคำแปลไปเติมช่องว่าง และห้ามนำข้อความบริบทมาเป็นรายการคำตอบ หากแปลรายการใดไม่ได้ ให้คง ID เดิมและตอบว่างเฉพาะรายการนั้น",
-    "ja": "同じ文書の修復要求です。最後のユーザーメッセージのIDだけを返してください。以前の訳はこの要求に実際に含まれている場合だけ参照し、なければ添付された文脈と現在の原文を基準にしてください。送られていない履歴を仮定しないでください。 修復対象のIDは連番とは限りません。各IDをそのままコピーし、同じマーカー内の原文だけを訳してください。番号の振り直し、欠番を埋めるための訳の移動、文脈を回答対象にすることは禁止です。訳せない項目は同じIDで空欄にしてください。",
-    "en": "This is a repair request for the same document. Return only IDs in the latest user message. Use prior translations only when they are actually present in this request; otherwise rely on the supplied context and current source. Do not assume unseen translation history. Repair IDs may have gaps. Copy each ID exactly and translate only the source inside that same marker. Never renumber, shift translations to fill gaps, or return context as target records. When an item cannot be translated, keep its original ID with an empty value.",
 }
 
 
@@ -49,6 +42,23 @@ def _history_messages(turns):
                        **({"image_b64": turn["image"], "image_mime": turn.get("mime", "image/jpeg")} if turn.get("image") else {})})
         result.append({"role": "assistant", "text": turn["assistant"]})
     return result
+
+
+def _paid_transport_fits(system, user, prior, current_image):
+    """Match the paired Center's message envelope without decoding old images.
+
+    Old turns may roll over; the current source/image must still reach Center
+    intact for its authoritative syntax, MIME and decompression checks.
+    """
+    texts = [system, user, *(m["text"] for m in prior)]
+    images = [m.get("image_b64", "") for m in prior if m.get("image_b64")]
+    if current_image:
+        images.append(current_image)
+    sizes = [len(v) * 3 // 4 - (2 if v.endswith("==") else 1 if v.endswith("=") else 0) for v in images]
+    return (len(prior) + 2 <= 100 and all(len(t) <= 60000 for t in texts)
+            and sum(map(len, texts)) <= 180000 and len(images) <= 32
+            and all(n <= 4 * 1024 * 1024 for n in sizes)
+            and sum(sizes) <= 10 * 1024 * 1024)
 
 
 def prepare(request, layout, ai):
@@ -91,17 +101,16 @@ def prepare(request, layout, ai):
             if template_static[persistent_len:persistent_len+2] != "\n\n":
                 raise ValueError("conversation_bootstrap_example_boundary_mismatch")
             bootstrap_examples = template_static[persistent_len+2:]
-    # Normal continuation is deliberately OCR-only. All task/output/image-ID
-    # semantics and human examples live in the immutable first User anchor.
-    # Repair appends to the same chat, retaining the immutable prefix.
-    if image_records and (ai.conversation or {}).get("branch") != "repair":
+    # Snapshot runtime memory/context in the first User anchor only. Updating
+    # Series memory must not change compatibility or become a fresh instruction.
+    bootstrap_context = ""
+    if image_records:
+        from backend.ai.prompts.instruction_packs import instruction_pack
+        bootstrap_context = dynamic.rsplit(conversation_source, 1)[0].rstrip() if conversation_source in dynamic else ""
+        bootstrap_context = bootstrap_context.removesuffix(instruction_pack(locale)["sourceHeading"]).rstrip()
         dynamic = conversation_source
-    elif image_records:
-        dynamic = dynamic.rsplit(conversation_source, 1)[0].rstrip() + "\n" + conversation_source if conversation_source in dynamic else conversation_source
     else:
-        dynamic = boundaries(origins,locale) + dynamic
-    if (ai.conversation or {}).get("branch") == "repair":
-        dynamic = REPAIR_NOTE.get(locale, REPAIR_NOTE["en"]) + "\n\n" + dynamic
+        dynamic = boundaries(origins, locale) + dynamic
     intro = INTRO
     static = persistent_template + "\n\n" + intro.get(locale, intro["en"])
     anchor_static = static if image_records else static + (("\n\n" + bootstrap_examples) if bootstrap_examples else "")
@@ -157,10 +166,12 @@ def prepare(request, layout, ai):
         # cache continuity is already broken by that trim.
         effective = [dict(turn) for turn in turns]
         if effective and not effective[0].get("anchor"):
-            effective[0]["user"] = anchor_static + "\n\n" + effective[0]["user"]
+            effective[0]["user"] = "\n\n".join(filter(None, (anchor_static, bootstrap_context, effective[0]["user"])))
+            effective[0]["bootstrapContext"] = bootstrap_context
             effective[0]["anchor"] = True
         prior = _history_messages(effective)
-        user = dynamic if effective else anchor_static + "\n\n" + dynamic
+        initial_anchor = anchor_static + (("\n\n" + bootstrap_context) if bootstrap_context else "")
+        user = dynamic if effective else initial_anchor + "\n\n" + dynamic
         estimate = estimate_provider_input(system=request.system_text,
             parts=[user], history=prior,
             schema=dict(request.response_schema) if request.response_schema else None,
@@ -169,12 +180,21 @@ def prepare(request, layout, ai):
     messages, user, estimate, effective_history = compose(history)
     # Only discard WHOLE old turns. Current source is never truncated; static
     # instructions are reattached exactly once at the new history boundary.
-    while history and (estimate > max_input or len(json.dumps(history, ensure_ascii=False)) + len(full) + len(request.image_b64) > MAX_HISTORY_CHARS-65536):
+    def paid_over_budget():
+        return request.provider == "paid" and not _paid_transport_fits(request.system_text, user, messages, request.image_b64)
+    while history and (estimate > max_input or paid_over_budget() or len(json.dumps(history, ensure_ascii=False)) + len(full) + len(request.image_b64) > MAX_HISTORY_CHARS-65536):
+        reason = ("paid_transport_budget" if paid_over_budget() else
+                  "context_budget" if estimate > max_input else "history_storage_budget")
         history.pop(0)
         trimmed += 1
         native_budget_trimmed += 1
-        reason = "context_budget" if estimate > max_input else "history_storage_budget"
         messages, user, estimate, effective_history = compose(history)
+    if request.provider == "paid" and len(json.dumps(effective_history, ensure_ascii=False)) + len(user) + len(request.image_b64) > MAX_HISTORY_CHARS - 65536:
+        # A page larger than the retained-history budget must not spend customer
+        # credits and only afterwards discover it strands this document's lane.
+        error = ConversationError("This page exceeds the Conversation history capacity; reduce the page image size before retrying. No provider request was sent")
+        error.code = "ai_conversation_history_capacity"
+        raise error
     provider_cursor = ""
     if native:
         # The native server owns earlier messages. A cursor after a budget
@@ -218,7 +238,11 @@ def prepare(request, layout, ai):
         "continuationTransport": transport,
         "providerCallsAdded": 0, "legacyFallback": False,
         "recordProtocol": "tp.translation.image-records/1" if image_records else "tp.translation.compact-records/1",
-        "continuationUserOcrOnly": bool(image_records and history),
+        "continuationUserOcrOnly": bool(image_records and history and dynamic.strip() == conversation_source.strip()),
+        "bootstrapContextIncluded": bool(not history and bootstrap_context),
+        "bootstrapContextChars": len(bootstrap_context) if not history else 0,
+        "memoryDelivery": "first_turn_only" if layout.get("memoryMode") in ("terms", "full") else "off",
+        "repairInstructionChars": 0,
         # HF Router is intentionally left in automatic fastest/failover mode.
         # The previous upstream is diagnostics only and must never become a
         # hidden routing input for the next turn.
@@ -237,7 +261,7 @@ def prepare(request, layout, ai):
         "userPersistentStaticSha256": _hash(static),
         "staticPrefixSha256": _hash(request.system_text + "\0" + effective_static),
     })
-    lease.prepared = {"history": effective_history, "prefix": compatibility, "dynamic": dynamic, "current_user": user,
+    lease.prepared = {"history": effective_history, "prefix": compatibility, "dynamic": dynamic, "bootstrap_context": bootstrap_context, "current_user": user,
         "image": request.image_b64, "mime": request.image_mime, "evidence": ev,"origins":origins,
         "prompt_layout": effective_layout, "provider_affinity": "",
         "continuation_transport": transport, "provider_id": spec.provider_id,
@@ -262,6 +286,7 @@ def prepare(request, layout, ai):
         cache_context={**dict(request.cache_context), "staticPrefixSha256":effective_layout["staticPrefixSha256"],
             "translationMode":"conversation", "conversationPolicy":POLICY,
             "conversationScope":lease.key,
+            **({"webchatTrimmedTurns":trimmed, "webchatRolloverReason":reason} if (ai.conversation or {}).get("webchatRunId") else {}),
             # The invocation passes resolved mode in request.thinking. Keep
             # original user intent so native LM Studio cannot mistake an
             # unresolved Minimum or clamped Off for requested Default.
@@ -277,7 +302,7 @@ def _history_assistant_text(result_text, meta, prepared, translated, source_text
     accepted non-empty records in canonical compact form.
     """
     from backend.ai import markers
-    if not (meta.get("redundant_closing_delimiter_chars") or
+    if "seriesSummaryStatus" not in meta and not (meta.get("redundant_closing_delimiter_chars") or meta.get("record_header_recovery_count") or
             meta.get("malformed_output_record_count") and meta.get("malformed_output_recoverable") is True):
         return str(result_text or "")
     values = list(translated[0] if translated else [])
@@ -292,6 +317,8 @@ def _history_assistant_text(result_text, meta, prepared, translated, source_text
         if not text:
             continue
         records.append(f"{markers.record_open(wire_id)}:{text}{markers.SUFFIX}")
+    if meta.get("seriesSummary"):
+        records.append(f"<<TP_MEMO:{meta['seriesSummary']}>>")
     return "\n".join(records)
 
 
@@ -306,12 +333,25 @@ def finish(result, decoded, ai, source_texts, target_lang, cancel_check=None):
     ev = prepared["evidence"]
     meta = decoded.get("meta") or {}
     usage = meta.get("usage") or {}
+    replayed = spec.provider_id == 'paid' and meta.get('centerOperationReplayed') is True
     cached = usage.get("cachedInputTokens")
-    ev["providerCacheStatus"] = "not_reported" if cached is None else "reported_hit" if cached > 0 else "reported_zero"
-    ev["cachedInputTokens"] = cached
-    ev["actualInputTokens"] = usage.get("inputTokens")
-    ev["actualOutputTokens"] = usage.get("outputTokens")
-    ev["providerCallsAdded"] = max(1, int(meta.get("generationAttempts") or meta.get("generation_attempts") or meta.get("providerAttempts") or meta.get("provider_attempts") or 1))
+    ev["providerCacheStatus"] = "not_requested" if replayed else "not_reported" if cached is None else "reported_hit" if cached > 0 else "reported_zero"
+    ev["cachedInputTokens"] = 0 if replayed else cached
+    ev["actualInputTokens"] = 0 if replayed else usage.get("inputTokens")
+    ev["actualOutputTokens"] = 0 if replayed else usage.get("outputTokens")
+    if replayed:
+        ev['centerOperationReplayed'] = True
+    endpoint_delivery = usage.get("promptDelivery")
+    if isinstance(endpoint_delivery, dict):
+        ev.update(continuationTransport=endpoint_delivery["transport"],
+                  providerState="new" if endpoint_delivery["firstTurn"] else "linked",
+                  effectiveWireSystemChars=endpoint_delivery["systemChars"],
+                  effectiveWireUserChars=endpoint_delivery["currentUserChars"],
+                  staticUserRepeated=endpoint_delivery["firstTurn"],
+                  continuationUserOcrOnly=endpoint_delivery["continuationUserOcrOnly"],
+                  bootstrapContextIncluded=endpoint_delivery["firstTurn"] and ev["bootstrapContextIncluded"],
+                  repairInstructionChars=0)
+    ev["providerCallsAdded"] = 0 if replayed else max(1, int(meta.get("generationAttempts") or meta.get("generation_attempts") or meta.get("providerAttempts") or meta.get("provider_attempts") or 1))
     resolved_upstream = str(getattr(result, "upstream_provider", "") or "").strip().lower()[:64]
     ev["resolvedUpstreamProvider"] = resolved_upstream or None
     # Conversation history is a transport/cache transcript, not the final page-quality
@@ -328,15 +368,15 @@ def finish(result, decoded, ai, source_texts, target_lang, cancel_check=None):
         and bool(translated)
         and any(str(v).strip() for v in translated[0])
     )
-    canonicalized = bool(meta.get("malformed_output_record_count") or meta.get("redundant_closing_delimiter_chars"))
+    canonicalized = bool(meta.get("malformed_output_record_count") or meta.get("redundant_closing_delimiter_chars") or meta.get("record_header_recovery_count"))
     native_recoverable_partial = native and canonicalized and structural_usable
     if native and canonicalized:
         structural_usable = False
     ev["formattingWhitespaceChars"] = meta.get("formatting_whitespace_chars", 0)
     ev["unexpectedProseChars"] = meta.get("unexpected_prose_chars", 0)
     ev["redundantClosingDelimiterChars"] = meta.get("redundant_closing_delimiter_chars", 0)
+    ev["recordHeaderRecoveryCount"] = meta.get("record_header_recovery_count", 0)
     ev["commitStatus"] = "not_committed_invalid_output"
-    branch = (ai.conversation or {}).get("branch")
     if callable(cancel_check) and cancel_check():
         ev["commitStatus"] = "not_committed_cancelled"
     elif lease.lost:
@@ -372,7 +412,7 @@ def finish(result, decoded, ai, source_texts, target_lang, cancel_check=None):
                 raise error
         lease.branch_only=False
         history_assistant = _history_assistant_text(result.text, meta, prepared, translated, source_texts)
-        turn = {"pages":prepared["origins"],"user": prepared["current_user"], "anchor": not bool(prepared["history"]), "assistant": history_assistant,
+        turn = {"pages":prepared["origins"],"user": prepared["current_user"], "anchor": not bool(prepared["history"]), "bootstrapContext": prepared["bootstrap_context"] if not prepared["history"] else "", "assistant": history_assistant,
                 "image": prepared["image"], "mime": prepared["mime"],
                 "pageId": (ai.conversation or {}).get("pageId", ""),
                 "pageIndex": (ai.conversation or {}).get("pageIndex"),

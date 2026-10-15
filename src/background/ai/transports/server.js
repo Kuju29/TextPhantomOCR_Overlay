@@ -9,13 +9,22 @@ import {
 } from "../../../shared/constants.js";
 import {
   failureUsageDetails,
+  isSettledPaidOperationReplay,
   persistProviderGeneration,
 } from "../../../shared/ai-usage.js";
 import { AI_PROMPT_MODE, normalizeAiPrompt } from "../../../shared/ai-prompt-policy.js";
 import { beginApiRequest, noteApiActivity, noteApiSuccess } from "../../api.js";
+import { noteRoutingAnswer, returnRoutingFeedback, takeRoutingFeedback } from "../routing-feedback.js";
+import { STREAM_PHASE_HEADER, createPhaseThrottle, normalizeStreamPhase } from "../../../shared/ai/stream-phase.js";
+import { installRequestHeaders } from "../../transports/install-header.js";
+import {
+  isManualCloudProvider, manualModelBlock, manualModelBlockError,
+  manualModelFailureCode, rememberManualModelFailure,
+} from "../../../shared/ai/manual-model-block.js";
+import { recordPaidRouteOutcome } from "../../../shared/paid-route-outcome.js";
 
 /** Read only the negotiated transport envelope; model output is never reparsed here. */
-export async function readAiStream(response, onDelta) {
+export async function readAiStream(response, onDelta, onPhase = null) {
   const reader = response.body?.getReader?.();
   const invalid = message => Object.assign(new Error(message), {code:"invalid_ai_stream"});
   if (!reader) throw invalid("AI stream has no readable body");
@@ -35,6 +44,9 @@ export async function readAiStream(response, onDelta) {
           throw invalid("AI stream schema or sequence mismatch");
         if (event.type === "delta" && typeof event.text === "string") {
           onDelta?.(event.text);
+        } else if (event.type === "progress" && normalizeStreamPhase(event)) {
+          // Stream phase (only sent when this client asked for it).
+          try { onPhase?.(normalizeStreamPhase(event)); } catch {}
         } else if (event.type === "result" && event.body && typeof event.body === "object") {
           return {status:200, body:event.body};
         } else if (event.type === "error" && Number.isInteger(event.status) && event.status >= 400 && event.status <= 599 && event.body && typeof event.body === "object") {
@@ -93,14 +105,30 @@ export async function translateViaServer(
   const apiBase = String(base || "").replace(/\/+$/, "");
   if (!apiBase) throw new Error("server AI route has no API base URL");
 
+  // Manual (own key) models are not probed when selected (10491). A model that
+  // already failed deterministically for this key is not sent again until the
+  // user re-selects it or changes the key/provider.
+  const manualSelection = isManualCloudProvider(ai?.provider, ai?.base_url)
+    ? { provider: ai.provider, baseUrl: ai.base_url, apiKey: ai.api_key, model: ai.model } : null;
+  if (manualSelection) {
+    const block = await manualModelBlock(manualSelection).catch(() => null);
+    if (block) {
+      trace?.("text-only AI failed", { stage: "manual_model_block", failureKind: block.code,
+        code: block.code, httpAttempts: 0, providerAttempts: 0, generationAttempts: 0,
+        requestDispatched: false, automaticContentRetry: false, automaticTransportRetry: false });
+      throw manualModelBlockError(block);
+    }
+  }
+
   requireConversationApi(ai, capabilities);
   const outputSelection = workloadSelection(ai || {}, "server");
   const body = {
     schema: "tp.ai.request/1",
     translationMode: ai?.translation_mode === "conversation" ? "conversation" : "independent",
-    conversation: {...(ai?.conversation || {}), ...(repairClaim ? {branch:"repair"} : {})},
+    conversation: {...(ai?.conversation || {}), ...(ai?.provider === "login" ? {webchatRunId:ai?.conversation?.webchatRunId || batchId} : {}), ...(repairClaim ? {branch:"repair"} : {})},
     operationId,
     ...(batchId ? { batchId } : {}),
+    ...(batchId ? { userRunId: batchId } : {}),
     context: {
       tp_trace: traceId,
       ...(tabSession ? { tp_tab_session: String(tabSession) } : {}),
@@ -119,13 +147,14 @@ export async function translateViaServer(
       model: String(ai?.model || "auto"),
       baseUrl: String(ai?.base_url || "auto"),
       apiKey: String(ai?.api_key || ""),
+      ...(ai?.provider==='paid'&&ai?.price_quote_token?{priceQuoteToken:String(ai.price_quote_token)}:{}),
       thinking: String(ai?.thinking || "minimum"),
       ...(outputSelection.contract ? { outputContract: outputSelection.contract } : {}),
       modelCapabilities: outputSelection.caps,
     },
     memory: {
       ...(["off", "terms", "full"].includes(ai?.memory_mode) ? { mode: ai.memory_mode } : {}),
-      styleExamples: ai?.style_examples !== false,
+      styleExamples: ai?.style_examples === true,
       enabled: ai?.char_memory === true,
       glossary: Array.isArray(ai?.glossary) ? ai.glossary : [],
       characters: Array.isArray(ai?.characters) ? ai.characters : [],
@@ -137,6 +166,9 @@ export async function translateViaServer(
   };
 
   if (ai?.repair_reason === "wrong_target_script") body.repair.reason = ai.repair_reason;
+  // Script-check outcomes of earlier answers (see routing-feedback.js).
+  const routingFeedback = takeRoutingFeedback();
+  if (routingFeedback.length) body.routingFeedback = routingFeedback;
 
   const requestPath = repairClaim
     ? repairRunPath(repairClaim.runId, `tasks/${encodeURIComponent(repairClaim.taskId)}/translate`)
@@ -145,7 +177,7 @@ export async function translateViaServer(
   const requestId = crypto.randomUUID();
   const headers = {
     "Content-Type": "application/json",
-    ...(progressiveRequested ? {Accept:"application/x-ndjson"} : {}),
+    ...(progressiveRequested ? {Accept:"application/x-ndjson", [STREAM_PHASE_HEADER]:"1"} : {}),
     ...(repairClaim ? { "X-TP-Run-Token": repairClaim.token } : {}),
     "X-TP-Request-Id": requestId,
     ...(jobId ? { "X-TP-Job-Id": String(jobId) } : {}),
@@ -238,11 +270,14 @@ export async function translateViaServer(
       throw signal.reason || new DOMException("Aborted", "AbortError");
     }
     const requestBody = JSON.stringify(body);
+    // The install id goes on the wire only; `headers` above is what the
+    // wire trace records, so the id is never written to a trace.
+    const sendHeaders = { ...headers, ...(await installRequestHeaders()) };
     progress("sending_request");
     httpStarted = performance.now(); httpAttempts = 1;
     const pendingResponse = fetch(`${apiBase}${path}`, {
       method: "POST",
-      headers,
+      headers: sendHeaders,
       cache: "no-store",
       priority: "high",
       signal,
@@ -262,6 +297,7 @@ export async function translateViaServer(
     });
   } catch (error) {
     finishApiRequest();
+    if (!httpAttempts || !res) returnRoutingFeedback(routingFeedback);
     const cancelled = signal?.aborted === true || error?.name === "AbortError";
     emitTiming(cancelled ? "cancelled" : httpAttempts ? "http_failed" : "persistence_failed");
     trace?.("text-only AI failed", {
@@ -308,18 +344,26 @@ export async function translateViaServer(
   }
 
   if (res.ok && res.headers.get("content-type")?.includes("application/x-ndjson")) {
-    let terminal, receivedDelta = false, contentProgressAt = -Infinity;
+    let terminal, receivedDelta = false, contentProgressAt = -Infinity, phaseSeen = false;
+    // ≤ 2 UI updates per second per request; the newest phase is never lost.
+    const phases = createPhaseThrottle(phase => onProgress?.({state:"provider_phase", phase}));
     try {
       terminal = await readAiStream(res, text => {
         receivedDelta = true;
         const now = performance.now();
-        if (text && now - contentProgressAt >= 350) {
+        // With phase rows the API already reports "writing n/N lines".
+        if (text && !phaseSeen && now - contentProgressAt >= 350) {
           contentProgressAt = now;
           progress("receiving_content");
         }
         try { onProgress?.({state:"translation_delta", text}); } catch {}
+      }, phase => {
+        phaseSeen = true;
+        if (phase.phase === "stalled" || phase.phase === "stopping") phases.final(phase);
+        else phases.push(phase);
       });
     } catch (error) {
+      phases.close();
       // A broken envelope cannot invent final provider usage. Keep its durable
       // pending receipt unresolved and distinguish known content from headers.
       if (receivedDelta) error.requestDispatched = true;
@@ -335,6 +379,7 @@ export async function translateViaServer(
       });
       throw error;
     }
+    phases.close();
     streamedBody = JSON.stringify(terminal.body);
     if (terminal.status >= 400) {
       // Reuse the same typed error/accounting path as a normal HTTP error.
@@ -366,9 +411,11 @@ export async function translateViaServer(
         ).slice(0, 500)
       : rawText.slice(0, 500);
     const code = String(detailObject?.code || detailObject?.error || "");
-    const providerAttempts = Number(detailObject?.providerAttempts || 0);
+    const unconfirmedPaidDispatch = code === "paid_database_unavailable" &&
+      detailObject?.providerDispatchEvidence === "unconfirmed";
+    const providerAttempts = unconfirmedPaidDispatch ? null : Number(detailObject?.providerAttempts || 0);
     const charged = failureUsageDetails(detailObject);
-    const generationAttempts = Number(
+    const generationAttempts = unconfirmedPaidDispatch ? null : Number(
       detailObject?.generationAttempts ??
         charged.generationAttempts ??
         providerAttempts,
@@ -410,6 +457,8 @@ export async function translateViaServer(
       apiHttpStatus: res.status,
       providerHttpStatuses: Number.isInteger(detailObject?.upstreamStatus) ? [detailObject.upstreamStatus] : [],
       generationAttempts,
+      ...(unconfirmedPaidDispatch ? {providerDispatchEvidence:"unconfirmed", creditState:"unconfirmed",
+        centerHttpStatus:res.status, requestDispatched:null} : {}),
       modelFallback: false,
       schemaFallback: false,
     });
@@ -417,7 +466,7 @@ export async function translateViaServer(
       `Text-only AI failed: HTTP ${res.status}${detailText ? ` - ${detailText}` : ""}`,
     );
     error.status = res.status;
-    if (["api", "client", "upstream_ai"].includes(detailObject?.origin)) error.origin = detailObject.origin;
+    if (["api", "client", "upstream_ai", "control_center"].includes(detailObject?.origin)) error.origin = detailObject.origin;
     if (code === "ai_conversation_origin_invalid") {
       error.stage = "conversation_mapping";
       error.category = "input";
@@ -438,6 +487,11 @@ export async function translateViaServer(
     error.retryAfterMs = retryAfterMs;
     error.providerAttempts = providerAttempts;
     error.generationAttempts = generationAttempts;
+    if (unconfirmedPaidDispatch) {
+      error.providerDispatchEvidence = "unconfirmed";
+      error.requestDispatched = null;
+      error.creditState = "unconfirmed";
+    }
     // Preserve only typed, additive API provenance for later bounded repair.
     // Never derive upstream status/finality from response text or outer status.
     if (detailObject?.providerFailureKind === "http_status")
@@ -485,10 +539,24 @@ export async function translateViaServer(
         },
         { emitTrace: trace },
       );
+    if (manualSelection && manualModelFailureCode(error)) {
+      try {
+        await rememberManualModelFailure(manualSelection, { code: error.code, status: error.status,
+          upstreamStatus: error.upstreamStatus, traceId });
+        error.manualModelMarked = true;
+      } catch {}
+    }
+    // Paid: Center's own route/capability refusal replaces the popup's saved
+    // quote state (10491); transient failures leave it alone.
+    if (ai?.provider === "paid")
+      await recordPaidRouteOutcome({ base: apiBase, model: ai.model, error,
+        message: detailObject?.userMessage || detailObject?.message || "" }).catch(() => {});
     throw error;
   }
 
   noteApiSuccess(apiBase);
+  if (ai?.provider === "paid")
+    await recordPaidRouteOutcome({ base: apiBase, model: ai.model }).catch(() => {});
   const rawResponse = await readResponseBody();
   progress("validating");
   await wireTrace?.("providerResponse", { mode: "body", status: res.status, raw: rawResponse });
@@ -625,6 +693,7 @@ export async function translateViaServer(
       ? result.memoryDelta.glossary.length
       : 0,
   });
+  noteRoutingAnswer(result, units, targetLang);
   await wireTrace?.("parsedRecords", result.translations);
   await wireTrace?.("providerValidation", { missingIds: Array.isArray(result.missing) ? result.missing.map(String) : [],
     omittedIds: Array.isArray(result?.meta?.omittedIds) ? result.meta.omittedIds.map(String) : [],
@@ -633,6 +702,13 @@ export async function translateViaServer(
     providerMs: Number.isFinite(result?.meta?.providerMs) ? result.meta.providerMs : null,
     parseMs: Number.isFinite(result?.meta?.parseMs) ? result.meta.parseMs : null });
 
+  const settledPaidReplay = result.replayed === true && isSettledPaidOperationReplay(result.meta, ai?.provider);
+  if (settledPaidReplay) {
+    // Historical tokens/charge remain in the answer for audit. Resolve only
+    // this request's durable intent; never journal a new generation/rate event.
+    await persistResponseUsage({ operationId, engine: "runsextension", resolvePending: true });
+    return { ...result, meta: { ...(result.meta || {}), route: "server" } };
+  }
   const generationAttempts = Math.max(
     1,
     Number(result?.meta?.generationAttempts) || 1,
@@ -659,7 +735,7 @@ export async function translateViaServer(
         "unknown",
       engine: "runsextension",
       generationAttempts,
-      reason: result?.meta?.repairAttempted ? "repair" : "translation_success",
+      reason: repairClaim || result?.meta?.repairAttempted ? "repair" : "translation_success",
       operationId,
       requestId,
       traceId,

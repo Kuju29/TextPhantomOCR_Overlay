@@ -142,7 +142,7 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
         observed=[]
         async def acquire(*args,**kwargs): observed.append(kwargs['cancel_check']())
         with patch.object(rate_admission.rate_gate,'snapshot',return_value={}), patch.object(rate_admission.rate_gate,'acquire',side_effect=acquire):
-            await rate_admission.acquire(rate={'enabled':True,'rpm':10,'burst':1},unlimited=False,provider='test',config=SimpleNamespace(model='test',api_key=''),context={},payload={},idempotency_key=None,cancel_check=lambda:True)
+            await rate_admission.acquire(rate={'enabled':True,'rpm':10,'burst':1},unlimited=False,provider='test',config=SimpleNamespace(model='test',api_key='',base_url='http://127.0.0.1:1234'),context={},payload={},idempotency_key=None,cancel_check=lambda:True)
         self.assertEqual(observed,[True])
 
 

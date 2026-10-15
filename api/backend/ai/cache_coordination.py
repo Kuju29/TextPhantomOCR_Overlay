@@ -242,8 +242,8 @@ def mark_dispatched():
 @contextmanager
 def coordinate(request, *, operation_id=''):
     context = getattr(request, 'cache_context', {})
-    # TP_PROMPT_CACHE_WAIT_MS from 14.7 is deliberately no longer read. There
-    # is no event wait, timer, warmup or retry in prefix observation.
+    # TP_PROMPT_CACHE_WAIT_MS is deliberately not read: prefix observation has
+    # no event wait, timer, warmup or retry.
     lease = _coordinator.acquire(provider=request.provider, model=request.model,
         endpoint=request.base_url, account=request.api_key,
         prefix=context.get('staticPrefixSha256'), target=context.get('targetLang',''), source=context.get('sourceLang',''),

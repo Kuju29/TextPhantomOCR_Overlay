@@ -5,7 +5,22 @@ import {translateLensPage} from '../src/background/pipeline/page-translation.js'
 import {createTranslationSessionStore,translationSessionRunKey} from '../src/background/translation-session-store.js';
 import {createRepairCoordinator} from '../src/background/repair/coordinator.js';
 import {ensureBatch} from '../src/background/batches.js';
+import {refreshLocalAiCapabilities} from '../src/background/local-ai-preflight.js';
 const deferred=()=>{let resolve;const promise=new Promise(r=>resolve=r);return {promise,resolve};};
+// Replace runtime metadata I/O, while retaining the real model-owned preflight.
+async function refreshFixtureModel(ai,route,options){
+ const fetch=globalThis.fetch,paths=[];
+ globalThis.fetch=async(url,init={})=>{
+  const path=new URL(url).pathname;paths.push(path);
+  if(path==='/api/tags')return Response.json({models:[{name:ai.model}]});
+  if(path==='/api/ps')return Response.json({models:[{name:ai.model,context_length:65536}]});
+  assert.equal(path,'/api/show');assert.equal(JSON.parse(init.body).model,ai.model);
+  return Response.json({capabilities:['completion'],thinking:{values:[false,true],default:false},
+   model_info:{'general.architecture':'fixture','fixture.context_length':65536}});
+ };
+ try{return await refreshLocalAiCapabilities(ai,route,{...options,get:async()=>({}),set:async()=>{},emitTrace:()=>{}});}
+ finally{globalThis.fetch=fetch;assert.deepEqual([...paths].sort(),['/api/ps','/api/show','/api/tags']);}
+}
 async function fixture({cancel=false,planningFailure=false}={}) {
  const id=crypto.randomUUID(),ac=new AbortController(),entered=deferred(),release=deferred();
  let saved={},writes=0,providerCalls=0,observations=0,nextCalls=0,epoch=7;
@@ -13,7 +28,7 @@ async function fixture({cancel=false,planningFailure=false}={}) {
  const area={get:async key=>key==null?structuredClone(saved):({[key]:structuredClone(saved[key])}),set:async patch=>{
   writes++;
   const page=Object.values(patch).map(v=>v?.row?.pages?.page).find(Boolean);
-  if(page?.accepted?.length===2 && page.inFlight?.length===2){entered.resolve();await release.promise;}
+  if(!planningFailure && page?.accepted?.length===2 && page.inFlight?.length===0){entered.resolve();await release.promise;}
   Object.assign(saved,structuredClone(patch));
  },remove:async keys=>{for(const key of (Array.isArray(keys)?keys:[keys]))delete saved[key];}};
  const sessions=createTranslationSessionStore({area:()=>area});
@@ -29,9 +44,9 @@ async function fixture({cancel=false,planningFailure=false}={}) {
   return {units:all.slice(offset,offset+2),splitReason:offset+2<all.length?'learned_output_target':'end_of_page',estimate:{predictedOutput:100,target:203,recordTarget:10,sourceChars:10,revision:2,samples:20,reasoningReserve:0,estimatedInput:500,completionAvailable:8192,limits:{source:'fixture'},planningContract:'json_schema_object_v1'}};
  },observe(){observations++;return {outcome:'ok'};},flush:async()=>{}})};
  const result={lensDocument:doc,eraseBoxes:{schema:'tp.erase-boxes/1',boxes:[]}};
- const args={base:'http://fixture',payload,result,jobId:'job',cancelBatchId:id,signal:ac.signal,plan:{route:'direct-local',ai:{provider:'ollama',model:'fixture',prompt:'EXACT STYLE',thinking:'off'}},
+ const args={base:'http://fixture',payload,result,jobId:'job',cancelBatchId:id,signal:ac.signal,plan:{route:'direct-local',ai:{provider:'ollama',model:'fixture',base_url:'http://localhost:11434',prompt:'EXACT STYLE',thinking:'off'}},
  onCheckpoint:async data=>{checkpoints.push(structuredClone({stage:data.stage,nextDispatch:data.nextDispatch}));await coordinator.capture(id,data);},
- dependencies:{workloadController:controller,translationUnits:()=>units,requireAiLensDocument:r=>r.lensDocument,
+ dependencies:{workloadController:controller,refreshLocalAiCapabilities:refreshFixtureModel,translationUnits:()=>units,requireAiLensDocument:r=>r.lensDocument,
  requireTranslationConservation:()=>({ok:true,eligibleParagraphCount:12,excludedBlankParagraphCount:0,unitCount:12}),
  translateUnits:async(selected,request)=>{
   providerCalls++;const recovered=await createTranslationSessionStore({area:()=>area}).get(run.id),page=recovered.pages.page;snapshots.push(page);
@@ -45,7 +60,7 @@ async function fixture({cancel=false,planningFailure=false}={}) {
  const pending=translateLensPage(args);
  if(planningFailure){await assert.rejects(pending,/controlled planning failure/);}
  else {
-  await entered.promise;assert.equal(providerCalls,1,'next provider blocked on combined durable write');
+  await entered.promise;assert.equal(providerCalls,1,'next provider blocked until the accepted-answer checkpoint is durable');
   assert.equal(saved[translationSessionRunKey(run.id)].row.pages.page.accepted.length,0,'uncommitted answer is not published');
   if(cancel)ac.abort();release.resolve();
   if(cancel)await assert.rejects(pending);else await pending;
@@ -54,9 +69,9 @@ async function fixture({cancel=false,planningFailure=false}={}) {
  if(cancel||planningFailure){assert.equal(providerCalls,1);assert.equal(final.pages.page.accepted.length,2,'completed answer survives cancellation/planning failure');}
  if(!cancel&&!planningFailure){
   assert.equal(providerCalls,6);assert.equal(observations,6);assert.equal(nextCalls,6);
-  assert.equal(writes,9,'prepared + first dispatch + six progress + finished');
-  assert.equal(checkpoints.filter(c=>c.stage==='dispatch').length,1);
-  assert.equal(checkpoints.filter(c=>c.nextDispatch).length,5);
+  assert.equal(writes,14,'prepared + six dispatches + six progress + finished');
+  assert.equal(checkpoints.filter(c=>c.stage==='dispatch').length,6);
+  assert.equal(checkpoints.filter(c=>c.nextDispatch).length,0,'live runtime context must be refreshed before planning each next dispatch');
   assert.equal(final.pages.page.accepted.length,12);assert.equal(final.pages.page.phase,'finished');assert.deepEqual(final.pages.page.inFlight,[]);
   const before=structuredClone(final.pages.page);epoch++;
   await coordinator.capture(id,{stage:'dispatch',payload,ids:['stale'],operationId:'stale'});
@@ -66,4 +81,4 @@ async function fixture({cancel=false,planningFailure=false}={}) {
  return {writes,providerCalls};
 }
 await fixture();await fixture({cancel:true});await fixture({planningFailure:true});
-console.log('PASS checkpoint handoff: six chunks use nine durable writes versus fourteen separate-transition writes. No provider passes blocked storage; restart snapshots conserve accepted/current operation; cancellation/planning failure/stale epoch verified.');
+console.log('PASS checkpoint handoff: six live-context chunks use fourteen durable writes with metadata refresh before each dispatch. No provider passes blocked storage; restart snapshots conserve accepted/current operation; cancellation/planning failure/stale epoch verified.');

@@ -136,7 +136,7 @@ button {
   transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease;
 }
 
-.btn:hover {
+.btn:hover:not(:disabled) {
   transform: translateY(-1px);
   border-color: rgba(255, 255, 255, 0.28);
 }
@@ -148,7 +148,7 @@ button {
   font-weight: 600;
 }
 
-.btn.primary:hover {
+.btn.primary:hover:not(:disabled) {
   filter: brightness(1.1);
 }
 
@@ -383,3 +383,4 @@ button {
     width: 100%;
   }
 }
+.btn:disabled { opacity: .5; cursor: default; }

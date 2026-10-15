@@ -1,5 +1,23 @@
 const LANES = Object.freeze(["overall", "lens", "grouping", "ai", "insert"]);
 const TERMINAL = new Set(["done", "error", "cancelled", "skipped"]);
+// Provider-stream phase shown live in the in-page status. The lane keeps
+// a bounded copy; the page renders it while lane.function is "provider_stream".
+const STREAM_STAGE = Object.freeze({
+  waiting: "Waiting for provider…", thinking: "AI is thinking…", writing: "Translating lines",
+  stalled: "No response — stopping", stopping: "No response — stopping",
+});
+const STREAM_NUMBER = value => Number.isInteger(value) && value >= 0 && value <= 86_400_000 ? value : null;
+function streamPhaseState(value) {
+  if (!value || typeof value !== "object" || !Object.hasOwn(STREAM_STAGE, value.phase)) return null;
+  return {
+    phase: value.phase,
+    phaseElapsedMs: STREAM_NUMBER(value.phaseElapsedMs) ?? 0,
+    linesDone: STREAM_NUMBER(value.linesDone),
+    linesTotal: STREAM_NUMBER(value.linesTotal),
+    reason: typeof value.reason === "string" ? value.reason.slice(0, 40) : "",
+    receivedAt: Number(value.receivedAt) || 0,
+  };
+}
 
 function laneState(lane = {}) {
   return {
@@ -17,6 +35,7 @@ function laneState(lane = {}) {
     provider: String(lane.provider || "").slice(0, 48),
     model: String(lane.model || "").slice(0, 96),
     conversation: lane.conversation === true,
+    ...(streamPhaseState(lane.streamPhase) ? { streamPhase: streamPhaseState(lane.streamPhase) } : {}),
   };
 }
 
@@ -196,12 +215,18 @@ export function mergeProgressDetail(progress, patch = {}, now = Date.now()) {
   }
   // This is a DOM receipt, not AI/accounting completion. A later conflict may
   // replace a provisional translation with a badge; keep Insert truthful.
-  if (typeof patch?.insertionAck?.present === "boolean") {
+  if (typeof patch?.insertionAck?.present === "boolean" ||
+      (progressEvent?.lane === "insert" && progressEvent.state === "error")) {
     // An acknowledged error badge is not an intentionally skipped image.
     const terminalFailure = progressEvent?.lane === "insert" && ["error", "cancelled"].includes(progressEvent.state);
     next.insert = {...next.insert, state:terminalFailure ? progressEvent.state : patch.insertionAck.present ? "done" : "skipped",
       startedAt:next.insert.startedAt || now, finishedAt:now,
-      detail:String(progressEvent?.detail || (patch.insertionAck.present ? "Placed on page" : "No translation layer")).slice(0,180)};
+      detail:String(progressEvent?.detail || (terminalFailure ? "Reader placement failed" : patch.insertionAck?.present ? "Placed on page" : "No translation layer")).slice(0,180)};
+  }
+  const streamPhase = streamPhaseState(patch?.providerPhase);
+  if (streamPhase && !TERMINAL.has(next.ai.state)) {
+    runLane(next, "ai", now, { function: "provider_stream", stage: STREAM_STAGE[streamPhase.phase] });
+    next.ai.streamPhase = streamPhase;
   }
   const aiPhase = String(patch?.phase || "");
   if (aiPhase) {
@@ -245,6 +270,7 @@ export function mergeProgressDetail(progress, patch = {}, now = Date.now()) {
       runLane(next, "insert", now, { stage: repairPhase === "applying" ? "Placing repair results" : "Repair result waiting to place", function: repairPhase === "applying" ? "repair_placing" : "repair_waiting_insert" });
       next.result = { state: "pending", detail: "Repair placement pending", updatedAt: now };
     } else if (repairPhase === "done") {
+      const unresolved = Math.max(0, Number(patch?.pending) || 0);
       // Repair is the authoritative terminal outcome for a deferred initial
       // failure. It may legitimately recover a lane that was previously marked
       // error, so do not let finishLane's terminal guard leave Total/AI stuck.
@@ -252,13 +278,19 @@ export function mergeProgressDetail(progress, patch = {}, now = Date.now()) {
         const lane = next[name];
         if (lane.state === "cancelled") continue;
         if (!lane.startedAt) lane.startedAt = lane.queuedAt || now;
-        lane.state = "done"; lane.finishedAt = now; lane.detail = detail;
+        lane.state = unresolved ? "error" : "done"; lane.finishedAt = now;
+        lane.detail = unresolved ? `Repair stopped with ${unresolved} unresolved unit(s)` : detail;
       }
-      const unresolved = Math.max(0, Number(patch?.pending) || 0);
       next.result = { state: unresolved ? "error" : "done",
         detail: unresolved ? `Repair complete · ${unresolved} unresolved unit(s)` : "Repair complete", updatedAt: now };
     } else if (["apply_failed", "unavailable", "blocked"].includes(repairPhase)) {
       const detail = repairPhase === "blocked" ? "Repair paused" : repairPhase === "apply_failed" ? "Repair placement failed" : "Repair unavailable";
+      // The request/placement has stopped. Retaining a resumable checkpoint
+      // must not leave its elapsed timer or AI/Insert lane running forever.
+      for (const name of LANES) {
+        if (["queued", "running"].includes(next[name].state))
+          finishLane(next, name, now, "error", detail);
+      }
       next.result = { state: "error", detail, updatedAt: now };
     }
   }

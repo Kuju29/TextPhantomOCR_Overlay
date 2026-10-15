@@ -26,7 +26,7 @@
         if(changed)notify();
       });
       chrome.storage.local.get(Object.values(keys),values=>{
-        const error=chrome.runtime.lastError;
+        let error;try{error=chrome.runtime.lastError;}catch{resolve(snapshot());return;}
         if(!error)for(const [field,key] of Object.entries(keys))if(!revisions[field])state[field]=normalize(field,values?.[key]);
         notify();resolve(snapshot());
       });
@@ -41,7 +41,7 @@
     notify();
     // No debounce: initiate writes in event order and expose failures to the UI.
     const write=()=>new Promise((resolve,reject)=>{
-      try{chrome.storage.local.set(values,()=>{const error=chrome.runtime.lastError;error?reject(new Error(error.message)):resolve(snapshot());});}
+      try{chrome.storage.local.set(values,()=>{try{const error=chrome.runtime.lastError;error?reject(new Error(error.message)):resolve(snapshot());}catch(error){reject(error);}});}
       catch(error){reject(error);}
     });
     const result=pending.then(write,write);pending=result.catch(()=>{});return result;

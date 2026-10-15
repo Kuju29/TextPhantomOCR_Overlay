@@ -1,25 +1,15 @@
 /**
- * Which way does this text read — across, or down?
- *
- *
+ * Reading axis (across or down) of Lens TREE items (`box.rotation_deg`).
  * Port of `classify_item_axis` / `paragraph_reading_axis` in
- * `api/backend/render/region.py`, pinned to the same fixture
- * (`api/tests/fixtures/lens_tree.json`).
- *
- * The service worker decides whether a page needs canonical Lens graph
- * grouping; the criterion is the same in every mode — **is the text
- * vertical**. Not source-axis versus target-axis. A horizontal page skips the
- * grouping stage and goes straight to layout.
- *
- * This reads TREE items (`box.rotation_deg`), the same shape Python reads, not
- * `tp.lens-document/1` items. Same numbers, same rule, one fixture.
+ * `api/backend/render/region.py`, pinned to `api/tests/fixtures/lens_tree.json`.
+ * Only vertical pages need canonical Lens graph grouping; horizontal pages skip it.
  */
 
 /** Thrown when an item carries no rotation this can trust. */
-export class LensAxisError extends Error {}
+class LensAxisError extends Error {}
 
 /** Off the 0/90 grid by more than this and the text is decorative, not typeset. */
-export const DEFAULT_TILT_TOL = 12.0;
+const DEFAULT_TILT_TOL = 12.0;
 
 // Compare 2.2 as the exact rational 22/10. `height >= width * 2.2`
 // can reject an exact boundary after binary floating-point rounding.
@@ -96,22 +86,10 @@ function isNearUprightPortraitCjk(item, tiltTol) {
 }
 
 /**
- * The rotation of one box, in degrees.
- *
- * Reads `rotation_deg`. `rotation_deg_css` is used ONLY when `rotation_deg` is
- * absent — not when it is zero.
- *
- * Python spelled this `box.get("rotation_deg") or box.get("rotation_deg_css")
- * or 0.0`, which falls through on a rotation of exactly 0 and silently answers
- * with the OTHER key. The two are written together everywhere today, so
- * nothing is currently wrong; the failure it sets up is that the day they
- * diverge, an upright box reports the css value and a whole page picks the
- * wrong reading axis — which surfaces as grouping a horizontal page, four
- * files away from the lookup that caused it.
- *
- * Absent from BOTH is 0°: an upright box legitimately omits the field, and
- * "unset" and "0°" are the same intent. A present-but-unreadable value is not,
- * and throws.
+ * The rotation of one box, in degrees. `rotation_deg_css` is read only when
+ * `rotation_deg` is absent, not when it is zero (a Python-style `a or b` would
+ * fall through on 0 and answer with the other key). Absent from both is 0°;
+ * a present but unreadable value throws.
  */
 export function boxRotationDeg(box) {
   const source = box && typeof box === "object" ? box : {};
@@ -157,14 +135,9 @@ function mod(a, n) {
 }
 
 /**
- * Majority reading axis of a paragraph's text items.
- *
- * Tilted items are excluded from the vote. Returns "h", "v", or "tilted" — the
- * last only when every text item is tilted.
- *
- * A paragraph with no text at all answers "h", which is the Python behaviour
- * and is a real answer rather than a cover-up: there is nothing to lay out
- * vertically, and "h" is the branch that does no extra work.
+ * Majority reading axis of a paragraph's text items. Tilted items do not vote;
+ * "tilted" only when every item is tilted. No text at all answers "h" (as in
+ * Python): there is nothing to lay out vertically.
  */
 export function paragraphReadingAxis(items, tiltTol = DEFAULT_TILT_TOL) {
   let nH = 0;
@@ -221,8 +194,7 @@ export function paragraphReadingAxis(items, tiltTol = DEFAULT_TILT_TOL) {
   return nV >= nH ? "v" : "h";
 }
 
-/** The reading axis of every paragraph in a tree, in order. */
-export function paragraphAxes(tree, tiltTol = DEFAULT_TILT_TOL) {
+function paragraphAxes(tree, tiltTol = DEFAULT_TILT_TOL) {
   return (tree?.paragraphs || []).map((para) =>
     paragraphReadingAxis(para?.items, tiltTol),
   );
@@ -251,12 +223,9 @@ function paragraphEnvelope(para) {
 }
 
 /**
- * Detect a local run of adjacent vertical columns on an otherwise mixed page.
- *
- * Page-majority is insufficient for manga: status panels and other horizontal
- * copy can outvote a real two/three-column speech balloon.  This is only an
- * admission check.  The server remains authoritative for grouping and may
- * conservatively return these paragraphs as singletons.
+ * Detect a local run of adjacent vertical columns on a mixed page: horizontal
+ * status panels can outvote a real two/three-column balloon. Admission only;
+ * the server stays authoritative for grouping.
  */
 function hasLocalVerticalRun(tree, axes) {
   const vertical = [];
@@ -284,29 +253,18 @@ function hasLocalVerticalRun(tree, axes) {
 }
 
 /**
- * Does this page need canonical Lens graph grouping?
- *
- * Only vertical pages do. Lens splits ONE vertical Japanese sentence into a
- * paragraph per column; without the merge the AI is handed those columns
- * separately and translates sentence fragments, which comes out unreadable.
- * Horizontal text is never split that way, so the pass would change nothing.
- *
- * Returns the verdict WITH its evidence. A bare boolean would make "this page
- * is horizontal" and "this page had no text to classify" the same answer, and
- * the second one is worth noticing — it means the decode came back empty.
+ * Does this page need canonical Lens graph grouping? Only vertical pages: Lens
+ * splits one vertical sentence into a paragraph per column. Returns the verdict
+ * with its evidence so "horizontal" and "no text to classify" stay distinct.
  */
 export function pageNeedsGroups(tree, tiltTol = DEFAULT_TILT_TOL) {
   const axes = paragraphAxes(tree, tiltTol);
   const counts = { h: 0, v: 0, tilted: 0 };
   for (const axis of axes) counts[axis] += 1;
 
-  // Decide at PAGE level. A horizontal page may legitimately contain one
-  // vertical title, side label or decorative caption; that isolated paragraph
-  // is not evidence that Lens split the page into vertical reading columns.
-  // Only non-empty paragraphs with at least one non-tilted text item vote.
-  // This deliberately uses paragraph votes (rather than raw item count or
-  // character length): Lens item fragmentation and title length are provider
-  // details and must not be allowed to overturn the page's dominant layout.
+  // Decide at PAGE level by paragraph votes (non-empty, at least one non-tilted
+  // item): one vertical title on a horizontal page is not evidence of split
+  // columns, and Lens item fragmentation must not overturn the dominant layout.
   const votes = { h: 0, v: 0 };
   const itemCounts = { h: 0, v: 0, tilted: 0 };
   const textChars = { h: 0, v: 0, tilted: 0 };
@@ -361,16 +319,9 @@ export function pageNeedsGroups(tree, tiltTol = DEFAULT_TILT_TOL) {
 }
 
 /**
- * Describe the target-axis relayout the extension must perform for AI text.
- *
- * API ownership stops after Lens upload, canonical Lens graph grouping and AI text
- * translation. Target rows/columns are built by the extension renderer from
- * the source item AABBs plus explicit semantic membership, so an axis change
- * is no longer a reason to re-run the entire image through `/v1/translate`.
- *
- * Returns the decision with its evidence so orchestration can put the exact
- * fallback reason in the trace.  An empty/unclassifiable document does not
- * claim a direction change; the normal fidelity guard handles that case.
+ * Describe the target-axis relayout the extension performs for AI text (built
+ * from source item AABBs plus semantic membership, never by re-running
+ * `/v1/translate`). Returns the decision with its evidence for the trace.
  */
 export function aiLayoutDecision(
   document,
@@ -431,8 +382,7 @@ export function aiLayoutDecision(
   const requiresRelayout =
     axisItems > 0 && sourceOrientation !== targetOrientation;
   return {
-    // Retained for callers/log readers during the schema transition. Full
-    // server rendering is forbidden for AI; only the text-only API is used.
+    // Always false: AI never uses full server rendering (kept for log readers).
     needsServer: false,
     requiresRelayout,
     sourceOrientation,

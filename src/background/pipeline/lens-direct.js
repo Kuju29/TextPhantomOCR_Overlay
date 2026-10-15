@@ -88,6 +88,7 @@ export function createLensDirectPath({
     const hasDomSize = Number(domSize?.width) > 0 && Number(domSize?.height) > 0;
 
     let image;
+    async function acquireImage() {
     try {
       image = await imageBytesFor(payload, tabId, frameId, signal);
     } catch (error) {
@@ -97,7 +98,9 @@ export function createLensDirectPath({
         `could not read the image bytes: ${error?.message || String(error)}`,
         { cause: error },
       ), {
-        code: status ? "IMG_SOURCE_UNREACHABLE" : "IMG_READ_FAILED",
+        // Over the API's 24 MiB cap: say so instead of "could not read".
+        code: status ? "IMG_SOURCE_UNREACHABLE"
+          : /\bimage too large\b/i.test(String(error?.message || "")) ? "IMG_TOO_LARGE" : "IMG_READ_FAILED",
         origin: "browser",
         stage: "image_read",
         httpStatus: status,
@@ -115,6 +118,8 @@ export function createLensDirectPath({
       imageId: String(payload?.metadata?.image_id || ""),
       batchId: String(payload?.metadata?.batch_id || ""),
     }));
+    return image;
+    }
 
     const traceId = String(payload?.context?.tp_trace || "");
     const imageId = String(payload?.metadata?.image_id || "");
@@ -131,8 +136,12 @@ export function createLensDirectPath({
       );
       const answer = await runStage(
         "lens:direct",
-        () =>
-          fetchLensRaw(base, {
+        async () => {
+          // Queue before fetching/decoding, so waiting Lens jobs do not all
+          // allocate decoded source buffers at once.
+          image = image || await acquireImage();
+          if (!image) throw decline.error || new Error(decline.reason);
+          return fetchLensRaw(base, {
             imageBytes: image.bytes,
             mime: image.mime,
             lang: payload.lang,
@@ -144,7 +153,8 @@ export function createLensDirectPath({
             tabSession: String(payload?.context?.tp_tab_session || ""),
             apiUnlimited: payload?.limits?.apiUnlimited === true,
             capabilities,
-          }),
+          });
+        },
         {
           signal, stage: "lens", imageId, traceId,
           onGranted: ({ queueWaitMs, accumulatedQueueWaitMs, attempt }) => {
@@ -156,6 +166,7 @@ export function createLensDirectPath({
           },
         },
       );
+      image.bytes = null; // Grouping/rendering retain the URI, not this buffer.
       trace(
         "imageStage",
         { stage: "lens", state: "finished", imageId },

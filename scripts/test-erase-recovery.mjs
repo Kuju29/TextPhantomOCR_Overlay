@@ -19,6 +19,7 @@ const erase=await load('src/shared/erase-boxes.js');
 const {flattenSpans}=await load('src/shared/lens-tree.js');
 const {translationUnits,applyTranslations}=await load('src/shared/lens-document.js');
 const {translateLensPage}=await load('src/background/pipeline/page-translation.js');
+const {refreshLocalAiCapabilities}=await load('src/background/local-ai-preflight.js');
 const {createWorkloadController}=await load('src/background/ai/workload-controller.js');
 const {makePageCheckpoint,buildPatchedResult,pageInitialReport}=await load('src/background/repair/page-checkpoint.js');
 const {executeRepairPool}=await load('src/background/repair/executor.js');
@@ -34,6 +35,20 @@ async function test(name,fn){try{await fn();results.push({name,pass:true});conso
 const decode=()=>decodeLensResponse(fixture.lens,{...fixture.image,targetLang:'th',source:'ai'});
 const rawResult=d=>({lensDocument:d.document,eraseBoxes:d.eraseBoxes,backgroundMode:'boxes',layout:{relayout_translated:false}});
 const ai={provider:'ollama',model:'fixture',base_url:'http://127.0.0.1:11434',thinking:'off',memory_mode:'off'};
+// Replace runtime metadata I/O, while retaining the real model-owned preflight.
+async function refreshFixtureModel(ai,route,options){
+ const fetch=globalThis.fetch,paths=[];
+ globalThis.fetch=async(url,init={})=>{
+  const path=new URL(url).pathname;paths.push(path);
+  if(path==='/api/tags')return Response.json({models:[{name:ai.model}]});
+  if(path==='/api/ps')return Response.json({models:[{name:ai.model,context_length:65536}]});
+  assert.equal(path,'/api/show');assert.equal(JSON.parse(init.body).model,ai.model);
+  return Response.json({capabilities:['completion'],thinking:{values:[false,true],default:false},
+   model_info:{'general.architecture':'fixture','fixture.context_length':65536}});
+ };
+ try{return await refreshLocalAiCapabilities(ai,route,{...options,get:async()=>({}),set:async()=>{},emitTrace:()=>{}});}
+ finally{globalThis.fetch=fetch;assert.deepEqual([...paths].sort(),['/api/ps','/api/show','/api/tags']);}
+}
 const cleanGeometry=box=>{const {p,...g}=box;return g;};
 
 await test('captured Lens producer assigns all 85 spans to surviving document paragraphs',()=>{
@@ -62,7 +77,7 @@ async function initial(unowned=false){
   onCheckpoint:async row=>{
    if(row.stage==='prepared')page=await makePageCheckpoint({...row,ctx:{jobId:'captured-job'}});
    if(row.stage==='finished'){page.accepted=row.accepted;page.failures=row.failures;page.phase='finished';}
-  },dependencies:{workloadController:createWorkloadController({read:async()=>({}),write:async()=>{}}),translateUnits:async units=>{
+  },dependencies:{refreshLocalAiCapabilities:refreshFixtureModel,workloadController:createWorkloadController({read:async()=>({}),write:async()=>{}}),translateUnits:async units=>{
    calls.push(units.map(u=>u.id));return {schema:'tp.ai.result/1',translations:units.map(u=>({id:u.id,text:['g0','g1'].includes(u.id)?'日本語のままです':'คำแปลที่ถูกภาษาไทย'})),missing:[],meta:{finishReason:'stop',providerAttempts:1,generationAttempts:1}};
   }}});
  return {outcome,page,raw,before,events,calls};
@@ -163,8 +178,8 @@ await test('cancellation during delivery never commits saved patches or cleans u
  assert(!r.events.some(e=>e.ev==='repairPatch'&&e.d.applied===true));assert.equal(r.deletes.length,0);
 });
 
-await test('real SQLite pool + executor completes partial repairs for two decoded pages after all answers',async()=>{
- const c=spawn('python',['-u',fileURLToPath(new URL('scripts/repair-ledger-fixture.py',root))],{stdio:['pipe','pipe','inherit'],cwd:fileURLToPath(root)}),q=[];
+await test('real process-memory pool + executor completes partial repairs for two decoded pages after all answers',async()=>{
+ const c=spawn(process.env.PYTHON||'python',['-u',fileURLToPath(new URL('scripts/repair-ledger-fixture.py',root))],{stdio:['pipe','pipe','inherit'],cwd:fileURLToPath(root)}),q=[];
  createInterface({input:c.stdout}).on('line',line=>{const p=q.shift(),r=JSON.parse(line);if(p)r.ok?p.resolve(r.value):p.reject(new Error(r.code));});
  c.on('exit',code=>{for(const p of q.splice(0))p.reject(new Error('ledger exited '+code));});
  const api=(run,action='',body={})=>new Promise((resolve,reject)=>{q.push({resolve,reject});c.stdin.write(JSON.stringify({run,action,body})+'\n');});

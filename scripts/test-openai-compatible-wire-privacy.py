@@ -207,6 +207,7 @@ class WirePrivacyTests(unittest.TestCase):
                               "chunkCount": 1, "complete": True})
             self.assert_private_absent(folder, "PRIVATE_RELAY_THOUGHT",
                                        "PRIVATE_RELAY_CHUNK", "PRIVATE_RELAY_META")
+            wire_trace.finish_in(folder)
 
     def test_provider_controlled_error_messages_are_absent_from_trace(self):
         with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, {
@@ -246,6 +247,7 @@ class WirePrivacyTests(unittest.TestCase):
                              ("provider_error", 503, 1, "<omitted>"))
             self.assert_private_absent(relay, "PRIVATE_RELAY_ERROR", "PRIVATE_RELAY_DETAIL",
                                        "PRIVATE_RELAY_TERMINAL")
+            wire_trace.finish_in(relay)
 
 
 if __name__ == "__main__":

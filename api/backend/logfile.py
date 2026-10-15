@@ -13,11 +13,18 @@ from urllib.parse import urlsplit
 # side by side without mental arithmetic.
 _TZ = timezone(timedelta(hours=7))
 
-_LOCK = threading.Lock()
+_LOCK = threading.RLock()
+_WRITE_FAILURES = 0
+_LAST_WRITE_ERROR = ""
+_WRITE_COUNT = 0
+_PRUNED = 0
+_MAX_FILE_BYTES = 8 * 1024 * 1024
+_MAX_LOG_BYTES = 64 * 1024 * 1024
 _MAX_VALUE_CHARS = 4000
 _SECRET_KEYS = (
     "authorization", "api_key", "apikey", "token", "cookie", "secret", "password",
-    "signature", "policy",
+    "signature", "policy", "verifier", "cipher", "csrf", "bootstrap", "credential",
+    "gateway_key", "gatewaykey", "gateway-key",
 )
 
 # Usage counts are measurements, not credential tokens. Strings remain redacted.
@@ -40,22 +47,30 @@ def _today() -> str:
     return datetime.now(_TZ).strftime("%Y%m%d")
 
 def _path(stream: str) -> Path:
-    return _ROOT / f"{stream}-{_today()}.log"
+    return _ROOT / f"{stream}-{_today()}-{os.getpid()}.log"
 
 def _prune() -> None:
     """Delete files older than the retention window. Best-effort."""
+    global _PRUNED
     cutoff = time.time() - _KEEP_DAYS * 86400
     try:
         for entry in _ROOT.glob("*.log"):
             if entry.stat().st_mtime < cutoff:
                 entry.unlink(missing_ok=True)
+                _PRUNED += 1
+        entries = sorted((f for f in _ROOT.glob("*.log") if f.is_file() and not f.is_symlink()), key=lambda f:f.stat().st_mtime)
+        total = sum(f.stat().st_size for f in entries)
+        for f in entries:
+            if total <= _MAX_LOG_BYTES: break
+            size=f.stat().st_size; f.unlink(missing_ok=True); total-=size; _PRUNED+=1
     except OSError:
         pass
 
 def _secret_key(key: Any) -> bool:
     lowered = str(key).strip().lower()
     return (
-        lowered in {"key", "passwd", "pwd", "api-key", "x-api-key"}
+        lowered in {"body", "payload", "prompt", "messages", "content", "otp", "otp_code", "verification_code", "email", "text", "image", "image_b64", "image_base64", "data_uri"}
+        or lowered in {"key", "passwd", "pwd", "api-key", "x-api-key"}
         or
         any(marker in lowered for marker in _SECRET_KEYS)
         or lowered == "sig"
@@ -91,9 +106,12 @@ def _mask_private_url(match: re.Match[str]) -> str:
 def sanitize(value: Any) -> Any:
     """Redact credentials recursively and truncate oversized strings."""
     if isinstance(value, str):
+        value = re.sub(r"(?i)(?:https?|wss?|file)://[^\s\"'<>]+", _mask_private_url, value)
+        value = re.sub(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "<private-email>", value)
+        value = re.sub(r"\b(?:sk-|rk_|re_|whsec_)[A-Za-z0-9_-]{8,}", "<redacted>", value)
+        value = re.sub(r"(?i)\b(?:otp|code)\s*[:=]\s*\d{6}\b", "otp=<redacted>", value)
         # Credentials sometimes appear in exception URLs (notably Gemini's
         # ``?key=``). Redaction at the sink protects every present/future caller.
-        value = re.sub(r"(?i)(?:https?|wss?|file)://[^\s\"'<>]+", _mask_private_url, value)
         value = re.sub(
             r"(?i)(authorization:\s*bearer\s+|bearer\s+|\b(?:password|passwd|pwd|api[_-]?key|access[_-]?token|refresh[_-]?token|cookie|secret|token|key|signature|sig|policy)=)[^\s&,\"'<>]+",
             lambda m: m.group(1) + "<redacted>", value,
@@ -107,7 +125,7 @@ def sanitize(value: Any) -> Any:
     if isinstance(value, dict):
         return {
             k: (v if k in _USAGE_COUNTS and (v is None or type(v) in (int, float))
-                else "<redacted>" if _secret_key(k)
+                else "<redacted>" if _secret_key(k) or (str(k).lower() == "code" and re.fullmatch(r"[0-9]{6}", str(v)))
                 else _log_origin(v) if str(k).lower() == "href" else sanitize(v))
             for k, v in value.items()
         }
@@ -117,12 +135,17 @@ def sanitize(value: Any) -> Any:
         return [sanitize(v) for v in value[:200]]
     return value
 
-def write(stream: str, record: dict[str, Any]) -> None:
+def write(stream: str, record: dict[str, Any]) -> bool:
     """Append one record. Never raises — logging must not break the request."""
+    global _WRITE_FAILURES, _LAST_WRITE_ERROR, _WRITE_COUNT
     if not _ENABLED:
-        return
+        return False
     try:
-        safe_record = sanitize(record)
+        if stream not in {"api", "extension"}:
+            raise ValueError("invalid log stream")
+        from backend.diagnostic_core import current
+        context = {k: v for k, v in current().items() if k in {"trace_id", "request_id", "job_id", "operation_id", "parent_request_id"}}
+        safe_record = sanitize({**context, **record})
         line = {
             "at": datetime.now(_TZ).isoformat(timespec="milliseconds"),
             **(safe_record if isinstance(safe_record, dict) else {}),
@@ -130,12 +153,28 @@ def write(stream: str, record: dict[str, Any]) -> None:
         text = json.dumps(line, ensure_ascii=False, default=str)
         with _LOCK:
             _ROOT.mkdir(parents=True, exist_ok=True)
-            with open(_path(stream), "a", encoding="utf-8") as handle:
+            path = _path(stream)
+            if path.exists() and path.stat().st_size + len(text.encode()) > _MAX_FILE_BYTES:
+                for n in range(3, 0, -1):
+                    old = path.with_name(path.stem + f"-old-{n}.log")
+                    if old.exists():
+                        if n == 3: old.unlink()
+                        else: old.replace(path.with_name(path.stem + f"-old-{n+1}.log"))
+                path.replace(path.with_name(path.stem + "-old-1.log"))
+            with open(path, "a", encoding="utf-8") as handle:
                 handle.write(text + "\n")
                 # Persist terminal events immediately.
                 handle.flush()
-    except Exception:  # noqa: BLE001 - a logger that can fail a request is worse than no logger
-        pass
+            _WRITE_COUNT += 1
+            if _WRITE_COUNT % 200 == 0: _prune()
+        return True
+    except Exception as exc:  # Diagnostics must not break business operations.
+        _WRITE_FAILURES += 1
+        _LAST_WRITE_ERROR = type(exc).__name__
+        if _WRITE_FAILURES == 1 or _WRITE_FAILURES % 100 == 0:
+            try: print(f"[TP Diagnostics] file_write_failed type={_LAST_WRITE_ERROR}; evidence may be missing", flush=True)
+            except Exception: pass
+        return False
 
 def api(tag: str, data: dict[str, Any] | None = None, *, ok: bool = True) -> None:
     """One server-side event."""
@@ -144,47 +183,42 @@ def api(tag: str, data: dict[str, Any] | None = None, *, ok: bool = True) -> Non
 # At-least-once extension delivery is deduplicated by bounded (run, n) keys.
 _SEEN_MAX = 20_000
 _seen_ids: dict[tuple[str, int], None] = {}
-_dupes_dropped = 0
 
-def _is_duplicate(record: dict[str, Any]) -> bool:
-    """True when this exact line has already been written."""
-    global _dupes_dropped
-    run = record.get("run")
-    number = record.get("n")
-    if not isinstance(run, str) or not isinstance(number, int):
-        # No identity: it cannot be de-duplicated, so it is written. Dropping an
-        # unidentifiable line would silently lose data to save a maybe-copy.
-        return False
-    key = (run, number)
-    if key in _seen_ids:
-        _dupes_dropped += 1
-        return True
-    _seen_ids[key] = None
-    while len(_seen_ids) > _SEEN_MAX:
-        _seen_ids.pop(next(iter(_seen_ids)))
-    return False
 
-def duplicates_dropped() -> int:
-    """How many repeat lines have been suppressed this run."""
-    return _dupes_dropped
+def health() -> dict:
+    return {"enabled": _ENABLED, "write_failures": _WRITE_FAILURES, "last_error_type": _LAST_WRITE_ERROR,
+            "written": _WRITE_COUNT, "pruned_files": _PRUNED, "max_log_bytes": _MAX_LOG_BYTES}
 
 def client(records: list[dict[str, Any]]) -> int:
-    """Write an extension batch, preserving event and receive timestamps."""
+    """ACK only durable writes; dedupe IDs are committed AFTER the append."""
+    from backend import diagnostics
     written = 0
     for record in records or []:
-        if not isinstance(record, dict):
-            continue
-        if _is_duplicate(record):
-            continue
-        line: dict[str, Any] = {"side": "extension", **record}
-        stamped = record.get("t")
-        if isinstance(stamped, (int, float)) and stamped > 0:
-            line["at"] = datetime.fromtimestamp(stamped / 1000, _TZ).isoformat(
-                timespec="milliseconds"
-            )
-            line["recvAt"] = datetime.now(_TZ).isoformat(timespec="milliseconds")
-        write("extension", line)
-        written += 1
+        if not isinstance(record, dict): continue
+        run, number = record.get("run"), record.get("n")
+        identity = (run, number) if isinstance(run, str) and isinstance(number, int) else None
+        with _LOCK:
+            if identity and identity in _seen_ids:
+                continue
+            line = {**record, "side": "extension", "source_trust": "client_reported"}
+            stamped = record.get("t")
+            if isinstance(stamped, (int, float)) and 0 < stamped < 10**15:
+                try:
+                    line["at"] = datetime.fromtimestamp(stamped/1000, _TZ).isoformat(timespec="milliseconds")
+                    line["recvAt"] = datetime.now(_TZ).isoformat(timespec="milliseconds")
+                except (OverflowError,ValueError,OSError): pass
+            if not write("extension", line): raise OSError("diagnostic_write_failed")
+            if record.get("diagnostic"):
+                ctx = {name: diagnostics.valid_id(record.get(name)) for name in ("trace_id", "request_id", "operation_id", "job_id")}
+                ctx.update(component="extension", source_trust="client_reported")
+                data = {k:v for k,v in record.items() if k not in {"schema", "event", "outcome", *ctx}}
+                persisted=diagnostics.writer.emit("extension." + diagnostics.valid_id(record.get("event"), "unknown"),
+                    outcome=diagnostics.valid_id(record.get("outcome"), "info"), context=ctx, **data)
+                if diagnostics.writer.enabled and not persisted: raise OSError("diagnostic_write_failed")
+            if identity:
+                _seen_ids[identity]=None
+                while len(_seen_ids)>_SEEN_MAX: _seen_ids.pop(next(iter(_seen_ids)))
+            written+=1
     return written
 
 def startup_banner() -> None:

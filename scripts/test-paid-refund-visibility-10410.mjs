@@ -1,0 +1,20 @@
+import assert from 'node:assert/strict';
+import { hasRefundHistory, customerAccountTab } from '../src/shared/customer-portal/view.js';
+const eligible = { id: 'payment-first', refund: { eligible: true, deadline_at: Date.now() + 3600000, available_tp: '500000', estimated_satang: 2900 } };
+const empty = { history: { payments: { items: [eligible] }, refunds: { total: 0, items: [] } } };
+let passed = 0;
+const test = (name, fn) => { fn(); ++passed; console.log('PASS ' + name); };
+test('An eligible purchase alone does not expose an empty Refunds tab', () => assert.equal(hasRefundHistory(empty), false));
+test('An empty-account Refunds bookmark has a usable Orders destination', () => assert.equal(customerAccountTab(empty, 'refunds'), 'orders'));
+test('History total retains navigation while a history page is empty', () => assert.equal(hasRefundHistory({ history: { refunds: { total: 1, items: [] } } }), true));
+test('A real refund row retains navigation before its total is refreshed', () => assert.equal(hasRefundHistory({ history: { refunds: { total: 0, items: [{ id: 'refund-first', status: 'queued' }] } } }), true));
+test('A newly accepted pending request exposes history immediately', () => assert.equal(hasRefundHistory({ history: { payments: { items: [{ refund: { pending_request: { id: 'refund-first', status: 'waiting_usage' } } }] } } }), true));
+test('A completed first refund keeps history available', () => assert.equal(hasRefundHistory({ history: { payments: { items: [{ refund: { latest_request: { id: 'refund-first', status: 'succeeded' } } }] } } }), true));
+test('A failed refund also retains its history for inspection and retry from the receipt', () => assert.equal(hasRefundHistory({ history: { payments: { items: [{ refund: { latest_request: { id: 'refund-first', status: 'failed' } } }] } } }), true));
+test('Empty provider metadata cannot create a history tab', () => assert.equal(hasRefundHistory({ history: { payments: { items: [{ refund: { latest_request: {} } }] } } }), false));
+test('A real history bookmark stays on Refunds', () => assert.equal(customerAccountTab({ history: { refunds: { total: 1 } } }, 'refunds'), 'refunds'));
+test('Account, purchase, order, activity and receipt navigation remain available before a refund', () => {
+  for (const tab of ['details','buy','orders','usage','payment']) assert.equal(customerAccountTab(empty,tab),tab);
+});
+test('An invalid navigation value returns to Account', () => assert.equal(customerAccountTab(empty, '/api/admin/secrets'), 'details'));
+console.log(`Refund history visibility contracts passed: ${passed} checks.`);

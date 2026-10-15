@@ -265,6 +265,9 @@ for (const route of ['direct-local', 'server']) {
     const {spawnSync}=await import('node:child_process');
     const py=spawnSync('python',['-c',String.raw`
 import os,sys,tempfile,json,asyncio
+if os.getenv('TP_TEST_ASYNCIO_HARNESS'):
+ import runpy
+ runpy.run_path(os.environ['TP_TEST_ASYNCIO_HARNESS'],run_name='qa_harness')
 from pathlib import Path
 sys.path.insert(0,'api')
 with tempfile.TemporaryDirectory() as temp:

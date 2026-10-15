@@ -1,9 +1,4 @@
-"""Centralised runtime configuration loaded from environment variables.
-
-All tunables live here so the rest of the codebase does not call ``os.environ``
-directly.  The values are read once on import; callers that need a fresh read
-should call :func:`reload` (useful in tests).
-"""
+"""Runtime configuration, read once from environment variables (``reload`` re-reads, for tests)."""
 
 from __future__ import annotations
 
@@ -55,6 +50,15 @@ class Settings:
     http_timeout_sec: float = field(default_factory=lambda: _env_float("HTTP_TIMEOUT_SEC", 120.0))
     # Bound pending work and execution time to protect shared deployments.
     max_queue_size: int = field(default_factory=lambda: _env_int("TP_MAX_QUEUE_SIZE", 2000))
+    # Queued (not yet running) jobs one caller scope may hold.
+    max_queue_per_caller: int = field(default_factory=lambda: _env_int("TP_MAX_QUEUE_PER_CALLER", 200))
+    # Per caller identity (see api/ingress.py): queued jobs and queued payload
+    # bytes. Byte budgets bound memory pinned by queued page images (a data URI
+    # can be ~32 MiB); a job count alone cannot.
+    max_queue_per_identity: int = field(default_factory=lambda: max(1, _env_int("TP_MAX_QUEUE_PER_IDENTITY", 200)))
+    max_queue_bytes: int = field(default_factory=lambda: max(1, _env_int("TP_MAX_QUEUE_BYTES", 512 * 1024 * 1024)))
+    max_queue_bytes_per_identity: int = field(
+        default_factory=lambda: max(1, _env_int("TP_MAX_QUEUE_BYTES_PER_IDENTITY", 128 * 1024 * 1024)))
     max_jobs_tracked: int = field(default_factory=lambda: _env_int("TP_MAX_JOBS_TRACKED", 5000))
     job_run_timeout_sec: float = field(default_factory=lambda: _env_float("TP_JOB_RUN_TIMEOUT_SEC", 120.0))
 
@@ -62,16 +66,19 @@ class Settings:
     sync_max_concurrency: int = field(
         default_factory=lambda: max(0, _env_int("TP_SYNC_MAX_CONCURRENCY", 0))
     )
-    # Google Lens is a remote two-request upstream. Large cold bursts showed a
-    # latency cliff above ~8 simultaneous uploads even though local CPU was idle.
-    # Keep the upstream fan-out bounded separately from generic server workers;
-    # operators can raise it explicitly after measuring their own deployment.
+    # Google Lens shows a latency cliff above ~8 simultaneous uploads, so its
+    # fan-out is bounded separately from server workers.
     lens_upstream_max_concurrency: int = field(
         default_factory=lambda: max(1, _env_int("TP_LENS_UPSTREAM_MAX_CONCURRENCY", 8))
     )
     # Provider SDKs use a dedicated executor; admission must not exceed it.
     ai_thread_workers: int = field(
         default_factory=lambda: max(1, _env_int("TP_AI_THREAD_WORKERS", 24))
+    )
+    # AI Login waits on the user's own browser tab (up to 230 s), so it has its
+    # own lane and cannot take the AI slots Paid/Manual users share.
+    login_thread_workers: int = field(
+        default_factory=lambda: max(1, _env_int("TP_LOGIN_THREAD_WORKERS", 32))
     )
     sync_ai_max_concurrency: int = field(
         default_factory=lambda: max(0, _env_int("TP_SYNC_AI_MAX_CONCURRENCY", 0))
@@ -112,15 +119,6 @@ class Settings:
     result_cache_max: int = field(default_factory=lambda: _env_int("TP_RESULT_CACHE_MAX", 512))
     ai_result_cache_max: int = field(default_factory=lambda: _env_int("TP_AI_RESULT_CACHE_MAX", 128))
 
-    # Hugging Face throttling ------------------------------------------------
-    # No TextPhantom-imposed HF account throttle by default. HF's real 429/503
-    # is authoritative and the browser learns from it. Operators/users that know
-    # a specific account quota can still pin these env vars explicitly.
-    hf_max_concurrency: int = field(default_factory=lambda: max(0, _env_int("HF_AI_MAX_CONCURRENCY", 0)))
-    hf_min_interval_sec: float = field(default_factory=lambda: max(0.0, _env_float("HF_AI_MIN_INTERVAL_SEC", 0.0)))
-    hf_max_retries: int = field(default_factory=lambda: max(1, _env_int("HF_AI_MAX_RETRIES", 3)))
-    hf_retry_base_sec: float = field(default_factory=lambda: max(0.2, _env_float("HF_AI_RETRY_BASE_SEC", 2.0)))
-
     # Optional rate gate, isolated by (provider, model, key) with bounded waits.
     rate_gate_enabled: bool = field(default_factory=lambda: _env_bool("TP_RATE_GATE", True))
     rate_max_wait_sec: float = field(default_factory=lambda: max(1.0, _env_float("TP_RATE_MAX_WAIT_SEC", 75.0)))
@@ -135,6 +133,9 @@ class Settings:
     # Only the API operator may configure Paid. The browser never supplies a
     # Center endpoint or receives the operator's inference key.
     center_url: str = field(default_factory=lambda: _env_str("TP_CENTER_URL"))
+    center_gateway_key_file: str = field(default_factory=lambda: _env_str("TP_CENTER_GATEWAY_KEY_FILE"))
+    center_gateway_key: str = field(default_factory=lambda: _env_str("TP_CENTER_GATEWAY_KEY"), repr=False)
+    trusted_proxy_ips: str = field(default_factory=lambda: _env_str("TP_TRUSTED_PROXY_IPS"))
     # AI network authority is independent from ownership of the API key.
     # Shared defaults trust provider endpoints + explicit operator allowlist only.
     # Personal mode additionally permits server-owned Local AI on loopback.
@@ -153,50 +154,33 @@ class Settings:
     )
 
     # CORS -------------------------------------------------------------------
-    # Comma-separated allowed origins. The extension does not need CORS at all
-    # (it fetches under its host permissions), so the safe production value is
-    # a concrete list — or "*", which is only honoured WITHOUT credentials.
-    allowed_origins: str = field(default_factory=lambda: _env_str("TP_ALLOWED_ORIGINS", "*"))
+    # Comma-separated allowed origins. Empty (default) admits browser-extension
+    # origins only (EXTENSION_ORIGIN_REGEX); "*" admits any page WITHOUT
+    # credentials. Extension service workers/pages with host permissions do not
+    # need CORS at all, but Firefox without granted host access does.
+    allowed_origins: str = field(default_factory=lambda: _env_str("TP_ALLOWED_ORIGINS", ""))
 
-    # Lens (Firebase cookie source) -----------------------------------------
-    # The jar behind this URL holds AEC / NID / __Secure-STRP — Google's
-    # anti-abuse and signed-out preference cookies. It carries NONE of the
-    # account-session cookies (SID, HSID, SSID, APISID, SAPISID,
-    # __Secure-*PSID, LSID), so a reader cannot act as anybody's Google
-    # account with it. Publishing it is a quota and abuse question, not an
-    # account one, which is why the default is kept.
-    #
-    # What still matters: everyone using this deployment shares one browser
-    # identity with Google, so abuse of it is attributed to all of them
-    # together. Point FIREBASE_URL at your own jar to get your own identity.
-    firebase_url: str = field(
-        default_factory=lambda: _env_str(
-            "FIREBASE_URL",
-            "https://cookie-6e1cd-default-rtdb.asia-southeast1.firebasedatabase.app/lens/cookie.json",
-        )
-    )
+    # Lens cookie source -----------------------------------------------------
+    # Optional Firebase JSON jar (AEC / NID / __Secure-STRP: Google anti-abuse
+    # and signed-out preference cookies, no account-session cookie). There is
+    # deliberately NO built-in URL: the public source must not point every
+    # deployment at one shared jar. Without FIREBASE_URL the API uses the
+    # "direct" source (its own first visit to lens.google.com) only.
+    firebase_url: str = field(default_factory=lambda: _env_str("FIREBASE_URL", ""))
+    # firebase | direct | auto (firebase, then direct) | direct-first.
+    lens_cookie_source: str = field(default_factory=lambda: os.environ.get("TP_LENS_COOKIE_SOURCE", "direct-first"))
     firebase_cookie_ttl_sec: int = field(default_factory=lambda: _env_int("FIREBASE_COOKIE_TTL_SEC", 900))
 
     # Lens-direct rendering --------------------------------------------------
-    # lens_images, lens_text.translated and lens_text.original are Lens-direct:
-    # they use Lens geometry/text and must not run a secondary text-grouping pass.
-    # Keeping erase/png enabled gives a clean background for text overlays; turn
-    # them off only when you want maximum speed and can tolerate overlaying text
-    # on the original image.
+    # Lens-direct outputs use Lens geometry/text and never run a secondary
+    # grouping pass. Erase/PNG give overlays a clean background.
     lens_direct_erase: bool = field(default_factory=lambda: _env_bool("TP_LENS_DIRECT_ERASE", True))
     lens_direct_png: bool = field(default_factory=lambda: _env_bool("TP_LENS_DIRECT_PNG", True))
 
     # Orientation relayout for the Translated layer ---------------------------
-    # When a page's source text runs on the other axis from the target language
-    # (vertical Japanese -> horizontal Thai), Lens's own MT boxes are rebuilt at
-    # the target orientation instead of rendering 90°-rotated columns. No
-    # provider call is involved, so users without AI quota get readable
-    # vertical->horizontal pages too.
-    #
-    # This is a DEFAULT only. A request may carry ``{"layout":
-    # {"relayout_translated": bool}}`` from the extension's toggle, and that
-    # always wins — this value applies when the client sends nothing (older
-    # builds, curl, the CLI).
+    # Rebuild Lens MT boxes at the target orientation when the source runs on
+    # the other axis (vertical JA -> horizontal TH); no provider call. Default
+    # only: a request's ``layout.relayout_translated`` always wins.
     relayout_translated: bool = field(
         default_factory=lambda: _env_bool("TP_RELAYOUT_TRANSLATED", True)
     )
@@ -221,13 +205,19 @@ class Settings:
         default_factory=_access_log_default
     )
 
+# Browser-extension origins (any id): Chromium/Edge/Opera, Firefox/Thunderbird
+# per-install UUIDs and Safari. Used as the CORS default when
+# TP_ALLOWED_ORIGINS is empty.
+EXTENSION_ORIGIN_REGEX: Final[str] = (
+    r"^(?:chrome-extension|moz-extension|safari-web-extension)://[A-Za-z0-9._-]{1,128}$"
+)
+
 def lens_concurrency_limit(value: "Settings") -> int:
     """Bound local Lens workers by the remote-upstream fan-out ceiling."""
     configured = max(1, int(value.sync_max_concurrency or value.max_workers))
     return max(1, min(configured, int(value.lens_upstream_max_concurrency)))
 
-# Module-level singleton.  Import this from anywhere as ``from backend.config import settings``.
-# (rate-gate settings added above: rate_gate_enabled / rate_max_wait_sec / ...)
+# Module-level singleton: ``from backend.config import settings``.
 settings: Final[Settings] = Settings()
 
 def reload() -> Settings:

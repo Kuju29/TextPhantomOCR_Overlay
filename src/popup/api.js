@@ -1,24 +1,20 @@
 /**
- *
- * Popup network helpers — thin wrappers around the API endpoints.
- *
- * All functions here are stateless: they take a base URL (and params), do one
- * request, and return parsed data. Retry/scheduling/state lives in `popup.js`.
+ * Popup network helpers: stateless wrappers that take a base URL (and params),
+ * do one request and return parsed data. Retry/scheduling/state live in `popup.js`.
  */
 
 import { normalizeUrl } from "../shared/url.js";
 import { API_PATHS } from "../shared/constants.js";
 import { normalizeAiModel, normalizePrompt } from "../shared/prompt.js";
+import { installHeaders } from "../paid/install-id.js";
 
 export const HEALTH_TIMEOUT_MS = 5000;
 export const AI_META_TIMEOUT_MS = 12000;
-export const AI_PROBE_TIMEOUT_MS = 18000;
-export const PROMPT_TIMEOUT_MS = 8000;
-export const WARMUP_TIMEOUT_MS = 2500;
+const PROMPT_TIMEOUT_MS = 8000;
 export const RETRY_DELAYS_MS = [600, 1200, 2500, 5000];
 
 /** Build a full API URL from the input field's base + a path + query params. */
-export function buildUrl(base, path, params = null) {
+function buildUrl(base, path, params = null) {
   const b = normalizeUrl(base);
   if (!b) return "";
   const u = new URL(`${b}${path}`);
@@ -31,22 +27,37 @@ export function buildUrl(base, path, params = null) {
   return u.toString();
 }
 
-/** GET/POST JSON with a timeout. Throws on non-2xx. */
+// One wait for a per-install 429 that fits inside the request timeout.
+const INSTALL_429_RETRY_MAX_MS = 5000;
+
+/** GET/POST JSON with a timeout. Throws on non-2xx (error.status, error.retryAfterMs). */
 export async function fetchJson(url, body, timeoutMs) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(url, {
-      method: body ? "POST" : "GET",
-      headers: body
-        ? { "Content-Type": "application/json", accept: "application/json" }
-        : { accept: "application/json" },
-      cache: "no-store",
-      body: body ? JSON.stringify(body) : undefined,
-      signal: ctrl.signal,
-    });
-    if (!res.ok) throw new Error(`status ${res.status}`);
-    return await res.json();
+    // POSTs (model resolve) do work on a shared API, which limits it
+    // per browser install (X-TP-Install, the id Paid/support requests send).
+    const install = body ? await installHeaders({ create: true }) : {};
+    for (let attempt = 0; ; attempt++) {
+      const res = await fetch(url, {
+        method: body ? "POST" : "GET",
+        headers: body
+          ? { "Content-Type": "application/json", accept: "application/json", ...install }
+          : { accept: "application/json" },
+        cache: "no-store",
+        body: body ? JSON.stringify(body) : undefined,
+        signal: ctrl.signal,
+      });
+      if (res.ok) return await res.json();
+      const seconds = Number(res.headers?.get?.("Retry-After"));
+      const retryAfterMs = Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : 0;
+      if (res.status === 429 && attempt === 0 && retryAfterMs > 0 &&
+          retryAfterMs <= INSTALL_429_RETRY_MAX_MS) {
+        await new Promise((resolve) => setTimeout(resolve, retryAfterMs));
+        continue;
+      }
+      throw Object.assign(new Error(`status ${res.status}`), { status: res.status, retryAfterMs });
+    }
   } finally {
     clearTimeout(timer);
   }
@@ -88,30 +99,10 @@ export async function checkHealthOnce(base) {
   }
 }
 
-/** Ping `/warmup` (best-effort). */
-export async function warmup(base) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), WARMUP_TIMEOUT_MS);
-  try {
-    await fetch(`${normalizeUrl(base)}${API_PATHS.WARMUP}`, {
-      cache: "no-store",
-      signal: ctrl.signal,
-    });
-  } catch {
-    /* best-effort */
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 /**
- * Fetch the default editable prompt for a (language, model).
- *
- * Returns the normalized prompt string on success (which may legitimately be
- * ""), or `null` when the request FAILED (no/invalid API base, unreachable,
- * timeout, non-ok response). Callers must distinguish the two: a failure must
- * surface an error and NOT overwrite the user's current prompt, so a network
- * blip can never silently swap the user's value for a blank/server default.
+ * Fetch the default editable prompt for a (language, model): the normalized
+ * prompt (possibly "") on success, `null` when the request FAILED. Callers must
+ * not overwrite the user's prompt on `null`.
  * @returns {Promise<string|null>}
  */
 export async function fetchDefaultPrompt(base, lang, model = "auto") {

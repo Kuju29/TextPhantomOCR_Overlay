@@ -67,8 +67,3 @@ export function usageIsComplete(value) {
     !(value?.accountingIssues?.length) &&
     !["incomplete", "unavailable", "inconsistent", "incomplete_due_to_early_completion"].includes(value?.usageStatus);
 }
-export function usageEventFields(usage) {
-  const u = object(usage);
-  return { ...u, usage: u, providerCostUsd: decimal(u.providerCostUsd),
-    generationUsage: Array.isArray(u.generations) ? u.generations : undefined };
-}

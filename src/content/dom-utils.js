@@ -250,6 +250,9 @@
   const toastVersions = new Map();
   let toastPageStarted = 0;
 
+  // Selected-interface-language copy (shared/page-ui-text.js); English without it.
+  const pageText = (source, values) => globalThis.TPPageText ? globalThis.TPPageText.t(source, values)
+    : String(source).replace(/\{([a-z]+)\}/g, (match, name) => values && name in values ? String(values[name]) : match);
   function ensureToastShell() {
     if (toastEl?.isConnected) {
       return {
@@ -283,7 +286,7 @@
     toastToggleEl.type = "button";
     toastToggleEl.textContent = "+";
     toastToggleEl.setAttribute("aria-expanded", "false");
-    toastToggleEl.setAttribute("aria-label", "Show TextPhantom details");
+    toastToggleEl.setAttribute("aria-label", pageText("Show TextPhantom details"));
     Object.assign(toastToggleEl.style, {
       display: "none", flex: "0 0 auto", width: "22px", height: "22px", padding: "0",
       marginLeft: "auto", alignItems: "center", justifyContent: "center", textAlign: "center",
@@ -341,7 +344,7 @@
 
   function paintToast(text, ms) {
     const shell = ensureToastShell();
-    shell.text.textContent = String(text);
+    shell.text.textContent = globalThis.TPPageText?.display?.(text) ?? String(text);
     if (!toastProgressMode) shell.text.style.whiteSpace = "normal";
     shell.root.style.display = "block";
     if (toastTimer) clearTimeout(toastTimer);
@@ -422,7 +425,7 @@
     return new Promise((resolve) => {
       try {
         chrome.runtime.sendMessage(message, (r) => {
-          void chrome.runtime.lastError;
+          try { if (chrome.runtime.lastError) { resolve(null); return; } } catch { resolve(null); return; }
           resolve(r || null);
         });
       } catch {

@@ -97,6 +97,10 @@ def classify_failure(detail: dict[str, Any], *, route: str = "") -> dict[str, An
         owner, outcome, severity = "user_config", "failed", "warning"
     elif origin == "upstream_image":
         owner, outcome, severity = "site_input", "failed", "warning"
+    elif origin == "control_center" and category == "admission":
+        owner, outcome, severity = "paid_service", "blocked", "warning"
+    elif origin == "control_center" and category == "database":
+        owner, outcome, severity = "paid_service", "unconfirmed", "error"
     elif origin.startswith("upstream_"):
         owner, outcome, severity = "provider", "failed", "warning"
     elif origin == "api":
@@ -204,7 +208,8 @@ def failure_event(route: str, detail: dict[str, Any], **safe_meta: Any) -> None:
             "clientVersion": detail.get("clientVersion"),
             **{key: detail.get(key) for key in (
                 "provider", "model", "providerReason", "providerAttempts",
-                "generationAttempts", "requestDispatched",
+                "generationAttempts", "requestDispatched", "centerHttpStatus",
+                "providerDispatchEvidence", "creditState", "centerErrorCode", "centerRequestId",
             ) if detail.get(key) not in (None, "")},
             **classify_failure(detail, route=route),
             **{key: value for key, value in safe_meta.items() if value not in (None, "")},
@@ -218,19 +223,6 @@ def provider_status(exc: BaseException) -> int | None:
 
     return upstream_http_status(exc)
 
-def provider_http_semantics(status: int | None) -> tuple[str, bool]:
-    """Stable code/retry decision for an upstream HTTP response.
-
-    The API keeps its existing outward status.  This only stops permanent 4xx
-    responses (notably a too-large image/prompt) being advertised as retryable.
-    """
-    if status == 413:
-        return "provider_payload_too_large", False
-    if status in (401, 403):
-        return "provider_auth_failed", False
-    if status is not None and 400 <= status < 500 and status not in (408, 425, 429):
-        return "provider_http", False
-    return "provider_http", status in (408, 425, 429, 500, 502, 503, 504)
 
 def origin_for(stage: str, code: str = "") -> str:
     """Infer provenance from the failing pipeline stage before generic code."""

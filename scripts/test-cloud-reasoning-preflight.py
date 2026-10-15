@@ -141,9 +141,14 @@ for provider, model in (("openrouter", "vendor/reasoner"), ("openai", "gpt-5.6-l
     check(provider, model, "off", optional, allowed=True)
     check(provider, model, "minimum", optional, allowed=True)
 
-for provider in ("groq", "together", "featherless", "paid"):
+for provider in ("groq", "together", "featherless"):
     check(provider, "reasoner", "off", optional, allowed=False)
     check(provider, "reasoner", "minimum", mandatory, allowed=True, fallback=True)
+
+# Paid now consumes verified Center catalogue controls, matching its new intent wire.
+check("paid", "reasoner", "off", optional, allowed=True)
+check("paid", "reasoner", "minimum", optional, allowed=True)
+check("paid", "reasoner", "minimum", mandatory, allowed=True)
 
 # An explicit named/On choice cannot silently become provider default on any
 # Cloud route when the account has no verified control for the current model.
@@ -205,7 +210,7 @@ for provider in ("openrouter", "openai", "deepseek", "huggingface", "anthropic",
           allowed=False, verified=False)
     check(provider, "future-model", "minimum", optional,
           allowed=True, verified=False, fallback=True)
-for provider in ("groq", "together", "featherless", "paid"):
+for provider in ("groq", "together", "featherless"):
     check(provider, "future-model", "minimum", {}, allowed=True, fallback=True)
     check(provider, "future-model", "minimum", {"supported": False}, allowed=True)
 
@@ -222,6 +227,7 @@ def translate(provider, model, thinking, cap, *, fresh=True):
     adapter = provider_registry.require(provider).adapter
     with patch("backend.ai.provider_resolution.discovered_model_capabilities",
                return_value=(fresh, {"reasoning": cap} if fresh else {})), \
+         patch("backend.ai.providers.huggingface_details.refresh", return_value={}), \
          patch.object(invocation, "assert_ai_base_url_allowed"), \
          patch.object(adapter, "generate") as generate:
         try:
@@ -232,24 +238,56 @@ def translate(provider, model, thinking, cap, *, fresh=True):
     raise AssertionError(f"{provider}/{model} {thinking}: request unexpectedly dispatched")
 
 
+def dispatch_provider_default(provider, model, thinking, cap):
+    """10488 owner decision: a fresh record without a selectable control (or
+    proving no reasoning) disables AI think and sends the provider default."""
+    ai = AiConfig(api_key="test-api-key", provider=provider, model=model,
+                  thinking=thinking, prompt_mode="replace", prompt_editable="Translate.",
+                  model_capabilities={"reasoning": cap})
+    with patch("backend.ai.provider_resolution.discovered_model_capabilities",
+               return_value=(True, {"reasoning": cap})), \
+         patch("backend.ai.providers.huggingface_details.refresh", return_value={}), \
+         patch.object(invocation, "assert_ai_base_url_allowed"), \
+         patch("backend.ai.accounting.generate_with_receipt",
+               return_value=ChatResult("translated", model)) as generation, \
+         patch.object(invocation, "decode_result", return_value={"meta": {"prompt_audit": {}}}):
+        _translate_once_impl(markers.apply(["source"]), "th", ai)
+    assert generation.call_count == 1, (provider, model, thinking)
+    request = generation.call_args.args[1]
+    assert request.thinking == "default", (provider, model, thinking, request.thinking)
+    assert request.cache_context["thinkingRequested"] == thinking
+    assert request.cache_context["thinkingProviderDefault"] is True
+
+
 for provider, model, preference, cap in (
     ("openrouter", "vendor/reasoner", "off", mandatory),
-    ("openrouter", "vendor/reasoner", "off", unknown_off),
     ("openai", "gpt-5", "off", {"supported": True, "control": "provider"}),
-    ("deepseek", "deepseek-v4-flash", "off", {}),
-    ("huggingface", "vendor/reasoner", "off", unknown_off),
     ("gemini", "gemini-2.5-pro", "off", optional),
     ("gemini", "gemini-2.5-pro", "off", {"supported": False}),
     ("anthropic", "claude-fable-5", "off", optional),
     ("anthropic", "claude-fable-5", "off", {"supported": False}),
     ("together", "reasoner", "off", optional),
-    ("openrouter", "future-model", "off", {}),
 ):
     assert translate(provider, model, preference, cap).requestDispatched is False
 
+# 10488: a silent catalogue entry / control "provider" / proven no-reasoning
+# model is provider default (control disabled), never a 409. A missing or
+# stale record ("loading") still fails before dispatch.
+for provider, model, preference, cap in (
+    ("deepseek", "deepseek-v4-flash", "off", {}),
+    ("huggingface", "vendor/reasoner", "off", unknown_off),
+    ("openrouter", "future-model", "off", {}),
+    ("openrouter", "vendor/reasoner", "high", unknown_off),
+    ("openrouter", "vendor/reasoner", "off", unknown_off),
+):
+    dispatch_provider_default(provider, model, preference, cap)
+    assert translate(provider, model, preference, cap, fresh=False).requestDispatched is False
+
 for provider in cloud_providers:
     for preference in ("low", "on"):
-        error = translate(provider, "future-model", preference, {})
+        dispatch_provider_default(provider, "future-model", preference, {})
+        dispatch_provider_default(provider, "future-model", preference, {"supported": False})
+        error = translate(provider, "future-model", preference, {}, fresh=False)
         assert error.code == "ai_thinking_mode_unavailable"
         assert error.requestDispatched is False and error.providerAttempts == 0
 assert translate("openrouter", "vendor/reasoner", "high", mandatory).code == "ai_thinking_mode_unavailable"
@@ -267,6 +305,7 @@ for provider, model, preference, cap, expected, active in (
                   model_capabilities={"reasoning": cap})
     with patch("backend.ai.provider_resolution.discovered_model_capabilities",
                return_value=(True, {"reasoning": cap})), \
+         patch("backend.ai.providers.huggingface_details.refresh", return_value={}), \
          patch.object(invocation, "assert_ai_base_url_allowed"), \
          patch("backend.ai.accounting.generate_with_receipt",
                return_value=ChatResult("translated", model, thinking_applied=f"requested_effort_{expected}")) as generation, \
@@ -288,6 +327,7 @@ for provider, model, preference, cap in verified_explicit_cases:
                   model_capabilities={"reasoning": cap})
     with patch("backend.ai.provider_resolution.discovered_model_capabilities",
                return_value=(True, {"reasoning": cap})), \
+         patch("backend.ai.providers.huggingface_details.refresh", return_value={}), \
          patch.object(invocation, "assert_ai_base_url_allowed"), \
          patch("backend.ai.accounting.generate_with_receipt",
                return_value=ChatResult("translated", model,
@@ -305,8 +345,9 @@ for provider, model, preference, cap in verified_explicit_cases:
 
 # An unproved Lowest must fail before generation, even when a saved browser
 # catalogue suggests Off. Do not bill a provider-default reasoning request.
+dispatch_provider_default("featherless", "Qwen/Qwen2.5-7B-Instruct", "minimum", {})
 for provider, model, cap, fresh in (
-    ("featherless", "Qwen/Qwen2.5-7B-Instruct", {}, True),
+    ("featherless", "Qwen/Qwen2.5-7B-Instruct", {}, False),
     ("huggingface", "vendor/reasoner", optional, False),
     ("openrouter", "vendor/reasoner", optional, False),
     ("openrouter", "vendor/reasoner", unranked_router, True),
@@ -317,6 +358,7 @@ for provider, model, cap, fresh in (
                   model_capabilities={"reasoning": cap})
     with patch("backend.ai.provider_resolution.discovered_model_capabilities",
                return_value=(fresh, {"reasoning": cap} if fresh else {})), \
+         patch("backend.ai.providers.huggingface_details.refresh", return_value={}), \
          patch("backend.ai.provider_resolution.refresh_cloud_model_capabilities",
                return_value=(False, {})), \
          patch.object(invocation, "assert_ai_base_url_allowed"), \
@@ -466,7 +508,8 @@ for preference in ("low", "on"):
          patch.object(provider_errors, "failure_event"):
         try:
             provider_errors.raise_execution_error(
-                ctx, translate("openrouter", "future-model", preference, {}),
+                # 10488: only a missing/stale record ("loading") reaches this error.
+                ctx, translate("openrouter", "future-model", preference, {}, fresh=False),
                 rate_wait_ms=0, admission_wait_ms=0, provider_ms=0,
             )
         except HTTPException as error:
@@ -615,7 +658,7 @@ for provider, model, preference, selected in (
     assert generated.call_args.args[1].thinking == selected
 
 # The Center-owned Paid route is not one of the nine manual Cloud choices;
-# its existing Lowest contract remains unchanged by this metadata repair.
+# it now refreshes Center metadata read-only on a cold API, without a paid probe.
 if provider_registry.get("paid") is None:
     provider_registry.register(cloud_paid.SPEC)
 paid = provider_registry.require("paid")
@@ -629,8 +672,29 @@ with patch("backend.ai.provider_resolution.discovered_model_capabilities",
      patch("backend.ai.accounting.generate_with_receipt",
            return_value=ChatResult("translated", "fixture-model")) as generated, \
      patch.object(invocation, "decode_result", return_value={"meta": {"prompt_audit": {}}}):
+    # 10488: a Center catalogue that cannot be read is "loading". Lowest is no
+    # longer forwarded as an unverified default; nothing is dispatched.
+    try:
+        _translate_once_impl(markers.apply(["source"]), "th", paid_ai)
+    except CloudReasoningPreferenceUnavailable as error:
+        assert error.code == "ai_thinking_minimum_unavailable" and error.requestDispatched is False
+    else:
+        raise AssertionError("Paid dispatched without a fresh Center catalogue record")
+assert listed.call_count == 1 and generated.call_count == 0
+# A fresh Center record without a reasoning control is provider default: the
+# saved intent stays in the trace and Center receives no `thinking` field.
+paid_list = ModelListResult(models=("fixture-model",), status="valid",
+                            capabilities={"fixture-model": {"vision": {"supported": False}}})
+forget_model_capabilities("paid", paid.default_base_url, "fixture-paid-session")
+with patch.object(paid.adapter, "list_models", return_value=paid_list), \
+     patch.object(invocation, "assert_ai_base_url_allowed"), \
+     patch("backend.ai.accounting.generate_with_receipt",
+           return_value=ChatResult("translated", "fixture-model")) as generated, \
+     patch.object(invocation, "decode_result", return_value={"meta": {"prompt_audit": {}}}):
     _translate_once_impl(markers.apply(["source"]), "th", paid_ai)
-assert listed.call_count == 0 and generated.call_count == 1
+assert generated.call_count == 1
 assert generated.call_args.args[1].thinking == "default"
+assert generated.call_args.args[1].cache_context["thinkingRequested"] == "minimum"
+assert generated.call_args.args[1].cache_context["thinkingProviderDefault"] is True
 
 print("PASS Cloud Thinking preflight and account-scoped refresh: 9 Cloud providers, cold/warm/concurrent and public 409; no live API calls")

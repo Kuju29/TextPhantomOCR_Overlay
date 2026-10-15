@@ -1,4 +1,4 @@
-"""BYOK at discovery, probe, initial, repair, job and replay boundaries.
+"""BYOK at discovery, initial, repair, job and replay boundaries (no /ai/probe since 10491).
 
 Only mock provider adapters are used. ASGI ingress and idempotency/cache code
 are real; a configured operator secret must never authorize an absent user key.
@@ -14,7 +14,7 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from starlette.requests import Request
 from backend.config import settings
-from backend.ai import resolve as resolution, probe as probing
+from backend.ai import resolve as resolution
 from backend.ai.credentials import request_api_key, MissingUserApiKey, ProviderEndpointConflict
 from backend.ai.provider_registry import provider_registry
 from backend.ai.translation.contracts import AiConfig
@@ -51,7 +51,9 @@ class Tests(unittest.TestCase):
    for cfg in [a,b]:self.assertEqual(cfg.api_key,'');self.assertFalse(cfg.user_key)
  def test_named_cloud_local_endpoint_fails_before_any_generation_or_key_rewrite(self):
   url='http://127.0.0.1:11434/v1'
-  for spec in [s for s in provider_registry if not s.local]:
+  # Paid has its own fixed localhost-or-HTTPS Center route (tested in
+  # test-paid-center-contract.py); it is not a manual cloud endpoint.
+  for spec in [s for s in provider_registry if not s.local and s.provider_id != 'paid']:
    with self.subTest(provider=spec.provider_id):
     self.assertFalse(is_local_target(spec.provider_id,url))
     for key in ('','USER_KEY'):
@@ -65,8 +67,6 @@ class Tests(unittest.TestCase):
         '<<TP_P0:Hello>>','th',AiConfig(api_key=key,provider=spec.provider_id,base_url=url))
      self.assertEqual(resolution.resolve({'provider':spec.provider_id,
        'base_url':url,'api_key':key})['error'],'ai_provider_endpoint_conflict')
-     self.assertEqual(probing.probe({'provider':spec.provider_id,
-       'base_url':url,'api_key':key})['status'],'ai_provider_endpoint_conflict')
   self.assertTrue(is_local_target('auto',url))
   self.assertEqual(request_api_key('auto',url,''),'')
   with self.assertRaises(ProviderEndpointConflict):request_api_key('auto',url,'USER_KEY')
@@ -80,10 +80,7 @@ class Tests(unittest.TestCase):
    for spec in cloud:
     r=resolution.resolve({'provider':spec.provider_id,'base_url':spec.default_base_url,'model':'fixture','lang':'th'})
     self.assertFalse(r['ok']);self.assertEqual(r['key_source'],'none');self.assertEqual(r['error'],'missing_api_key')
-    r=probing.probe({'provider':spec.provider_id,'base_url':spec.default_base_url,'model':'fixture'})
-    self.assertFalse(r['ok']);self.assertEqual(r['status'],'missing_api_key')
    self.assertEqual(resolution.resolve({'provider':'auto'})['error'],'missing_api_key')
-   self.assertEqual(probing.probe({'provider':'auto'})['status'],'missing_api_key')
    self.assertTrue(all(m.call_count==0 for m in mocks))
  def test_supplied_key_used_for_model_discovery(self):
   enumeration=resolution.EnumerationResult(models=['fixture'],source='live',verified=True,status='valid',http_status=200,error='',capabilities={},candidates={})
@@ -103,8 +100,8 @@ class Tests(unittest.TestCase):
    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://fixture') as c:
     r=await c.get('/meta');self.assertFalse(r.json()['has_env_ai_key']);self.assertEqual(r.json()['credential_policy'],'user_required')
     r=await c.get('/v1/ai/schema');self.assertFalse(r.json()['hasServerKey'])
-    for path in ['/ai/resolve','/ai/probe']:
-     r=await c.post(path,json={'provider':'huggingface','model':'fixture','lang':'th'});self.assertEqual(r.status_code,200);self.assertFalse(r.json()['ok'])
+    r=await c.post('/ai/resolve',json={'provider':'huggingface','model':'fixture','lang':'th'});self.assertEqual(r.status_code,200);self.assertFalse(r.json()['ok'])
+    self.assertEqual((await c.post('/ai/probe',json={'provider':'huggingface','model':'fixture'})).status_code,404)
     for path in ['/v1/ai/translate','/v2/engine/runsextension/ai/translate']:
      r=await c.post(path,json={'provider':{'id':'huggingface','model':'fixture'},'units':[{'id':'P0','text':'Hello'}],'targetLang':'th'})
      self.assertEqual(r.status_code,400);self.assertEqual(r.json()['detail']['code'],'missing_api_key')

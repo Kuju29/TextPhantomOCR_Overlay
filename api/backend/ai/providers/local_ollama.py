@@ -14,7 +14,7 @@ from .ollama_sampling import OLLAMA_TRANSLATION_SAMPLING
 from .ollama_context import plan_ollama_context
 
 from backend.ai.generation_defaults import DEFAULT_GENERATION, output_token_budget
-from backend.ai.clients.base import ChatResult, LineCompletionDetector, provider_output_error, token_usage
+from backend.ai.clients.base import ChatResult, LineCompletionDetector, provider_output_error
 from backend.ai.clients.provider_error import safe_http_error
 from backend.ai.provider_contract import GenerationRequest, ModelListResult, ProbeRequest, ProbeResponse, ProviderSpec
 from backend.ai.providers.probe_support import response_error, response_error_details
@@ -197,8 +197,9 @@ class OllamaAdapter:
 
     def generate(self, request: GenerationRequest) -> ChatResult:
         thinking = _thinking_mode(request.thinking, dict(request.model_capabilities))
-        requested = normalize_reasoning_preference(
-            request.cache_context.get("thinkingRequested", request.thinking), "off")
+        requested = ("default" if request.cache_context.get("thinkingProviderDefault") is True
+                     else normalize_reasoning_preference(
+                         request.cache_context.get("thinkingRequested", request.thinking), "off"))
         reasoning = request.model_capabilities.get("reasoning")
         reasoning = reasoning if isinstance(reasoning, dict) else {}
         verified = request.cache_context.get("reasoningCapabilityVerified") is True

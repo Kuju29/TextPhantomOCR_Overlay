@@ -30,17 +30,27 @@ const db={
       });
       return q;
     };
-    tx.objectStore=()=>({
+    tx.objectStore=name=>name==='evicted'?({
+      // .10485 tombstone store; no scope is idle long enough to be evicted here.
+      get:key=>request(()=>undefined),
+    }):({
       get:key=>request(()=>rows.get(key)),
       count:()=>request(()=>rows.size),
       getAll:()=>{throw new Error('bulk history scan is forbidden');},
       put:value=>{staged.set(value.scope,structuredClone(value));},
       delete:key=>{removed.add(key);},
+      // .10485 key-only LRU scan of rows idle >= 1 h (none in this fixture).
+      index:()=>({openKeyCursor:range=>request(()=>{
+        const idle=[...rows.values()].filter(row=>row.updated<=range.upper);
+        if(idle.length)throw new Error('fixture rows are never idle');
+        return null;
+      })}),
     });
     return tx;
   },
 };
 const oldIndexedDB=globalThis.indexedDB;
+globalThis.IDBKeyRange??={upperBound:upper=>({upper})};
 globalThis.indexedDB={open(){const q={};queueMicrotask(()=>{q.result=db;q.onsuccess?.();});return q;}};
 const bigImage='data:image/png;base64,'+Buffer.alloc(780000).toString('base64');
 let calls=0;

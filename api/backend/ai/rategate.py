@@ -1,38 +1,18 @@
 """Proactive per-provider AI request pacing (the "batch gate").
 
-Why this exists
----------------
-On a manga page with many images the extension enqueues one AI translation
-job per image. Firing them all as fast as the workers drain trips a provider's
-*requests-per-minute* limit (e.g. Gemini free tier ~15 RPM) and the provider
-returns HTTP 429 — so most images error at once. Reacting with retries only
-masks the symptom and wastes tokens.
+Firing one job per image as fast as workers drain trips a provider's
+requests-per-minute limit (HTTP 429), and retries only waste tokens. Instead
+each ``(provider, model, key)`` gets a token bucket sized to its RPM: the first
+``burst`` requests fire immediately, the rest drain at the sustainable rate.
 
-Instead we pace *proactively*: each provider+model+key gets a token bucket
-sized to its RPM. A request must take a token before the provider is called;
-when the bucket is empty the request waits just long enough for the bucket to
-refill. The first ``burst`` requests fire immediately (the visible "batch"),
-the rest drain at the sustainable rate, and no request is ever sent above the
-limit — so there is nothing to retry.
+- Users sharing one key share its bucket fairly: waiters are dispatched
+  round-robin across tab sessions.
+- A waiting request can be cancelled without consuming a token.
+- Waits are bounded: past ``deadline_sec`` a request is skipped
+  (``RateGateTimeout``); a bucket with ``max_waiters`` queued rejects new
+  requests immediately (``RateGateRejected``).
 
-Design properties (all requested):
-- **Multiple models / providers**: bucket key is ``(provider, model, key)``.
-  gemini-2.0-flash and gemini-1.5-pro on the same key get independent budgets,
-  because the real limits are per model/key.
-- **Multi-user**: buckets are per API key (the limit lives on the key). Users
-  who share one key share one bucket *fairly* — waiters are dispatched
-  round-robin across tab sessions, so one user's 50-page dump cannot starve
-  another user's 2 pages.
-- **Cancellation**: a waiting request can be cancelled (tab closed / batch
-  cancelled) without ever consuming a token.
-- **Dynamic, bounded wait (anti-bloat)**: fast path has zero added latency; a
-  request that cannot get a token within ``deadline_sec`` is skipped fast
-  (``RateGateTimeout``); once a bucket already has ``max_waiters`` queued,
-  new requests are rejected immediately (``RateGateRejected``) so memory and
-  latency stay bounded instead of the queue swelling without end.
-
-The gate lives at the async worker level (before the blocking pipeline runs in
-a thread), so waiting is cheap and does not pin a worker thread.
+The gate runs at the async worker level, so waiting does not pin a thread.
 """
 
 from __future__ import annotations
@@ -42,7 +22,6 @@ import time, asyncio, hashlib, math, os
 from collections.abc import Callable
 from collections import OrderedDict, deque
 
-# from backend.ai import providers as _provider_modules  # noqa: F401
 from backend.ai.provider_registry import provider_registry
 from backend.ai.provider_resolution import canonical_provider, resolve_model
 from backend.config import settings
@@ -85,13 +64,6 @@ def _env_int(name: str, default: int) -> int:
 # and no pending refill timer) are ever evicted; an evicted bucket simply starts
 # full again next time, which is the correct state for one that was quiet.
 _MAX_BUCKETS = _env_int("TP_RATE_MAX_BUCKETS", 512)
-
-# Learned rates exist only in the bounded live bucket map.
-# Legacy file settings are ignored; process restart begins empty.
-
-def _state_path() -> None:
-    """Legacy file settings never enable restart persistence."""
-    return None
 
 class _Waiter:
     __slots__ = ("job_id", "session", "future")
@@ -145,12 +117,9 @@ class _Bucket:
         self.capacity = float(max(1, burst))
         self.tokens = min(self.tokens, self.capacity)
 
-    # How long a request arriving NOW would have to wait, in seconds.
-    #
-    # This is the number the caller owes a rejected client: not a flat guess,
-    # but the queue in front of it divided by the rate it drains at. A flat
-    # "Retry-After: 5" on a bucket with 30 queued jobs at 12 rpm sends every one
-    # of them back in five seconds to be rejected again.
+    # How long a request arriving NOW would have to wait, in seconds: the queue
+    # in front of it divided by the drain rate (a flat Retry-After would send
+    # every rejected job back at the same moment).
     def eta_sec(self) -> float:
         self.refill()
         if self.rate <= 0:
@@ -175,27 +144,6 @@ class RateGate:
         self._buckets: dict[str, _Bucket] = {}
         # job_id -> _Waiter, for O(1) cancellation by job id.
         self._waiters: dict[str, _Waiter] = {}
-        # Learned rates read from disk, applied when a bucket is first created.
-        self._restored: dict[str, float] | None = None
-        self._state_error: str = ""
-        self._state_loaded_count: int = 0
-        self._state_saved_at: float = 0.0
-        self._state_dirty: bool = False
-
-    # --- learned-rate persistence -------------------------------------------
-    def _load_state(self) -> dict[str, float]:
-        """Each process learns from its own live provider observations."""
-        if self._restored is None:
-            self._restored = {}
-        return self._restored
-
-    def _save_state(self, *, force: bool = False) -> None:
-        # Learned rates already live in the bounded bucket map. No disk mirror.
-        self._state_dirty = False
-
-    def persistence(self) -> dict:
-        return {"path": "", "enabled": False, "restored": 0, "error": "",
-                "storage": "process_memory"}
 
     # --- policy ------------------------------------------------------------
     @staticmethod
@@ -235,11 +183,11 @@ class RateGate:
         return spec.uses_proactive_rate_gate if spec is not None else True
 
     # Identity of one quota: provider + resolved model + API key. The rate is NOT
-    # part of the key, because the bucket's rate now moves at runtime — one key
+    # part of the key, because the bucket's rate moves at runtime — one key
     # keeps one bucket and one learned rate for as long as it stays warm.
     @staticmethod
     def _bucket_key(provider: str, model: str, api_key: str) -> str:
-        kf = hashlib.sha1((api_key or "").encode("utf-8")).hexdigest()[:12]
+        kf = hashlib.sha256((api_key or "").encode("utf-8")).hexdigest()[:32]
         resolved = (resolve_model(provider, model) or "auto").strip().lower()
         return f"{provider}|{resolved}|{kf}"
 
@@ -364,11 +312,8 @@ class RateGate:
         bucket = self._buckets.get(key)
         now = time.monotonic()
         if bucket is not None and (now - bucket.touched) > RATE_ADAPT_IDLE_RESET_SEC:
-            # A quota that has been quiet for this long is weaker evidence, not
-            # no evidence. Give back one idle window's worth and keep the rest:
-            # being wrong here costs a single 429 that halves the rate anyway,
-            # while resetting to the start cost the whole ramp after every
-            # break the user took.
+            # A quiet quota is weaker evidence, not none: decay per idle window
+            # instead of resetting (a wrong guess costs one 429, which halves it).
             idle_windows = int(
                 (now - bucket.touched) // max(1.0, RATE_ADAPT_IDLE_RESET_SEC)
             )
@@ -377,14 +322,7 @@ class RateGate:
             bucket.ok_streak = 0
         if bucket is None:
             self._prune_buckets()
-            # Start from what this key was last known to sustain. Only the RATE
-            # is restored — tokens start full either way, so a restored bucket
-            # still fires its burst immediately and still halves on a 429.
-            restored = 0.0 if pinned else self._load_state().get(key, 0.0)
-            seed = start_rpm
-            if restored > 0:
-                seed = min(max(restored, rpm_min), rpm_max)
-            bucket = _Bucket(burst, seed / 60.0)
+            bucket = _Bucket(burst, start_rpm / 60.0)
             self._buckets[key] = bucket
         bucket.touched = now
         bucket.rpm_start = start_rpm
@@ -418,8 +356,6 @@ class RateGate:
         bucket.ok_streak = 0
         if bucket.rpm < bucket.rpm_max:
             bucket.set_rpm(min(bucket.rpm_max, bucket.rpm + RATE_ADAPT_STEP_RPM))
-            self._state_dirty = True
-        self._save_state()
 
     # The provider itself said no. Halve the sustained rate immediately and, when
     # it told us how long to wait, spend that time before handing out a token.
@@ -432,11 +368,6 @@ class RateGate:
         bucket.ok_streak = 0
         if not bucket.pinned and self.adaptive_enabled():
             bucket.set_rpm(max(bucket.rpm_min, bucket.rpm * RATE_ADAPT_BACKOFF))
-            # Persist the DECREASE straight away. A rate we learned was too high
-            # is the one piece of evidence worth surviving a crash: replaying it
-            # after a restart is another round of 429s at the user's expense.
-            self._state_dirty = True
-            self._save_state(force=True)
         wait = max(0.0, float(retry_after_sec))
         if wait > 0:
             bucket.refill()
@@ -474,8 +405,7 @@ class RateGate:
             "tokens": round(bucket.tokens, 2),
             "waiting": len(bucket.jobset),
             # How many clean calls this bucket still owes before it may speed
-            # up, and how long a request arriving now would queue. Both were
-            # previously only derivable by re-implementing the maths.
+            # up, and how long a request arriving now would queue.
             "okStreak": int(bucket.ok_streak),
             "okStreakTarget": bucket.ok_streak_target(),
             "etaSec": round(bucket.eta_sec(), 2),
@@ -484,8 +414,7 @@ class RateGate:
     def retry_after_sec(self, provider: str, model: str, api_key: str) -> float:
         """Seconds a rejected caller should actually wait, from the bucket.
 
-        A flat number here is worse than none: told to come back in 5 s, thirty
-        queued pages all come back in 5 s and are all rejected again.
+        A flat number would bring every queued page back at the same moment.
         """
         bucket = self._lookup(provider, model, api_key)
         if bucket is None:
@@ -502,16 +431,11 @@ class RateGate:
                 hit += 1
         return hit
 
-    def cancel_session(self, session: str) -> int:
-        session = str(session or "")
-        ids = [w.job_id for w in self._waiters.values() if w.session == session]
-        return self.cancel_jobs(ids)
 
     def stats(self) -> dict:
         return {
             "buckets": len(self._buckets),
             "waiting": len(self._waiters),
-            "persistence": self.persistence(),
         }
 
     # --- internals ---------------------------------------------------------

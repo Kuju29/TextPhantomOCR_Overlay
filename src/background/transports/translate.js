@@ -1,3 +1,4 @@
+import { diagnosticFetch } from "../../shared/diagnostics.js";
 import { TOKEN_FIELDS, token, decimal } from "../../shared/ai/usage-values.js";
 import { createLogger } from "../../shared/logger.js";
 import { API_PATHS, engineApiPath } from "../../shared/constants.js";
@@ -12,18 +13,34 @@ import {
   readJson,
 } from "./http-error.js";
 import { awaitServerBackoff, noteRetryAfter } from "./polling.js";
+import { installReady } from "./install-header.js";
 import { beginApiRequest, noteApiActivity, noteApiSuccess } from "../api.js";
+import { readLoginState } from "../../shared/login-session.js";
+import { RELAY_PROVIDERS, acquireBrowserRelay } from "../login/endpoint/login_browser_relay.js";
 
 const log = createLogger("SW.transport.translate");
 const SUBMIT_TIMEOUT_MS = 90000;
+// An inline image is sent once. When `src` is a data: URI identical to
+// `imageDataUri`, the API reads `imageDataUri` first (jobs/stages/payload_io.py),
+// so the duplicate `src` only doubled the request body.
+export function wirePayload(payload) {
+  if (!payload || typeof payload !== "object") return payload;
+  const src = payload.src;
+  if (typeof src !== "string" || !src.startsWith("data:") || src !== payload.imageDataUri)
+    return payload;
+  const { src: _duplicate, ...rest } = payload;
+  return rest;
+}
+
 export async function submitJobViaRest(
   base,
   payload,
   { idempotencyKey = "" } = {},
 ) {
   await awaitServerBackoff();
+  await installReady();
 
-  const body = JSON.stringify(payload);
+  const body = JSON.stringify(wirePayload(payload));
   const t0 = Date.now();
   const headers = limitHeaders(base, payload?.limits?.apiUnlimited === true, {
     "Content-Type": "application/json",
@@ -38,10 +55,19 @@ export async function submitJobViaRest(
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), SUBMIT_TIMEOUT_MS);
   let res;
+  // A Claude Login turn is sent by the API through this browser's own
+  // claude.ai tab (browser relay); keep the relay pump running meanwhile.
+  let releaseRelay = () => {};
+  if (payload?.ai?.provider === "login") {
+    try {
+      const login = await readLoginState(["loginProvider", "paidSessionToken"]);
+      if (RELAY_PROVIDERS[login.loginProvider]) releaseRelay = acquireBrowserRelay(base, login.paidSessionToken);
+    } catch {}
+  }
   const finishApiRequest = beginApiRequest(base);
   try {
     noteApiActivity(base);
-    res = await fetch(base.replace(/\/+$/, "") + API_PATHS.TRANSLATE, {
+    res = await diagnosticFetch(base.replace(/\/+$/, "") + API_PATHS.TRANSLATE, {
       method: "POST",
       headers,
       cache: "no-store",
@@ -62,6 +88,7 @@ export async function submitJobViaRest(
     }
     throw networkFailure(e, "submit");
   } finally {
+    releaseRelay();
     finishApiRequest();
     clearTimeout(timer);
   }
@@ -212,6 +239,8 @@ export async function translateViaSyncRest(
 ) {
   const t0 = Date.now();
   const traceId = String(payload?.context?.tp_trace || "");
+  await installReady();
+  const requestBody = JSON.stringify(wirePayload(payload));
   const ctrl = new AbortController();
   const totalTimeoutMs = syncTotalTimeoutMs(payload, cloudTimeoutMs);
   const timer =
@@ -251,7 +280,7 @@ export async function translateViaSyncRest(
       ),
       mode: payload?.mode,
       source: payload?.source,
-      bytes: JSON.stringify(payload).length,
+      bytes: requestBody.length,
     });
     const path = engineApiPath(
       capabilities,
@@ -272,7 +301,7 @@ export async function translateViaSyncRest(
       cache: "no-store",
       priority: "high",
       signal: ctrl.signal,
-      body: JSON.stringify(payload),
+      body: requestBody,
     });
     try {
       onSent?.();

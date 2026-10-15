@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict';
 import {summarizeExecutionTiming as summarize, providerLearningSample as sample} from '../src/shared/ai/execution-timing.js';
+const paid=summarize([{meta:{providerMs:1000,providerTimingScope:'center_round_trip',
+  centerTiming:{upstreamMs:100},generationAttempts:1}}]);
+assert.equal(paid.providerMs,1000);assert.equal(sample(paid),100);
+assert.equal(sample(summarize([{meta:{providerMs:1000,providerTimingScope:'center_round_trip',generationAttempts:1}}])),0,
+  'unknown Center stages must not train Auto as AI latency');
 const result=(providerMs,replayed=false)=>({replayed,meta:{providerMs,generationAttempts:1}});
 const measured=summarize([result(100),result(250)]);
 assert.equal(measured.providerMs,350);

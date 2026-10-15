@@ -1,23 +1,14 @@
 /**
+ * The workflow state machine. Pure (no storage, no chrome.*, no time), because
+ * it decides whether a job is still alive after the service worker stopped
+ * mid-flight. It must express:
  *
- * The workflow state machine.
- *
- * Pure: no storage, no chrome.*, no time. Everything here can be reasoned
- * about and tested directly, which matters because this is the part that
- * decides whether a job is still alive after the service worker was shut down
- * mid-flight.
- *
- * Two things the previous design could not express, and this one must:
- *
- * 1. **Why a job took the slow path.** `LENS_DEGRADED` is a state, not a flag,
- *    and every entry into it records a reason and bumps an attempt counter. A
- *    system where the fast path quietly stopped working looks completely
- *    healthy right up until the bill arrives.
- *
- * 2. **The difference between "not finished" and "finished elsewhere".** A
- *    result that arrives for a page the user has already scrolled past, or for
- *    an image that has since been replaced, must be dropped — not applied over
- *    whatever is on screen now. That is what `cancelEpoch` is for.
+ * 1. **Why a job took the slow path.** `LENS_DEGRADED` is a state, not a flag;
+ *    every entry records a reason and bumps an attempt counter, so a fast path
+ *    that quietly stopped working is visible.
+ * 2. **"Not finished" vs "finished elsewhere".** A result for a page the user
+ *    left, or an image since replaced, is dropped rather than applied over what
+ *    is on screen now (`cancelEpoch`).
  */
 
 export const STATES = {
@@ -237,12 +228,9 @@ export function stageExhausted(record, stage, max = MAX_STAGE_ATTEMPTS) {
 }
 
 /**
- * Whether a record still belongs to the world it was created in.
- *
- * A result for a page the user navigated away from, or for an image slot a
- * virtualised reader has since re-used, must be dropped. Applying it would
- * paint a translation of one picture over a different one — which looks like a
- * translation bug and is not one.
+ * Whether a record still belongs to the world it was created in. A result for a
+ * page the user left, or a slot a virtualised reader re-used, must be dropped:
+ * it would paint one picture's translation over another.
  */
 export function isCurrent(record, generation) {
   const g = record?.generation || {};

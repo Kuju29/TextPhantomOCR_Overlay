@@ -255,9 +255,8 @@ def patch(
             fs = fit_item_font_size(width_pct, height_pct, line_text or "ก", img_w, img_h)
             fs = max(min_size_px, fs)
             item["font_size_px"] = int(fs)
-            # We no longer maintain per-word spans for the AI layer — the
-            # renderer reads ``item.text`` directly.  Keep the field as an
-            # empty list so any consumer that iterates it stays happy.
+            # The AI layer has no per-word spans (the renderer reads
+            # ``item.text``); keep an empty list for consumers that iterate it.
             item["spans"] = []
             para_sizes.append(int(fs))
 

@@ -58,30 +58,6 @@ export function unionGeometry(geometries) {
   };
 }
 
-export function geometryFromPixelBounds(bounds, imgW, imgH) {
-  if (
-    !Array.isArray(bounds) ||
-    bounds.length !== 4 ||
-    !bounds.every((value) => Number.isFinite(Number(value))) ||
-    !(imgW > 0) ||
-    !(imgH > 0)
-  )
-    return null;
-  const left = Math.max(0, Math.min(imgW, Number(bounds[0])));
-  const top = Math.max(0, Math.min(imgH, Number(bounds[1])));
-  const right = Math.max(0, Math.min(imgW, Number(bounds[2])));
-  const bottom = Math.max(0, Math.min(imgH, Number(bounds[3])));
-  if (!(right > left) || !(bottom > top)) return null;
-  return {
-    leftPct: (left / imgW) * 100,
-    topPct: (top / imgH) * 100,
-    widthPct: ((right - left) / imgW) * 100,
-    heightPct: ((bottom - top) / imgH) * 100,
-    rotation: 0,
-    text: "",
-  };
-}
-
 export function paragraphBlock(geometries) {
   if (geometries.length === 1) return geometries[0];
   return unionGeometry(geometries);

@@ -103,6 +103,59 @@ body {
   border: 1px solid var(--tp-line);
 }
 
+/* Visual user guide entry point (opens guide/guide.html in a new tab).
+   Sits at the end of the tab bar so it is reachable from every tab. */
+.tabs-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 16px 12px;
+}
+
+.tabs-row > .tabs {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+}
+
+.guide-btn {
+  appearance: none;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--tp-accent) 40%, var(--tp-line));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--tp-accent) 14%, var(--tp-surface));
+  color: var(--tp-accent-soft);
+  cursor: pointer;
+  transition: background var(--tp-transition), border-color var(--tp-transition), color var(--tp-transition);
+}
+
+.guide-btn svg {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.guide-btn:hover {
+  color: var(--tp-text);
+  background: color-mix(in srgb, var(--tp-accent) 30%, var(--tp-surface));
+  border-color: var(--tp-accent);
+}
+
+.guide-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--tp-focus);
+}
+
 /* ============ Tabs ============ */
 .tabs {
   /* Flex (not a fixed 3-column grid) so the pill shrinks/reflows when a tab
@@ -246,6 +299,7 @@ label {
 
 input[type="text"],
 input[type="password"],
+input[type="number"],
 select,
 textarea {
   appearance: none;
@@ -644,3 +698,153 @@ textarea {
 .api-offline-gate[hidden] { display: none; }
 .api-offline-gate strong { display: block; margin-bottom: 3px; }
 .api-offline-gate button { margin-top: 8px; }
+
+/* Paid sign-in: email -> verification code -> account. No modal or remote UI. */
+.paid-card {
+  border: 1px solid var(--tp-line-2); border-radius: 14px;
+  padding: 18px 16px 14px; margin-bottom: 14px;
+  background: var(--tp-surface); min-width: 0;
+}
+.paid-brand { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: var(--tp-accent-soft); }
+.paid-mark { display: grid; place-items: center; width: 23px; height: 23px; background: var(--tp-accent); color: white; border-radius: 7px; font-size: 14px; }
+.paid-card h2 { margin: 17px 0 5px; font-size: 19px; font-weight: 650; letter-spacing: -0.3px; line-height: 1.35; }
+.paid-subtitle { margin: 0 0 20px; color: var(--tp-muted); font-size: 13px; line-height: 1.55; }
+.paid-card label { display: block; font-size: 13px; font-weight: 600; margin: 0 0 7px; }
+.paid-card input, .paid-card select { width: 100%; min-width: 0; height: 44px; border-radius: 9px; font-size: 13px; }
+.paid-card input { padding: 10px 12px; border: 1px solid var(--tp-line-2); background: var(--tp-surface-2); color: var(--tp-text); font-family: inherit; outline: none; }
+.paid-card input:focus { border-color: var(--tp-accent); box-shadow: var(--tp-focus); }
+.paid-card input:disabled { opacity: 0.6; }
+.paid-card input::placeholder { color: var(--tp-muted); opacity: 0.75; }
+.paid-card .paid-primary {
+  width: 100%; min-height: 44px; margin-top: 13px; padding: 10px 12px; border: 1px solid transparent;
+  border-radius: 9px; color: white; background: var(--tp-accent); cursor: pointer; font: inherit; font-weight: 600;
+  display: flex; align-items: center; justify-content: center; gap: 12px;
+}
+.paid-card .paid-primary:hover:not(:disabled) { filter: brightness(1.1); }
+.paid-primary:disabled, .paid-link:disabled { opacity: 0.5; cursor: default; }
+.paid-primary:focus-visible, .paid-link:focus-visible { outline: 2px solid var(--tp-accent-soft); outline-offset: 3px; }
+.paid-footnote { display: block; font-size: 13px; line-height: 1.55; color: var(--tp-muted); margin: 12px 0 0; }
+.paid-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; }
+.paid-link { background: none; border: none; color: var(--tp-accent-soft); padding: 5px 0; border-radius: 4px; font: inherit; font-size: 13px; cursor: pointer; }
+.paid-link:hover:not(:disabled) { text-decoration: underline; }
+.paid-recipient { color: var(--tp-muted); font-size: 13px; line-height: 1.5; margin: -6px 0 18px; overflow-wrap: anywhere; }
+.paid-recipient strong { color: var(--tp-text); font-weight: 500; }
+#ai-paid-code { text-align: center; font-size: 23px; font-weight: 600; letter-spacing: 0.28em; padding-left: 0.6em; font-variant-numeric: tabular-nums; }
+.paid-connection { padding: 11px 12px; margin: 0 0 12px; border-radius: 9px; border: 1px solid color-mix(in srgb, var(--tp-warn) 32%, transparent); background: color-mix(in srgb, var(--tp-warn) 7%, var(--tp-surface)); font-size: 13px; line-height: 1.6; color: var(--tp-text); }
+.paid-connection .paid-link { display: block; }
+.paid-status { color: var(--tp-muted); font-size: 13px; line-height: 1.55; margin-top: 13px; overflow-wrap: anywhere; }
+.paid-status:empty { display: none; }
+.paid-status[data-kind="error"] { color: var(--tp-err); }
+.paid-status[data-kind="warning"] { color: var(--tp-warn); }
+.paid-account-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.paid-badge { color: var(--tp-ok); font-size: 10px; border-radius: 20px; padding: 4px 7px; background: color-mix(in srgb, var(--tp-ok) 9%, transparent); white-space: nowrap; }
+.paid-badge[data-kind="warning"] { color: var(--tp-warn); background: color-mix(in srgb, var(--tp-warn) 10%, transparent); }
+.paid-email { margin: 10px 0 16px; font-size: 13px; overflow-wrap: anywhere; }
+.paid-wallet { border: 1px solid var(--tp-line); background: var(--tp-bg); border-radius: 10px; padding: 13px; margin-bottom: 18px; }
+.paid-wallet-label { display: block; color: var(--tp-muted); font-size: 13px; }
+#ai-paid-credits { display: block; font-size: 26px; font-weight: 650; margin-top: 5px; letter-spacing: -0.5px; }
+.paid-wallet .paid-footnote { margin-top: 4px; }
+.paid-model-heading{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:6px;margin-bottom:8px;font-size:13px;font-weight:600}
+.paid-model-heading small{color:var(--tp-muted);font-size:11px;font-weight:400}
+.paid-model-picker{border:1px solid var(--tp-line-2);border-radius:9px;background:var(--tp-surface-2);overflow:hidden}
+.paid-model-picker summary{padding:12px;font-size:13px;cursor:pointer;overflow-wrap:anywhere}
+.paid-model-picker summary[aria-disabled="true"]{opacity:.6;cursor:default}
+.paid-model-columns,.paid-model-option{display:grid;grid-template-columns:minmax(0,1fr) 56px 62px;gap:4px;align-items:center}
+.paid-model-columns{padding:9px 10px;color:var(--tp-muted);font-size:10px;border-top:1px solid var(--tp-line)}
+.paid-model-options{max-height:260px;overflow-y:auto}
+.paid-model-search-row{padding:8px 10px;border-top:1px solid var(--tp-line)}
+.paid-model-search{width:100%;box-sizing:border-box;padding:8px 10px;border:1px solid var(--tp-line-2);border-radius:7px;background:var(--tp-surface);color:var(--tp-text);font:inherit;font-size:12px}
+.paid-model-search:focus-visible{outline:2px solid var(--tp-accent-soft);outline-offset:1px}
+.paid-model-option[hidden]{display:none}
+.paid-model-empty{margin:0;padding:12px 10px;border-top:1px solid var(--tp-line);color:var(--tp-muted);font-size:11px}
+.paid-model-option{width:100%;padding:11px 10px;background:none;border:0;border-top:1px solid var(--tp-line);color:var(--tp-text);font:inherit;font-size:11px;text-align:left;cursor:pointer}
+.paid-model-option span:first-child{overflow-wrap:anywhere}
+.paid-model-columns span:not(:first-child),.paid-model-option span:not(:first-child){text-align:right;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.paid-model-option[aria-pressed="true"],.paid-model-option:hover:not(:disabled){background:color-mix(in srgb,var(--tp-accent) 12%,var(--tp-surface-2))}
+.paid-model-option:focus-visible,.paid-model-picker summary:focus-visible,.paid-pricing-help summary:focus-visible{outline:2px solid var(--tp-accent-soft);outline-offset:-3px}
+.paid-model-rates{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
+.paid-model-rates>div{display:flex;flex-direction:column;gap:5px;padding:10px;border:1px solid var(--tp-line);border-radius:8px;min-width:0}
+.paid-model-rates span,.paid-model-rates small{color:var(--tp-muted);font-size:11px}
+.paid-model-rates strong{font-size:15px;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+#ai-paid-model-price-status{font-size:11px;margin-top:8px}
+.paid-pricing-help{margin-top:10px;color:var(--tp-muted);font-size:12px;line-height:1.6}
+.paid-pricing-help summary{cursor:pointer;color:var(--tp-accent-soft)}
+.paid-pricing-help p{margin:9px 0}
+
+.paid-purchase-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:14px 0 18px}.paid-purchase-actions .paid-primary{margin:0;padding:10px 8px;font-size:12px}.paid-secondary{border:1px solid var(--border,#34415a);background:transparent;color:inherit;border-radius:8px;font:inherit;font-size:12px;cursor:pointer;padding:10px 8px}
+
+/* Customer account uses the existing popup's full area. Back restores the
+   normal 344px settings view; the shared renderer owns the single scroller. */
+html.paid-account-open{width:460px;height:600px;overflow:hidden}
+body.paid-account-open{width:100%;height:100%;overflow:hidden}
+.paid-account-open .panel{animation:none}
+.paid-account-open .app{visibility:hidden}
+.paid-card.paid-browsing{position:fixed;inset:0;z-index:1000;margin:0;padding:18px;border:0;border-radius:0;background:var(--tp-bg);display:flex;flex-direction:column;min-width:0;overflow:hidden;visibility:visible}
+.paid-browsing .paid-inline{display:flex;flex-direction:column;flex:1;min-height:0;width:100%;overflow:hidden}
+.paid-browsing .paid-inline[hidden]{display:none}
+.paid-browsing>.paid-status,.paid-browsing>.paid-connection{display:none}
+.paid-inline-state{display:flex;flex-direction:column;gap:12px;font-size:14px;line-height:1.6}
+.paid-inline-state button{min-height:44px;font-size:14px}
+/* Action popups negotiate their own viewport from intrinsic content size.
+   Keep an in-flow width request even while the account card fills the view. */
+html.paid-account-open[data-paid-surface="popup"],body.paid-account-open[data-paid-surface="popup"]{width:460px;min-width:460px}
+body.paid-account-open[data-paid-surface="popup"]>.app{width:460px;min-width:460px;height:600px;min-height:600px;overflow:hidden}
+html[data-paid-surface="page"],body[data-paid-surface="page"]{width:min(344px,100vw);min-width:0}
+html.paid-account-open[data-paid-surface="page"]{width:min(460px,100vw);height:min(600px,100dvh)}
+body.paid-account-open[data-paid-surface="page"]{position:relative;width:100%;min-width:0}
+body.paid-account-open[data-paid-surface="page"] .paid-card.paid-browsing{position:absolute}
+@media(max-width:340px){body[data-paid-surface="page"] .paid-card.paid-browsing{padding:12px}}
+
+/* Shared secondary actions keep the same theme as the compact popup fields. */
+.secondary-btn {
+  appearance: none;
+  border: 1px solid var(--tp-line);
+  border-radius: var(--tp-radius-sm);
+  background: var(--tp-surface-2);
+  color: var(--tp-text);
+  min-height: 34px;
+  padding: 7px 11px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color var(--tp-transition), background var(--tp-transition);
+}
+.secondary-btn:hover:not(:disabled) {
+  border-color: var(--tp-accent);
+  background: color-mix(in srgb, var(--tp-accent) 12%, var(--tp-surface-2));
+}
+.secondary-btn:focus-visible { outline: none; box-shadow: var(--tp-focus); }
+.secondary-btn:disabled { opacity: .55; cursor: default; }
+#ai-local-test { width: 100%; margin-top: 6px; }
+.rate-field { min-width: 0; }
+input[type="number"] { min-width: 0; box-sizing: border-box; }
+
+.sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+/* Support entry: shown only when popup-entry.js confirms a signed-in Paid customer. */
+.contact-admin-section { display: flex; flex-direction: column; gap: 12px; }
+.contact-admin-section:has(> #contact-admin[hidden]):has(> #contact-admin-status[hidden]) { display: none; }
+.contact-admin-card {
+  appearance: none; position: relative; display: flex; align-items: center; gap: 11px; width: 100%;
+  padding: 11px 12px; text-align: left; font: inherit; color: var(--tp-text); cursor: pointer;
+  border: 1px solid transparent; border-radius: var(--tp-radius);
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--tp-accent) 16%, var(--tp-surface-2)), color-mix(in srgb, var(--tp-accent-2) 10%, var(--tp-surface-2))) padding-box,
+    linear-gradient(135deg, color-mix(in srgb, var(--tp-accent) 60%, transparent), color-mix(in srgb, var(--tp-accent-2) 45%, transparent)) border-box;
+  transition: transform var(--tp-transition), box-shadow var(--tp-transition), filter var(--tp-transition);
+}
+.contact-admin-card:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.08); box-shadow: 0 8px 22px color-mix(in srgb, var(--tp-accent) 22%, transparent); }
+.contact-admin-card:focus-visible { outline: none; box-shadow: var(--tp-focus); }
+.contact-admin-card:disabled { opacity: .6; cursor: wait; transform: none; }
+.contact-admin-card[hidden] { display: none; }
+.contact-admin-icon { flex: none; display: grid; place-items: center; width: 36px; height: 36px; border-radius: 11px; background: var(--tp-grad); color: #fff; box-shadow: 0 4px 12px color-mix(in srgb, var(--tp-accent) 38%, transparent); }
+.contact-admin-icon svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.contact-admin-text { display: grid; gap: 1px; min-width: 0; flex: 1; }
+.contact-admin-text strong { font-size: 13px; font-weight: 650; }
+.contact-admin-text small { font-size: 11px; line-height: 1.35; color: var(--tp-muted); overflow-wrap: anywhere; }
+.contact-admin-badge { flex: none; min-width: 20px; padding: 2px 6px; border-radius: 999px; background: var(--tp-err); color: #fff; font-size: 10.5px; font-weight: 700; line-height: 1.3; text-align: center; }
+.contact-admin-badge[hidden] { display: none; }
+.contact-admin-chevron { flex: none; width: 16px; height: 16px; fill: none; stroke: var(--tp-muted); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; transition: transform var(--tp-transition); }
+.contact-admin-card:hover .contact-admin-chevron { transform: translateX(2px); stroke: var(--tp-text); }
+.contact-admin-status { font-size: 11px; color: var(--tp-warn); line-height: 1.4; }
+.contact-admin-status[hidden] { display: none; }

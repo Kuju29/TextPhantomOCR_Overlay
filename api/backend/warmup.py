@@ -57,7 +57,11 @@ def warmup(lang: str = "th") -> dict[str, Any]:
 
     cookie_ok = False
     try:
+        # A fresh or merely aged jar answers without a source call; a jar near
+        # expiry also starts one background refresh so the next Lens request
+        # does not pay for it. A failing source is backed off, never polled.
         cookie.get(settings.firebase_url)
+        cookie.prefetch(settings.firebase_url)
         cookie_ok = True
     except Exception:
         cookie_ok = False

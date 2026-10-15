@@ -12,8 +12,7 @@ from backend.ai.provider_bootstrap import ensure_provider_registry
 from backend.ai.provider_registry import provider_registry
 ensure_provider_registry()
 from backend.ai.provider_resolution import (
-    resolve_base_url, remember_model_rejection, remember_model_promotion,
-    forget_model_capabilities,
+    resolve_base_url, forget_model_capabilities,
 )
 from backend.ai.provider_contract import GenerationRequest, ProbeRequest, ProbeResponse
 from backend.ai.clients.base import ChatResult
@@ -300,10 +299,9 @@ with patch.object(resolve_service, "_enumerate_models_detailed", return_value=en
     auto = resolve_service.resolve({"provider":"openrouter", "api_key":"sk-or-fixture", "model":"auto", "lang":"th"})
     assert auto["ok"] is True and auto["model"] in enum["models"]
 
-# A deterministic selected-model generation failure outranks a still-present
-# catalogue row for this exact provider/endpoint/account/model. This prevents a
-# 400/403/404 model from reappearing after popup refresh. A later successful
-# probe clears the negative evidence.
+# 10491: no selected-model probe evidence overlays the catalogue. A listed
+# usable model stays usable in /ai/resolve; the extension marks a model only
+# after a real translation fails deterministically for that key.
 route_key = "sk-or-negative-evidence-fixture"
 route_model = "openai/o3-fixture"
 route_base = cloud_openrouter.DEFAULT_BASE_URL
@@ -314,33 +312,11 @@ route_enum = {
 }
 forget_model_capabilities("openrouter", route_base, route_key)
 with patch.object(resolve_service, "_enumerate_models_detailed", return_value=route_enum):
-    before = resolve_service.resolve({"provider":"openrouter", "api_key":route_key,
+    listed = resolve_service.resolve({"provider":"openrouter", "api_key":route_key,
                                       "model":route_model, "lang":"th"})
-    assert before["ok"] is True
-    assert before["model_candidates"][0]["eligibility"] == "usable"
-
-    remember_model_rejection("openrouter", route_base, route_key, route_model,
-                             status="rejected", http_status=400,
-                             error="reasoning parameter rejected")
-    with patch("backend.trace.note") as trace_note:
-        blocked = resolve_service.resolve({"provider":"openrouter", "api_key":route_key,
-                                           "model":route_model, "lang":"th"})
-    assert blocked["ok"] is False and blocked["error"] == "model_unavailable"
-    assert blocked["model_status"] == "unavailable"
-    assert blocked["model_candidates"][0]["eligibility"] == "blocked"
-    assert blocked["model_candidates"][0]["probe_status"] == "rejected"
-    assert blocked["model_candidates"][0]["probe_http_status"] == 400
-    catalogue_events = [call for call in trace_note.call_args_list
-                        if call.args and call.args[0] == "model_catalogue_completed"]
-    assert len(catalogue_events) == 1, catalogue_events
-    assert catalogue_events[0].args[1]["blockedCount"] == 1, catalogue_events[0]
-    assert catalogue_events[0].args[1]["usableCount"] == 0, catalogue_events[0]
-
-    remember_model_promotion("openrouter", route_base, route_key, route_model)
-    recovered = resolve_service.resolve({"provider":"openrouter", "api_key":route_key,
-                                         "model":route_model, "lang":"th"})
-    assert recovered["ok"] is True
-    assert recovered["model_candidates"][0]["eligibility"] == "usable"
+    assert listed["ok"] is True
+    assert listed["model_candidates"][0]["eligibility"] == "usable"
+    assert "probe_status" not in listed["model_candidates"][0]
 forget_model_capabilities("openrouter", route_base, route_key)
 
-print("Provider/model eligibility matrix passed: 9 cloud providers, route-scoped probe rejection/promotion, endpoint binding, no explicit remap.")
+print("Provider/model eligibility matrix passed: 9 cloud providers, catalogue-only eligibility, endpoint binding, no explicit remap.")

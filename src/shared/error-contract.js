@@ -1,14 +1,16 @@
 // TextPhantom's stable cross-context error contract. Diagnostics stay in logs;
 // only the short Thai message and support code are sent to page content.
 
-export const TP_ERROR_SCHEMA = "tp.error/1";
+const TP_ERROR_SCHEMA = "tp.error/1";
 
 const USER_MESSAGES = Object.freeze({
   IMG_NO_TEXT: "ไม่พบข้อความในภาพ",
   IMG_READ_FAILED: "ส่วนขยายอ่านไฟล์ภาพไม่ได้",
   IMG_BLOCKED: "เว็บไซต์ไม่อนุญาตให้อ่านภาพนี้",
   IMG_INVALID: "ไฟล์นี้ไม่ใช่ภาพที่รองรับ",
-  IMG_TOO_LARGE: "ภาพมีขนาดใหญ่เกินไป",
+  IMG_TOO_LARGE: "ภาพมีขนาดใหญ่เกินไป (API รับภาพได้ไม่เกิน 24 MiB)",
+  SESSION_STORAGE_LIMIT: "พื้นที่ชั่วคราวของส่วนขยายเต็ม งานซ่อมแปลหยุดแล้ว—เก็บภาพและผลแปลเดิมไว้",
+  CHECKPOINT_FAILED: "บันทึกสถานะงานแปลไม่ได้ งานซ่อมแปลหยุดแล้ว—เก็บภาพและผลแปลเดิมไว้",
   NET_OFFLINE: "เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ กรุณาตรวจอินเทอร์เน็ต",
   API_UNREACHABLE:
     "เชื่อมต่อ API ไม่ได้—ตรวจว่าเปิดเซิร์ฟเวอร์แล้ว, URL ถูกต้อง และเบราว์เซอร์อนุญาตการเชื่อมต่อ",
@@ -20,10 +22,10 @@ const USER_MESSAGES = Object.freeze({
   LENS_FAILED: "ระบบอ่านข้อความจากภาพขัดข้อง",
   GROUP_ORIENTATION_INVALID: "ข้อมูลตำแหน่งข้อความไม่พอสำหรับจัดวางส่วนที่แยกไว้ กรุณาลองอ่านข้อความจากภาพใหม่",
   GROUP_FAILED: "ระบบจัดกลุ่มข้อความขัดข้อง",
-  AI_KEY_MISSING: "ยังไม่ได้ตั้งค่า API key [AI option > API key]",
-  AI_PROVIDER_MISSING: "ยังไม่ได้เลือก Provider [AI option > Provider]",
-  AI_MODEL_MISSING: "ยังไม่ได้เลือกโมเดล [AI option > Model]",
-  AI_PROMPT_MISSING: "ยังไม่ได้ตั้งค่า AI Style [AI option > Set prompt]",
+  AI_KEY_MISSING: "ยังไม่ได้ตั้งค่า API key [AI settings > API key]",
+  AI_PROVIDER_MISSING: "ยังไม่ได้เลือก Provider [AI settings > Provider]",
+  AI_MODEL_MISSING: "ยังไม่ได้เลือกโมเดล [AI settings > Model]",
+  AI_PROMPT_MISSING: "ยังไม่ได้ตั้งค่า AI Style [AI settings > Set prompt]",
   API_URL_MISSING: "ยังไม่ได้ตั้งค่า TextPhantom API [Tools > Custom API URL]",
   AI_KEY_INVALID: "AI key ใช้งานไม่ได้",
   AI_RATE_LIMIT: "ผู้ให้บริการ AI จำกัดการใช้งานชั่วคราว",
@@ -33,7 +35,7 @@ const USER_MESSAGES = Object.freeze({
   AI_CAPABILITY_CHANGED: "ข้อมูลความสามารถโมเดลเปลี่ยน กรุณารีเฟรชรายชื่อโมเดลก่อนแปล ยังไม่ได้เรียก AI",
   AI_MODEL_UNAVAILABLE: "โมเดล AI ที่เลือกใช้งานไม่ได้",
   AI_INCOMPLETE: "AI แปลได้ไม่ครบ—เก็บข้อความเดิมในส่วนที่ขาด",
-  LOCAL_ENDPOINT_MISSING: "ยังไม่ได้ตั้งค่า URL ของ Local AI [AI option > Local server URL]",
+  LOCAL_ENDPOINT_MISSING: "ยังไม่ได้ตั้งค่า URL ของ Local AI [AI settings > Local server URL]",
   LOCAL_ENDPOINT_UNSAFE:
     "URL ของ Local AI ต้องเป็นเครื่องนี้หรือเครือข่ายส่วนตัว",
   LOCAL_UNREACHABLE:
@@ -73,9 +75,15 @@ const USER_MESSAGES = Object.freeze({
   IMG_SOURCE_UNREACHABLE: "โหลดภาพจากเว็บไซต์ต้นทางไม่ได้",
   AI_UNREACHABLE: "เชื่อมต่อผู้ให้บริการ AI ไม่ได้ กรุณาลองใหม่",
   AI_TIMEOUT: "ผู้ให้บริการ AI ตอบช้าเกินเวลา กรุณาลองใหม่",
-  AI_PROVIDER_ERROR: "ผู้ให้บริการ AI ปฏิเสธคำขอ—ตรวจ AI key และสิทธิ์ของบัญชี",
+  // Phase-aware stream stops (API stream_progress.py).
+  AI_STALLED: "ผู้ให้บริการ AI หยุดตอบกลับ (ไม่มีการคิดหรือข้อความ) จึงหยุดคำขอนี้ กรุณาลองใหม่",
+  AI_THINKING_TOO_LONG: "AI คิดนานเกินงบเวลาโดยยังไม่เริ่มตอบ ลองลดระดับการคิดหรือเลือกโมเดลที่เร็วกว่า",
+  AI_OUTPUT_NO_PROGRESS: "AI เขียนต่อเนื่องแต่ไม่มีบรรทัดแปลใหม่เสร็จ จึงหยุดคำขอนี้ บรรทัดที่เสร็จแล้วยังถูกเก็บไว้",
+  AI_STREAM_CEILING: "คำตอบของ AI ใช้เวลาเกินเพดานความปลอดภัย จึงหยุดคำขอนี้",
+  AI_PROVIDER_ERROR: "ผู้ให้บริการ AI ไม่รับคำขอนี้—ตรวจรหัสอ้างอิงและ HTTP status ก่อนสรุปว่าเป็นปัญหาคีย์",
   AI_MODEL_NOT_FOUND: "ไม่พบโมเดลที่เลือกใน Provider",
   AI_MODEL_ACCESS_DENIED: "บัญชีนี้ไม่มีสิทธิ์ใช้โมเดลที่เลือก",
+  AI_REGION_UNSUPPORTED: "Provider ไม่ให้บริการในภูมิภาคของบัญชีนี้",
   AI_CONTENT_BLOCKED: "Provider ปฏิเสธเนื้อหานี้",
   AI_ADAPTER_ERROR:
     "ตัวเชื่อม Provider ภายใน TextPhantom ไม่เข้ากัน—กรุณาอัปเดตระบบ",
@@ -91,6 +99,100 @@ const USER_MESSAGES = Object.freeze({
   AI_WRONG_LANGUAGE: "AI ตอบกลับเป็นภาษาที่ไม่ตรงกับภาษาที่เลือก",
   AI_NOT_CONFIGURED:
     "เซิร์ฟเวอร์ไม่มี AI key ให้ใช้—กรุณาใส่ AI key ของคุณเองในหน้าตั้งค่า",
+  PAID_DATABASE_UNAVAILABLE: "ฐานข้อมูล Center ขัดข้อง ยังยืนยันสถานะคำขอ Paid ไม่ได้ กรุณาตรวจคำขอเดิมและประวัติเครดิตก่อนเริ่มใหม่",
+  PAID_CAPACITY_BUSY: "บริการ Paid มีคำขอเต็มจำนวนที่รองรับ ยังไม่ได้ส่งไป AI หรือจองเครดิต รอสักครู่แล้วเริ่มใหม่",
+  PAID_PROVIDER_CAPACITY: "บริการ AI มีงานเต็มชั่วคราว กรุณาลองใหม่ภายหลัง ยอด TP ของคุณไม่ใช่สาเหตุ",
+  PAID_PROVIDER_KEY_LIMIT: "บริการ Paid ไม่พร้อมรับคำขอขณะนี้ ยอดเครดิตของคุณไม่ได้เป็นสาเหตุ",
+  PAID_PROVIDER_ROUTE: "โมเดล Paid นี้ไม่พร้อมใช้งาน กรุณาติดต่อฝ่ายสนับสนุนพร้อมรหัสอ้างอิง",
+  PAID_PROVIDER_AUTH: "บริการ Paid ไม่พร้อมใช้งาน กรุณาติดต่อฝ่ายสนับสนุน",
+  PAID_PROVIDER_BALANCE: "บริการ Paid ไม่พร้อมรับคำขอขณะนี้ ยอดเครดิตของคุณไม่ได้เป็นสาเหตุ",
+  PAID_PROVIDER_FORBIDDEN: "บริการ Paid ไม่สามารถทำคำขอนี้ได้ กรุณาติดต่อฝ่ายสนับสนุนพร้อมรหัสอ้างอิง",
+  PAID_PROVIDER_REQUEST: "บริการ Paid ไม่รับคำขอนี้ กรุณาติดต่อฝ่ายสนับสนุนพร้อมรหัสอ้างอิง",
+  PAID_PROVIDER_LIMITED: "ผู้ให้บริการ AI จำกัดคำขอ Paid ชั่วคราว ตรวจคำขอเดิมก่อนลองใหม่",
+  PAID_PROVIDER_FAILED: "บริการ Paid ทำคำขอนี้ไม่สำเร็จ กรุณาตรวจคำขอเดิมหรือติดต่อฝ่ายสนับสนุน",
+  PAID_PENDING_CALLS: "มีงาน Paid ค้างอยู่ กรุณาตรวจประวัติของคุณก่อนเริ่มงานใหม่",
+  PAID_OUTCOME_PENDING: "ผลหรือต้นทุน Paid ยังไม่ยืนยัน กรุณาตรวจคำขอเดิม ห้ามเริ่มซ้ำด้วยรหัสใหม่",
+  PAID_ALREADY_DISPATCHED: "คำขอ Paid นี้ส่งไปแล้ว ตรวจประวัติก่อนเริ่มงานใหม่เพื่อป้องกันการหักซ้ำ",
+  PAID_OPERATION_CONFLICT: "รหัสคำขอ Paid ถูกใช้กับข้อมูลอื่นแล้ว กรุณาตรวจคำขอเดิม",
+  PAID_PRICE_UNVERIFIED: "ยังตรวจสอบราคาปัจจุบันของโมเดล Paid ไม่ได้ กรุณาลองใหม่หลังระบบอัปเดตราคา เครดิตของคุณยังคงอยู่",
+  PAID_RECONCILIATION_REQUIRED: "คำขอ Paid เดิมอยู่ระหว่างตรวจสอบ กรุณาติดต่อฝ่ายสนับสนุน",
+  PAID_LEDGER_UNAVAILABLE: "ยอดเครดิต Paid อยู่ระหว่างตรวจสอบ กรุณาติดต่อฝ่ายสนับสนุน",
+  PAID_OUTPUT_INVALID: "AI ไม่คืนคำแปลที่ใช้ได้ ระบบคืนวงเงินลูกค้าและแจ้งผู้ดูแลแล้ว",
+  PAID_RATE_LIMITED: "ส่งคำขอ Paid บ่อยเกินไป กรุณารอก่อนเริ่มคำขอใหม่",
+  PAID_AI_NOT_CONFIGURED: "บริการแปล Paid ยังไม่เปิดใช้งาน",
+  PAID_MODEL_PAUSED: "โมเดลนี้พักชั่วคราว เลือกโมเดลอื่นหรือลองใหม่ภายหลัง ยังไม่ส่ง AI หรือจองเครดิต",
+  PAID_PAUSED: "บริการแปล Paid พักชั่วคราว กรุณาลองใหม่ภายหลัง",
+  PAID_REFUND_PENDING: "พัก Paid ชั่วคราวระหว่างคำนวณและยืนยันคืนเงิน ยังเปิดดูบัญชีและประวัติได้",
+  PAID_ACCOUNT_RESTRICTED: "บัญชีถูกระงับ Paid ระหว่างตรวจ refund/dispute กรุณาติดต่อผู้ดูแล ยังเปิดดูบัญชีและประวัติได้",
+  PAID_LOGIN_REQUIRED: "กรุณาเข้าสู่บัญชี Paid และเลือกโมเดลที่ AI settings",
+  LOGIN_ADDON_REQUIRED: "สิทธิ์ AI Login ไม่พร้อมใช้งาน กรุณาตรวจแพ็กเสริมในบัญชี",
+  LOGIN_SESSION_REQUIRED: "กรุณาเชื่อมต่อบัญชี AI Login และเลือกโมเดลก่อนแปล",
+  LOGIN_SESSION_EXPIRED: "การเชื่อมต่อ AI Login หมดอายุ กรุณาเชื่อมต่อบัญชีใหม่",
+  LOGIN_CONNECT_FAILED: "เชื่อมต่อบัญชี AI Login ไม่สำเร็จ ยังไม่ได้เริ่มแปล กรุณาเปิดหน้าต่าง TextPhantom › Login ดูเหตุผล แล้วกดเชื่อมต่อใหม่",
+  LOGIN_CONNECT_FIRST_TIME: "ครั้งแรกให้เปิดหน้าต่าง TextPhantom › AI Login แล้วกด Connect หนึ่งครั้ง (เพื่ออนุญาตให้อ่านว่าบัญชีไหนล็อกอินอยู่) หลังจากนั้นเวลาแปล TextPhantom จะเชื่อมต่อให้เอง ยังไม่ได้ส่งอะไรออกไป",
+  LOGIN_CONNECT_PENDING: "ยังเชื่อมต่อบัญชี AI Login ไม่เสร็จ ยังไม่ได้เริ่มแปล กรุณาเข้าสู่ระบบในแท็บที่เปิดขึ้นให้เสร็จ แล้วกดแปลอีกครั้ง",
+  AI_PROFILE_SAVE_FAILED: "บันทึกค่า AI ไม่สำเร็จ ค่าที่แก้ยังรอบันทึก กรุณาลองบันทึกอีกครั้ง",
+  REQUEST_RESULT_EXPIRED: "คำขอนี้ปิดยอดแล้ว แต่ผลชั่วคราวหมดอายุ ระบบไม่ได้ส่ง AI หรือหัก TP ซ้ำ",
+  PAID_QUEUE_CANCELLED: "ยกเลิกงานก่อนส่ง AI และจอง TP แล้ว",
+  LOGIN_MEMORY_STORAGE_UNAVAILABLE: "อ่านสถานะ AI Login ในเบราว์เซอร์ไม่ได้ กรุณาเปิดส่วนขยายใหม่แล้วลองอีกครั้ง",
+  LOGIN_CHAT_CONTEXT_CHANGED: "บริบทบทสนทนา AI Login เปลี่ยน กรุณาเริ่มรอบแปลใหม่",
+  LOGIN_CHAT_INSTRUCTIONS_CHANGED: "คำสั่งแปลของบทสนทนา AI Login เปลี่ยน กรุณาเริ่มรอบแปลใหม่",
+  LOGIN_CHAT_MODEL_CHANGED: "โมเดลของบทสนทนา AI Login เปลี่ยน กรุณาเริ่มรอบแปลใหม่",
+  LOGIN_CHAT_LOST: "ไม่พบบทสนทนา AI Login เดิม กรุณาตรวจการเชื่อมต่อแล้วเริ่มรอบใหม่",
+  LOGIN_RUN_EXPIRED: "รอบแปล AI Login หมดอายุ กรุณาเริ่มรอบใหม่",
+  LOGIN_SEND_AMBIGUOUS: "ยังยืนยันผลคำขอ AI Login เดิมไม่ได้ ระบบหยุดส่งซ้ำเพื่อป้องกันงานซ้ำ",
+  LOGIN_TAB_CLOSED: "ปิดแท็บเข้าสู่บัญชีก่อนยืนยันการเชื่อมต่อ กรุณาเชื่อมต่อบัญชี AI อีกครั้ง",
+  LOGIN_CANCELLED: "ยกเลิกรอบแปล AI Login แล้ว",
+  LOGIN_UNAVAILABLE: "AI Login ไม่พร้อมใช้งาน กรุณารีเฟรชการเชื่อมต่อบัญชี",
+  LOGIN_MODEL_UNAVAILABLE: "โมเดล AI Login ที่เลือกไม่พร้อมใช้งาน กรุณารีเฟรชรายชื่อโมเดล",
+  LOGIN_MODEL_ACCESS_DENIED: "บัญชีบนเว็บไซต์ AI ใช้โมเดลที่เลือกไม่ได้ (อาจต้องอัปเกรดแพ็กเกจ) ยังไม่ได้ส่งอะไรออกไป · กรุณาเลือกโมเดลอื่นที่ AI settings › Model แล้วแปลใหม่",
+  // The website answered 403. For a chat turn this is a model the plan cannot use.
+  LOGIN_PROVIDER_ACCESS_DENIED: "เว็บไซต์ AI ไม่อนุญาตให้บัญชีนี้ใช้โมเดลที่เลือก (บางโมเดลต้องอัปเกรดแพ็กเกจ เช่น Pro/Max) · กรุณาเลือกโมเดลอื่นที่ AI settings › Model แล้วแปลใหม่ · ถ้าเลือกโมเดลอื่นแล้วยังขึ้นอีก ให้กด Reconnect",
+  LOGIN_TRANSLATION_UNSUPPORTED: "ผู้ให้บริการ AI Login นี้ยังไม่รองรับการแปลและอยู่ระหว่างปรับปรุง คุณยังเข้าสู่บัญชีได้ กรุณาเลือกผู้ให้บริการที่พร้อมแปล",
+  LOGIN_ENDPOINT_NATIVE_PREPARATION_REQUIRED: "บัญชี ChatGPT นี้ต้องเตรียมคำขอผ่านเบราว์เซอร์ก่อนแปล ยังไม่ได้ส่งคำขอสร้างคำแปล",
+  LOGIN_ENDPOINT_NATIVE_PREPARATION_UNAVAILABLE: "เตรียมคำขอ ChatGPT ผ่าน API ไม่สำเร็จ ยังไม่ได้ส่งคำขอสร้างคำแปล",
+  LOGIN_ENDPOINT_CHALLENGE_REQUIRED: "เว็บไซต์ AI ต้องการการยืนยันเพิ่มเติม กรุณาตรวจแท็บผู้ให้บริการแล้วเชื่อมต่อใหม่",
+  LOGIN_QUOTA_EXCEEDED: "บัญชี AI Login ใช้ครบโควตาแล้วชั่วคราว กรุณาลองใหม่ภายหลังหรือเลือกโมเดลอื่น",
+  LOGIN_WORK_TAB_CLOSED: "แท็บ claude.ai / chatgpt.com ที่ใช้แปลถูกปิดระหว่างแปล การแปลส่วนที่เหลือหยุดแล้ว · กดแปลอีกครั้งเพื่อให้ TextPhantom เปิดแท็บใหม่ (อย่าปิดแท็บนั้นระหว่างแปล)",
+  AI_CONVERSATION_CAPACITY: "ที่เก็บประวัติบทสนทนา (Conversation) เต็ม และทุกเรื่องเพิ่งใช้ภายใน 1 ชั่วโมง ลองใหม่ภายหลัง ยังไม่ได้ส่งคำขอ AI",
+  REPAIR_STORE_CAPACITY: "พื้นที่ซ่อมคำแปลบนเซิร์ฟเวอร์เต็มชั่วคราว ผลแปลเดิมยังอยู่ ลองใหม่ภายหลัง",
+  QUEUE_CALLER_LIMIT: "แท็บนี้มีภาพรอแปลครบ 200 ภาพแล้ว จะรับภาพใหม่เมื่องานก่อนหน้าเสร็จ",
+  // Per-install quotas of a shared API (429 + Retry-After / pool shares).
+  IDENTITY_RATE_LIMITED: "เบราว์เซอร์นี้ส่งคำขอแปลถี่เกินโควตาของ API ที่ใช้ร่วมกัน ระบบรอและลองใหม่ให้แล้วแต่ยังไม่ผ่าน ยังไม่ได้ส่งงานนี้ กรุณารอสักครู่แล้วแปลใหม่",
+  AI_CONVERSATION_IDENTITY_CAPACITY: "เบราว์เซอร์นี้เปิดบทสนทนา (Conversation) บน API ที่ใช้ร่วมกันครบจำนวนแล้ว ยังไม่ได้ส่งคำขอ AI รอให้งานเดิมจบแล้วลองใหม่",
+  REPAIR_IDENTITY_CAPACITY: "เบราว์เซอร์นี้มีงานซ่อมคำแปลค้างบน API ที่ใช้ร่วมกันครบจำนวนแล้ว ผลแปลเดิมยังอยู่ รอให้งานเดิมจบแล้วลองใหม่",
+  LOGIN_TAB_BUSY: "แท็บ ChatGPT ยังตอบข้อความอื่นอยู่ กรุณารอสักครู่แล้วลองใหม่",
+  LOGIN_PROVIDER_NOT_READY: "แท็บ chatgpt.com ยังไม่พร้อม (เช่น ยังโหลดไม่เสร็จหรือไม่พบช่องพิมพ์) กรุณาเปิด/รีโหลดแท็บ chatgpt.com ปิดหน้าต่างที่บังอยู่ แล้วลองใหม่",
+  LOGIN_ACCOUNT_CHANGED: "บัญชีผู้ให้บริการในเบราว์เซอร์เปลี่ยนไป กรุณาเชื่อมต่อบัญชี AI Login ใหม่",
+  LOGIN_ENDPOINT_TIMEOUT: "เว็บไซต์ AI ตอบไม่ทันเวลา กรุณาเริ่มรอบแปลใหม่",
+  LOGIN_ENDPOINT_TRANSPORT_FAILED: "ยืนยันคำตอบจากเว็บไซต์ AI ไม่ได้ ระบบจะไม่ส่งข้อความซ้ำเอง กรุณาเริ่มรอบแปลใหม่",
+  LOGIN_IMAGE_UNSUPPORTED: "การเชื่อมต่อนี้ส่งภาพหน้าไม่ได้ กรุณาปิด Send page image to AI",
+  LOGIN_BROWSER_RELAY_UNAVAILABLE: "ส่วนขยายใช้แท็บเว็บไซต์ AI (claude.ai / chatgpt.com) ในเบราว์เซอร์นี้ไม่ได้ กรุณาเปิดเบราว์เซอร์ค้างไว้ เข้าสู่ระบบเว็บไซต์นั้น แล้วลองใหม่",
+  LOGIN_PROVIDER_REPLY_FAILED: "Gemini ส่งข้อความแจ้งข้อผิดพลาดแทนคำแปล รอบนี้หยุดแล้ว กรุณาลองใหม่ภายหลัง",
+  // 10493: the website's own server failed (5xx, overloaded). Not TextPhantom or the account.
+  LOGIN_PROVIDER_TEMPORARILY_UNAVAILABLE: "เซิร์ฟเวอร์ของเว็บไซต์ AI ที่เชื่อมต่อขัดข้องชั่วคราว ไม่ใช่ปัญหาของ TextPhantom หรือบัญชีของคุณ กรุณาลองใหม่ภายหลัง",
+  LOGIN_ENDPOINT_RESPONSE_INVALID: "เว็บไซต์ AI ตอบกลับในรูปแบบที่ TextPhantom อ่านไม่ได้ รอบนี้หยุดแล้ว กรุณาเริ่มรอบแปลใหม่ ถ้าเกิดซ้ำให้ส่งรหัสอ้างอิงให้ฝ่ายสนับสนุน",
+  LOGIN_ENDPOINT_REJECTED: "เว็บไซต์ AI ปฏิเสธคำขอนี้ รอบนี้หยุดแล้ว กรุณาเริ่มรอบแปลใหม่",
+  PAID_CENTER_UPGRADE_REQUIRED: "API และ Center ของ Paid ใช้สัญญาคำขอคนละรุ่น กรุณาอัปเดตและเริ่ม Center ใหม่ ยังไม่ได้ส่ง AI หรือจอง TP เพิ่ม",
+  PAID_REQUEST_INVALID: "Center ไม่รับรูปแบบคำขอ Paid นี้ ยังไม่ได้ส่ง AI หรือจอง TP เพิ่ม กรุณาติดต่อผู้ดูแลพร้อมรหัสอ้างอิง",
+  PAID_CENTER_UNAVAILABLE: "บริการ Paid ไม่ตอบสนองชั่วคราว บัญชียังไม่ถูกออกจากระบบ กรุณาลองใหม่ภายหลัง",
+  PAID_MODEL_NOT_ALLOWED: "โมเดล Paid นี้ไม่ได้เปิดให้บัญชีนี้ใช้ กรุณารีเฟรชโมเดลใน AI settings",
+  PAID_INSUFFICIENT_CREDITS: "เครดิตไม่พอสำหรับภาพนี้ ยังไม่ได้ส่ง AI และไม่หักเครดิต เติมเครดิตแล้วแปลใหม่ได้",
+  PAID_CREDITS_RESERVED: "เครดิตที่ใช้กับโมเดลนี้ถูกจองในคำขออื่นอยู่ รอปิดยอดหรือตรวจคำขอเดิม ยังไม่ได้ส่ง AI เพิ่ม",
+  PAID_DAILY_BUDGET: "บริการ Paid พักรับคำขอชั่วคราว กรุณาลองใหม่ภายหลัง",
+  PAID_BUSY: "บัญชี Paid มีงานค้างอยู่ กรุณาตรวจประวัติก่อนเริ่มงานใหม่",
+  PAID_THINKING_UNSUPPORTED: "โมเดล Paid ไม่รองรับระดับ Thinking ที่เลือก กรุณาตรวจ AI thinking หรือเลือก Lowest available",
+  PAID_THINKING_UNVERIFIED: "ยังตรวจสอบ Thinking ของโมเดล Paid นี้ไม่ได้ กรุณาติดต่อฝ่ายสนับสนุน",
+  PAID_IMAGE_UNSUPPORTED: "โมเดล Paid ยังไม่รองรับหรือยังไม่ยืนยันการรับภาพ ปิด Send page image to AI หรือเลือกโมเดลที่รับภาพได้",
+  PAID_IMAGE_INVALID: "ข้อมูลภาพสำหรับ Paid ไม่ถูกต้อง รับเฉพาะภาพนิ่ง PNG/JPEG/WebP/GIF แบบ base64",
+  PAID_IMAGE_TOO_LARGE: "ภาพในคำขอ Paid นี้ใหญ่เกินขอบเขต กรุณาลดขนาดภาพ",
+  PAID_PRICE_REFRESHING: "กำลังอัปเดตราคาช่องทาง Paid กรุณารอสักครู่ ยังไม่ได้ส่ง AI หรือจองเครดิต",
+  PAID_PRICE_CHECK_UNAVAILABLE: "ตรวจราคาช่องทาง Paid ไม่สำเร็จ ยังไม่ได้ส่ง AI เพิ่มหรือจองเครดิต กรุณาตรวจคำขอเดิมอีกครั้งภายหลัง",
+  PAID_ROUTE_UNAVAILABLE: "ยังไม่มีช่องทางที่ยืนยันราคาและรองรับตัวเลือก Paid นี้ ยังไม่ได้ส่ง AI หรือจองเครดิต",
+  PAID_QUOTE_REQUIRED: "กรุณาเริ่มงานแปลใหม่เพื่อตรวจราคาปัจจุบัน ราคาที่ตรวจไว้ในงานเดิมไม่อยู่ในหน่วยความจำ ยังไม่ได้ส่ง AI เพิ่มหรือจองเครดิต",
+  PAID_QUOTE_INVALID: "ข้อมูลราคา Paid ไม่ถูกต้อง กรุณาตรวจราคาอีกครั้ง ยังไม่ได้ส่ง AI หรือจองเครดิต",
+  PAID_QUOTE_STALE: "ราคาหรือตัวเลือก Paid ที่ตรวจไว้เปลี่ยน กรุณาเริ่มงานใหม่เพื่อตรวจราคา ยังไม่ได้ส่ง AI เพิ่มหรือจองเครดิต",
+  PAID_QUOTE_PRICE_CHANGED: "ราคาช่องทาง Paid เปลี่ยนจากที่ตรวจไว้ กรุณาเริ่มงานใหม่เพื่อตรวจราคา ยังไม่ได้ส่ง AI เพิ่มหรือจองเครดิต",
   UNCLASSIFIED: "เกิดข้อผิดพลาดที่ระบบยังไม่มีคำอธิบาย",
 });
 
@@ -147,7 +249,6 @@ export function userMessageForCode(code) {
     no_text: "IMG_NO_TEXT",
     no_translatable_text: "IMG_NO_TEXT",
     image_read_failed: "IMG_READ_FAILED",
-    image_fetch_failed: "IMG_READ_FAILED",
     image_blocked: "IMG_BLOCKED",
     invalid_image: "IMG_INVALID",
     image_too_large: "IMG_TOO_LARGE",
@@ -180,6 +281,7 @@ export function userMessageForCode(code) {
     invalid_api_key: "AI_KEY_INVALID",
     provider_key_mismatch: "AI_KEY_INVALID",
     provider_rate_limited: "AI_RATE_LIMIT",
+    repair_provider_cooldown: "AI_RATE_LIMIT",
     provider_quota_exhausted: "AI_QUOTA_EXHAUSTED",
     billing_required: "AI_BILLING_REQUIRED",
     rate_gate_busy: "AI_RATE_LIMIT",
@@ -229,9 +331,7 @@ export function userMessageForCode(code) {
     render_failed: "RENDER_FAILED",
     insert_failed: "INSERT_FAILED",
     server_busy: "SERVER_BUSY",
-    // Codes the API emits today. Every one of these used to fall through to
-    // UNKNOWN, which told the reader nothing while the real cause sat in the
-    // `code` field right next to it.
+    // Codes the API emits, mapped so the reader sees the real cause instead of UNKNOWN.
     invalid_request: "REQUEST_REJECTED",
     ai_conversation_origin_invalid: "AI_SOURCE_MAPPING_INVALID",
     service_unavailable: "API_5XX",
@@ -246,6 +346,10 @@ export function userMessageForCode(code) {
     image_fetch_http_error: "IMG_SOURCE_UNREACHABLE",
     provider_transport: "AI_UNREACHABLE",
     provider_timeout: "AI_TIMEOUT",
+    ai_provider_stalled: "AI_STALLED",
+    ai_thinking_too_long: "AI_THINKING_TOO_LONG",
+    ai_output_no_progress: "AI_OUTPUT_NO_PROGRESS",
+    ai_stream_ceiling: "AI_STREAM_CEILING",
     provider_http: "AI_PROVIDER_ERROR",
     unsupported_provider: "AI_PROVIDER_UNSUPPORTED",
     provider_auth_failed: "AI_KEY_INVALID",
@@ -253,6 +357,7 @@ export function userMessageForCode(code) {
     ai_workload_budget_insufficient: "AI_WORKLOAD_BUDGET_INSUFFICIENT",
     provider_model_not_found: "AI_MODEL_NOT_FOUND",
     provider_model_access_denied: "AI_MODEL_ACCESS_DENIED",
+    provider_region_unsupported: "AI_REGION_UNSUPPORTED",
     provider_content_blocked: "AI_CONTENT_BLOCKED",
     provider_client_contract_error: "AI_ADAPTER_ERROR",
     provider_adapter_error: "AI_ADAPTER_ERROR",
@@ -269,6 +374,7 @@ export function userMessageForCode(code) {
   };
   return (
     USER_MESSAGES[raw] ||
+    USER_MESSAGES[normalized.toUpperCase()] ||
     USER_MESSAGES[aliases[normalized]] ||
     USER_MESSAGES.UNCLASSIFIED
   );
@@ -424,23 +530,41 @@ export function publicTpError(error, traceId = "") {
   };
 }
 
+// Center: PAID_PROVIDER_CAPACITY is OpenRouter's in-flight budget being full
+// for the moment ("wait for running work, then retry"; customer message
+// "temporarily full, try again later"). It fails only its own request, even
+// though Center reports the upstream 402 behind it (10491).
+const TRANSIENT_PAID_CAPACITY = 'paid_provider_capacity';
+const isTransientPaidCapacity = error => [error, error?.tpError, error?.diagnostics, error?.structuralDetails]
+  .some(value => value && typeof value === 'object' && String(value.code || '').toLowerCase() === TRANSIENT_PAID_CAPACITY);
 // A proven account payment/quota failure can fence unsent work. Do not treat
 // ordinary 429 throttling, timeouts, malformed output or language defects as it.
 export function isProviderBillingFailure(error) {
+  if (isTransientPaidCapacity(error)) return false;
   return [error, error?.tpError, error?.diagnostics, error?.structuralDetails].some(value => {
     if (!value || typeof value !== 'object') return false;
     const code = String(value.failureKind || value.code || '').toLowerCase();
-    return ['billing_required', 'ai_billing_required', 'provider_quota_exhausted', 'ai_quota_exhausted'].includes(code) ||
+    return ['billing_required', 'ai_billing_required', 'provider_quota_exhausted', 'ai_quota_exhausted', 'paid_provider_key_limit', 'paid_provider_balance', 'paid_insufficient_credits'].includes(code) ||
       Number(value.upstreamStatus) === 402 || Number(value.httpStatus || value.status) === 402;
   });
 }
 
-export function providerBillingFenceError() {
+export function providerBillingFenceCode(provider = "", error = null) {
+  if (provider !== 'paid') return 'billing_required';
+  for (const value of [error, error?.tpError, error?.diagnostics, error?.structuralDetails]) {
+    const code = String(value?.code || '').toLowerCase();
+    if (['paid_provider_key_limit', 'paid_provider_balance', 'paid_insufficient_credits'].includes(code)) return code;
+  }
+  return 'paid_insufficient_credits';
+}
+export function providerBillingFenceError(provider = "", error = null) {
   // A queued page did not make the failed provider request. In particular, do
   // not copy that request's usage, operation ID, attempts or diagnostics here.
-  return Object.assign(new Error('AI provider credits exhausted or payment required; unsent work stopped'), {
-    code:'billing_required', failureKind:'billing_required', origin:'provider', stage:'ai',
-    upstreamStatus:402, httpStatus:402, retryable:false, requestDispatched:false,
+  const paid = provider === 'paid';
+  const code = providerBillingFenceCode(provider, error);
+  return Object.assign(new Error(paid && code !== 'paid_insufficient_credits' ? 'Paid service unavailable; remaining work stopped' : paid ? 'Paid credits exhausted; remaining work stopped' : 'AI provider credits exhausted or payment required; unsent work stopped'), {
+    code, failureKind:'billing_required', origin:'provider', stage:'ai',
+    httpStatus:code === 'paid_provider_key_limit' ? 503 : code === 'paid_provider_balance' ? 502 : 402, retryable:false, requestDispatched:false,
     providerAttempts:0, generationAttempts:0, automaticContentRetry:false, automaticTransportRetry:false,
   });
 }

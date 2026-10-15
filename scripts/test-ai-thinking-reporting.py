@@ -29,13 +29,18 @@ class ThinkingAndCompletionTests(unittest.TestCase):
             with self.subTest(selected=selected), patch.object(type(adapter), "generate",
                     return_value=ChatResult("<<TP_P0:translated>>", "test-model")), \
                     patch.object(invocation, "decode_result", side_effect=lambda **values: {**values, "meta": {"prompt_audit": {}}}), \
-                    patch.object(invocation, "assert_ai_base_url_allowed"):
+                    patch.object(invocation, "assert_ai_base_url_allowed"), \
+                    patch("backend.ai.provider_resolution.discovered_model_capabilities",
+                          return_value=(True, {})):
                 result = invocation._translate_once(markers.apply(["source"]), "en", AiConfig(
                     api_key="", provider="jan", model="test-model",
                     base_url="http://localhost:1337/v1", thinking=selected,
                     prompt_mode="replace", prompt_editable="Translate accurately."))
                 self.assertEqual(result["thinking_selected"], "default")
-                self.assertEqual(result["thinking_applied"], "unverified")
+                # 10488: Jan publishes no AI think control. A saved On is kept
+                # but the request is reported as provider default, not an error.
+                self.assertEqual(result["thinking_applied"],
+                                 "unverified" if selected == "default" else "provider_default")
 
     def test_ollama_unknown_native_control_preserves_saved_off_or_lowest(self):
         with patch.object(local_ollama, "generate", return_value=ChatResult("text", "model")) as generate:

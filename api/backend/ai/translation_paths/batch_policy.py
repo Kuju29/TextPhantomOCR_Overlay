@@ -98,7 +98,7 @@ def _estimate(candidate_rows, ai, target, profile, target_output, records):
         has_image=bool(ai.image_b64), series_state=ai.series_state, speakers=ai.speakers,
         prev_context=ai.prev_context, page_context=ai.page_context, source_context=ai.source_context,
         source_lang=ai.source_lang,
-        style_examples=getattr(ai, 'style_examples', True),
+        style_examples=getattr(ai, 'style_examples', False) is True,
         memory_mode=ai.memory_mode)
     schema = markers.translation_schema(markers.apply(texts)) if structured else None
     raw_input = estimate_provider_input(system=system, parts=[user], schema=schema,

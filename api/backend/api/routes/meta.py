@@ -11,6 +11,8 @@ import time
 
 from backend.config import settings
 from backend.paid_center import center_base_url
+from backend import logfile
+from backend.release import RELEASE
 from backend.lens.languages import UI_LANGUAGES
 from backend.warmup import warmup as run_warmup
 
@@ -28,11 +30,12 @@ async def meta() -> dict:
     """Languages / sources the UI should offer, plus the request-owned cloud-key policy."""
     return {
         "ok": True,
+        "diagnostics": {"schema": "tp.diagnostic/1", "log_file": logfile.is_enabled(), "release": RELEASE},
         "languages": UI_LANGUAGES,
         "sources": _SOURCES,
         "has_env_ai_key": False,
         "credential_policy": "user_required",
-        "paid": {"available": bool(center_base_url()), "auth": "email_otp"} if center_base_url() else None,
+        "paid": {"configured": True, "available": True, "auth": "email_otp"} if center_base_url() else None,
     }
 
 @router.get("/warmup")

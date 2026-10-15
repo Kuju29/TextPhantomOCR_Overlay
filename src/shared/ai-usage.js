@@ -6,12 +6,21 @@ import { priceGeneration } from "./ai/pricing/calculate.js";
 import { routeRateKey } from "./ai/pricing/providers.js";
 import { money, sumMoney, lessMoney } from "./ai/pricing/money.js";
 import { bangkokDate, convertThb } from "./ai/pricing/fx.js";
+import { createLogger } from "./logger.js";
 
 export const AI_USAGE_STORAGE_KEY = "aiUsageV1";
 export const AI_USAGE_RECEIPT_PREFIX = "aiUsageReceiptV1:";
 export const AI_USAGE_VERSION = 1;
 export const AI_USAGE_SESSION_LIMIT = 20;
 export const AI_USAGE_DELTA_LIMIT = 200;
+// storage.local is ~10 MB without unlimitedStorage. Every model keeps up
+// to 20 sessions x 200 deltas, so the number of models is capped (least recently
+// used first; the active model is never evicted). Evicted models keep their
+// dedupe identities in `seen` so a replayed receipt is still not double counted.
+export const AI_USAGE_MODEL_LIMIT = 32;
+// Unfolded request receipts kept by this worker before the oldest are folded or
+// evicted. A full storage area never blocks translation: see persistUsageReceipt.
+export const AI_USAGE_RECEIPT_LIMIT = 256;
 const blankLedger = () => ({
   version: AI_USAGE_VERSION,
   active: null,
@@ -235,6 +244,7 @@ export function normalizeUsageLedger(raw) {
       }));
     if (sessions.length) models[key] = { ...value, sessions };
   }
+  const evictedModels = capModelsInPlace(models, raw.active?.selectionKey);
   const active =
     raw.active &&
     models[raw.active.selectionKey]?.sessions.some(
@@ -275,15 +285,18 @@ export function normalizeUsageLedger(raw) {
         }
       : null;
   const seen = raw.seen && typeof raw.seen === "object" ? { ...raw.seen } : {};
-  // Retained deltas already provide exact replay/enrichment evidence. Keeping
-  // the same long dedupe identity in `seen` duplicated every active receipt
-  // and made each chrome.storage write grow much faster than the visible
-  // history. `seen` is only the overflow index for deltas/sessions no longer
-  // retained in the ledger.
+  // Retained deltas already provide replay/enrichment evidence; keeping their
+  // dedupe identity in `seen` too would duplicate every active receipt and
+  // inflate each storage write. `seen` only indexes deltas/sessions that are no
+  // longer retained in the ledger.
   for (const model of Object.values(models))
     for (const session of model.sessions)
       for (const delta of session.deltas || [])
         if (delta?.dedupeKey) delete seen[delta.dedupeKey];
+  for (const model of evictedModels)
+    for (const session of model.sessions || [])
+      for (const delta of session.deltas || [])
+        if (delta?.dedupeKey && !(delta.dedupeKey in seen)) seen[delta.dedupeKey] = Number(delta.timestamp) || 0;
   const days = raw.days && typeof raw.days === "object" && !Array.isArray(raw.days)
     ? Object.fromEntries(Object.entries(raw.days).filter(([date, day]) => /^\d{4}-\d{2}-\d{2}$/.test(date) && day && typeof day === "object").sort(([a],[b]) => a.localeCompare(b)).slice(-400)) : {};
   const pricing = raw.pricing && typeof raw.pricing === "object" ? raw.pricing : {};
@@ -463,11 +476,47 @@ const capSeenDedupe = (ledger) => {
       entries.sort((a, b) => Number(b[1]) - Number(a[1])).slice(0, 8192),
     );
 };
+const modelRecency = (model) => {
+  let at = 0;
+  for (const session of model?.sessions || []) {
+    at = Math.max(at, Number(session?.endedAt) || 0, Number(session?.startedAt) || 0,
+      Number(session?.deltas?.at?.(-1)?.timestamp) || 0);
+  }
+  return at;
+};
+// Removes least-recently-used models beyond `limit` (never `keepKey`) from the
+// `models` object and returns them so their dedupe keys can be remembered.
+function capModelsInPlace(models, keepKey, limit = AI_USAGE_MODEL_LIMIT) {
+  const keys = Object.keys(models);
+  if (keys.length <= limit) return [];
+  const victims = keys.filter(key => key !== keepKey)
+    .sort((a, b) => modelRecency(models[a]) - modelRecency(models[b]))
+    .slice(0, keys.length - limit);
+  const evicted = [];
+  for (const key of victims) { evicted.push(models[key]); delete models[key]; }
+  return evicted;
+}
 const rememberEvictedSessions = (ledger, sessions, now) => {
   for (const session of sessions || [])
     for (const delta of session?.deltas || [])
       rememberEvictedDedupe(ledger, delta?.dedupeKey, now);
 };
+
+/** Only the authenticated Paid receipt boundary can prove no new generation. */
+export function isSettledPaidOperationReplay(meta, requestedProvider) {
+  if (requestedProvider !== "paid" || !meta || typeof meta !== "object") return false;
+  const usage = meta.usage;
+  if (!usage || typeof usage !== "object" || Array.isArray(usage) ||
+      (usage.generations !== undefined && !Array.isArray(usage.generations))) return false;
+  const identities = [meta.provider, meta.resolvedProvider, meta.resolved_provider].filter(v => v !== undefined);
+  const exactZero = keys => keys.some(k => meta[k] === 0) && keys.every(k => meta[k] === undefined || meta[k] === 0);
+  return identities.length > 0 && identities.every(v => v === "paid") &&
+    meta.centerOperationReplayed === true && meta.requestDispatched === false &&
+    exactZero(["providerAttempts", "provider_attempts"]) &&
+    exactZero(["generationAttempts", "generation_attempts"]) &&
+    usage.centerOperationReplayed === true && !usage.receiptId &&
+    !usage.generations?.some(g => g?.receiptId);
+}
 
 export function recordProviderGeneration(
   raw,
@@ -513,7 +562,7 @@ export function recordProviderGeneration(
           : undefined }, { now, id }), ledger);
   }
   event = { ...(event?.usage || {}), ...event };
-  const { runtime, provider, resolvedModel, requestedModel, modelName } = generationSelection(event);
+  const { runtime, provider, resolvedModel, modelName } = generationSelection(event);
   const key = usageKey(runtime, provider, modelName);
   const engine = event?.engine === "runsapi" ? "runsapi" : "runsextension";
   const dedupeKey = generationDedupeKey(event, runtime, provider, modelName);
@@ -632,12 +681,13 @@ export function recordProviderGeneration(
     closeActive(ledger, now, "model_switch");
     ledger.active = null;
   }
-  const model = (ledger.models[key] ||= {
-    provider,
-    model: modelName,
-    runtime,
-    sessions: [],
-  });
+  if (!ledger.models[key]) {
+    ledger.models[key] = { provider, model: modelName, runtime, sessions: [] };
+    const evicted = capModelsInPlace(ledger.models, key);
+    for (const old of evicted) rememberEvictedSessions(ledger, old.sessions, now);
+    if (evicted.length) capSeenDedupe(ledger);
+  }
+  const model = ledger.models[key];
   let session = staleCompletion
     ? model.sessions.at(-1)
     : ledger.active &&
@@ -895,7 +945,8 @@ export function usageDetailedRows(raw) {
       thinkingTokens: d.thinkingTokens, totalTokens: d.totalTokens,
       isByok: d.isByok === true, upstreamInferenceCostUsd: decimal(d.upstreamInferenceCostUsd),
       imageCount: d.imageCount,
-      groupKey: groupToken(d.jobId || d.batchId || d.operationId || d.requestId || d.id),
+      groupKey: groupToken(d.batchId || d.jobId || d.operationId || d.requestId || d.id),
+      reason: d.reason,
       price: d.price ? structuredClone(d.price) : null,
     })) };
   });
@@ -1095,7 +1146,18 @@ export async function flushUsageReceiptJournal({ recover = false } = {}) {
       if (observer) observations.push({ observer, event: record.value.event, before, next, unchanged });
     }
     const changed = original !== JSON.stringify(next);
-    if (changed) await setStorage({ [AI_USAGE_STORAGE_KEY]: next });
+    if (changed) {
+      try { await setStorage({ [AI_USAGE_STORAGE_KEY]: next }); }
+      catch (error) {
+        if (!isQuotaError(error)) throw error;
+        // The materialized ledger no longer fits. Drop the least
+        // recently used half of the models (display history) and retry once;
+        // the receipts being folded are never dropped here.
+        const removed = shrinkLedger(next);
+        noteUsageStorage("usage_ledger_trimmed", { removedModels: removed, reason: "quota" });
+        await setStorage({ [AI_USAGE_STORAGE_KEY]: next });
+      }
+    }
     await removeStorage(records.map(record => record.key));
     for (const record of records) {
       usageReceiptKeys.delete(record.key);
@@ -1121,6 +1183,66 @@ function scheduleUsageReceiptFlush() {
   }, 0);
 }
 
+const isQuotaError = (error) => /quota/i.test(String(error?.message || error?.name || error || ""));
+const usageLog = createLogger("SW.usage");
+let usageStorageObserver = null;
+/** Diagnostic hook for usage-storage degradation (tests and trace wiring). */
+export function setUsageStorageObserver(fn) { usageStorageObserver = typeof fn === "function" ? fn : null; }
+function noteUsageStorage(event, detail) {
+  try { usageLog.warn(event, detail); } catch {}
+  try { usageStorageObserver?.(event, detail); } catch {}
+}
+function shrinkLedger(ledger) {
+  const keep = ledger.active?.selectionKey;
+  const count = Object.keys(ledger.models).length;
+  const evicted = capModelsInPlace(ledger.models, keep, Math.max(1, Math.floor(count / 2)));
+  for (const old of evicted) rememberEvictedSessions(ledger, old.sessions, Date.now());
+  capSeenDedupe(ledger);
+  return evicted.length;
+}
+// Frees storage.local for a new receipt: drops the oldest unfolded receipts
+// (keeping the newest half, at most AI_USAGE_RECEIPT_LIMIT / 2) and the least
+// recently used half of the ledger models. Usage display loses old history;
+// translation keeps running.
+async function relieveUsageStorage() {
+  return usageStorageLock(async () => {
+    const all = await getStorage(null);
+    const receipts = Object.entries(all).filter(([key, value]) => key.startsWith(AI_USAGE_RECEIPT_PREFIX) && value)
+      .sort(([, a], [, b]) => Number(a.storedAt || 0) - Number(b.storedAt || 0) || Number(a.sequence || 0) - Number(b.sequence || 0));
+    const keep = Math.min(Math.floor(receipts.length / 2), AI_USAGE_RECEIPT_LIMIT / 2);
+    const dropped = receipts.slice(0, receipts.length - keep).map(([key]) => key);
+    if (dropped.length) {
+      await removeStorage(dropped);
+      for (const key of dropped) usageReceiptKeys.delete(key);
+    }
+    let removedModels = 0;
+    if (all[AI_USAGE_STORAGE_KEY] || dropped.length) {
+      const ledger = normalizeUsageLedger(all[AI_USAGE_STORAGE_KEY]);
+      removedModels = shrinkLedger(ledger);
+      // Dropped receipts are unaccounted requests: the overflow counter makes
+      // the usage display say "incomplete" instead of showing a low total.
+      ledger.pendingOverflow = (Number(ledger.pendingOverflow) || 0) + dropped.length;
+      if (removedModels || dropped.length) {
+        try { await setStorage({ [AI_USAGE_STORAGE_KEY]: ledger }); } catch {}
+      }
+    }
+    return { droppedReceipts: dropped.length, removedModels };
+  });
+}
+async function evictOldestTrackedReceipts() {
+  // Receipts normally fold within one task; this only bounds a worker whose
+  // folds keep failing. Oldest first (insertion order of usageReceiptKeys).
+  const excess = usageReceiptKeys.size - AI_USAGE_RECEIPT_LIMIT + 1;
+  if (excess <= 0) return;
+  await flushUsageReceiptJournal({ recover: true }).catch(() => {});
+  const still = usageReceiptKeys.size - AI_USAGE_RECEIPT_LIMIT + 1;
+  if (still <= 0) return;
+  const dropped = [...usageReceiptKeys].slice(0, still);
+  await removeStorage(dropped).catch(() => {});
+  for (const key of dropped) usageReceiptKeys.delete(key);
+  noteUsageStorage("usage_receipts_evicted", { droppedReceipts: dropped.length, reason: "receipt_limit" });
+}
+
 async function persistUsageReceipt(event, { emitTrace = null, onTiming = null } = {}) {
   const started = usageReceiptClock();
   const immutable = structuredClone(event);
@@ -1128,8 +1250,29 @@ async function persistUsageReceipt(event, { emitTrace = null, onTiming = null } 
   const nonce = usageReceiptId();
   const key = `${AI_USAGE_RECEIPT_PREFIX}${nonce}`;
   const record = { version: 1, nonce, storedAt: Date.now(), sequence: ++usageReceiptSequence, event: immutable };
+  if (usageReceiptKeys.size >= AI_USAGE_RECEIPT_LIMIT) await evictOldestTrackedReceipts();
   const writeAt = usageReceiptClock();
-  await setStorage({ [key]: record });
+  try {
+    await setStorage({ [key]: record });
+  } catch (error) {
+    if (!isQuotaError(error)) throw error;
+    // A full storage.local must never block translation. Evict the
+    // oldest receipts / ledger history once and retry; if it still fails the
+    // request proceeds without a durable usage receipt (display incomplete).
+    let relief = null;
+    try { relief = await relieveUsageStorage(); } catch {}
+    try { await setStorage({ [key]: record }); }
+    catch (retryError) {
+      noteUsageStorage("usage_receipt_skipped", { reason: "quota", operationId: cleanId(immutable?.operationId),
+        pending: immutable?.pending === true, ...(relief || {}) });
+      try { emitTrace?.("AI usage receipt skipped", { schema: "tp.audit/1", event: "usage_receipt_skipped",
+        reason: "storage_quota", operationId: cleanId(immutable?.operationId), ...(relief || {}) }); } catch {}
+      return immutable;
+    }
+    noteUsageStorage("usage_storage_relieved", { reason: "quota", ...(relief || {}) });
+    try { emitTrace?.("AI usage storage relieved", { schema: "tp.audit/1", event: "usage_storage_relieved",
+      reason: "storage_quota", ...(relief || {}) }); } catch {}
+  }
   const ended = usageReceiptClock();
   usageReceiptKeys.add(key);
   if (typeof emitTrace === "function") usageReceiptObservers.set(nonce, { emitTrace });

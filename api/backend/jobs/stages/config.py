@@ -7,6 +7,7 @@ from backend.ai.reasoning_preference import normalize_reasoning_preference
 from backend.ai.translation.contracts import AiConfig
 from backend.ai.credentials import request_api_key
 from backend.config import settings
+from backend.ai.user_run import identifier as user_run_identifier
 
 def layout_options(payload: dict | None) -> dict[str, bool]:
     request = payload if isinstance(payload, dict) else {}
@@ -36,6 +37,8 @@ def build_ai_config(payload: dict, mode: str, source: str) -> AiConfig | None:
     if mode != "lens_text" or source != "ai":
         return None
     ai = payload.get("ai") if isinstance(payload.get("ai"), dict) else {}
+    if "style_examples" in ai and not isinstance(ai["style_examples"], bool):
+        raise ValueError("style_examples must be boolean")
     provider = str(ai.get("provider") or "auto").strip() or "auto"
     base_url = str(ai.get("base_url") or "auto").strip() or "auto"
     user_key = str(ai.get("api_key") or "").strip()
@@ -44,10 +47,22 @@ def build_ai_config(payload: dict, mode: str, source: str) -> AiConfig | None:
     prompt = str(ai.get("prompt") or "").strip()
     from backend.ai.translation_paths.mode import mode as path_mode, descriptor
     from backend.jobs.admission import identity_of
+    from backend.ai.translation_paths.independent_examples import descriptor as example_scope
+    paid_quote = ai.get('price_quote_token') or '' if provider.lower() == 'paid' else ''
+    if not isinstance(paid_quote, str) or len(paid_quote) > 8192:
+        raise ValueError('Invalid Paid price quote')
     return AiConfig(
         translation_mode=path_mode(ai.get("translation_mode")),
         conversation=descriptor(ai.get("conversation"), context=payload.get("context"),
                                 metadata=payload.get("metadata"), caller=identity_of(payload)),
+        independent_scope=example_scope(payload.get("context"), payload.get("metadata"),
+            (ai.get("conversation") or {}).get("documentId", "")),
+        paid_operation_id=str(payload.get("idempotency_key") or "")[:160],
+        routing_batch=(str(payload["metadata"].get("batch_id") or "")[:160]
+                       if isinstance(payload.get("metadata"), dict) else ""),
+        paid_user_run_id=(user_run_identifier(payload["metadata"].get("batch_id")
+                        if isinstance(payload.get("metadata"), dict) else None)
+                        if provider.lower() == "paid" else ""),
         api_key=api_key,
         user_key=bool(api_key),
         model=str(ai.get("model") or "auto").strip() or "auto",
@@ -59,9 +74,10 @@ def build_ai_config(payload: dict, mode: str, source: str) -> AiConfig | None:
         characters=ai.get("characters") if isinstance(ai.get("characters"), list) else [],
         char_memory=bool(ai.get("char_memory", True)),
         memory_mode=ai.get("memory_mode") if ai.get("memory_mode") in ("off", "terms", "full") else None,
-        style_examples=ai.get("style_examples", True) is not False,
+        style_examples=ai.get("style_examples", False) is True,
+        paid_price_quote_token=paid_quote,
         send_image=(ai.get("send_image").strip().lower() if isinstance(ai.get("send_image"), str) else bool(ai.get("send_image"))),
-        thinking=normalize_reasoning_preference(ai.get("thinking"), "off"),
+        thinking=normalize_reasoning_preference(ai.get("thinking"), "minimum" if provider == "paid" else "off"),
         model_capabilities=normalize_model_capabilities(ai.get("model_capabilities")),
         # One image is one billable provider generation.  Do not let a client
         # payload re-enable the legacy second content-repair request.
@@ -71,5 +87,6 @@ def build_ai_config(payload: dict, mode: str, source: str) -> AiConfig | None:
         prev_context=ai.get("prev_context") if isinstance(ai.get("prev_context"), list) else [],
         source_lang=str(ai.get("source_lang") or ai.get("sourceLang") or ""),
         page_context=ai.get("page_context") if isinstance(ai.get("page_context"), list) else [],
+        source_context=ai.get("source_context") if isinstance(ai.get("source_context"), list) else [],
         context_frozen=bool(ai.get("context_frozen", False)),
     )

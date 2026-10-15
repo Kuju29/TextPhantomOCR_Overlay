@@ -3,23 +3,36 @@ import {huggingfaceRate} from "./huggingface.js";
 // Prices in USD per 1M tokens; exact model names only. These are snapshots of
 // official *standard* API prices. User overrides take precedence. Record the
 // snapshot on each request so a later price edit cannot rewrite history.
-export const PRICE_CONFIG_KEY = "aiPricingConfigV1";
 const google = "https://ai.google.dev/gemini-api/docs/pricing";
 const openai = "https://developers.openai.com/api/docs/pricing";
 const claude = "https://platform.claude.com/docs/en/about-claude/pricing";
 const make = (input, cached, output, url, extra = {}) =>
   ({ input, cached, output, url, asOf: "2026-09-25", ...extra });
+const geminiFlashRate = (at) => {
+  const stamp = typeof at === "number" && Number.isFinite(at) ? at : Date.now();
+  if (stamp < Date.parse("2026-10-06T00:00:00Z")) return null;
+  // Google announces a calendar date without a timezone. Use the higher
+  // tariff around that boundary and label the uncertainty explicitly.
+  const boundary = Date.parse("2027-01-01T00:00:00Z"), day = 86400000;
+  const higher = stamp >= boundary - day;
+  return make(higher ? "1.50" : "0.75", higher ? "0.15" : "0.075", higher ? "7.50" : "3.75", google,
+    {asOf:"2026-10-06",origin:"official_snapshot",cacheStoragePerMillionHour:higher ? "1.00" : "0.50",
+      ...(stamp >= boundary-day && stamp < boundary+day ? {upperBoundReason:"price_change_timezone_unverified"} : {})});
+};
 
-export const OFFICIAL_RATES = Object.freeze({
+const OFFICIAL_RATES = Object.freeze({
   gemini: {
     "gemini-3.5-flash": make("1.50", "0.15", "9.00", google),
     "gemini-3.5-flash-lite": make("0.30", "0.03", "2.50", google),
-    "gemini-3.6-flash": make("2.70", "0.27", "16.20", google),
     "gemini-3.1-flash-lite": make("0.25", "0.025", "1.50", google),
     "gemini-2.5-flash": make("0.30", "0.03", "2.50", google),
     "gemini-2.5-flash-lite": make("0.10", "0.01", "0.40", google),
   },
   openai: {
+    "gpt-6-luna": make("0.10", "0.01", "0.50", "https://developers.openai.com/api/docs/models/gpt-6-luna",
+      {cacheWrite:"0.125",highContextThreshold:272000,highInputFactor:"2",highOutputFactor:"1.5",asOf:"2026-10-06"}),
+    "gpt-6.1-sol": make("2", "0.10", "10", "https://developers.openai.com/api/docs/models/gpt-6.1-sol",
+      {cacheWrite:"2.50",highContextThreshold:272000,highInputFactor:"2",highOutputFactor:"1.5",asOf:"2026-10-06"}),
     // Native standard rates, including the exact served snapshot returned by
     // the API. Unknown snapshots/fine-tunes keep their own pricing identity.
     "gpt-4.1": make("2", "0.5", "8", "https://developers.openai.com/api/docs/models/gpt-4.1", {asOf: "2026-09-28"}),
@@ -34,6 +47,9 @@ export const OFFICIAL_RATES = Object.freeze({
     "gpt-5.6-luna": make("0.20", "0.02", "1.20", openai, {cacheWrite: "0.25", highContextThreshold:272000, highInputFactor:"2", highOutputFactor:"1.5"}),
   },
   anthropic: {
+    "claude-sonnet-5-5": make("2", "0.20", "10", claude, {cacheWrite:"2.50",cacheWrite1h:"4",asOf:"2026-10-06"}),
+    "claude-opus-5-5": make("4", "0.20", "20", claude, {cacheWrite:"5",cacheWrite1h:"8",asOf:"2026-10-06"}),
+    "claude-haiku-4-5-20251001": make("1", "0.10", "5", claude, {cacheWrite:"1.25",cacheWrite1h:"2",asOf:"2026-10-06"}),
     "claude-sonnet-4-6": make("3", "0.30", "15", claude, {cacheWrite: "3.75", cacheWrite1h: "6", asOf: "2026-09-28"}),
     "claude-sonnet-5": make("2", "0.20", "10", claude, {cacheWrite: "2.50", cacheWrite1h: "4"}),
     "claude-haiku-4-5": make("1", "0.10", "5", claude, {cacheWrite: "1.25", cacheWrite1h: "2"}),
@@ -65,6 +81,8 @@ export function selectRate(provider, model, overrides = {}, upstream = "", liveR
     return {...live, ...(live.cached == null && sameRates ? {cached:routeSnapshot.cached,cachePriceSource:routeSnapshot.url} : {}), origin:"live_catalogue"};
   }
   if (String(provider).toLowerCase() === "deepseek") return deepseekRate(model,at);
+  if (String(provider).toLowerCase() === "gemini" && ["gemini-3.6-flash","gemini-3.7-flash","gemini-3.8-flash"].includes(String(model).toLowerCase()))
+    return geminiFlashRate(at);
   if (routeSnapshot && at >= Date.parse("2026-09-28T00:00:00Z")) return routeSnapshot;
   const official = OFFICIAL_RATES[String(provider || "").toLowerCase()]?.[String(model || "").toLowerCase()];
   return official ? {...official, origin:"official_snapshot"} : null;

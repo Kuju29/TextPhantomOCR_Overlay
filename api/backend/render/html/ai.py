@@ -64,16 +64,14 @@ def _render_ai_paragraph(
 ) -> str:
     """Render one AI paragraph as a single ``<div>`` using pre-computed geometry.
 
-    This is the correct path for trees built by
-    :mod:`backend.render.build_ai_tree`.  It reads ``para_font_size_px``
-    directly — already computed by the canonical typography fitter
-    — rather than deriving the font size from synthetic item ``box.height``
-    values (which store *slot* heights, not glyph heights, and would give
-    wildly wrong sizes via :func:`compute_region_geometry`).
+    For trees built by :mod:`backend.render.ai_tree.builder`. It reads
+    ``para_font_size_px`` from the canonical typography fitter rather than
+    deriving a size from synthetic item ``box.height`` values (slot heights,
+    not glyph heights).
 
     Position comes from ``bubble_bounds_px`` (the OpenCV-detected speech-bubble
     outline) via :func:`_para_bounds_px`.  Text direction is read from the
-    item rotation angles that :mod:`backend.render.build_ai_tree` stamped:
+    item rotation angles that :mod:`backend.render.ai_tree.builder` stamped:
     0° = horizontal target language, 90° = vertical CJK target.
     """
     # Use bounds_px set by build_ai_tree — it's the group's unique canvas

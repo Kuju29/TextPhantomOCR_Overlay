@@ -48,9 +48,11 @@ try {
     aiThinkingHint:{},aiPageImage:{},aiPageImageWrap:{querySelector:()=>null}};
   createPopupUiController({els,state:{localAiCapability:{provider:"ollama",baseUrl:"http://localhost:11434",models:{}}},
     isLocalProvider:()=>true,toggleDom:()=>{},updatePromptWarning:()=>{},validateAiKey:()=>{},validateLangSource:()=>{}}).toggle();
+  // 10488: no record for this model yet → "Checking model…", value kept.
   assert.equal(select.value,"off");
-  assert.equal(select.disabled,false);
-  assert.deepEqual(select.options.map(x=>x.value), ["minimum","off"]);
+  assert.equal(select.disabled,true);
+  assert.deepEqual(select.options.map(x=>x.value), ["off"]);
+  assert.deepEqual(select.options.map(x=>x.textContent), ["Checking model…"]);
 
   const localCompatible = mkSelect("off");
   const compatibleEls = {...els, aiProvider:{value:"lmstudio"},
@@ -61,17 +63,19 @@ try {
     isLocalProvider:()=>true,toggleDom:()=>{},updatePromptWarning:()=>{},
     validateAiKey:()=>{},validateLangSource:()=>{}}).toggle();
   assert.equal(localCompatible.value, "off", "do not rewrite the user's Thinking intent");
-  assert.match(compatibleEls.aiThinkingHint.textContent,/cannot verify or set.*reasoning mode/i);
-  assert.match(compatibleEls.aiThinkingHint.textContent,/Off requires verified control/i);
+  assert.equal(localCompatible.disabled, true, "no published control → provider default (10488)");
+  assert.match(compatibleEls.aiThinkingHint.textContent,/does not publish an AI think control/i);
+  assert.match(compatibleEls.aiThinkingHint.textContent,/provider default/i);
 
   const unsupported = mkSelect("off");
   const unsupportedEls = {...els, aiModel:{value:"plain"}, aiThinking:unsupported, aiThinkingHint:{}};
   createPopupUiController({els:unsupportedEls,state:{localAiCapability:{provider:"ollama",baseUrl:"http://localhost:11434",models:{
       "plain":{reasoning:{supported:false,control:"none"}}
     }}}, isLocalProvider:()=>true,toggleDom:()=>{},updatePromptWarning:()=>{},validateAiKey:()=>{},validateLangSource:()=>{}}).toggle();
-  assert.equal(unsupported.value,"off");
-  assert.equal(unsupported.disabled,false,"unsupported reasoning must not disable or erase the user's Off selector");
-  assert.deepEqual(unsupported.options.map(x=>x.value), ["minimum","off"]);
+  assert.equal(unsupported.value,"off","the saved Off is never erased");
+  // 10488 owner decision: a no-reasoning model shows a disabled provider default.
+  assert.equal(unsupported.disabled,true);
+  assert.deepEqual(unsupported.options.map(x=>x.textContent), ["Provider default (this model has no AI think)"]);
 
   const levels = mkSelect("off");
   const levelEls = {...els, aiModel:{value:"gpt-oss"}, aiThinking:levels, aiThinkingHint:{}};

@@ -30,7 +30,7 @@ assert.equal(shouldPrefetchDataUri(
 
 const messaging = await read("src/content/messaging.js");
 assert.match(messaging, /!mime\.toLowerCase\(\)\.startsWith\("image\/"\)/);
-assert.match(messaging, /25 \* 1024 \* 1024/);
+assert.match(messaging, /24 \* 1024 \* 1024/); // 10490: aligned with the API's 24 MiB image cap
 
 const popup = await read("src/popup/popup.html");
 const localRegistry = await read("src/shared/ai/providers/local-registry.js");
@@ -42,7 +42,7 @@ for (const value of ["koboldcpp", "vllm", "llamafile", "gpt4all"]) {
 }
 
 const manifest = JSON.parse(await read("platform/base.json"));
-const manifestScripts = manifest.content_scripts[0].js;
+const manifestScripts = manifest.content_scripts.flatMap(group => group.js || []);
 // Extension pages deliberately use only the content modules they need. Check
 // their translation path and relative order without enabling site-specific
 // readers or another Translate all control merely to mirror the manifest.
@@ -62,8 +62,14 @@ const requiredPageScripts = [
 ];
 for (const page of ["viewer", "auto"]) {
   const html = await read(`src/${page}/${page}.html`);
+  const languageEntry = 'shared/ui-language-entry.js';
+  const languageTag = [...html.matchAll(/<script\b[^>]*\bsrc="\.\.\/shared\/ui-language-entry\.js"[^>]*><\/script>/g)];
+  assert.equal(languageTag.length, 1, `${page}: one interface-language module must mount`);
+  assert.match(languageTag[0][0], /\btype="module"/, `${page}: UI language is a page module, not a content script`);
+  assert.ok((await read(`src/${languageEntry}`)).includes('createUiLanguageController'),
+    `${page}: language module must be present with its actual controller`);
   const pageScripts = [...html.matchAll(/<script\b[^>]*\bsrc="\.\.\/([^"]+)"[^>]*><\/script>/g)]
-    .map((match) => match[1]);
+    .map((match) => match[1]).filter((script) => script !== languageEntry);
   assert.equal(new Set(pageScripts).size, pageScripts.length, `${page}: duplicate content script`);
   for (const script of requiredPageScripts) {
     assert.ok(pageScripts.includes(script), `${page}: missing required ${script}`);
@@ -161,7 +167,7 @@ for (const page of ["viewer", "auto"]) {
 
 const gemini = await read("api/backend/ai/providers/cloud_gemini.py");
 assert.match(gemini, /def _accepts_sampling_parameters/);
-assert.match(gemini, /if _accepts_sampling_parameters\(model\):/);
+assert.match(gemini, /if \(_accepts_sampling_parameters\(model\)\s+and accepts_optional_parameter\(model_capabilities, "temperature"\)\):/);
 assert.doesNotMatch(gemini, /"generationConfig": \{\n\s*"temperature":/);
 
 const aiConfig = gemini;
@@ -227,9 +233,11 @@ console.log("audit regression test passed");
   assert.match(resolver, /models=\[\],[\s\S]{0,140}?source="none"/);
   assert.doesNotMatch(resolver, /GEMINI_FALLBACK_MODELS|HF_FALLBACK_MODELS|_fallback_models/);
   assert.match(popupDom, /No `auto` or static fallback is offered/);
-  assert.match(popupProviderMeta, /model_access_denied:\s*\["error",\s*" • ✕ Account cannot use this model"\]/);
-  assert.match(popupProviderMeta, /probeMessages\[probe\.status\]/,
-    "provider probe status must select the explicit model-access-denied message");
+  // 10491: no selected-model probe; a real translation's deterministic
+  // failure (e.g. model access denied) is shown with the page's own message.
+  assert.doesNotMatch(popupProviderMeta, /AI_PROBE|probeSelected/);
+  assert.match(popupProviderMeta, /manualModelBlockMessage\(block\.row\)/,
+    "a marked Manual model must show the same message as the failed translation");
   assert.match(aiRoute, /from backend\.application\.ai_translation\.orchestration import ai_schema, execute/,
     "the extension AI route must delegate to the application service");
   assert.match(aiApplication, /AI provider must be selected explicitly for this API key/);

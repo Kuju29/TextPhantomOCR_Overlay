@@ -16,9 +16,13 @@
   }
   function clean(text) {
     return text
+      .replace(/(?:https?|wss?|file):\/\/[^\s"'<>]+/gi, redactExternalUrl)
+      .replace(/[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, '<private-email>')
+      .replace(/\b(?:re_|rk_|whsec_)[\w-]{8,}/g, '<redacted>')
+      .replace(/\b(?:otp|code)\s*[:=]\s*\d{6}\b/gi, 'otp=<redacted>')
       // Handle URLs before named query assignments: arbitrary paths and query
       // names can carry secrets, including in copied Error stacks.
-      .replace(/(?:https?|wss?|file):\/\/[^\s"'<>]+/gi, redactExternalUrl)
+
       // Redact named assignments outside URLs while retaining surrounding
       // diagnostic text (for example an error code or stack location).
       .replace(/(^|[?&\s{,;])(["']?(?:(?:x[-_])?api[_-]?key|access[_-]?token|refresh[_-]?token|key|token|password|passwd|pwd|secret|client[_-]?secret|authorization|proxy-authorization|signature|sig|policy|x-amz-(?:security-token|credential|signature)|x-goog-(?:credential|signature))["']?\s*[=:]\s*)(?:(?:Bearer|Basic|Token)\s+)?(?:"[^"]*"|'[^']*'|[^\s&,"'<>;})]+)/gi, '$1$2<redacted>')
@@ -41,7 +45,7 @@
         ? [...new Set(['name', 'message', 'code', 'stack', 'cause', 'errors', ...Object.keys(value)])]
         : Object.keys(value);
       for (const key of keys) {
-        if (sensitive.test(key)) {out[key] = '<redacted>'; continue;}
+        if (sensitive.test(key) || /secret|credential|password|verifier|cipher|csrf|bootstrap|paidSessionToken|accessToken|refreshToken/i.test(key) || /^(?:body|payload|prompt|messages|content|text|image_b64|imageBase64|dataUri|email|otp|otp_code|verification_code)$/i.test(key) || (key === "code" && /^\d{6}$/.test(String(value[key])))) {out[key] = '<redacted>'; continue;}
         try {
           const entry = value[key];
           if (entry !== undefined) Object.defineProperty(out, key, {value:normalize(entry, ancestors, depth + 1), enumerable:true, writable:true});

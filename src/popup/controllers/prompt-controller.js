@@ -21,6 +21,11 @@ export function createPromptController(deps) {
     keyForPrompt = (lang) => String(lang || "en"),
     saveProfilePrompt = null,
   } = deps;
+  const invalidate = () => { state.promptSeq = (Number(state.promptSeq) || 0) + 1; };
+  for (const key of ["aiProvider", "aiModel", "aiPaidModel", "aiService", "lang", "apiUrl", "aiBaseUrl"])
+    els[key]?.addEventListener?.("change", invalidate);
+  for (const key of ["aiPrompt", "apiUrl", "aiBaseUrl"])
+    els[key]?.addEventListener?.("input", invalidate);
 
   const recordFor = (key) => {
     const value = state.aiPromptByLang[key];
@@ -31,7 +36,6 @@ export function createPromptController(deps) {
       };
     return { text: normalizePrompt(String(value || "")), mode: "replace" };
   };
-  const selectedMode = () => "replace";
   const setRecord = (key, text) => {
     state.aiPromptByLang[key] = {
       text: normalizePrompt(String(text || "")),
@@ -46,10 +50,12 @@ export function createPromptController(deps) {
     if (!els.aiPromptBack && !els.aiPromptForward) return;
     try {
       const key = keyForPrompt(state.desiredLang, state.desiredAiModel);
+      const revision = state.promptSeq;
       const snapshot = await promptHistoryState(
         key,
         String(els.aiPrompt.value || ""),
       );
+      if (revision !== state.promptSeq || key !== keyForPrompt(state.desiredLang, state.desiredAiModel)) return;
       if (els.aiPromptBack) els.aiPromptBack.disabled = !snapshot.canBack;
       if (els.aiPromptForward)
         els.aiPromptForward.disabled = !snapshot.canForward;
@@ -58,16 +64,21 @@ export function createPromptController(deps) {
     }
   }
 
-  async function applyHistoryResult(key, result) {
+  async function applyHistoryResult(key, result, originalText = null, revision = null) {
     if (!result) return;
+    if ((revision !== null && revision !== state.promptSeq) || key !== keyForPrompt(state.desiredLang, state.desiredAiModel) ||
+        (originalText !== null && String(els.aiPrompt.value || "") !== originalText)) return;
     els.aiPrompt.value = result.text;
     setRecord(key, result.text);
     state.aiPromptDirtyByLang[key] = false;
     updatePromptCount(AI_PROMPT_MAX_CHARS, result.text);
+    const appliedRevision = state.promptSeq;
     if (saveProfilePrompt)
-      await saveProfilePrompt(state.desiredLang, result.text, selectedMode());
+      await saveProfilePrompt(state.desiredLang, result.text);
     else await setStorage({ aiPromptByLang: state.aiPromptByLang });
     broadcast({ type: "AI_SETTINGS_CHANGED" });
+    if (appliedRevision !== state.promptSeq || key !== keyForPrompt(state.desiredLang, state.desiredAiModel) ||
+        String(els.aiPrompt.value || "") !== result.text) return;
     if (els.aiPromptBack) els.aiPromptBack.disabled = !result.canBack;
     if (els.aiPromptForward) els.aiPromptForward.disabled = !result.canForward;
   }
@@ -87,39 +98,51 @@ export function createPromptController(deps) {
     }
   }
 
+  // A model/language without a saved prompt loads the built-in style by
+  // itself (as if Reload were pressed), once per popup session and key.
+  const autoLoaded = new Set();
   function applyForLang(lang) {
     if (!canUseAiUi()) return;
     const selectedLang =
       (lang || state.desiredLang || els.lang.value || "en").trim() || "en";
     const key = keyForPrompt(selectedLang, state.desiredAiModel);
     if (state.aiPromptDirtyByLang[key]) return;
-    const saved = Object.prototype.hasOwnProperty.call(
-      state.aiPromptByLang,
-      key,
-    )
-      ? recordFor(key).text
-      : "";
+    const hasSaved = Object.prototype.hasOwnProperty.call(state.aiPromptByLang, key);
+    const saved = hasSaved ? recordFor(key).text : "";
     els.aiPrompt.value = saved;
     updateModeHint();
     updatePromptCount(AI_PROMPT_MAX_CHARS, saved);
     void promptHistoryPush(key, saved).then(refreshHistoryButtons);
     updateWarning();
+    if (!saved.trim() && !autoLoaded.has(key) && typeof fetchDefaultPrompt === "function") {
+      autoLoaded.add(key);
+      // Best effort: the built-in style is used anyway; Reload stays available.
+      void resetForLang(selectedLang, {auto: true}).catch(() => updateWarning());
+    }
   }
 
-  async function resetForLang(lang) {
+  async function resetForLang(lang, {auto = false} = {}) {
     if (!canUseAiUi()) return;
     const selectedLang =
       (lang || state.desiredLang || els.lang.value || "en").trim() || "en";
     const model = normalizeAiModel(state.desiredAiModel);
     const key = keyForPrompt(selectedLang, model);
+    const originalText = String(els.aiPrompt.value || "");
+    const apiBase = els.apiUrl.value;
     const sequence = ++state.promptSeq;
+    const current = () => sequence === state.promptSeq && canUseAiUi() &&
+      selectedLang === state.desiredLang && apiBase === els.apiUrl.value &&
+      key === keyForPrompt(state.desiredLang, state.desiredAiModel) &&
+      String(els.aiPrompt.value || "") === originalText;
     const fetched = await fetchDefaultPrompt(
       els.apiUrl.value,
       selectedLang,
       model,
     );
-    if (sequence !== state.promptSeq) return;
+    if (!current()) return;
     if (fetched === null) {
+      // Automatic load: the built-in style is still used; Reload stays available.
+      if (auto) { updateWarning(); return; }
       setFieldMessage(
         els.aiPromptWrap,
         "error",
@@ -128,7 +151,7 @@ export function createPromptController(deps) {
       return;
     }
     const value = normalizePrompt(fetched);
-    if (sequence !== state.promptSeq) return;
+    if (!current()) return;
     setFieldMessage(els.aiPromptWrap, "", "");
     setRecord(key, value);
     updateModeHint();
@@ -136,7 +159,7 @@ export function createPromptController(deps) {
     els.aiPrompt.value = value;
     updatePromptCount(AI_PROMPT_MAX_CHARS, value);
     if (saveProfilePrompt)
-      await saveProfilePrompt(selectedLang, value, "replace");
+      await saveProfilePrompt(selectedLang, value);
     else await setStorage({ aiPromptByLang: state.aiPromptByLang });
     broadcast({ type: "AI_SETTINGS_CHANGED" });
     void promptHistoryPush(key, value).then(refreshHistoryButtons);

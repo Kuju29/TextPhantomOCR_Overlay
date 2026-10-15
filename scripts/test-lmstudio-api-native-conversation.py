@@ -210,8 +210,31 @@ class NativeConversationTest(unittest.TestCase):
         real_client = httpx.Client
         unknown = self.model_catalogue()
         del unknown["models"][1]["capabilities"]["reasoning"]
+        # 10488 owner decision: a loaded model whose live catalogue publishes no
+        # reasoning options has no AI think control. Lowest (or any saved
+        # choice) is kept but the chat is sent with the provider default.
+        for preference in ("minimum", "off", "high"):
+            forget_model_capabilities("lmstudio", base, "")
+            sent = []
+            def handle_default(req):
+                if req.method == "GET":
+                    return httpx.Response(200, json=unknown)
+                sent.append(json.loads(req.content))
+                return httpx.Response(200, text=events(response_id=None, answer="<<TP_P0:คำแปล>>"))
+            ai = AiConfig(api_key="", provider="lmstudio", model="selected", base_url=base,
+                thinking=preference, source_lang="en", translation_mode="independent",
+                output_contract="compact_markers_v1")
+            with patch.dict(os.environ, {"TP_USAGE_RECEIPTS": "off", "TP_AI_WIRE_TRACE": "0"}), \
+                 patch("backend.ai.translation.invocation.assert_ai_base_url_allowed"), \
+                 patch.object(local_lmstudio.httpx, "Client", side_effect=lambda *, timeout:
+                     real_client(transport=httpx.MockTransport(handle_default), timeout=timeout)):
+                result = translate(markers.apply(["source"]), "th", ai)
+            self.assertEqual(len(sent), 1, preference)
+            self.assertNotIn("reasoning", sent[0])
+            self.assertEqual(result["meta"]["thinking_selected"], "default")
+            self.assertEqual(result["meta"]["thinking_applied"], "provider_default")
+            self.assertEqual(result["meta"]["thinking_state"], "default")
         for catalogue, preference, error in (
-            (unknown, "minimum", "lowest Thinking"),
             (self.model_catalogue(options=("low", "medium")), "off", "cannot verify"),
             (self.model_catalogue(loaded=False), "minimum", "no available exact instance"),
         ):
@@ -790,9 +813,12 @@ class NativeConversationTest(unittest.TestCase):
                     self.assertNotIn("think",body)
                     self.assertEqual(first["meta"]["thinking_applied"],
                                      "not_applicable_non_reasoning_model")
+                    # 10488: a proven no-reasoning model gets no control at all.
+                    self.assertEqual(first["meta"]["thinking_state"],"none")
+                    self.assertEqual(first["meta"]["thinking_selected"],"default")
                 else:
                     self.assertEqual(body["think"],expected)
-                self.assertEqual(first["meta"]["thinking_selected"],resolved)
+                    self.assertEqual(first["meta"]["thinking_selected"],resolved)
                 self.assertEqual(second["meta"]["conversation"]["historyTurns"],1)
         forget_model_capabilities("ollama",base,"")
 
@@ -810,8 +836,11 @@ class NativeConversationTest(unittest.TestCase):
                    ("mandatory_level",{"values":["low"],"default":"low"},"off"),
                    ("unknown_level",{"values":["fast"],"default":"fast"},"minimum"),
                    ("mixed_known_unknown",{"values":["low","nano"],"default":"low"},"minimum"))
-        blocked={"named_off_is_not_boolean","mandatory_boolean","mandatory_level",
-                 "unknown_level","mixed_known_unknown"}
+        # 10488 owner decision: /api/show without a usable thinking control
+        # (omitted, malformed, or only unfamiliar names) is provider default:
+        # no `think` field, saved choice kept, never an error. Proven controls
+        # that cannot honor the saved choice still stop before chat.
+        blocked={"mandatory_boolean","mandatory_level","mixed_known_unknown"}
         for label,thinking,requested in scenarios:
             with self.subTest(case=label):
                 forget_model_capabilities("ollama",base,"")
@@ -829,7 +858,7 @@ class NativeConversationTest(unittest.TestCase):
                         return httpx.Response(200,json={"models":[]})
                     if label not in blocked and req.url.path == "/api/chat":
                         body = json.loads(req.content)
-                        self.assertIs(body.get("think"),False)
+                        self.assertNotIn("think",body)
                         lines = [{"message":{"content":"<<TP_P0:Thai>>"},"done":False},
                                  {"message":{"content":""},"done":True,"done_reason":"stop",
                                   "prompt_eval_count":10,"eval_count":3}]
@@ -845,9 +874,9 @@ class NativeConversationTest(unittest.TestCase):
                             context={"tp_tab_session":"missing-"+label}))
                     if label not in blocked:
                         result = translate(markers.apply(["first"]),"th",ai)
-                        self.assertEqual(result["meta"]["thinking_applied"],
-                                         "requested_off_unverified_metadata")
-                        self.assertEqual(result["meta"]["thinking_selected"],"off")
+                        self.assertEqual(result["meta"]["thinking_applied"],"provider_default")
+                        self.assertEqual(result["meta"]["thinking_selected"],"default")
+                        self.assertEqual(result["meta"]["thinking_state"],"default")
                     else:
                         with self.assertRaises(store.ConversationError) as failure:
                             translate(markers.apply(["first"]),"th",ai)
@@ -1049,8 +1078,10 @@ class NativeConversationTest(unittest.TestCase):
                           ["reasoning"]["mandatory"],True)
             state["thinking"]=None  # Missing metadata must evict old optional proof.
             third=translate(markers.apply(["Third"]),"th",ai)
-            self.assertEqual(third["meta"]["thinking_applied"],"requested_off_unverified_metadata")
-            self.assertIs(json.loads(calls[-1].content).get("think"),False)
+            # 10488: without current thinking.values there is no control; the
+            # saved Off is kept and the chat uses the provider default.
+            self.assertEqual(third["meta"]["thinking_applied"],"provider_default")
+            self.assertNotIn("think",json.loads(calls[-1].content))
             self.assertEqual(discovered_model_capabilities("ollama",base,"selected"),(False,{}))
         self.assertEqual([call.url.path for call in calls],
             ["/api/tags","/api/show","/api/ps","/api/chat",

@@ -175,8 +175,8 @@ def run_ai_layer(
         "units": len(merged_src_paras),
     })
 
-    # Units Lens read as digits, punctuation or symbols only are never sent: they
-    # cost tokens, come back unchanged, and their source text is the right answer.
+    # Noise and single visible source code points are kept as source text.
+    # Meaningful Thai vowel/tone sequences still qualify after NFC counting.
     # Same rule as `hasTranslatableText` in src/shared/lens-document.js.
     all_group_para_indices = group_para_indices
     all_group_src_paras = merged_src_paras
@@ -195,9 +195,8 @@ def run_ai_layer(
     # untouched and is reassembled after translation for renderer attachment.
     merged_src_paras = kept_paras
 
-    # Clamp runaway character runs in the SOURCE from the very first attempt
-    # (SFX like ヒヤァァァ… are the usual trigger that sends the model into a
-    # repetition loop). Previously this only happened on the retry pass.
+    # Clamp runaway character runs in the SOURCE from the first attempt (SFX
+    # like ヒヤァァァ… are the usual trigger of a model repetition loop).
     merged_src_paras = [markers.clamp_runaway_repeats(p) for p in merged_src_paras]
     src_text = markers.apply(merged_src_paras)
     n_src = len(merged_src_paras)
@@ -207,10 +206,8 @@ def run_ai_layer(
         out["Ai"] = {"meta": {"skipped": True, "skipped_reason": "no_text"}}
         return None
 
-    # The model now sees only the source — no Lens MT reference block.
-    # This halves the prompt input and lets it translate freely, which
-    # produced noticeably more natural Thai/JP/ZH/KO dialogue than the
-    # previous "improve on the Lens MT" approach.
+    # The model sees only the source, no Lens MT reference block: half the
+    # prompt input and more natural dialogue.
 
     # Vision (opt-in): attach a downscaled page image so the model can SEE
     # speaker gender / expressions / who talks to whom.  ``base_img`` may have
@@ -232,9 +229,8 @@ def run_ai_layer(
             try:
                 ai_cfg.image_b64, ai_cfg.image_mime = render_stage.encode_vision_image(vimg)
             except Exception as exc:  # noqa: BLE001
-                # Was a bare `pass`. A page that silently translated text-only
-                # while the user believed the model could see it is a setting
-                # that "does nothing" for no visible reason.
+                # Reported: a page silently translated text-only would make the
+                # vision setting look broken for no visible reason.
                 event(
                     "ai.vision.skipped",
                     {"reason": str(exc)[:200], "size": list(vimg.size)},
@@ -324,7 +320,7 @@ def run_ai_layer(
     missing_units = [i for i, t in enumerate(translated_group_texts) if not str(t or "").strip()]
     if missing_units and len(missing_units) >= n_src:
         raise RuntimeError("AI returned no usable text for any unit")
-    # Reinsert numeric/symbol-only groups at their ORIGINAL spatial positions.
+    # Reinsert skipped source groups at their ORIGINAL spatial positions.
     # This produces a one-to-one renderer text/group map without ever asking AI
     # to translate content whose correct answer is the source itself.
     ai_group_texts: list[str] = []
@@ -342,9 +338,8 @@ def run_ai_layer(
     # Named so a log can tell "the server grouped the page" from "the server
     # gave up on grouping and translated the fragments anyway".
     meta["grouping"] = "ai_source_tree"
-    # Which SOURCE paragraphs those units came from. The erase already ran, so
-    # the caller needs this to put the original pixels back before the reply is
-    # encoded — an unanswered bubble must show its own text, never a blank.
+    # Which SOURCE paragraphs those units came from (reported in meta), so an
+    # unanswered bubble is identifiable rather than silently blank.
     missing_paras: set[int] = set()
     for unit in missing_units:
         if 0 <= unit < len(translation_group_para_indices):
@@ -417,7 +412,7 @@ def run_ai_layer(
     render_stage.annotate_text_light(ai_tree, base_img)
 
     # AI HTML overlay — ``target_lang`` drives the deterministic reading
-    # direction (see backend.render.region.resolve_text_direction).
+    # direction (see backend.render.region.direction_preset).
     out["Ai"]["aihtml"] = render_tree_overlay(ai_tree, W, H, target_lang=target_lang)
     out["Ai"]["aihtmlMeta"] = {"baseW": int(W), "baseH": int(H), "format": "tp"}
 

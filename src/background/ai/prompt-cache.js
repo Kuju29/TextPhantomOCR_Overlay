@@ -6,7 +6,7 @@ import { BUNDLED_CANONICAL_PROMPT_PLANS } from "../../generated/canonical-prompt
 const log = createLogger("SW.ai.prompt-cache");
 const promptCache = new Map();
 const promptAuditCache = new Map();
-export const CANONICAL_PROMPT_VERSION = "translation-plan-2";
+const CANONICAL_PROMPT_VERSION = "translation-plan-2";
 const REQUIRED_PIECES = Object.freeze([
   "systemPolicy",
   "editableStyle",
@@ -27,7 +27,7 @@ const EXTENSION_OWNED_PIECES = new Set([
   "seriesNotesHeading",
 ]);
 
-export class PromptContractError extends Error {
+class PromptContractError extends Error {
   constructor(message) {
     super(message);
     this.name = "PromptContractError";

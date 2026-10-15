@@ -95,7 +95,8 @@ assert.deepEqual(
     mode: "lens_text", lang: "ja", sources: "ai",
     provider: "openrouter", model: "deepseek/test", key: "roundtrip-secret",
     baseUrl: "https://openrouter.ai/api/v1", thinking: "off",
-    memory: "terms", image: "always", rate: [true, 42, 3], engine: "api",
+    // .68: rate cap retired (token ceiling replaces it); RPM/burst values are kept, never active.
+    memory: "terms", image: "always", rate: [false, 42, 3], engine: "api",
   },
   "flat settings must round-trip unchanged before profile migration",
 );
@@ -180,15 +181,15 @@ assert.equal(autoAiSettingsIssue({ aiProvider: "ollama", aiBaseUrl: "", aiKey: "
 assert.equal(autoAiSettingsIssue({
   aiProvider: "openrouter", aiModel: "", aiPrompt: "style", aiKey: "key",
 }, { mainApiBaseUrl: "https://api.example", requireComplete: true })?.path,
-"[AI option > Model]", "strict dispatch readiness must identify the missing Model control");
+"[AI settings > Model]", "strict dispatch readiness must identify the missing Model control");
 assert.equal(autoAiSettingsIssue({
   aiProvider: "openrouter", aiModel: "model", aiPrompt: "", aiKey: "key",
 }, { mainApiBaseUrl: "https://api.example", requireComplete: true })?.path,
-"[AI option > Set prompt]", "strict dispatch readiness must identify the missing AI Style control");
+"[AI settings > Set prompt]", "strict dispatch readiness must identify the missing AI Style control");
 assert.equal(autoAiSettingsIssue({
   aiProvider: "ollama", aiModel: "model", aiPrompt: "style", aiBaseUrl: "",
 }, { mainApiBaseUrl: "https://api.example", requireComplete: true })?.path,
-"[AI option > Local server URL]", "strict dispatch readiness must identify the missing Local URL control");
+"[AI settings > Local server URL]", "strict dispatch readiness must identify the missing Local URL control");
 assert.equal(autoAiSettingsIssue({ aiProvider: "auto", aiBaseUrl: "http://127.0.0.1:11434", aiKey: "" }), null,
   "a keyless local URL with auto provider is supported");
 assert.deepEqual(

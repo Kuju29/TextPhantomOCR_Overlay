@@ -1,3 +1,4 @@
+import { diagnosticFetch } from "../../shared/diagnostics.js";
 import { API_PATHS } from "../../shared/constants.js";
 import { readLimitedText } from "../images.js";
 import {
@@ -7,6 +8,7 @@ import {
   networkFailure,
   readJson,
 } from "./http-error.js";
+import { installReady } from "./install-header.js";
 import { noteRetryAfter } from "./polling.js";
 import { noteApiActivity, noteApiSuccess } from "../api.js";
 
@@ -29,10 +31,11 @@ export async function groupParagraphsViaRest(
   const imageInput = imageArtifactToken
     ? { imageArtifactToken: String(imageArtifactToken) }
     : { imageDataUri: String(imageDataUri || "") };
+  await installReady();
   let res;
   try {
     noteApiActivity(base);
-    res = await fetch(
+    res = await diagnosticFetch(
       base.replace(/\/+$/, "") + API_PATHS.ENGINE_EXTENSION_GROUPS,
       {
         method: "POST",

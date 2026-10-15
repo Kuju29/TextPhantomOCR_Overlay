@@ -1,23 +1,15 @@
 /**
- * Serialise Lens text boxes so the canvas can erase them — client side.
- *
- *
- * Port of `api/backend/render/erase_boxes.py`, pinned to the same fixture
- * (`api/tests/fixtures/lens_tree.json`, asserted by `scripts/test-lens-tree.mjs`
- * and `api/tests/test_lens_tree.py`).
- *
- * The service worker decodes Lens itself now (`README.md#architecture-and-ownership`),
- * so it has to produce these boxes rather than receive them. Python keeps its
- * copy for `/v1/lens/fallback`, where the server did the Lens call.
+ * Serialise Lens text boxes so the canvas can erase them. Port of
+ * `api/backend/render/erase_boxes.py`, pinned to
+ * `api/tests/fixtures/lens_tree.json` (`scripts/test-lens-tree.mjs`,
+ * `api/tests/test_lens_tree.py`); Python keeps its copy for `/v1/lens/fallback`.
  *
  * Schema `tp.erase-boxes/1`:
  *
  *     { "schema": "tp.erase-boxes/1", "boxes": [ {l, t, w, h, r?, p?}, ... ] }
  *
- * `l/t/w/h` are normalised to the image size (0..1) and `r` is the box's
- * rotation in degrees about its own centre — the same numbers
- * `erase-canvas.js` consumes, so the client reconstructs exactly the quad the
- * server would have erased.
+ * `l/t/w/h` are normalised to the image size (0..1) and `r` is the rotation in
+ * degrees about the box centre — exactly what `erase-canvas.js` consumes.
  */
 
 // `p` is the source LensDocument paragraph ID. It is mandatory for selective
@@ -76,12 +68,8 @@ export function boxPayload(token) {
 }
 
 /**
- * Build the `tp.erase-boxes/1` payload for `tokens`.
- *
- * Tokens without geometry are dropped, and the count of dropped tokens is
- * reported: a page where most tokens were unusable is a page whose background
- * will look wrong, and that must be visible rather than inferred from a
- * suspiciously short box list.
+ * Build the `tp.erase-boxes/1` payload for `tokens`. Tokens without geometry are
+ * dropped and counted, so a page with a wrong-looking background says why.
  */
 export function buildEraseBoxes(tokens, { ownerForToken = null } = {}) {
   const boxes = [];

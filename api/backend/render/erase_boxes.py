@@ -1,14 +1,8 @@
 """Serialise Lens text boxes so the CLIENT can erase them.
 
-The server used to do the whole background job: inpaint every Lens token out
-of the page, re-encode the result, and base64 it into the response. That is
-the single most expensive thing the direct lane does and the largest field in
-the reply — a multi-megabyte string per image, held in the job registry until
-the extension polls for it.
-
-The boxes themselves are a few hundred bytes. The browser already has the
-original image decoded in the page, and a canvas can fill those boxes far
-faster than a 2-vCPU container can inpaint and re-encode them. So the server
+Server-side inpainting and re-encoding is the most expensive step of the
+direct lane and produces a multi-megabyte field per image. The boxes are a few
+hundred bytes and the browser already has the decoded image, so the server
 sends the boxes and the extension paints.
 
 Everything here is deliberately free of numpy/PIL/cv2 so the schema can be

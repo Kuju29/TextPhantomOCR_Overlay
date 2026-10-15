@@ -13,7 +13,6 @@ from starlette.concurrency import run_in_threadpool
 
 import time
 
-from backend.ai import probe as ai_probe
 from backend.ai import resolve as ai_resolve
 from backend.log import event
 from backend.security import SecurityError
@@ -89,46 +88,6 @@ def _resolve(payload: dict[str, Any]) -> dict:
         return result
     except Exception as exc:
         raise
-
-@router.post("/ai/probe")
-async def probe(payload: dict[str, Any]) -> dict:
-    """Run one tiny real provider call for the selected model (cached)."""
-    return await run_in_threadpool(_probe, payload)
-
-
-def _probe(payload: dict[str, Any]) -> dict:
-    t0 = time.perf_counter()
-    try:
-        result = dict(ai_probe.probe(payload))
-    except SecurityError as exc:
-        event(
-            "ai.probe.error",
-            {
-                "provider": str(payload.get("provider") or "auto"),
-                "model": str(payload.get("model") or ""),
-                "status": "unsafe_base_url",
-                "dt_ms": round((time.perf_counter() - t0) * 1000, 1),
-            },
-            ok=False,
-        )
-        return _refused_base_url(payload, exc)
-    event(
-        "ai.probe" if result.get("ok") else "ai.probe.error",
-        {
-            "provider": result.get("provider") or str(payload.get("provider") or "auto"),
-            "model": result.get("model") or str(payload.get("model") or ""),
-            "status": result.get("status") or "unknown",
-            "http_status": int(result.get("http_status") or 0),
-            "cached": bool(result.get("cached")),
-            "shared": bool(result.get("shared")),
-            **({"probeId": result["probeId"]} if result.get("probeId") else {}),
-            **({"error_details": result["error_details"]} if result.get("error_details") else {}),
-            **({"error_reason": str(result.get("error") or "")[:160]} if not result.get("ok") and result.get("error") else {}),
-            "dt_ms": round((time.perf_counter() - t0) * 1000, 1),
-        },
-        ok=bool(result.get("ok")),
-    )
-    return result
 
 @router.get("/ai/prompt/default")
 async def prompt_default(

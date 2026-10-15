@@ -1,0 +1,2879 @@
+{
+  "schema": "tp.routing-vectors/1",
+  "contract": "2026.10.4.86",
+  "release": "10486",
+  "about": "Shared parity vectors for provider routing score/choose (contract §4-§5). Both the API (scripts/test-provider-routing-10486.py) and the Center must produce exactly these outputs (floats compared with relative tolerance 1e-9 after rounding to 9 decimals; scores in 'choose' are not compared).",
+  "rules": {
+    "aggregate_defaults": "Any count/sum field missing from an input aggregate is 0; lat_hist missing is [0]*8.",
+    "lat_hist": "8 counts for upper bounds [1,2,4,8,16,32,64,128] seconds; latency s goes to the first bound with s <= bound, anything above 64 s goes to the last bucket. median_ms = 1000 * bound of the first bucket whose cumulative count * 2 >= total; total 0 -> null.",
+    "quality": "(ok+1)/(V+2), V = ok+wrong_language+missing_ids+empty+format",
+    "reliability": "(n-F+1)/(n+2), F = http_error+timeout+transport",
+    "cost": "USD per 1K tokens. cost_n>=5 and in_tok+out_tok>0: cost_usd/((in_tok+out_tok)/1000). Else listed prices (USD per token): c=cached_tok/in_tok (0 if in_tok=0), eff_in=prompt*(1-c)+cache_read*c (cache_read null -> prompt), 1000*(in*eff_in+out*completion)/(in+out); without tokens 1000*(eff_in+completion)/2. prompt or completion missing -> null.",
+    "factors": "costfactor = cheapest/cost, latfactor = fastest/median over candidates with a known positive value; unknown -> 1.",
+    "score": "100*q^wq*r^wr*costfactor^wc*latfactor^wl; default weights wq=3,wr=2,wc=1,wl=0.5",
+    "learning": "n < min_samples (default 20): score = median of the non-learning candidates' scores (mean of the two middle for an even count); none -> null.",
+    "choose_steps": "1 remove blocked; 2 no_fp4: remove fp4/int4 unless every listed candidate (before step 1) is fp4/int4 (unknown counts as not fp4); 3 avoid: remove avoid hosts unless that removes every remaining candidate (with no candidates at all the avoid hosts still count); ignore = sorted(blocked + hosts removed by no_fp4 + applied avoid hosts) so an OpenRouter fallback cannot reach them; 4 mode order: manual = manual_order ∩ candidates (+ auto order of the rest when manual_fallback, else only=true), reason manual; auto = auto order, reason auto; stats with <2 candidates having n>=min_samples = auto order with reason learning; stats otherwise: rank by score desc then host asc, pool = non-cooled ranked hosts (all if every host is cooled), u1=rng(); if u1<explore and pool has others: u2=rng(), pick among pool[1:] with probability ∝ score (walk cumulative in rank order, first with u2*total < cumulative; total 0 -> first), reason explore; else chosen=pool[0], reason best, or fallback_cooldown when the top-ranked host is cooled; order = [chosen] + rest of pool + cooled by rank. For auto/manual/learning cooled hosts are moved to the end (stable) and reason becomes fallback_cooldown if that changed the first host. 5 pinned host (present and not cooled) first, reason pinned; else sticky host (present and not cooled) first, reason sticky. 6 order truncated to 16.",
+    "auto_order": "cache-capable (cache_read < prompt) by cache_read+completion asc, then others with prompt+completion by that sum asc, then hosts without prices by name; ties by host"
+  },
+  "latency_buckets": [
+    {
+      "latency_ms": 0,
+      "bucket": 0
+    },
+    {
+      "latency_ms": 999,
+      "bucket": 0
+    },
+    {
+      "latency_ms": 1000,
+      "bucket": 0
+    },
+    {
+      "latency_ms": 1001,
+      "bucket": 1
+    },
+    {
+      "latency_ms": 2500,
+      "bucket": 2
+    },
+    {
+      "latency_ms": 64000,
+      "bucket": 6
+    },
+    {
+      "latency_ms": 64001,
+      "bucket": 7
+    },
+    {
+      "latency_ms": 128000,
+      "bucket": 7
+    },
+    {
+      "latency_ms": 500000,
+      "bucket": 7
+    }
+  ],
+  "medians": [
+    {
+      "lat_hist": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "median_ms": null
+    },
+    {
+      "lat_hist": [
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "median_ms": 1000.0
+    },
+    {
+      "lat_hist": [
+        1,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "median_ms": 1000.0
+    },
+    {
+      "lat_hist": [
+        1,
+        1,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "median_ms": 2000.0
+    },
+    {
+      "lat_hist": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        3
+      ],
+      "median_ms": 128000.0
+    },
+    {
+      "lat_hist": [
+        5,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        6
+      ],
+      "median_ms": 128000.0
+    }
+  ],
+  "score": [
+    {
+      "name": "three_learned_default_weights",
+      "input": {
+        "candidates": [
+          {
+            "host": "deepinfra/fp8",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 2.5e-07,
+              "completion": 1e-06,
+              "cache_read": 5e-08
+            },
+            "agg": {
+              "n": 40,
+              "ok": 36,
+              "wrong_language": 2,
+              "http_error": 2,
+              "in_tok": 80000,
+              "cached_tok": 40000,
+              "out_tok": 20000,
+              "lat_hist": [
+                0,
+                10,
+                20,
+                8,
+                2,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "together",
+            "quant": "bf16",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": 3e-08
+            },
+            "agg": {
+              "n": 30,
+              "ok": 30,
+              "in_tok": 60000,
+              "cached_tok": 30000,
+              "out_tok": 15000,
+              "cost_usd": 0.03,
+              "cost_n": 30,
+              "lat_hist": [
+                0,
+                0,
+                5,
+                20,
+                5,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "baseten",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": null
+            },
+            "agg": {
+              "n": 25,
+              "ok": 20,
+              "missing_ids": 3,
+              "empty": 1,
+              "timeout": 1,
+              "in_tok": 50000,
+              "out_tok": 10000,
+              "lat_hist": [
+                2,
+                20,
+                3,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          }
+        ]
+      },
+      "expected": {
+        "deepinfra/fp8": {
+          "learning": false,
+          "quality": 0.925,
+          "reliability": 0.928571429,
+          "cost": 0.00032,
+          "latency_ms": 4000.0,
+          "score": 48.254834854
+        },
+        "together": {
+          "learning": false,
+          "quality": 0.96875,
+          "reliability": 0.96875,
+          "cost": 0.0004,
+          "latency_ms": 8000.0,
+          "score": 34.128607512
+        },
+        "baseten": {
+          "learning": false,
+          "quality": 0.807692308,
+          "reliability": 0.925925926,
+          "cost": 0.00045,
+          "latency_ms": 2000.0,
+          "score": 32.123865128
+        }
+      }
+    },
+    {
+      "name": "learning_gets_median",
+      "input": {
+        "candidates": [
+          {
+            "host": "deepinfra/fp8",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 2.5e-07,
+              "completion": 1e-06,
+              "cache_read": 5e-08
+            },
+            "agg": {
+              "n": 40,
+              "ok": 36,
+              "wrong_language": 2,
+              "http_error": 2,
+              "in_tok": 80000,
+              "cached_tok": 40000,
+              "out_tok": 20000,
+              "lat_hist": [
+                0,
+                10,
+                20,
+                8,
+                2,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "together",
+            "quant": "bf16",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": 3e-08
+            },
+            "agg": {
+              "n": 30,
+              "ok": 30,
+              "in_tok": 60000,
+              "cached_tok": 30000,
+              "out_tok": 15000,
+              "cost_usd": 0.03,
+              "cost_n": 30,
+              "lat_hist": [
+                0,
+                0,
+                5,
+                20,
+                5,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "baseten",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": null
+            },
+            "agg": {
+              "n": 25,
+              "ok": 20,
+              "missing_ids": 3,
+              "empty": 1,
+              "timeout": 1,
+              "in_tok": 50000,
+              "out_tok": 10000,
+              "lat_hist": [
+                2,
+                20,
+                3,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "novita",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 2e-07,
+              "completion": 8e-07,
+              "cache_read": null
+            },
+            "agg": {
+              "n": 5,
+              "ok": 5
+            }
+          }
+        ]
+      },
+      "expected": {
+        "deepinfra/fp8": {
+          "learning": false,
+          "quality": 0.925,
+          "reliability": 0.928571429,
+          "cost": 0.00032,
+          "latency_ms": 4000.0,
+          "score": 48.254834854
+        },
+        "together": {
+          "learning": false,
+          "quality": 0.96875,
+          "reliability": 0.96875,
+          "cost": 0.0004,
+          "latency_ms": 8000.0,
+          "score": 34.128607512
+        },
+        "baseten": {
+          "learning": false,
+          "quality": 0.807692308,
+          "reliability": 0.925925926,
+          "cost": 0.00045,
+          "latency_ms": 2000.0,
+          "score": 32.123865128
+        },
+        "novita": {
+          "learning": true,
+          "quality": 0.857142857,
+          "reliability": 0.857142857,
+          "cost": 0.0005,
+          "latency_ms": null,
+          "score": 34.128607512
+        }
+      }
+    },
+    {
+      "name": "unknown_price_neutral_cost",
+      "input": {
+        "candidates": [
+          {
+            "host": "deepinfra/fp8",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 2.5e-07,
+              "completion": 1e-06,
+              "cache_read": 5e-08
+            },
+            "agg": {
+              "n": 40,
+              "ok": 36,
+              "wrong_language": 2,
+              "http_error": 2,
+              "in_tok": 80000,
+              "cached_tok": 40000,
+              "out_tok": 20000,
+              "lat_hist": [
+                0,
+                10,
+                20,
+                8,
+                2,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "noprice",
+            "quant": "unknown",
+            "prices": {},
+            "agg": {
+              "n": 21,
+              "ok": 21
+            }
+          }
+        ]
+      },
+      "expected": {
+        "deepinfra/fp8": {
+          "learning": false,
+          "quality": 0.925,
+          "reliability": 0.928571429,
+          "cost": 0.00032,
+          "latency_ms": 4000.0,
+          "score": 68.242641901
+        },
+        "noprice": {
+          "learning": false,
+          "quality": 0.956521739,
+          "reliability": 0.956521739,
+          "cost": null,
+          "latency_ms": null,
+          "score": 80.070810397
+        }
+      }
+    },
+    {
+      "name": "custom_weights_quality_only",
+      "input": {
+        "candidates": [
+          {
+            "host": "deepinfra/fp8",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 2.5e-07,
+              "completion": 1e-06,
+              "cache_read": 5e-08
+            },
+            "agg": {
+              "n": 40,
+              "ok": 36,
+              "wrong_language": 2,
+              "http_error": 2,
+              "in_tok": 80000,
+              "cached_tok": 40000,
+              "out_tok": 20000,
+              "lat_hist": [
+                0,
+                10,
+                20,
+                8,
+                2,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "together",
+            "quant": "bf16",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": 3e-08
+            },
+            "agg": {
+              "n": 30,
+              "ok": 30,
+              "in_tok": 60000,
+              "cached_tok": 30000,
+              "out_tok": 15000,
+              "cost_usd": 0.03,
+              "cost_n": 30,
+              "lat_hist": [
+                0,
+                0,
+                5,
+                20,
+                5,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "baseten",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": null
+            },
+            "agg": {
+              "n": 25,
+              "ok": 20,
+              "missing_ids": 3,
+              "empty": 1,
+              "timeout": 1,
+              "in_tok": 50000,
+              "out_tok": 10000,
+              "lat_hist": [
+                2,
+                20,
+                3,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          }
+        ],
+        "weights": {
+          "wq": 1,
+          "wr": 0,
+          "wc": 0,
+          "wl": 0
+        }
+      },
+      "expected": {
+        "deepinfra/fp8": {
+          "learning": false,
+          "quality": 0.925,
+          "reliability": 0.928571429,
+          "cost": 0.00032,
+          "latency_ms": 4000.0,
+          "score": 92.5
+        },
+        "together": {
+          "learning": false,
+          "quality": 0.96875,
+          "reliability": 0.96875,
+          "cost": 0.0004,
+          "latency_ms": 8000.0,
+          "score": 96.875
+        },
+        "baseten": {
+          "learning": false,
+          "quality": 0.807692308,
+          "reliability": 0.925925926,
+          "cost": 0.00045,
+          "latency_ms": 2000.0,
+          "score": 80.769230769
+        }
+      }
+    },
+    {
+      "name": "min_samples_30_only_A_B_learned",
+      "input": {
+        "candidates": [
+          {
+            "host": "deepinfra/fp8",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 2.5e-07,
+              "completion": 1e-06,
+              "cache_read": 5e-08
+            },
+            "agg": {
+              "n": 40,
+              "ok": 36,
+              "wrong_language": 2,
+              "http_error": 2,
+              "in_tok": 80000,
+              "cached_tok": 40000,
+              "out_tok": 20000,
+              "lat_hist": [
+                0,
+                10,
+                20,
+                8,
+                2,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "together",
+            "quant": "bf16",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": 3e-08
+            },
+            "agg": {
+              "n": 30,
+              "ok": 30,
+              "in_tok": 60000,
+              "cached_tok": 30000,
+              "out_tok": 15000,
+              "cost_usd": 0.03,
+              "cost_n": 30,
+              "lat_hist": [
+                0,
+                0,
+                5,
+                20,
+                5,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "baseten",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": null
+            },
+            "agg": {
+              "n": 25,
+              "ok": 20,
+              "missing_ids": 3,
+              "empty": 1,
+              "timeout": 1,
+              "in_tok": 50000,
+              "out_tok": 10000,
+              "lat_hist": [
+                2,
+                20,
+                3,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          }
+        ],
+        "min_samples": 30
+      },
+      "expected": {
+        "deepinfra/fp8": {
+          "learning": false,
+          "quality": 0.925,
+          "reliability": 0.928571429,
+          "cost": 0.00032,
+          "latency_ms": 4000.0,
+          "score": 48.254834854
+        },
+        "together": {
+          "learning": false,
+          "quality": 0.96875,
+          "reliability": 0.96875,
+          "cost": 0.0004,
+          "latency_ms": 8000.0,
+          "score": 34.128607512
+        },
+        "baseten": {
+          "learning": true,
+          "quality": 0.807692308,
+          "reliability": 0.925925926,
+          "cost": 0.00045,
+          "latency_ms": 2000.0,
+          "score": 41.191721183
+        }
+      }
+    }
+  ],
+  "choose": [
+    {
+      "name": "stats_best",
+      "input": {
+        "candidates": [
+          {
+            "host": "deepinfra/fp8",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 2.5e-07,
+              "completion": 1e-06,
+              "cache_read": 5e-08
+            },
+            "agg": {
+              "n": 40,
+              "ok": 36,
+              "wrong_language": 2,
+              "http_error": 2,
+              "in_tok": 80000,
+              "cached_tok": 40000,
+              "out_tok": 20000,
+              "lat_hist": [
+                0,
+                10,
+                20,
+                8,
+                2,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "together",
+            "quant": "bf16",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": 3e-08
+            },
+            "agg": {
+              "n": 30,
+              "ok": 30,
+              "in_tok": 60000,
+              "cached_tok": 30000,
+              "out_tok": 15000,
+              "cost_usd": 0.03,
+              "cost_n": 30,
+              "lat_hist": [
+                0,
+                0,
+                5,
+                20,
+                5,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "baseten",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": null
+            },
+            "agg": {
+              "n": 25,
+              "ok": 20,
+              "missing_ids": 3,
+              "empty": 1,
+              "timeout": 1,
+              "in_tok": 50000,
+              "out_tok": 10000,
+              "lat_hist": [
+                2,
+                20,
+                3,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          }
+        ],
+        "mode": "stats",
+        "rng": [
+          0.9
+        ]
+      },
+      "expected": {
+        "order": [
+          "deepinfra/fp8",
+          "together",
+          "baseten"
+        ],
+        "ignore": [],
+        "only": false,
+        "chosen": "deepinfra/fp8",
+        "reason": "best",
+        "candidates": 3
+      }
+    },
+    {
+      "name": "stats_explore",
+      "input": {
+        "candidates": [
+          {
+            "host": "deepinfra/fp8",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 2.5e-07,
+              "completion": 1e-06,
+              "cache_read": 5e-08
+            },
+            "agg": {
+              "n": 40,
+              "ok": 36,
+              "wrong_language": 2,
+              "http_error": 2,
+              "in_tok": 80000,
+              "cached_tok": 40000,
+              "out_tok": 20000,
+              "lat_hist": [
+                0,
+                10,
+                20,
+                8,
+                2,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "together",
+            "quant": "bf16",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": 3e-08
+            },
+            "agg": {
+              "n": 30,
+              "ok": 30,
+              "in_tok": 60000,
+              "cached_tok": 30000,
+              "out_tok": 15000,
+              "cost_usd": 0.03,
+              "cost_n": 30,
+              "lat_hist": [
+                0,
+                0,
+                5,
+                20,
+                5,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "baseten",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": null
+            },
+            "agg": {
+              "n": 25,
+              "ok": 20,
+              "missing_ids": 3,
+              "empty": 1,
+              "timeout": 1,
+              "in_tok": 50000,
+              "out_tok": 10000,
+              "lat_hist": [
+                2,
+                20,
+                3,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          }
+        ],
+        "mode": "stats",
+        "rng": [
+          0.01,
+          0.6
+        ]
+      },
+      "expected": {
+        "order": [
+          "baseten",
+          "deepinfra/fp8",
+          "together"
+        ],
+        "ignore": [],
+        "only": false,
+        "chosen": "baseten",
+        "reason": "explore",
+        "candidates": 3
+      }
+    },
+    {
+      "name": "stats_explore_first_other",
+      "input": {
+        "candidates": [
+          {
+            "host": "deepinfra/fp8",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 2.5e-07,
+              "completion": 1e-06,
+              "cache_read": 5e-08
+            },
+            "agg": {
+              "n": 40,
+              "ok": 36,
+              "wrong_language": 2,
+              "http_error": 2,
+              "in_tok": 80000,
+              "cached_tok": 40000,
+              "out_tok": 20000,
+              "lat_hist": [
+                0,
+                10,
+                20,
+                8,
+                2,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "together",
+            "quant": "bf16",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": 3e-08
+            },
+            "agg": {
+              "n": 30,
+              "ok": 30,
+              "in_tok": 60000,
+              "cached_tok": 30000,
+              "out_tok": 15000,
+              "cost_usd": 0.03,
+              "cost_n": 30,
+              "lat_hist": [
+                0,
+                0,
+                5,
+                20,
+                5,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "baseten",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": null
+            },
+            "agg": {
+              "n": 25,
+              "ok": 20,
+              "missing_ids": 3,
+              "empty": 1,
+              "timeout": 1,
+              "in_tok": 50000,
+              "out_tok": 10000,
+              "lat_hist": [
+                2,
+                20,
+                3,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          }
+        ],
+        "mode": "stats",
+        "rng": [
+          0.04,
+          0.0
+        ]
+      },
+      "expected": {
+        "order": [
+          "together",
+          "deepinfra/fp8",
+          "baseten"
+        ],
+        "ignore": [],
+        "only": false,
+        "chosen": "together",
+        "reason": "explore",
+        "candidates": 3
+      }
+    },
+    {
+      "name": "stats_learning_behaves_like_auto",
+      "input": {
+        "candidates": [
+          {
+            "host": "deepinfra/fp8",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 2.5e-07,
+              "completion": 1e-06,
+              "cache_read": 5e-08
+            },
+            "agg": {
+              "n": 40,
+              "ok": 36,
+              "wrong_language": 2,
+              "http_error": 2,
+              "in_tok": 80000,
+              "cached_tok": 40000,
+              "out_tok": 20000,
+              "lat_hist": [
+                0,
+                10,
+                20,
+                8,
+                2,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "novita",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 2e-07,
+              "completion": 8e-07,
+              "cache_read": null
+            },
+            "agg": {
+              "n": 5,
+              "ok": 5
+            }
+          }
+        ],
+        "mode": "stats",
+        "rng": []
+      },
+      "expected": {
+        "order": [
+          "deepinfra/fp8",
+          "novita"
+        ],
+        "ignore": [],
+        "only": false,
+        "chosen": "deepinfra/fp8",
+        "reason": "learning",
+        "candidates": 2
+      }
+    },
+    {
+      "name": "auto_cache_capable_first",
+      "input": {
+        "candidates": [
+          {
+            "host": "deepinfra/fp8",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 2.5e-07,
+              "completion": 1e-06,
+              "cache_read": 5e-08
+            },
+            "agg": {
+              "n": 40,
+              "ok": 36,
+              "wrong_language": 2,
+              "http_error": 2,
+              "in_tok": 80000,
+              "cached_tok": 40000,
+              "out_tok": 20000,
+              "lat_hist": [
+                0,
+                10,
+                20,
+                8,
+                2,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "together",
+            "quant": "bf16",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": 3e-08
+            },
+            "agg": {
+              "n": 30,
+              "ok": 30,
+              "in_tok": 60000,
+              "cached_tok": 30000,
+              "out_tok": 15000,
+              "cost_usd": 0.03,
+              "cost_n": 30,
+              "lat_hist": [
+                0,
+                0,
+                5,
+                20,
+                5,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "baseten",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": null
+            },
+            "agg": {
+              "n": 25,
+              "ok": 20,
+              "missing_ids": 3,
+              "empty": 1,
+              "timeout": 1,
+              "in_tok": 50000,
+              "out_tok": 10000,
+              "lat_hist": [
+                2,
+                20,
+                3,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "novita",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 2e-07,
+              "completion": 8e-07,
+              "cache_read": null
+            },
+            "agg": {
+              "n": 5,
+              "ok": 5
+            }
+          }
+        ],
+        "mode": "auto",
+        "rng": []
+      },
+      "expected": {
+        "order": [
+          "deepinfra/fp8",
+          "together",
+          "novita",
+          "baseten"
+        ],
+        "ignore": [],
+        "only": false,
+        "chosen": "deepinfra/fp8",
+        "reason": "auto",
+        "candidates": 4
+      }
+    },
+    {
+      "name": "manual_only",
+      "input": {
+        "candidates": [
+          {
+            "host": "deepinfra/fp8",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 2.5e-07,
+              "completion": 1e-06,
+              "cache_read": 5e-08
+            },
+            "agg": {
+              "n": 40,
+              "ok": 36,
+              "wrong_language": 2,
+              "http_error": 2,
+              "in_tok": 80000,
+              "cached_tok": 40000,
+              "out_tok": 20000,
+              "lat_hist": [
+                0,
+                10,
+                20,
+                8,
+                2,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "together",
+            "quant": "bf16",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": 3e-08
+            },
+            "agg": {
+              "n": 30,
+              "ok": 30,
+              "in_tok": 60000,
+              "cached_tok": 30000,
+              "out_tok": 15000,
+              "cost_usd": 0.03,
+              "cost_n": 30,
+              "lat_hist": [
+                0,
+                0,
+                5,
+                20,
+                5,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "baseten",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": null
+            },
+            "agg": {
+              "n": 25,
+              "ok": 20,
+              "missing_ids": 3,
+              "empty": 1,
+              "timeout": 1,
+              "in_tok": 50000,
+              "out_tok": 10000,
+              "lat_hist": [
+                2,
+                20,
+                3,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          }
+        ],
+        "mode": "manual",
+        "model_rules": {
+          "manual_order": [
+            "baseten",
+            "together",
+            "missing"
+          ]
+        },
+        "rng": []
+      },
+      "expected": {
+        "order": [
+          "baseten",
+          "together"
+        ],
+        "ignore": [],
+        "only": true,
+        "chosen": "baseten",
+        "reason": "manual",
+        "candidates": 3
+      }
+    },
+    {
+      "name": "manual_with_fallback",
+      "input": {
+        "candidates": [
+          {
+            "host": "deepinfra/fp8",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 2.5e-07,
+              "completion": 1e-06,
+              "cache_read": 5e-08
+            },
+            "agg": {
+              "n": 40,
+              "ok": 36,
+              "wrong_language": 2,
+              "http_error": 2,
+              "in_tok": 80000,
+              "cached_tok": 40000,
+              "out_tok": 20000,
+              "lat_hist": [
+                0,
+                10,
+                20,
+                8,
+                2,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "together",
+            "quant": "bf16",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": 3e-08
+            },
+            "agg": {
+              "n": 30,
+              "ok": 30,
+              "in_tok": 60000,
+              "cached_tok": 30000,
+              "out_tok": 15000,
+              "cost_usd": 0.03,
+              "cost_n": 30,
+              "lat_hist": [
+                0,
+                0,
+                5,
+                20,
+                5,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "baseten",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": null
+            },
+            "agg": {
+              "n": 25,
+              "ok": 20,
+              "missing_ids": 3,
+              "empty": 1,
+              "timeout": 1,
+              "in_tok": 50000,
+              "out_tok": 10000,
+              "lat_hist": [
+                2,
+                20,
+                3,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "novita",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 2e-07,
+              "completion": 8e-07,
+              "cache_read": null
+            },
+            "agg": {
+              "n": 5,
+              "ok": 5
+            }
+          }
+        ],
+        "mode": "manual",
+        "model_rules": {
+          "manual_order": [
+            "baseten"
+          ],
+          "manual_fallback": true
+        },
+        "rng": []
+      },
+      "expected": {
+        "order": [
+          "baseten",
+          "deepinfra/fp8",
+          "together",
+          "novita"
+        ],
+        "ignore": [],
+        "only": false,
+        "chosen": "baseten",
+        "reason": "manual",
+        "candidates": 4
+      }
+    },
+    {
+      "name": "no_fp4_removes_fp4",
+      "input": {
+        "candidates": [
+          {
+            "host": "deepinfra/fp8",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 2.5e-07,
+              "completion": 1e-06,
+              "cache_read": 5e-08
+            },
+            "agg": {
+              "n": 40,
+              "ok": 36,
+              "wrong_language": 2,
+              "http_error": 2,
+              "in_tok": 80000,
+              "cached_tok": 40000,
+              "out_tok": 20000,
+              "lat_hist": [
+                0,
+                10,
+                20,
+                8,
+                2,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "together",
+            "quant": "bf16",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": 3e-08
+            },
+            "agg": {
+              "n": 30,
+              "ok": 30,
+              "in_tok": 60000,
+              "cached_tok": 30000,
+              "out_tok": 15000,
+              "cost_usd": 0.03,
+              "cost_n": 30,
+              "lat_hist": [
+                0,
+                0,
+                5,
+                20,
+                5,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "cheapfp4",
+            "quant": "fp4",
+            "prices": {
+              "prompt": 1e-07,
+              "completion": 4e-07,
+              "cache_read": null
+            },
+            "agg": {
+              "n": 50,
+              "ok": 50,
+              "lat_hist": [
+                50,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          }
+        ],
+        "mode": "stats",
+        "rng": [
+          0.9
+        ]
+      },
+      "expected": {
+        "order": [
+          "deepinfra/fp8",
+          "together"
+        ],
+        "ignore": [
+          "cheapfp4"
+        ],
+        "only": false,
+        "chosen": "deepinfra/fp8",
+        "reason": "best",
+        "candidates": 2
+      }
+    },
+    {
+      "name": "no_fp4_off_keeps_fp4",
+      "input": {
+        "candidates": [
+          {
+            "host": "deepinfra/fp8",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 2.5e-07,
+              "completion": 1e-06,
+              "cache_read": 5e-08
+            },
+            "agg": {
+              "n": 40,
+              "ok": 36,
+              "wrong_language": 2,
+              "http_error": 2,
+              "in_tok": 80000,
+              "cached_tok": 40000,
+              "out_tok": 20000,
+              "lat_hist": [
+                0,
+                10,
+                20,
+                8,
+                2,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "together",
+            "quant": "bf16",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": 3e-08
+            },
+            "agg": {
+              "n": 30,
+              "ok": 30,
+              "in_tok": 60000,
+              "cached_tok": 30000,
+              "out_tok": 15000,
+              "cost_usd": 0.03,
+              "cost_n": 30,
+              "lat_hist": [
+                0,
+                0,
+                5,
+                20,
+                5,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "cheapfp4",
+            "quant": "fp4",
+            "prices": {
+              "prompt": 1e-07,
+              "completion": 4e-07,
+              "cache_read": null
+            },
+            "agg": {
+              "n": 50,
+              "ok": 50,
+              "lat_hist": [
+                50,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          }
+        ],
+        "mode": "stats",
+        "no_fp4": false,
+        "rng": [
+          0.9
+        ]
+      },
+      "expected": {
+        "order": [
+          "cheapfp4",
+          "deepinfra/fp8",
+          "together"
+        ],
+        "ignore": [],
+        "only": false,
+        "chosen": "cheapfp4",
+        "reason": "best",
+        "candidates": 3
+      }
+    },
+    {
+      "name": "all_fp4_kept",
+      "input": {
+        "candidates": [
+          {
+            "host": "cheapfp4",
+            "quant": "fp4",
+            "prices": {
+              "prompt": 1e-07,
+              "completion": 4e-07,
+              "cache_read": null
+            },
+            "agg": {
+              "n": 50,
+              "ok": 50,
+              "lat_hist": [
+                50,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "other4",
+            "quant": "int4",
+            "prices": {
+              "prompt": 1e-07,
+              "completion": 4e-07,
+              "cache_read": null
+            },
+            "agg": {
+              "n": 50,
+              "ok": 50,
+              "lat_hist": [
+                50,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          }
+        ],
+        "mode": "auto",
+        "rng": []
+      },
+      "expected": {
+        "order": [
+          "cheapfp4",
+          "other4"
+        ],
+        "ignore": [],
+        "only": false,
+        "chosen": "cheapfp4",
+        "reason": "auto",
+        "candidates": 2
+      }
+    },
+    {
+      "name": "blocked_and_pinned",
+      "input": {
+        "candidates": [
+          {
+            "host": "deepinfra/fp8",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 2.5e-07,
+              "completion": 1e-06,
+              "cache_read": 5e-08
+            },
+            "agg": {
+              "n": 40,
+              "ok": 36,
+              "wrong_language": 2,
+              "http_error": 2,
+              "in_tok": 80000,
+              "cached_tok": 40000,
+              "out_tok": 20000,
+              "lat_hist": [
+                0,
+                10,
+                20,
+                8,
+                2,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "together",
+            "quant": "bf16",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": 3e-08
+            },
+            "agg": {
+              "n": 30,
+              "ok": 30,
+              "in_tok": 60000,
+              "cached_tok": 30000,
+              "out_tok": 15000,
+              "cost_usd": 0.03,
+              "cost_n": 30,
+              "lat_hist": [
+                0,
+                0,
+                5,
+                20,
+                5,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "baseten",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": null
+            },
+            "agg": {
+              "n": 25,
+              "ok": 20,
+              "missing_ids": 3,
+              "empty": 1,
+              "timeout": 1,
+              "in_tok": 50000,
+              "out_tok": 10000,
+              "lat_hist": [
+                2,
+                20,
+                3,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          }
+        ],
+        "mode": "stats",
+        "model_rules": {
+          "blocked": [
+            "deepinfra/fp8"
+          ],
+          "pinned": "baseten"
+        },
+        "rng": [
+          0.9
+        ]
+      },
+      "expected": {
+        "order": [
+          "baseten",
+          "together"
+        ],
+        "ignore": [
+          "deepinfra/fp8"
+        ],
+        "only": false,
+        "chosen": "baseten",
+        "reason": "pinned",
+        "candidates": 2
+      }
+    },
+    {
+      "name": "cooldown_moves_best_to_end",
+      "input": {
+        "candidates": [
+          {
+            "host": "deepinfra/fp8",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 2.5e-07,
+              "completion": 1e-06,
+              "cache_read": 5e-08
+            },
+            "agg": {
+              "n": 40,
+              "ok": 36,
+              "wrong_language": 2,
+              "http_error": 2,
+              "in_tok": 80000,
+              "cached_tok": 40000,
+              "out_tok": 20000,
+              "lat_hist": [
+                0,
+                10,
+                20,
+                8,
+                2,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "together",
+            "quant": "bf16",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": 3e-08
+            },
+            "agg": {
+              "n": 30,
+              "ok": 30,
+              "in_tok": 60000,
+              "cached_tok": 30000,
+              "out_tok": 15000,
+              "cost_usd": 0.03,
+              "cost_n": 30,
+              "lat_hist": [
+                0,
+                0,
+                5,
+                20,
+                5,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "baseten",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": null
+            },
+            "agg": {
+              "n": 25,
+              "ok": 20,
+              "missing_ids": 3,
+              "empty": 1,
+              "timeout": 1,
+              "in_tok": 50000,
+              "out_tok": 10000,
+              "lat_hist": [
+                2,
+                20,
+                3,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          }
+        ],
+        "mode": "stats",
+        "cooled": [
+          "together"
+        ],
+        "rng": [
+          0.9
+        ]
+      },
+      "expected": {
+        "order": [
+          "deepinfra/fp8",
+          "baseten",
+          "together"
+        ],
+        "ignore": [],
+        "only": false,
+        "chosen": "deepinfra/fp8",
+        "reason": "best",
+        "candidates": 3
+      }
+    },
+    {
+      "name": "cooldown_top_host_falls_back",
+      "input": {
+        "candidates": [
+          {
+            "host": "deepinfra/fp8",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 2.5e-07,
+              "completion": 1e-06,
+              "cache_read": 5e-08
+            },
+            "agg": {
+              "n": 40,
+              "ok": 36,
+              "wrong_language": 2,
+              "http_error": 2,
+              "in_tok": 80000,
+              "cached_tok": 40000,
+              "out_tok": 20000,
+              "lat_hist": [
+                0,
+                10,
+                20,
+                8,
+                2,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "together",
+            "quant": "bf16",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": 3e-08
+            },
+            "agg": {
+              "n": 30,
+              "ok": 30,
+              "in_tok": 60000,
+              "cached_tok": 30000,
+              "out_tok": 15000,
+              "cost_usd": 0.03,
+              "cost_n": 30,
+              "lat_hist": [
+                0,
+                0,
+                5,
+                20,
+                5,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "baseten",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": null
+            },
+            "agg": {
+              "n": 25,
+              "ok": 20,
+              "missing_ids": 3,
+              "empty": 1,
+              "timeout": 1,
+              "in_tok": 50000,
+              "out_tok": 10000,
+              "lat_hist": [
+                2,
+                20,
+                3,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          }
+        ],
+        "mode": "stats",
+        "cooled": [
+          "deepinfra/fp8"
+        ],
+        "rng": [
+          0.9
+        ]
+      },
+      "expected": {
+        "order": [
+          "together",
+          "baseten",
+          "deepinfra/fp8"
+        ],
+        "ignore": [],
+        "only": false,
+        "chosen": "together",
+        "reason": "fallback_cooldown",
+        "candidates": 3
+      }
+    },
+    {
+      "name": "all_cooled_keeps_rank",
+      "input": {
+        "candidates": [
+          {
+            "host": "deepinfra/fp8",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 2.5e-07,
+              "completion": 1e-06,
+              "cache_read": 5e-08
+            },
+            "agg": {
+              "n": 40,
+              "ok": 36,
+              "wrong_language": 2,
+              "http_error": 2,
+              "in_tok": 80000,
+              "cached_tok": 40000,
+              "out_tok": 20000,
+              "lat_hist": [
+                0,
+                10,
+                20,
+                8,
+                2,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "together",
+            "quant": "bf16",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": 3e-08
+            },
+            "agg": {
+              "n": 30,
+              "ok": 30,
+              "in_tok": 60000,
+              "cached_tok": 30000,
+              "out_tok": 15000,
+              "cost_usd": 0.03,
+              "cost_n": 30,
+              "lat_hist": [
+                0,
+                0,
+                5,
+                20,
+                5,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "baseten",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": null
+            },
+            "agg": {
+              "n": 25,
+              "ok": 20,
+              "missing_ids": 3,
+              "empty": 1,
+              "timeout": 1,
+              "in_tok": 50000,
+              "out_tok": 10000,
+              "lat_hist": [
+                2,
+                20,
+                3,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          }
+        ],
+        "mode": "stats",
+        "cooled": [
+          "deepinfra/fp8",
+          "together",
+          "baseten"
+        ],
+        "rng": [
+          0.9
+        ]
+      },
+      "expected": {
+        "order": [
+          "deepinfra/fp8",
+          "together",
+          "baseten"
+        ],
+        "ignore": [],
+        "only": false,
+        "chosen": "deepinfra/fp8",
+        "reason": "fallback_cooldown",
+        "candidates": 3
+      }
+    },
+    {
+      "name": "cooldown_auto",
+      "input": {
+        "candidates": [
+          {
+            "host": "deepinfra/fp8",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 2.5e-07,
+              "completion": 1e-06,
+              "cache_read": 5e-08
+            },
+            "agg": {
+              "n": 40,
+              "ok": 36,
+              "wrong_language": 2,
+              "http_error": 2,
+              "in_tok": 80000,
+              "cached_tok": 40000,
+              "out_tok": 20000,
+              "lat_hist": [
+                0,
+                10,
+                20,
+                8,
+                2,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "together",
+            "quant": "bf16",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": 3e-08
+            },
+            "agg": {
+              "n": 30,
+              "ok": 30,
+              "in_tok": 60000,
+              "cached_tok": 30000,
+              "out_tok": 15000,
+              "cost_usd": 0.03,
+              "cost_n": 30,
+              "lat_hist": [
+                0,
+                0,
+                5,
+                20,
+                5,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "baseten",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": null
+            },
+            "agg": {
+              "n": 25,
+              "ok": 20,
+              "missing_ids": 3,
+              "empty": 1,
+              "timeout": 1,
+              "in_tok": 50000,
+              "out_tok": 10000,
+              "lat_hist": [
+                2,
+                20,
+                3,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          }
+        ],
+        "mode": "auto",
+        "cooled": [
+          "together"
+        ],
+        "rng": []
+      },
+      "expected": {
+        "order": [
+          "deepinfra/fp8",
+          "baseten",
+          "together"
+        ],
+        "ignore": [],
+        "only": false,
+        "chosen": "deepinfra/fp8",
+        "reason": "auto",
+        "candidates": 3
+      }
+    },
+    {
+      "name": "sticky_first",
+      "input": {
+        "candidates": [
+          {
+            "host": "deepinfra/fp8",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 2.5e-07,
+              "completion": 1e-06,
+              "cache_read": 5e-08
+            },
+            "agg": {
+              "n": 40,
+              "ok": 36,
+              "wrong_language": 2,
+              "http_error": 2,
+              "in_tok": 80000,
+              "cached_tok": 40000,
+              "out_tok": 20000,
+              "lat_hist": [
+                0,
+                10,
+                20,
+                8,
+                2,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "together",
+            "quant": "bf16",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": 3e-08
+            },
+            "agg": {
+              "n": 30,
+              "ok": 30,
+              "in_tok": 60000,
+              "cached_tok": 30000,
+              "out_tok": 15000,
+              "cost_usd": 0.03,
+              "cost_n": 30,
+              "lat_hist": [
+                0,
+                0,
+                5,
+                20,
+                5,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "baseten",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": null
+            },
+            "agg": {
+              "n": 25,
+              "ok": 20,
+              "missing_ids": 3,
+              "empty": 1,
+              "timeout": 1,
+              "in_tok": 50000,
+              "out_tok": 10000,
+              "lat_hist": [
+                2,
+                20,
+                3,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          }
+        ],
+        "mode": "stats",
+        "sticky": "baseten",
+        "rng": [
+          0.9
+        ]
+      },
+      "expected": {
+        "order": [
+          "baseten",
+          "deepinfra/fp8",
+          "together"
+        ],
+        "ignore": [],
+        "only": false,
+        "chosen": "baseten",
+        "reason": "sticky",
+        "candidates": 3
+      }
+    },
+    {
+      "name": "sticky_ignored_when_cooled",
+      "input": {
+        "candidates": [
+          {
+            "host": "deepinfra/fp8",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 2.5e-07,
+              "completion": 1e-06,
+              "cache_read": 5e-08
+            },
+            "agg": {
+              "n": 40,
+              "ok": 36,
+              "wrong_language": 2,
+              "http_error": 2,
+              "in_tok": 80000,
+              "cached_tok": 40000,
+              "out_tok": 20000,
+              "lat_hist": [
+                0,
+                10,
+                20,
+                8,
+                2,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "together",
+            "quant": "bf16",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": 3e-08
+            },
+            "agg": {
+              "n": 30,
+              "ok": 30,
+              "in_tok": 60000,
+              "cached_tok": 30000,
+              "out_tok": 15000,
+              "cost_usd": 0.03,
+              "cost_n": 30,
+              "lat_hist": [
+                0,
+                0,
+                5,
+                20,
+                5,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "baseten",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": null
+            },
+            "agg": {
+              "n": 25,
+              "ok": 20,
+              "missing_ids": 3,
+              "empty": 1,
+              "timeout": 1,
+              "in_tok": 50000,
+              "out_tok": 10000,
+              "lat_hist": [
+                2,
+                20,
+                3,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          }
+        ],
+        "mode": "stats",
+        "sticky": "baseten",
+        "cooled": [
+          "baseten"
+        ],
+        "rng": [
+          0.9
+        ]
+      },
+      "expected": {
+        "order": [
+          "deepinfra/fp8",
+          "together",
+          "baseten"
+        ],
+        "ignore": [],
+        "only": false,
+        "chosen": "deepinfra/fp8",
+        "reason": "best",
+        "candidates": 3
+      }
+    },
+    {
+      "name": "pinned_beats_sticky",
+      "input": {
+        "candidates": [
+          {
+            "host": "deepinfra/fp8",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 2.5e-07,
+              "completion": 1e-06,
+              "cache_read": 5e-08
+            },
+            "agg": {
+              "n": 40,
+              "ok": 36,
+              "wrong_language": 2,
+              "http_error": 2,
+              "in_tok": 80000,
+              "cached_tok": 40000,
+              "out_tok": 20000,
+              "lat_hist": [
+                0,
+                10,
+                20,
+                8,
+                2,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "together",
+            "quant": "bf16",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": 3e-08
+            },
+            "agg": {
+              "n": 30,
+              "ok": 30,
+              "in_tok": 60000,
+              "cached_tok": 30000,
+              "out_tok": 15000,
+              "cost_usd": 0.03,
+              "cost_n": 30,
+              "lat_hist": [
+                0,
+                0,
+                5,
+                20,
+                5,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "baseten",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": null
+            },
+            "agg": {
+              "n": 25,
+              "ok": 20,
+              "missing_ids": 3,
+              "empty": 1,
+              "timeout": 1,
+              "in_tok": 50000,
+              "out_tok": 10000,
+              "lat_hist": [
+                2,
+                20,
+                3,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          }
+        ],
+        "mode": "auto",
+        "sticky": "baseten",
+        "model_rules": {
+          "pinned": "deepinfra/fp8"
+        },
+        "rng": []
+      },
+      "expected": {
+        "order": [
+          "deepinfra/fp8",
+          "together",
+          "baseten"
+        ],
+        "ignore": [],
+        "only": false,
+        "chosen": "deepinfra/fp8",
+        "reason": "pinned",
+        "candidates": 3
+      }
+    },
+    {
+      "name": "repair_avoid_goes_to_ignore",
+      "input": {
+        "candidates": [
+          {
+            "host": "deepinfra/fp8",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 2.5e-07,
+              "completion": 1e-06,
+              "cache_read": 5e-08
+            },
+            "agg": {
+              "n": 40,
+              "ok": 36,
+              "wrong_language": 2,
+              "http_error": 2,
+              "in_tok": 80000,
+              "cached_tok": 40000,
+              "out_tok": 20000,
+              "lat_hist": [
+                0,
+                10,
+                20,
+                8,
+                2,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "together",
+            "quant": "bf16",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": 3e-08
+            },
+            "agg": {
+              "n": 30,
+              "ok": 30,
+              "in_tok": 60000,
+              "cached_tok": 30000,
+              "out_tok": 15000,
+              "cost_usd": 0.03,
+              "cost_n": 30,
+              "lat_hist": [
+                0,
+                0,
+                5,
+                20,
+                5,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "baseten",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": null
+            },
+            "agg": {
+              "n": 25,
+              "ok": 20,
+              "missing_ids": 3,
+              "empty": 1,
+              "timeout": 1,
+              "in_tok": 50000,
+              "out_tok": 10000,
+              "lat_hist": [
+                2,
+                20,
+                3,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          }
+        ],
+        "mode": "stats",
+        "avoid": [
+          "together"
+        ],
+        "rng": [
+          0.9
+        ]
+      },
+      "expected": {
+        "order": [
+          "deepinfra/fp8",
+          "baseten"
+        ],
+        "ignore": [
+          "together"
+        ],
+        "only": false,
+        "chosen": "deepinfra/fp8",
+        "reason": "best",
+        "candidates": 2
+      }
+    },
+    {
+      "name": "repair_avoid_not_when_nothing_left",
+      "input": {
+        "candidates": [
+          {
+            "host": "together",
+            "quant": "bf16",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": 3e-08
+            },
+            "agg": {
+              "n": 30,
+              "ok": 30,
+              "in_tok": 60000,
+              "cached_tok": 30000,
+              "out_tok": 15000,
+              "cost_usd": 0.03,
+              "cost_n": 30,
+              "lat_hist": [
+                0,
+                0,
+                5,
+                20,
+                5,
+                0,
+                0,
+                0
+              ]
+            }
+          }
+        ],
+        "mode": "auto",
+        "avoid": [
+          "together"
+        ],
+        "rng": []
+      },
+      "expected": {
+        "order": [
+          "together"
+        ],
+        "ignore": [],
+        "only": false,
+        "chosen": "together",
+        "reason": "auto",
+        "candidates": 1
+      }
+    },
+    {
+      "name": "no_candidates_with_avoid",
+      "input": {
+        "candidates": [],
+        "mode": "stats",
+        "avoid": [
+          "together"
+        ],
+        "rng": []
+      },
+      "expected": {
+        "order": [],
+        "ignore": [
+          "together"
+        ],
+        "only": false,
+        "chosen": null,
+        "reason": "learning",
+        "candidates": 0
+      }
+    },
+    {
+      "name": "blocked_never_lets_fp4_back",
+      "input": {
+        "candidates": [
+          {
+            "host": "deepinfra/fp8",
+            "quant": "fp8",
+            "prices": {
+              "prompt": 2.5e-07,
+              "completion": 1e-06,
+              "cache_read": 5e-08
+            },
+            "agg": {
+              "n": 40,
+              "ok": 36,
+              "wrong_language": 2,
+              "http_error": 2,
+              "in_tok": 80000,
+              "cached_tok": 40000,
+              "out_tok": 20000,
+              "lat_hist": [
+                0,
+                10,
+                20,
+                8,
+                2,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "together",
+            "quant": "bf16",
+            "prices": {
+              "prompt": 3e-07,
+              "completion": 1.2e-06,
+              "cache_read": 3e-08
+            },
+            "agg": {
+              "n": 30,
+              "ok": 30,
+              "in_tok": 60000,
+              "cached_tok": 30000,
+              "out_tok": 15000,
+              "cost_usd": 0.03,
+              "cost_n": 30,
+              "lat_hist": [
+                0,
+                0,
+                5,
+                20,
+                5,
+                0,
+                0,
+                0
+              ]
+            }
+          },
+          {
+            "host": "cheapfp4",
+            "quant": "fp4",
+            "prices": {
+              "prompt": 1e-07,
+              "completion": 4e-07,
+              "cache_read": null
+            },
+            "agg": {
+              "n": 50,
+              "ok": 50,
+              "lat_hist": [
+                50,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          }
+        ],
+        "mode": "stats",
+        "rng": [],
+        "model_rules": {
+          "blocked": [
+            "deepinfra/fp8",
+            "together"
+          ]
+        }
+      },
+      "expected": {
+        "order": [],
+        "ignore": [
+          "cheapfp4",
+          "deepinfra/fp8",
+          "together"
+        ],
+        "only": false,
+        "chosen": null,
+        "reason": "learning",
+        "candidates": 0
+      }
+    }
+  ]
+}

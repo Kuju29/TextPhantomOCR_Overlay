@@ -33,6 +33,7 @@
       scopes.add(scope);
       scope.style.setProperty("--tp-font-scale", String(scale));
     },
+    // Removed overlays must not stay referenced until the next scale change.
     unregister(scope) {
       scopes.delete(scope);
     },

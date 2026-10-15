@@ -5,12 +5,10 @@ import {
   fitColumnFontSize,
   fitItemFontSize,
   fitParagraphFontSizeHorizontal,
-  // isCjkDominant,
   sharedParagraphFontSize,
 } from "../text-metrics.js";
-// `canRenderFaithfully` lives in the schema module, not here: the service
-// worker asks it too (before committing to the Lens-Direct route, which has no
-// server markup to fall back on) and the service worker has no DOM.
+// `canRenderFaithfully` lives in the schema module: the service worker needs it
+// too (before choosing the Lens-Direct route) and has no DOM.
 import {
   canRenderFaithfully,
   itemsForSource,
@@ -34,7 +32,6 @@ import { OVERLAY_CLASSES } from "./markup.js";
 import { OVERLAY_CSS } from "./css.js";
 import { makeLine } from "./line-renderer.js";
 import {
-  VERTICAL_TILT_DEG,
   translatedRotationSigns,
   verticalOriginalGeometries,
 } from "./vertical-layout.js";
@@ -44,21 +41,14 @@ import { fitTranslatedBlockFont } from "./translated-fit.js";
 import { originalDisplayGroups } from "./original-groups.js";
 
 export { canRenderFaithfully };
-export { itemGeometry, paragraphBlock, rotatedItemAabbGeometry };
-
 export { OVERLAY_CLASSES };
 
 export { OVERLAY_CSS };
 
 /**
- * Count AI bubbles whose drawn canvases land on top of one another.
- *
- * Two translations stacked in the same spot is the loudest way this layer can
- * fail. Independent single-paragraph horizontal Lens envelopes are allowed to
- * share a noisy AABB edge; those are partitioned at the midpoint before text
- * fitting, without relocating either paragraph. Remaining collisions are kept
- * diagnostic-only because grouped SOURCE regions can genuinely be spliced and
- * there is no honest second place to move them.
+ * Count AI bubbles whose drawn canvases overlap. Single-paragraph horizontal
+ * envelopes that share a noisy edge are split at the midpoint before fitting;
+ * other collisions are only reported, since grouped regions have nowhere else to go.
  */
 /**
  * One box covering a whole paragraph, for text that has no per-item split.
@@ -69,18 +59,14 @@ export { OVERLAY_CSS };
  * that no longer follows any one baseline.
  */
 /**
- * `paraId` is the LensDocument paragraph this line was drawn from, stamped as
- * `data-tp-para`. Every line of one bubble carries the same value, which is
- * what lets a reader select the whole bubble instead of a single visual row.
- * It is descriptive only — nothing in the rendering reads it back.
+ * `paraId` is stamped as `data-tp-para` on every line of a bubble so a reader can
+ * select the whole bubble. Nothing in the renderer reads it back.
  */
 /**
  * Render a LensDocument layer into a detached element.
  *
- * @returns {{root: HTMLElement, report: object}} The report says what was
- *   drawn and what was not. A paragraph skipped for want of text and a
- *   paragraph skipped for want of geometry look identical on screen — both are
- *   simply absent — so the caller is told which happened.
+ * @returns {{root: HTMLElement, report: object}} The report says what was not
+ *   drawn and why (missing text and missing geometry look identical on screen).
  */
 export { translatedRotationSigns };
 
@@ -122,11 +108,8 @@ export function renderOverlay(
     coveredByGroup: 0,
     // Bubbles drawn as one string across several columns.
     groupsDrawn: 0,
-    // Pairs of AI bubbles whose canvases still land on top of each other.
-    // The renderer cannot fix this — two groups whose SOURCE columns overlap
-    // have no two places to go — but two translations stacked in one spot is
-    // the most visible failure this layer has, so it is counted rather than
-    // drawn in silence. A non-zero count means grouping spliced a region.
+    // AI bubble pairs whose canvases still overlap (grouping spliced a region).
+    // The renderer cannot separate them, so they are counted, not hidden.
     aiBlocksOverlapping: 0,
     aiBlocksOverlappingIds: [],
   };
@@ -139,24 +122,17 @@ export function renderOverlay(
   const fidelity = canRenderFaithfully(doc, source);
   report.approximate = !fidelity.ok;
   if (!fidelity.ok && (fidelity.refuseLocal || !allowApproximate)) {
-    // Refused, not degraded. The caller uses the server's markup and logs that
-    // it did — which is a visible decision, unlike a page that quietly renders
-    // its translation in the wrong places. Resource-budget failures are hard
-    // refusals: `allowApproximate` may relax geometry fidelity, never resource
-    // safety.
+    // Refused, not degraded: the caller falls back to the server markup and logs
+    // it. `allowApproximate` may relax geometry fidelity, never resource limits.
     report.error = fidelity.reason;
     return { root, report };
   }
 
   // Paragraphs by id, so a bubble-group leader can reach its members' boxes.
-  // Built once: a group of 4 in a page of 40 would otherwise scan the list
-  // once per member.
   const byId = new Map((doc.paragraphs || []).map((p) => [String(p?.id), p]));
 
-  // AI text always comes back as one semantic string per translation unit.
-  // Build its target-language rows/columns HERE in the extension. The API is
-  // responsible for Lens upload, vertical Lens graph membership and text
-  // translation only; it must not be called again to build aiItems/HTML.
+  // AI text arrives as one string per translation unit; its rows/columns are
+  // laid out here. The API must not be called again to build aiItems/HTML.
   const aiLayouts = new Map();
   if (source === "ai") {
     const groupsByLeader = new Map();
@@ -305,12 +281,9 @@ export function renderOverlay(
       }
       const rebuilt = relayoutBlocks.get(paraId);
       if (rebuilt) {
-        // The target block represents the whole explicit Lens group, not only its
-        // leader paragraph.  A dark panel can be sampled differently by two
-        // narrow source columns (one catches a white edge / glyph, the other
-        // the black fill), so one dark member must flip the combined target to
-        // white ink.  The Original browser-translate group follows the same
-        // rule below.
+        // The target block covers the whole Lens group. Narrow columns can sample
+        // a dark panel differently, so one dark member flips the block to white ink
+        // (the Original browser-translate group follows the same rule).
         const onDark = rebuilt.members.some((member) =>
           Boolean(member?.textLight),
         );
@@ -336,42 +309,26 @@ export function renderOverlay(
       }
     }
 
-    // This column's sentence is drawn by another column of the same bubble.
-    // Lens split ONE vertical sentence into several paragraphs; the
-    // translation belongs to the bubble, and drawing it here as well would
-    // stack the whole sentence on top of itself once per column.
-    //
-    // Counted, not silently skipped: a page that is short a bubble because the
-    // grouping was wrong must not look the same as one where every bubble was
-    // drawn.
+    // Another column of this bubble draws the sentence; drawing it here too
+    // would stack it once per column. Counted so a page short a bubble does not
+    // look complete.
     if (source === "ai" && para.aiCoveredBy) {
       report.coveredByGroup++;
       continue;
     }
 
-    // Each layer draws from its OWN lines. `items` is Lens's source layout,
-    // `lensItems` its machine translation, `aiItems` the layout the AI text
-    // was fitted into — a translation does not break where the source did, so
-    // one layer's boxes are not usable for another's text.
-    //
-    // Resolved BEFORE the missing-text check, and that order is the whole
-    // point. It was the other way round on 2026-08-07 and every AI page came
-    // out blank: the server delivers its AI text inside `aiItems[].text`, so
-    // asking `para.aiText` first declared all four paragraphs missing and
-    // skipped them — while `canRenderFaithfully` had just said the layer was
-    // fine, because the items it needed were right there.
+    // Each layer draws from its OWN lines (`items` = Lens source layout,
+    // `lensItems` = Lens translation, `aiItems` = AI layout); one layer's boxes
+    // do not fit another's text. Resolved BEFORE the missing-text check: the
+    // server delivers AI text inside `aiItems[].text`, so checking `para.aiText`
+    // first would declare every such paragraph missing.
     let { items: layerItems, own: ownItems } = itemsForSource(para, source, {
       allowApproximate,
     });
 
-    // A bubble-group leader draws for the whole bubble, so it needs the whole
-    // bubble's boxes — its own column only covers part of the speech balloon,
-    // and one sentence squeezed into one column is unreadable.
-    //
-    // The SOURCE items are used deliberately: those are the columns Lens
-    // actually found on the page, which is where the bubble is. `aiItems`
-    // (per-line AI geometry) is a server-side product and does not exist on
-    // this path.
+    // A bubble-group leader draws for the whole bubble, so it needs every
+    // member's SOURCE boxes (where Lens found the columns); per-line `aiItems`
+    // do not exist on this path.
     const groupIds = source === "ai" ? para.aiGroupParagraphIds : null;
     if (Array.isArray(groupIds) && groupIds.length > 1) {
       const merged = [];
@@ -385,10 +342,8 @@ export function renderOverlay(
         merged.push(...(member.items || []));
       }
       if (missingMember) {
-        // A group naming a paragraph this document does not have means the
-        // grouping and the document have come apart. Drawing the sentence over
-        // whatever boxes did resolve would put it in the wrong place and still
-        // look deliberate.
+        // A group naming an unknown paragraph means grouping and document
+        // disagree; drawing anyway would look deliberate in the wrong place.
         report.missingLayer.push(para.id);
         continue;
       }
@@ -402,10 +357,8 @@ export function renderOverlay(
     }
     const layerItemText =
       ownItems && layerItems.some((i) => String(i?.text || "").trim());
-    // The AI layer is re-laid out and can land on different background than
-    // the source paragraph, so it carries its own reading. A grouped AI block
-    // spans every named column, therefore one dark member flips the whole
-    // combined block just like Original gtext and Translated relayout do.
+    // The re-laid-out AI block can sit on a different background than its source,
+    // so it samples its own; one dark member flips a grouped block.
     const paragraphOnDark = (member) =>
       Boolean(
         source === "ai" && member?.aiTextLight !== undefined
@@ -423,10 +376,8 @@ export function renderOverlay(
     const { text, layer } = textForSource(para, source);
     if (!layerItemText) {
       if (layer === "ai-missing") {
-        // The user asked for AI and this paragraph has none — no per-line text
-        // and no whole-paragraph string. Recorded by id so the caller can
-        // re-ask for exactly these, and so a half-translated page is never
-        // mistaken for a fully translated one.
+        // AI requested but this paragraph has none: recorded by id so the caller can
+        // re-ask for exactly these and a half-translated page is never shown as done.
         report.missingLayer.push(para.id);
         report.aiUnanswered.push(para.id);
         continue;
@@ -507,15 +458,11 @@ export function renderOverlay(
       continue;
     }
 
-    // No per-line text for this layer: one string over the paragraph's extent.
-    // Only reachable for a single-line paragraph (`itemsForSource` returns
-    // nothing for a multi-line one without its own items) or when the layer's
-    // text was patched in client-side, where one box is the right answer.
+    // No per-line text for this layer: one string over the paragraph's extent
+    // (single-line paragraphs, or text patched in client-side).
     let block = paragraphBlock(geometries);
-    // AI target text is laid out horizontally even when Lens's sole source
-    // line was vertical. Convert the rotated source rectangle to its upright
-    // pixel AABB; retaining rotate(-90deg) reproduces the source direction and
-    // prevents Thai from wrapping naturally.
+    // AI text is laid out horizontally even for a vertical source line: use the
+    // upright AABB so Thai wraps naturally instead of keeping rotate(-90deg).
     if (source === "ai" && Math.abs(Number(block.rotation) || 0) > 45) {
       const cx = block.leftPct + block.widthPct / 2;
       const cy = block.topPct + block.heightPct / 2;
@@ -530,11 +477,8 @@ export function renderOverlay(
         rotation: 0,
       };
     }
-    // Horizontal AI paragraphs can deliberately skip buildAiLineLayout above:
-    // their source box already has the right direction and one DOM block is
-    // the faithful layout. They still need the same Thai spacing policy as a
-    // rebuilt vertical bubble. Without this final boundary, cached/direct AI
-    // text bypasses the normaliser and visibly keeps provider word gaps.
+    // Horizontal AI paragraphs may skip buildAiLineLayout but still need the Thai
+    // spacing policy; without it cached/direct AI text keeps provider word gaps.
     const displayText =
       source === "ai" ? collapseThaiWordGaps(normalizeAiUnitText(text)) : text;
     const shouldWrap = source === "ai" || geometries.length > 1;
@@ -624,11 +568,8 @@ export function renderOverlay(
         target.onDark,
         ["tp-gtext", "tp-bubble"],
       );
-      // Rawkuma and similar reader pages commonly declare themselves English
-      // even when the inserted OCR is Japanese. Chrome otherwise translates
-      // this Japanese as if it were English and produces mostly Japanese/�
-      // output. Give the browser's own translator the OCR source language on
-      // the exact semantic group it is allowed to replace.
+      // Reader pages often declare English while the OCR is Japanese; give the
+      // browser translator the real source language for this group.
       if (sourceLanguage) line.setAttribute?.("lang", sourceLanguage);
       if (target.groupId) line.setAttribute?.("data-tp-group", target.groupId);
       line.setAttribute?.("translate", "yes");

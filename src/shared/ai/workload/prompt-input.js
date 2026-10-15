@@ -14,7 +14,7 @@ export function createPromptInputEstimator({ ai = {}, route = "", targetLang = "
   const plan = BUNDLED_CANONICAL_PROMPT_PLANS[normalizeLanguageCode(targetLang) || "en"];
   const structuredOutput = /schema|json/i.test(contract);
   const conversation = ai?.translation_mode === "conversation";
-  const styleExamples = ai?.style_examples !== false;
+  const styleExamples = ai?.style_examples === true;
   // Both direct Local and the API's nine named Local Independent providers
   // send four human examples. Cloud and Conversation still send twenty;
   // unknown routes retain the conservative API/legacy estimate.
@@ -27,7 +27,7 @@ export function createPromptInputEstimator({ ai = {}, route = "", targetLang = "
   // reaches the server estimator; only Direct Local consumes that selection.
   const independentExamples = conversation ? null : route === 'direct-local'
     ? ai?.independent_examples || compactHuman : apiLocalIndependent ? compactHuman : null;
-  const composed = composeCanonicalPrompt(plan, { ...ai, style_examples: styleExamples, page_context: [], source_context: [] }, image, structuredOutput, targetLang);
+  const composed = composeCanonicalPrompt(plan, { ...ai, style_examples: styleExamples, page_context: [], source_context: [] }, image || (conversation && ai.send_image), structuredOutput, targetLang);
   const system = composed.system;
   const fixedByCount = new Map();
   return (units, allUnits = units, capturedContext = ai.source_context) => {
@@ -47,7 +47,7 @@ export function createPromptInputEstimator({ ai = {}, route = "", targetLang = "
     }
     let context;
     try {
-      context = [capturedContext ? "" : pageContextText(selectPageContext(allUnits, units), targetLang),
+      context = ai?.conversation?.branch === 'repair' || ai?.repair_reason ? '' : [capturedContext ? "" : pageContextText(selectPageContext(allUnits, units), targetLang),
         sourceContextText(capturedContext, units, targetLang,
           conversation && units.every(unit => /^I[1-9][0-9]{0,6}_P[0-9]{1,6}$/.test(String(unit.id)))
             ? units.map(unit => String(unit.id)) : null)].filter(Boolean).join("\n\n");

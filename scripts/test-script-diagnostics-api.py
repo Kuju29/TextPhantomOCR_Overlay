@@ -37,4 +37,15 @@ short_invented = diagnose(
 assert short_invented["decision"] == "reject", short_invented
 assert short_invented["reason"] == "invented_third_script", short_invented
 
+for language in ("th", "ko"):
+    for text in ("MAPLE TRANSLATION", "+ MAPLE TRANSLATION", "++ MAPLE TRANSLATIONS", "MAPLE TRANSLATION M", "@maple_translation"):
+        item = _target_script_diagnostic(text, language, text, "P0")
+        assert item["decision"] == "accept", (language, text, item)
+    for text, source in (("THIS TRANSLATION", "THIS TRANSLATION"), ("NO TRANSLATION", "NO TRANSLATION"),
+                         ("STOP TRANSLATION", "STOP TRANSLATION"), ("MAPLE TRANSLATION", "DIFFERENT TRANSLATION"),
+                         ("THIS OUTPUT WAS NOT TRANSLATED AT ALL", "THIS OUTPUT WAS NOT TRANSLATED AT ALL"),
+                         ("MAPLE TRANSLATION HELLO", "MAPLE TRANSLATION HELLO")):
+        item = _target_script_diagnostic(text, language, source, "P0")
+        assert item["decision"] == "reject", (language, text, item)
+
 print("API source-aware third-script diagnostics passed: invented Cyrillic rejected, source-preserved name accepted.")

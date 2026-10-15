@@ -142,7 +142,7 @@ def _render_original_gtext_block(
 
     # Join into ONE text node. CJK sources have no word spaces — joining
     # their lines with spaces would feed Google fake word boundaries and
-    # (per the user's v1.0.1 experience) skew the translation.
+    # skew the translation.
     line_texts = [tx for _it, tx in items]
     sep = "" if _is_cjk_dominant("".join(line_texts)) else " "
     text = sep.join(line_texts)

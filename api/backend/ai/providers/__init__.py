@@ -22,6 +22,8 @@ _MODULES = (
 )
 if center_base_url():
     _MODULES = (*_MODULES, cloud_paid)
+    from backend.ai.login import login_translation
+    _MODULES = (*_MODULES, login_translation)
 
 def compose_providers(registry: ProviderRegistry = provider_registry) -> ProviderRegistry:
     """Register every canonical declaration exactly once in ``registry``.

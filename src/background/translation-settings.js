@@ -1,10 +1,12 @@
+import { activeTokenCeiling } from '../shared/token-ceiling.js';
+
 // Only semantic changes invalidate active translation results. Metadata and
 // scheduler/usage telemetry are intentionally excluded from this projection.
 const stable = value => value == null || typeof value !== 'object' ? JSON.stringify(value)
   : Array.isArray(value) ? `[${value.map(stable).join(',')}]`
   : `{${Object.keys(value).sort().map(k => `${JSON.stringify(k)}:${stable(value[k])}`).join(',')}}`;
 
-export function translationProfileIdentity(state) {
+function translationProfileIdentity(state) {
   const active = state?.active || {};
   const provider = state?.providers?.[active.providerIdentity] || {};
   const profile = provider.models?.[active.model]?.profile || {};
@@ -12,20 +14,31 @@ export function translationProfileIdentity(state) {
   return { active, provider: provider.provider, endpoint: provider.endpoint,
     thinking: profile.thinking, tokenPolicy: profile.tokenPolicy,
     temperature: profile.temperature, pageImage: profile.pageImage,
-    memoryMode: profile.memoryMode, styleExamples: profile.styleExamples !== false, providerOptions };
+    memoryMode: profile.memoryMode, translationMode: profile.translationMode, conversationReset: profile.conversationReset, styleExamples: profile.styleExamples === true, providerOptions,
+    // 10493: the token ceiling changes what one request asks for.
+    tokenCeiling: activeTokenCeiling(profile) };
 }
 
-export function translationSettingsChanged(changes, area = 'local') {
+export function translationSettingsChanged(changes, area = 'local', serviceMode) {
   if (area !== 'local' || !changes) return false;
   // These legacy/top-level values can change either translated text or the
   // cached HTML/image artifact. Scheduling, usage and fontScale are excluded:
   // fontScale is a live CSS variable applied again when a cached overlay is
   // mounted, while pacing/concurrency cannot change the semantic result.
   for (const key of ['mode', 'lang', 'sources', 'aiProvider', 'aiModel', 'aiRuntime',
-    'customApiUrl', 'aiProfilePromptsV1', 'aiProfileCredentialsV1',
+    'customApiUrl', 'aiServiceMode', 'aiProfilePromptsV1', 'aiProfileCredentialsV1',
     'aiOnDevice', 'localRender', 'engineMode', 'relayoutTranslated']) {
     const change = changes[key];
     if (change && stable(change.oldValue) !== stable(change.newValue)) return true;
+  }
+  // Support shares the verified account, but signing in/out must not cancel
+  // Manual/Local translation. Paid work still invalidates on identity change.
+  const activeMode = changes.aiServiceMode?.newValue ?? serviceMode;
+  if (activeMode == null || activeMode === 'paid') {
+    for (const key of ['paidModel', 'paidApiBase', 'paidSessionToken', 'paidAiProfilesV1', 'paidTranslationSource', 'loginProvider', 'loginModel', 'loginSessionId', 'loginAccountId', 'loginAiProfilesV1']) {
+      const change = changes[key];
+      if (change && stable(change.oldValue) !== stable(change.newValue)) return true;
+    }
   }
   const profile = changes.aiProfilesV1;
   return Boolean(profile && stable(translationProfileIdentity(profile.oldValue)) !==

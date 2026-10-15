@@ -7,6 +7,8 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <link rel="stylesheet" href="../shared/theme.css" />
   <link rel="stylesheet" href="popup.css" />
+  <link rel="stylesheet" href="../shared/customer-portal/view.css" />
+<link rel="stylesheet" href="../shared/ui-language.css" />
 </head>
 
 <body>
@@ -16,32 +18,40 @@
     </a>
     <!-- ============ HEADER ============ -->
     <header class="app-head">
-      <div class="brand">
+      <a class="brand tp-brand-link" href="https://kuju29.com/" target="_blank" rel="noopener noreferrer" aria-label="TextPhantom website">
         <img class="brand-icon" src="../icons/48.png" alt="" />
         <div class="brand-text">
-          <h1>TextPhantom</h1>
-          <span class="brand-sub">Manga image translator</span>
+          <h1 translate="no">TextPhantom</h1>
+          <span class="brand-sub" translate="yes">Manga image translator</span>
         </div>
-      </div>
+      </a>
+      <div data-tp-language-host></div>
       <span id="api-status-emoji" class="api-dot" aria-live="polite" title="Loading…">⏳</span>
     </header>
 
+    <script type="module" src="../support/popup-entry.js"></script>
     <!-- ============ TABS ============ -->
+    <div class="tabs-row">
     <nav class="tabs" role="tablist" aria-label="Sections">
       <button type="button" class="tab" id="tab-translate" data-tab="translate" role="tab"
         aria-controls="panel-translate" aria-selected="true">Translate</button>
       <button type="button" class="tab" id="tab-ai" data-tab="ai" role="tab" aria-controls="panel-ai"
-        aria-selected="false">Ai option</button>
+        aria-selected="false">AI settings</button>
       <button type="button" class="tab" id="tab-tools" data-tab="tools" role="tab" aria-controls="panel-tools"
         aria-selected="false">Tools</button>
     </nav>
+      <button type="button" id="open-guide" class="guide-btn" translate="no"
+        title="คู่มือการใช้งาน (User guide)" aria-label="เปิดคู่มือการใช้งาน (User guide)">
+        <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9.2"/><path d="M9.4 9.3a2.7 2.7 0 1 1 3.9 2.4c-.8.4-1.3 1-1.3 1.9v.4"/><path d="M12 17.2h.01"/></svg>
+      </button>
+    </div>
 
     <div class="panels">
       <!-- ============ 1. TRANSLATE ============ -->
       <section class="panel" id="panel-translate" role="tabpanel" aria-labelledby="tab-translate">
         <div id="api-gate-translate" class="api-offline-gate" role="alert" hidden>
           <strong>API server is offline.</strong>
-          Translation is paused. Check the API URL or start the server, then this page will recover automatically.
+          Check the API URL or start the server. Translation resumes automatically.
           <button type="button" id="api-gate-translate-open" class="secondary-btn">Open API settings</button>
         </div>
         <div class="field">
@@ -50,17 +60,16 @@
         </div>
 
         <div class="field" id="lang-wrap">
-          <label for="lang">Language</label>
-          <select id="lang" aria-label="Language"></select>
+          <label for="lang">Target language</label>
+          <select id="lang" translate="no" aria-label="Target language"></select>
         </div>
 
         <div class="field" id="sources-wrap" style="display: none">
-          <label for="sources">Source</label>
-          <select id="sources" aria-label="Source"></select>
+          <label for="sources">Text output</label>
+          <select id="sources" aria-label="Text output"></select>
         </div>
 
-        <div class="note">💡 Right-click any image on a page to translate it — or use the Page actions below on sites
-          that block right-click.</div>
+        <div class="note">Right-click an image to translate, or enable Page actions below.</div>
 
         <!-- Reading direction: rebuild text boxes when the page reads on a
                different axis than the target language. Only shown for the text
@@ -73,9 +82,7 @@
               <span>↔️ Rotate Translated to fit language</span>
               <input type="checkbox" id="relayout-translated" />
             </label>
-            <div class="hint">Vertical Japanese into horizontal Thai/English gets rebuilt into lines that read the right
-              way instead of sideways columns. Only runs on pages that actually change direction. Turn off to keep
-              Google Lens's original boxes.</div>
+            <div class="hint">Reflows vertical text for horizontal reading. Turn off to keep Google Lens boxes.</div>
           </div>
         </div>
 
@@ -100,7 +107,7 @@
               <button type="button" id="font-scale-reset" class="icon-btn" title="Reset to 100%"
                 aria-label="Reset font size">⟲</button>
             </div>
-            <div class="hint">Scales every translated line across all overlays at once.</div>
+            <div class="hint"></div>
           </div>
         </div>
 
@@ -113,18 +120,17 @@
             <span>🔍 Translate all images on this page</span>
             <input type="checkbox" id="translate-all-button-toggle" />
           </label>
-          <div class="hint">Shows a slim handle at the middle-right edge. Hover or tap to reveal Translate all.</div>
+          <div class="hint">Hover or tap the right-edge handle.</div>
           <label class="label-row toggle-row">
             <span>🔘 Translate buttons on images</span>
             <input type="checkbox" id="img-buttons-toggle" />
           </label>
-          <div class="hint">Shows a small 🔍 button only while hovering over an image so you can translate a single
-            image without right-clicking.</div>
+          <div class="hint">Appears when you hover over an image.</div>
           <label class="label-row toggle-row">
             <span>⬇ Download images</span>
             <input type="checkbox" id="download-images-toggle" />
           </label>
-          <div class="hint">Shows a small button at the bottom-right. Save all matching images as one ZIP, or save individual images. Remembers your image format. No new translation.</div>
+          <div class="hint">Bottom-right button: save images individually or as a ZIP. Does not start a translation.</div>
         </div>
       </section>
 
@@ -132,7 +138,7 @@
       <section class="panel" id="panel-ai" role="tabpanel" aria-labelledby="tab-ai">
         <div id="api-gate-ai" class="api-offline-gate" role="alert" hidden>
           <strong>API server is offline.</strong>
-          AI options are paused until the API URL responds. Local AI connection is checked separately.
+          Check the API connection. Local AI is checked separately.
           <button type="button" id="api-gate-ai-open" class="secondary-btn">Open API settings</button>
         </div>
         <section id="ai-group" class="ai-group" style="display: none">
@@ -152,7 +158,7 @@
             <div class="ai-usage-history-head"><h2 id="ai-usage-detailed-title">Current session requests</h2><button type="button" id="ai-usage-detailed-close" class="secondary-btn ai-usage-history-close">Close</button></div>
             <div class="ai-usage-history-list">
               <div id="ai-usage-detailed-list"></div>
-              <details class="ai-price-settings"><summary>Rates &amp; THB conversion</summary>
+              <details id="ai-price-settings" class="ai-price-settings"><summary>Rates &amp; THB conversion</summary>
                 <p>New requests use the rates below. Existing requests keep their original price. Estimates can exclude cache storage, plan fees, and conversion fees.</p>
                 <div id="ai-price-provider-rates">
                   <label>Input $/1M <input id="ai-price-input" type="number" min="0" step="any" /></label>
@@ -182,32 +188,93 @@
               <option value="paid">Paid · TextPhantom credits</option>
             </select>
           </div>
-          <div class="hint" id="ai-paid-unavailable" role="status" style="display: none"></div>
-          <div id="ai-paid-panel" style="display: none">
-            <div class="field" id="ai-paid-login">
-              <label for="ai-paid-email">Email</label>
-              <input id="ai-paid-email" type="email" autocomplete="email" placeholder="Your account email" />
-              <button type="button" id="ai-paid-send" class="secondary-btn">Send login code</button>
-              <button type="button" id="ai-paid-check" class="secondary-btn">Check login status</button>
-              <label for="ai-paid-code">Email code</label>
-              <input id="ai-paid-code" type="text" inputmode="numeric" pattern="[0-9]{6}"
-                     autocomplete="one-time-code" maxlength="6" placeholder="6 digits" />
-              <button type="button" id="ai-paid-verify" class="secondary-btn">Sign in</button>
-            </div>
-            <div class="field" id="ai-paid-account" style="display: none">
-              <div id="ai-paid-email-label"></div>
-              <div id="ai-paid-credits"></div>
-              <label for="ai-paid-model">Model</label>
-              <select id="ai-paid-model" aria-label="Paid model"></select>
-              <button type="button" id="ai-paid-refresh" class="secondary-btn">Refresh account</button>
-              <button type="button" id="ai-paid-logout" class="secondary-btn">Sign out</button>
-              <div class="hint">Credits are shared across devices on this account.</div>
-            </div>
-            <div class="hint" id="ai-paid-status" role="status"></div>
+          <div id="ai-paid-unavailable" class="paid-connection" role="status" style="display: none">
+            <span id="ai-paid-connection-message"></span>
+            <button type="button" id="ai-paid-check" class="paid-link">Try again</button>
           </div>
+          <section id="ai-paid-panel" class="paid-card" aria-label="TextPhantom account" style="display: none">
+            <div id="ai-paid-login">
+              <div class="paid-brand"><span class="paid-mark" aria-hidden="true">T</span> TextPhantom credits</div>
+              <h2 id="ai-paid-title">Sign in to TextPhantom</h2>
+              <p id="ai-paid-subtitle" class="paid-subtitle">No API key needed.</p>
+              <form id="ai-paid-email-step">
+                <label for="ai-paid-email">Email address</label>
+                <input id="ai-paid-email" name="email" type="email" autocomplete="email" required
+                       autocapitalize="none" spellcheck="false" maxlength="254" placeholder="you@example.com" />
+                <button type="submit" id="ai-paid-send" class="paid-primary">Continue with email <span aria-hidden="true">→</span></button>
+                <p class="paid-footnote">Sign in with an emailed code.</p>
+              </form>
+              <form id="ai-paid-code-step" style="display: none">
+                <p class="paid-recipient">For <strong id="ai-paid-code-email"></strong></p>
+                <label for="ai-paid-code">6-digit code</label>
+                <input id="ai-paid-code" name="code" type="text" inputmode="numeric" pattern="[0-9]{6}" required
+                       autocomplete="one-time-code" minlength="6" maxlength="6" placeholder="000000" aria-describedby="ai-paid-status" />
+                <button type="submit" id="ai-paid-verify" class="paid-primary">Verify &amp; sign in</button>
+                <p class="paid-footnote" id="ai-paid-spam-hint">No email after a minute? Check your spam or junk folder.</p>
+              <div class="paid-actions">
+                  <button type="button" id="ai-paid-change-email" class="paid-link">Change email</button>
+                  <button type="button" id="ai-paid-resend" class="paid-link">Resend code</button>
+                </div>
+              </form>
+            </div>
+            <div id="ai-paid-account" style="display: none">
+              <div class="paid-account-head"><span class="paid-brand">Your account</span><span id="ai-paid-account-state" class="paid-badge">Signed in</span></div>
+              <div id="ai-paid-email-label" data-tp-ui-private class="paid-email"></div>
+              <div class="paid-wallet">
+                <span class="paid-wallet-label">Available credits</span>
+                <strong id="ai-paid-credits" data-tp-ui-private>— TP</strong>
+                <span id="ai-paid-held" class="paid-footnote"></span>
+              </div>
+              <div class="paid-purchase-actions">
+                <button type="button" id="ai-paid-buy" class="paid-primary">Buy credits</button>
+                <button type="button" id="ai-paid-details" class="paid-secondary">Account details</button>
+              </div>
+              <div class="field" id="ai-paid-source-wrap" style="display:none">
+                <label for="ai-paid-source">Translation source</label>
+                <select id="ai-paid-source"><option value="tp">TP Model</option><option value="login">Login</option></select>
+              </div>
+              <div id="ai-paid-tp-model">
+              <div class="paid-model-heading"><span>Translation model</span><small>TP / 1,000 tokens</small></div>
+              <select id="ai-paid-model" translate="no" aria-label="Paid model" hidden></select>
+              <details id="ai-paid-model-picker" class="paid-model-picker">
+                <summary aria-label="Choose translation model"><span id="ai-paid-model-name" translate="no">Select model…</span></summary>
+                <div class="paid-model-search-row"><input id="ai-paid-model-search" class="paid-model-search" type="search" placeholder="Search models (name or id)" autocomplete="off" spellcheck="false" aria-label="Search translation models" aria-controls="ai-paid-model-options"></div>
+                <div class="paid-model-columns"><span>Model</span><span>Input</span><span>Output</span></div>
+                <div id="ai-paid-model-options" class="paid-model-options"></div>
+                <p id="ai-paid-model-empty" class="paid-model-empty" hidden>No model matches this search.</p>
+              </details>
+              <div class="paid-model-rates">
+                <div><span>Input</span><strong id="ai-paid-model-input" translate="no">—</strong><small>per 1,000 tokens</small></div>
+                <div><span>Output</span><strong id="ai-paid-model-output" translate="no">—</strong><small>per 1,000 tokens</small></div>
+              </div>
+              <p id="ai-paid-model-price-status" class="paid-footnote"></p>
+              <details class="paid-pricing-help">
+                <summary>How credits are calculated</summary>
+                <p>Input includes prompts and context; output may include Thinking. Caching, images and provider routing affect cost.</p>
+                <p>Charges use actual provider usage. Reservations are temporary; unused credits are released. See final charges in Account details.</p>
+              </details>
+                </div>
+              <section id="ai-login-panel" style="display:none" class="paid-login-source">
+                <div class="field"><label for="ai-login-provider">Provider</label><select id="ai-login-provider" translate="no"><option value="login_chatgpt">ChatGPT</option></select></div>
+                <div class="field" id="ai-login-project-wrap" style="display:none"><label for="ai-login-project">Google Cloud project ID</label><input type="text" id="ai-login-project" autocomplete="off" spellcheck="false" maxlength="63" placeholder="your-cloud-project" /><p class="paid-footnote">Uses your Google Cloud API billing. A Gemini website subscription does not cover these API requests.</p></div>
+                <p id="ai-login-account" class="paid-footnote">Use your own AI account</p>
+                <p id="ai-login-support" class="paid-footnote" role="note" style="display:none"></p>
+                <div class="paid-purchase-actions"><button type="button" id="ai-login-connect" class="paid-primary">Sign in</button><button type="button" id="ai-login-refresh" class="paid-secondary">Refresh</button><button type="button" id="ai-login-cancel" class="paid-secondary" style="display:none">Cancel</button><button type="button" id="ai-login-logout" class="paid-secondary" style="display:none">Logout</button></div>
+                <div class="field" id="ai-login-model-wrap" style="display:none"><label for="ai-login-model">Model</label><select id="ai-login-model" translate="no"></select></div>
+                <p id="ai-login-status" class="paid-footnote" role="status" aria-live="polite"></p>
+              </section>
+              <div class="paid-actions">
+                <button type="button" id="ai-paid-refresh" class="paid-link">Refresh balance</button>
+                <button type="button" id="ai-paid-logout" class="paid-link">Sign out</button>
+              </div>
+              <p class="paid-footnote">Your balance is shared across devices.</p>
+            </div>
+            <div id="ai-paid-inline" class="paid-inline" hidden></div>
+            <div id="ai-paid-status" class="paid-status" role="status" aria-live="polite" aria-atomic="true"></div>
+          </section>
           <div class="field" id="ai-provider-wrap">
             <label for="ai-provider">Provider</label>
-            <select id="ai-provider" aria-label="AI provider">
+            <select id="ai-provider" translate="no" aria-label="AI provider">
               <option value="" disabled selected>Select provider…</option>
               <optgroup id="ai-cloud-provider-options" label="Cloud (needs API key)"></optgroup>
               <optgroup id="ai-local-provider-options" label="Local (runs on your PC — no key)">
@@ -223,9 +290,9 @@
               <a id="ai-local-website" href="#" target="_blank" rel="noopener noreferrer" hidden>(website)</a>
             </div>
             <input type="text" id="ai-base-url" placeholder="http://localhost:11434" />
-            <div class="hint">Local server address. No API key.</div>
+            <div class="hint">No API key needed.</div>
             <button type="button" id="ai-local-test" class="secondary-btn">Refresh models</button>
-            <div class="hint" id="ai-local-status">Models load automatically when Local AI is selected.</div>
+            <div class="hint" id="ai-local-status"></div>
             <div id="ai-local-adapter-wrap" style="display: none; margin-top: 10px">
               <label for="ai-local-adapter">Custom adapter JSON</label>
               <textarea id="ai-local-adapter" rows="9" spellcheck="false"
@@ -238,16 +305,16 @@
           <div class="field" id="ai-key-wrap">
             <div class="label-row label-row--inline">
               <label for="ai-key">API key</label>
-              <a id="ai-key-get" href="#" target="_blank" rel="noopener noreferrer">(get key)</a>
+              <a id="ai-key-get" data-tp-ui-private href="#" target="_blank" rel="noopener noreferrer">(get key)</a>
             </div>
             <input type="password" id="ai-key" aria-describedby="ai-key-hint" placeholder="Paste your API key" />
-            <div class="hint" id="ai-key-hint">Required for this Cloud provider.</div>
+            <div class="hint" id="ai-key-hint"></div>
           </div>
 
           <div class="field" id="ai-model-wrap" style="display: none">
             <label for="ai-model">Model <span aria-hidden="true">(required)</span></label>
-            <select id="ai-model" aria-label="AI Model"></select>
-            <div class="hint" id="ai-local-model-hint" style="display: none">Installed models are loaded from the selected Local AI runtime. Choosing a model checks its runtime metadata automatically.</div>
+            <select id="ai-model" translate="no" aria-label="AI Model"></select>
+            <div class="hint" id="ai-local-model-hint" style="display: none"></div>
             <div id="ai-local-capacity-wrap" style="display: none; margin-top: 10px">
               <label for="ai-local-capacity-mode">Local AI capacity</label>
               <select id="ai-local-capacity-mode" aria-label="Local AI capacity mode">
@@ -257,14 +324,14 @@
               </select>
               <div id="ai-local-manual-concurrency-wrap" style="display: none; margin-top: 6px">
                 <label for="ai-local-manual-concurrency">Simultaneous requests</label>
-                <select id="ai-local-manual-concurrency" aria-label="Local AI simultaneous requests">
+                <select id="ai-local-manual-concurrency" translate="no" aria-label="Local AI simultaneous requests">
                   <option value="1">1</option>
                   <option value="2">2</option>
                   <option value="3">3</option>
                   <option value="4">4</option>
                 </select>
               </div>
-              <div class="hint" id="ai-local-capacity-hint">Auto adapts to this model.</div>
+              <div class="hint" id="ai-local-capacity-hint"></div>
             </div>
           </div>
 
@@ -295,7 +362,7 @@
               </span>
             </label>
             <textarea id="ai-prompt" rows="8"
-              placeholder="Optional custom translation style. Leave empty to use the built-in style."></textarea>
+              placeholder="Leave empty to use the built-in prompt."></textarea>
             <div id="ai-prompt-count" class="prompt-count" aria-live="polite"></div>
           </div>
 
@@ -314,75 +381,43 @@
               </select>
             </label>
             <label class="label-row" id="ai-style-examples-wrap" style="cursor: pointer">
-              <span>Use style examples</span>
-              <input type="checkbox" id="ai-style-examples" checked />
+              <span>Use human translation examples</span>
+              <input type="checkbox" id="ai-style-examples" aria-describedby="ai-style-examples-hint" />
             </label>
+            <div id="ai-style-examples-hint" class="hint">Local Independent: first use human examples (English, Japanese and Thai), then accepted AI translations from this run. This switch controls both. Saved for this model.</div>
             <div id="ai-characters-count" class="hint">No memory for this series yet</div>
             <div id="ai-memory-hint" class="hint"></div>
           </div>
 
           <div class="field" id="ai-page-image-wrap" style="display: none">
             <label class="label-row" style="cursor: pointer">
-              <span>Page image to AI</span>
+              <span>Send page image to AI</span>
               <input type="checkbox" id="ai-page-image" />
             </label>
-            <div class="hint">For vision models. Uses more time and memory.</div>
+            <div class="hint">Images may increase time and cost.</div>
           </div>
 
-          <!-- Rate limit: pace requests to the user's own model quota. -->
-          <div class="field" id="ai-rate-wrap" style="display: none">
+          <!-- Per-model token ceiling (replaces the request-rate cap). -->
+          <div class="field" id="ai-token-ceiling-wrap" style="display: none">
             <label class="label-row" style="cursor: pointer">
-              <span>Use a manual AI request-rate cap</span>
-              <input type="checkbox" id="rate-limit-enabled" />
+              <span>Set a token ceiling</span>
+              <input type="checkbox" id="ai-token-ceiling-enabled" aria-describedby="ai-token-ceiling-default ai-token-ceiling-hint" />
             </label>
             <label class="rate-field">
-              <span>Speed profile</span>
-              <select id="rate-profile">
-                <option value="auto">Provider managed (recommended)</option>
-                <option value="stable">Stable</option>
-                <option value="balanced">Balanced</option>
-                <option value="fast">Fast</option>
-                <option value="custom">Custom</option>
-              </select>
+              <span>Tokens per AI request (prompt + text + reply)</span>
+              <input type="number" id="ai-token-ceiling" min="256" max="2000000" step="256" inputmode="numeric" disabled />
             </label>
-            <div class="inline-row rate-row" id="rate-custom-fields">
-              <label class="rate-field">
-                <span>AI requests / minute (including repair)</span>
-                <input type="number" id="rate-rpm" min="1" max="600" step="1" placeholder="Auto" />
-              </label>
-              <label class="rate-field">
-                <span>Requests allowed back-to-back</span>
-                <input type="number" id="rate-burst" min="1" max="60" step="1" placeholder="Auto" />
-              </label>
-            </div>
-            <div id="rate-preset-hint" class="hint rate-preset" aria-live="polite"></div>
-            <div class="hint">Optional Cloud-only request-rate cap, separate from per-request token limits. Off means provider managed. Unknown token/minute limits are not guessed.</div>
-          </div>
-          <div class="field" id="ai-local-rate-wrap" style="display: none">
-            <label class="label-row" style="cursor: pointer">
-              <span>Use a manual AI request-rate cap</span>
-              <input type="checkbox" id="ai-local-rate-enabled" />
-            </label>
-            <div class="inline-row rate-row">
-              <label class="rate-field">
-                <span>Local AI requests / minute (including repair)</span>
-                <input type="number" id="ai-local-rate-rpm" min="1" max="600" step="1" value="6" />
-              </label>
-              <label class="rate-field">
-                <span>Requests allowed back-to-back</span>
-                <input type="number" id="ai-local-rate-burst" min="1" max="60" step="1" value="1" />
-              </label>
-            </div>
-            <div id="ai-local-rate-hint" class="hint" aria-live="polite"></div>
-            <div class="hint">Optional pacing between Local AI requests. For a slow PC, also use Local AI capacity → Safe. Cloud settings remain separate.</div>
+            <div id="ai-token-ceiling-default" class="hint" aria-live="polite"></div>
+            <div id="ai-token-ceiling-warning" class="hint rate-preset" data-warn="1" aria-live="polite" hidden></div>
+            <div id="ai-token-ceiling-hint" class="hint">A higher ceiling puts more text in each request, so fewer requests are needed. Off uses the default. Above what the model can really answer, replies can run out of space and fail. Saved for this model.</div>
           </div>
           <div class="field" id="ai-translation-mode-wrap">
-            <label class="label-row" for="ai-translation-mode">Translation mode</label>
+            <label class="label-row" for="ai-translation-mode">AI request mode</label>
             <select id="ai-translation-mode" disabled aria-label="Assigned translation mode">
               <option value="conversation" selected>Conversation</option>
               <option value="independent">Independent</option>
             </select>
-            <div class="hint">Cloud uses Conversation. All Local AI providers, including LM Studio, use Independent. The mode follows the provider automatically.</div>
+            <div class="hint">Assigned automatically: Cloud → Conversation; Local → Independent.</div>
           </div>
         </section>
       </section>
@@ -392,10 +427,10 @@
         <div class="section-title">Local viewer</div>
         <div class="field">
           <div class="file-actions">
-            <button type="button" id="open-local-images" class="action-btn primary">Select a image</button>
+            <button type="button" id="open-local-images" class="action-btn primary">Select images</button>
             <button type="button" id="open-local-folder" class="action-btn secondary">Select folder</button>
           </div>
-          <div class="hint">Open images in the local reader. For folders in Brave, enable
+          <div class="hint">For folders in Brave, enable
             <code>brave://flags/#file-system-access-api</code>.</div>
           <div id="local-picker-msg" class="hint local-picker-msg" role="status" aria-live="polite"></div>
           <input id="local-images-input" type="file" accept="image/*" multiple hidden />
@@ -407,7 +442,7 @@
           <div class="file-actions">
             <button type="button" id="open-auto-translate" class="action-btn primary">Auto translate</button>
           </div>
-          <div class="hint">Drop, paste or upload one image for immediate translation.</div>
+          <div class="hint">Paste, drop or upload one image.</div>
         </div>
 
         <div class="divider" role="separator"></div>
@@ -420,13 +455,13 @@
             <button id="reset-api" class="icon-btn" aria-label="Reset to default"
               title="Reset to default API">⟲</button>
           </div>
-          <div class="hint">Leave empty to use the managed default server.</div>
+          <div class="hint">Leave empty for the default server.</div>
           <div id="api-local-unlimited-wrap" style="display: none">
             <label class="label-row" style="cursor: pointer; margin-top: 8px">
               <span>Remove server pacing for this local API</span>
               <input type="checkbox" id="api-local-unlimited" />
             </label>
-            <div class="hint">Removes API pacing on your local network. Safety limits stay active.</div>
+            <div class="hint">Safety limits still apply.</div>
           </div>
         </div>
 
@@ -436,16 +471,28 @@
             <option value="extension">Extension (default)</option>
             <option value="api" disabled aria-disabled="true">API server (temporarily unavailable)</option>
           </select>
-          <div class="hint engine-mode-availability" id="engine-mode-availability" role="status">API server mode is temporarily unavailable; work will run in the extension.</div>
-          <div class="hint" id="engine-mode-hint">Extension runs the page workflow; API handles remote services.</div>
+          <div class="hint engine-mode-availability" id="engine-mode-availability" role="status">API server mode is unavailable.</div>
+          <div class="hint" id="engine-mode-hint"></div>
         </div>
 
         <div class="divider" role="separator"></div>
         <div class="section-title">Reset</div>
         <div class="field">
           <button type="button" id="reset-defaults" class="action-btn secondary">Reset defaults</button>
-          <div class="hint">Clears settings and reloads current defaults.</div>
+          <div class="hint"></div>
           <div id="reset-defaults-status" class="hint" role="status" aria-live="polite"></div>
+        </div>
+
+        <div class="contact-admin-section">
+          <div class="divider" role="separator"></div>
+          <div class="section-title">Support</div>
+          <button type="button" id="contact-admin" class="contact-admin-card" hidden>
+            <span class="contact-admin-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M21 11.5a8.4 8.4 0 0 1-8.5 8.3H7.3L3 22.5l1.4-4.8A8.1 8.1 0 0 1 4 11.5 8.4 8.4 0 0 1 12.5 3.2 8.4 8.4 0 0 1 21 11.5Z"/><path d="M8.5 11.5h.01M12.5 11.5h.01M16.5 11.5h.01"/></svg></span>
+            <span class="contact-admin-text"><strong>Contact admin</strong><small>Chat with the TextPhantom admin</small></span>
+            <span id="contact-admin-badge" class="contact-admin-badge" hidden><span class="sr-only">Unread messages</span><span id="contact-admin-unread" translate="no"></span></span>
+            <svg class="contact-admin-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+          </button>
+          <small id="contact-admin-status" class="contact-admin-status" role="status" hidden></small>
         </div>
 
       </section>
@@ -455,7 +502,8 @@
 
   <script src="../shared/compat.js"></script>
   <script src="tabs.js"></script>
-  <script type="module" src="popup.js"></script>
+  <script type="module" src="../shared/ui-language-entry.js"></script>
+<script type="module" src="popup.js"></script>
 </body>
 
 </html>

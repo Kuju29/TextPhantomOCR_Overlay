@@ -145,7 +145,7 @@ export async function composeImageResponse(blob, headers, {signal = null, hint =
     }
     const output=await canvas.convertToBlob({type:'image/png'});
     signal?.throwIfAborted?.();
-    if (output.type !== 'image/png' || output.size < 64 || output.size > 25*1024*1024)
+    if (output.type !== 'image/png' || output.size < 64 || output.size > 24*1024*1024) // API image cap (MAX_API_IMAGE_BYTES)
       throw fail('IMAGE_COMPOSE_ENCODE_FAILED','Composed image could not be encoded');
     onResult?.('complete',{kind:'tiles',width,height,bytes:output.size});
     return output;

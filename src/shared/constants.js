@@ -1,7 +1,4 @@
-/**
- * Constants shared across the extension (API paths, defaults, fallbacks).
- *
- */
+/** Constants shared across the extension (API paths, defaults, fallbacks). */
 
 import { cloudRatePresets } from "./ai/providers/cloud-registry.js";
 
@@ -13,19 +10,14 @@ export const API_PATHS = {
   TRANSLATE: "/translate",
   TRANSLATE_CANCEL: "/translate/cancel",
   TRANSLATE_POLL: "/translate/poll",
-  // v1: one request, one result. TRANSLATE/TRANSLATE_POLL above are the legacy
-  // submit+poll pair, kept so an updated extension still works against a
-  // server that has not been deployed yet.
+  // v1: one request, one result. TRANSLATE/TRANSLATE_POLL above are the
+  // submit+poll pair for servers without the v1 routes.
   CAPABILITIES: "/v1/capabilities",
   TRANSLATE_V1: "/v1/translate",
-  // No LENS_DECODE. The protobuf decode runs in the service worker now
-  // (`src/shared/lens-tree.js`, `README.md#architecture-and-ownership`). The server route
-  // still exists for older builds, but nothing in this one calls it, and a
-  // constant for a path we never request is a wrong answer to "what does the
-  // extension talk to?".
-  // Service 1: the API uploads to Lens and returns the response UNDECODED, so
-  // the service worker can decode it with `src/shared/lens-tree.js`. A browser
-  // cannot do this upload itself; see `README.md#architecture-and-ownership`.
+  // No LENS_DECODE: the protobuf decode runs in the service worker
+  // (`src/shared/lens-tree.js`). LENS_RAW: the API uploads to Lens (a browser
+  // cannot) and returns the response UNDECODED; see
+  // `README.md#architecture-and-ownership`.
   LENS_RAW: "/v1/lens/raw",
   // Service 3: text units only. The image/tree stays in the extension.
   AI_TRANSLATE_V1: "/v1/ai/translate",
@@ -36,9 +28,16 @@ export const API_PATHS = {
   ENGINE_EXTENSION_AI_TRANSLATE: "/v2/engine/runsextension/ai/translate",
   ENGINE_API_TRANSLATE: "/v2/engine/runsapi/translate",
   AI_RESOLVE: "/ai/resolve",
-  AI_PROBE: "/ai/probe",
   AI_PROMPT_DEFAULT: "/ai/prompt/default",
 };
+
+/**
+ * Largest image the extension sends to the API. The API rejects decoded
+ * images above TP_MAX_IMAGE_BYTES (24 MiB) and caps request bodies from it, so
+ * a larger page fails here with a clear image-size error instead of a 413.
+ * Content scripts (classic scripts) repeat the literal 24 * 1024 * 1024.
+ */
+export const MAX_API_IMAGE_BYTES = 24 * 1024 * 1024;
 
 /** Select an engine-owned route only when the server explicitly advertises it. */
 export function engineApiPath(capabilities, canonicalPath, compatibilityAlias) {
@@ -55,10 +54,14 @@ export const MODES = [
 
 /** Overlay sources for `lens_text` mode. */
 export const FALLBACK_SOURCES = [
-  { id: "original", name: "Original" },
-  { id: "translated", name: "Translated" },
-  { id: "ai", name: "Ai" },
+  { id: "original", name: "Original text" },
+  { id: "translated", name: "Lens translation" },
+  { id: "ai", name: "AI translation" },
 ];
+/** Older API metadata may advertise ambiguous display names; protocol IDs stay intact. */
+export const canonicalSourceNames = (sources) => sources.map((source) => ({
+  ...source, name: FALLBACK_SOURCES.find((known) => known.id === source.id)?.name || source.name,
+}));
 
 /** Stored-settings defaults. */
 export const DEFAULT_MODE = "lens_text";
@@ -70,18 +73,10 @@ export const DEFAULT_MAX_CONCURRENCY = 0;
 
 /**
  * How the content script encodes a canvas-captured page before uploading it.
- *
- * PNG was the original behaviour and is lossless, but a full manga page costs
- * 5-15 MB — base64'd (+33%) through the service worker, over the wire, and
- * then decoded by the API container, where on a 2-vCPU box that decode is the
- * heaviest thing the direct lane does before translation even starts. WebP
- * q92 is visually equivalent at OCR resolution and 15-25x smaller.
- *
- * Set `uploadFormat` to "png" to restore the lossless upload. The API accepts
- * any of these, so this switch is independent of the server's own
- * TP_LENS_DIRECT_IMG_FORMAT (which governs the RESULT background, not the
- * upload). Mirrored in content/payload.js — content scripts are classic
- * scripts and cannot import this module, so keep both in sync.
+ * WebP q92 is visually equivalent to PNG at OCR resolution and 15-25x smaller
+ * (a PNG page is 5-15 MB before base64). "png" restores lossless upload; this is
+ * independent of the server's TP_LENS_DIRECT_IMG_FORMAT (the RESULT background).
+ * Mirrored in content/payload.js (a classic script): keep both in sync.
  */
 export const DEFAULT_UPLOAD_FORMAT = "webp";
 export const DEFAULT_UPLOAD_QUALITY = 0.92;

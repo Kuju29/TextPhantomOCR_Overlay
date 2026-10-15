@@ -1,3 +1,4 @@
+import { classifyThinkingState, sendsProviderDefault } from "../../shared/thinking-state.js";
 import {
   localAiPreset,
   normalizeLocalAiAdapter,
@@ -8,6 +9,8 @@ import {
 import { normalizeReasoningPreference } from "../../shared/reasoning-preference.js";
 import { note } from "../../shared/trace.js";
 import { broadcast } from "../../shared/messaging.js";
+import { setUiParts, setUiText } from "../../shared/ui-template.js";
+import {createManualProviderViewCache,manualProviderViewScope} from './manual-provider-view-cache.js';
 import {
   LOCAL_CAPABILITY_SNAPSHOTS_KEY,
   LOCAL_MODEL_VERIFICATION_MAX_AGE_MS,
@@ -59,6 +62,10 @@ function lmStudioThinkingStatus(capability, selected, requested) {
   const mode = normalizeReasoningPreference(requested, "minimum");
   if (mode === "minimum" || mode === "default") return {ready:true,reason:"runtime_or_verified_minimum"};
   const reasoning = capability?.models?.[selected]?.reasoning;
+  // No control is offered for this model, so the saved mode is kept and
+  // the request uses the provider default instead of blocking the model.
+  if (capability?.models?.[selected] && sendsProviderDefault(classifyThinkingState(reasoning, {fresh:true})))
+    return {ready:true,reason:"provider_default_no_control"};
   const supported = reasoning?.supported_efforts;
   if (mode === "off" && reasoning?.supported === false &&
       reasoning?.source === "lmstudio_native_loaded_instance")
@@ -94,6 +101,7 @@ export function createLocalConnectionController({
   renderCapacity,
   persistCapacity,
   toggleUi,
+  viewCache=createManualProviderViewCache(),
   traceLocalConnection = (event) => {
     console.info("[TextPhantom][popup] ai.local_connection", event);
     note("popup/local-connection-controller.js", "localConnection", event);
@@ -183,13 +191,14 @@ export function createLocalConnectionController({
       clearPrevious: !saved && provider === "lmstudio" && !loadedDefault,
       showUnknownHint: false,
     });
-    state.aiModelBlocked = !verified;
+    state.aiModelBlocked = true;
     if (els.aiLocalStatus) {
       const when = Number(record.checkedAt) > 0
         ? new Date(record.checkedAt).toLocaleString() : "an earlier session";
-      els.aiLocalStatus.textContent = verified
+      // setUiText renders registered copy (and templates with protected values) translatable.
+      setUiText(els.aiLocalStatus, verified
         ? `Saved model metadata for ${saved}, checked on ${when}. Availability is rechecked when translation starts.`
-        : `Saved model metadata from ${when}. Refreshing installed models automatically…`;
+        : `Saved model metadata from ${when}. Refreshing installed models automatically…`);
     }
     setFieldMessage(els.aiModelWrap, verified ? "info" : "warn",
       verified
@@ -200,8 +209,8 @@ export function createLocalConnectionController({
       model: saved,
       backend_supported: true,
       key_status: "not_required",
-      models_verified: verified,
-      availability_verified: Boolean(savedPresent && verification.fresh),
+      models_verified: false,
+      availability_verified: false,
       models,
       verification_source: "saved_snapshot",
       verified_model: verified ? verifiedModel : "",
@@ -250,8 +259,11 @@ export function createLocalConnectionController({
     );
   };
 
-  const connect = async ({ automatic = false } = {}) => {
+  const connect = async ({ automatic = false,displayOnly=false } = {}) => {
     if (state.localConnectInFlight) return;
+    if(!automatic)void viewCache.clear();
+    state.aiModelBlocked=true;
+    if(displayOnly)state.lastAiResolve=null;
     const provider = String(els.aiProvider?.value || "")
       .trim()
       .toLowerCase();
@@ -281,12 +293,16 @@ export function createLocalConnectionController({
     };
     const requestedModel = String(state.desiredAiModel || els.aiModel?.value || "").trim();
     const requestedThinking = normalizeReasoningPreference(els.aiThinking?.value, "minimum");
+    const selectedApi=normalizeUrl(els.apiUrl?.value || '');
     const adapterDraft = String(els.aiLocalAdapter?.value || "");
     const transitionRevision = state.providerTransitionRevision;
     let expectedModel = requestedModel;
     let expectedModelControl = String(els.aiModel?.value || "").trim();
+    let displayView=null,displayScope='';
+    const displayIdentity=()=>({api:selectedApi,provider,endpoint,model:expectedModelControl,thinking:requestedThinking,adapter:provider==='customlocal'?adapterDraft:''});
     const current = () => sequence === state.localConnectSeq &&
       identity() === requestIdentity &&
+      normalizeUrl(els.apiUrl?.value || '') === selectedApi &&
       String(state.desiredAiModel || els.aiModel?.value || "").trim() === expectedModel &&
       String(els.aiModel?.value || "").trim() === expectedModelControl &&
       state.providerTransitionRevision === transitionRevision &&
@@ -308,10 +324,10 @@ export function createLocalConnectionController({
         if (!requestedModel) expectedModel = expectedModelControl;
         state.localAiCapability = message.capability ? {...message.capability, provider, baseUrl:endpoint} : null;
         state.aiModelBlocked = true;
-        setFieldMessage(els.aiModelWrap, "info", "Models found. Checking selected model metadata…");
-        els.aiLocalStatus.textContent = `Connected · ${models.length} model(s) listed · Checking metadata…`;
+        if(!displayView){setFieldMessage(els.aiModelWrap, "info", "Models found. Checking selected model metadata…");
+        setUiText(els.aiLocalStatus, `Connected · ${models.length} model(s) listed · Checking metadata…`);}
         renderCapacity(); toggleUi();
-      } else if (message.stage === "model_verify") {
+      } else if (message.stage === "model_verify" && !displayView) {
         els.aiLocalStatus.textContent = "Connected · Checking selected model metadata…";
       }
     };
@@ -350,10 +366,16 @@ export function createLocalConnectionController({
         model: requestedModel, thinking: requestedThinking,
       };
       setBusy(true);
-      els.aiLocalStatus.textContent = "Loading Local AI models…";
       state.aiModelBlocked = true;
-      clearCapacity();
+      displayScope=await manualProviderViewScope(displayIdentity());
+      if(!current())return;
+      if(automatic){displayView=await viewCache.restore(displayScope,'local',{allowStale:true});if(!current())return;}
+      else void viewCache.clear(displayScope);
+      if(displayView){setModelOptions(displayView.models,{keepValue:expectedModelControl,selectFirst:false,showUnknownHint:false});
+        els.aiLocalStatus.textContent=displayView.status;setFieldMessage(els.aiModelWrap,displayView.fieldKind,displayView.field);
+      }else if(!displayOnly){els.aiLocalStatus.textContent = "Loading Local AI models…";clearCapacity();}
       toggleUi();
+      if(displayOnly)return;
       stage = "persist";
       milestone("started");
       await persistConnectionSettings({
@@ -457,7 +479,9 @@ export function createLocalConnectionController({
       }
       const verificationMessages = {
         passed: thinkingCompatible
-          ? ["info", `✓ ${selected} is ${provider === "lmstudio" ? "loaded" : "listed"} and its metadata was checked. You can start translation.`]
+          ? ["info", provider === "lmstudio"
+            ? `✓ ${selected} is loaded and its metadata was checked. You can start translation.`
+            : `✓ ${selected} is listed and its metadata was checked. You can start translation.`]
           : ["error", `✕ LM Studio has not confirmed the selected Thinking mode for ${selected}. Choose Lowest available or a verified mode.`],
         jit_loadable: thinkingCompatible
           ? ["info", `✓ ${selected} is downloaded; LM Studio will load it on the first real translation with a bounded context request.`]
@@ -477,11 +501,11 @@ export function createLocalConnectionController({
       const modelMessage = verificationMessages[verification.status] ||
         ["error", "✕ Selected model availability could not be confirmed"];
       setFieldMessage(els.aiModelWrap, ...modelMessage);
-      els.aiLocalStatus.textContent = verified
+      setUiText(els.aiLocalStatus, verified
         ? verification.status === "jit_loadable"
           ? `✓ Model selected · ${selected} · will load on first translation`
           : `✓ Model selected · ${selected} · ${models.length} model(s) listed`
-        : `⚠ Connected to ${adapter.baseUrl}, but the selected model metadata is not ready`;
+        : `⚠ Connected to ${adapter.baseUrl}, but the selected model metadata is not ready`);
       renderCapacity();
       toggleUi();
       acknowledge(true, verified);
@@ -495,6 +519,9 @@ export function createLocalConnectionController({
       }, current);
       if (!current()) return;
       await persistCapacity();
+      if(!current())return;
+      const finalScope=await manualProviderViewScope(displayIdentity());if(!current())return;
+      await viewCache.remember(finalScope,{kind:'local',models:localPickerOptions(provider,models,response.capability),status:els.aiLocalStatus.textContent,field:modelMessage[1],fieldKind:modelMessage[0]},current);
     } catch (error) {
       if (sequence !== state.localConnectSeq) return;
       if (requestIdentity && !current()) return;
@@ -508,10 +535,14 @@ export function createLocalConnectionController({
       if (error?.snapshotOwner !== "worker") await forgetSnapshot(provider, endpoint,
         () => sequence === state.localConnectSeq && (!requestIdentity || current())).catch(() => {});
       if (requestIdentity && !current()) return;
-      els.aiLocalStatus.textContent = `✕ ${error.message}`;
-      showFallback();
+      setUiParts(els.aiLocalStatus, "✕ ", error.message);
+      if(displayView){setModelOptions(displayView.models,{keepValue:expectedModelControl,selectFirst:false,showUnknownHint:false});
+        setFieldMessage(els.aiModelWrap,'warn','Local AI could not be reached. Showing the previous model list; translation is paused.');
+      }else showFallback();
       toggleUi();
       acknowledge(true, false);
+      if(displayScope)await viewCache.remember(displayScope,{kind:'local',models:displayView?.models || (savedModel()?[savedModel()]:[]),status:'Local AI could not be reached. Translation is paused.',
+        field:'Showing the previous model list; availability has not been confirmed.',fieldKind:'warn'},()=>sequence===state.localConnectSeq&&(!requestIdentity||current()));
     } finally {
       globalThis.chrome?.runtime?.onMessage?.removeListener?.(onProgress);
       if (state.localConnectInFlight?.seq === sequence) {
@@ -519,7 +550,7 @@ export function createLocalConnectionController({
         setBusy(false);
         // The user can change Thinking while renderPrompt awaits. Re-evaluate
         // the current choice after metadata discovery fully releases the gate.
-        if (requestIdentity && current() &&
+        if (!displayOnly && requestIdentity && current() &&
             state.lastAiResolve?.verification_source === "live_local_metadata")
           refreshThinkingCompatibility();
       }
@@ -585,9 +616,9 @@ export function createLocalConnectionController({
     invalidate("Selected model changed — refreshing metadata.");
     state.aiModelBlocked = true;
     if (els.aiLocalStatus)
-      els.aiLocalStatus.textContent = selected
+      setUiText(els.aiLocalStatus, selected
         ? `Checking ${selected} metadata…`
-        : "Select an installed model.";
+        : "Select an installed model.");
     setFieldMessage(els.aiModelWrap, "info",
       selected ? `⏳ Checking ${selected} with this Local AI runtime…`
         : "Select an installed model.");
@@ -618,11 +649,11 @@ export function createLocalConnectionController({
         ? `✓ ${selected} is downloaded and will load on the first translation.`
         : `✓ ${selected} is loaded and its metadata is verified.`
       : `✕ ${selected} does not support the selected Thinking mode. Choose Lowest available or a verified mode.`);
-    if (availability && els.aiLocalStatus) els.aiLocalStatus.textContent = ready
+    if (availability && els.aiLocalStatus) setUiText(els.aiLocalStatus, ready
       ? selectedHint?.jitLoadable === true
         ? `✓ Model selected · ${selected} · will load on first translation`
         : `✓ Model selected · ${selected} · ${state.lastAiResolve?.models?.length || 0} model(s) listed`
-      : `✕ ${selected} does not support the selected Thinking mode. Choose Lowest available.`;
+      : `✕ ${selected} does not support the selected Thinking mode. Choose Lowest available.`);
     toggleUi();
   };
 
@@ -639,6 +670,7 @@ export function createLocalConnectionController({
     savedModel,
     isCurrentProviderLocal,
     restoreSnapshot,
+    restoreDisplay:()=>connect({automatic:true,displayOnly:true}),
     connect,
     waitForPendingSettingsWrites,
     markModelChanged,

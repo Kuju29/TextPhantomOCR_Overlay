@@ -32,17 +32,24 @@ with tempfile.TemporaryDirectory() as temporary:
     local_app_data = os.path.join(temporary, "LocalAppData")
     machine_fonts = os.path.join(windows_root, "Fonts")
     user_fonts = os.path.join(local_app_data, "Microsoft", "Windows", "Fonts")
+    xdg_data_home = os.path.join(temporary, "xdg-data")
+    linux_user_fonts = os.path.join(xdg_data_home, "fonts")
     os.makedirs(machine_fonts)
     os.makedirs(user_fonts)
+    os.makedirs(linux_user_fonts)
 
     old_windir = os.environ.get("WINDIR")
     old_local = os.environ.get("LOCALAPPDATA")
+    old_xdg = os.environ.get("XDG_DATA_HOME")
     os.environ["WINDIR"] = windows_root
     os.environ["LOCALAPPDATA"] = local_app_data
+    os.environ["XDG_DATA_HOME"] = xdg_data_home
     try:
         discovered = fonts._system_font_dirs()
         assert machine_fonts in discovered
         assert user_fonts in discovered
+        assert linux_user_fonts in discovered
+        assert os.path.expanduser("~/.local/share/fonts") in discovered
 
         local_face = os.path.join(machine_fonts, "NotoSans-Regular.ttf")
         shutil.copyfile(installed, local_face)
@@ -52,6 +59,14 @@ with tempfile.TemporaryDirectory() as temporary:
         resolved = fonts.ensure_font("NotoSans-Regular.ttf", ["https://must-not-run.invalid/font.ttf"])
         assert resolved == local_face
         assert fonts._font_supports_text(resolved, "A")
+        assert network_calls == []
+
+        linux_face = os.path.join(linux_user_fonts, "NotoSans-Regular.ttf")
+        shutil.copyfile(installed, linux_face)
+        fonts._SYSTEM_FONT_DIRS = (linux_user_fonts,)
+        fonts._resolve_cache.clear()
+        fonts._coverage_cache.clear()
+        assert fonts.ensure_font("NotoSans-Regular.ttf", ["https://must-not-run.invalid/font.ttf"]) == linux_face
         assert network_calls == []
 
         empty = os.path.join(temporary, "empty")
@@ -79,8 +94,12 @@ with tempfile.TemporaryDirectory() as temporary:
             os.environ.pop("LOCALAPPDATA", None)
         else:
             os.environ["LOCALAPPDATA"] = old_local
+        if old_xdg is None:
+            os.environ.pop("XDG_DATA_HOME", None)
+        else:
+            os.environ["XDG_DATA_HOME"] = old_xdg
 
-print("Font discovery regression passed: Windows roots, local-first resolution, explicit missing-font error.")
+print("Font discovery regression passed: Windows/Linux user roots, local-first resolution, explicit missing-font error.")
 `;
 
 const result = spawnSync(python, ["-c", program], {

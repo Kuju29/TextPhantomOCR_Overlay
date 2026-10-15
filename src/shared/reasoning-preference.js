@@ -1,10 +1,12 @@
 /** Provider-neutral user intent for model reasoning/thinking controls. */
-export const REASONING_PREFERENCES = Object.freeze([
-  "minimum", "default", "off", "on", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+import { thinkingControlOptions } from "./thinking-state.js";
+
+const REASONING_PREFERENCES = Object.freeze([
+  "minimum", "default", "off", "on", "minimal", "low", "medium", "high", "xhigh", "extra", "max", "ultra",
 ]);
 
 const PREFERENCE_SET = new Set(REASONING_PREFERENCES);
-const EFFORTS = Object.freeze(["minimal", "low", "medium", "high", "xhigh", "max", "ultra"]);
+const EFFORTS = Object.freeze(["minimal", "low", "medium", "high", "xhigh", "extra", "max", "ultra"]);
 const EFFORT_SET = new Set(EFFORTS);
 
 export function normalizeReasoningPreference(value, fallback = "minimum") {
@@ -29,36 +31,15 @@ export function normalizeUserReasoningPreference(value) {
   return normalized === "default" ? "minimum" : normalized;
 }
 
-export function reasoningEffortPreference(value) {
-  const normalized = normalizeReasoningPreference(value, "default");
-  return EFFORT_SET.has(normalized) ? normalized : "";
-}
-
-/** Return the concrete model options in ascending reasoning cost/strength. */
+/** Return the concrete model options in ascending reasoning cost/strength.
+ * The same function classifies the AI think state, so the popup can never offer
+ * a control that the shared classification does not prove. */
 export function concreteReasoningPreferences(reasoning) {
-  const cap = reasoning && typeof reasoning === "object" ? reasoning : {};
-  if (cap.supported !== true) return [];
-  const mandatory = cap.mandatory === true;
-  const control = String(cap.control || "provider");
-  const supported = new Set(Array.isArray(cap.supported_efforts)
-    ? cap.supported_efforts.map(value => String(value || "").trim().toLowerCase())
-    : []);
-  const options = [];
-  // Explicit mandatory=false is enough to preserve Off as an executable user
-  // intent even when a stale catalogue snapshot omits can_disable/none.
-  if (!mandatory && (cap.mandatory === false || cap.can_disable === true || control === "toggle" || control === "boolean" || supported.has("none")))
-    options.push("off");
-  if (control === "toggle" || control === "boolean") {
-    if (!Array.isArray(cap.supported_efforts) || supported.has("on")) options.push("on");
-    return options;
-  }
-  if (control === "levels")
-    for (const effort of EFFORTS) if (supported.has(effort)) options.push(effort);
-  return options;
+  return thinkingControlOptions(reasoning);
 }
 
 /** Lowest available is an alias for the first concrete option, never a fixed effort. */
-export function minimumReasoningPreference(reasoning) {
+function minimumReasoningPreference(reasoning) {
   const concrete = concreteReasoningPreferences(reasoning);
   // A verified disable control is lower than any named reasoning level.
   if (concrete[0] === "off") return "off";
@@ -91,7 +72,7 @@ export function reasoningOptionsForCapability(reasoning) {
   const labels = {
     off: "Thinking off", on: "Thinking on",
     minimal: "Thinking minimal", low: "Thinking low", medium: "Thinking medium",
-    high: "Thinking high", xhigh: "Thinking xhigh", max: "Thinking max", ultra: "Thinking ultra",
+    high: "Thinking high", xhigh: "Thinking xhigh", extra: "Thinking extra", max: "Thinking max", ultra: "Thinking ultra",
   };
   for (const value of concreteReasoningPreferences(cap))
     options.push({ value, label: labels[value] || `Thinking ${value}` });

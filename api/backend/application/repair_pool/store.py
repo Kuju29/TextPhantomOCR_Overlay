@@ -15,9 +15,25 @@ from pathlib import Path
 from typing import Callable
 from . import state
 
-TTL = 24 * 60 * 60
+# Capacity is shared by every user, so finished or abandoned runs must not
+# hold it for long.
+# - TTL: hard lifetime of any run. 6 h matches the extension checkpoint TTL
+#   (translation-session-store ttlMs): after that no extension can resume it.
+# - TERMINAL_IDLE: done/cancelled runs only serve late duplicate requests; they
+#   expire after 1 h without use.
+# - IDLE_EVICT: under capacity pressure, a collecting/repairing run untouched
+#   for this long is treated as abandoned (its extension stopped: blocked,
+#   unavailable or closed) and may give its slot, oldest first. A run used within
+#   IDLE_EVICT is active and is never evicted; the caller then gets 503.
+TTL = 6 * 60 * 60
+TERMINAL_IDLE = 60 * 60
+IDLE_EVICT = 60 * 60
+TERMINAL_PHASES = ("done", "cancelled")
 MAX_RUNS = 512
 MAX_CALLER_RUNS = 64
+# One browser (X-TP-Install / trusted client IP) across all of its tab sessions:
+# a quarter of the shared pool, so a single identity cannot occupy all of it.
+MAX_IDENTITY_RUNS = 128
 MAX_BYTES = 128 * 1024 * 1024
 
 class RepairStore:
@@ -47,22 +63,69 @@ class RepairStore:
                     if not owners:
                         self._page_runs.pop(page, None)
 
+    @staticmethod
+    def _expired(row, now):
+        return row["expires"] < now or (
+            row["phase"] in TERMINAL_PHASES and now - row.get("updated", 0) >= TERMINAL_IDLE)
+
     def _prune(self):
         now = self.now()
-        for run_id in [key for key, row in self._runs.items() if row["expires"] < now]:
+        for run_id in [key for key, row in self._runs.items() if self._expired(row, now)]:
             self._drop(run_id)
+
+    def _victims(self, *, caller=None, keep=None):
+        """Evictable runs, oldest first: terminal runs, then runs idle >= IDLE_EVICT."""
+        now = self.now()
+        rows = [(run_id, row) for run_id, row in self._runs.items()
+                if run_id != keep and (caller is None or row["caller"] == caller)]
+        terminal = sorted((row.get("updated", 0), run_id) for run_id, row in rows if row["phase"] in TERMINAL_PHASES)
+        idle = sorted((row.get("updated", 0), run_id) for run_id, row in rows
+                      if row["phase"] not in TERMINAL_PHASES and now - row.get("updated", 0) >= IDLE_EVICT)
+        return [run_id for _, run_id in terminal + idle]
+
+    def _make_room(self, *, runs=0, size=0, caller=None, keep=None, identity=None):
+        """Evict oldest terminal/idle runs until the requested room exists; never active runs."""
+        def held_by(key, value):
+            return sum(row.get(key) == value for row in self._runs.values())
+
+        def short():
+            return (len(self._runs) + runs > MAX_RUNS or self._bytes + size > MAX_BYTES or (
+                caller is not None and runs and held_by("caller", caller) + runs > MAX_CALLER_RUNS) or (
+                identity and runs and held_by("identity", identity) + runs > MAX_IDENTITY_RUNS))
+        if not short():
+            return True
+        # Caller/identity caps first from their own runs, then global caps from anyone's.
+        if caller is not None and runs and held_by("caller", caller) + runs > MAX_CALLER_RUNS:
+            for run_id in self._victims(caller=caller, keep=keep):
+                self._drop(run_id)
+                if held_by("caller", caller) + runs <= MAX_CALLER_RUNS:
+                    break
+        if identity and runs and held_by("identity", identity) + runs > MAX_IDENTITY_RUNS:
+            for run_id in self._victims(keep=keep):
+                if self._runs.get(run_id, {}).get("identity") != identity:
+                    continue
+                self._drop(run_id)
+                if held_by("identity", identity) + runs <= MAX_IDENTITY_RUNS:
+                    break
+        for run_id in self._victims(keep=keep):
+            if not short():
+                break
+            self._drop(run_id)
+        return not short()
 
     def _owned(self, run_id, hashed):
         state.identifier(run_id)
         row = self._runs.get(run_id)
-        if row and row["expires"] < self.now():
+        if row and self._expired(row, self.now()):
             self._drop(run_id)
             row = None
         if not row or not hmac.compare_digest(row["secret"], hashed):
             raise state.PoolError("repair_run_not_found", 404)
+        row["updated"] = self.now()
         return row
 
-    def register(self, run_id: str, token: str, manifest: list, caller: str) -> dict:
+    def register(self, run_id: str, token: str, manifest: list, caller: str,
+                 identity: str | None = None) -> dict:
         hashed = self.secret(token)
         run = state.new_run(run_id, manifest, self.now())
         with self._lock:
@@ -77,10 +140,11 @@ class RepairStore:
                 return state.view(previous)
             data = json.dumps(run, ensure_ascii=False, separators=(",", ":"))
             size = len(data.encode())
-            if len(self._runs) >= MAX_RUNS or self._bytes + size > MAX_BYTES or sum(
-                    row["caller"] == caller for row in self._runs.values()) >= MAX_CALLER_RUNS:
+            if not self._make_room(runs=1, size=size, caller=caller, identity=identity):
+                if identity and sum(r.get("identity") == identity for r in self._runs.values()) >= MAX_IDENTITY_RUNS:
+                    raise state.PoolError("repair_identity_capacity", 429)
                 raise state.PoolError("repair_store_capacity", 503)
-            self._runs[run_id] = dict(secret=hashed, caller=caller, expires=self.now() + TTL,
+            self._runs[run_id] = dict(secret=hashed, caller=caller, identity=identity or None, expires=self.now() + TTL, updated=self.now(),
                                       data=data, size=size, phase=run["phase"], manifest=tuple(run["manifest"]))
             for page in run["manifest"]:
                 self._page_runs.setdefault(page, set()).add(run_id)
@@ -99,7 +163,8 @@ class RepairStore:
             size = len(data.encode())
             if size > state.MAX_RUN_BYTES:
                 raise state.PoolError("repair_run_size_limit", 413)
-            if self._bytes - row["size"] + size > MAX_BYTES:
+            if self._bytes - row["size"] + size > MAX_BYTES and not self._make_room(
+                    size=size - row["size"], keep=run_id):
                 raise state.PoolError("repair_store_capacity", 503)
             self._bytes += size - row["size"]
             row.update(data=data, size=size, phase=run["phase"])
@@ -121,7 +186,7 @@ class RepairStore:
             now = self.now()
             return {run_id for run_id in run_ids
                     if (row := self._runs.get(run_id)) is not None
-                    and row["expires"] >= now and row["phase"] in ("collecting", "repairing")}
+                    and not self._expired(row, now) and row["phase"] in ("collecting", "repairing")}
 
     def is_cancelled(self, run_id: str, token: str) -> bool:
         hashed = self.secret(token)

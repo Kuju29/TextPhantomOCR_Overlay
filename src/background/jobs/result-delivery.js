@@ -1,4 +1,4 @@
-import { persistProviderGeneration, failureUsageDetails } from "../../shared/ai-usage.js";
+import { persistProviderGeneration, failureUsageDetails, isSettledPaidOperationReplay } from "../../shared/ai-usage.js";
 import { isLocalAiTarget } from "../../shared/constants.js";
 const URL_ONLY_DATA_URI_RETRY_CODES = new Set([
   "IMAGE_FETCH_FAILED",
@@ -192,7 +192,6 @@ export function createResultDelivery(deps) {
     evaluateTextNoOverlaySkippable,
     finalizeBatch,
     findContext,
-    getSettingsEpoch,
     getTabSessionId,
     imageErrorMessage,
     markDomainNeedsDataUri,
@@ -248,10 +247,10 @@ export function createResultDelivery(deps) {
 
   function accountQueued(ctx, value, success) {
     if (!ctx?.serverQueued) return Promise.resolve();
-    if (success && value?.perf?.cache === "hit") {
+    const meta = success ? value?.Ai?.meta : null;
+    if (success && (value?.perf?.cache === "hit" || isSettledPaidOperationReplay(meta, ctx.aiProvider))) {
       return accounting.enqueue({ operationId: String(ctx.idempotencyKey || ""), engine: "runsapi", resolvePending: true });
     }
-    const meta = success ? value?.Ai?.meta : null;
     const charged = success ? { ...meta, usage: meta?.usage } : failureUsageDetails(value);
     if (!charged?.provider || !charged?.model) {
       if (success || value?.generationAttempts === 0 || value?.requestDispatched === false)
@@ -306,7 +305,7 @@ export function createResultDelivery(deps) {
       markImagePhase(batchId, imageKey, "cancelled", {
         lastError: "navigation",
       });
-      batchUpdateToast(batch, "Cancelled", true);
+      batchUpdateToast(batch, "Cancelled");
       finalizeBatch(batch);
     }
   }
@@ -394,8 +393,8 @@ export function createResultDelivery(deps) {
     if(!ctx||deliveringJobs.has(jobId))return;
     const batchId=String(ctx.batchId||ctx.metadata?.batch_id||'');
     const batch=batchId?ensureBatch(batchId,ctx.tabId,ctx.frameId||0):null;
+    // A settings change is not staleness; the job keeps its saved settings.
     const stale=()=>state.isCancelled?.()||!pendingByJob.has(jobId)||batch?.cancelled||
-      (typeof ctx.settingsEpoch==='number'&&ctx.settingsEpoch!==getSettingsEpoch())||
       (ctx.sessionId&&getTabSessionId(ctx.tabId)&&ctx.sessionId!==getTabSessionId(ctx.tabId));
     if(stale())return;
     const streamTiming={...state.streamTiming,domEnqueuedAt:Date.now(),
@@ -472,13 +471,10 @@ export function createResultDelivery(deps) {
     ).trim();
     const batch = batchId ? ensureBatch(batchId, tabId, frameId) : null;
     const curSession = getTabSessionId(tabId);
-    const settingsStale =
-      typeof ctx.settingsEpoch === "number" &&
-      ctx.settingsEpoch !== getSettingsEpoch();
+    // Only Cancel and reload/navigation (tab session) make a result stale.
     const isStale =
       Boolean(batch?.cancelled) ||
-      Boolean(ctx.sessionId && curSession && ctx.sessionId !== curSession) ||
-      settingsStale;
+      Boolean(ctx.sessionId && curSession && ctx.sessionId !== curSession);
     if (isStale) {
       traceNote(
         "background/jobs/result-delivery.js",
@@ -503,13 +499,17 @@ export function createResultDelivery(deps) {
     }
     const { newImg, hasHtml, skipReason, shouldShowSkipBadge } =
       summarizeResultPresentation(result, mode);
-    void (async () => {
+    // A reused (cached) page was already folded into series memory when it
+    // was first translated; folding it again would duplicate its context.
+    if (!ctx.resultCacheHit) void (async () => {
       try {
         const key =
           (ctx.seriesKey && String(ctx.seriesKey)) ||
           (await resolveSeriesKey(ctx.pageUrl || "")) ||
           "default";
-        await accumulateSeriesMemory(key, result);
+        const memoryResult = Number.isInteger(ctx.pageIndex) ? {...result,Ai:{...(result.Ai || {}),
+          meta:{...(result.Ai?.meta || {}),pageIndex:ctx.pageIndex,batchId:String(ctx.batchId || "")}}} : result;
+        await accumulateSeriesMemory(key, memoryResult, ctx.lang || ctx.metadata?.lang, ctx.pageUrl || "");
       } catch {}
     })();
     const cacheKey = mdCacheKey(
@@ -527,6 +527,8 @@ export function createResultDelivery(deps) {
         setCachedDataUri(sourceImageKey, result.sourceImageDataUri);
       setCachedResult(cacheKey, {
         newImg: newImg || null,
+        // Which generation settings produced this page (10493).
+        generation: String(ctx.generationKey || ""),
         result: hasHtml
           ? {
               ...stripImageFields(result),
@@ -534,6 +536,15 @@ export function createResultDelivery(deps) {
             }
           : null,
       });
+    }
+    // General result cache (memory only, bounded). A reused result is
+    // not stored again; a partial result is never stored.
+    if (ctx.resultCacheKey && !ctx.resultCacheHit && !partialNotice && deps.resultCache) {
+      const stored = deps.resultCache.store(ctx.resultCacheKey, result, { mode, hasHtml });
+      traceNote("background/jobs/result-delivery.js", "resultCacheStore", {
+        imageId: imageKey, batchId, stored: stored.stored, imageOmitted: stored.imageOmitted === true,
+        reason: stored.reason || "", ...deps.resultCache.stats(),
+      }, String(ctx.traceId || ""));
     }
     if (batch && imageKey) {
       markImagePhase(batchId, imageKey, "rendering");
@@ -544,7 +555,6 @@ export function createResultDelivery(deps) {
     await workflow.applyRequested(workflowId, `apply:${jobId}`);
     const stopStaleDraw = () => {
       const stale =
-        (typeof ctx.settingsEpoch === "number" && ctx.settingsEpoch !== getSettingsEpoch()) ||
         Boolean(batch?.cancelled) ||
         Boolean(
           ctx.sessionId &&

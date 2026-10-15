@@ -3,7 +3,10 @@
     "menus",
     "storage",
     "activeTab",
-    "declarativeNetRequestWithHostAccess"
+    "declarativeNetRequestWithHostAccess",
+    "alarms",
+    "scripting",
+    "webNavigation"
   ],
   "background": {
     "scripts": [

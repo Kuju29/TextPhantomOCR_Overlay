@@ -1,7 +1,9 @@
+import { chapterKey, mergeChapterSummaries, priorChapterState, SERIES_MEMORY_BUDGET } from "./chapter-summary-store.js";
 // Stores and merges the per-series AI memory: glossary, character sheet, series state and recent page context.
 
 import { createLogger } from "../shared/logger.js";
 import { getStorage, setStorage } from "../shared/storage.js";
+import { seriesMemoryKey, seriesIdentityKnown } from "../shared/series.js";
 
 const log = createLogger("SW.seriesMemory");
 
@@ -20,16 +22,30 @@ async function readAll() {
 }
 
 // Returns the stored memory for one series, with empty fields when it is unknown.
-export async function getSeriesMemory(seriesKey) {
+export async function getSeriesMemory(seriesKey, targetLang = "", chapterURL = "", {includeCurrentChapter = false} = {}) {
+  if (targetLang && !seriesIdentityKnown(seriesKey)) {
+    return { glossary: [], characters: [], state: "", prevContext: [], pageContexts: {}, visionPages: 0, identityKnown: false };
+  }
   try {
-    const key = String(seriesKey || "default");
+    const key = seriesMemoryKey(seriesKey, targetLang);
     await writeChain.catch(() => {});
-    const all = await readAll();
-    const m = all[key] || {};
+    let m;
+    let summary = "";
+    if (targetLang && chapterKey(chapterURL) && seriesIdentityKnown(seriesKey)) {
+      const next = writeChain.catch(() => {}).then(async () => {
+        const all = await readAll();
+        const prior = priorChapterState(all[key] || {}, chapterURL, {includeCurrent: includeCurrentChapter});
+        all[key] = {...prior.state,at:prior.state.at || Date.now()}; m = prior.state; summary = prior.summary;
+        const scopedKeys=Object.keys(all).filter(k=>k.startsWith("tp-memory-v2:"));
+        scopedKeys.sort((a,b)=>(all[a]?.at||0)-(all[b]?.at||0)).slice(0,Math.max(0,scopedKeys.length-MAX_SERIES)).forEach(k=>delete all[k]);
+        await setStorage({[STORE_KEY]:all});
+      });
+      writeChain = next; await next;
+    } else { const all = await readAll(); m = all[key] || {}; }
     return {
       glossary: Array.isArray(m.glossary) ? m.glossary : [],
       characters: Array.isArray(m.characters) ? m.characters : [],
-      state: typeof m.state === "string" ? m.state : "",
+      state: chapterURL ? summary : typeof m.state === "string" ? m.state : "",
       prevContext: Array.isArray(m.prevContext)
         ? m.prevContext.slice(-MAX_PREV_CONTEXT)
         : [],
@@ -41,15 +57,9 @@ export async function getSeriesMemory(seriesKey) {
         ? Number(m.visionPages)
         : 0,
     };
-  } catch {
-    return {
-      glossary: [],
-      characters: [],
-      state: "",
-      prevContext: [],
-      pageContexts: {},
-      visionPages: 0,
-    };
+  } catch (error) {
+    log.warn("read failed", error?.message || String(error));
+    throw error;
   }
 }
 
@@ -66,7 +76,7 @@ export function selectPromptMemory(
       ? memory.characters
       : []
     ).slice(-characterLimit),
-    state: String(memory?.state || "").slice(0, 1200),
+    state: [...String(memory?.state || "")].slice(0, SERIES_MEMORY_BUDGET).join(""),
     prevContext: (Array.isArray(memory?.prevContext) ? memory.prevContext : [])
       .slice(-MAX_PREV_CONTEXT)
       .map((entry) => ({
@@ -137,7 +147,7 @@ function mergeCharacters(existing, incoming) {
 }
 
 // Merges one page's AI result into the stored series memory.
-async function accumulateSeriesMemoryNow(seriesKey, result) {
+async function accumulateSeriesMemoryNow(seriesKey, result, chapterURL = "") {
   try {
     const glossary = result?.Ai?.glossary || result?.ai?.glossary || null;
     const characters = result?.Ai?.characters || result?.ai?.characters || null;
@@ -159,13 +169,18 @@ async function accumulateSeriesMemoryNow(seriesKey, result) {
     const batchId = String(result?.Ai?.meta?.batchId || "");
     const hasG = Array.isArray(glossary) && glossary.length;
     const hasC = Array.isArray(characters) && characters.length;
-    if (!hasG && !hasC && !usedVision && !pageContext.length) return;
+    const incomingSummaries = result?.Ai?.meta?.seriesSummaryRecords || result?.ai?.meta?.seriesSummaryRecords || [];
+    const summaryPageIndex = result?.Ai?.meta?.pageIndex;
+    const summaryRecords = incomingSummaries.map(row => ({...row,pageIndex:Number.isInteger(row.pageIndex)?row.pageIndex:summaryPageIndex}));
+    if (!hasG && !hasC && !usedVision && !pageContext.length && !summaryRecords.length) return;
 
     const key = String(seriesKey || "default");
     const all = await readAll();
-    const cur = all[key] && typeof all[key] === "object" ? all[key] : {};
+    const previous = all[key] && typeof all[key] === "object" ? all[key] : {};
+    const cur = key.startsWith("tp-memory-v2:") ? mergeChapterSummaries(previous,chapterURL,summaryRecords) : previous;
     delete all[key];
     all[key] = {
+      ...(cur.seriesMemoV1 ? {seriesMemoV1:cur.seriesMemoV1} : {}),
       glossary: hasG
         ? mergeGlossary(cur.glossary, glossary)
         : cur.glossary || [],
@@ -204,7 +219,11 @@ async function accumulateSeriesMemoryNow(seriesKey, result) {
       at: Date.now(),
     };
 
-    const keys = Object.keys(all);
+    // Updating new language scopes must not discard unknown-language records
+    // retained for rollback. Each group keeps the existing twelve-record cap.
+    const scoped = key.startsWith("tp-memory-v2:");
+    const keys = Object.keys(all).filter((storedKey) =>
+      storedKey.startsWith("tp-memory-v2:") === scoped);
     if (keys.length > MAX_SERIES) {
       keys
         .sort((a, b) => (all[a]?.at || 0) - (all[b]?.at || 0))
@@ -218,11 +237,43 @@ async function accumulateSeriesMemoryNow(seriesKey, result) {
 }
 
 // Merges one page's AI result into the series memory, serialised against every other write.
-export async function accumulateSeriesMemory(seriesKey, result) {
-  const key = String(seriesKey || "default");
+export async function accumulateSeriesMemory(seriesKey, result, targetLang = "", chapterURL = "") {
+  if (targetLang && !seriesIdentityKnown(seriesKey)) return;
+  const key = seriesMemoryKey(seriesKey, targetLang);
   const next = writeChain
     .catch(() => {})
-    .then(() => accumulateSeriesMemoryNow(key, result));
+    .then(() => accumulateSeriesMemoryNow(key, result, chapterURL));
   writeChain = next;
   await next;
+}
+
+// Clear through the same writer as accepted translation results. A delayed
+// write already in flight cannot restore the memory after Clear completes.
+export async function clearSeriesMemory(seriesKey, targetLang = "") {
+  const key = seriesMemoryKey(seriesKey, targetLang);
+  const next = writeChain.catch(() => {}).then(async () => {
+    const all = await readAll();
+    delete all[key];
+    await setStorage({ [STORE_KEY]: all });
+  });
+  writeChain = next;
+  await next;
+}
+
+// Memory for one Local Independent request, read when that request is
+// planned. Each request is stateless, so it carries the prior chapters'
+// summaries plus this chapter's accepted summaries so far (rolling).
+export async function independentPromptMemory(payload, memoryMode) {
+  const seriesKey = String(payload?.context?.series_key || "");
+  if (!seriesKey || !["terms", "full"].includes(memoryMode)) return {};
+  const full = memoryMode === "full";
+  const recent = selectPromptMemory(await getSeriesMemory(seriesKey, payload?.lang,
+    full ? payload?.context?.page_url || "" : "", {includeCurrentChapter: true}));
+  const pageIndex = Number(payload?.context?.page_index);
+  const batchId = String(payload?.context?.batch_id || payload?.metadata?.batch_id || "");
+  const previousPage = Number.isInteger(pageIndex) && pageIndex > 0
+    ? recent.pageContexts?.[batchId]?.[String(pageIndex - 1)] || [] : [];
+  return {glossary: recent.glossary, characters: full ? recent.characters : [],
+    series_state: full ? recent.state : "",
+    prev_context: full ? (previousPage.length ? previousPage : recent.prevContext) : []};
 }

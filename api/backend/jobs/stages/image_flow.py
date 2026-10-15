@@ -411,10 +411,6 @@ def process_image(
             finally:
                 _ai_executor.shutdown(wait=False)  # type: ignore[union-attr]
             stages["ai_ms"] = round((time.perf_counter() - _t_ai_submit) * 1000, 1)
-            # _restore_unanswered_paragraphs(
-            #     out, original_tree, img, base_img,
-            #     client_background=client_background, stages=stages,
-            # )
             _attached = lens_document.attach_ai_layer(
                 out.get("lensDocument"), (out.get("Ai") or {}).get("aiTree")
             )

@@ -94,7 +94,6 @@ try{
     if(spec.protocol==='openai'){
       for(const [choice,reasoning] of [
         ['off',{supported:true,mandatory:false,control:'boolean'}],
-        ['off',{supported:false,control:'none',source:'unverified_model_list'}],
         ['on',{supported:true,control:'boolean'}],
         ['low',{supported:true,mandatory:true,control:'levels',supported_efforts:['high']}],
       ]){
@@ -120,7 +119,21 @@ try{
       });
       assert.equal(calls.length,1,`${spec.id}: unknown Lowest dispatches one real request`);
       assert.equal(calls[0].body.reasoning,undefined,`${spec.id}: no invented reasoning field`);
-      assert.equal(unknownLowest.meta.thinkingApplied,'provider_managed_unverified');
+      // 10488: no published control → provider default (control disabled).
+      assert.equal(unknownLowest.meta.thinkingApplied,'provider_default');
+      // A no-reasoning record offers no control either: the saved Off is kept,
+      // nothing is guessed on the wire and the request is not refused.
+      calls.length=0;
+      const noReasoning=await translateWithLocalOpenAi([{id:'I2_P0',text:'CURRENT_SOURCE'}],{
+        ai:{provider:spec.id,model:'matrix-model',base_url:spec.baseUrl,local_adapter:localAiPreset(spec.id),
+          prompt:'',translation_mode:'conversation',thinking:'off',
+          model_capabilities:{structuredOutput:{supported:false},reasoning:{supported:false,control:'none'}}},
+        canonicalPrompt:plan,targetLang:'th',sourceLang:'en',conversationContext:conversationContext(),
+      });
+      assert.equal(calls.length,1,`${spec.id}: no-reasoning Off dispatches one request`);
+      assert.equal(calls[0].body.reasoning,undefined);
+      assert.equal(calls[0].body.reasoning_effort,undefined);
+      assert.equal(noReasoning.meta.thinkingApplied,'not_applicable_non_reasoning_model');
     }
 
     // Frozen Independent reference: schema-capable behavior remains unchanged.

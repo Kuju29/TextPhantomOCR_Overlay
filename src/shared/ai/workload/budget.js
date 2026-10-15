@@ -13,8 +13,10 @@ export function guardOutputBudget({ standard, workload, limits = {}, userMaxOutp
   const bound = normalizeLimits(limits);
   const rawInput = estimateProviderInput({system, user, schema, image, history});
   const lmStudioRuntimeWindow = bound.source === 'lmstudio_native_loaded_instance';
-  const measuredScale = lmStudioRuntimeWindow &&
-    (positive(hint?.inputSampleCount) || hint?.inputUnverified === true) &&
+  // Any runtime whose planner calibrated input from real prompt counts
+  // must be checked with the same scale, or a filled window is rejected here.
+  const measuredScale = (lmStudioRuntimeWindow &&
+    (positive(hint?.inputSampleCount) || hint?.inputUnverified === true) || positive(hint?.inputSampleCount)) &&
     Number.isFinite(hint?.inputEstimateScale) && hint.inputEstimateScale >= .45 &&
     hint.inputEstimateScale <= 1 ? hint.inputEstimateScale : 1;
   const input = Math.ceil(rawInput * measuredScale);

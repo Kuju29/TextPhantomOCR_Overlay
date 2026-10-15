@@ -17,7 +17,7 @@ export class LensTreeError extends Error {}
  * Text rotated 200° is visually the same as 20°; the renderer only cares about
  * that folded value. Mirrors `render.geometry.normalize_angle_deg`.
  */
-export function normalizeAngleDeg(angleDeg) {
+function normalizeAngleDeg(angleDeg) {
   let a = angleDeg;
   while (a <= -180) a += 360;
   while (a > 180) a -= 360;
@@ -33,7 +33,7 @@ export function normalizeAngleDeg(angleDeg) {
  * box rather than a zero-area quad at the origin, which would drag every
  * paragraph's bounds to the top-left corner of the page.
  */
-export function boxQuadPx(node, W, H, padPx = 0) {
+function boxQuadPx(node, W, H, padPx = 0) {
   const b = node && node.box;
   if (!b || typeof b !== "object") {
     throw new LensTreeError("boxQuadPx needs a node with a box");
@@ -116,12 +116,8 @@ function emptyDiagnostics() {
 }
 
 /**
- * Slice `chars[start:end]`, or null when the range is not usable.
- *
- * Python's `_slice_text` returns "" here. Returning "" is what makes a bad
- * offset indistinguishable from a genuinely empty paragraph, so this returns
- * null and the caller counts it. The rendered result is the same empty string;
- * the difference is that somebody can now see it happened.
+ * Slice `chars[start:end]`, or null when the range is not usable. Python's
+ * `_slice_text` returns ""; null lets the caller count bad offsets.
  */
 function sliceText(chars, start, end) {
   if (start === null || end === null) return null;
@@ -131,14 +127,9 @@ function sliceText(chars, start, end) {
 
 /**
  * Build a render tree from Lens `paragraphs` (base64 protobuf) + text.
- *
- * `fullText` is the concatenated text the span ranges index into. `side`
- * labels the layer (`original` / `translated`).
- *
- * `imgW` / `imgH` must be the image's NATURAL pixel size. Lens normalises its
- * geometry against the image it was given, so there is no default that could
- * be right here — a guess produces a tree that renders, at the wrong scale, on
- * every page, with nothing to indicate why.
+ * `fullText` is the text the span ranges index into; `side` labels the layer
+ * (`original` / `translated`). `imgW` / `imgH` must be the image's NATURAL size:
+ * Lens geometry is normalised against it, so no default could be right.
  */
 export function decodeTree(paragraphsB64, fullText, side, imgW, imgH) {
   if (!Array.isArray(paragraphsB64)) {
@@ -423,7 +414,7 @@ export function treeWarnings(tree) {
 // Tree traversal helpers
 
 /** `[index, paragraph]` pairs for a tree. */
-export function iterParagraphs(tree) {
+function iterParagraphs(tree) {
   if (!tree || typeof tree !== "object") return [];
   const out = [];
   (Array.isArray(tree.paragraphs) ? tree.paragraphs : []).forEach((p, i) => {
@@ -441,36 +432,3 @@ export function flattenSpans(tree) {
   return spans;
 }
 
-/**
- * One text string per paragraph.
- *
- * Prefers the paragraph's own `text`; if empty, joins its items' texts.
- */
-export function paragraphTexts(tree) {
-  return iterParagraphs(tree).map(([, p]) => {
-    const text = String(p.text || "").trim();
-    if (text) return text;
-    return (p.items || [])
-      .filter(
-        (it) => it && typeof it === "object" && String(it.text || "").trim(),
-      )
-      .map((it) => String(it.text || "").trim())
-      .join(" ");
-  });
-}
-
-/** `{paras, items, spans}` counts — used for debug logging. */
-export function treeStats(tree) {
-  let paras = 0;
-  let items = 0;
-  let spans = 0;
-  for (const [, p] of iterParagraphs(tree)) {
-    paras += 1;
-    for (const item of p.items || []) {
-      if (!item || typeof item !== "object") continue;
-      items += 1;
-      spans += (item.spans || []).length;
-    }
-  }
-  return { paras, items, spans };
-}

@@ -4,7 +4,7 @@ import {createLmStudioNativeAdapter} from '../src/shared/ai/providers/local-lmst
 
 const page=(index,batchId='parallel')=>({engine:'extension',source:'ai',
   context:{page_index:index},metadata:{batch_id:batchId},
-  ai:{provider:'lmstudio',base_url:'http://localhost:1234/v1',translation_mode:'independent'}});
+  ai:{provider:'lmstudio',base_url:'http://localhost:1234/v1',translation_mode:'independent',style_examples:true}});
 
 // With story examples enabled, finish/accept the earlier page before the next POST.
 // Waiting happens before acquiring a provider capacity slot.

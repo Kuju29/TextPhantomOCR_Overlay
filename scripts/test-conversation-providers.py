@@ -6,7 +6,9 @@ from pathlib import Path
 from unittest.mock import patch
 ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT/'api'))
 h=runpy.run_path(str(ROOT/'scripts/test-api-provider-boundary-matrix.py'),run_name='helpers')
-registry=list(h['compose_providers'](h['ProviderRegistry']()))
+registry=[spec for spec in h['compose_providers'](h['ProviderRegistry']())
+          if spec.provider_id not in {'paid','login'}]
+assert len(registry)==18
 Client=h['BoundaryClient'];NativeClient=h['NativeLmStudioClient'];Response=h['Response'];gemini=h['cloud_gemini'];anthropic=h['cloud_anthropic']
 prior=({'role':'user','text':'TASK_KEEP_ONCE\n<<I1_P0:A_OLD_SOURCE>>'}, {'role':'assistant','text':'<<I1_P0:B_OLD_ANSWER>>'})
 count=0

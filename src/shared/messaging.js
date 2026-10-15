@@ -1,10 +1,7 @@
 /**
- *
  * Promise wrappers around the `chrome.runtime` / `chrome.tabs` messaging APIs.
- *
- * All helpers swallow `chrome.runtime.lastError` (the messaging APIs throw it
- * asynchronously when there is no receiver) and resolve to `null` instead, so
- * callers can simply `await` them.
+ * They swallow `chrome.runtime.lastError` (thrown asynchronously when there is
+ * no receiver) and resolve to `null` instead.
  */
 
 /**
@@ -16,8 +13,11 @@ export function sendRuntimeMessage(message) {
   return new Promise((resolve) => {
     try {
       chrome.runtime.sendMessage(message, (resp) => {
-        void chrome.runtime.lastError;
-        resolve(resp ?? null);
+        try {
+          resolve(chrome.runtime.lastError ? null : (resp ?? null));
+        } catch {
+          resolve(null);
+        }
       });
     } catch {
       resolve(null);
@@ -28,7 +28,13 @@ export function sendRuntimeMessage(message) {
 /** Fire-and-forget runtime broadcast (errors ignored). */
 export function broadcast(message) {
   try {
-    chrome.runtime.sendMessage(message, () => void chrome.runtime.lastError);
+    chrome.runtime.sendMessage(message, () => {
+      try {
+        void chrome.runtime.lastError;
+      } catch {
+        /* extension reloaded before the callback */
+      }
+    });
   } catch {
     /* no receiver */
   }

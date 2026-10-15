@@ -25,6 +25,7 @@ from backend.ai.providers.openai_provider_runtime import (
 )
 from backend.ai.providers.probe_support import openai_chat_probe
 from backend.ai.transports.huggingface_chat import execute_huggingface_chat
+from backend.ai.routing import huggingface as hf_routing, trace_summary
 
 
 _HF_PROVIDER_SUFFIX = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
@@ -39,12 +40,9 @@ def _base_model_id(model: str) -> str:
 def _effective_conversation_model(request: GenerationRequest) -> tuple[str, str]:
     """Keep HF Router on automatic fastest/failover unless the user pins it.
 
-    Hugging Face Router already performs backend selection and failover.  A
-    provider suffix is therefore honored only when it is part of the user's
-    selected model.  Observed upstreams and catalogue hints remain diagnostics;
-    they must not silently turn into sticky routing for later Conversation turns.
-    This mirrors Hermes' default HF strategy and prevents one slow backend from
-    being pinned merely because it served an earlier turn.
+    A provider suffix is honored only when it is part of the user's selected
+    model. Observed upstreams and catalogue hints stay diagnostics and never
+    become sticky routing for later Conversation turns.
     """
     requested = str(request.model or "").strip()
     _, suffix, policy = split_model(requested)
@@ -120,11 +118,8 @@ def _accepted_reasoning_effort(request: GenerationRequest) -> str | None:
     """Select an accepted request control, not a verified behavioral effect."""
     reasoning = request.model_capabilities.get("reasoning", {})
     reasoning = reasoning if isinstance(reasoning, dict) else {}
-    efforts = [
-        str(value).strip().lower()
-        for value in reasoning.get("supported_efforts", [])
-        if isinstance(value, str)
-    ]
+    from backend.ai.providers.provider_helpers import normalized_efforts
+    efforts = normalized_efforts(reasoning)
     if reasoning.get("supported") is not True or reasoning.get("control") != "levels":
         return None
     if request.thinking == "off" and "none" in efforts:
@@ -154,7 +149,7 @@ class HuggingFaceAdapter(OpenAIProviderAdapter):
         if off.ok:
             prior = request.model_capabilities.get("reasoning", {})
             prior = prior if isinstance(prior, dict) else {}
-            # Keep previously scoped, verified options, but never invent Low
+            # Keep already scoped, verified options, but never invent Low
             # or require another generation to enable Lowest available.
             efforts = ["none"]
             if prior.get("supported") is True and prior.get("control") == "levels":
@@ -247,57 +242,54 @@ class HuggingFaceAdapter(OpenAIProviderAdapter):
     def generate(self, request: GenerationRequest):
         model = request.model
         effective_model, affinity = _effective_conversation_model(request)
-        payload = build_payload(request, effective_model, POLICY)
+        base_model, user_suffix, hf_policy = split_model(model)
         effort = _accepted_reasoning_effort(request)
-        if effort:
-            payload["reasoning_effort"] = effort
-            # Preserve the compatibility policy, including effort="none".
-            # Acceptance of reasoning_effort does not verify compatibility of
-            # the combined sampling controls or reveal the upstream defaults.
-            payload.pop("temperature", None)
         from backend.ai.provider_resolution import (
             capture_capability_cache_revision, retain_observed_off_control,
             invalidate_observed_off_control,
         )
         evidence_base = request.base_url or DEFAULT_BASE_URL
         dispatch_revision = capture_capability_cache_revision(PROVIDER_ID, evidence_base, request.api_key)
-        result = execute_huggingface_chat(
-            url=(request.base_url or DEFAULT_BASE_URL).rstrip("/") + "/chat/completions",
-            headers=bearer_headers(request.api_key),
-            payload=payload,
-            model=effective_model,
-            timeout=DEFAULT_GENERATION.timeout_sec,
-            timeout_policy="cloud_default",
-            expected_ids=list(request.expected_ids),
-            cancel_check=request.cancel_check,
-            trace_event="huggingface.generate",
-            trace_file="ai/providers/cloud_huggingface.py",
-            trace_fields={
-                "requestedModel": model,
-                "effectiveModel": effective_model,
-                "hfRoutingPolicy": split_model(model)[2],
-                "hfRouteMetadata": request.model_capabilities.get("hf_route", {}),
-                "hfInferenceProviderAffinity": affinity or None,
-                "temperatureSent": "temperature" in payload,
-                "sampling": {
-                    "requestedTemperature": payload.get("temperature"),
-                    "temperatureOmissionReason": "reasoning_compatibility_policy" if effort else None,
-                    "effectiveTemperature": "unknown",
-                    "topPSent": "top_p" in payload,
-                },
-                "reasoningEvidence": {
-                    "control": "capability_reported_acceptance" if effort else "unknown",
-                    "behavior": "not_verified_by_probe",
-                },
-                "outputBudgetField": POLICY.output_budget_field,
-                "requestedOutputTokens": payload.get("max_tokens"),
-                "reasoningPolicy": "selected_model_reasoning_effort" if effort else POLICY.reasoning_policy,
-                "reasoningControlSent": bool(effort),
-                "reasoningEffortSent": effort,
-                "thinkingMode": request.thinking,
-                "capabilityKnown": bool(request.model_capabilities),
-            },
-        )
+        # An unqualified model id is routed to a measured inference
+        # provider (`model:<provider>`); a user-selected suffix is respected.
+        decision, route_reason = None, "user_choice" if hf_policy != "auto_fastest" else ""
+        if hf_policy == "auto_fastest" and evidence_base.rstrip("/") == DEFAULT_BASE_URL:
+            try:
+                decision, route_reason = hf_routing.plan(request, base_model)
+            except Exception as exc:  # noqa: BLE001 - routing never breaks a translation; traced
+                decision, route_reason = None, "routing_error_" + type(exc).__name__
+        hosts = list((decision or {}).get("order") or [])[:2] or [None]
+        from backend.ai import content_stream
+        import time as _time
+        result = None
+        for index, host in enumerate(hosts):
+            attempt_model = f"{base_model}:{host}" if host else effective_model
+            route_trace = (trace_summary(decision, providers=route_reason, attempt=index + 1) if decision
+                           else {"providers": route_reason or None})
+            payload = build_payload(request, attempt_model, POLICY)
+            if effort:
+                payload["reasoning_effort"] = effort
+                # Preserve the compatibility policy, including effort="none".
+                # Acceptance of reasoning_effort does not verify compatibility of
+                # the combined sampling controls or reveal the upstream defaults.
+                payload.pop("temperature", None)
+            started = _time.monotonic()
+            with content_stream.watch() as seen:
+                try:
+                    result = self._execute(request, payload, model, attempt_model, affinity, effort, route_trace)
+                except BaseException as exc:
+                    _record_failure(request, base_model, host or (user_suffix if hf_policy == "provider" else ""),
+                                    exc, decision, started)
+                    if index + 1 < len(hosts) and hf_routing.retryable_before_output(exc, seen["emitted"]):
+                        from backend import trace
+                        trace.note("huggingface.routing_retry", {"failedHost": host, "nextHost": hosts[index + 1],
+                            "errorType": type(exc).__name__, "status": getattr(exc, "status", None)},
+                            file="ai/providers/cloud_huggingface.py")
+                        continue
+                    raise
+            _record_success(request, base_model, host or (user_suffix if hf_policy == "provider" else ""),
+                            result, decision)
+            break
         # A client-held probe can be the only evidence after an API restart.
         # Retain only the native Off used in this real response, never speculative
         # levels from that client. Unknown/missing usage is not zero reasoning.
@@ -325,6 +317,93 @@ class HuggingFaceAdapter(OpenAIProviderAdapter):
         if applied == "provider_ignored_off":
             invalidate_observed_off_control(PROVIDER_ID, evidence_base, request.api_key, model)
         return result._replace(thinking_applied=applied)
+
+
+    def _execute(self, request, payload, model, effective_model, affinity, effort, route_trace):
+        return execute_huggingface_chat(
+            url=(request.base_url or DEFAULT_BASE_URL).rstrip("/") + "/chat/completions",
+            headers=bearer_headers(request.api_key),
+            payload=payload,
+            model=effective_model,
+            timeout=DEFAULT_GENERATION.timeout_sec,
+            timeout_policy="cloud_default",
+            expected_ids=list(request.expected_ids),
+            cancel_check=request.cancel_check,
+            trace_event="huggingface.generate",
+            trace_file="ai/providers/cloud_huggingface.py",
+            trace_fields={
+                "requestedModel": model,
+                "effectiveModel": effective_model,
+                "hfRoutingPolicy": split_model(model)[2],
+                "hfRouteMetadata": request.model_capabilities.get("hf_route", {}),
+                "hfInferenceProviderAffinity": affinity or None,
+                "routing": route_trace,
+                "temperatureSent": "temperature" in payload,
+                "sampling": {
+                    "requestedTemperature": payload.get("temperature"),
+                    "temperatureOmissionReason": "reasoning_compatibility_policy" if effort else None,
+                    "effectiveTemperature": "unknown",
+                    "topPSent": "top_p" in payload,
+                },
+                "reasoningEvidence": {
+                    "control": "capability_reported_acceptance" if effort else "unknown",
+                    "behavior": "not_verified_by_probe",
+                },
+                "outputBudgetField": POLICY.output_budget_field,
+                "requestedOutputTokens": payload.get("max_tokens"),
+                "reasoningPolicy": "selected_model_reasoning_effort" if effort else POLICY.reasoning_policy,
+                "reasoningControlSent": bool(effort),
+                "reasoningEffortSent": effort,
+                "thinkingMode": request.thinking,
+                "capabilityKnown": bool(request.model_capabilities),
+            },
+        )
+
+
+_ACCOUNT_STATUSES = {401, 402, 403}
+
+
+def _record_failure(request, base_model, host, exc, decision, started):
+    """One observation for a failed HF attempt whose host is known (never raises)."""
+    try:
+        _record_failure_unguarded(request, base_model, host, exc, decision, started)
+    except Exception:  # noqa: BLE001 - statistics never replace the provider error
+        pass
+
+
+def _record_success(request, base_model, host, result, decision):
+    try:
+        _record_success_unguarded(request, base_model, host, result, decision)
+    except Exception:  # noqa: BLE001 - statistics never fail a delivered answer
+        pass
+
+
+def _record_failure_unguarded(request, base_model, host, exc, decision, started):
+    import time as _time
+    from backend.ai import routing
+    from backend.ai.routing.openrouter import outcome_of
+    outcome = outcome_of(exc)
+    host = host or str(getattr(exc, "upstream_provider", "") or "")
+    if outcome is None or not host or getattr(exc, "status", None) in _ACCOUNT_STATUSES:
+        return
+    quant = ((decision or {}).get("quants") or {}).get(host.lower(), "unknown")
+    routing.record("huggingface", base_model, host, quant, outcome,
+                   latency_ms=(_time.monotonic() - started) * 1000.0,
+                   scope=(decision or {}).get("scope", ""), avoid=(decision or {}).get("avoid_key", ""),
+                   units=len(tuple(request.expected_ids or ())))
+
+
+def _record_success_unguarded(request, base_model, host, result, decision):
+    from backend.ai import routing
+    served = str(result.upstream_provider or "").strip().lower() or host or ""
+    quant = ((decision or {}).get("quants") or {}).get(served, "unknown")
+    routing.record("huggingface", base_model, served, quant, "unvalidated",
+                   latency_ms=result.provider_ms, in_tok=result.input_tokens,
+                   cached_tok=result.cached_input_tokens, out_tok=result.output_tokens,
+                   scope=(decision or {}).get("scope", ""), avoid=(decision or {}).get("avoid_key", ""),
+                   units=len(tuple(request.expected_ids or ())))
+    if (decision or {}).get("scope") and served:
+        routing.remember_sticky("huggingface", base_model, decision["scope"], served)
 
 
 ADAPTER = HuggingFaceAdapter(POLICY)

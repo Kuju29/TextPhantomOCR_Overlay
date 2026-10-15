@@ -1,7 +1,8 @@
 """One-shot OpenAI chat-completions HTTP/SSE execution.
 
-This module deliberately knows no vendors, model families, aliases, default
-URLs, reasoning policy or payload policy.  A concrete provider prepares the
+This module owns wire decoding, including verified response usage aliases.
+It knows no model families, default URLs, reasoning, pricing or payload policy.
+A concrete provider prepares the
 complete URL, headers and payload; this transport performs exactly one request
 and normalizes its response into :class:`ChatResult`.
 """
@@ -14,17 +15,35 @@ from decimal import Decimal
 
 from backend.ai.clients.base import (
     ChatResult, LineCompletionDetector, ProviderGenerationCancelled,
-    provider_output_error, token_usage,
+    provider_output_error,
 )
 from backend.ai.clients.provider_error import safe_http_error, http_error_evidence
 from backend.ai import wire_trace, accounting, content_stream
 from backend.ai.usage import llama_cached_usage, token
 from backend.ai.transports.stream_timing import StreamTiming
+from backend.ai.transports.stream_progress import (
+    StreamProgress, reasoning_budget_from_payload, report_sink,
+)
 
 from backend.ai.transports.openai_compat.streaming import (
     JsonObjectCompletionDetector, JsonClosureGate, merge_usage,
 )
 from backend.ai.transports.openai_compat.response import json_response, response_text
+
+# A streamed request has per-phase limits (transports/stream_progress.py), not
+# one wall clock. The numeric budget bounds a non-streamed body and tightens
+# the stream's waiting/idle windows when it is shorter than them.
+
+
+def _has_reasoning(delta: dict[str, Any]) -> bool:
+    """Reasoning evidence in one OpenAI-compatible delta (no text retained)."""
+    for field in ("reasoning_content", "reasoning"):
+        value = delta.get(field)
+        if isinstance(value, str) and value:
+            return True
+    details = delta.get("reasoning_details")
+    return isinstance(details, list) and any(isinstance(item, dict) for item in details)
+
 
 def execute_openai_compatible_request(
     *, url: str, headers: dict[str, str], payload: dict[str, Any],
@@ -71,6 +90,15 @@ def execute_openai_compatible_request(
             pool=connect_timeout_sec,
         )
     response = None
+    # Phase guard for a streamed response (thinking/writing/stalled). Keep-alive
+    # comments and empty deltas are "waiting at provider", never progress.
+    guard = StreamProgress(
+        started=started, budget_sec=hard_total_sec, model=model,
+        reasoning_budget_tokens=reasoning_budget_from_payload(request_payload),
+        lines_total=len(expected_ids) if expected_ids else None,
+        report=report_sink(), enforce=hard_total_sec is not None,
+    )
+    stream_stop: list[BaseException | None] = [None]
     detector = LineCompletionDetector(expected_ids)
     json_detector = JsonObjectCompletionDetector(expected_ids)
     json_gate = JsonClosureGate()
@@ -108,13 +136,31 @@ def execute_openai_compatible_request(
                     except Exception:
                         pass
 
+            stream_method = getattr(client, "stream", None)
+            can_stream = callable(stream_method) and (
+                type(client).__module__.startswith("httpx")
+                or getattr(client, "_textphantom_streaming", False) is True
+            )
+
             def transport_watch() -> None:
-                deadline = started + hard_total_sec if hard_total_sec is not None else None
+                # A non-streamed body has no progress evidence: its numeric
+                # budget stays a wall clock. A stream is judged by its phase:
+                # a stuck call ends at the idle window, a model that is
+                # thinking or writing lines is not cut by a fixed wall clock.
+                deadline = (started + hard_total_sec
+                            if hard_total_sec is not None and not can_stream else None)
                 while not watch_stop.wait(0.05):
                     if cancel_check is not None and cancel_check():
                         cancelled_by_owner.set()
                         abort_transport()
                         return
+                    if can_stream:
+                        stop = guard.check()
+                        if stop is not None:
+                            stream_stop[0] = stop
+                            abort_transport()
+                            return
+                        continue
                     if deadline is not None and time.perf_counter() >= deadline:
                         total_timeout_hit.set()
                         abort_transport()
@@ -128,11 +174,6 @@ def execute_openai_compatible_request(
             if watcher:
                 watcher.start()
             try:
-                stream_method = getattr(client, "stream", None)
-                can_stream = callable(stream_method) and (
-                    type(client).__module__.startswith("httpx")
-                    or getattr(client, "_textphantom_streaming", False) is True
-                )
                 upstream_provider = ""
                 llama_cache_n = None
                 if can_stream:
@@ -142,6 +183,8 @@ def execute_openai_compatible_request(
                     actual_model = model
                     finish = None
                     first_content_ms = None
+                    lines_done: list[int] = [0]
+                    json_mode: list[bool | None] = [None]
                     chunk_count = 0
                     reasoning_chunk_count = 0
                     protocol_done = False
@@ -163,6 +206,7 @@ def execute_openai_compatible_request(
                                 header_upstream = ""
                             if header_upstream:
                                 upstream_provider = header_upstream[:160]
+                            guard.opened()
                             trace.note(trace_event + ".response_headers", {
                                 "stage": "provider_response_headers",
                                 "status": getattr(response, "status_code", None),
@@ -173,13 +217,16 @@ def execute_openai_compatible_request(
                                 with timing.frame():
                                     if cancelled_by_owner.is_set() or (cancel_check is not None and cancel_check()):
                                         raise ProviderGenerationCancelled("AI generation was cancelled")
-                                    if total_timeout_hit.is_set():
-                                        raise TimeoutError(
-                                            f"AI provider total timeout after {hard_total_sec:g}s (model={model}, attempts=1)"
-                                        )
+                                    if stream_stop[0] is not None:
+                                        raise stream_stop[0]
                                     line = raw_line.decode() if isinstance(raw_line, bytes) else str(raw_line or "")
                                     line = line.strip()
-                                    if not line or line.startswith(":"): continue
+                                    if not line: continue
+                                    if line.startswith(":"):
+                                        # An SSE comment (keep-alive) proves the socket,
+                                        # not the model: "waiting at provider".
+                                        guard.keepalive()
+                                        continue
                                     if line.startswith("data:"): line = line[5:].strip()
                                     if line == "[DONE]":
                                         protocol_done = True
@@ -192,8 +239,12 @@ def execute_openai_compatible_request(
                                         if isinstance(timings, dict) and "cache_n" in timings:
                                             llama_cache_n = token(timings["cache_n"])
                                     if isinstance(item.get("id"), str): response_id = item["id"]
-                                    if isinstance(item.get("usage"), dict):
-                                        merge_usage(usage_data, item["usage"])
+                                    observed = item.get("usage")
+                                    if provider_id == "groq" and not observed:
+                                        extra = item.get("x_groq")
+                                        observed = extra.get("usage") if isinstance(extra, dict) else None
+                                    if isinstance(observed, dict):
+                                        merge_usage(usage_data, observed)
                                         accounting.observe(usage_data, complete=False,
                                             cost_authoritative=cost_authoritative,
                                             response_id=response_id)
@@ -208,8 +259,9 @@ def execute_openai_compatible_request(
                                         if choice.get("finish_reason"):
                                             timing.terminal("finish_reason")
                                         delta = choice.get("delta") or {}
-                                        reasoning = delta.get("reasoning_content", delta.get("reasoning"))
-                                        if isinstance(reasoning, str) and reasoning: reasoning_chunk_count += 1
+                                        if not isinstance(delta, dict): delta = {}
+                                        reasoning_seen = _has_reasoning(delta)
+                                        if reasoning_seen: reasoning_chunk_count += 1
                                         content = delta.get("content") or ""
                                         if isinstance(content, str) and content:
                                             if first_content_ms is None:
@@ -247,13 +299,25 @@ def execute_openai_compatible_request(
                                                 # the final SSE frame, so keep draining this same request.
                                                 early_evidence = evidence
                                                 early_completion_ms = elapsed
+                                            # Lines can only close at ">>" (records) or at
+                                            # a closing quote (JSON); count only then.
+                                            if ">>" in boundary or (json_mode[0] is not False and '"' in content):
+                                                if json_mode[0] is None:
+                                                    json_mode[0] = "".join(pieces).lstrip().startswith("{")
+                                                if ">>" in boundary or json_mode[0]:
+                                                    lines_done[0] = detector.closed_count(assembled or "".join(pieces))
+                                            guard.writing(lines_done[0])
+                                        elif reasoning_seen:
+                                            guard.thinking()
+                                        else:
+                                            guard.keepalive()
+                                    else:
+                                        guard.keepalive()
                                     chunk_count += 1
                             if cancelled_by_owner.is_set():
                                 raise ProviderGenerationCancelled("AI generation was cancelled")
-                            if total_timeout_hit.is_set():
-                                raise TimeoutError(
-                                    f"AI provider total timeout after {hard_total_sec:g}s (model={model}, attempts=1)"
-                                )
+                            if stream_stop[0] is not None:
+                                raise stream_stop[0]
                     finally:
                         # Flush on success, malformed SSE, cancellation and
                         # transport interruption. Never influence completion,
@@ -329,6 +393,16 @@ def execute_openai_compatible_request(
                 "elapsedMs": round((time.perf_counter() - started) * 1000, 1),
             }, file=trace_file)
             raise ProviderGenerationCancelled("AI generation was cancelled") from exc
+        if stream_stop[0] is not None:
+            stop = stream_stop[0]
+            trace.note(trace_event + ".stream_stopped", {
+                "stage": "provider_stream_stopped",
+                "elapsedMs": round((time.perf_counter() - started) * 1000, 1),
+                **getattr(stop, "stream_stop", {}),
+            }, file=trace_file)
+            if stop is exc:
+                raise
+            raise stop from exc
         if 'total_timeout_hit' in locals() and total_timeout_hit.is_set():
             elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
             trace.note(trace_event + ".timeout", {
@@ -352,6 +426,9 @@ def execute_openai_compatible_request(
         choices = data.get("choices") or []
         finish = str((choices[0] if choices else {}).get("finish_reason") or "").strip() or None
         raw_usage = data.get("usage")
+        if provider_id == "groq" and not raw_usage:
+            extra = data.get("x_groq")
+            raw_usage = extra.get("usage") if isinstance(extra, dict) else None
         if provider_id in {"llamacpp", "llamafile"}:
             if not streamed:
                 timings = data.get("timings")

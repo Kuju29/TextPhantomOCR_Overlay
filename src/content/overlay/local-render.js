@@ -44,16 +44,10 @@
       (id) => !unanswered.includes(id),
     );
     if (unanswered.length) {
-      // Not "no text": the text is still on screen. The model answered some
-      // units and not others, and this build leaves the source pixels of the
-      // unanswered ones alone rather than erasing them into a blank bubble.
-      //
-      // Two different counts, both needed. The model is asked per UNIT (one
-      // bubble = one unit, however many Lens paragraphs it spans), so the unit
-      // count is what it actually got wrong. The paragraph count is what the
-      // reader sees still in the source language. Reporting only paragraphs
-      // reads as a much worse failure than it is: 5 unanswered units across
-      // two-column bubbles print as "10".
+      // Not "no text": the unanswered units keep their source pixels on screen.
+      // Both counts are reported: units are what the model got wrong (one
+      // bubble = one unit), paragraphs are what the reader still sees untranslated
+      // (5 unanswered two-column bubbles would otherwise read as "10").
       const partial = result?.aiPartial || null;
       const unitsMissing = Array.isArray(partial?.missing)
         ? partial.missing.length

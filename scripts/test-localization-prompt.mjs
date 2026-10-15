@@ -24,7 +24,7 @@ print(json.dumps(out,ensure_ascii=False))
 assert.equal(result.status,0,result.stderr);
 const rows=JSON.parse(result.stdout);
 for (const r of rows) {
- const c=composeCanonicalPrompt(plans[r.lang],{prompt:r.override,prev_context:[{src:'Previous line'}],page_context:[{id:'neighbor',text:'…ต่อเนื่อง 😀'}]},false,r.structured,r.lang);
+ const c=composeCanonicalPrompt(plans[r.lang],{prompt:r.override,repair_reason:r.repair,prev_context:[{src:'Previous line'}],page_context:[{id:'neighbor',text:'…ต่อเนื่อง 😀'}]},false,r.structured,r.lang);
  const system=composeTranslatorIdentitySystem(`${c.sections.language}\n${c.sections.style}`,r.lang || r.targetLang);
  const user=composeTranslationUserMessage({sections:{...c.sections,source:r.structured?'INPUT — tp.translation.schema-object/1\nEach source record is Pn:source text.':c.sections.source},requestOutputContract:r.contract,sourceRecords:r.source,targetLang:r.lang,repairReason:r.repair,expectedIds:['P0'],structuredOutput:r.structured});
  assert.equal(system,r.system,`${r.lang}/${r.mode}: system parity`);

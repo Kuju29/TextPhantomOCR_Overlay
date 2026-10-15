@@ -16,7 +16,7 @@ from typing import Any
 from fastapi import HTTPException, Request
 from starlette.concurrency import run_in_threadpool
 
-from backend import trace
+from backend import trace, diagnostics
 from backend.api.errors import (
     failure_event,
     merged_request_correlation,
@@ -190,7 +190,7 @@ async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict[st
             worker_started = time.perf_counter()
             service_result = await loop.run_in_executor(
                 request.app.state.grouping_executor,
-                _group_on_worker, tree, image, raw_to_document,
+                diagnostics.bind_context(_group_on_worker), tree, image, raw_to_document,
             )
             grouping_worker_ms = (time.perf_counter() - worker_started) * 1000
         else:
@@ -200,7 +200,7 @@ async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict[st
                 worker_started = time.perf_counter()
                 service_result = await loop.run_in_executor(
                     request.app.state.grouping_executor,
-                    _group_on_worker, tree, image, raw_to_document,
+                    diagnostics.bind_context(_group_on_worker), tree, image, raw_to_document,
                 )
                 grouping_worker_ms = (time.perf_counter() - worker_started) * 1000
     except AdmissionRejected as exc:
@@ -250,7 +250,7 @@ async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict[st
     try:
         loop = __import__("asyncio").get_running_loop()
         ai_source_tree = await loop.run_in_executor(
-            request.app.state.grouping_executor, build_ai_source_tree, tree, grouping_result
+            request.app.state.grouping_executor, diagnostics.bind_context(build_ai_source_tree), tree, grouping_result
         )
     except AiSourceTreeError as exc:
         detail = error_payload(

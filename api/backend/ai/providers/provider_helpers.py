@@ -1,8 +1,25 @@
 """Neutral value normalization shared by provider leaves."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 from backend.ai.provider_contract import GenerationRequest, ModelListResult
+
+def accepts_optional_parameter(capabilities, parameter: str) -> bool:
+    """Respect exact-model parameter evidence; malformed metadata is unknown.
+
+    This does not select a wire format or infer capabilities from a model name.
+    Missing evidence leaves the provider leaf's established policy in control.
+    """
+    values = capabilities.get("supported_parameters") if isinstance(capabilities, Mapping) else None
+    if not isinstance(values, (list, tuple)) or not all(isinstance(v, str) for v in values):
+        return True
+    return parameter in values
+
+def normalized_efforts(reasoning) -> list[str]:
+    values = reasoning.get("supported_efforts") if isinstance(reasoning, Mapping) else None
+    if not isinstance(values, (list, tuple)):
+        return []
+    return [value.strip().lower() for value in values if isinstance(value, str)]
 
 def model_status(*, models=None, status: str, http_status: int = 0,
                  error: str = "") -> dict:

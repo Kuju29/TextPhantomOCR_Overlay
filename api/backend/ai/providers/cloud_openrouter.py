@@ -22,8 +22,16 @@ MAX_OUTPUT_TOKENS = 8192
 def normalize_capabilities(item: dict[str, Any]) -> dict[str, Any]:
     reasoning = item.get("reasoning") if isinstance(item.get("reasoning"), dict) else {}
     supported_raw = item.get("supported_parameters")
-    supported = {str(value).lower() for value in supported_raw} if isinstance(supported_raw, list) else set()
+    parameters_known = isinstance(supported_raw, list) and all(isinstance(value, str) for value in supported_raw)
+    supported = {value.lower() for value in supported_raw} if parameters_known else set()
     efforts = reasoning.get("supported_efforts", item.get("supported_reasoning_efforts", []))
+    # Official model metadata distinguishes explicit null (all gateway effort
+    # values) from an omitted field (no effort selector). Other providers' extra
+    # vocabulary is not part of OpenRouter's documented gateway contract.
+    if "supported_efforts" in reasoning and efforts is None:
+        efforts = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+        if reasoning.get("mandatory") is True:
+            efforts.remove("none")
     clean = [value.strip().lower() for value in efforts if isinstance(value, str) and re.fullmatch(r"[a-z0-9_-]{1,32}", value.strip().lower())] if isinstance(efforts, list) else []
     result: dict[str, Any] = {}
     if isinstance(efforts, list) and len(clean) != len(efforts):
@@ -33,6 +41,12 @@ def normalize_capabilities(item: dict[str, Any]) -> dict[str, Any]:
     explicit = reasoning.get("supported")
     if isinstance(explicit, bool): result["supported"] = explicit
     elif "reasoning" in supported or clean or reasoning.get("mandatory") is True: result["supported"] = True
+    elif (parameters_known and not reasoning and
+          not any(value == "include_reasoning" or value.startswith("reasoning") for value in supported)):
+        # Any reasoning-family parameter (e.g. the legacy include_reasoning)
+        # still means the model may reason, so it stays unknown. Without any,
+        # the model has no reasoning to lower, so Thinking Lowest/Off can pass.
+        result["supported"] = False
     if isinstance(reasoning.get("mandatory"), bool): result["mandatory"] = reasoning["mandatory"]
     if isinstance(reasoning.get("default_enabled"), bool): result["default_enabled"] = reasoning["default_enabled"]
     # OpenRouter exposes disable as a separate control from supported_efforts.
@@ -54,6 +68,8 @@ def normalize_capabilities(item: dict[str, Any]) -> dict[str, Any]:
     if reasoning.get("supports_max_tokens") is True or "reasoning.max_tokens" in supported:
         result["supports_max_tokens"] = True
     output: dict[str, Any] = {"reasoning": result}
+    if parameters_known:
+        output["supported_parameters"] = sorted(supported)
     architecture = item.get("architecture") if isinstance(item.get("architecture"), dict) else {}
     inputs = architecture.get("input_modalities")
     if isinstance(inputs, list) and inputs:
@@ -129,11 +145,9 @@ def _budget(request: GenerationRequest, reasoning: bool) -> int:
     answer = int(sum(len(part) for part in request.user_parts) * 2.2) + units * 112 + 384
     hidden = min(4096, 768 + units * 128 + int(len(request.system_text) * .04)) if reasoning else 0
     standard = max(1024, min(MAX_OUTPUT_TOKENS, answer + hidden))
-    # The planner already predicts the marker output.  Do not advertise a 7-8K
-    # completion ceiling for a ~1K-token translation: some OpenRouter endpoints
-    # schedule/rout large reservations more conservatively, and an accidental
-    # reasoning mode can then consume that entire allowance.  Keep a generous
-    # 50% margin while preserving the old estimator as the fallback.
+    # The planner predicts the marker output; a 7-8K ceiling for a ~1K-token
+    # translation lets accidental reasoning consume it and some endpoints route
+    # large reservations conservatively. Keep a 50% margin over the estimate.
     workload = dict(request.workload or {})
     predicted = workload.get("predictedOutput")
     if isinstance(predicted, int) and not isinstance(predicted, bool) and predicted > 0:
@@ -186,8 +200,10 @@ def _apply_official_routing(payload: dict[str, Any], base_url: str) -> dict[str,
 def _reasoning_budget(total: int) -> int:
     """Cap hidden reasoning while reserving most completion space for markers."""
     # Completion budgets are never below 1024, so the 256 minimum and 768
-    # answer reserve can both be satisfied, including the smallest boundary.
-    return max(256, min(2048, int(total) // 3, int(total) - 768))
+    # answer reserve both fit. The formula (generation_defaults) also feeds the
+    # stream's thinking-time limit.
+    from backend.ai.generation_defaults import reasoning_token_cap
+    return reasoning_token_cap(total)
 
 def prepare_payload(request: GenerationRequest) -> dict[str, Any]:
     system_text = request.system_text
@@ -203,10 +219,6 @@ def prepare_payload(request: GenerationRequest) -> dict[str, Any]:
             messages.append({"role": "user", "content": source_text})
     reasoning_payload, reasoning_active = _policy(request)
     reasoning_caps = request.model_capabilities.get("reasoning", {})
-    reasoning_mandatory = (
-        isinstance(reasoning_caps, dict)
-        and reasoning_caps.get("mandatory") is True
-    )
     from backend.ai.translation_paths.messages import insert_history
     messages = insert_history(messages, request.history_messages, "openai_image_first")
     payload: dict[str, Any] = {"model": request.model, "messages": messages}
@@ -214,11 +226,19 @@ def prepare_payload(request: GenerationRequest) -> dict[str, Any]:
         payload["max_completion_tokens"] = _budget(request, True)
     else:
         payload.update(temperature=TEMPERATURE, max_tokens=_budget(request, False))
+    from backend.ai.providers.provider_helpers import accepts_optional_parameter
+    if not accepts_optional_parameter(request.model_capabilities, "temperature"):
+        payload.pop("temperature", None)
     if reasoning_payload is not None:
         payload["reasoning"] = reasoning_payload
     provider_managed_minimum = (request.thinking == "default" and
-                                request.cache_context.get("thinkingRequested") == "minimum")
+                                (request.cache_context.get("thinkingRequested") == "minimum" or
+                                 request.cache_context.get("thinkingProviderDefault") is True))
+    # OpenRouter takes reasoning.effort OR reasoning.max_tokens, "not both"
+    # (docs: use-cases/reasoning-tokens). A chosen effort level wins; the token
+    # bound is only added when no effort was sent.
     if (reasoning_active and not provider_managed_minimum and
+            not (isinstance(reasoning_payload, dict) and "effort" in reasoning_payload) and
             isinstance(reasoning_caps, dict) and reasoning_caps.get("supports_max_tokens") is True):
         # OpenRouter counts reasoning and final text against the same completion
         # ceiling. Bound reasoning for on/default/mandatory modes so it cannot
@@ -294,6 +314,16 @@ class OpenRouterAdapter:
         headers = {"Content-Type": "application/json", "HTTP-Referer": "https://textphantom.app", "X-Title": "TextPhantom"}
         if request.api_key: headers["Authorization"] = f"Bearer {request.api_key}"
         payload = _apply_official_routing(prepare_payload(request), base)
+        # Hosts ordered by the routing decision (stats by default; `auto` is the
+        # cache-capable-first rule; `manual` the admin's list), using the
+        # per-model endpoint list cached by openrouter_cache_order.
+        from backend.ai.routing import openrouter as routing
+        from backend.ai.routing import trace_summary
+        try:
+            payload, decision, endpoints, endpoint_reason = routing.plan(request, payload, base)
+        except Exception as exc:  # noqa: BLE001 - routing never breaks a translation; reason is traced
+            decision, endpoints, endpoint_reason = None, [], "routing_error_" + type(exc).__name__
+        route_trace = trace_summary(decision, endpoints=endpoint_reason) if decision else {"endpoints": endpoint_reason}
         # The private lease already separates caller/document/key/language. Do
         # not derive this from a global System prefix or a per-request UUID.
         from backend.ai.prompt_cache import enabled as prompt_cache_enabled
@@ -320,8 +350,28 @@ class OpenRouterAdapter:
             "providerSort": (payload.get("provider") or {}).get("sort"),
             "requireParameters": (payload.get("provider") or {}).get("require_parameters"),
             "preferredMaxLatency": (payload.get("provider") or {}).get("preferred_max_latency"),
+            "routing": route_trace,
         }, file="ai/providers/cloud_openrouter.py")
-        result = execute_openrouter_chat(
+        import time as _time
+        started = _time.monotonic()
+        try:
+            result = self._execute(base, headers, payload, request, reasoning_value, route_trace)
+        except BaseException as exc:
+            if decision is not None:
+                try:
+                    routing.record_failure(request, exc, decision, endpoints, started)
+                except Exception:  # noqa: BLE001 - statistics never replace the provider error
+                    pass
+            raise
+        if decision is not None:
+            try:
+                routing.record_success(request, result, decision, endpoints)
+            except Exception:  # noqa: BLE001 - statistics never fail a delivered answer
+                pass
+        return self._finish(request, result, reasoning_value, reasoning_mandatory)
+
+    def _execute(self, base, headers, payload, request, reasoning_value, route_trace):
+        return execute_openrouter_chat(
             url=base + "/chat/completions", headers=headers, payload=payload,
             model=request.model, timeout=120.0,
             timeout_policy="provider_total_bounded", expected_ids=list(request.expected_ids),
@@ -335,8 +385,12 @@ class OpenRouterAdapter:
                           "capabilityKnown": bool(request.model_capabilities),
                           "providerSort": (payload.get("provider") or {}).get("sort"),
                           "requireParameters": (payload.get("provider") or {}).get("require_parameters"),
-                          "preferredMaxLatency": (payload.get("provider") or {}).get("preferred_max_latency")},
+                          "preferredMaxLatency": (payload.get("provider") or {}).get("preferred_max_latency"),
+                          "routing": route_trace},
         )
+
+    def _finish(self, request, result, reasoning_value, reasoning_mandatory):
+        from backend import trace
         applied = "provider_default" if request.thinking == "default" else "unverified"
         off_control_sent = (reasoning_value.get("enabled") is False
                             or reasoning_value.get("effort") == "none")

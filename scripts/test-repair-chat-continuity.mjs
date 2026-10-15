@@ -28,7 +28,7 @@ let complete=0,queued=0,finished=0,labels=[];
 const batch={id:'batch',pass:1,items:new Map([['a',{payload:{source:'ai'},status:'error'}]])};
 const {finalizeBatch}=createBatchRetryCoordinator({batchPassStats:()=>({total:1,finished}),selectRetryCandidates:()=>({failed:['a'],permanentErrors:0}),addTask:()=>queued++,onComplete:(_,label)=>{complete++;labels.push(label);}});
 finalizeBatch(batch);assert.equal(complete,0,'post-main barrier retained');
-finished=1;finalizeBatch(batch);
+finished=1;finalizeBatch(batch);await Promise.resolve();
 assert.equal(complete,1);assert.equal(queued,0,'AI errors must not retry entire image');assert.match(labels[0],/1 errors/,'uncaptured failures remain explicit');
 assert.equal(batch.pass,1);
 console.log('PASS repair identity, interleaved pages, skipped OCR units, alias projection, corruption rejection and post-main one-pass boundary');

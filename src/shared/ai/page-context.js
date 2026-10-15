@@ -1,7 +1,7 @@
 import { instructionPack } from "./prompt-language.js";
 // Bounded source evidence from the current page; never additional translation targets.
-export const PAGE_CONTEXT_MAX_UNITS = 6;
-export const PAGE_CONTEXT_MAX_CHARS = 2000;
+const PAGE_CONTEXT_MAX_UNITS = 6;
+const PAGE_CONTEXT_MAX_CHARS = 2000;
 export const PAGE_CONTEXT_HEADER = "SAME PAGE — READ ONLY: These are nearby source units outside this request. They may clarify a continuation, reference or reply. Array proximity is not verified reading order or speaker identity; do not invent either. Translate only SOURCE TEXT target IDs, never these context records. Preserve each target unit's own contribution without copying context into its translation.";
 
 export function normalizePageContext(entries, targetUnits = []) {

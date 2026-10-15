@@ -1,3 +1,4 @@
+import { splitSeriesSummary, withSeriesSummarySchema } from "../series-summary.js";
 import { uncertainRepairIds } from "../repair-alignment.js";
 import { promptLayout } from "../prompt-layout.js";
 import { planOllamaContext } from "../providers/ollama-context.js";
@@ -5,7 +6,6 @@ import { LOCAL_CONTEXT_METADATA_MAX } from "../providers/local-openai-compatible
 import { guardOutputBudget, estimateProviderInput } from "../workload/budget.js";
 import { emitPreviewChunks, tracePreviewUnits } from "../../trace-preview.js";
 import { diagnosticPreviewsEnabled } from "../../trace.js";
-import { completedLineContract } from "../contracts/marker-completion.js";
 import { resolveLocalProvider } from "../providers/local-registry.js";
 import { LocalAiError } from "./error.js";
 import { classifyDirectLocalMissingIds } from "./result-classification.js";
@@ -13,7 +13,6 @@ import {
   composeCanonicalPrompt,
   composeTranslationUserMessage,
   sessionPromptFingerprint,
-  withoutLeadingTargetLanguageHeader,
 } from "./prompt.js";
 import {
   MARKER_CONTRACT_VERSION,
@@ -27,9 +26,8 @@ import {
   translationObjectSchema,
 } from "./output-contract.js";
 import { normalizeReasoningPreference, resolveReasoningPreference } from "../../reasoning-preference.js";
+import { classifyThinkingState, sendsProviderDefault } from "../../thinking-state.js";
 
-export { LocalAiError } from "./error.js";
-export { localOpenAiBase } from "./endpoint.js";
 export { shouldUseDirectLocalAi } from "./route-policy.js";
 export { discoverLocalModels } from "./model-discovery.js";
 export { buildLocalAiCapabilityHints } from "./capability-hints.js";
@@ -45,10 +43,9 @@ function dynamicOutputTokens(units, _systemText = "", workload = null) {
   );
   const count = Math.max(1, list.length);
   const predicted = Number(workload?.predictedOutput);
-  // Output allowance must follow the requested translation, not the size of
-  // the system/style prompt. Counting prompt characters here previously gave
-  // a four-record Local request 2k+ completion tokens, which invited small
-  // models to ramble or spend the entire allowance on hidden reasoning.
+  // Output allowance follows the requested translation, not the system/style
+  // prompt size: counting prompt characters gave small requests 2k+ completion
+  // tokens, which invites small models to ramble or spend it all on reasoning.
   const sourceAllowance = Math.ceil(chars * 1.75 + count * 36 + 96);
   const learnedAllowance = Number.isFinite(predicted) && predicted > 0
     ? Math.ceil(predicted * 1.75 + 96)
@@ -57,7 +54,7 @@ function dynamicOutputTokens(units, _systemText = "", workload = null) {
 }
 export const localAiOutputBudgetForTest = dynamicOutputTokens;
 
-export function encodeLocalSourceBlocks(wireUnits) {
+function encodeLocalSourceBlocks(wireUnits) {
   const records = (wireUnits || []).map((unit) => {
     const id = String(unit?.id || "");
     const source = String(unit?.text ?? "");
@@ -83,7 +80,7 @@ export function encodeLocalSourceBlocks(wireUnits) {
     .join("\n");
 }
 
-export function encodeLocalSchemaSource(wireUnits) {
+function encodeLocalSchemaSource(wireUnits) {
   return (wireUnits || []).map((unit, index) => {
     const id = String(unit?.id || "");
     const source = String(unit?.text ?? "");
@@ -177,7 +174,6 @@ async function translateSingle(
     conversationContext = null,
     canonicalPrompt = null,
     promptAudit = null,
-    systemText = "",
     imageDataUri = "",
     sourceLang = "",
     targetLang = "",
@@ -239,15 +235,15 @@ async function translateSingle(
     formatSwitch: false,
   };
   if (!conversationContext && ai?.translation_mode === 'independent' &&
-      ai?.style_examples !== false && !ai?.independent_examples)
+      ai?.style_examples === true && !ai?.independent_examples)
     throw new LocalAiError('Independent example selection is missing', {
       code:'independent_example_selection_missing',attempted:false,retryable:false});
   const independentExamples = conversationContext || ai?.translation_mode === 'conversation'
-    ? null : ai?.independent_examples || {source:ai?.style_examples === false?'none':'human',
+    ? null : ai?.independent_examples || {source:ai?.style_examples !== true?'none':'human',
         pairs:[],scopeStatus:'legacy_unscoped'};
-  const effectiveStyleExamples = ai?.style_examples !== false &&
+  const effectiveStyleExamples = ai?.style_examples === true &&
     (Boolean(conversationContext) || independentExamples?.source !== 'none');
-  const promptAi = effectiveStyleExamples === (ai?.style_examples !== false) ? ai : {...ai, style_examples:effectiveStyleExamples};
+  const promptAi = effectiveStyleExamples === (ai?.style_examples === true) ? ai : {...ai, style_examples:effectiveStyleExamples};
   const wireUnits = units.map((unit, index) => ({
     id: conversationRecords ? String(unit?.id||"") : `P${index}`,
     text: String(unit?.text || ""),
@@ -255,7 +251,7 @@ async function translateSingle(
   const composed = composeCanonicalPrompt(
     canonicalPrompt,
     promptAi,
-    Boolean(imageDataUri),
+    Boolean(imageDataUri || (conversationRecords && ai?.send_image)),
     outputContract.kind === "schema_object",
     targetLang,
     units,
@@ -266,9 +262,6 @@ async function translateSingle(
       code: "local_prompt_unavailable",
     });
   const userPrompt = String(ai?.prompt || "").trim();
-  const builtInStyle = String(
-    canonicalPrompt?.pieces?.editableStyle || "",
-  ).trim();
   const userPromptPresent = Boolean(userPrompt);
   const savedDefault = userPromptPresent && composed.sections.savedDefault;
   const requestOutputContract = exactOutputInstruction(
@@ -327,14 +320,21 @@ async function translateSingle(
   for (const key of ["styleRole", "systemStyleCopies", "userStyleCopies", "userStaticChars"])
     audit[key] = audit.promptLayout[key];
   const reasoning = ai?.model_capabilities?.reasoning;
-  const thinkingRequested = normalizeReasoningPreference(ai?.thinking, "minimum");
-  let thinkingSelected = resolveReasoningPreference(thinkingRequested, reasoning);
-  // Missing Ollama thinking.values is not proof that the model cannot switch
-  // thinking off. Lowest may request the native boolean Off and then verify
-  // the response; an advertised mandatory mode is handled by the resolver.
-  if (adapter.id === "ollama" && thinkingRequested === "minimum" &&
-      thinkingSelected === "default" && typeof reasoning?.supported !== "boolean")
-    thinkingSelected = "off";
+  const thinkingSaved = normalizeReasoningPreference(ai?.thinking, "minimum");
+  // One shared classification (shared/thinking-state.js, mirrored by
+  // the API). Direct Local generation only runs after the background readiness
+  // gate (ensureLocalAiBatchReady / refreshLocalAiCapabilities) re-read this
+  // runtime's live metadata or failed the batch, so this is the fresh record;
+  // the "loading" state is handled there and in the popup, never here.
+  const thinkingState = classifyThinkingState(reasoning, { fresh: true });
+  // No-reasoning models and models without a provable control: the control is
+  // not offered, the saved choice is kept, and no thinking field is sent.
+  const thinkingProviderDefault = thinkingSaved !== "default" && sendsProviderDefault(thinkingState);
+  const thinkingRequested = thinkingProviderDefault ? "default" : thinkingSaved;
+  const providerDefaultApplied = thinkingState === "none"
+    ? "not_applicable_non_reasoning_model" : "provider_default";
+  const thinkingSelected = thinkingProviderDefault ? "default"
+    : resolveReasoningPreference(thinkingRequested, reasoning);
   const minimumAtProviderDefault = thinkingRequested === "minimum" && thinkingSelected === "default";
   const verifiedNonReasoning = reasoning?.supported === false &&
     Array.isArray(reasoning.supported_efforts) && reasoning.supported_efforts.length === 0 &&
@@ -343,6 +343,7 @@ async function translateSingle(
   const thinkingAudit = {
     thinkingRequested,
     thinkingSelected,
+    ...(thinkingProviderDefault ? {thinkingState, thinkingSaved, thinkingApplied: providerDefaultApplied} : {}),
     ...(minimumAtProviderDefault ? {thinkingApplied: verifiedNonReasoning
       ? "not_applicable_non_reasoning_model" : "provider_managed_unverified"} : {}),
   };
@@ -368,10 +369,13 @@ async function translateSingle(
   });
   const sourceTexts = wireUnits.map(unit => String(unit.text));
   const userMaxOutput = ai?.max_output_tokens;
-  const localReasoningRisk = thinkingMode !== "off" && !verifiedNonReasoning;
+  // A provider default may still think unless the record proves no reasoning.
+  const localReasoningRisk = thinkingMode !== "off" && !verifiedNonReasoning && thinkingState !== "none";
   const budgetOptions = { sourceTexts, userMaxOutput, localReasoningRisk };
   const responseSchema = outputContract.kind === "schema_object"
-    ? translationObjectSchema(wireUnits.map(u => u.id)) : null;
+    ? (ai?.memory_mode === "full"
+      ? withSeriesSummarySchema(translationObjectSchema(wireUnits.map(u => u.id)))
+      : translationObjectSchema(wireUnits.map(u => u.id))) : null;
   let conversationOutputReserve = standardOutputTokens;
   if (conversationContext) {
     const baseBudgetInput = { history: [], system: effectiveSystemPrompt, user: userText,
@@ -386,12 +390,8 @@ async function translateSingle(
       contextTokens: discovered.modelContextTokens || undefined } : discovered;
     const reserveWorkload = ai?.workload || (nativeOllama
       ? { version: 1, predictedOutput: standardOutputTokens } : null);
-    try {
-      conversationOutputReserve = guardOutputBudget({ standard: standardOutputTokens,
-        workload: reserveWorkload, limits: reserveLimits, ...baseBudgetInput, ...budgetOptions });
-    } catch (error) {
-      throw error;
-    }
+    conversationOutputReserve = guardOutputBudget({ standard: standardOutputTokens,
+      workload: reserveWorkload, limits: reserveLimits, ...baseBudgetInput, ...budgetOptions });
   }
   const conversation = conversationContext ? await conversationContext.prepare({
     layout:audit.promptLayout,system:effectiveSystemPrompt,user:userText,
@@ -739,7 +739,7 @@ async function translateSingle(
     (Number.isSafeInteger(usage.thinkingTokens) && usage.thinkingTokens > 0) ||
     Boolean(String(adapter.responseReasoning?.(data) || "").trim());
   const timings = adapter.timing(data, usage.outputTokens),
-    thinkingApplied = minimumAtProviderDefault
+    thinkingApplied = thinkingProviderDefault ? providerDefaultApplied : minimumAtProviderDefault
       ? verifiedNonReasoning && !providerReasoningObserved
         ? "not_applicable_non_reasoning_model" : "provider_managed_unverified"
       : String(transportThinkingApplied || (thinkingMode === "default"
@@ -826,8 +826,10 @@ async function translateSingle(
   }
   const translationStarted = performance.now();
   let decoded;
+  const summaryResult = splitSeriesSummary(text, {enabled:ai?.memory_mode === "full",
+    nativeSchema:outputContract.kind === "schema_object"});
   try {
-    decoded = decodeTranslations(text, units, {
+    decoded = decodeTranslations(summaryResult.text, units, {
       structured: composed.structured,
       wireUnits,
       compactMarkers: outputContract.kind === "compact_records",
@@ -931,8 +933,8 @@ async function translateSingle(
       error.generationAttempts=1;
       throw attach(error);
     }
-    conversationContext?.capture(text,responseId);
-  } else conversationContext?.capture(text);
+    conversationContext?.capture(summaryResult.status === "invalid" ? summaryResult.text : text,responseId);
+  } else conversationContext?.capture(summaryResult.status === "invalid" ? summaryResult.text : text);
   onProgress?.({ state: "completed" });
   return {
     schema: "tp.ai.result/1",
@@ -940,6 +942,11 @@ async function translateSingle(
     missing,
     meta: {
       route: "direct-local",
+      ...(ai?.memory_mode === "full" ? {seriesSummaryStatus:summaryResult.status,
+        ...(summaryResult.summary && !missing.length && !alignmentUncertainIds.length &&
+          (outputContract.kind === "schema_object" || decoded.acceptedLosslessly === true)
+          ? {seriesSummary:summaryResult.summary,seriesSummaries:[summaryResult.summary],
+            seriesSummaryRecords:[{text:summaryResult.summary,sourceIds:units.map(u=>String(u.id))}]} : {})} : {}),
       translationMode:conversation ? "conversation" : "independent",
       ...(conversation ? {conversation:conversation.evidence, historyOrigins:conversation.origins} : {}),
       responseShape: decoded.responseShape,

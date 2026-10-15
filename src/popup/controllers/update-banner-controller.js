@@ -1,3 +1,5 @@
+import { setUiTemplate } from "../../shared/ui-template.js";
+
 function versionParts(value) {
   const text = String(value || "").trim();
   if (!/^\d+(?:\.\d+){1,3}$/.test(text)) return null;
@@ -27,7 +29,7 @@ export function createUpdateBannerController({ els, getDefaults, getCurrentVersi
       const updateUrl = String(defaults?.updateUrl || "").trim();
       if (!/^https:\/\//i.test(updateUrl)) return false;
       els.updateBanner.href = updateUrl;
-      els.updateBanner.textContent = `Version ${latest} is available. Please update TextPhantom.`;
+      setUiTemplate(els.updateBanner, "Version {version} is available. Please update TextPhantom.", { version: latest });
       els.updateBanner.hidden = false;
       return true;
     } catch {

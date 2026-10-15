@@ -23,3 +23,26 @@ export function imageKeyFromPayload(payload) {
   const id = String(payload?.metadata?.image_id || "").trim();
   return id || normImgSrc(payload?.src);
 }
+
+// Session-storage records (pending jobs, batch snapshots) must not copy
+// multi-MB data: URIs. This compact marker keeps identity (MIME, length and an
+// FNV-1a digest) so a restored record can still be matched against the
+// original source with sameImageSource(); it is never fetchable.
+const DATA_MARKER = "tp-data-omitted:";
+export function persistableSource(src) {
+  const s = String(src || "");
+  if (!s.startsWith("data:") || s.length <= 256) return s;
+  let h1 = 0x811c9dc5, h2 = 0x01000193;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 16777619) >>> 0;
+    h2 = Math.imul(h2 ^ c, 2246822519) >>> 0;
+  }
+  const mime = /^data:([^;,]{0,64})/.exec(s)?.[1] || "";
+  return `${DATA_MARKER}${mime};len=${s.length};fnv=${h1.toString(16)}${h2.toString(16)}`;
+}
+export const isOmittedSource = src => String(src || "").startsWith(DATA_MARKER);
+/** Compares image sources where either side may be a persisted marker. */
+export function sameImageSource(a, b) {
+  return persistableSource(normImgSrc(a)) === persistableSource(normImgSrc(b));
+}

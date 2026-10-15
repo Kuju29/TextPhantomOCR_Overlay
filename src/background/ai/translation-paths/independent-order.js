@@ -18,9 +18,12 @@ export function reserveLocalIndependentJob(payload,tabId=0) {
   const ticket={key:JSON.stringify([context.tp_tab_session || meta.tp_tab_session || `tab:${tabId}`,
     meta.batch_id || '',context.page_url || '',a.provider,a.base_url,a.model,a.prompt,payload.lang]),
     tabId,batchId:String(meta.batch_id || ''),index,sequence:++sequence,entered:false,done:false,
+    // Cross-page Local Independent: positive wire order for I{order}_P{n}
+    // mapping inside the shared ready queue (the transport sends P0..Pn).
+    get order(){return this.sequence;},
     // This dependency, unlike capacity, cannot run concurrently without losing
     // the previous page's examples. With examples off only admission is ordered.
-    waitForAccepted:a.style_examples !== false};
+    waitForAccepted:a.style_examples === true};
   tickets.set(payload,ticket);active.add(ticket);wake();return ticket;
 }
 const sourceOrder=t=>t.index ?? t.sequence;
@@ -35,6 +38,21 @@ function blocked(ticket) {
 }
 function finish(ticket) { if(ticket&&!ticket.done){ticket.done=true;active.delete(ticket);wake();} }
 export function finishLocalIndependentJob(payload) {finish(tickets.get(payload));tickets.delete(payload);}
+// Cross-page Local Independent (ready queue). Pages enter in webpage order;
+// a finished/failed page's reservation disappears so it never blocks others.
+export function localIndependentTicket(payload) { return tickets.get(payload) || reserveLocalIndependentJob(payload); }
+export function localIndependentTickets(key) {
+  return [...active].filter(t=>t.key===key&&!t.done&&!t.consumed)
+    .sort((a,b)=>precedes(a,b)?-1:precedes(b,a)?1:0);
+}
+export function onLocalIndependentReady(listener) { listeners.add(listener); return () => listeners.delete(listener); }
+export function fenceLocalIndependentConfiguration(ownerTicket, error) {
+  if (!ownerTicket || ownerTicket.done) return;
+  for (const ticket of active)
+    if (ticket.key === ownerTicket.key && ticket.batchId === ownerTicket.batchId && !ticket.done && !ticket.consumed)
+      ticket.configurationFailure = error;
+  wake();
+}
 export function cancelLocalIndependentJobs({tabId,batchId}={}) {
   for(const ticket of [...active]) if((tabId==null||ticket.tabId===tabId)&&(!batchId||ticket.batchId===batchId))finish(ticket);
 }

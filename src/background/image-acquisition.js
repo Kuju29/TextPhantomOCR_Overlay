@@ -192,78 +192,74 @@ export async function acquireImageDataUri(url, pageUrl = '', signal = null, {
       counts:{w:Number(detail?.width)||0,h:Number(detail?.height)||0},
     },traceId);
   };
-  try {
-    for (const route of order) {
+  for (const route of order) {
+    if (signal?.aborted) throw abortError();
+    const startedAt = Date.now();
+    report('start',{route,preferred:preferred || 'none',previousFailures:failures.length});
+    try {
+      const dataUri = await bounded(ownedSignal => {
+        if (route === 'DEFAULT') {
+          const onResponse=async (blob,response,actualUrl=url)=>{
+            const inspected=await composeImageResponse(blob,response.headers,{
+              signal:ownedSignal,hint:compositionHint,onResult:onComposition});
+            return inspected===blob ? decodeSiteImage(blob,{url:actualUrl,pageUrl,
+              signal:ownedSignal,onResult:onComposition}) : inspected;
+          };
+          if(vizEndpoint(url,pageUrl))return (async()=>{
+            const endpoint=await fetch(url,{credentials:'include',cache:'no-store',
+              referrer:pageUrl||'about:client',signal:ownedSignal});
+            const signed=await vizSignedUrl(endpoint);
+            return fetchImageDataUriFromUrl(signed,pageUrl,ownedSignal,{
+              onResponse:(blob,response)=>onResponse(blob,response,signed)});
+          })();
+          return fetchImageDataUriFromUrl(url, pageUrl, ownedSignal,{
+            requestUrl:imageRequestUrl(url,pageUrl,compositionHint),onResponse,
+            allowBinaryImage:Boolean(mangaMiraiKey(url,pageUrl))});
+        }
+        if (route === 'REFERER') return refererFetch(url, pageUrl, ownedSignal,{
+          compositionHint,onResult:onComposition,retryTransient:Boolean(domFetch),
+          onRetry:detail=>{
+            report('retry',{route:'REFERER',...detail});
+            traceNote('background/image-acquisition.js','imageAcquisition_REFERER_retry',{
+              schema:'tp.audit/1',event:'route_retry',scope:{runId:traceRunId,pageId:`p${pageId || 0}`,imageId},
+              status:detail.status,counts:{httpAttempts:detail.attempt},timing:{pauseMs:detail.delayMs},
+            },traceId);
+          }});
+        return domFetch(ownedSignal);
+      }, signal, timeoutMs);
       if (signal?.aborted) throw abortError();
-      const startedAt = Date.now();
-      report('start',{route,preferred:preferred || 'none',previousFailures:failures.length});
-      try {
-        const dataUri = await bounded(ownedSignal => {
-          if (route === 'DEFAULT') {
-            const onResponse=async (blob,response,actualUrl=url)=>{
-              const inspected=await composeImageResponse(blob,response.headers,{
-                signal:ownedSignal,hint:compositionHint,onResult:onComposition});
-              return inspected===blob ? decodeSiteImage(blob,{url:actualUrl,pageUrl,
-                signal:ownedSignal,onResult:onComposition}) : inspected;
-            };
-            if(vizEndpoint(url,pageUrl))return (async()=>{
-              const endpoint=await fetch(url,{credentials:'include',cache:'no-store',
-                referrer:pageUrl||'about:client',signal:ownedSignal});
-              const signed=await vizSignedUrl(endpoint);
-              return fetchImageDataUriFromUrl(signed,pageUrl,ownedSignal,{
-                onResponse:(blob,response)=>onResponse(blob,response,signed)});
-            })();
-            return fetchImageDataUriFromUrl(url, pageUrl, ownedSignal,{
-              requestUrl:imageRequestUrl(url,pageUrl,compositionHint),onResponse,
-              allowBinaryImage:Boolean(mangaMiraiKey(url,pageUrl))});
-          }
-          if (route === 'REFERER') return refererFetch(url, pageUrl, ownedSignal,{
-            compositionHint,onResult:onComposition,retryTransient:Boolean(domFetch),
-            onRetry:detail=>{
-              report('retry',{route:'REFERER',...detail});
-              traceNote('background/image-acquisition.js','imageAcquisition_REFERER_retry',{
-                schema:'tp.audit/1',event:'route_retry',scope:{runId:traceRunId,pageId:`p${pageId || 0}`,imageId},
-                status:detail.status,counts:{httpAttempts:detail.attempt},timing:{pauseMs:detail.delayMs},
-              },traceId);
-            }});
-          return domFetch(ownedSignal);
-        }, signal, timeoutMs);
-        if (signal?.aborted) throw abortError();
-        // Legacy DEFAULT accepts an absent Content-Type and leaves actual image
-        // decoding to Lens. Keep that behavior when sharing the route with NORMAL.
-        const valid = route === 'DOM' ? /^data:image\//i : /^data:(?:image\/|application\/octet-stream;)/i;
-        if (!valid.test(String(dataUri || ''))) throw new Error('IMAGE_ACQUISITION_INVALID');
-        entry.preferred = route;
-        report('success',{route,elapsedMs:Date.now()-startedAt,encodedChars:String(dataUri).length,
-          previousFailures:failures.length});
-        traceNote('background/image-acquisition.js', `imageAcquisition_${route}_success`, {
-          schema:'tp.audit/1',event:'route_capability',reason:'success',
-          scope:{runId:traceRunId,pageId:`p${pageId || 0}`},
-          timing:{readMs:Date.now()-startedAt},counts:{fallbackCount:failures.length},
-        }, traceId);
-        if (failures.length || preferred !== route)
-          log.info('image acquisition selected', { scope:traceRunId || 'normal', route, host, fallbacks: failures });
-      return dataUri;
-      } catch (error) {
-        if (signal?.aborted || error?.name === 'AbortError') throw abortError();
-        if(/^IMAGE_COMPOSE_/.test(String(error?.code || '')))
-          onComposition('failed',{code:String(error.code).slice('IMAGE_COMPOSE_'.length).toLowerCase()});
-        report('failed',{route,elapsedMs:Date.now()-startedAt,
-          code:error?.code || error?.name || 'FETCH_FAILED',reason:error?.message || String(error)});
-        failures.push({ route, reason: error.message });
-        traceNote('background/image-acquisition.js', `imageAcquisition_${route}_fallback`, {
-          schema:'tp.audit/1',event:'route_capability',reason:'failed',
-          scope:{runId:traceRunId,pageId:`p${pageId || 0}`},timing:{readMs:Date.now()-startedAt},
-        }, traceId);
-      }
+      // Legacy DEFAULT accepts an absent Content-Type and leaves actual image
+      // decoding to Lens. Keep that behavior when sharing the route with NORMAL.
+      const valid = route === 'DOM' ? /^data:image\//i : /^data:(?:image\/|application\/octet-stream;)/i;
+      if (!valid.test(String(dataUri || ''))) throw new Error('IMAGE_ACQUISITION_INVALID');
+      entry.preferred = route;
+      report('success',{route,elapsedMs:Date.now()-startedAt,encodedChars:String(dataUri).length,
+        previousFailures:failures.length});
+      traceNote('background/image-acquisition.js', `imageAcquisition_${route}_success`, {
+        schema:'tp.audit/1',event:'route_capability',reason:'success',
+        scope:{runId:traceRunId,pageId:`p${pageId || 0}`},
+        timing:{readMs:Date.now()-startedAt},counts:{fallbackCount:failures.length},
+      }, traceId);
+      if (failures.length || preferred !== route)
+        log.info('image acquisition selected', { scope:traceRunId || 'normal', route, host, fallbacks: failures });
+    return dataUri;
+    } catch (error) {
+      if (signal?.aborted || error?.name === 'AbortError') throw abortError();
+      if(/^IMAGE_COMPOSE_/.test(String(error?.code || '')))
+        onComposition('failed',{code:String(error.code).slice('IMAGE_COMPOSE_'.length).toLowerCase()});
+      report('failed',{route,elapsedMs:Date.now()-startedAt,
+        code:error?.code || error?.name || 'FETCH_FAILED',reason:error?.message || String(error)});
+      failures.push({ route, reason: error.message });
+      traceNote('background/image-acquisition.js', `imageAcquisition_${route}_fallback`, {
+        schema:'tp.audit/1',event:'route_capability',reason:'failed',
+        scope:{runId:traceRunId,pageId:`p${pageId || 0}`},timing:{readMs:Date.now()-startedAt},
+      }, traceId);
     }
-    entry.preferred = '';
-    const error=new Error(`${domFetch ? 'READER' : 'IMAGE'}_ACQUISITION_FAILED: ${failures.map(f => `${f.route}: ${f.reason}`).join('; ')}`);
-    error.code='IMG_READ_FAILED';
-    throw error;
-  } catch (error) {
-    throw error;
   }
+  entry.preferred = '';
+  const error=new Error(`${domFetch ? 'READER' : 'IMAGE'}_ACQUISITION_FAILED: ${failures.map(f => `${f.route}: ${f.reason}`).join('; ')}`);
+  error.code='IMG_READ_FAILED';
+  throw error;
 }
 
 export function fetchImageDataUriWithReferer(url, pageUrl = '', signal = null, options = {}) {

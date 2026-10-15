@@ -22,6 +22,3 @@ export function requestGroups(history, day = null) {
   }
   return [...groups.values()].sort((a,b) => b.startedAt - a.startedAt);
 }
-export function todayRequestGroups(history, at = Date.now()) {
-  return requestGroups(history, bangkokDate(at));
-}

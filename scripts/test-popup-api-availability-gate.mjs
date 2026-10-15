@@ -17,24 +17,29 @@ const button = () => ({
 let intervalCallback = null;
 let intervalStarts = 0;
 let intervalStops = 0;
+const delays = [];
 let checks = 0;
 let toolsClicks = 0;
 const translate = control();
 const alreadyDisabled = control(true);
 const ai = control();
+const paidSelect = control(), paidRetry = control(), paidLogout = control();
 const translateOpen = button();
 const aiOpen = button();
 const gate = createApiAvailabilityGate({
   els: {
     translatePanel: panel(translate, alreadyDisabled, translateOpen),
-    aiPanel: panel(ai, aiOpen),
+    aiPanel: panel(ai, aiOpen, paidSelect, paidRetry, paidLogout),
+    aiService: paidSelect, aiPaidCheck: paidRetry, aiPaidLogout: paidLogout,
     apiGateTranslate: banner(), apiGateAi: banner(),
     apiGateTranslateOpen: translateOpen, apiGateAiOpen: aiOpen,
     tabTools: { click: () => toolsClicks++ },
   },
   checkApi: () => checks++,
-  setIntervalFn: (fn) => { intervalStarts++; intervalCallback = fn; return 7; },
-  clearIntervalFn: () => { intervalStops++; intervalCallback = null; },
+  // 10490: bounded one-shot retries (5, 15, 30, then 60 s) instead of a 5 s interval.
+  setTimeoutFn: (fn, ms) => { intervalStarts++; delays.push(ms); intervalCallback = fn; return 7; },
+  clearTimeoutFn: () => { intervalStops++; intervalCallback = null; },
+  events: null,
   now: () => 100000,
 });
 
@@ -47,15 +52,22 @@ gate.failure();
 assert.equal(gate.snapshot().state, "offline");
 assert.equal(translate.disabled, true);
 assert.equal(ai.disabled, true);
+assert.equal(paidSelect.disabled, false, "Offline API cannot trap a saved Paid choice");
+assert.equal(paidRetry.disabled, false, "Retry must stay usable while API is offline");
+assert.equal(paidLogout.disabled, false, "Local sign-out must stay usable while API is offline");
 assert.equal(intervalStarts, 1);
 intervalCallback();
+await Promise.resolve(); await Promise.resolve();
 assert.equal(checks, 1);
+gate.failure();
+assert.equal(gate.snapshot().state, "offline");
+assert.deepEqual(delays, [5000, 15000], "second retry waits longer");
 gate.success();
 assert.equal(gate.snapshot().state, "online");
 assert.equal(translate.disabled, false);
 assert.equal(ai.disabled, false);
 assert.equal(alreadyDisabled.disabled, true);
-assert.equal(intervalStops, 1);
+assert.equal(intervalStops, 1, "success cancels the scheduled retry");
 
 gate.failure();
 assert.equal(gate.snapshot().state, "online");

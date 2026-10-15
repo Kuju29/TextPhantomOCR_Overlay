@@ -70,7 +70,9 @@ const {
 
   stored = { rateLimitEnabled: true, rateRpm: 0, rateBurst: 0 };
   const migratedCap = await readFullSettings();
-  assert.equal(migratedCap.rateLimitEnabled, true);
+  // .68: the request-rate cap was replaced by the token ceiling; a saved cap
+  // from an older popup can no longer pace requests invisibly.
+  assert.equal(migratedCap.rateLimitEnabled, false);
   assert.equal(migratedCap.rateRpm, 0, "saved zero RPM must not become a hidden throttle");
   assert.equal(migratedCap.rateBurst, 0, "saved zero burst must not become a hidden throttle");
   assert.equal(migratedCap.rateProfile, "custom");
@@ -117,7 +119,7 @@ const {
   assert.match(optionFor.api.label, /temporarily unavailable/i, "the API option must explain its temporary state");
   assert.match(
     popupHtml,
-    /id="engine-mode-availability"[^>]*role="status"[^>]*>[\s\S]*?temporarily unavailable[\s\S]*?run in the extension/i,
+    /id="engine-mode-availability"[^>]*role="status"[^>]*>API server mode is unavailable\./i,
     "the selector must have an accessible availability notice",
   );
   assert.match(

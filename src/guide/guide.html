@@ -1,0 +1,611 @@
+<!doctype html>
+<html lang="th">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>คู่มือการใช้งาน TextPhantom</title>
+  <link rel="icon" href="../icons/48.png" />
+  <link rel="stylesheet" href="guide.css" />
+</head>
+
+<body>
+  <a class="skip-link" href="#content">ข้ามไปที่เนื้อหา</a>
+
+  <header class="topbar">
+    <div class="topbar-inner">
+      <img class="topbar-icon" src="../icons/48.png" alt="" width="32" height="32" />
+      <div class="topbar-text">
+        <strong translate="no">TextPhantom</strong>
+        <span>คู่มือการใช้งานแบบมีภาพ <span id="guide-version" class="version" translate="no"></span></span>
+      </div>
+      <button type="button" class="toc-toggle" id="toc-toggle" aria-controls="toc" aria-expanded="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h10" /></svg>
+        <span>สารบัญ</span>
+      </button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <nav class="toc" id="toc" aria-label="สารบัญ">
+      <p class="toc-title">สารบัญ</p>
+      <ol>
+        <li><a href="#start">เริ่มต้นใช้งาน</a></li>
+        <li><a href="#header">ส่วนบนของหน้าต่าง</a></li>
+        <li><a href="#translate">แท็บ Translate</a></li>
+        <li><a href="#ai-source">เลือกแปลด้วย AI</a></li>
+        <li><a href="#manual">AI แบบ Manual (ใช้ key ของคุณ)</a></li>
+        <li><a href="#local">AI บนเครื่อง (Local)</a></li>
+        <li><a href="#paid">Paid (เครดิต TP)</a></li>
+        <li><a href="#buy">ซื้อแพ็กเครดิต TP</a></li>
+        <li><a href="#login">Login (บัญชี AI ของคุณ)</a></li>
+        <li><a href="#tools">แท็บ Tools</a></li>
+        <li><a href="#during">ระหว่างแปลบนหน้าเว็บ</a></li>
+        <li><a href="#trouble">แก้ปัญหาที่พบบ่อย</a></li>
+      </ol>
+    </nav>
+
+    <main id="content" tabindex="-1">
+      <section class="intro card">
+        <h1>คู่มือการใช้งาน TextPhantom</h1>
+        <p class="lead">TextPhantom แปลข้อความในภาพมังงะ มังฮวา บนหน้าเว็บ คู่มือนี้มีภาพของหน้าต่างจริง
+          ตัวเลขในวงกลมบนภาพตรงกับคำอธิบายข้อเดียวกันด้านล่าง ชี้หรือแตะที่ตัวเลขเพื่อดูว่าหมายถึงส่วนไหน</p>
+        <ul class="notes">
+          <li>ชื่อปุ่มในคู่มือเขียนเป็นภาษาอังกฤษใน “เครื่องหมายคำพูด” ให้ตรงกับหน้าต่างจริง
+            ถ้าคุณเปลี่ยนภาษาหน้าจอเป็น “ไทย” ชื่อปุ่มจะถูกแปล แต่ตำแหน่งเหมือนเดิม</li>
+          <li>อีเมล ตัวเลขเครดิต ชื่อเรื่อง และราคาในภาพเป็นเพียงตัวอย่าง</li>
+          <li>การตั้งค่าที่เลือกในหน้าต่าง TextPhantom ถูกบันทึกไว้ให้เอง ไม่มีปุ่มบันทึก</li>
+        </ul>
+      </section>
+
+      <!-- ================= 1. START ================= -->
+      <section id="start" class="card" aria-labelledby="start-title">
+        <h2 id="start-title"><span class="sec-no">1</span>เริ่มต้นใช้งานใน 4 ขั้น</h2>
+        <ol class="steps">
+          <li>
+            <h3>ติดตั้งส่วนขยาย</h3>
+            <p>ติดตั้ง TextPhantom จากร้านส่วนขยายของเบราว์เซอร์ที่คุณใช้
+              (Chrome, Microsoft Edge, Opera, Firefox หรือ Thunderbird)</p>
+          </li>
+          <li>
+            <h3>เปิดหน้าต่าง TextPhantom</h3>
+            <p>คลิกไอคอน TextPhantom บนแถบเครื่องมือของเบราว์เซอร์ หน้าต่างเล็ก ๆ จะเปิดขึ้น
+              ในคู่มือนี้เรียกว่า “หน้าต่าง TextPhantom”</p>
+          </li>
+          <li>
+            <h3>เลือกภาษาและวิธีแปล</h3>
+            <p>ที่แท็บ “Translate” เลือก “Target language” เป็นภาษาที่อยากอ่าน (เช่น “Thai”)
+              ค่าเริ่มต้นของ “Text output” คือ “Lens translation” ใช้ได้ทันทีโดยไม่ต้องตั้งค่าอื่น
+              ถ้าต้องการแปลด้วย AI ดู<a href="#ai-source">หัวข้อ 4</a></p>
+          </li>
+          <li>
+            <h3>แปลภาพบนหน้าเว็บ</h3>
+            <p>คลิกขวาที่ภาพแล้วเลือก “🔍 Translate this image” หรือคลิกขวาที่ว่างบนหน้าเว็บ
+              แล้วเลือก “🔍 Translate all images on page” เพื่อแปลทุกภาพในหน้านั้น</p>
+            <div class="menu-mock" role="img" aria-label="ตัวอย่างเมนูคลิกขวาที่มีคำสั่ง Translate this image">
+              <div class="menu-item muted">Open image in new tab</div>
+              <div class="menu-item muted">Save image as…</div>
+              <div class="menu-sep"></div>
+              <div class="menu-item active"><img src="../icons/16.png" alt="" width="16" height="16" /> 🔍 Translate this image</div>
+            </div>
+            <p class="hint">เมนูจริงหน้าตาต่างกันเล็กน้อยตามเบราว์เซอร์ นอกจากคลิกขวา ยังเปิดปุ่มแปลบนหน้าเว็บได้ ดู<a href="#translate">หัวข้อ 3</a> ข้อ 6–7</p>
+          </li>
+        </ol>
+      </section>
+
+      <!-- ================= 2. HEADER ================= -->
+      <section id="header" class="card" aria-labelledby="header-title">
+        <h2 id="header-title"><span class="sec-no">2</span>ส่วนบนของหน้าต่าง</h2>
+        <p>ส่วนนี้แสดงอยู่ทุกแท็บ ใช้สลับหน้าและดูสถานะการเชื่อมต่อ</p>
+        <div class="shot-block">
+          <figure class="shot" data-shot="header"></figure>
+          <ol class="callout-list" data-shot="header">
+            <li data-key="language"><b>ภาษาหน้าจอ</b> เปลี่ยนภาษาของปุ่มในหน้าต่างนี้ (แปลด้วย Google Translate) เลือก “ไทย” ได้
+              ค่านี้ไม่เกี่ยวกับภาษาที่ใช้แปลภาพ</li>
+            <li data-key="status"><b>สถานะเซิร์ฟเวอร์</b> ✅ เชื่อมต่อได้ · ⏳ กำลังตรวจ · ❌ เชื่อมต่อไม่ได้
+              ชี้เมาส์ค้างไว้เพื่อดูรายละเอียด</li>
+            <li data-key="tab-translate"><b>“Translate”</b> ตั้งค่าหลัก: วิธีแปล ภาษา ขนาดตัวอักษร และปุ่มบนหน้าเว็บ</li>
+            <li data-key="tab-ai"><b>“AI settings”</b> แท็บนี้มีเฉพาะเมื่อเลือก “Text output” เป็น “AI translation”</li>
+            <li data-key="tab-tools"><b>“Tools”</b> เปิดภาพจากเครื่อง, “Auto translate” และการตั้งค่าขั้นสูง</li>
+            <li data-key="guide"><b>ปุ่ม ?</b> เปิดคู่มือนี้ในแท็บใหม่</li>
+          </ol>
+        </div>
+      </section>
+
+      <!-- ================= 3. TRANSLATE ================= -->
+      <section id="translate" class="card" aria-labelledby="translate-title">
+        <h2 id="translate-title"><span class="sec-no">3</span>แท็บ Translate</h2>
+        <p>ภาพนี้คือแท็บ “Translate” เมื่อเลือก “Text output” เป็น “Lens translation”
+          บางช่องจะซ่อนหรือแสดงตามสิ่งที่เลือก</p>
+        <div class="shot-block">
+          <figure class="shot" data-shot="translate"></figure>
+          <ol class="callout-list" data-shot="translate">
+            <li data-key="mode"><b>“Mode”</b>
+              <ul>
+                <li>“Google Lens (text)” วางคำแปลเป็นกล่องข้อความทับบนภาพ ปรับขนาดตัวอักษรได้ และแปลด้วย AI ได้</li>
+                <li>“Google Lens (image)” ได้ภาพที่ใส่คำแปลไว้ในภาพเลย (ช่อง “Text output” และ “Display” จะซ่อน)</li>
+              </ul>
+            </li>
+            <li data-key="lang"><b>“Target language”</b> ภาษาที่ต้องการอ่าน เช่น “Thai”
+              (ซ่อนเมื่อเลือก “Original text” เพราะไม่ได้แปล)</li>
+            <li data-key="sources"><b>“Text output”</b> (เฉพาะ “Google Lens (text)”)
+              <ul>
+                <li>“Original text” แสดงข้อความต้นฉบับที่อ่านได้จากภาพ</li>
+                <li>“Lens translation” คำแปลจาก Google Lens (ค่าเริ่มต้น)</li>
+                <li>“AI translation” แปลด้วย AI ต้องตั้งค่าที่แท็บ “AI settings”</li>
+              </ul>
+            </li>
+            <li data-key="relayout"><b>“↔️ Rotate Translated to fit language”</b> (แสดงเฉพาะ “Lens translation”)
+              จัดข้อความแนวตั้งให้อ่านแนวนอนได้ ปิดถ้าต้องการกล่องตามตำแหน่งเดิมของ Google Lens</li>
+            <li data-key="font"><b>“Overlay font size”</b> ขนาดตัวอักษรของคำแปล ปุ่ม − / + ปรับครั้งละ 10%
+              ลากแถบได้ตั้งแต่ 50% ถึง 200% ปุ่ม ⟲ กลับเป็น 100% (ไม่มีในโหมด “Google Lens (image)”)</li>
+            <li data-key="translate-all"><b>“🔍 Translate all images on this page”</b> แสดงปุ่ม “🔍 Translate all”
+              ที่ขอบขวาของหน้าเว็บ ชี้เมาส์หรือแตะแถบเล็ก ๆ ที่ขอบขวาเพื่อเปิด</li>
+            <li data-key="img-buttons"><b>“🔘 Translate buttons on images”</b> แสดงปุ่ม 🔍 บนภาพเมื่อชี้เมาส์ที่ภาพ
+              คลิกเพื่อแปลเฉพาะภาพนั้น</li>
+            <li data-key="download"><b>“⬇ Download images”</b> แสดงปุ่มดาวน์โหลดที่มุมขวาล่างของหน้าเว็บ
+              บันทึกภาพทีละภาพหรือรวมเป็นไฟล์ ZIP ปุ่มนี้ไม่ได้เริ่มแปล</li>
+          </ol>
+        </div>
+      </section>
+
+      <!-- ================= 4. AI SOURCE ================= -->
+      <section id="ai-source" class="card" aria-labelledby="ai-source-title">
+        <h2 id="ai-source-title"><span class="sec-no">4</span>เลือกแปลด้วย AI</h2>
+        <div class="shot-block">
+          <figure class="shot" data-shot="source-ai"></figure>
+          <ol class="callout-list" data-shot="source-ai">
+            <li data-key="tab-ai"><b>“AI settings”</b> แท็บนี้ปรากฏหลังเลือก “AI translation” กดเพื่อตั้งค่า AI</li>
+            <li data-key="sources"><b>“Text output”</b> เลือก “AI translation” (ใช้ได้เมื่อ “Mode” เป็น “Google Lens (text)”)</li>
+          </ol>
+        </div>
+        <h3>AI มี 3 แบบ เลือกแบบที่เหมาะกับคุณ</h3>
+        <div class="choices">
+          <a class="choice" href="#manual">
+            <strong>Manual</strong>
+            <span>“Manual · use your own key” ใช้ API key ของคุณเอง จ่ายกับบริษัท AI โดยตรง
+              หรือใช้ AI ที่รันบนคอมพิวเตอร์ของคุณ (Local) ซึ่งไม่ต้องมี key</span>
+          </a>
+          <a class="choice" href="#paid">
+            <strong>Paid</strong>
+            <span>“Paid · TextPhantom credits” ไม่ต้องมี API key เข้าสู่ระบบด้วยอีเมล แล้วใช้เครดิต TP</span>
+          </a>
+          <a class="choice" href="#login">
+            <strong>Login</strong>
+            <span>อยู่ในบัญชี Paid ใช้บัญชี ChatGPT, Claude, Gemini หรือ DeepSeek ของคุณ
+              ใช้โควตาบัญชีนั้น ไม่ใช้เครดิต TP (ต้องมีสิทธิ์ AI Login ในบัญชี)</span>
+          </a>
+        </div>
+        <p class="hint">ถ้าไม่เห็นช่อง “AI service” แปลว่าเซิร์ฟเวอร์ที่ใช้อยู่ยังไม่เปิดบริการ Paid
+          ใช้แบบ Manual ได้ตามปกติ</p>
+      </section>
+
+      <!-- ================= 5. MANUAL ================= -->
+      <section id="manual" class="card" aria-labelledby="manual-title">
+        <h2 id="manual-title"><span class="sec-no">5</span>AI แบบ Manual (ใช้ API key ของคุณ)</h2>
+        <p>เลือก “AI service” เป็น “Manual · use your own key” แล้วตั้งค่าจากบนลงล่าง</p>
+        <div class="shot-block">
+          <figure class="shot" data-shot="manual-top"></figure>
+          <ol class="callout-list" data-shot="manual-top">
+            <li data-key="usage"><b>“Tokens used”</b> จำนวนโทเคนที่ใช้กับ Provider และ Model ที่เลือก กดเพื่อเปิดดู
+              มีปุ่ม “Reset” (เริ่มนับใหม่), “Detailed” (คำขอในรอบนี้และราคาโดยประมาณ) และ “History” (ประวัติการใช้)</li>
+            <li data-key="service"><b>“AI service”</b> เลือก “Manual · use your own key”</li>
+            <li data-key="provider"><b>“Provider”</b> บริษัท AI ที่จะใช้ กลุ่ม “Cloud (needs API key)” เช่น Google Gemini,
+              OpenAI, OpenRouter, Anthropic, Groq, DeepSeek ต้องมี key ส่วนกลุ่ม “Local (runs on your PC — no key)”
+              ดู<a href="#local">หัวข้อ 6</a></li>
+            <li data-key="key"><b>“API key”</b> วาง key ที่ได้จากบริษัท AI</li>
+            <li data-key="get-key"><b>“(get key)”</b> เปิดหน้าเว็บของบริษัทนั้นเพื่อสร้าง key</li>
+            <li data-key="model"><b>“Model (required)”</b> เลือกโมเดล (จำเป็น) เมื่อใส่ key ที่ใช้ได้ รายชื่อจะอัปเดตจากบริษัท AI</li>
+            <li data-key="thinking"><b>“AI thinking”</b> ให้ AI “คิด” ก่อนตอบ แนะนำ “Lowest available”
+              ตัวเลือกขึ้นกับโมเดล ช่องนี้แสดงหลังระบบตรวจโมเดลแล้ว ถ้าโมเดลทำตามที่เลือกไม่ได้ จะมีคำเตือนใต้ช่อง
+              (การคิดอาจทำให้ใช้โทเคนมากขึ้น)</li>
+          </ol>
+        </div>
+        <h3>ตัวเลือกเพิ่มเติม</h3>
+        <p>ช่องเหล่านี้แสดงเมื่อใส่ API key แล้ว (หรือใช้ Local) และใช้กับ Paid ได้เหมือนกัน</p>
+        <div class="shot-block">
+          <figure class="shot" data-shot="manual-bottom"></figure>
+          <ol class="callout-list" data-shot="manual-bottom">
+            <li data-key="prompt"><b>“Set prompt”</b> คำสั่งพิเศษถึง AI เช่น สไตล์การแปล
+              ปล่อยว่างเพื่อใช้คำสั่งในตัว บันทึกแยกตามภาษาและโมเดล ตัวเลขใต้ช่องคือจำนวนตัวอักษร</li>
+            <li data-key="prompt-tools"><b>ปุ่มของ prompt</b> ↶ ↷ ย้อนกลับ/ไปข้างหน้าระหว่างเวอร์ชัน ·
+              🗗 เปิดหน้าแก้ไขเต็มจอ (Prompt Studio) · ⤢ ขยายช่อง · ⟲ โหลดคำสั่งในตัวกลับมา</li>
+            <li data-key="memory-clear"><b>🗑 ล้างความจำ</b> ลบความจำของเรื่องที่เปิดอยู่ในแท็บปัจจุบัน</li>
+            <li data-key="memory-mode"><b>“Story memory mode”</b> ให้ AI จำเรื่องเพื่อแปลชื่อและคำเฉพาะให้ตรงกันทุกตอน
+              <ul>
+                <li>“Off” ไม่จำ</li>
+                <li>“Terms only” จำคำเฉพาะ</li>
+                <li>“Full (+ characters)” จำเนื้อเรื่องและตัวละครด้วย</li>
+              </ul>
+              บรรทัดใต้ช่องบอกว่าจำอะไรไว้แล้วบ้าง</li>
+            <li data-key="examples"><b>“Use human translation examples”</b> ให้ AI ใช้ตัวอย่างคำแปลที่คนแปล
+              (อังกฤษ ญี่ปุ่น และไทย) เป็นแนวทาง บันทึกแยกตามโมเดล</li>
+            <li data-key="page-image"><b>“Send page image to AI”</b> ส่งภาพทั้งหน้าให้ AI ดูด้วย
+              อาจใช้เวลาและค่าใช้จ่ายมากขึ้น ใช้ได้เฉพาะโมเดลที่ยืนยันว่ารับภาพได้ ถ้าไม่ได้ ช่องจะกดไม่ได้</li>
+            <li data-key="ceiling"><b>“Set a token ceiling”</b> กำหนดขนาดสูงสุดของแต่ละคำขอ ค่าสูงขึ้น = ส่งข้อความต่อครั้งมากขึ้น
+              จำนวนครั้งน้อยลง แต่ถ้าสูงเกินที่โมเดลตอบได้ คำตอบอาจไม่ครบและล้มเหลว ปิดไว้ = ใช้ค่าเริ่มต้น</li>
+            <li data-key="request-mode"><b>“AI request mode”</b> ระบบเลือกให้อัตโนมัติ: Cloud ใช้ “Conversation”,
+              Local ใช้ “Independent” เปลี่ยนเองไม่ได้</li>
+          </ol>
+        </div>
+      </section>
+
+      <!-- ================= 6. LOCAL ================= -->
+      <section id="local" class="card" aria-labelledby="local-title">
+        <h2 id="local-title"><span class="sec-no">6</span>AI บนเครื่อง (Local)</h2>
+        <p>ถ้าคุณติดตั้งโปรแกรม AI ไว้บนคอมพิวเตอร์ เลือกจากกลุ่ม “Local” ได้เลย ไม่ต้องมี API key
+          ต้องเปิดโปรแกรมนั้นไว้ก่อนแปล</p>
+        <div class="shot-block">
+          <figure class="shot" data-shot="local"></figure>
+          <ol class="callout-list" data-shot="local">
+            <li data-key="provider"><b>“Provider”</b> เลือกโปรแกรม เช่น Ollama, LM Studio, Jan, KoboldCpp, llama.cpp
+              หรือ “Custom local adapter”</li>
+            <li data-key="base-url"><b>“Local server URL”</b> ที่อยู่ของโปรแกรมบนเครื่อง ระบบใส่ค่าเริ่มต้นให้
+              ลิงก์ “(website)” เปิดเว็บไซต์ของโปรแกรม</li>
+            <li data-key="refresh"><b>“Refresh models”</b> ดึงรายชื่อโมเดลจากโปรแกรมใหม่ เช่น หลังโหลดโมเดลเพิ่ม</li>
+            <li data-key="model"><b>“Model (required)”</b> เลือกโมเดลที่ติดตั้งไว้</li>
+            <li data-key="capacity"><b>“Local AI capacity”</b> จำนวนคำขอพร้อมกัน:
+              “Auto (recommended)” แนะนำ · “Safe — 1 request” ทีละคำขอ ·
+              “Manual” เลือกเองที่ “Simultaneous requests” 1–4</li>
+          </ol>
+        </div>
+      </section>
+
+      <!-- ================= 7. PAID ================= -->
+      <section id="paid" class="card" aria-labelledby="paid-title">
+        <h2 id="paid-title"><span class="sec-no">7</span>Paid (ใช้เครดิต TP)</h2>
+        <h3>เข้าสู่ระบบด้วยอีเมล</h3>
+        <div class="shot-block">
+          <figure class="shot" data-shot="paid-signin"></figure>
+          <ol class="callout-list" data-shot="paid-signin">
+            <li data-key="service"><b>“AI service”</b> เลือก “Paid · TextPhantom credits”</li>
+            <li data-key="email"><b>“Email address”</b> ใส่อีเมลของคุณ</li>
+            <li data-key="send"><b>“Continue with email”</b> ระบบส่งรหัสไปที่อีเมล ใช้ครั้งแรกจะสร้างบัญชีให้หลังยืนยันรหัส</li>
+          </ol>
+        </div>
+        <div class="shot-block">
+          <figure class="shot" data-shot="paid-code"></figure>
+          <ol class="callout-list" data-shot="paid-code">
+            <li data-key="code"><b>“6-digit code”</b> ใส่รหัส 6 หลักจากอีเมล
+              ถ้าไม่ได้รับภายในหนึ่งนาที ให้ดูในโฟลเดอร์สแปมหรือจดหมายขยะ</li>
+            <li data-key="verify"><b>“Verify &amp; sign in”</b> ยืนยันรหัสและเข้าสู่ระบบ</li>
+            <li data-key="change-email"><b>“Change email”</b> กลับไปแก้อีเมล</li>
+            <li data-key="resend"><b>“Resend code”</b> ขอรหัสใหม่ (ต้องรอเวลานับถอยหลังก่อน)</li>
+          </ol>
+        </div>
+        <h3>บัญชี เครดิต และโมเดล</h3>
+        <div class="shot-block">
+          <figure class="shot" data-shot="paid-account"></figure>
+          <ol class="callout-list" data-shot="paid-account">
+            <li data-key="credits"><b>“Available credits”</b> เครดิต TP ที่ใช้ได้
+              “Reserved” คือเครดิตที่ถูกจองไว้ชั่วคราวระหว่างแปล ส่วนที่ไม่ได้ใช้จะคืนให้</li>
+            <li data-key="buy"><b>“Buy credits”</b> ซื้อเครดิตเพิ่ม (ดูขั้นตอนใน<a href="#buy">หัวข้อ 8</a>)</li>
+            <li data-key="details"><b>“Account details”</b> ดูบัญชี ประวัติ และค่าใช้จ่ายจริงของแต่ละครั้ง</li>
+            <li data-key="source"><b>“Translation source”</b> “TP Model” ใช้โมเดลของ TextPhantom (หักเครดิต TP)
+              หรือ “Login” ใช้บัญชี AI ของคุณ (ดู<a href="#login">หัวข้อ 9</a>)
+              ช่องนี้แสดงเฉพาะบัญชีที่มีสิทธิ์ AI Login</li>
+            <li data-key="model"><b>“Translation model”</b> กดเพื่อเปิดรายการโมเดลพร้อมช่องค้นหา (ดูภาพถัดไป)</li>
+            <li data-key="rates"><b>“Input” / “Output”</b> ราคาโดยประมาณเป็น TP ต่อ 1,000 โทเคน
+              Input คือข้อความที่ส่งไป Output คือคำตอบ (อาจรวมการคิดของ AI)
+              เครื่องหมาย ≈ แปลว่าประมาณ ส่วน ≤ แปลว่าไม่เกินราคานี้ ค่าจริงคิดจากการใช้งานจริง</li>
+            <li data-key="pricing-help"><b>“How credits are calculated”</b> กดอ่านวิธีคิดเครดิต</li>
+            <li data-key="refresh"><b>“Refresh balance”</b> โหลดยอดเครดิตและราคาล่าสุด</li>
+            <li data-key="logout"><b>“Sign out”</b> ออกจากระบบบนเครื่องนี้ ยอดเครดิตใช้ร่วมกันทุกเครื่อง</li>
+          </ol>
+        </div>
+        <div class="shot-block">
+          <figure class="shot" data-shot="paid-picker"></figure>
+          <ol class="callout-list" data-shot="paid-picker">
+            <li data-key="search"><b>ช่องค้นหา</b> พิมพ์ชื่อหรือรหัสโมเดล (ทุกคำที่พิมพ์ต้องตรง)
+              กด Enter เพื่อเลือกตัวแรก ลูกศรลงเพื่อเลื่อน Esc เพื่อปิด</li>
+            <li data-key="row"><b>แถวโมเดล</b> กดเพื่อเลือกโมเดลนั้น</li>
+            <li data-key="columns"><b>หัวตาราง</b> “Model” ชื่อ · “Input” และ “Output” ราคาประมาณ TP ต่อ 1,000 โทเคน</li>
+          </ol>
+        </div>
+        <p class="hint">เมื่อใช้ Paid ช่อง “AI thinking”, “Set prompt”, “Series memory”, “Send page image to AI”
+          และ “Set a token ceiling” ยังใช้ได้ ทำงานเหมือน<a href="#manual">หัวข้อ 5</a>
+          ถ้าเปลี่ยน “AI thinking” หรือ “Send page image to AI” ราคาจะถูกตรวจใหม่</p>
+      </section>
+
+      <!-- ================= 8. BUY CREDITS ================= -->
+      <section id="buy" class="card" aria-labelledby="buy-title">
+        <h2 id="buy-title"><span class="sec-no">8</span>ซื้อแพ็กเครดิต TP</h2>
+        <p>ต้องเข้าสู่ระบบ Paid ก่อน (<a href="#paid">หัวข้อ 7</a>) จ่ายเงินเป็นบาทผ่าน Stripe
+          เครดิตเข้าบัญชีเองหลังระบบตรวจกับ Stripe ว่าจ่ายแล้ว ไม่ต้องส่งสลิปหรือแจ้งโอน</p>
+
+        <h3>ขั้นที่ 1 เลือกแพ็ก</h3>
+        <p>ที่แท็บ “AI settings” กด “Buy credits” (ใต้ยอดเครดิต) หน้าต่างจะกว้างขึ้นและเปิดหน้า “Buy credits”</p>
+        <div class="shot-block">
+          <figure class="shot" data-shot="buy-packages"></figure>
+          <ol class="callout-list" data-shot="buy-packages">
+            <li data-key="tab"><b>“Buy credits”</b> แท็บซื้อเครดิต แท็บอื่นในหน้านี้:
+              “Account” ยอดเครดิตและรายการล่าสุด · “Orders” รายการสั่งซื้อและการชำระ · “Activity” ประวัติการใช้เครดิต
+              (แท็บ “Refunds” จะปรากฏหลังเคยขอคืนเงิน)</li>
+            <li data-key="available"><b>“Available”</b> เครดิตที่ใช้ได้ตอนนี้</li>
+            <li data-key="package"><b>การ์ดแพ็ก</b> ชื่อแพ็ก ราคาเป็นบาท จำนวนเครดิต TP และอายุเครดิต
+              เช่น “Valid for 12 months after credits are issued.” คือใช้ได้ 12 เดือนนับจากวันที่เครดิตเข้า
+              ถ้ามีหลายแพ็กให้เลื่อนลงเพื่อดูทั้งหมด</li>
+            <li data-key="select"><b>“Select package”</b> สร้างรายการสั่งซื้อแพ็กนั้นและไปหน้าชำระเงิน (ขั้นที่ 2)
+              ถ้ามีรายการของแพ็กนี้ที่ยังรอจ่ายอยู่ ปุ่มจะเป็น “View payment” เพื่อเปิดรายการเดิม ไม่สร้างรายการใหม่</li>
+            <li data-key="how"><b>“How payment works”</b> กดอ่านสรุปวิธีชำระ
+              (และช่องทางติดต่อ “Support: …” ถ้าผู้ดูแลตั้งไว้)</li>
+            <li data-key="back"><b>“Back”</b> กลับไปหน้าต่าง TextPhantom ตามเดิม</li>
+            <li data-key="reload"><b>“Reload”</b> โหลดข้อมูลบัญชี แพ็ก และรายการล่าสุดอีกครั้ง</li>
+          </ol>
+        </div>
+        <p class="hint">ถ้าเห็น “Payments are not available yet.” หรือ “New purchases are currently closed.”
+          แปลว่าตอนนี้ยังซื้อไม่ได้ ปุ่ม “Select package” จะกดไม่ได้ ส่วนเครดิตและรายการเดิมยังอยู่ครบ</p>
+
+        <h3>ขั้นที่ 2 จ่ายเงินบนหน้า Stripe</h3>
+        <p>หลังกด “Select package” สถานะเป็น “Preparing payment” ระหว่างเตรียมรายการกับ Stripe
+          เมื่อพร้อม หน้าชำระเงินของ Stripe (checkout.stripe.com) จะเปิดในแท็บใหม่ให้เอง</p>
+        <div class="shot-block">
+          <figure class="shot" data-shot="buy-payment"></figure>
+          <ol class="callout-list" data-shot="buy-payment">
+            <li data-key="summary"><b>“Selected package · …”</b> สรุปแพ็กที่เลือก จำนวนเครดิต ราคา และอายุเครดิต ตรวจก่อนจ่าย</li>
+            <li data-key="status"><b>“Payment status”</b>
+              <ul>
+                <li>“Preparing payment” กำลังเตรียมหน้าชำระ</li>
+                <li>“Ready to pay” จ่ายได้แล้ว</li>
+                <li>“Confirming payment” Stripe กำลังยืนยันการจ่าย</li>
+                <li>“Credits added” เครดิตเข้าบัญชีแล้ว (ขั้นที่ 3)</li>
+              </ul>
+            </li>
+            <li data-key="open"><b>“Open Stripe checkout”</b> เปิดหน้าชำระของ Stripe อีกครั้ง
+              ใช้เมื่อหน้า Stripe ไม่เปิดเอง (จะมีข้อความ “Stripe could not be opened automatically. Use Open Stripe checkout to continue.”)
+              หรือเมื่อปิดหน้า Stripe ไปก่อนจ่ายเสร็จ</li>
+            <li data-key="check"><b>“Check payment status”</b> ให้ระบบตรวจกับ Stripe อีกครั้ง
+              ใช้รายการเดิม ไม่เรียกเก็บเงินซ้ำ</li>
+            <li data-key="cancel"><b>“Cancel this payment”</b> ยกเลิกรายการนี้ (ถ้ายังไม่ได้จ่าย)
+              การยกเลิกเสร็จเมื่อ Stripe ยืนยัน แล้วหน้าจะกลับไปที่รายการแพ็ก</li>
+            <li data-key="details"><b>“Order details”</b> เลขอ้างอิงรายการ (“Order reference”)
+              เวลาหมดอายุของลิงก์ชำระ (“Payment link expires”) และ “Support code” เมื่อมีปัญหา</li>
+            <li data-key="back"><b>“Back to packages”</b> กลับไปหน้ารายการแพ็ก รายการที่ยังไม่จ่ายยังอยู่</li>
+          </ol>
+        </div>
+        <div class="info-grid">
+          <div class="info">
+            <h3>บนหน้า Stripe</h3>
+            <p>หน้านี้เป็นเว็บของ Stripe จึงไม่มีภาพในคู่มือ ตรวจชื่อแพ็กและยอดเงิน (บาท)
+              แล้วเลือกวิธีจ่ายที่ Stripe แสดง เช่น บัตร หรือ PromptPay แล้วทำตามขั้นตอนบนหน้านั้น</p>
+          </div>
+          <div class="info">
+            <h3>หลังจ่ายเสร็จ</h3>
+            <p>Stripe จะพาไปหน้า “Checking your payment” ของ TextPhantom ปิดแท็บนั้นได้
+              ถ้าปิดหน้า Stripe โดยยังไม่จ่าย จะเห็น “Payment page closed” รายการยังเปิดอยู่ กลับมาจ่ายต่อหรือยกเลิกได้</p>
+          </div>
+          <div class="info">
+            <h3>หน้าต่าง TextPhantom ปิดไป</h3>
+            <p>รายการไม่หาย เปิดหน้าต่าง TextPhantom › “AI settings” › “Buy credits”
+              จะเห็น “You have a pending payment” กด “Resume payment” เพื่อดูสถานะหรือจ่ายต่อ</p>
+          </div>
+        </div>
+
+        <h3>ขั้นที่ 3 รอเครดิตเข้า</h3>
+        <p>เมื่อ Stripe ยืนยันการจ่าย ระบบเพิ่มเครดิตให้เอง ถ้าเปิดหน้านี้ค้างไว้ สถานะจะอัปเดตเอง
+          (ตรวจซ้ำเป็นระยะประมาณ 9 นาที และตรวจอีกครั้งเมื่อกลับมาที่หน้านี้) ถ้าสถานะยังไม่เปลี่ยน กด “Check payment status”</p>
+        <div class="shot-block">
+          <figure class="shot" data-shot="buy-done"></figure>
+          <ol class="callout-list" data-shot="buy-done">
+            <li data-key="status"><b>“Credits added”</b> จ่ายสำเร็จและเครดิตเข้าบัญชีแล้ว</li>
+            <li data-key="success"><b>“Payment confirmed”</b> บอกจำนวนเครดิตที่เพิ่ม เช่น “30,000 TP added to your account.”</li>
+            <li data-key="view-account"><b>“View account”</b> ไปแท็บ “Account” เพื่อดูยอดและรายการล่าสุด</li>
+            <li data-key="available"><b>“Available now”</b> ยอดเครดิตที่ใช้ได้หลังเติม
+              ยอด “Available credits” ในแท็บ “AI settings” อัปเดตตามด้วย</li>
+          </ol>
+        </div>
+        <p class="hint">ดูรายการย้อนหลังได้ที่แท็บ “Orders”: กด “View payment” เพื่อดูหรือตรวจรายการที่ยังไม่เสร็จ
+          หรือ “View receipt” สำหรับรายการที่เครดิตเข้าแล้ว</p>
+
+        <h3>ถ้าจ่ายแล้วยังไม่สำเร็จ</h3>
+        <dl class="faq">
+          <dt>สถานะค้างที่ “Confirming payment”</dt>
+          <dd>Stripe ยังยืนยันไม่เสร็จ เครดิตจะเข้าหลังยืนยัน กด “Check payment status” ภายหลังได้ ไม่เกิดการเรียกเก็บซ้ำ</dd>
+          <dt>“Payment needs attention” หรือ “Payment failed”</dt>
+          <dd>ผู้ดูแลต้องตรวจรายการนี้กับ Stripe ก่อน ติดต่อผู้ดูแลด้วย “Contact admin” ในแท็บ “Tools”
+            แจ้ง “Order reference” และ “Support code” จาก “Order details”</dd>
+          <dt>“This checkout link has expired.” หรือสถานะ “Instructions expired” / “Cancelled”</dt>
+          <dd>ลิงก์ชำระนั้นใช้ไม่ได้แล้ว กด “Check payment status” ก่อน (ถ้ามีปุ่ม) เพื่อให้แน่ใจว่ายังไม่ได้จ่าย
+            แล้วกลับไปที่ “Buy credits” เพื่อเลือกแพ็กใหม่</dd>
+          <dt>สร้างรายการใหม่ไม่ได้ (ให้รอหรือมีรายการรอมากเกินไป)</dt>
+          <dd>ระบบจำกัดการสร้างรายการติดกันเร็ว ๆ และจำนวนรายการที่รอจ่าย เปิดรายการเดิมจาก “Resume payment”
+            หรือแท็บ “Orders” เพื่อจ่ายต่อหรือยกเลิกก่อน</dd>
+        </dl>
+
+        <h3>ขอคืนเงิน</h3>
+        <p>ถ้าผู้ดูแลเปิดให้ขอคืนเงินเองได้ ในแท็บ “Orders” › “Confirmed payments” จะมีกล่อง “Request a refund”
+          บอกเครดิตที่ยังไม่ได้ใช้ (“Unused”) ยอดเงินที่คาดว่าจะได้คืน (“Estimated refund”) และกำหนดเวลา (“Request deadline”)
+          กด “Refund unused credits” แล้วกดยืนยัน</p>
+        <ul class="tips">
+          <li>คืนเฉพาะเครดิตที่ซื้อและยังไม่ได้ใช้จากการจ่ายครั้งนั้น ในราคาเดิม ไม่รวมเครดิตโบนัสและเครดิตทดลอง
+            และต้องขอภายในเวลาที่แสดง</li>
+          <li>ระหว่างคำนวณและยืนยันการคืนเงิน Paid จะหยุดชั่วคราว ยอดคืนสุดท้ายอาจต่างจากที่ประมาณไว้</li>
+          <li>ติดตามสถานะที่แท็บ “Refunds” ถ้าขึ้น “Bank details needed” ให้ดูอีเมลจาก Stripe แล้วกรอกข้อมูลบัญชีธนาคาร</li>
+          <li>ถ้าไม่มีปุ่ม “Refund unused credits” ข้อความในกล่องจะบอกเหตุผล เช่น เลยเวลาขอคืนแล้ว ให้ติดต่อผู้ดูแลในแชท</li>
+        </ul>
+      </section>
+
+      <!-- ================= 9. LOGIN ================= -->
+      <section id="login" class="card" aria-labelledby="login-title">
+        <h2 id="login-title"><span class="sec-no">9</span>Login (ใช้บัญชี AI ของคุณ)</h2>
+        <p>ต้องเข้าสู่ระบบ Paid ก่อน (หัวข้อ 7) และบัญชีต้องมีสิทธิ์ AI Login จึงจะเห็นช่อง “Translation source”
+          การแปลใช้โควตาบัญชีผู้ให้บริการของคุณ ไม่ใช้เครดิต TP</p>
+        <div class="shot-block">
+          <figure class="shot" data-shot="login"></figure>
+          <ol class="callout-list" data-shot="login">
+            <li data-key="source"><b>“Translation source”</b> เลือก “Login”</li>
+            <li data-key="provider"><b>“Provider”</b> เลือก ChatGPT, Claude, Gemini หรือ DeepSeek
+              ข้อความต่อท้าย เช่น “· Checking…” หรือ “· Unavailable” บอกสถานะของผู้ให้บริการนั้น</li>
+            <li data-key="support"><b>Claude และ ChatGPT ใช้แท็บในเบราว์เซอร์นี้</b>
+              การแปลทำผ่านแท็บ claude.ai หรือ chatgpt.com เว็บละ 1 แท็บ ถ้าเปิดไว้แล้วระบบใช้แท็บนั้น
+              ถ้ายังไม่มีระบบเปิดให้ 1 แท็บเบื้องหลัง ระบบไม่ปิดแท็บเอง ปิดเองได้เมื่อไม่ใช้แล้ว ใช้แท็บอื่นต่อได้ตามปกติ
+              <strong>ต้องเปิดเบราว์เซอร์ค้างไว้และล็อกอินเว็บนั้นไว้</strong> ถ้าปิดแท็บนั้นระหว่างแปล การแปลจะหยุด</li>
+            <li data-key="connect"><b>“Sign in”</b> เริ่มเชื่อมต่อบัญชี กดครั้งแรกครั้งเดียว เบราว์เซอร์อาจถามสิทธิ์เข้าถึงข้อมูลการเข้าสู่ระบบของเว็บผู้ให้บริการ
+              ให้กดอนุญาต แล้วทำตามขั้นตอนในแท็บของเว็บนั้น
+              หลังจากนั้นถ้ากดแปลตอนยังไม่ได้เชื่อมต่อ (เช่น หลัง API เริ่มใหม่) ระบบจะเชื่อมต่อให้เองและขึ้น “กำลังเชื่อมต่อ…” ที่มุมขวาล่าง แล้วเริ่มแปลเอง ระหว่างรอ ปุ่มเป็น “Waiting for sign-in…” และมีปุ่ม “Cancel” ให้ยกเลิก
+              เมื่อเชื่อมต่อแล้ว ปุ่มเป็น “Reconnect” มีช่อง “Model” ให้เลือก และปุ่ม “Logout”</li>
+            <li data-key="refresh"><b>“Refresh”</b> ตรวจสถานะและรายชื่อโมเดลอีกครั้ง</li>
+            <li data-key="status"><b>บรรทัดสถานะ</b> บอกขั้นตอนที่กำลังทำ หรือเหตุผลเมื่อไม่สำเร็จ</li>
+          </ol>
+        </div>
+        <ul class="tips">
+          <li>“Logout” ตัดการเชื่อมต่อกับ TextPhantom เท่านั้น คุณยังล็อกอินเว็บไซต์นั้นในเบราว์เซอร์ตามเดิม</li>
+          <li>บางเว็บไซต์เลือกการคิดของ AI เอง ช่อง “AI thinking” จะถูกล็อกและมีข้อความอธิบายใต้ช่อง</li>
+        </ul>
+      </section>
+
+      <!-- ================= 10. TOOLS ================= -->
+      <section id="tools" class="card" aria-labelledby="tools-title">
+        <h2 id="tools-title"><span class="sec-no">10</span>แท็บ Tools</h2>
+        <div class="shot-block">
+          <figure class="shot" data-shot="tools"></figure>
+          <ol class="callout-list" data-shot="tools">
+            <li data-key="local-images"><b>“Select images”</b> เลือกไฟล์ภาพในเครื่องมาเปิดในหน้าดูภาพของ TextPhantom เพื่อแปล</li>
+            <li data-key="local-folder"><b>“Select folder”</b> เปิดทั้งโฟลเดอร์ (ใน Brave ต้องเปิด
+              <code>brave://flags/#file-system-access-api</code> ก่อน)</li>
+            <li data-key="auto"><b>“Auto translate”</b> เปิดแท็บใหม่สำหรับวาง ลาก หรืออัปโหลดภาพทีละภาพ
+              แท็บนี้มีโหมด ภาษา และแหล่งแปลของตัวเอง</li>
+            <li data-key="api-url"><b>“Custom API URL”</b> ที่อยู่เซิร์ฟเวอร์ ปล่อยว่างเพื่อใช้เซิร์ฟเวอร์เริ่มต้น
+              (ถ้าเป็นเซิร์ฟเวอร์ในเครื่องหรือในวงแลน จะมีช่อง “Remove server pacing for this local API” เพิ่ม)</li>
+            <li data-key="reset-api"><b>⟲</b> กลับไปใช้เซิร์ฟเวอร์เริ่มต้น</li>
+            <li data-key="engine"><b>“Where the work runs”</b> ตอนนี้ใช้ได้เฉพาะ “Extension (default)”</li>
+            <li data-key="reset"><b>“Reset defaults”</b> คืนค่าการตั้งค่าทั้งหมดเป็นค่าเริ่มต้น (มีหน้าต่างถามยืนยันก่อน)</li>
+            <li data-key="contact"><b>“Contact admin”</b> แชทกับผู้ดูแล TextPhantom
+              แสดงเมื่อเข้าสู่ระบบบัญชี Paid แล้ว และต้องเปิดจากหน้าเว็บทั่วไป</li>
+          </ol>
+        </div>
+      </section>
+
+      <!-- ================= 11. DURING ================= -->
+      <section id="during" class="card" aria-labelledby="during-title">
+        <h2 id="during-title"><span class="sec-no">11</span>ระหว่างแปลบนหน้าเว็บ</h2>
+        <div class="shot-block shot-block--wide">
+          <figure class="shot" data-shot="page-demo"></figure>
+          <ol class="callout-list" data-shot="page-demo">
+            <li data-key="image-button"><b>ปุ่ม 🔍 บนภาพ</b> (เปิดที่ “Translate buttons on images”) คลิกเพื่อแปลภาพนั้น
+              ระหว่างทำงานปุ่มจะเป็น ⏳</li>
+            <li data-key="translate-all"><b>“🔍 Translate all”</b> (เปิดที่ “Translate all images on this page”)
+              ชี้เมาส์หรือแตะแถบเล็ก ๆ ที่ขอบขวาให้ปุ่มเลื่อนออกมา แล้วกดเพื่อแปลทุกภาพในหน้า</li>
+            <li data-key="toast"><b>กล่องสถานะมุมขวาล่าง</b> บอกความคืบหน้า เช่น “inserted 3/12” คือใส่คำแปลแล้ว 3 จาก 12 ภาพ
+              เมื่อเสร็จจะขึ้นคำว่า “done” แล้วกล่องจะหายไปเองในไม่กี่วินาที</li>
+            <li data-key="toast-details"><b>ปุ่ม +</b> เปิดตารางรายละเอียดทีละภาพ กด − หรือปุ่ม Esc เพื่อย่อ</li>
+          </ol>
+        </div>
+        <div class="info-grid">
+          <div class="info">
+            <h3>หยุดการแปล</h3>
+            <p>โหลดหน้าเว็บใหม่ (Reload) ไปหน้าอื่น หรือปิดแท็บนั้น งานแปลของแท็บนั้นจะถูกยกเลิก</p>
+          </div>
+          <div class="info">
+            <h3>กล่อง “เครดิตอาจไม่พอ” (Paid)</h3>
+            <p>ถ้าเครดิตอาจไม่พอสำหรับทุกภาพ จะมีกล่องกลางจอบอกจำนวนภาพ เครดิตที่ประมาณว่าจะใช้ และยอดคงเหลือ
+              กด “แปลต่อ” (“Continue”) เพื่อแปลเท่าที่เครดิตพอ ภาพที่เหลือจะแจ้งว่าเครดิตไม่พอ โดยไม่ส่ง AI และไม่หักเครดิต
+              หรือกด “ยกเลิก” (“Cancel”) หรือปุ่ม Esc เพื่อไม่แปล</p>
+          </div>
+          <div class="info">
+            <h3>ภาพที่แปลไม่ได้</h3>
+            <p>จะมีป้ายบนภาพหรือข้อความ “Not translated: …” พร้อมเหตุผลภาษาไทยและรหัส เช่น IMG_NO_TEXT
+              ดูวิธีแก้ใน<a href="#trouble">หัวข้อ 12</a></p>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= 12. TROUBLE ================= -->
+      <section id="trouble" class="card" aria-labelledby="trouble-title">
+        <h2 id="trouble-title"><span class="sec-no">12</span>แก้ปัญหาที่พบบ่อย</h2>
+        <h3>คำถามทั่วไป</h3>
+        <dl class="faq">
+          <dt>ไม่เห็นแท็บ “AI settings”</dt>
+          <dd>ที่แท็บ “Translate” ตั้ง “Mode” เป็น “Google Lens (text)” และ “Text output” เป็น “AI translation”</dd>
+          <dt>สถานะเป็น ❌ หรือมีกล่อง “API server is offline.”</dt>
+          <dd>ตรวจอินเทอร์เน็ต แล้วกด “Open API settings” ในกล่องนั้น (หรือไปที่แท็บ “Tools”)
+            ถ้าไม่ได้ตั้งเซิร์ฟเวอร์เอง ให้กด ⟲ ข้างช่อง “Custom API URL” เพื่อใช้ค่าเริ่มต้น
+            เมื่อเชื่อมต่อได้ การแปลจะกลับมาทำงานเอง</dd>
+          <dt>อยากเริ่มใหม่ทั้งหมด</dt>
+          <dd>แท็บ “Tools” › “Reset defaults”</dd>
+        </dl>
+        <h3>ข้อความแจ้งเตือนบนภาพ</h3>
+        <p>ข้อความที่เห็นบนหน้าเว็บจะเป็นภาษาไทยตามด้านล่าง ตามด้วยรหัส ใช้รหัสค้นหาในตารางนี้</p>
+        <div class="errors" role="table" aria-label="ข้อความแจ้งเตือนและวิธีแก้">
+          <div class="err-row err-head" role="row">
+            <span role="columnheader">ข้อความที่เห็น</span><span role="columnheader">ควรทำอย่างไร</span>
+          </div>
+          <div class="err-row" role="row">
+            <span role="cell"><q data-error="IMG_NO_TEXT">ไม่พบข้อความในภาพ</q><code>IMG_NO_TEXT</code></span>
+            <span role="cell">ภาพนี้ไม่มีตัวอักษรให้แปล ไม่ต้องทำอะไร</span>
+          </div>
+          <div class="err-row" role="row">
+            <span role="cell"><q data-error="IMG_BLOCKED">เว็บไซต์ไม่อนุญาตให้อ่านภาพนี้</q><code>IMG_BLOCKED</code>
+              <q data-error="IMG_SOURCE_UNREACHABLE">โหลดภาพจากเว็บไซต์ต้นทางไม่ได้</q><code>IMG_SOURCE_UNREACHABLE</code></span>
+            <span role="cell">โหลดหน้าเว็บใหม่แล้วลองอีกครั้ง ถ้ายังไม่ได้ ให้บันทึกภาพลงเครื่อง แล้วเปิดด้วย “Tools” › “Select images”</span>
+          </div>
+          <div class="err-row" role="row">
+            <span role="cell"><q data-error="NET_OFFLINE">เชื่อมต่อเซิร์ฟเวอร์ไม่ได้ กรุณาตรวจอินเทอร์เน็ต</q><code>NET_OFFLINE</code>
+              <q data-error="API_UNREACHABLE">เชื่อมต่อ API ไม่ได้—ตรวจว่าเปิดเซิร์ฟเวอร์แล้ว, URL ถูกต้อง และเบราว์เซอร์อนุญาตการเชื่อมต่อ</q><code>API_UNREACHABLE</code></span>
+            <span role="cell">ตรวจอินเทอร์เน็ต และดูช่อง “Custom API URL” ในแท็บ “Tools” (ปล่อยว่างหรือกด ⟲ เพื่อใช้ค่าเริ่มต้น)</span>
+          </div>
+          <div class="err-row" role="row">
+            <span role="cell"><q data-error="AI_KEY_MISSING">ยังไม่ได้ตั้งค่า API key [AI settings &gt; API key]</q><code>AI_KEY_MISSING</code>
+              <q data-error="AI_MODEL_MISSING">ยังไม่ได้เลือกโมเดล [AI settings &gt; Model]</q><code>AI_MODEL_MISSING</code></span>
+            <span role="cell">ไปที่จุดในวงเล็บเหลี่ยม แล้วใส่ API key หรือเลือก Model (<a href="#manual">หัวข้อ 5</a>)</span>
+          </div>
+          <div class="err-row" role="row">
+            <span role="cell"><q data-error="AI_KEY_INVALID">AI key ใช้งานไม่ได้</q><code>AI_KEY_INVALID</code></span>
+            <span role="cell">สร้าง key ใหม่จากลิงก์ “(get key)” แล้ววางในช่อง “API key”</span>
+          </div>
+          <div class="err-row" role="row">
+            <span role="cell"><q data-error="AI_RATE_LIMIT">ผู้ให้บริการ AI จำกัดการใช้งานชั่วคราว</q><code>AI_RATE_LIMIT</code></span>
+            <span role="cell">รอสักครู่แล้วแปลใหม่</span>
+          </div>
+          <div class="err-row" role="row">
+            <span role="cell"><q data-error="AI_QUOTA_EXHAUSTED">โควตาหรือเครดิต AI หมด กรุณาเติมเครดิตหรือตรวจแผนการใช้งาน</q><code>AI_QUOTA_EXHAUSTED</code></span>
+            <span role="cell">เติมเงินหรือตรวจแผนบนเว็บไซต์ของบริษัท AI ที่ใช้ หรือเปลี่ยนไปใช้ Paid</span>
+          </div>
+          <div class="err-row" role="row">
+            <span role="cell"><q data-error="LOCAL_UNREACHABLE">เชื่อมต่อ Local AI ไม่ได้—ตรวจว่าเปิดโปรแกรม, URL และ CORS แล้ว</q><code>LOCAL_UNREACHABLE</code></span>
+            <span role="cell">เปิดโปรแกรม AI บนเครื่อง ตรวจ “Local server URL” แล้วกด “Refresh models” (<a href="#local">หัวข้อ 6</a>)</span>
+          </div>
+          <div class="err-row" role="row">
+            <span role="cell"><q data-error="PAID_LOGIN_REQUIRED">กรุณาเข้าสู่บัญชี Paid และเลือกโมเดลที่ AI settings</q><code>PAID_LOGIN_REQUIRED</code></span>
+            <span role="cell">เข้าสู่ระบบและเลือก “Translation model” (<a href="#paid">หัวข้อ 7</a>)</span>
+          </div>
+          <div class="err-row" role="row">
+            <span role="cell"><q data-error="PAID_INSUFFICIENT_CREDITS">เครดิตไม่พอสำหรับภาพนี้ ยังไม่ได้ส่ง AI และไม่หักเครดิต เติมเครดิตแล้วแปลใหม่ได้</q><code>PAID_INSUFFICIENT_CREDITS</code></span>
+            <span role="cell">กด “Buy credits” ซื้อเครดิต (<a href="#buy">หัวข้อ 8</a>) แล้วแปลใหม่</span>
+          </div>
+          <div class="err-row" role="row">
+            <span role="cell"><q data-error="LOGIN_SESSION_REQUIRED">กรุณาเชื่อมต่อบัญชี AI Login และเลือกโมเดลก่อนแปล</q><code>LOGIN_SESSION_REQUIRED</code>
+              <q data-error="LOGIN_SESSION_EXPIRED">การเชื่อมต่อ AI Login หมดอายุ กรุณาเชื่อมต่อบัญชีใหม่</q><code>LOGIN_SESSION_EXPIRED</code></span>
+            <span role="cell">แท็บ “AI settings” › Login กด “Sign in” หรือ “Reconnect” แล้วเลือก “Model” (<a href="#login">หัวข้อ 9</a>)</span>
+          </div>
+          <div class="err-row" role="row">
+            <span role="cell"><q data-error="LOGIN_BROWSER_RELAY_UNAVAILABLE">ส่วนขยายใช้แท็บเว็บไซต์ AI (claude.ai / chatgpt.com) ในเบราว์เซอร์นี้ไม่ได้ กรุณาเปิดเบราว์เซอร์ค้างไว้ เข้าสู่ระบบเว็บไซต์นั้น แล้วลองใหม่</q><code>LOGIN_BROWSER_RELAY_UNAVAILABLE</code></span>
+            <span role="cell">เปิดเบราว์เซอร์ค้างไว้ เข้าสู่ระบบ claude.ai หรือ chatgpt.com ในเบราว์เซอร์เดียวกัน แล้วแปลใหม่</span>
+          </div>
+          <div class="err-row" role="row">
+            <span role="cell"><q data-error="LOGIN_PROVIDER_NOT_READY">แท็บ chatgpt.com ยังไม่พร้อม (เช่น ยังโหลดไม่เสร็จหรือไม่พบช่องพิมพ์) กรุณาเปิด/รีโหลดแท็บ chatgpt.com ปิดหน้าต่างที่บังอยู่ แล้วลองใหม่</q><code>LOGIN_PROVIDER_NOT_READY</code>
+              <q data-error="LOGIN_TAB_BUSY">แท็บ ChatGPT ยังตอบข้อความอื่นอยู่ กรุณารอสักครู่แล้วลองใหม่</q><code>LOGIN_TAB_BUSY</code></span>
+            <span role="cell">เปิดหรือรีโหลดแท็บ chatgpt.com ปิดหน้าต่างที่บังช่องพิมพ์ หรือรอให้ตอบเสร็จ แล้วแปลใหม่</span>
+          </div>
+          <div class="err-row" role="row">
+            <span role="cell"><q data-error="LOGIN_QUOTA_EXCEEDED">บัญชี AI Login ใช้ครบโควตาแล้วชั่วคราว กรุณาลองใหม่ภายหลังหรือเลือกโมเดลอื่น</q><code>LOGIN_QUOTA_EXCEEDED</code></span>
+            <span role="cell">รอให้โควตาบัญชีกลับมา หรือเลือก “Model” อื่น</span>
+          </div>
+          <div class="err-row" role="row">
+            <span role="cell"><q data-error="LOGIN_IMAGE_UNSUPPORTED">การเชื่อมต่อนี้ส่งภาพหน้าไม่ได้ กรุณาปิด Send page image to AI</q><code>LOGIN_IMAGE_UNSUPPORTED</code></span>
+            <span role="cell">ปิดช่อง “Send page image to AI” แล้วแปลใหม่</span>
+          </div>
+        </div>
+      </section>
+
+      <footer class="foot">
+        <p>มีปัญหาที่ไม่อยู่ในคู่มือ? ถ้าเข้าสู่ระบบ Paid แล้ว ใช้ “Contact admin” ในแท็บ “Tools”</p>
+      </footer>
+    </main>
+  </div>
+
+  <script src="guide-data.js"></script>
+  <script src="guide.js"></script>
+</body>
+
+</html>

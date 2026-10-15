@@ -2,7 +2,7 @@
 
 Provider policy must stay outside the shared wire core.
 
-- `openai_compat/core.py` — one prepared OpenAI-compatible HTTP/SSE request; no vendor names or routing policy.
+- `openai_compat/core.py` — one prepared OpenAI-compatible HTTP/SSE request; verified wire usage aliases (including Groq `x_groq.usage`), no model selection, pricing or routing policy.
 - `openai_compat/streaming.py` — SSE completion gates, bounded wire capture and usage merging.
 - `openai_compat/response.py` — non-stream response decoding/text extraction.
 - `openrouter_chat.py` — OpenRouter cache/routing/accounting seam.

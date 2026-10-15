@@ -2,7 +2,9 @@
 import assert from 'node:assert/strict';
 const rows=new Map();let fail=false;
 function database(){return {
-  createObjectStore(){},
+  // v2 schema (.10485): an "updated" index and an "evicted" tombstone store.
+  objectStoreNames:{contains:()=>false},
+  createObjectStore(){return {indexNames:{contains:()=>false},createIndex(){}};},
   transaction(){
     const tx={};let waiting=0,scheduled=false,aborted=false;
     const complete=()=>{

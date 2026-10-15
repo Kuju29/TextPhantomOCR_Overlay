@@ -82,7 +82,7 @@ export async function activateAiProfileSafely({
     state.aiProfileBlocked = true;
     state.aiProfileErrorCode = error.code;
     state.lastAiResolve = null;
-    state.lastAiProbe = null;
+    state.manualModelBlock = null;
     profileController.beginRecovery?.(stored);
     const message = error.code === "AI_PROFILE_MIGRATION_CONFLICT"
       ? "✕ Saved AI profiles conflict (AI_PROFILE_MIGRATION_CONFLICT). Open Provider and select/save the intended Provider and Model."
@@ -105,6 +105,7 @@ export async function loadPopupSettings(deps) {
     usageViewController,
     providerMetaController,
     apiHealthController,
+    paidServiceController,
     refreshPromptHistoryButtons,
     toggleUi,
     localConnectionController,
@@ -142,11 +143,13 @@ export async function loadPopupSettings(deps) {
     "aiThinking",
     "aiLocalThinking",
     "aiPromptByLang",
+    "paidAiProfilesV1", "loginAiProfilesV1", "paidTranslationSource", "loginProvider", "loginModel", "loginSessionId", "loginAccountId",
     "fontScale",
     "imgButtonsEnabled",
     "translateAllButtonEnabled",
     "downloadImagesEnabled",
     "relayoutTranslated",
+    "paidRateLimitEnabled", "paidRateProfile", "paidRateRpm", "paidRateBurst",
     "rateLimitEnabled",
     "rateProfile",
     "rateRpm",
@@ -164,6 +167,7 @@ export async function loadPopupSettings(deps) {
     "aiProfileCredentialsV1",
     "aiProfilePromptsV1",
   ]);
+  profileController.seedServiceProfiles?.(stored);
 
   if (els.imgButtonsToggle)
     els.imgButtonsToggle.checked = Boolean(stored.imgButtonsEnabled);
@@ -210,11 +214,9 @@ export async function loadPopupSettings(deps) {
   const cachedDefaultApiUrl = normalizeUrl(stored.apiUrlDefault || "");
   const cachedResetApiUrl = normalizeUrl(stored.apiUrlReset || "");
 
-  // Hydrate the cached remote-managed API URL before the first paint that uses
-  // this field. Reset intentionally keeps customApiUrl empty so future remote
-  // changes can still flow through; therefore reopening the popup must render
-  // the cached default immediately instead of waiting for ensureApiDefaults()
-  // to complete another async round-trip.
+  // Paint the cached remote-managed API URL immediately: Reset keeps
+  // customApiUrl empty so remote changes still flow through, and reopening the
+  // popup must not wait for another ensureApiDefaults() round trip.
   state.apiDefaults = {
     defaultApiUrl: cachedDefaultApiUrl,
     resetApiUrl: cachedResetApiUrl,
@@ -224,6 +226,8 @@ export async function loadPopupSettings(deps) {
   els.apiUrl.value =
     storedCustomNorm || cachedDefaultApiUrl || cachedResetApiUrl || "";
   if (storedCustomNorm) state.userInteractedApi = true;
+  // Restore Paid after its saved API origin, before health/meta can resolve.
+  await paidServiceController?.initialize();
 
   // Prompt map (migrate the legacy shape if needed).
   const migration = migratePromptMap(
@@ -356,6 +360,7 @@ export async function loadPopupSettings(deps) {
       Number(stored.rateBurst) > 0 ? stored.rateBurst : (els.rateLimitEnabled?.checked ? "" : DEFAULT_RATE_BURST),
     );
   }
+  await rateSettingsController.initialize?.(stored);
   rateSettingsController.renderHint();
   rateSettingsController.renderLocalHint();
   // Storage is the source of truth during first paint. Live verification is
@@ -396,22 +401,24 @@ export async function loadPopupSettings(deps) {
 
   // Opening the popup to inspect token usage must be observational while a
   // translation is live. In 18.5 popup hydration could otherwise run a live
-  // provider catalogue refresh (and selected-model probe) concurrently with
+  // provider catalogue refresh concurrently with
   // the active translation. Read committed usage only; explicit provider/model
   // edits still use the normal live verification path.
   const translationActive = await readTranslationActivity();
+  if(aiProfileReady && canUseAiUi())await providerMetaController.restoreDisplay?.();
   if (translationActive && usageViewController.refreshPassive)
     await usageViewController.refreshPassive();
   else
     await usageViewController.refresh();
   const initialApiUrl = normalizeUrl(els.apiUrl.value);
   if (initialApiUrl) {
+    await apiHealthController.restoreDisplay?.(initialApiUrl);
     // Read the background snapshot first. Only a stale/missing snapshot needs
     // a live health request, preventing Online -> Checking popup flicker.
     void sendRuntimeMessage({ type: "GET_API_STATUS" }).then((resp) => {
       if (!apiHealthController.acceptSnapshot(resp, initialApiUrl))
         void apiHealthController.check(initialApiUrl);
-    });
+    }).catch(() => void apiHealthController.check(initialApiUrl));
   }
 
   // Fill in a default API URL from the remote config if none is set.
@@ -453,11 +460,11 @@ export async function loadPopupSettings(deps) {
   if (aiProfileReady && canUseAiUi()) {
     applyPromptForLang(state.desiredLang);
     // During a live translation the popup is read-only by default. Do not turn
-    // a token/usage inspection into provider catalogue traffic or a generation
-    // probe. Explicit provider/model interaction still calls refresh() through
+    // a token/usage inspection into provider catalogue traffic. Explicit
+    // provider/model interaction still calls refresh() through
     // the normal popup event handlers. Once no translation is active, startup
     // keeps the provider-authoritative verification behavior.
     if (translationActive) providerMetaController.renderStatus?.();
-    else providerMetaController.refresh();
+    else providerMetaController.refresh({automatic:true});
   }
 }

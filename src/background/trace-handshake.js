@@ -1,3 +1,4 @@
+import { setLogShippingEnabled, initializeLogJournal } from "../shared/log-sink.js";
 // Authoritative, bounded trace negotiation used by UI actions that can occur
 // before the first translation job (notably Local-AI Connect).
 import { getCapabilities, forgetCapabilities } from "./capabilities.js";
@@ -76,6 +77,8 @@ export async function ensureTraceHandshake(rawBase) {
         reason: "capabilities_unavailable",
         caps,
       });
+    await initializeLogJournal(base);
+    if (typeof caps.logFile === "boolean") setLogShippingEnabled(caps.logFile, () => base, base, {authoritative:true});
     setTracingEnabled(
       caps.trace === true,
       () => base,

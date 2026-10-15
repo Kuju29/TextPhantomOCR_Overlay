@@ -1,12 +1,34 @@
-fastapi>=0.110
-uvicorn[standard]>=0.23
-httpx>=0.24
-# Required by /v1/lens/fallback, which takes the image as multipart rather than
-# as a base64 field. Without it FastAPI refuses to build the route AT IMPORT
-# TIME, so a missing dependency here is a server that will not start — not one
-# that starts and fails on the first fallback.
-python-multipart>=0.0.9
-numpy
-opencv-python-headless
-Pillow
-budoux
+# .45 runtime pins tested together; re-audit when updating these versions.
+fastapi==0.142.4
+starlette==1.7.0
+uvicorn[standard]==0.48.0
+httpx==0.28.1
+httpcore==1.0.9
+python-multipart==0.0.32
+numpy==2.2.6
+opencv-python-headless==4.12.0.88
+Pillow==12.3.0
+budoux==0.9.3
+cryptography==50.0.2
+anyio==4.15.1
+pydantic==2.13.4
+pydantic-core==2.46.4
+annotated-types==0.7.0
+annotated-doc==0.0.4
+typing-extensions==4.16.0
+typing-inspection==0.4.2
+opentelemetry-api==1.45.1
+idna==3.17
+certifi==2026.5.20
+h11==0.16.0
+click==8.1.8
+cffi==2.0.0
+pycparser==3.0
+httptools==0.8.0
+python-dotenv==1.2.4
+PyYAML==6.0.3
+watchfiles==1.3.0
+websockets==17.2
+colorama==0.4.6; sys_platform == "win32"
+# Linux Uvicorn acceleration; wheel resolution is checked separately.
+uvloop==0.22.1; sys_platform != "win32"

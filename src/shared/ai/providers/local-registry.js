@@ -15,7 +15,12 @@ const CATALOG = Object.freeze(Object.fromEntries(
   [ollama, lmstudio, jan, textgen, koboldcpp, vllm, llamafile, gpt4all, llamacpp]
     .map((spec) => [spec.id, spec]),
 ));
-const ALIASES = Object.freeze({ local: "ollama", llama: "ollama", "llama.cpp": "llamacpp", "llama-cpp": "llamacpp" });
+const ALIASES = Object.freeze({
+  local: "ollama", llama: "ollama", "llama.cpp": "llamacpp", "llama-cpp": "llamacpp",
+  "lm-studio": "lmstudio", lm_studio: "lmstudio", lms: "lmstudio", "jan.ai": "jan",
+  "text-generation-webui": "textgen", oobabooga: "textgen", ooba: "textgen",
+  kobold: "koboldcpp", koboldai: "koboldcpp", "gpt-4-all": "gpt4all", "gpt-4all": "gpt4all",
+});
 const PROTOCOLS = Object.freeze({
   ollama,
   openai: Object.freeze({ id: "openai", create: createOpenAiCompatibleAdapter, capabilityHints: openAiCompatibleCapabilityHints }),

@@ -184,9 +184,8 @@ export async function runContentValidatedTranslation({
       };
       return { outcome, firstOutcome, repairAttempted, repairReason };
     }
-    // jobs.js historically owns a second malformed-output repair branch. This
-    // sentinel tells that older caller the policy has already made its choice,
-    // while accurately stating that no repair generation was attempted.
+    // jobs.js has its own malformed-output repair branch; this sentinel tells it
+    // the policy already decided, while stating no repair generation ran.
     if (
       repair?.enabled !== true &&
       Number(error?.generationAttempts || error?.providerAttempts || 0) > 0

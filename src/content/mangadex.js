@@ -592,7 +592,7 @@
         rec.img = img;
         continue;
       }
-      const { r, left, top } = TP.getOverlayBoxFromParent(img, parent);
+      const { r, left, top } = TP.getOverlayBoxFromParent(img, parent, rec.fixedPortal === true);
       if (r.width < 2 || r.height < 2) {
         TP.setOverlayStyleIfChanged(host, "display", "none");
         rec.img = img;
@@ -655,7 +655,6 @@
       else if (keys.size) updateMangaDexOverlays(keys);
     });
   }
-  const mdScheduleUpdate = scheduleMangaDexOverlayUpdate;
 
   function ensureMangaDexOverlayListeners() {
     if (window.__tpMdOverlayListeners) return;

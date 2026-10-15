@@ -28,15 +28,30 @@ from backend.security import SecurityError
 from backend.application.ai_translation.context import TranslationContext
 
 PUBLIC_MESSAGES = {
+    "paid_database_unavailable": "ฐานข้อมูล Center ขัดข้อง ยังยืนยันสถานะคำขอ Paid ไม่ได้ กรุณาตรวจคำขอเดิมและประวัติเครดิตก่อนเริ่มใหม่",
+    "paid_login_required": "session ของบัญชี Paid หมดอายุหรือถูกยกเลิก กรุณาเข้าสู่ระบบอีกครั้ง",
+    "paid_provider_route": "โมเดล Paid นี้ไม่พร้อมใช้งาน กรุณาติดต่อฝ่ายสนับสนุนพร้อมรหัสอ้างอิง",
+    "paid_provider_auth": "บริการ Paid ไม่พร้อมใช้งาน กรุณาติดต่อฝ่ายสนับสนุน",
+    "paid_provider_balance": "บริการ Paid ไม่พร้อมรับคำขอขณะนี้ ยอดเครดิตของคุณไม่ได้เป็นสาเหตุ",
+    "paid_provider_forbidden": "บริการ Paid ไม่สามารถทำคำขอนี้ได้ กรุณาติดต่อฝ่ายสนับสนุนพร้อมรหัสอ้างอิง",
+    "paid_provider_request": "บริการ Paid ไม่รับคำขอนี้ กรุณาติดต่อฝ่ายสนับสนุนพร้อมรหัสอ้างอิง",
+    "paid_provider_limited": "ผู้ให้บริการ AI จำกัดคำขอ Paid ชั่วคราว ตรวจคำขอเดิมก่อนลองใหม่",
+    "paid_provider_capacity": "บริการ AI มีงานเต็มชั่วคราว กรุณาลองใหม่ภายหลัง ยอด TP ของคุณไม่ใช่สาเหตุ",
+    "paid_provider_failed": "บริการ Paid ทำคำขอนี้ไม่สำเร็จ กรุณาตรวจคำขอเดิมหรือติดต่อฝ่ายสนับสนุน",
     "provider_auth_failed": "API key ถูกปฏิเสธ กรุณาตรวจสอบคีย์และ Provider",
     "provider_quota_exhausted": "โควตาหรือเครดิต AI หมด",
     "billing_required": "Provider ต้องการตั้งค่าการชำระเงิน",
     "provider_rate_limited": "Provider จำกัดอัตราหรือโควตาตามเวลา (ไม่ใช่ max_tokens ของคำขอเดียว)",
     "provider_model_not_found": "ไม่พบโมเดลที่เลือกใน Provider",
     "provider_model_access_denied": "บัญชีนี้ไม่มีสิทธิ์ใช้โมเดลที่เลือก",
+    "provider_region_unsupported": "Provider ไม่ให้บริการในภูมิภาคของบัญชีนี้",
     "provider_content_blocked": "Provider ปฏิเสธเนื้อหานี้",
     "provider_payload_too_large": "Prompt หรือข้อความยาวเกินขีดจำกัดของ Provider",
     "provider_timeout": "Provider ตอบช้าเกินเวลา",
+    "ai_provider_stalled": "ผู้ให้บริการ AI หยุดตอบกลับ (ไม่มีการคิดหรือข้อความ) จึงหยุดคำขอนี้",
+    "ai_thinking_too_long": "AI คิดนานเกินงบเวลาโดยยังไม่เริ่มตอบ ลองลดระดับการคิดหรือเลือกโมเดลที่เร็วกว่า",
+    "ai_output_no_progress": "AI เขียนต่อเนื่องแต่ไม่มีบรรทัดแปลใหม่เสร็จ จึงหยุดคำขอนี้ บรรทัดที่เสร็จแล้วยังถูกเก็บไว้",
+    "ai_stream_ceiling": "คำตอบของ AI ใช้เวลาเกินเพดานความปลอดภัย จึงหยุดคำขอนี้",
     "provider_transport": "ติดต่อ Provider ไม่สำเร็จ",
     "invalid_model_output": "AI ตอบกลับไม่ครบตามรูปแบบที่ต้องใช้",
     "invalid_output_contract": "AI ตอบกลับในรูปแบบที่ระบบอ่านไม่ได้",
@@ -46,7 +61,28 @@ PUBLIC_MESSAGES = {
     "internal_error": "TextPhantom เกิดข้อผิดพลาดภายใน โปรดดู Trace ID",
 }
 
-def provider_call_counts(exc: BaseException, default: int = 1) -> tuple[int, int]:
+def _owned_paid_replay_meta(exc: BaseException) -> dict[str, Any] | None:
+    structural = getattr(exc, "structural_details", {})
+    structural = structural if isinstance(structural, dict) else {}
+    meta = getattr(exc, "generationMeta", None)
+    if not isinstance(meta, dict):
+        meta = structural.get("generationMeta")
+    if not isinstance(meta, dict):
+        return None
+    usage = meta.get("usage")
+    if (meta.get("provider") == "paid" and meta.get("centerOperationReplayed") is True
+            and meta.get("requestDispatched") is False
+            and type(meta.get("generationAttempts")) is int and meta["generationAttempts"] == 0
+            and type(meta.get("providerAttempts")) is int and meta["providerAttempts"] == 0
+            and isinstance(usage, dict) and usage.get("centerOperationReplayed") is True):
+        return meta
+    return None
+
+
+def provider_call_counts(exc: BaseException, default: int = 1, *,
+                         allow_paid_replay: bool = False) -> tuple[int, int]:
+    if allow_paid_replay and _owned_paid_replay_meta(exc) is not None:
+        return 0, 0
     structural = getattr(exc, "structural_details", {})
     structural = structural if isinstance(structural, dict) else {}
     generation = getattr(exc, "generationMeta", {})
@@ -72,7 +108,8 @@ def invalid_detail(ctx: TranslationContext, message: str,
 
 def trace_failure(ctx: TranslationContext, stage: str, exc: BaseException,
                   status: int, **details: Any) -> None:
-    upstream = provider_status(exc)
+    from backend.ai.login.login_provider_contract import LoginError
+    upstream = getattr(exc, 'upstream_status', None) if isinstance(exc, LoginError) else provider_status(exc)
     provider_attempts = int(details.pop("providerAttempts", 0) or 0)
     generation_attempts = int(details.pop("generationAttempts", provider_attempts) or 0)
     trace.write("api", "api/routes/ai_v1.py", "ai_translate_v1", "!!", {
@@ -90,6 +127,43 @@ def raise_execution_error(ctx: TranslationContext, exc: BaseException, *,
                           provider_ms: float) -> NoReturn:
     common = {"units": ctx.unit_count, "rateWaitMs": rate_wait_ms,
               "admissionWaitMs": admission_wait_ms, "providerMs": provider_ms}
+    from backend.ai.login.login_provider_registry import LoginError
+    if isinstance(exc, LoginError):
+        dispatched = exc.requestDispatched is True
+        from backend.ai.login.endpoint.login_endpoint_http import ENDPOINT_STEPS
+        login_metadata = {}
+        if getattr(exc, 'endpoint_step', '') in ENDPOINT_STEPS:
+            login_metadata['endpointStep'] = exc.endpoint_step
+        from backend.ai.login.login_http import PROVIDER_REASONS
+        reason = getattr(exc, 'provider_reason', '')
+        if isinstance(reason, str) and reason in PROVIDER_REASONS:
+            login_metadata['providerReason'] = reason
+        if getattr(exc, 'identity_verified', None) is True:
+            login_metadata['identityVerified'] = True
+        delay = getattr(exc, 'retry_after_ms', None)
+        if type(delay) is int and 0 <= delay <= 300000:
+            login_metadata['retryAfterMs'] = delay
+        # A page stopped because an earlier sent page of the same run failed
+        # sent nothing itself, but reports that page's provider outcome; it is
+        # not an authorization/configuration fault of TextPhantom.
+        earlier = getattr(exc, 'earlier_page_failed', False) is True
+        if earlier:
+            login_metadata['earlierPageFailed'] = True
+        provider_side = dispatched or earlier or exc.code == 'login_provider_temporarily_unavailable'
+        detail = error_payload(code=exc.code, message=str(exc), user_message=str(exc),
+            origin="upstream_ai" if provider_side else "api",
+            stage="login_provider" if dispatched else "login_run_stopped" if earlier else
+                "login_provider_validation" if provider_side else "login_authorization",
+            category="policy" if exc.code in {'login_content_refused', 'login_endpoint_challenge_required',
+                'login_endpoint_native_preparation_required'} else ("upstream" if provider_side else "configuration"),
+            retryable=getattr(exc, 'retryable', False) is True,
+            http_status=exc.status, trace_id=ctx.trace_id, upstream_status=getattr(exc, 'upstream_status', None),
+            extra={"requestDispatched": dispatched, "providerAttempts": int(dispatched), "generationAttempts": int(dispatched),
+                "automaticContentRetry": False, "automaticTransportRetry": False, "billingAuthority": "own_login_account", **login_metadata},
+            correlation=dict(ctx.correlation))
+        trace_failure(ctx, detail["stage"], exc, exc.status, **common, providerAttempts=int(dispatched), generationAttempts=int(dispatched))
+        failure_event(ctx.requested_route, detail, **ctx.route_identity)
+        raise HTTPException(exc.status, detail=detail) from exc
     if isinstance(exc, AdmissionRejected):
         detail = error_payload(
             code="server_busy", message=str(exc),
@@ -181,7 +255,8 @@ def raise_execution_error(ctx: TranslationContext, exc: BaseException, *,
                       providerAttempts=0)
         raise HTTPException(400, detail=invalid_detail(ctx, str(exc), stage)) from exc
     if isinstance(exc, ProviderGenerationCancelled):
-        providers, generations = provider_call_counts(exc)
+        providers, generations = ((0, 0) if getattr(exc, "preDispatchCancelled", False)
+                                 else provider_call_counts(exc))
         trace_failure(ctx, "cancelled", exc, 409, units=ctx.unit_count,
                       providerMs=provider_ms, providerAttempts=providers,
                       generationAttempts=generations)
@@ -193,7 +268,9 @@ def raise_execution_error(ctx: TranslationContext, exc: BaseException, *,
         raise HTTPException(409, detail=detail) from exc
     if isinstance(exc, ModelOutputContractError):
         structural = dict(getattr(exc, "structural_details", {}) or {})
-        providers, generations = provider_call_counts(exc)
+        browser_webchat = ctx.config.provider == "login" and str(ctx.config.model).endswith("/web-current")
+        retained_paid = ctx.config.provider == "paid" and _owned_paid_replay_meta(exc) is not None
+        providers, generations = provider_call_counts(exc, allow_paid_replay=retained_paid)
         trace_failure(ctx, "model_output_contract", exc, 502, **common,
                       chars=ctx.char_count, pageImage=bool(ctx.config.image_b64),
                       requestedProvider=ctx.config.provider, requestedModel=ctx.config.model,
@@ -201,7 +278,7 @@ def raise_execution_error(ctx: TranslationContext, exc: BaseException, *,
                       resolvedModel=structural.get("resolvedModel", ctx.resolved_model),
                       outputContractRequested="id_markers", structuralDetails=structural,
                       providerAttempts=providers, generationAttempts=generations,
-                      providerHttpStatuses=[200])
+                      providerHttpStatuses=[] if browser_webchat else [200])
         budget = isinstance(exc, OutputBudgetExhausted)
         code = ("output_budget_exhausted" if budget else
                 "AI_OUTPUT_CONTRACT_MISMATCH" if getattr(exc, "code", "") == "AI_OUTPUT_CONTRACT_MISMATCH"
@@ -217,9 +294,9 @@ def raise_execution_error(ctx: TranslationContext, exc: BaseException, *,
                           else "Local AI ส่ง Thinking กลับมาแม้เลือก Off กรุณาตรวจการตั้งค่าโมเดล" if code == "ai_local_thinking_violated"
                           else "AI ตอบ ID ไม่ครบหรือรูปแบบผิด ยังไม่มีหลักฐานว่าชนเพดานโทเค็น"),
             origin="upstream_ai", stage="model_output_contract", category="upstream_contract",
-            retryable=False, http_status=502, trace_id=ctx.trace_id, upstream_status=200,
+            retryable=False, http_status=502, trace_id=ctx.trace_id, upstream_status=None if browser_webchat else 200,
             extra={"error": code, "constraintScope":"per_request" if budget else "output_contract", "structuralDetails": structural,
-                   "requestDispatched":True,
+                   "requestDispatched":not retained_paid,
                    "providerAttempts": providers, "generationAttempts": generations,
                    "automaticContentRetry": False, "automaticTransportRetry": False,
                    "modelFallback": False, "schemaFallback": False},
@@ -236,6 +313,58 @@ def _raise_provider_failure(ctx: TranslationContext, exc: BaseException,
         exc = ProviderAdapterContractError(
             "TextPhantom provider adapter rejected the router call signature")
     semantics = provider_http_failure(exc)
+    if (getattr(exc, "provider", "") == "paid"
+            and getattr(exc, "centerAdmissionRejected", False) is True):
+        # A typed Center admission refusal proves no AI dispatch for this
+        # operation. Unknown/upstream HTTP errors deliberately keep the
+        # ordinary provider/uncertain classification below.
+        stage = "paid_admission"
+        trace_failure(ctx, stage, exc, semantics.status, units=ctx.unit_count,
+                      timing={"rateWaitMs": rate_wait_ms,
+                              "admissionWaitMs": admission_wait_ms,
+                              "providerMs": provider_ms},
+                      providerAttempts=0, generationAttempts=0,
+                      centerRequestDispatched=True, requestDispatched=False,
+                      providerHttpStatuses=[], upstreamStatus=None,
+                      centerHttpStatus=semantics.status)
+        detail = error_payload(
+            code=semantics.code, message=semantics.message,
+            user_message=PUBLIC_MESSAGES.get(semantics.code, semantics.message),
+            origin="control_center", stage=stage, category="admission",
+            retryable=False, http_status=semantics.status, trace_id=ctx.trace_id,
+            extra={"requestDispatched": False, "centerRequestDispatched": True,
+                   "creditReserved": False, "providerAttempts": 0,
+                   "generationAttempts": 0, "providerHttpStatuses": [],
+                   "automaticContentRetry": False, "automaticTransportRetry": False,
+                   "modelFallback": False, "schemaFallback": False,
+                   "constraintScope": "account_admission"},
+            correlation=dict(ctx.correlation),
+        )
+        failure_event(ctx.requested_route, detail, **ctx.route_identity)
+        raise HTTPException(semantics.status, detail=detail) from exc
+    if getattr(exc, "provider", "") == "paid" and getattr(exc, "provider_code", "") == "DATABASE_UNAVAILABLE":
+        # A database error can precede reservation OR follow a billed provider
+        # response. It proves neither zero calls nor one actual generation.
+        evidence = {"centerRequestDispatched": True, "centerHttpStatus": provider_status(exc),
+                    "centerRequestId": str(getattr(exc, "centerRequestId", ""))[:80],
+                    "providerDispatchEvidence": "unconfirmed", "requestDispatched": None,
+                    "providerAttempts": None, "generationAttempts": None,
+                    "creditState": "unconfirmed", "automaticContentRetry": False,
+                    "automaticTransportRetry": False, "modelFallback": False, "schemaFallback": False}
+        stage = "paid_database"
+        trace.write("api", "api/routes/ai_v1.py", "ai_translate_v1", "!!", {
+            "stage": stage, "failureKind": semantics.code, "errorType": type(exc).__name__,
+            "error": str(exc), "httpStatus": semantics.status, "origin": "control_center",
+            "units": ctx.unit_count, "timing": {"providerMs": provider_ms,
+                "rateWaitMs": rate_wait_ms, "admissionWaitMs": admission_wait_ms},
+            **ctx.route_identity, **evidence}, trace_id=ctx.trace_id)
+        detail = error_payload(code=semantics.code, message=semantics.message,
+            user_message=PUBLIC_MESSAGES[semantics.code], origin="control_center", stage=stage,
+            category="database", retryable=False, http_status=semantics.status, trace_id=ctx.trace_id,
+            extra={**evidence, "provider": "paid", "model": ctx.resolved_model,
+                   "centerErrorCode": "DATABASE_UNAVAILABLE"}, correlation=dict(ctx.correlation))
+        failure_event(ctx.requested_route, detail, **ctx.route_identity)
+        raise HTTPException(semantics.status, detail=detail) from exc
     limited = semantics.code == "provider_rate_limited"
     retry_sec = retry_after_sec(exc) if limited else 0.0
     if ctx.rate["enabled"] and not ctx.unlimited and limited:
@@ -265,7 +394,8 @@ def _raise_provider_failure(ctx: TranslationContext, exc: BaseException,
         origin="api" if internal else "upstream_ai", stage=stage,
         category="internal" if internal else "upstream", retryable=semantics.retryable,
         http_status=status, trace_id=ctx.trace_id, upstream_status=upstream,
-        extra={"constraintScope":"unknown",
+        extra={"constraintScope":getattr(exc, 'provider_limit_scope', 'unknown'),
+               "creditState":getattr(exc, 'center_credit_state', None),
                "upstreamProvider": str(getattr(exc, "upstream_provider", "") or "")[:80],
                "retryAfterSource": "provider_header" if retry_sec > 0 else "local_default" if limited else "not_applicable",
                "quotaKind":"not_reported", "providerAttempts": providers, "generationAttempts": generations,
@@ -275,7 +405,9 @@ def _raise_provider_failure(ctx: TranslationContext, exc: BaseException,
                "model": str(ctx.resolved_model or "")[:160],
                "providerCode": str(getattr(exc, "provider_code", "") or "")[:80],
                "providerType": str(getattr(exc, "provider_type", "") or "")[:80],
-               "providerReason": semantics.message, "failureKind": code, **http_evidence},
+               "providerReason": semantics.message, "failureKind": code, **http_evidence,
+               **({"streamStop": dict(exc.stream_stop), "requestDispatched": True}
+                  if isinstance(getattr(exc, "stream_stop", None), dict) else {})},
         correlation=dict(ctx.correlation),
     )
     headers = None

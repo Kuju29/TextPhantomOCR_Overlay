@@ -102,8 +102,8 @@ for (const rule of base.web_accessible_resources || []) {
 
 // --- per-platform overlays --------------------------------------------------
 for (const [platform, expectations] of Object.entries({
-  chromium: { serviceWorker: true, forbid: ["menus", "messagesRead", "scripting"] },
-  firefox: { serviceWorker: false, forbid: ["messagesRead", "scripting"] },
+  chromium: { serviceWorker: true, require: ["scripting"], forbid: ["menus", "messagesRead"] },
+  firefox: { serviceWorker: false, require: ["scripting"], forbid: ["messagesRead"] },
   thunderbird: { serviceWorker: false, require: ["menus", "messagesRead", "scripting"] },
 })) {
   const overlay = await json(path.join(projectRoot, `platform/${platform}.json`));

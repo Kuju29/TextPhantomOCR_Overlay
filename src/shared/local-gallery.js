@@ -17,8 +17,20 @@ function openDb() {
         db.createObjectStore(STORE_NAME, { keyPath: "id" });
       }
     };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error || new Error("indexeddb_open_failed"));
+    req.onsuccess = () => {
+      const db = req.result;
+      // The background worker keeps a connection open too; never let it block
+      // a future schema upgrade from a viewer tab.
+      db.onversionchange = () => {
+        db.close();
+        dbPromise = null;
+      };
+      resolve(db);
+    };
+    req.onerror = () => {
+      dbPromise = null;
+      reject(req.error || new Error("indexeddb_open_failed"));
+    };
   });
   return dbPromise;
 }
@@ -78,6 +90,19 @@ export function isImageFile(file) {
   return isImageFileName(file?.name);
 }
 
+/**
+ * Hidden/metadata files ("._01.jpg" AppleDouble forks that macOS writes on
+ * USB/network drives, ".thumb.png"). Browsers type them by extension, so
+ * "._01.jpg" arrives as image/jpeg and would become a broken page.
+ */
+export function isHiddenFileName(name) {
+  return trim(name).startsWith(".");
+}
+
+/** A page-worthy image: an image type and not a hidden/metadata file. */
+const isPageImage = (file) =>
+  !isHiddenFileName(file?.name) && isImageFile(file);
+
 /** Read top-level images without opening non-images or traversing subfolders. */
 export async function imagesFromDirectoryHandle(directoryHandle) {
   if (!directoryHandle || typeof directoryHandle.values !== "function") {
@@ -98,8 +123,8 @@ export async function imagesFromDirectoryHandle(directoryHandle) {
     if (entry?.kind !== "file") continue;
     entries++;
 
-    // Do not materialize obvious non-images.
-    if (!isImageFileName(entry.name)) {
+    // Do not materialize obvious non-images or hidden metadata files.
+    if (isHiddenFileName(entry.name) || !isImageFileName(entry.name)) {
       skipped++;
       continue;
     }
@@ -159,6 +184,19 @@ export async function pickImagesFromDirectory(
   }
 }
 
+/**
+ * Firefox/Thunderbird hide an extension popup as soon as a native file dialog
+ * opens (Mozilla bug 1292701), which kills the popup's `change` listener: the
+ * pick is lost. There the pickers have to run in the Local viewer tab instead.
+ */
+export function popupFileDialogClosesPopup(extensionBaseUrl) {
+  return /^moz-extension:/i.test(String(extensionBaseUrl || ""));
+}
+
+/** Brave ships File System Access behind a flag; other browsers lack it entirely. */
+export const isBraveBrowser = (nav = globalThis?.navigator) =>
+  typeof nav?.brave?.isBrave === "function";
+
 /** Locale-aware natural comparison (handles "page2" < "page10"). */
 export function naturalCompare(a, b) {
   return new Intl.Collator(undefined, {
@@ -207,7 +245,7 @@ export function toLocalPageRecord(file, index = 0, relativePath = "") {
  */
 export function filterImageFiles(files, { topLevelOnly = false } = {}) {
   return [...(files || [])].filter((file) => {
-    if (!isImageFile(file)) return false;
+    if (!isPageImage(file)) return false;
     if (topLevelOnly && !isTopLevelRelativePath(file?.webkitRelativePath))
       return false;
     return true;
@@ -265,14 +303,10 @@ function entryToFile(entry) {
 }
 
 /**
- * The images inside dropped folders (and any images dropped alongside them).
- *
- * A dropped folder is a real folder selection: the browser hands over the
- * directory itself, this reads only its top level, and nothing is uploaded or
- * confirmed. It is the way to pick a folder of images in a browser that has no
- * directory picker — Brave blocks the File System Access API outright, and
- * `<input webkitdirectory>` is the one that walks the whole subtree and makes
- * the browser ask about every file in it.
+ * The images inside dropped folders (and images dropped alongside them). Only
+ * the top level is read and nothing is uploaded. This is the folder pick for
+ * browsers without a directory picker (Brave blocks File System Access, and
+ * `<input webkitdirectory>` walks and prompts for the whole subtree).
  *
  * @param {Array<object>} entries from `dropEntriesFrom`
  * @returns {Promise<{files: File[], folderNames: string[], relativePaths: string[],
@@ -291,7 +325,7 @@ export async function imagesFromDroppedEntries(entries) {
     if (entry.isFile) {
       scanned++;
       const file = await entryToFile(entry).catch(() => null);
-      if (file && isImageFile(file)) {
+      if (file && isPageImage(file)) {
         files.push(file);
         relativePaths.push("");
       }
@@ -312,7 +346,7 @@ export async function imagesFromDroppedEntries(entries) {
       }
       scanned++;
       const file = await entryToFile(child).catch(() => null);
-      if (!file || !isImageFile(file)) continue;
+      if (!file || !isPageImage(file)) continue;
       files.push(file);
       relativePaths.push(folder ? `${folder}/${file.name}` : "");
     }
@@ -326,9 +360,8 @@ export async function imagesFromDroppedEntries(entries) {
     skipped: scanned - files.length,
     subfolders,
     hadFolder,
-    // True when a folder held more entries than one read pass could list. The
-    // caller must say so: a short list presented as the whole folder is the
-    // kind of quiet lie that sends someone hunting for a missing page.
+    // A folder held more entries than one read pass could list; the caller must
+    // say so rather than present a short list as the whole folder.
     truncated,
   };
 }
@@ -370,7 +403,6 @@ export async function loadLocalSession(id) {
   });
 }
 
-/** Delete a viewer session by id. */
 export async function deleteLocalSession(id) {
   const key = trim(id);
   if (!key) return;
@@ -378,4 +410,29 @@ export async function deleteLocalSession(id) {
   const tx = db.transaction(STORE_NAME, "readwrite");
   tx.objectStore(STORE_NAME).delete(key);
   await txComplete(tx);
+}
+
+/**
+ * Every stored session as `{id, createdAt}` (no page data copied out; the
+ * blobs stay on disk). Used by the background cleanup to find sessions that
+ * no Local viewer tab shows any more.
+ */
+export async function listLocalSessionSummaries() {
+  const db = await openDb();
+  return new Promise((resolve, reject) => {
+    const out = [];
+    const tx = db.transaction(STORE_NAME, "readonly");
+    const req = tx.objectStore(STORE_NAME).openCursor();
+    req.onsuccess = () => {
+      const cursor = req.result;
+      if (!cursor) return resolve(out);
+      out.push({
+        id: String(cursor.key),
+        createdAt: Number(cursor.value?.createdAt) || 0,
+      });
+      cursor.continue();
+    };
+    req.onerror = () =>
+      reject(req.error || new Error("indexeddb_cursor_failed"));
+  });
 }

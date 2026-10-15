@@ -1,9 +1,6 @@
 /**
- *
- * Popup tab switcher (classic script — MV3 CSP forbids inline scripts).
- *
- * Pure presentation: shows one `.panel` at a time and remembers the last
- * active tab in localStorage. All app logic stays in popup.js.
+ * Popup tab switcher (classic script: MV3 CSP forbids inline scripts). Shows one
+ * `.panel` at a time and remembers the last tab in localStorage.
  */
 (() => {
   const STORAGE_KEY = "tp.popup.tab";

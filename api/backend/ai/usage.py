@@ -61,6 +61,10 @@ def finalize_usage(values: dict, *, complete: bool = True) -> dict:
         out['totalTokens'] = token(inp + output)
     issues = list(out.get('accountingIssues') or [])
     read, write = out['cachedInputTokens'], out['cacheWriteInputTokens']
+    short, hour = out['cacheWrite5mInputTokens'], out['cacheWrite1hInputTokens']
+    if write is not None and (any(n is not None and n > write for n in (short, hour)) or
+                             short is not None and hour is not None and short + hour != write):
+        issues.append('cache_write_duration_inconsistent')
     if inp is not None and write is not None and write > inp:
         issues.append('cache_write_exceeds_input')
     if inp is not None and read is not None:

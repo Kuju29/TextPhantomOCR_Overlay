@@ -1,5 +1,6 @@
 import { repairSourceContext } from './source-evidence.js';
 import { checkedOrigins } from '../../shared/ai/conversation/origins.js';
+import {sourceUnitOrdinal} from '../../shared/ai-source-filter.js';
 
 const conflict = message => Object.assign(new Error(message), {
   code:'repair_source_evidence_conflict', stage:'conversation_mapping',
@@ -39,7 +40,7 @@ export function prepareConversationRepairWire(pages, units, conversationRepair) 
         !original || original.text !== row.text || original.sourceHash !== row.sourceHash ||
         page.generationId !== row.generationId)
       throw conflict('Repair source identity does not match its checkpoint');
-    const alias = String(row.id), wireId = `I${descriptor.pageOrder}_P${unitIndex}`;
+    const alias = String(row.id), wireId = `I${descriptor.pageOrder}_P${sourceUnitOrdinal(original,unitIndex)}`;
     if (seenAliases.has(alias) || seenWireIds.has(wireId))
       throw conflict('Repair source identities are not unique');
     seenAliases.add(alias); seenWireIds.add(wireId);

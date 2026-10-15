@@ -1,16 +1,9 @@
 """Service behind ``/ai/resolve`` and ``/ai/prompt/default``.
 
-Given a (possibly partial) AI configuration, work out the concrete provider,
-model, base URL and the list of models the user can pick from. Kept out of
-the route module so it stays unit-testable.
-
-The settings UI intentionally separates three questions:
-1. Is this provider implemented by TextPhantom?
-2. Is the supplied key accepted by the provider?
-3. Is the selected model present in the provider's live model list?
-
-The selectable model list is live-only: if the provider/key cannot enumerate a
-model, the popup must not promise that model will work.
+Resolves provider, model, base URL and the selectable models, keeping three
+questions separate: is the provider implemented, is the key accepted, and is
+the model in the provider's live list. The list is live-only, so the popup
+never promises a model the provider/key cannot enumerate.
 """
 
 from __future__ import annotations
@@ -20,7 +13,6 @@ from typing import Any, TypedDict
 import hashlib
 
 from backend.ai import prompts
-# from backend.ai import providers as _provider_modules  # noqa: F401
 from backend.ai.provider_registry import provider_registry
 from backend.ai.provider_resolution import (
     canonical_provider,
@@ -88,11 +80,10 @@ def _enumerate_models_detailed(provider: str, api_key: str, base_url: str) -> En
     spec = provider_registry.require(provider)
     listed = spec.adapter.list_models(api_key="" if local else api_key, base_url=base_url)
     from backend.ai.provider_resolution import (
-        forget_model_capabilities, remember_model_capabilities, retain_model_promotions, model_capabilities,
+        forget_model_capabilities, remember_model_capabilities, model_capabilities,
     )
     if listed.status == "valid":
         remember_model_capabilities(provider, base_url, api_key, dict(listed.capabilities), models=listed.models)
-        retain_model_promotions(provider, base_url, api_key, list(listed.models))
     else:
         forget_model_capabilities(provider, base_url, api_key)
     live = {"models": list(listed.models), "status": listed.status,
@@ -263,33 +254,20 @@ def resolve(payload: dict[str, Any]) -> ResolveResult:
                                http_status=0, error="missing_api_key", capabilities={}, candidates={}))
     models = enumeration["models"]
     live_verified = enumeration["verified"]
-    from backend.ai.provider_resolution import model_is_promoted, model_rejection
+    # Catalogue eligibility only: no selected-model generation probe exists
+    # (10491). A Manual model that fails deterministically on a real
+    # translation is marked by the extension, not here.
     model_candidates = []
     for candidate_model in models:
         native = dict(enumeration.get("candidates", {}).get(candidate_model) or {})
         eligibility = str(native.get("eligibility") or "unknown")
         evidence = str(native.get("evidence") or "provider_catalogue_only")[:120]
-        rejection = model_rejection(provider, base_url, api_key, candidate_model)
-        if rejection:
-            eligibility = "blocked"
-            evidence = f"selected_generation_probe_{rejection.get('status') or 'rejected'}"[:120]
-        elif model_is_promoted(provider, base_url, api_key, candidate_model):
-            eligibility, evidence = "usable", "selected_generation_probe"
         if eligibility not in {"usable", "unknown", "blocked"}:
             eligibility = "unknown"
-        candidate = {"id": candidate_model, "eligibility": eligibility,
-                     "evidence": evidence,
-                     "capabilities": dict(enumeration["capabilities"].get(candidate_model) or {})}
-        if rejection:
-            candidate["probe_status"] = str(rejection.get("status") or "rejected")[:64]
-            candidate["probe_http_status"] = int(rejection.get("http_status") or 0)
-        model_candidates.append(candidate)
+        model_candidates.append({"id": candidate_model, "eligibility": eligibility,
+                                 "evidence": evidence,
+                                 "capabilities": dict(enumeration["capabilities"].get(candidate_model) or {})})
 
-    # Log the effective picker state only after deterministic probe rejection
-    # and promotion evidence have been overlaid. Logging the raw catalogue here
-    # used to report blockedCount=0 even while the same resolve call returned a
-    # blocked selected model, which made production diagnostics contradict the
-    # actual UI state.
     from backend import trace
     effective_counts = {state: sum(1 for item in model_candidates
                                    if item.get("eligibility") == state)

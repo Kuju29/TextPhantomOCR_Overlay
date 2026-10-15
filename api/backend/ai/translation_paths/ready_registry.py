@@ -114,6 +114,7 @@ class ReadyRegistry:
                     for t in candidates:
                         if t.units is None:break
                         if not t.units:self.finish(t);continue
+                        if ready and str(t.ai.provider).lower() == 'paid' and t.ai.paid_user_run_id != ready[0].ai.paid_user_run_id:break
                         if ready and (t.options['compat']!=ready[0].options['compat'] or t.ai.image_b64 or ready[0].ai.image_b64):break
                         if any(r.ai.conversation.get('pageId')==t.ai.conversation.get('pageId') for r in ready):break
                         ready.append(t)
@@ -137,7 +138,8 @@ class ReadyRegistry:
                     turn_ms=max(0.0,(time.monotonic()-started)*1000)
                     values=result['values'];meta=result['meta'];receipt=meta.get('usage')
                     conversation=dict(meta.get('conversation') or {})
-                    committed = conversation.get('historyTurns',0) > 0 or conversation.get('commitStatus') in ('pending_commit','committed','ephemeral_not_retained')
+                    status = conversation.get('commitStatus')
+                    committed = status in ('pending_commit','committed','ephemeral_not_retained') or (not status and conversation.get('historyTurns',0) > 0)
                     if committed:
                         profile['lastCommittedUnits']=len(picked)
                         profile['lastTurnMs']=turn_ms
@@ -145,7 +147,17 @@ class ReadyRegistry:
                         for t in owners:
                             t.in_flight=False
                             own=[(i,r) for i,r in enumerate(picked) if r['ticket'] is t]
-                            t.offset+=len(own);t.meta=meta
+                            t.offset+=len(own)
+                            previous_summaries = t.meta.get("seriesSummaryRecords", [])
+                            records = meta.get("seriesSummaryRecords", []) if t is owners[0] and all(str(v).strip() for v in values) else []
+                            page_indexes = [(r["ticket"].ai.conversation or {}).get("pageIndex") for r in picked]
+                            if not all(type(index) is int and 0 <= index < 10000000 for index in page_indexes):
+                                records = []
+                            source_ids = [f'I{index}_P{r["index"]}' for index, r in zip(page_indexes, picked)]
+                            records = [{**row,"sourceIds":source_ids,"requestOrder":len(t.refs)} for row in records]
+                            t.meta = {**meta,"seriesSummaryRecords":[*previous_summaries,*records][-24:]}
+                            t.meta["seriesSummaries"] = [row["text"] for row in t.meta["seriesSummaryRecords"]]
+                            t.meta.pop("seriesSummary", None)
                             t.refs.append({'operationId':result['batchId'],'requestUnits':len(picked),'pageUnits':len(own)})
                             if receipt:t.receipts.append(receipt)
                             if t.finished:continue

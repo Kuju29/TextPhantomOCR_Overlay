@@ -19,6 +19,7 @@ for(const [name,g] of Object.entries(gate.separate)){assert.ok(g.reason&&g.comma
 const removed={...pkg.scripts,test:pkg.scripts.test.replace('npm run test:progress && ','')};
 assert.equal(reachableScripts(removed).files.has('scripts/test-background-job-ownership.mjs'),false);
 assert.throws(()=>reachableScripts({test:'npm run absent'}),/Missing npm script/);
+assert.ok(reachableScripts({test:'python -m pytest scripts/case.py -q'}).files.has('scripts/case.py'), 'pytest module entry points are executable tests');
 const cycle=reachableScripts({pretest:'node scripts/pre.mjs',test:'npm run a',a:'npm run a && python scripts/case.py',posttest:'node scripts/post.mjs'});
 assert.deepEqual([...cycle.files].sort(),['scripts/case.py','scripts/post.mjs','scripts/pre.mjs']);
 console.log(`Test reachability: ${graph.files.size} reachable files, ${deferred.size} explicit separate-gate files; removal/negative controls passed.`);

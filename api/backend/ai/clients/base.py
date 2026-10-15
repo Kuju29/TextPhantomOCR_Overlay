@@ -78,24 +78,26 @@ class LineCompletionDetector:
                 return "all_id_records_closed"
         return None
 
-def token_usage(
-    raw: Any,
-    *,
-    input_keys: tuple[str, ...],
-    output_keys: tuple[str, ...],
-    total_keys: tuple[str, ...],
-) -> tuple[int | None, int | None, int | None]:
-    """Read non-negative integer token counts without estimating values."""
-    data = raw if isinstance(raw, dict) else {}
+    _CLOSED_RECORD = re.compile(r"^[ \t]*<<(?:TP_(P\d+)|(I[1-9][0-9]{0,6}_P[0-9]{1,6})):(.*?\S.*?)>>[ \t]*$",
+                                re.MULTILINE)
+    _CLOSED_JSON_FIELD = re.compile(r'"((?:TP_)?P\d+|I[1-9][0-9]{0,6}_P[0-9]{1,6})"\s*:\s*"(?:[^"\\]|\\.)*"')
 
-    def pick(keys: tuple[str, ...]) -> int | None:
-        for key in keys:
-            value = data.get(key)
-            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-                return value
-        return None
+    def closed_count(self, content: str) -> int:
+        """Translated lines already complete in a partial answer (progress
+        display and loop detection only; never completion evidence).
 
-    return pick(input_keys), pick(output_keys), pick(total_keys)
+        Counts distinct record IDs whose ``<<ID:text>>`` line is closed, or, for
+        the JSON contract, whose string value is closed. With expected IDs only
+        those IDs count."""
+        source = str(content or "").replace("\r\n", "\n").replace("\r", "\n")
+        if source.lstrip().startswith("{"):
+            ids = {match.group(1).removeprefix("TP_") for match in self._CLOSED_JSON_FIELD.finditer(source)}
+        else:
+            ids = {match.group(1) or match.group(2) for match in self._CLOSED_RECORD.finditer(source)}
+        if self.expected:
+            ids &= {str(value).removeprefix("TP_") for value in self.expected}
+        return len(ids)
+
 
 def usage_meta(result: ChatResult) -> dict[str, Any]:
     if result.usage_details is not None:

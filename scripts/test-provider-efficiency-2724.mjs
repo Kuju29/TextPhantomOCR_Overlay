@@ -16,12 +16,16 @@ for(const {id:provider} of cloudProviderCatalog()){
   context:{provider,limits,contract:'compact_markers_v1',reasoningActive:false,...over},
   capabilities:{reasoning:{supported:false,supports_max_tokens:true}},estimateFixedInput:()=>400});
  const known=plan({contextTokens:65536}),unknown=plan({});
- eq(known.units.length,160,provider+': verified window fills ready queue');
+ // .67 owner rule: new turn input + reply share the 8K ceiling, so a verified
+ // window packs whole pages until that sum is reached, not until output is 90%.
+ const tb=known.estimate.turnBudget;
+ eq(tb.ceiling,8192,provider+': application turn ceiling');
+ assert.ok(tb.turnInput+tb.turnOutput<=8192&&known.units.length>unknown.units.length&&known.units.length%10===0,provider+': whole pages within turn budget');checks++;
  eq(unknown.units.length,50,provider+': unknown window never guessed');
  eq(known.estimate.target,7372,provider+': same bounded application policy');
  assert.ok(plan({contextTokens:65536,maxOutputTokens:2048}).units.length<160);checks++;
  assert.ok(plan({contextTokens:65536},{userMaxOutput:1024}).units.length<160);checks++;
- eq(known.units,rows,provider+': exact ID order');
+ eq(known.units,rows.slice(0,known.units.length),provider+': exact ID order');
  evidence.cloud.push({provider,knownSelected:known.units.length,unknownSelected:unknown.units.length,target:known.estimate.target});
 }
 const localRows=Array.from({length:24},(_,i)=>({id:`P${i}`,text:'Hello there.'}));
@@ -31,18 +35,30 @@ for(const provider of [...localProviderCatalog().map(p=>p.id),'customlocal']){
  const measured={...initialProfile(),samples:2,successes:2,zeroReasoningSamples:2,reasoning:[0,0]};
  const batch=takeWorkloadBatch(localRows,0,measured,context);
  eq(batch.units,localRows,provider+': same-page units preserved');
- for(const over of [{limits:{}},{userMaxOutput:256},{reasoningActive:true}]){
+ // .67 owner rule: Local Independent fills the live model window (prompt +
+ // source + reply <= context). Only a real ceiling splits: an unknown window,
+ // a user output cap, or a window too small for the whole page.
+ for(const over of [{limits:{}},{userMaxOutput:256},{limits:{contextTokens:2300,source:'runtime'}}]){
   assert.ok(takeWorkloadBatch(localRows,0,measured,{...context,...over}).units.length<24);checks++;
  }
+ const thinking=takeWorkloadBatch(localRows,0,measured,{...context,reasoningActive:true});
+ assert.ok(thinking.units.length===24&&thinking.estimate.reasoningReserve>0,'reasoning is reserved inside the window');checks++;
+ // Cold, restricted, slow or previously truncated profiles no longer shrink a
+ // page that fits the window; a truncation widens only the reply gap.
  for(const p of [initialProfile(),{...measured,reliabilityRestricted:true},{...measured,latencyOutputTarget:160},
   {...measured,reasoning:[0,500]},{...measured,outcomes:['length']}]){
-  assert.ok(takeWorkloadBatch(localRows,0,p,context).units.length<24);checks++;
+  const b=takeWorkloadBatch(localRows,0,p,context);
+  assert.ok(b.units.length===24&&b.estimate.estimatedInput+b.estimate.predictedOutput+b.estimate.reasoningReserve+128<=8192);checks++;
  }
  // Native control + actual successful generations can safely grow with unknown thinking counts.
  const unknownThinking={...initialProfile(),samples:2,successes:2,reasoning:[],zeroReasoningSamples:0};
  const proof=['ollama','lmstudio'].includes(provider) ? {nativeOffControl:true,nativeLmStudioOff:provider==='lmstudio'} : {reasoningSupported:false};
  eq(takeWorkloadBatch(localRows,0,unknownThinking,{...context,...proof}).units.length,24);
- assert.ok(takeWorkloadBatch(localRows,0,unknownThinking,context).units.length<24);checks++;
+ // .67: without native proof the page still fills the window; LM Studio keeps
+ // its unverified-reasoning reserve, and a real truncation widens the gap.
+ const unproven=takeWorkloadBatch(localRows,0,unknownThinking,context);
+ eq(unproven.units.length,24);
+ if(provider==='lmstudio'){assert.ok(unproven.estimate.reasoningReserve>0);checks++;}
  eq(takeWorkloadBatch(localRows,0,{...measured,outcomes:['length','ok','ok','ok','ok']},context).units.length,24);
  const plan=estimateRequest([localRows[0]],measured,context);
  const answer={translations:[{id:'P0',text:'สวัสดี'}],meta:{finishReason:'stop',usage:{source:'provider',inputTokens:1000,outputTokens:20,totalTokens:1020,thinkingTokens:null}}};

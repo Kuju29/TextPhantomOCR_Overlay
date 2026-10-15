@@ -36,7 +36,7 @@ export function isTextNoOverlaySkippable(
   );
 }
 
-export function extractNewImage(result) {
+function extractNewImage(result) {
   return (
     result?.imageDataUri ||
     result?.imageDataURI ||
@@ -48,7 +48,7 @@ export function extractNewImage(result) {
   );
 }
 
-export function extractHtml(result) {
+function extractHtml(result) {
   return {
     aiHtml: result?.Ai?.aihtml || result?.ai?.aihtml || null,
     translatedHtml:

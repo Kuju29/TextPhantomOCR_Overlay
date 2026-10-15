@@ -1,6 +1,7 @@
 import { isLocalHostUrl } from "../../shared/constants.js";
 import { readLimitedText } from "../images.js";
 import { attachTpError } from "../../shared/error-contract.js";
+import { installHeader } from "./install-header.js";
 
 function detail(body) {
   try {
@@ -117,7 +118,10 @@ export function correlationHeaders({
     "X-TP-Trace-Id": String(traceId || ""),
     "X-TP-Client-Version": clientVersion(),
   };
-  return Object.fromEntries(
-    Object.entries(headers).filter(([, value]) => value),
-  );
+  // The per-install quota identity. Callers await installReady() first
+  // so the id is cached; it is never logged with these headers.
+  return {
+    ...Object.fromEntries(Object.entries(headers).filter(([, value]) => value)),
+    ...installHeader(),
+  };
 }

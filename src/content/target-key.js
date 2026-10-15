@@ -67,6 +67,8 @@
 
     if (generation.targetInstanceId && targets.get(img)?.instanceId !== generation.targetInstanceId)
       return {ok:false, reason:"target instance changed"};
+    if (Number.isInteger(generation.targetRevision) && targets.get(img)?.revision !== generation.targetRevision)
+      return {ok:false, reason:"target revision changed"};
     if (generation.targetInstanceId) {
       const entry=targets.get(img), current=TP.normUrl(img.currentSrc || img.src || "");
       const equivalent=(a,b)=>a===b || (a && b && TP.imageIdentity?.(a) && TP.imageIdentity(a)===TP.imageIdentity(b));

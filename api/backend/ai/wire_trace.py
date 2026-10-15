@@ -9,19 +9,28 @@ cannot be safely separated from visible text in arbitrary SSE/JSON extensions.
 from __future__ import annotations
 
 import contextvars
+import atexit
 import hashlib
 import json
 import os
 import re
 import threading
+import shutil
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from backend import diagnostic_retention as retention
+
 _active: contextvars.ContextVar[Path | None] = contextvars.ContextVar("tp_ai_wire_dir", default=None)
 _secrets: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar("tp_ai_wire_secrets", default=())
 _lock = threading.Lock()
+_folder_leases: dict[Path, tuple[retention.Lease, int]] = {}
+_relay_folders: set[Path] = set()
+_session_lease: retention.Lease | None = None
+_session_lease_root: Path | None = None
 _SECRET_KEYS = {"authorization", "api-key", "api_key", "apikey", "x-api-key", "cookie", "set-cookie"}
 _OMITTED_RAW_RESPONSE = "[raw provider response omitted]\n"
 _RAW_RESPONSE_ARTIFACTS = {"05_provider_response.raw", "response-stream.sse"}
@@ -42,6 +51,204 @@ def enabled() -> bool:
 def root_dir() -> Path:
     return Path(os.getenv("TP_AI_WIRE_TRACE_DIR") or Path(__file__).resolve().parents[2] / "logs" / "ai-wire")
 
+
+def retention_limits() -> dict[str, int]:
+    maximum = retention.positive_env("TP_AI_WIRE_TRACE_MAX_BYTES", retention.DEFAULT_MAX_BYTES)
+    return {
+        "maxBytes": maximum,
+        "keepDays": retention.positive_env("TP_AI_WIRE_TRACE_KEEP_DAYS", retention.DEFAULT_KEEP_DAYS),
+        "operationMaxBytes": min(maximum, retention.positive_env(
+            "TP_AI_WIRE_TRACE_OPERATION_MAX_BYTES", 16 * 1024 * 1024)),
+        "maxOperations": retention.positive_env("TP_AI_WIRE_TRACE_MAX_OPERATIONS", 2048),
+        "maxActiveOperations": retention.positive_env(
+            "TP_AI_WIRE_TRACE_MAX_ACTIVE_OPERATIONS", retention.DEFAULT_MAX_ACTIVE),
+        "maxFiles": retention.positive_env("TP_AI_WIRE_TRACE_MAX_FILES", retention.DEFAULT_MAX_FILES),
+    }
+
+
+def _entries(root: Path):
+    for item in root.iterdir():
+        if ((item.name.startswith(("img-", "imgs-")) and "--" in item.name)
+                or (item.name.startswith("_session-") and item.suffix == ".json")):
+            yield item
+
+
+def _entry_size(item: Path) -> tuple[int, bool, float, int]:
+    """Flat operation folders only; unexpected links/subdirectories stay intact."""
+    info = item.lstat()
+    if item.is_symlink():
+        return retention.charge(info.st_size), False, info.st_mtime, 1
+    if item.is_file():
+        return retention.charge(info.st_size), True, info.st_mtime, 1
+    total, safe, touched, count = retention.ALLOCATION_UNIT, True, info.st_mtime, 1
+    for child in item.iterdir():
+        details = child.lstat()
+        total += retention.charge(details.st_size)
+        count += 1
+        touched = max(touched, details.st_mtime)
+        safe = safe and child.is_file() and not child.is_symlink()
+        if child.is_dir() and not child.is_symlink():
+            nested, _safe, nested_touched, nested_count = _entry_size(child)
+            total += nested - retention.charge(details.st_size)
+            count += nested_count - 1
+            touched = max(touched, nested_touched)
+    return total, safe, touched, count
+
+
+def _scan_bytes(root: Path) -> int:
+    return _scan_usage(root)[0]
+
+
+def _scan_usage(root: Path) -> tuple[int, int]:
+    total, count = retention.metadata_usage(root, "wire")
+    for item in _entries(root):
+        size, _safe, _touched, files = _entry_size(item)
+        total += size
+        count += files
+    return total, count
+
+
+def _prune_locked(root: Path, *, budget: int | None = None, protected: Path | None = None,
+                  operation_budget: int | None = None, file_budget: int | None = None) -> tuple[int, int]:
+    """Only terminal operations without an OS lease can be removed."""
+    limits = retention_limits()
+    cutoff = time.time() - limits["keepDays"] * 86400
+    maximum = limits["maxBytes"] if budget is None else max(0, budget)
+    retention.active_count(root, "wire")
+    rows = []
+    total, files = retention.metadata_usage(root, "wire")
+    operations = 0
+    max_operations = limits["maxOperations"] if operation_budget is None else max(0, operation_budget)
+    max_files = limits["maxFiles"] if file_budget is None else max(0, file_budget)
+    for item in _entries(root):
+        size, safe, touched, count = _entry_size(item)
+        total += size
+        files += count
+        operations += int(item.is_dir())
+        completed = item.is_file()
+        if safe and item.is_dir():
+            try:
+                completed = json.loads((item / "11_terminal.json").read_text("utf-8")).get("terminal") is True
+            except (OSError, ValueError, AttributeError):
+                completed = False
+        rows.append((touched, item, size, count, safe and completed))
+    for touched, item, size, count, completed in sorted(rows, key=lambda row: (row[0], row[1].name)):
+        if (item == protected or not completed or (touched >= cutoff and total <= maximum
+                and operations <= max_operations and files <= max_files)):
+            continue
+        if retention.active(root, "wire", item):
+            continue
+        try:
+            if item.is_dir():
+                shutil.rmtree(item)
+                operations -= 1
+            else:
+                item.unlink()
+            total -= size
+            files -= count
+        except OSError:
+            continue
+    retention.store_usage(root, "wire", total, files, checked_at=time.time())
+    return total, files
+
+
+def _retain_folder(folder: Path, *, relay: bool = False) -> None:
+    with _lock:
+        if relay and folder in _relay_folders:
+            return
+        lease, count = _folder_leases.get(folder, (None, 0))
+        if lease is None:
+            with retention.guard(folder.parent, "wire"):
+                limits = retention_limits()
+                if retention.active_count(folder.parent, "wire") >= limits["maxActiveOperations"]:
+                    raise OSError("active wire operation retention capacity exceeded")
+                created = not folder.exists()
+                reserved_files = 2 if created else 1  # folder and unique active lease
+                reserved_bytes = reserved_files * retention.ALLOCATION_UNIT
+                total, files = _prune_locked(
+                    folder.parent, budget=limits["maxBytes"] - reserved_bytes,
+                    protected=folder, operation_budget=limits["maxOperations"] - int(created),
+                    file_budget=limits["maxFiles"] - reserved_files)
+                if (total + reserved_bytes > limits["maxBytes"]
+                        or files + reserved_files > limits["maxFiles"]
+                        or sum(item.is_dir() for item in _entries(folder.parent)) + int(created) > limits["maxOperations"]):
+                    raise OSError("wire operation retention capacity occupied by protected evidence")
+                retention.store_usage(folder.parent, "wire", total + reserved_bytes, files + reserved_files)
+                folder.mkdir(parents=True, exist_ok=True)
+                lease = retention.retain(folder.parent, "wire", folder)
+        _folder_leases[folder] = (lease, count + 1)
+        if relay:
+            _relay_folders.add(folder)
+
+
+def _release_folder(folder: Path | None, *, relay: bool = False) -> None:
+    if folder is None:
+        return
+    with _lock:
+        if relay:
+            if folder not in _relay_folders:
+                return
+            _relay_folders.discard(folder)
+        entry = _folder_leases.get(folder)
+        if entry is None:
+            return
+        lease, count = entry
+        if count > 1:
+            _folder_leases[folder] = (lease, count - 1)
+            return
+        _folder_leases.pop(folder, None)
+        retention.release(lease)
+        # Cleanup cannot replace a successful business result. Capacity checks
+        # before each content write remain fail-visible when tracing is opted in.
+        try:
+            with retention.guard(folder.parent, "wire"):
+                _prune_locked(folder.parent)
+        except OSError:
+            pass
+
+
+def finish_in(folder: Path) -> None:
+    """Release a relay operation only after the owner's final terminal stage."""
+    _release_folder(folder, relay=True)
+
+
+def _write_bytes_locked(folder: Path, name: str, body: str, *, append: bool = False) -> None:
+    if Path(name).name != name or len(name) > 100:
+        raise OSError("invalid diagnostic artifact name")
+    target = folder / name
+    root = folder.parent
+    encoded = body.encode("utf-8")
+    limits = retention_limits()
+    with retention.guard(root, "wire"):
+        # Read the old size under the shared lock. Two workers can touch the
+        # same operation; a stale pre-lock size could undercount an overwrite.
+        if folder.is_symlink() or target.is_symlink():
+            raise OSError("diagnostic artifact must not be a symbolic link")
+        exists = target.exists()
+        previous = target.stat().st_size if exists else 0
+        if exists and target.stat().st_nlink != 1:
+            raise OSError("diagnostic artifact must not be hard-linked")
+        size = previous + len(encoded) if append else len(encoded)
+        previous_charge = retention.charge(previous) if exists else 0
+        size_charge = retention.charge(size)
+        operation_size = _entry_size(folder)[0]
+        if operation_size - previous_charge + size_charge > limits["operationMaxBytes"]:
+            raise OSError("wire operation retention capacity exceeded")
+        total, files = retention.usage(root, "wire", lambda: _scan_usage(root))
+        growth = max(0, size_charge - previous_charge)
+        new_files = int(not exists)
+        if total + growth > limits["maxBytes"] or files + new_files > limits["maxFiles"]:
+            total, files = _prune_locked(root, budget=limits["maxBytes"] - growth, protected=folder,
+                                        file_budget=limits["maxFiles"] - new_files)
+        if total + growth > limits["maxBytes"] or files + new_files > limits["maxFiles"]:
+            raise OSError("wire retention capacity occupied by protected evidence")
+        # Reserve first: interrupted or failed writes conservatively overcount
+        # until the next inventory scan, instead of allowing extra disk growth.
+        retention.store_usage(root, "wire", total + growth, files + new_files)
+        with target.open("ab" if append else "wb") as handle:
+            handle.write(encoded)
+        retention.store_usage(root, "wire", total + size_charge - previous_charge, files + new_files)
+
 def start_session() -> dict[str, Any]:
     """Persist process-level proof that wire tracing reached this API process."""
     state = {
@@ -50,6 +257,7 @@ def start_session() -> dict[str, Any]:
         "pid": os.getpid(),
         "startedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "root": str(root_dir()),
+        "retention": retention_limits(),
     }
     if not state["enabled"]:
         return state
@@ -57,9 +265,35 @@ def start_session() -> dict[str, Any]:
         root = root_dir()
         root.mkdir(parents=True, exist_ok=True)
         with _lock:
-            (root / f"_session-{os.getpid()}.json").write_text(
-                json.dumps(state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-            )
+            global _session_lease, _session_lease_root
+            target = root / f"_session-{os.getpid()}.json"
+            with retention.guard(root, "wire"):
+                if _session_lease_root != root:
+                    retention.release(_session_lease)
+                    _session_lease = None
+                if target.is_symlink() or (target.exists() and target.stat().st_nlink != 1):
+                    raise OSError("diagnostic session must be a regular private file")
+                exists = target.exists()
+                previous = target.stat().st_size if exists else 0
+                body = (json.dumps(state, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+                growth = retention.charge(len(body)) - (retention.charge(previous) if exists else 0)
+                lease_growth = retention.ALLOCATION_UNIT if _session_lease is None else 0
+                new_files = int(not exists) + int(_session_lease is None)
+                total, files = _prune_locked(root, protected=target,
+                    budget=state["retention"]["maxBytes"] - max(0, growth) - lease_growth,
+                    file_budget=state["retention"]["maxFiles"] - new_files)
+                if _session_lease is None:
+                    if retention.active_count(root, "wire") >= state["retention"]["maxActiveOperations"]:
+                        raise OSError("active wire retention capacity exceeded")
+                if (total + max(0, growth) + lease_growth > state["retention"]["maxBytes"]
+                        or files + new_files > state["retention"]["maxFiles"]):
+                    raise OSError("wire retention capacity occupied by protected evidence")
+                retention.store_usage(root, "wire", total + max(0, growth) + lease_growth, files + new_files)
+                if _session_lease is None:
+                    _session_lease = retention.retain(root, "wire", target)
+                    _session_lease_root = root
+                target.write_bytes(body)
+                retention.store_usage(root, "wire", total + growth + lease_growth, files + new_files)
     except Exception as exc:
         raise AiWireTraceWriteError(
             f"AI_WIRE_TRACE_WRITE_FAILED: session: {type(exc).__name__}"
@@ -114,7 +348,9 @@ def begin(identity: dict[str, Any]) -> contextvars.Token:
     identity = {**dict(identity or {}), "wireTracePid": os.getpid()}
     root = root_dir()
     folder = root / folder_name(identity)
+    token = None
     try:
+        _retain_folder(folder)
         folder.mkdir(parents=True, exist_ok=True)
         token = _active.set(folder)
         _secrets.set(())
@@ -129,6 +365,9 @@ def begin(identity: dict[str, Any]) -> contextvars.Token:
         write_json("11_terminal.json", {"terminal": False, "state": "started"})
         return token
     except Exception as exc:
+        _release_folder(folder)
+        if token is not None:
+            _active.reset(token)
         if isinstance(exc, AiWireTraceWriteError):
             raise
         raise AiWireTraceWriteError(
@@ -154,10 +393,8 @@ def update_identity(**details: Any) -> None:
                 if isinstance(loaded, dict):
                     current = loaded
             current.update(details)
-            path.write_text(
-                json.dumps(redact(current), ensure_ascii=False, indent=2, default=str) + "\n",
-                encoding="utf-8",
-            )
+            _write_bytes_locked(folder, "00_identity.json", json.dumps(
+                redact(current), ensure_ascii=False, indent=2, default=str) + "\n")
     except Exception as exc:
         raise AiWireTraceWriteError(
             f"AI_WIRE_TRACE_WRITE_FAILED: 00_identity.json: {type(exc).__name__}"
@@ -170,11 +407,14 @@ def active_folder() -> Path | None:
 def resume(folder: Path | None) -> contextvars.Token:
     """Attach an existing ingress operation to the current execution context."""
     _secrets.set(())
+    if folder is not None:
+        _retain_folder(folder)
     return _active.set(folder)
 
 def begin_in(folder: Path, identity: dict[str, Any]) -> None:
     """Create relay artifacts without relying on request-local contextvars."""
     try:
+        _retain_folder(folder, relay=True)
         folder.mkdir(parents=True, exist_ok=True)
         write_json_in(folder, "00_identity.json", identity)
         write_json_in(folder, "04_provider_request.json",
@@ -184,8 +424,10 @@ def begin_in(folder: Path, identity: dict[str, Any]) -> None:
         write_text_in(folder, "05_provider_response.assembled.txt", "")
         write_json_in(folder, "11_terminal.json", {"terminal": False, "state": "started"})
     except AiWireTraceWriteError:
+        _release_folder(folder, relay=True)
         raise
     except Exception as exc:
+        _release_folder(folder, relay=True)
         raise AiWireTraceWriteError(f"AI_WIRE_TRACE_WRITE_FAILED: relay begin: {type(exc).__name__}") from exc
 
 def write_json_in(folder: Path, name: str, value: Any) -> None:
@@ -198,7 +440,7 @@ def write_json_in(folder: Path, name: str, value: Any) -> None:
             value = _safe_relay_terminal_meta(value)
         body = json.dumps(redact(value), ensure_ascii=False, indent=2, default=str) + "\n"
         with _lock:
-            (folder / name).write_text(body, encoding="utf-8")
+            _write_bytes_locked(folder, name, body)
     except Exception as exc:
         raise AiWireTraceWriteError(f"AI_WIRE_TRACE_WRITE_FAILED: {name}: {type(exc).__name__}") from exc
 
@@ -209,12 +451,13 @@ def write_text_in(folder: Path, name: str, value: str) -> None:
         if name == "05_provider_response.raw" and value:
             value = _OMITTED_RAW_RESPONSE
         with _lock:
-            (folder / name).write_text(_scrub_text(str(value)), encoding="utf-8")
+            _write_bytes_locked(folder, name, _scrub_text(str(value)))
     except Exception as exc:
         raise AiWireTraceWriteError(f"AI_WIRE_TRACE_WRITE_FAILED: {name}: {type(exc).__name__}") from exc
 
 def end(token: contextvars.Token) -> None:
     _secrets.set(())
+    _release_folder(_active.get())
     _active.reset(token)
 
 def _safe_url(value: str) -> str:
@@ -304,7 +547,7 @@ def write_json(name: str, value: Any) -> None:
             value = {**value, "message": "<omitted>" if value.get("message") else ""}
         body = json.dumps(redact(value), ensure_ascii=False, indent=2, default=str) + "\n"
         with _lock:
-            (folder / name).write_text(body, encoding="utf-8")
+            _write_bytes_locked(folder, name, body)
     except Exception as exc:
         raise AiWireTraceWriteError(f"AI_WIRE_TRACE_WRITE_FAILED: {name}: {type(exc).__name__}") from exc
 
@@ -316,7 +559,7 @@ def write_text(name: str, value: str) -> None:
         if name in _RAW_RESPONSE_ARTIFACTS and value:
             value = _OMITTED_RAW_RESPONSE
         with _lock:
-            (folder / name).write_text(str(value), encoding="utf-8")
+            _write_bytes_locked(folder, name, str(value))
     except Exception as exc:
         raise AiWireTraceWriteError(f"AI_WIRE_TRACE_WRITE_FAILED: {name}: {type(exc).__name__}") from exc
 
@@ -330,8 +573,7 @@ def append_text(name: str, value: str) -> None:
         return
     try:
         with _lock:
-            with (folder / name).open("a", encoding="utf-8", newline="") as handle:
-                handle.write(_scrub_text(str(value)))
+            _write_bytes_locked(folder, name, _scrub_text(str(value)), append=True)
     except Exception as exc:
         raise AiWireTraceWriteError(f"AI_WIRE_TRACE_WRITE_FAILED: {name}: {type(exc).__name__}") from exc
 
@@ -352,7 +594,9 @@ def record_error(exc: BaseException, *, stage: str) -> None:
     detail = detail if isinstance(detail, dict) and detail.get("schema") == "tp.error/1" else {}
     code = detail.get("code") or getattr(exc, "code", None)
     evidence = {}
-    for key in ("origin", "httpStatus", "upstreamStatus", "requestDispatched", "providerAttempts", "generationAttempts"):
+    for key in ("origin", "httpStatus", "upstreamStatus", "requestDispatched", "providerAttempts", "generationAttempts",
+                "centerHttpStatus", "centerRequestDispatched", "centerRequestId", "centerErrorCode",
+                "providerDispatchEvidence", "creditState"):
         if key in detail:
             evidence[key] = detail[key]
     status = getattr(exc, "status", None)
@@ -423,3 +667,69 @@ def provider_response(value: Any) -> None:
 def http_response(response: Any) -> None:
     """Persist status only; never touch a native provider's response body."""
     provider_response_omitted(response, streamed=None)
+
+
+def _release_all_leases() -> None:
+    for lease, _count in list(_folder_leases.values()):
+        retention.release(lease)
+    _folder_leases.clear()
+    _relay_folders.clear()
+    retention.release(_session_lease)
+
+
+atexit.register(_release_all_leases)
+
+# Runtime tracing is supplementary evidence. The reservation layer above stays
+# strict, but a disk failure must never interrupt SSE draining or authoritative
+# provider/Center usage receipts (including writes from transport finally blocks).
+from functools import wraps
+from collections import OrderedDict
+
+_degraded_folders: OrderedDict[Path, None] = OrderedDict()
+_degraded_lock = threading.Lock()
+
+def _degrade(folder, stage, exc):
+    first = True
+    if folder is not None:
+        with _degraded_lock:
+            first = folder not in _degraded_folders
+            _degraded_folders[folder] = None
+            while len(_degraded_folders) > 8192:
+                _degraded_folders.popitem(last=False)
+        _release_folder(folder)
+        if _active.get() == folder:
+            _active.set(None)
+    if first:
+        try:
+            from backend import diagnostics
+            diagnostics.emit("ai.wire_trace.degraded", outcome="incomplete",
+                             stage=stage, error_type=type(exc).__name__)
+        except Exception:
+            pass
+
+def _runtime_trace(function):
+    @wraps(function)
+    def run(*args, **kwargs):
+        folder = _active.get()
+        if function.__name__ == "resume" and args:
+            folder = args[0]
+        with _degraded_lock:
+            disabled = folder is not None and folder in _degraded_folders
+        if disabled:
+            if function.__name__ == "resume":
+                return _active.set(None)
+            return None
+        try:
+            return function(*args, **kwargs)
+        except (AiWireTraceWriteError, OSError) as exc:
+            _degrade(folder or _active.get(), function.__name__, exc)
+            if function.__name__ in {"begin", "resume"}:
+                return _active.set(None)
+            if function.__name__ == "start_session":
+                return {"enabled": False, "incomplete": True, "code": "AI_WIRE_TRACE_WRITE_FAILED"}
+            return None
+    return run
+
+for _runtime_name in ("begin", "resume", "start_session", "update_identity",
+                      "write_json", "write_text", "append_text"):
+    globals()[_runtime_name] = _runtime_trace(globals()[_runtime_name])

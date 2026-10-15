@@ -4,7 +4,7 @@ No filesystem state is read or written. A condition reserves each conversation
 lane without holding a lock across provider work. This is not provider KV cache.
 """
 from __future__ import annotations
-from contextlib import contextmanager, asynccontextmanager, closing
+from contextlib import contextmanager, asynccontextmanager
 from contextvars import ContextVar
 from pathlib import Path
 import asyncio
@@ -20,9 +20,17 @@ import time
 from .mode import scope_material, POLICY
 
 MAX_SESSIONS = 256
+# One browser (X-TP-Install / trusted client IP, see api/ingress.py) may hold at
+# most this many of the shared conversation slots, across all of its tabs.
+MAX_SESSIONS_PER_IDENTITY = 32
 MAX_HISTORY_CHARS = 1_000_000
 MAX_TOTAL_HISTORY_CHARS = 16_000_000
 LEASE_SECONDS = 180
+# When the store is full, a scope idle this long gives its slot to a new
+# conversation (otherwise new conversations fail until a restart). The evicted
+# scope starts over and its next request says so (scopeStatus "history_evicted").
+IDLE_EVICT_SECONDS = 60 * 60
+MAX_EXPIRED_NOTES = 1024
 WAIT_SECONDS = 600
 _current = ContextVar("tp_conversation_lease", default=None)
 _stores = {}
@@ -43,6 +51,13 @@ class Store:
         self.wakeup = threading.Condition(threading.RLock())
         self._rows = {}
         self._async_waiters = set()
+        self._expired = {}
+
+    def _drop(self, key):
+        del self._rows[key]
+        self._expired[key] = time.monotonic()
+        while len(self._expired) > MAX_EXPIRED_NOTES:
+            self._expired.pop(next(iter(self._expired)))
 
     def key(self, material):
         return hmac.new(self.secret, material.encode(), hashlib.sha256).hexdigest()
@@ -55,9 +70,10 @@ class Store:
         row["workflows"] = repair_store.active_workflows(row.get("workflows", ()))
         if row["workflows"]:
             return False
-        # No lifecycle contract: do not silently discard retained history merely
-        # because no request holds the lane. New admission fails clearly instead.
-        return row.get("managed", False) or not (row["revision"] or row["chars"] or row.get("blocked"))
+        # No lifecycle contract: do not discard retained history merely because no
+        # request holds the lane - unless nobody used it for IDLE_EVICT_SECONDS.
+        return (row.get("managed", False) or not (row["revision"] or row["chars"] or row.get("blocked"))
+                or now - row["updated"] >= IDLE_EVICT_SECONDS)
 
     def try_acquire(self, key, page_ids=()):
         from backend.application.repair_pool.store import store as repair_store
@@ -72,6 +88,19 @@ class Store:
             if row and row["active"] and row["until"] > now:
                 return None
             if row is None:
+                from backend.api.ingress import current_identity
+                identity = current_identity()
+                if identity:
+                    owned = [(r["updated"], k) for k, r in self._rows.items() if r.get("identity") == identity]
+                    if len(owned) >= MAX_SESSIONS_PER_IDENTITY:
+                        idle = [item for item in owned if self._evictable(self._rows[item[1]], now)]
+                        if not idle:
+                            error = ConversationError(
+                                "This browser already uses its share of conversation slots; "
+                                "active workflows were preserved and no provider request was sent")
+                            error.code = "ai_conversation_identity_capacity"
+                            raise error
+                        self._drop(min(idle)[1])
                 if len(self._rows) >= MAX_SESSIONS:
                     idle = [(r["updated"], k) for k, r in self._rows.items()
                             if self._evictable(r, now)]
@@ -79,13 +108,15 @@ class Store:
                         error = ConversationError("Conversation history capacity is busy; active workflows were preserved and no provider request was sent")
                         error.code = "ai_conversation_capacity"
                         raise error
-                    del self._rows[min(idle)[1]]
+                    self._drop(min(idle)[1])
                 row = {"history": [], "prefix": "", "revision": 0,
-                       "active": None, "until": 0, "updated": now, "chars": 0}
+                       "active": None, "until": 0, "updated": now, "chars": 0,
+                       "identity": identity}
                 self._rows[key] = row
             row["workflows"] = repair_store.active_workflows(row.get("workflows", ())) | workflows
             row["managed"] = row.get("managed", False) or bool(workflows)
-            reason = "expired_lane_recovered" if row["active"] else "ready"
+            reason = ("expired_lane_recovered" if row["active"] else
+                      "history_evicted" if self._expired.pop(key, None) is not None and not row["revision"] else "ready")
             token = secrets.token_hex(16)
             row.update(active=token, until=now + LEASE_SECONDS, updated=now)
             return Lease(self, key, token, copy.deepcopy(row["history"]),
@@ -150,7 +181,7 @@ class Store:
                         lease.commit_status = "history_storage_limit"
                     else:
                         for _, key, chars in idle:
-                            del self._rows[key]
+                            self._drop(key)
                             excess -= chars
                             if excess <= 0:
                                 break
@@ -283,6 +314,11 @@ def finalize_evidence(lease):
 
 @contextmanager
 def execution_scope(ai, target_lang, cancel_check=None):
+    if getattr(ai, "translation_mode", "independent") == "independent":
+        from .independent_examples import execution_scope as example_scope
+        with example_scope(ai, target_lang, cancel_check) as lease:
+            yield lease
+        return
     if getattr(ai, "translation_mode", "independent") != "conversation" or current() is not None:
         yield current()
         return
@@ -319,6 +355,11 @@ def execution_scope(ai, target_lang, cancel_check=None):
 
 @asynccontextmanager
 async def async_execution_scope(ai, target_lang, cancel_check=None):
+    if getattr(ai, "translation_mode", "independent") == "independent":
+        from .independent_examples import async_execution_scope as example_scope
+        async with example_scope(ai, target_lang, cancel_check) as lease:
+            yield lease
+        return
     if getattr(ai, "translation_mode", "independent") != "conversation":
         yield None
         return

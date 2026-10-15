@@ -43,6 +43,18 @@ const SUMMARY_PRIMARY_SCRIPTS = new Set([
   "oriya", "tamil", "telugu", "kannada", "malayalam", "sinhala",
 ]);
 const normalizeComparable = value => String(value || "").normalize("NFKC");
+const ATTRIBUTION_PROSE = new Set(["THIS", "THAT", "THE", "MY", "YOUR", "OUR", "NO", "YES", "NOT", "STOP", "START", "NEXT", "NEW", "LAST", "PREVIOUS", "ANY", "SOME", "NEED", "WANT"]);
+function attributionIdentity(text) {
+  // Printable ASCII, bounded scanlator credit only. Preserve every token and
+  // the plus count; only letter case and spacing may differ from its source.
+  if (!/^[\x20-\x7e]+$/u.test(text)) return "";
+  const match = /^(\+*)\s*([A-Z0-9_.-]{2,40})\s+(TRANSLATIONS?|SCANLATIONS?)(?:\s+([A-Z]))?$/u.exec(text.toUpperCase());
+  return match && !ATTRIBUTION_PROSE.has(match[2])
+    ? JSON.stringify(match.slice(1).map(value => value || "")) : "";
+}
+function isAttribution(text) {
+  return Boolean(attributionIdentity(text));
+}
 function scriptOf(char) {
   if (!/\p{L}/u.test(char)) return "";
   for (const [name, regex] of SCRIPT_TESTS) if (regex.test(char)) return name;
@@ -105,12 +117,18 @@ export function diagnoseTargetScripts(
     const source = sourceById.get(String(item?.id || "")) || "";
     const trimmed = text.trim();
     const sourceTrimmed = source.trim();
+    const credit = attributionIdentity(trimmed);
+    const preservedCredit = Boolean(credit && credit === attributionIdentity(sourceTrimmed));
+    // Source-identical credit signature with a year: a bounded name/handle,
+    // not a blanket exemption for unchanged English dialogue.
+    const preservedNameYear = trimmed === sourceTrimmed &&
+      /^(?:[A-Z][a-z]{1,23})(?:[A-Z][a-z]{1,23}){1,3}[ _]?(?:19|20)\d{2}$/u.test(trimmed);
     const preservedIdentifier =
-      trimmed === sourceTrimmed &&
       trimmed.length > 0 &&
       /^[\x20-\x7e]+$/u.test(trimmed) &&
+      (preservedCredit || preservedNameYear || (trimmed === sourceTrimmed &&
       (/^@[a-z0-9_][a-z0-9_.-]{0,63}$/iu.test(trimmed) ||
-        /^\+{2,}\s*[A-Z0-9_.-]{2,40}\s+(?:TRANSLATIONS?|SCANLATIONS?)$/u.test(trimmed) ||
+        isAttribution(trimmed) ||
         /^(?:https?:\/\/|www\.)\S+$/iu.test(trimmed) ||
         /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/iu.test(
           trimmed,
@@ -130,7 +148,7 @@ export function diagnoseTargetScripts(
         /^(?=[a-z0-9_.:-]*\d)[a-z0-9][a-z0-9_.-]*:[a-z0-9][a-z0-9_.:-]*$/iu.test(
           trimmed,
         ) ||
-        /^(?:v?\d+)(?:\.\d+)+(?:[-_][a-z0-9]+)?$/iu.test(trimmed));
+        /^(?:v?\d+)(?:\.\d+)+(?:[-_][a-z0-9]+)?$/iu.test(trimmed))));
     if (preservedIdentifier) {
       diagnostics.push({
         id: String(item?.id || ""),

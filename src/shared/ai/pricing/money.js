@@ -1,6 +1,6 @@
 // Exact, bounded decimal arithmetic for prices and exchange rates. Never round
 // each call to cents before adding the calls in a day.
-const DECIMAL = /^(?:0|[1-9]\d{0,14})(?:\.\d{1,12})?$/;
+const DECIMAL = /^(?:0|[1-9]\d{0,14})(?:\.\d{1,120})?$/;
 export function money(value) {
   const text = typeof value === "number" ? String(value) : value;
   return typeof text === "string" && DECIMAL.test(text) ? text : null;
@@ -25,11 +25,11 @@ export function multiplyMoney(left, right, divisor = 1n) {
   const a = money(left), b = money(right);
   if (a === null || b === null || divisor <= 0n) return null;
   const x = fraction(a), y = fraction(b);
-  const precision = 12;
-  const scaled = x.value * y.value * 10n ** BigInt(precision);
-  const divideBy = divisor * 10n ** BigInt(x.scale + y.scale);
-  // 12 fractional digits are sufficient for a sub-token USD breakdown.
-  return stringify((scaled + divideBy / 2n) / divideBy, precision);
+  // Prices, FX and per-million token rates have finite decimal products.
+  // Keep every digit until display; never round each generation before sums.
+  const power = String(divisor);
+  if (!/^10*$/.test(power)) return null;
+  return stringify(x.value * y.value, x.scale + y.scale + power.length - 1);
 }
 export function perMillion(tokens, rate) {
   return Number.isSafeInteger(tokens) && tokens >= 0 ? multiplyMoney(String(tokens), rate, 1000000n) : null;

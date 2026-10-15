@@ -44,7 +44,7 @@
             t: Date.now(),
           },
         },
-        () => void chrome.runtime.lastError,
+        () => { try { void chrome.runtime.lastError; } catch {} },
       );
     } catch {}
   }
@@ -120,7 +120,7 @@
         ver: TP.version,
         top: TP.isTop,
       },
-      () => void chrome.runtime.lastError,
+      () => { try { void chrome.runtime.lastError; } catch {} },
     );
   } catch {}
 
@@ -181,7 +181,7 @@ function preservesKaganeChapter(before,after) {
             top: true,
             ver: TP.version,
           },
-          () => void chrome.runtime.lastError,
+          () => { try { void chrome.runtime.lastError; } catch {} },
         );
       } catch {
         canSend = false;

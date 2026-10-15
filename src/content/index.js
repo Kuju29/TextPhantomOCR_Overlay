@@ -6,7 +6,7 @@
 
   try {
     chrome.runtime.sendMessage({ type: "TP_TRACE_STATE" }, (resp) => {
-      void chrome.runtime.lastError;
+      try { void chrome.runtime.lastError; } catch { return; }
       const detail =
         resp?.detail === "full" ? "full" : resp?.enabled ? "compact" : "off";
       TP.setLogLevel?.(resp?.consoleLevel || "warn");

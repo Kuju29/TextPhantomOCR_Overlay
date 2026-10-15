@@ -11,14 +11,15 @@ const {ensureBatch,batchToast,batchUpdateToast,serializeBatchSnapshot,restoreBat
 const results=[];
 async function check(name,fn){try{await fn();results.push({name,pass:true});}catch(e){results.push({name,pass:false,error:e.stack});}}
 const b=ensureBatch('repair-progress',23,0);b.total1=10;
+b.lifecycle='processing'; // These rows are already discovered and terminal.
 for(let i=0;i<10;i++)b.items.set(`i${i}`,{attempt:1,status:'done',phase:'done',payload:{generation:{pageInstanceId:'page-a'}}});
 function send(phase,label){b.repair={phase,label};batchUpdateToast(b,label,true);return messages.filter(x=>x.type==='BATCH_STATUS_UPDATE').at(-1)?.batch;}
 await check('finished initial pages remain visibly active while repair owns the batch',()=>{
  const m=send('repairing','Repairing 34 unit(s); 15 fixed');assert.equal(m.repair.phase,'repairing');assert.equal(m.terminal,10);assert.equal(m.total,10);assert.match(m.message,/Repairing 34/);
 });
-await check('apply/blocked/pending repair phases remain explicit in batch status',()=>{
+await check('apply/blocked/pending phases remain explicit; paused repair has no active work',()=>{
  for(const phase of ['applying','blocked','apply_pending','repair_wave','repair_circuit_open']){const m=send(phase,`Repair ${phase}`);assert.equal(m.repair.phase,phase);assert.match(m.message,new RegExp(phase));
-  batchToast(b,`Repair ${phase}`,2000,true);assert.equal(messages.filter(x=>x.type==='TP_TOAST').at(-1).progress.active,true);
+  batchToast(b,`Repair ${phase}`,2000,true);assert.equal(messages.filter(x=>x.type==='TP_TOAST').at(-1).progress.active,phase!=='blocked');
  }
 });
 await check('real compact panel keeps repair waves and circuit settlement active after initial completion',()=>{

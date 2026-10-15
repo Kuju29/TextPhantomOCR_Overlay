@@ -2,8 +2,8 @@
 from __future__ import annotations
 from typing import Any
 
-PREFERENCES = ("minimum", "default", "off", "on", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
-EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+PREFERENCES = ("minimum", "default", "off", "on", "minimal", "low", "medium", "high", "xhigh", "extra", "max", "ultra")
+EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "extra", "max", "ultra")
 _PREFERENCE_SET = set(PREFERENCES)
 _EFFORT_SET = set(EFFORTS)
 
@@ -14,8 +14,8 @@ def normalize_reasoning_preference(value: Any, fallback: str = "minimum") -> str
     if value is False:
         return "off"
     raw = str(value or "").strip().lower()
-    # Historical user-facing `auto` was Lowest available. Keep the explicit
-    # internal/provider preference `default` separate from that saved value.
+    # A saved user-facing `auto` means Lowest available. Keep the internal/
+    # provider preference `default` separate from that saved value.
     if raw == "auto":
         return "minimum"
     if raw in {"provider", "provider_default"}:
@@ -30,29 +30,15 @@ def normalize_reasoning_preference(value: Any, fallback: str = "minimum") -> str
 
 
 def concrete_reasoning_preferences(reasoning: Any) -> tuple[str, ...]:
-    """Concrete model options ordered from lowest to highest reasoning."""
-    cap = reasoning if isinstance(reasoning, dict) else {}
-    if cap.get("supported") is not True:
-        return ()
-    mandatory = cap.get("mandatory") is True
-    control = str(cap.get("control") or "provider")
-    supported = {
-        str(value).strip().lower() for value in cap.get("supported_efforts", [])
-        if isinstance(value, str)
-    }
-    out: list[str] = []
-    # An explicit mandatory=false is provider evidence that reasoning is optional.
-    # Some catalogues publish the effort ladder separately and transiently omit
-    # can_disable/none; do not let that stale metadata erase the user's Off intent.
-    if not mandatory and (cap.get("mandatory") is False or cap.get("can_disable") is True
-                          or control in {"toggle", "boolean"} or "none" in supported):
-        out.append("off")
-    if control in {"toggle", "boolean"}:
-        out.append("on")
-        return tuple(out)
-    if control == "levels":
-        out.extend(effort for effort in EFFORTS if effort in supported)
-    return tuple(out)
+    """Concrete model options ordered from lowest to highest reasoning.
+
+    The shared AI think classification (thinking_state.py, mirrored by the
+    extension) owns this list, so the API never accepts a control the popup
+    does not offer. An explicit mandatory=false keeps Off even when a stale
+    catalogue omits can_disable/none.
+    """
+    from backend.ai.thinking_state import thinking_control_options
+    return thinking_control_options(reasoning)
 
 
 def minimum_reasoning_preference(reasoning: Any) -> str:

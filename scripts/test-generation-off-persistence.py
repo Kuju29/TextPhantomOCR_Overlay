@@ -16,7 +16,7 @@ MODEL='fixture/model'; KEY='hf_fixture_only'; BASE=hf.DEFAULT_BASE_URL
 CAP={'reasoning':{'supported':True,'mandatory':False,'control':'levels','supported_efforts':['none','low']}}
 class BootstrapOff(unittest.TestCase):
  def setUp(self):
-  cache._MODEL_CAPABILITIES.clear();cache._OFF_CONTRADICTIONS.clear();cache._OFF_CONTRADICTIONS_NEXT_SWEEP=0.;cache._MODEL_PROMOTIONS.clear()
+  cache._MODEL_CAPABILITIES.clear();cache._OFF_CONTRADICTIONS.clear();cache._OFF_CONTRADICTIONS_NEXT_SWEEP=0.
   self.clock=patch.object(cache.time,'monotonic',return_value=1000.);self.clock.start();self.addCleanup(self.clock.stop)
  def caps(self,key=KEY,model=MODEL,base=BASE):
   return cache.discovered_model_capabilities('huggingface',base,model,key)[1]

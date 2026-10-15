@@ -1,8 +1,12 @@
 import {pricingModel} from "./provider-identity.js";
 import { money, sumMoney, lessMoney, multiplyMoney, perMillion } from "./money.js";
 import { selectRate } from "./providers.js";
+import {resolveOpenRouterPrice} from './openrouter.js';
 const count = n => Number.isSafeInteger(n) && n >= 0 ? n : null;
 export function priceGeneration(event, config = {}) {
+  if (event?.costConflict === true)
+    return { usd:null, source:"provider", status:"cost_conflict", savingsUsd:null };
+  if (String(event?.provider || "").toLowerCase() === "login") return {usd:null,source:"own_login_account",status:"account_quota",savingsUsd:null};
   const provided = money(event?.providerCostUsd);
   if (event?.runtime === "local") return { usd: "0", source: "local_api_free", status: "local_api_free", savingsUsd: null };
   if (String(event?.provider || "").toLowerCase() === "paid")
@@ -11,9 +15,16 @@ export function priceGeneration(event, config = {}) {
     return { usd: null, source: "provider", status: "byok_upstream_separate", savingsUsd: null,
       providerFeeUsd: provided, upstreamInferenceCostUsd: money(event?.upstreamInferenceCostUsd) };
   if (provided !== null) return { usd: provided, source: "provider", status: "reported", savingsUsd: null };
-  const rate = selectRate(event?.provider, pricingModel(event),
+  let rate = selectRate(event?.provider, pricingModel(event),
     config.overrides,event?.upstreamProvider,config.liveRates,event?.timestamp);
   if (!rate) return { usd: null, source: "no_rate", status: "unpriced", savingsUsd: null };
+  if(String(event?.provider||'').toLowerCase()==='openrouter'&&rate.origin==='live_catalogue'&&rate.syncStatus==='stale')
+    return {usd:null,source:rate.origin,status:'catalogue_price_unavailable',rate,savingsUsd:null};
+  if(String(event?.provider||'').toLowerCase()==='openrouter'&&rate.origin==='live_catalogue'){
+    const resolved=resolveOpenRouterPrice(rate,event);
+    if(resolved.error)return {usd:null,source:rate.origin,status:resolved.error,rate,savingsUsd:null};
+    rate=resolved.rate;
+  }
   if ([rate.input,rate.output].some(value=>money(value)===null) ||
       [rate.cached,rate.cacheWrite,rate.cacheWrite1h].some(value=>value != null && money(value)===null))
     return {usd:null,source:rate.origin,status:"invalid_rate",savingsUsd:null};
@@ -25,6 +36,10 @@ export function priceGeneration(event, config = {}) {
     return {usd:null,source:rate.origin,status:"unknown_per_request_tier",rate,savingsUsd:null};
   const cached = count(event.cachedInputTokens), write = count(event.cacheWriteInputTokens);
   const write1h = count(event.cacheWrite1hInputTokens), write5m = count(event.cacheWrite5mInputTokens);
+  if (write === null && (write1h > 0 || write5m > 0))
+    return { usd:null, source:rate.origin, status:"missing_cache_write_total", rate, savingsUsd:null };
+  if (write === null && rate.cacheWrite && Number(rate.cacheWrite) > Number(rate.input))
+    return { usd:null, source:rate.origin, status:"missing_cache_write_usage", rate, savingsUsd:null };
   if ((cached !== null && cached > input) || (write !== null && write > input - (cached || 0)))
     return { usd: null, source: rate.origin, status: "inconsistent", rate, savingsUsd: null };
   if (write !== null && ((write1h !== null && write1h > write) ||
@@ -44,6 +59,8 @@ export function priceGeneration(event, config = {}) {
   if (write1h && !write1hRate) return {usd:null,source:rate.origin,status:"missing_1h_cache_rate",rate,savingsUsd:null};
   const hourCount = write1h || 0;
   const durationKnown = !writeCount || write1h !== null || write5m === writeCount;
+  if (!durationKnown && rate.cacheWrite1h)
+    return { usd:null, source:rate.origin, status:"missing_cache_write_duration", rate, savingsUsd:null };
   const cacheRate = large && rate.cached ? multiplyMoney(rate.cached, rate.highInputFactor) : rate.cached;
   if (readCount && !cacheRate) return { usd: null, source:rate.origin, status:"missing_cache_rate", rate, savingsUsd:null };
   const parts = {

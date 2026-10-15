@@ -11,7 +11,7 @@ from backend import trace
 from backend.ai.clients.base import OutputBudgetExhausted, ProviderGenerationCancelled
 from backend.ai.failure_reason import provider_http_failure, retry_after_sec
 from backend.ai.rategate import rate_gate
-from backend.api.errors import (ai_rate_feedback_allowed, cancelled_payload,
+from backend.api.errors import (ai_rate_feedback_allowed,
                                 payload as error_payload, failure_event, provider_status,
                                 stage_failure_semantics)
 from backend.jobs.admission import AdmissionRejected

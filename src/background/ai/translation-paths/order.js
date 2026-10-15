@@ -13,6 +13,7 @@ export function bindConversation(payload, tabId = 0) {
   const owner = String(context.tp_tab_session || payload.metadata?.tp_tab_session || (tabId ? `tab:${tabId}` : ""));
   payload.ai.conversation = { ...d, documentId, owner,
     reset: "automatic",
+    ...(payload.ai.provider === "login" ? {webchatRunId:String(payload.metadata?.batch_id || d.webchatRunId || "")} : {}),
     pageId: String(payload.metadata?.image_id || d.pageId || ""),
     ...(Number.isInteger(context.page_index) ? {pageIndex:context.page_index} : {}),
     branch: "initial", orderPolicy: d.orderPolicy || "request_arrival" };
@@ -24,7 +25,7 @@ export function reserveConversationJob(payload, tabId = 0) {
   const a=payload.ai;
   // Raw values remain transient in this private worker map, never in diagnostics.
   const key=JSON.stringify([d.owner,d.documentId,d.reset,a.provider,a.base_url,a.model,
-    a.api_key,a.prompt,payload.lang,a.style_examples,a.memory_mode,a.thinking,a.send_image]);
+    a.api_key,a.prompt,d.webchatRunId || "",payload.lang,a.style_examples,a.memory_mode,a.thinking,a.send_image]);
   const prior = tails.get(key);
   let resolve;
   const promise = new Promise(r => {resolve=r;});
@@ -49,7 +50,7 @@ function finish(ticket) {
     if (tails.get(ticket.key)===ticket) tails.delete(ticket.key);
   });
 }
-export function fenceConversationBilling(ownerTicket) {
+export function fenceConversationBilling(ownerTicket, error) {
   // A late response belonging to a cancelled run cannot fence a fresh run.
   if (!active.has(ownerTicket) || ownerTicket.done) return;
   const billingKey = ownerTicket.billingKey;
@@ -57,7 +58,7 @@ export function fenceConversationBilling(ownerTicket) {
   // using this credential, not another key/provider or a newly requested run.
   for (const ticket of active) {
     if (ticket.billingKey === billingKey && !ticket.done && !ticket.consumed)
-      ticket.billingFailure = providerBillingFenceError();
+      ticket.billingFailure = providerBillingFenceError(JSON.parse(billingKey)[0], error);
   }
   wakeConversationReady();
 }
@@ -100,7 +101,7 @@ export async function enterConversationJob(payload, signal, trace=null) {
 // Ready-data batching uses the same enqueue reservations, not the old page gate.
 const listeners = new Set();
 export function onConversationReady(listener) { listeners.add(listener); return () => listeners.delete(listener); }
-export function wakeConversationReady() { for (const fn of listeners) fn(); }
+function wakeConversationReady() { for (const fn of listeners) fn(); }
 export function reservedConversation(payload) {
   const descriptor=tickets.get(payload)?.descriptor;
   return descriptor ? {...descriptor} : null;

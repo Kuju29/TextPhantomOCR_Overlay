@@ -139,30 +139,6 @@ def _write_failure(
         "See error.json and lens_raw.json. The CLI did not fall back to the other engine.\n",
     )
 
-def _prewarm_fonts(lang: str) -> tuple[bool, str, str]:
-    """Warm CLI fonts without letting missing glyph coverage abort startup."""
-    from backend.jobs.fonts import resolve_font_pair
-    from backend.render.fonts import UnsupportedFontError, is_truetype, pick_font
-
-    thai_font, latin_font = resolve_font_pair(lang)
-    try:
-        probe = pick_font("กa", thai_font, latin_font, 64)
-    except UnsupportedFontError as exc:
-        print(
-            f"[cli] WARNING: font prewarm degraded ({exc}); continuing with "
-            "geometry-only layout fallback for unsupported text.",
-            file=sys.stderr,
-        )
-        return False, thai_font, latin_font
-    if not is_truetype(probe):
-        print(
-            "[cli] WARNING: font prewarm produced no validated scalable font; "
-            "continuing with geometry-only layout fallback.",
-            file=sys.stderr,
-        )
-        return False, thai_font, latin_font
-    print(f"[cli] fonts ok: thai={thai_font} latin={latin_font}")
-    return True, thai_font, latin_font
 
 def _data_uri_to_bytes(data_uri: str) -> bytes:
     """Decode a ``data:...;base64,`` URI to raw bytes (empty on failure)."""
@@ -864,13 +840,6 @@ limits:
     # Keep the extension diagnostic path independent from the Python renderer's
     # native dependencies. The full API engine imports them only when selected.
     from backend.jobs.pipeline import process_image
-
-    # --- Font pre-warm ------------------------------------------------------
-    # Without a real TTF, Pillow falls back to a bitmap font whose textbbox
-    # ignores the requested size, which makes the fit-size calculation
-    # explode (a 139px-tall box ends up with fs=688). Warm the fonts and
-    # surface the situation loud and clear.
-    # _fonts_ok, thai_font, latin_font = _prewarm_fonts(args.lang)
 
     # --- AI config ----------------------------------------------------------
     ai_cfg = None

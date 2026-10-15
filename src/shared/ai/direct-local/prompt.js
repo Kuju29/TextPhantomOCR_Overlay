@@ -1,12 +1,12 @@
-import { instructionPack, formatInstruction } from "../prompt-language.js";
+import { seriesSummaryInstruction } from "../series-summary.js";
+import { instructionPack } from "../prompt-language.js";
 import { sourceContextText } from "../source-context.js";
 import { pageContextText } from "../page-context.js";
-import { wrongLanguageRepairInstruction } from "../repair-instruction.js";
 import { normalizeLanguageCode } from "../../../generated/language-code-aliases.js";
 import { FALLBACK_LANGS } from "../../constants.js";
 import {formatIndependentStoryExamples,humanExampleCount} from "../independent/examples.js";
 
-import { TRANSLATOR_IDENTITY_BASE, TASK_GUIDANCE, STYLE_EXAMPLES } from "../../../generated/localization-content.js";
+import { TRANSLATOR_IDENTITY_BASE, STYLE_EXAMPLES } from "../../../generated/localization-content.js";
 export { TRANSLATOR_IDENTITY_BASE };
 export const CONVERSATION_STYLE_EXAMPLE_LIMIT = 20;
 
@@ -15,30 +15,6 @@ export function composeTranslatorIdentitySystem(style, lang = "en") {
   if (!selected) throw new Error("AI translation style is empty");
   const pack = instructionPack(lang);
   return `${pack.identity}\n\n${pack.styleHeading}\n${selected}`;
-}
-
-export function joinCanonicalSystemSections(sections) {
-  const mandatory = [
-    sections?.policy,
-    sections?.source,
-    sections?.output,
-  ]
-    .map((text) => String(text || "").trim())
-    .filter(Boolean)
-    .join("\n");
-  const system = [
-    mandatory,
-    sections?.request,
-    sections?.runtime,
-  ]
-    .map((text) => String(text || "").trim())
-    .filter(Boolean)
-    .join("\n\n");
-  const style = [sections?.language, sections?.style]
-    .map((text) => String(text || "").trim())
-    .filter(Boolean)
-    .join("\n");
-  return `System prompt:\n${system}\n\nStyle prompt:\n${style}`;
 }
 
 export function exactRequestOutputContract(expectedIds) {
@@ -99,7 +75,9 @@ function previousContextText(entries, limit = 6, lang = "en") {
       .replace(/\n/g, " ");
     if (!src) return [];
     const who = String(entry.who || "").trim();
-    return [(who ? `  [${who}] ${src}` : `  ${src}`).slice(0, 200)];
+    const tgt = String(entry.tgt || "").trim().replace(/\n/g, " ");
+    return [(who ? `  [${who}] ` : "  ") +
+      (tgt ? `SRC: ${src.slice(0, 240)} | TGT: ${tgt.slice(0, 240)}` : src.slice(0, 240))];
   });
   return lines.length ? instructionPack(lang).previous + lines.join("\n") : "";
 }
@@ -118,8 +96,10 @@ function memoryText(ai, sourceUnits = null, lang = "en", wireIds = null) {
     if (lines.length) blocks.push(pack.speakers + lines.join("\n"));
   }
   if (full) blocks.push(previousContextText(ai?.prev_context, 6, lang));
-  blocks.push(pageContextText(ai?.page_context, lang));
-  blocks.push(sourceContextText(ai?.source_context, sourceUnits, lang, wireIds));
+  if (ai?.conversation?.branch !== 'repair' && !ai?.repair_reason) {
+    blocks.push(pageContextText(ai?.page_context, lang));
+    blocks.push(sourceContextText(ai?.source_context, sourceUnits, lang, wireIds));
+  }
   return blocks.filter(Boolean).join("\n\n");
 }
 
@@ -177,14 +157,14 @@ export function targetLanguagePriority(targetLang) {
   return `Translate every source unit into ${label}.`;
 }
 
-export function withoutLeadingTargetLanguageHeader(text) {
+function withoutLeadingTargetLanguageHeader(text) {
   return String(text || "")
     .replace(/^\s*(?:Style prompt|สไตล์การแปล|翻訳方針)\s*:\s*(?:\r?\n)?/i, "")
     .replace(/^\s*(?:Target language|ภาษาปลายทาง|訳先言語):\s*[^\r\n]*(?:\r?\n)?/i, "")
     .trim();
 }
 
-export function normalizePromptMode(_value) {
+function normalizePromptMode(_value) {
   // Legacy/missing modes are normalized during activation. The editable prompt
   // is always composed as one replace-style block on the provider wire.
   return "replace";
@@ -197,7 +177,7 @@ const REQUIRED_CANONICAL_PIECES = Object.freeze([
   "seriesNotesHeading",
 ]);
 
-export function assertCanonicalPromptPlan(plan) {
+function assertCanonicalPromptPlan(plan) {
   const missing = REQUIRED_CANONICAL_PIECES.filter(
     (key) => typeof plan?.pieces?.[key] !== "string" || !plan.pieces[key].trim(),
   );
@@ -249,7 +229,8 @@ export function composeCanonicalPrompt(
   runtime.push(memoryText(ai, sourceUnits, targetLang, wireIds));
   const sections = {
     style: styleText,
-    useStyleExamples: ai?.style_examples !== false,
+    useStyleExamples: ai?.style_examples === true,
+    memoryMode: ai?.memory_mode || "off",
     savedDefault,
     policy: String(pieces.systemPolicy || "").trim(),
     language: selectedLanguage,
@@ -269,7 +250,7 @@ export function composeCanonicalPrompt(
   };
 }
 
-export function conversationRecordContract(targetLang, structuredOutput=false) {
+function conversationRecordContract(targetLang, structuredOutput=false) {
   const code=normalizeLanguageCode(targetLang);
   if(structuredOutput){
     if(code==="th") return "INPUT/OUTPUT — tp.translation.image-records/1\nข้อความล่าสุดใช้ ID I<ภาพ>_P<หน่วย> ซึ่งระบุตำแหน่ง ไม่ใช่ผู้พูด ตอบเฉพาะ ID ในข้อความผู้ใช้ล่าสุดให้ครบครั้งเดียวด้วยคีย์เดิมใน JSON schema ค่าของแต่ละคีย์ต้องเป็นคำแปลเท่านั้น ห้ามคงข้อความต้นฉบับเป็นค่า และห้ามมีข้อความนอก JSON ห้ามตอบ ID เก่าซ้ำ";
@@ -281,7 +262,7 @@ export function conversationRecordContract(targetLang, structuredOutput=false) {
   return "INPUT/OUTPUT — tp.translation.image-records/1\nReal translation records use <<I<image>_P<unit>:source text>>. I identifies the image and P the unit; IDs are not speakers. Return only I<number>_P<number> IDs from the latest user message exactly once as <<I<image>_P<unit>:translated text>>. The text after ':' inside each marker must be a non-empty translation. Keep both << and >> delimiters and replace the source text with the translation. Never keep source text inside a marker and put its translation outside; output no non-whitespace text outside markers. Previous turns are context only.";
 }
 
-export function buildStaticUserPrefix(targetLang, sourceLang = "", structuredOutput = false, enabled = true, selectedStyle, conversationRecords = false, independentExamples = null) {
+export function buildStaticUserPrefix(targetLang, sourceLang = "", structuredOutput = false, enabled = false, selectedStyle, conversationRecords = false, independentExamples = null) {
   const pack = instructionPack(targetLang);
   const style = String(selectedStyle || "").trim();
   if (!style) throw new Error("AI translation style is empty");
@@ -304,16 +285,16 @@ export function buildStaticUserPrefix(targetLang, sourceLang = "", structuredOut
   return blocks.join("\n\n");
 }
 
-export function composeTranslationUserMessage({ sections, requestOutputContract, sourceRecords, targetLang, repairReason = "", expectedIds = [], structuredOutput = false, sourceLang = "", conversationRecords = false, independentExamples = null }) {
+export function composeTranslationUserMessage({ sections, requestOutputContract, sourceRecords, targetLang, structuredOutput = false, sourceLang = "", conversationRecords = false, independentExamples = null }) {
   const pack = instructionPack(targetLang);
   const style = [sections?.language, sections?.style].filter(Boolean).join("\n");
-  const blocks = [buildStaticUserPrefix(targetLang, sourceLang, structuredOutput, sections?.useStyleExamples !== false, style, conversationRecords, independentExamples)];
+  const blocks = [buildStaticUserPrefix(targetLang, sourceLang, structuredOutput, sections?.useStyleExamples === true, style, conversationRecords, independentExamples)];
   const runtime = String(sections?.runtime || "").trim();
   if (runtime) blocks.push(`${pack.contextHeading}\n${runtime}`);
   const output = String(requestOutputContract || "").trim();
   if (output && !conversationRecords) blocks.push(output);
-  const repair = wrongLanguageRepairInstruction(targetLanguagePriority(targetLang), repairReason, targetLang);
-  if (repair) blocks.push(repair);
+  if (sections?.memoryMode === "full") blocks.push(seriesSummaryInstruction(targetLang, structuredOutput));
+  // Repair reasons are diagnostics, not additional instructions to the model.
   blocks.push(`${pack.sourceHeading}\n${String(sourceRecords || "")}`);
   return blocks.filter(Boolean).join("\n\n");
 }

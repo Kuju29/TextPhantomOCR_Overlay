@@ -17,7 +17,7 @@ const ALIASES = Object.freeze(Object.fromEntries(
 ));
 
 export const cloudProviderCatalog = () => Object.values(CATALOG);
-export const canonicalCloudProviderId = (id) => ALIASES[String(id || "").trim().toLowerCase()] || String(id || "").trim().toLowerCase();
+const canonicalCloudProviderId = (id) => ALIASES[String(id || "").trim().toLowerCase()] || String(id || "").trim().toLowerCase();
 export const cloudProviderSpec = (id) => CATALOG[canonicalCloudProviderId(id)] || null;
 export const cloudRatePresets = () => Object.fromEntries(cloudProviderCatalog().filter((spec) => spec.rate).map((spec) => [spec.id, spec.rate]));
 export const cloudKeyPrefixes = () => [...new Set(cloudProviderCatalog().flatMap((spec) => spec.keyPrefixes))];

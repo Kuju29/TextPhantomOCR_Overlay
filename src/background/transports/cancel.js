@@ -1,7 +1,9 @@
+import { diagnosticFetch } from "../../shared/diagnostics.js";
 import { createLogger } from "../../shared/logger.js";
 import { API_PATHS } from "../../shared/constants.js";
 import { getApiBase, noteApiSuccess } from "../api.js";
 import { limitHeaders } from "./http-error.js";
+import { installRequestHeaders } from "./install-header.js";
 
 const log = createLogger("SW.transport.cancel");
 export async function cancelJobsViaRest({
@@ -14,12 +16,13 @@ export async function cancelJobsViaRest({
   try {
     const base = await getApiBase();
     if (!base) return;
-    const response = await fetch(base.replace(/\/+$/, "") + API_PATHS.TRANSLATE_CANCEL, {
+    const response = await diagnosticFetch(base.replace(/\/+$/, "") + API_PATHS.TRANSLATE_CANCEL, {
       method: "POST",
       // Cancellation is control traffic, not paced work. Keep the policy
       // explicit and request-local rather than inheriting it from another job.
       headers: limitHeaders(base, false, {
         "Content-Type": "application/json",
+        ...(await installRequestHeaders()),
       }),
       cache: "no-store",
       keepalive: true,

@@ -10,6 +10,7 @@ import {
   readJson,
 } from "./http-error.js";
 import { pollFailure } from "./polling-result.js";
+import { installHeader } from "./install-header.js";
 import { noteApiSuccess } from "../api.js";
 
 export { pollFailure };
@@ -70,7 +71,7 @@ async function fetchJobStatus(url, session = "", base = "") {
         headers: limitHeaders(
           url,
           false,
-          session ? { "X-TP-Tab-Session": session } : {},
+          { ...(session ? { "X-TP-Tab-Session": session } : {}), ...installHeader() }, // cached at submit
         ),
       });
     } catch (error) {
@@ -131,9 +132,7 @@ async function fetchBatchPoll(base, ids, session = "") {
         method: "POST",
         // Polling itself must not inherit an unlimited processing policy from
         // any one of the jobs represented by this shared batch request.
-        headers: limitHeaders(base, false, {
-          "Content-Type": "application/json",
-        }),
+        headers: limitHeaders(base, false, { "Content-Type": "application/json", ...installHeader() }),
         cache: "no-store",
         signal: ctrl.signal,
         body: JSON.stringify({
@@ -278,7 +277,7 @@ async function runBatchPollLoop() {
             continue;
           }
           await new Promise((r) =>
-            setTimeout(r, POLL_RETRY_DELAY_MS + Math.random() * 1000),
+            setTimeout(r, Math.max(POLL_RETRY_DELAY_MS + Math.random() * 1000, serverBackoffMs())), // Retry-After
           );
           continue;
         }
@@ -373,7 +372,7 @@ async function pollJobViaRestLegacy(
     } catch (e) {
       log.debug?.("poll retry", { jobId, err: e?.message || String(e) });
       await new Promise((r) =>
-        setTimeout(r, POLL_RETRY_DELAY_MS + Math.random() * 1000),
+        setTimeout(r, Math.max(POLL_RETRY_DELAY_MS + Math.random() * 1000, serverBackoffMs())), // Retry-After
       );
       continue;
     } finally {

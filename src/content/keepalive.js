@@ -46,7 +46,7 @@
 
   // Acknowledges a close from the other end and keeps the deadline for a later restore.
   function onPortDisconnect() {
-    void chrome.runtime?.lastError;
+    try { void chrome.runtime?.lastError; } catch {}
     teardownPort();
   }
 

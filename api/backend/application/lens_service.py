@@ -10,9 +10,10 @@ import asyncio, os, tempfile, time
 
 from backend import cancellation, trace
 from backend.application import lens_request
+from backend import diagnostics
 from backend.config import settings
-from backend.jobs.admission import AdmissionRejected, identity_of
-from backend.jobs.image_artifacts import ArtifactError, image_artifacts
+from backend.jobs.admission import AdmissionRejected
+from backend.jobs.image_artifacts import image_artifacts
 from backend.lens import document as lens_document
 from backend.lens.languages import normalize as normalize_lang
 from backend.lens.tree import decode_tree, tree_warnings
@@ -188,12 +189,13 @@ async def lens_raw(
         trace_id=tp_trace,
     )
 
-    if not settings.firebase_url:
+    from backend.lens import cookie as lens_cookie
+    if not lens_cookie.configured():
         # Loud, not empty. A Lens call with no cookie source returns "no text",
         # which is indistinguishable from an image that has none.
         raise HTTPException(
             status_code=503,
-            detail="FIREBASE_URL is not configured; the server cannot reach Lens",
+            detail="No Lens cookie source is configured; the server cannot reach Lens",
         )
 
     raw = await image.read()
@@ -224,13 +226,13 @@ async def lens_raw(
         if wants_unlimited(request):
             loop = asyncio.get_running_loop()
             width, height, data = await loop.run_in_executor(
-                request.app.state.lens_executor, _fetch_raw_sync, raw, target_lang, tp_trace
+                request.app.state.lens_executor, diagnostics.bind_context(_fetch_raw_sync), raw, target_lang, tp_trace
             )
         else:
             async with request.app.state.admission_gate.slot(identity):
                 loop = asyncio.get_running_loop()
                 width, height, data = await loop.run_in_executor(
-                    request.app.state.lens_executor, _fetch_raw_sync, raw, target_lang, tp_trace
+                    request.app.state.lens_executor, diagnostics.bind_context(_fetch_raw_sync), raw, target_lang, tp_trace
                 )
     except AdmissionRejected as exc:
         detail = error_payload(
@@ -372,13 +374,14 @@ async def lens_fallback(
         "clientVersion": client_version,
     })
 
-    if not settings.firebase_url:
+    from backend.lens import cookie as lens_cookie
+    if not lens_cookie.configured():
         # Failing loudly: without a cookie source this endpoint cannot work at
         # all, and a Lens call that returns "no text" would look like an image
         # with no text in it.
         raise HTTPException(
             status_code=503,
-            detail="FIREBASE_URL is not configured; the server cannot reach Lens either",
+            detail="No Lens cookie source is configured; the server cannot reach Lens either",
         )
 
     raw = await image.read()
@@ -404,7 +407,7 @@ async def lens_fallback(
         async with request.app.state.admission_gate.slot(identity):
             loop = asyncio.get_running_loop()
             document, _, _ = await loop.run_in_executor(
-                request.app.state.lens_executor, _fetch_fallback_sync, raw, target_lang
+                request.app.state.lens_executor, diagnostics.bind_context(_fetch_fallback_sync), raw, target_lang
             )
     except AdmissionRejected as exc:
         detail = error_payload(

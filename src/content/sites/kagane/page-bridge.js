@@ -148,9 +148,10 @@
         const response=await Reflect.apply(nativeFetch,window,[url.href,{credentials:state.credentials,
           signal:controller.signal,cache:'default'}]);
         if(!response.ok)throw Error(`KAGANE_IMAGE_HTTP_${response.status}`);
-        if(Number(response.headers.get('content-length'))>25*1024*1024)throw Error('KAGANE_IMAGE_TOO_LARGE');
+        // The API accepts images up to 24 MiB (MAX_API_IMAGE_BYTES).
+        if(Number(response.headers.get('content-length'))>24*1024*1024)throw Error('KAGANE_IMAGE_TOO_LARGE');
         const bytes=new Uint8Array(await response.arrayBuffer());
-        if(bytes.length<64||bytes.length>25*1024*1024)throw Error('KAGANE_IMAGE_SIZE_INVALID');
+        if(bytes.length<64||bytes.length>24*1024*1024)throw Error('KAGANE_IMAGE_SIZE_INVALID');
         const mime=imageMime(bytes);if(!mime)throw Error('KAGANE_IMAGE_FORMAT_UNSUPPORTED');
         if(controller.signal.aborted||sync()!==lease.chapter)throw Error('KAGANE_CHAPTER_CHANGED');
         const dataUri=await new Promise((resolve,reject)=>{const reader=new FileReader();

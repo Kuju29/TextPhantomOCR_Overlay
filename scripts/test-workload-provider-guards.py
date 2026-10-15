@@ -25,7 +25,9 @@ c=normalize_capabilities({'context_length':4096,'top_provider':{'max_completion_
 assert c['limits']['contextTokens']==4096 and 'maxOutputTokens' not in c['limits']
 print('PASS normalization, unknown limits, output vs reasoning, endpoint-hint provenance')
 
-registry=list(h['compose_providers'](h['ProviderRegistry']()))
+registry=[spec for spec in h['compose_providers'](h['ProviderRegistry']())
+          if spec.provider_id not in {'paid','login'}]
+assert len(registry)==18
 Client=h['BoundaryClient']; NativeClient=h['NativeLmStudioClient']; Response=h['Response']; openai_chat=h['openai_chat']; gemini=h['cloud_gemini']; anthropic=h['cloud_anthropic']
 Request=h['GenerationRequest']; calls=[]
 def strip_budget(payload):

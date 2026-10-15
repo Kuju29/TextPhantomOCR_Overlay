@@ -18,7 +18,9 @@ class AiConfig:
     characters: list = field(default_factory=list)
     char_memory: bool = False
     memory_mode: str | None = None
-    style_examples: bool = True
+    style_examples: bool = False
+    # Derived by ingress builders; never accepts client-provided example pairs.
+    independent_scope: dict = field(default_factory=dict, repr=False)
     send_image: bool | str = False
     image_b64: str = ""
     image_mime: str = "image/jpeg"
@@ -42,6 +44,10 @@ class AiConfig:
     translation_mode: str = "independent"
     conversation: dict = field(default_factory=dict, repr=False)
     paid_operation_id: str = ""
+    # Provider routing: the click/batch that groups an image and its repair.
+    routing_batch: str = ""
+    paid_user_run_id: str = ""
+    paid_price_quote_token: str = field(default="", repr=False)
 
     def __post_init__(self) -> None:
         self.thinking = normalize_reasoning_preference(self.thinking, "off")

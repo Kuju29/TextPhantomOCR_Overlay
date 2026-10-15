@@ -8,6 +8,7 @@ import httpx, base64, hashlib
 
 from backend.config import settings
 from backend.security import UnsafeImageUrl, assert_image_url_allowed
+from backend.utils.image_transport import PinnedImageTransport
 
 _DOWNLOAD_USER_AGENT = "Mozilla/5.0 (TextPhantomOCR; +https://huggingface.co/spaces)"
 
@@ -51,14 +52,17 @@ def download(url: str, referer: str = "") -> tuple[bytes, str]:
     Redirects are followed MANUALLY so that every hop passes the SSRF policy.
     With ``follow_redirects=True`` only the first URL would ever be checked,
     and an attacker-controlled host could 302 the server to an internal
-    address. The body is also size-capped: the caller-supplied URL used to be
-    able to stream an unbounded response into the worker's memory.
+    address. The body is also size-capped so a caller-supplied URL cannot
+    stream an unbounded response into the worker's memory.
     """
     u = (url or "").strip()
     if not u:
         return b"", ""
 
-    headers = {"user-agent": _DOWNLOAD_USER_AGENT}
+    # Image formats already compress their payload. Request an identity HTTP
+    # transfer so an untrusted content decoder cannot expand bytes before the
+    # size guard sees them.
+    headers = {"user-agent": _DOWNLOAD_USER_AGENT, "accept-encoding": "identity"}
     ref = (referer or "").strip()
     if ref:
         headers["referer"] = ref
@@ -71,6 +75,8 @@ def download(url: str, referer: str = "") -> tuple[bytes, str]:
         timeout=settings.http_timeout_sec,
         follow_redirects=False,
         headers=headers,
+        transport=PinnedImageTransport(),
+        trust_env=False,
     ) as client:
         for _hop in range(settings.max_image_redirects + 1):
             with client.stream("GET", u) as r:
@@ -83,6 +89,9 @@ def download(url: str, referer: str = "") -> tuple[bytes, str]:
                     continue
                 r.raise_for_status()
 
+                if str(r.headers.get("content-encoding") or "").strip().lower() not in {"", "identity"}:
+                    raise UnsafeImageUrl("compressed image HTTP transfer is not supported")
+
                 declared = r.headers.get("content-length")
                 if declared and int(declared) > limit:
                     raise ImageTooLarge(
@@ -92,7 +101,7 @@ def download(url: str, referer: str = "") -> tuple[bytes, str]:
 
                 chunks: list[bytes] = []
                 total = 0
-                for chunk in r.iter_bytes():
+                for chunk in r.iter_raw(chunk_size=64 * 1024):
                     total += len(chunk)
                     if total > limit:
                         raise ImageTooLarge(

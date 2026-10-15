@@ -17,6 +17,8 @@ from __future__ import annotations
 import asyncio
 from http import HTTPStatus
 from fastapi import Request
+from starlette.requests import ClientDisconnect
+from starlette.responses import Response
 
 import logging
 
@@ -29,18 +31,15 @@ _UVICORN_MODE = "uvicorn"
 _EVENT_MODES = {"summary", "custom", "tp", "plain"}
 _ERROR_ONLY_MODES = {"errors", "error", "err", "warn", "warnings"}
 _FAILURE_MODES = _EVENT_MODES | _ERROR_ONLY_MODES
-# The app's REAL route prefixes. A 404 on anything else is internet background
-# noise — vulnerability scanners probing /.env, /.git/config, /phpinfo.php,
-# /actuator/... on every public host. Those used to be logged one line each
-# (dozens per sweep, several sweeps per hour on a public HF Space) and drowned
-# out real errors; now they are AGGREGATED into one compact summary line per
-# window (see _note_scanner_probe).
+# The app's REAL route prefixes. A 404 on anything else is scanner noise
+# (/.env, /.git/config, /phpinfo.php, ...); those are aggregated into one
+# summary line per window (see _note_scanner_probe) so real errors stay visible.
 _KNOWN_PREFIXES = (
-    "/translate", "/ai/", "/v1/", "/v2/", "/health", "/warmup", "/meta", "/version",
+    "/translate", "/ai/", "/login/", "/v1/", "/v2/", "/health", "/warmup", "/meta", "/version",
 )
 _TRACE_EVIDENCE_PATHS = ("/v1/capabilities",)
 _TRACE_PIPELINE_PREFIXES = (
-    "/v2/engine/", "/v1/lens", "/v1/ai/translate", "/v1/translate", "/v1/repair-runs",
+    "/login/", "/v2/engine/", "/v1/lens", "/v1/ai/translate", "/v1/translate", "/v1/repair-runs",
 )
 
 def _trace_request_path(path: str) -> bool:
@@ -95,8 +94,23 @@ def _quiet_logger(name: str, *, disable: bool = False) -> None:
     except Exception:
         pass
 
+class _LoginAccessFilter(logging.Filter):
+    def filter(self, record):
+        # Uvicorn formats (client, method, full_path, protocol, status).
+        # Even an explicitly enabled stock access log must not retain OAuth queries.
+        if isinstance(record.args, tuple) and len(record.args) >= 3:
+            path = record.args[2]
+            if isinstance(path, str) and path.startswith("/login/oauth/callback/"):
+                values = list(record.args)
+                values[2] = path.split("?", 1)[0]
+                record.args = tuple(values)
+        return True
+
 def configure_uvicorn_access_log() -> None:
     """Silence uvicorn/websocket request chatter unless explicitly restored."""
+    access = logging.getLogger("uvicorn.access")
+    if not any(isinstance(item, _LoginAccessFilter) for item in access.filters):
+        access.addFilter(_LoginAccessFilter())
     if settings.access_log_mode == _UVICORN_MODE:
         return
 
@@ -108,6 +122,7 @@ def configure_uvicorn_access_log() -> None:
     # "connection closed" while preserving warnings and errors.
     _quiet_logger("websockets.server")
     _quiet_logger("websockets.protocol")
+
 
 async def access_log_middleware(request: Request, call_next):
     """Log failures plus trace-only ingress/egress for diagnostic pipeline paths."""
@@ -128,6 +143,17 @@ async def access_log_middleware(request: Request, call_next):
     try:
         try:
             response = await call_next(request)
+        except ClientDisconnect:
+            if not await request.is_disconnected():
+                raise
+            response = Response(status_code=499)
+        except RuntimeError as exc:
+            # Starlette raises this when the browser closed the request (page
+            # closed, run cancelled) before the route answered: a client
+            # disconnect, not a server fault.
+            if str(exc) != "No response returned." or not await request.is_disconnected():
+                raise
+            response = Response(status_code=499)
         except asyncio.CancelledError:
             # ASGI shutdown/user disconnect is lifecycle control flow. It must
             # propagate so Uvicorn can stop, but is not an application error.
@@ -201,8 +227,6 @@ async def access_log_middleware(request: Request, call_next):
             }, trace_id=request_trace_id)
         return response
     finally:
-        # Lens upload, Lens graph grouping, AI and browser-ingest routes are
-        # separate requests.  The
-        # old code flushed only /v1/translate, leaving the last stage buffered
-        # until another request happened or the process exited cleanly.
+        # Every route flushes: Lens upload, grouping, AI and browser-ingest are
+        # separate requests, and the last stage must not stay buffered.
         trace.flush()

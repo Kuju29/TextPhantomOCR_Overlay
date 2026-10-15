@@ -1,21 +1,16 @@
 """Request-boundary security policy.
 
-These guards also protect legacy/internal callers. Since 14.8, public Cloud
-routes require request-owned credentials and never use AI_API_KEY. Historical
-attack cases below explain why the endpoint/image guards remain in place:
+Public Cloud routes require request-owned credentials and never use
+AI_API_KEY; these guards also protect legacy/internal callers. Threats:
 
-1. **Server API-key exfiltration.** ``/translate`` let the caller choose the
-   AI ``base_url`` while ``api_key`` silently fell back to the server's own
-   ``AI_API_KEY``. A request with ``base_url = "https://attacker.example/v1"``
-   therefore made the server post ``Authorization: Bearer <server key>`` to
-   the attacker. :func:`assert_ai_base_url_allowed` refuses that combination.
+1. **Server API-key exfiltration.** A caller-chosen AI ``base_url`` combined
+   with a server-owned key would post ``Authorization: Bearer <server key>``
+   to an attacker. :func:`assert_ai_base_url_allowed` refuses that combination.
 
-2. **SSRF via the image ``src``.** ``utils.images.download`` fetched any URL
-   the caller supplied, including ``http://169.254.169.254/`` (cloud instance
-   metadata) and hosts inside the deployment's private network.
-   :func:`assert_image_url_allowed` rejects those, and it is applied to *every
-   redirect hop* — checking only the first URL is not enough, because an
-   attacker-controlled host can simply 302 to the internal address.
+2. **SSRF via the image ``src``.** A caller URL such as
+   ``http://169.254.169.254/`` (cloud metadata) or a private-network host.
+   :func:`assert_image_url_allowed` rejects those on *every redirect hop*,
+   because an attacker-controlled host can 302 to the internal address.
 
 Both raise instead of quietly substituting a safe default: a request that
 tried to do one of these things is a request the operator wants to see in the
@@ -28,7 +23,6 @@ from urllib.parse import urlparse
 
 import socket, ipaddress
 
-# from backend.ai import providers as _providers  # noqa: F401
 from backend.ai.provider_registry import provider_registry
 from backend.config import settings
 
@@ -43,32 +37,6 @@ class UnsafeImageUrl(SecurityError):
 
 # --- AI base URL ------------------------------------------------------------
 
-def _host_of(url: str) -> str:
-    try:
-        return (urlparse(url).hostname or "").strip().lower()
-    except ValueError:
-        return ""
-
-def server_key_allowed_hosts() -> frozenset[str]:
-    """Hosts the SERVER-OWNED key may ever be sent to.
-
-    The provider defaults plus anything the operator explicitly added via
-    ``TP_AI_EXTRA_HOSTS`` (comma-separated). Local/self-hosted providers are
-    deliberately excluded: ``localhost`` means the *server's* localhost, and
-    the server key has no business going there.
-    """
-    hosts = {
-        _host_of(str(d.get("base_url") or ""))
-        for d in ({"base_url": spec.default_base_url} for spec in provider_registry if spec.provider_id != "paid")
-    }
-    hosts.discard("")
-    hosts.discard("localhost")
-    hosts.discard("127.0.0.1")
-    for extra in settings.ai_extra_hosts.split(","):
-        h = extra.strip().lower()
-        if h:
-            hosts.add(h)
-    return frozenset(hosts)
 
 def _is_keyless_local_endpoint(provider: str, url: str) -> bool:
     """Allow a keyless local runtime without opening a general SSRF path.
@@ -159,8 +127,14 @@ _ALLOWED_IMAGE_SCHEMES = ("http", "https")
 
 def _ip_is_forbidden(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Whether an address belongs to a range the server must never fetch."""
+    # A NAT64 gateway can translate this globally routable IPv6 prefix back
+    # into a server-private IPv4 address. Check that embedded destination too.
+    if ip.version == 6 and ip in ipaddress.ip_network('64:ff9b::/96'):
+        if _ip_is_forbidden(ipaddress.IPv4Address(int(ip) & 0xffffffff)):
+            return True
     return bool(
-        ip.is_private
+        not ip.is_global
+        or ip.is_private
         or ip.is_loopback
         or ip.is_link_local        # 169.254.0.0/16 — cloud metadata lives here
         or ip.is_reserved

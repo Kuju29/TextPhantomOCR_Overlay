@@ -1,0 +1,27 @@
+{
+  "accept": [
+    {"source":"KUMO TRANSLATION","output":"Kumo Translation"},
+    {"source":"++ KUMO TRANSLATION","output":"++Kumo   Translation"},
+    {"source":"+ MAPLE SCANLATIONS M","output":"+ maple scanlations m"},
+    {"source":"MAPLE TRANSLATION","output":"MAPLE TRANSLATION"},
+    {"source":"https://Example.com/CasePath","output":"https://Example.com/CasePath"}
+  ],
+  "reject": [
+    {"source":"KUMO TRANSLATION M","output":"Kumo Translation"},
+    {"source":"KUMO TRANSLATION M","output":"KUMO M TRANSLATION"},
+    {"source":"KUMO TRANSLATION","output":"Kumo Translations"},
+    {"source":"++ KUMO TRANSLATION","output":"+ Kumo Translation"},
+    {"source":"KUMO TRANSLATION","output":"+ Kumo Translation"},
+    {"source":"KUMO TRANSLATION","output":"Other Translation"},
+    {"source":"KUMO-SCAN TRANSLATION","output":"Kumo.Scan Translation"},
+    {"source":"KUMO TRANSLATION","output":"Kumo Translation Hello"},
+    {"source":"","output":"Kumo Translation"},
+    {"source":"THIS TRANSLATION","output":"This Translation"},
+    {"source":"NO TRANSLATIONS","output":"No Translations"},
+    {"source":"I NEED YOUR HELP TODAY","output":"I need your help today"},
+    {"source":"普通の日本語の文章","output":"普通の日本語の文章"},
+    {"source":"KUMO TRANSLATION","output":"Kumо Translation"},
+    {"source":"ＫＵＭＯ TRANSLATION","output":"Kumo Translation"},
+    {"source":"https://Example.com/CasePath","output":"https://Example.com/casepath"}
+  ]
+}

@@ -225,7 +225,8 @@ def assert_wire(spec, first: dict, second: dict, r1, r2) -> None:
 
 
 def main() -> None:
-    specs = list(compose_providers(ProviderRegistry()))
+    specs = [spec for spec in compose_providers(ProviderRegistry())
+             if spec.provider_id not in {"paid", "login"}]
     check(len(specs) == 18, f"expected 18 API providers, found {[s.provider_id for s in specs]}")
     for spec in specs:
         upstream = SyntheticUpstream(spec.provider_id, spec.default_model)

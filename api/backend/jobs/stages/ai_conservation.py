@@ -102,7 +102,7 @@ def require_ai_input_conservation(
         expected_translation = str(separator).join(value for value in proven_translation if value).strip()
         if str(group.get("text") or "").strip() != expected_translation:
             errors.append({"group": group_index, "reason": "translation_text_mismatch"})
-        if markers.has_translatable_text(expected_full) and not markers.has_translatable_text(expected_translation):
+        if markers.has_letters(expected_full) and not markers.has_letters(expected_translation):
             errors.append({"group": group_index, "reason": "letters_collapsed"})
 
     owners: dict[int, list[int]] = {}

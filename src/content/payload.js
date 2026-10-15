@@ -66,7 +66,7 @@
     uploadPrefsPromise = new Promise((resolve) => {
       try {
         chrome.storage.local.get(["uploadFormat", "uploadQuality"], (it) => {
-          void chrome.runtime.lastError;
+          try { if (chrome.runtime.lastError) { resolve({...UPLOAD_DEFAULTS}); return; } } catch { resolve({...UPLOAD_DEFAULTS}); return; }
           const fmt = String(it?.uploadFormat || "")
             .trim()
             .toLowerCase();
@@ -152,7 +152,7 @@
   TP.clientBackgroundEnabled = true;
   try {
     chrome.storage.local.get(["localRender"], (it) => {
-      void chrome.runtime.lastError;
+      try { if (chrome.runtime.lastError) return; } catch { return; }
       TP.localRenderEnabled = it?.localRender === true;
       TP.clientBackgroundEnabled = true;
       if (TP.localRenderEnabled) TP.log.info("local overlay rendering is ON");

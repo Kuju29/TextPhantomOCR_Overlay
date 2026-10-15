@@ -3,7 +3,10 @@
     "contextMenus",
     "storage",
     "activeTab",
-    "declarativeNetRequestWithHostAccess"
+    "declarativeNetRequestWithHostAccess",
+    "alarms",
+    "scripting",
+    "webNavigation"
   ],
   "background": {
     "service_worker": "background/index.js",

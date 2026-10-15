@@ -1,32 +1,22 @@
-"""Diagnostic log ingest.
+"""Bounded, privacy-filtered diagnostics ingest, enabled by TP_LOG_FILE.
 
-The extension cannot write files. Its console is the only record of what it
-decided, and that console is not being watched at the moment a problem
-happens — which is how three regressions in a row ended up being diagnosed by
-guesswork.
-
-So it ships its log lines here and they land in `api/logs/extension-*.log`,
-next to `api/logs/api-*.log`. Two files, one folder, one timeline covering both
-sides of the request. That is the whole feature.
-
-Deliberately permissive about content: this is a debugging aid for a local
-server, and a schema that rejects an unexpected field would drop exactly the
-line that explains the surprise. It is NOT permissive about size — a log
-endpoint that can be filled by a loop is a disk-space bug.
+Browser events are untrusted observations, never audit authorization. Payloads
+are byte/count/rate bounded and redacted; retries ACK only successful appends.
+Legacy console files and structured trace-correlated events share api/logs.
 """
 
 from __future__ import annotations
 
 from typing import Any
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
 from backend.trace_shipping import shipping_metadata
 
 import json
 import time
+import threading
 
 from backend import logfile, trace
-# from backend.config import settings
 from backend.trace_dedupe import TraceIngestDedupe, legacy_shipment_id
 from backend.api.errors import payload as error_payload
 
@@ -41,11 +31,25 @@ MAX_TRACE_REQUEST_BYTES = 512 * 1024
 TRACE_DEDUPE_TTL_SEC = 10 * 60
 TRACE_DEDUPE_MAX = 100_000
 
+_log_budget = [0.0, 0]
+_trace_budget = [0.0, 0, 0]
+_trace_budget_lock = threading.Lock()
+MAX_TRACE_RECORDS_PER_MINUTE = 60_000
+MAX_TRACE_BYTES_PER_MINUTE = 16 * 1024 * 1024
+
 _trace_dedupe = TraceIngestDedupe(TRACE_DEDUPE_TTL_SEC, TRACE_DEDUPE_MAX)
 
 @router.post("/v1/logs")
-async def ingest(payload: dict[str, Any]) -> dict:
-    # Decision-log file I/O must not block unrelated API requests either.
+async def ingest(request: Request) -> dict:
+    # Bound bytes BEFORE parsing. Client log data is untrusted on a public API.
+    chunks=[]; size=0
+    async for chunk in request.stream():
+        size+=len(chunk)
+        if size>128*1024: raise HTTPException(413,detail="log request exceeds byte limit")
+        chunks.append(chunk)
+    try: payload=json.loads(b"".join(chunks))
+    except (ValueError,UnicodeError): raise HTTPException(400,detail="invalid log JSON") from None
+    if not isinstance(payload,dict): raise HTTPException(400,detail="log object required")
     return await run_in_threadpool(_ingest, payload)
 
 
@@ -71,11 +75,48 @@ def _ingest(payload: dict[str, Any]) -> dict:
             detail=f"{len(records)} records in one batch (max {MAX_RECORDS_PER_BATCH})",
         )
 
-    written = logfile.client(records)
-    return {"ok": True, "written": written, "dir": str(logfile.log_dir())}
+    if any(not isinstance(r, dict) or len(json.dumps(r,ensure_ascii=False).encode()) > 16*1024 for r in records):
+        raise HTTPException(413,detail="invalid or oversized log record")
+    if len(json.dumps(payload,ensure_ascii=False).encode())>128*1024:
+        raise HTTPException(413,detail="log request exceeds byte limit")
+    # A bounded global budget prevents the unauthenticated debug endpoint from
+    # filling disks. This never throttles translation or paid authentication.
+    global _log_budget
+    with logfile._LOCK:
+        now=time.monotonic()
+        if now-_log_budget[0]>60: _log_budget=[now,0]
+        if _log_budget[1]+len(records)>6000:
+            raise HTTPException(429, detail={"code":"diagnostic_rate_limited"}, headers={"Retry-After":"60"})
+        _log_budget[1]+=len(records)
+    try:
+        written = logfile.client(records)
+    except OSError:
+        raise HTTPException(503,detail={"code":"diagnostic_write_failed","retryable":True}) from None
+    dropped=payload.get("droppedSinceLastBatch",0)
+    if type(dropped) is int and dropped>0:
+        logfile.api("extension.evidence_gap", {"dropped":min(dropped,10**9)},ok=False)
+    shipping=payload.get("shipping",{})
+    if isinstance(shipping,dict):
+        info={k:min(v,10**9) for k,v in shipping.items() if k in {"pending","failures","storageFailures"} and type(v) is int and v>=0}
+        if info.get("failures") or info.get("storageFailures"):
+            logfile.api("extension.shipping_recovered", info)
+    return {"ok": True, "written": written, "received":len(records), "duplicates":len(records)-written, "logging":logfile.health()}
 
 @router.post("/v1/trace")
-async def ingest_trace(payload: dict[str, Any]) -> dict:
+async def ingest_trace(request: Request) -> dict:
+    # Reject bytes before JSON allocation, including chunked requests. A limit
+    # applied only after FastAPI parses the body is not an ingress bound.
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > MAX_TRACE_REQUEST_BYTES:
+            raise HTTPException(413, detail="trace request exceeds byte limit")
+    try:
+        payload = json.loads(body)
+    except (ValueError, UnicodeError):
+        raise HTTPException(400, detail="invalid trace JSON") from None
+    if not isinstance(payload, dict):
+        raise HTTPException(400, detail="trace object required")
     # File/lock waits and privacy formatting must not occupy the API event loop.
     handler_started = time.perf_counter()
     return await run_in_threadpool(_ingest_trace, payload, handler_started)
@@ -134,6 +175,19 @@ def _ingest_trace(payload: dict[str, Any], handler_started: float | None = None)
         raise HTTPException(status_code=413, detail="trace request exceeds byte limit")
     if any(size > MAX_TRACE_RECORD_BYTES for size in record_bytes):
         raise HTTPException(status_code=413, detail="trace record exceeds byte limit")
+    # This process-wide budget cannot be reset by changing client IDs or IPs.
+    # It belongs only to diagnostics and never throttles Paid/authentication.
+    global _trace_budget
+    with _trace_budget_lock:
+        now = time.monotonic()
+        if now - _trace_budget[0] > 60:
+            _trace_budget = [now, 0, 0]
+        if (_trace_budget[1] + len(records) > MAX_TRACE_RECORDS_PER_MINUTE or
+                _trace_budget[2] + payload_bytes > MAX_TRACE_BYTES_PER_MINUTE):
+            raise HTTPException(429, detail={"code": "diagnostic_rate_limited"},
+                                headers={"Retry-After": "60"})
+        _trace_budget[1] += len(records)
+        _trace_budget[2] += payload_bytes
 
     original_records = records
     payload_producer = str(payload.get("producerId") or "").strip()
@@ -195,12 +249,13 @@ def _ingest_trace(payload: dict[str, Any], handler_started: float | None = None)
 
 @router.get("/v1/logs/where")
 async def where() -> dict:
-    """Where the logs are, so nobody has to guess the path."""
+    """Public write health; filesystem locations belong in operator stdout."""
     return {
         "ok": True,
         "enabled": logfile.is_enabled(),
-        "dir": str(logfile.log_dir()),
-        "files": sorted(p.name for p in logfile.log_dir().glob("*.log"))
-        if logfile.log_dir().exists()
-        else [],
+        "health": logfile.health(),
+        "schema": "tp.diagnostic/1",
+        # Preserve legacy keys without exposing server paths or file inventory.
+        "dir": "",
+        "files": [],
     }

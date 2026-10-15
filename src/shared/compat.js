@@ -122,6 +122,7 @@
     tabs,
     contextMenus,
     scripting: primary.scripting,
+    alarms: primary.alarms,
   };
 
   try {

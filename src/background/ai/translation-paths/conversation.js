@@ -90,7 +90,7 @@ export async function conversationTranslation(dispatch, units, options) {
       if(e.commitStatus==="pending_commit"){
         const historyAssistant=canonicalHistoryAssistant(prepared,units,translations,d,options.ai.conversation?.origins||[]);
         try {
-          const storage=await state.save({history:[...prepared.turns,{pages:options.ai.conversation?.origins||[],user:prepared.current,anchor:prepared.turns.length===0,assistant:historyAssistant,image:prepared.image,
+          const storage=await state.save({history:[...prepared.turns,{pages:options.ai.conversation?.origins||[],user:prepared.current,anchor:prepared.turns.length===0,bootstrapContext:prepared.turns.length===0?prepared.bootstrapContext:"",assistant:historyAssistant,image:prepared.image,
             pageId:options.ai?.conversation?.pageId||"",pageIndex:options.ai?.conversation?.pageIndex,
             ...(prepared.providerConversation?{providerResponseId:prepared.responseId}:{})}],
             prefix:prepared.prefix,revision:state.revision+1});

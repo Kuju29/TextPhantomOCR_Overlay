@@ -1,6 +1,7 @@
 import { getTrace, note as traceNote } from "../../shared/trace.js";
 import {
   failureUsageDetails,
+  isSettledPaidOperationReplay,
   persistProviderGeneration,
 } from "../../shared/ai-usage.js";
 import { isLocalAiPayload } from "../local-capacity.js";
@@ -28,6 +29,12 @@ import {
 import * as wf from "../workflow-track.js";
 import { idempotencyKeyForPayload } from "../jobs/idempotency.js";
 import { withPipelineStage } from "../jobs/batch-retry.js";
+import {
+  INSTALL_RETRY_BUDGET_MS,
+  installRetryDelayMs,
+  isInstallRateLimited,
+  waitInstallLimit,
+} from "../transports/install-header.js";
 
 function rateGateBusy(error) {
   const code = String(error?.code || "");
@@ -66,6 +73,7 @@ export async function runServerTranslation(input, deps) {
   const serverOwnedImage = payload?.mode === "lens_images";
   let browserImageFallbackUsed = false;
   let serverRequestTracked = false;
+  let installWaitMs = 0;
   for (let attempt = 0; ; attempt++) {
     const outbound = payloadForFullServer(payload);
     try {
@@ -167,9 +175,10 @@ export async function runServerTranslation(input, deps) {
           ? result.Ai.meta
           : {};
       const responseCached = result?.perf?.cache === "hit";
-      if (responseCached || !aiMeta.provider || !aiMeta.model)
+      const settledPaidReplay = isSettledPaidOperationReplay(aiMeta, outbound?.ai?.provider);
+      if (responseCached || settledPaidReplay || !aiMeta.provider || !aiMeta.model)
         await persistProviderGeneration({ resolvePending: true, engine: "runsapi", operationId: String(outbound.idempotency_key || "") });
-      if (!responseCached && aiMeta.provider && aiMeta.model)
+      if (!responseCached && !settledPaidReplay && aiMeta.provider && aiMeta.model)
         await persistProviderGeneration(
           {
             runtime: localRequest ? "local" : "cloud",
@@ -206,7 +215,7 @@ export async function runServerTranslation(input, deps) {
               ),
           },
         );
-      if (slotHeld && replayed) releaseReplay(requestLane);
+      if (slotHeld && (replayed || settledPaidReplay)) releaseReplay(requestLane);
       else if (slotHeld) {
         const localProviderMs = aiMeta.provider_ms;
         const localSingleGeneration = Number(aiMeta.generation_attempts) === 1;
@@ -386,6 +395,32 @@ export async function runServerTranslation(input, deps) {
               ),
           },
         );
+      // The shared API limited this browser install before any work
+      // (429 identity_rate_limited). Wait its Retry-After (≤ 60 s) and send
+      // the same idempotent request again, within a total budget.
+      if (generationAttempts === 0 && isInstallRateLimited(error) &&
+          installWaitMs < INSTALL_RETRY_BUDGET_MS) {
+        const installRetryMs = installRetryDelayMs(error);
+        installWaitMs += installRetryMs;
+        if (slotHeld) {
+          releaseDeferred(requestLane, installRetryMs);
+          slotHeld = false;
+        }
+        log.info("this browser reached the shared API's request quota; the image waits", {
+          laneKey: requestLane, attempt: attempt + 1, retryAfterMs: installRetryMs, installWaitMs,
+        });
+        traceNote(
+          "background/pipeline/server-translation.js",
+          "imageStage",
+          {
+            stage: serverOwnedImage ? "lens" : "ai", state: "requeued", route: "api",
+            imageId, status, retryAfterMs: installRetryMs, code, attempt: attempt + 1,
+          },
+          traceId,
+        );
+        await waitInstallLimit(installRetryMs, (ms) => waitForRetry(ms, ctrl.signal));
+        continue;
+      }
       const safeDeferred =
         generationAttempts === 0 &&
         [
@@ -502,7 +537,20 @@ export async function submitAndPollServer(input, deps) {
     if (payload?.ai?.provider)
       await persistProviderGeneration({ pending: true, operationId: idempotencyKey, engine: "runsapi",
         provider: payload.ai.provider, model: payload.ai.model, runtime: isLocalAiPayload(payload) ? "local" : "cloud" });
-    const submitted = await submitJobViaRest(base, payload, { idempotencyKey });
+    // A submit refused by the per-install quota enqueued nothing; send
+    // the same idempotent submit again after Retry-After, within a budget.
+    let submitted;
+    for (let installWaitMs = 0; ; ) {
+      try {
+        submitted = await submitJobViaRest(base, payload, { idempotencyKey });
+        break;
+      } catch (error) {
+        if (!isInstallRateLimited(error) || installWaitMs >= INSTALL_RETRY_BUDGET_MS) throw error;
+        const waitMs = installRetryDelayMs(error);
+        installWaitMs += waitMs;
+        await waitInstallLimit(waitMs, (ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+      }
+    }
     jobId = String(submitted.id || "");
     const ctx = makeContext({
       startedAt: Date.now(),
@@ -510,6 +558,7 @@ export async function submitAndPollServer(input, deps) {
       idempotencyKey,
       serverHints: submitted,
       serverQueued: true,
+      aiProvider: String(payload?.ai?.provider || ""),
     });
     rememberJob(jobId, ctx);
     await pollJobViaRest(base, jobId, {

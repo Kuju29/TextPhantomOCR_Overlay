@@ -1,4 +1,4 @@
-/** Real grouping -> source -> page validation -> durable repair -> patch.
+/** Real grouping -> source -> page validation -> process-memory repair -> patch.
  * Only OCR/provider I/O and browser storage are replaced; no live requests.
  */
 import assert from 'node:assert/strict';
@@ -7,6 +7,7 @@ import {createInterface} from 'node:readline';
 import {readFileSync} from 'node:fs';
 import {translateUnits as routeTranslate} from '../src/background/ai/translation-service.js';
 import {translateLensPage} from '../src/background/pipeline/page-translation.js';
+import {refreshLocalAiCapabilities} from '../src/background/local-ai-preflight.js';
 import {makePageCheckpoint,buildPatchedResult,pageInitialReport} from '../src/background/repair/page-checkpoint.js';
 import {executeRepairPool} from '../src/background/repair/executor.js';
 import {createWorkloadController} from '../src/background/ai/workload-controller.js';
@@ -15,6 +16,7 @@ import {targetLanguagePriority} from '../src/shared/ai/direct-local/prompt.js';
 import {reportTranslationFailure} from '../src/shared/diagnostic-policy.js';
 import {createLogger,setLogLevel} from '../src/shared/logger.js';
 import {makeTpError} from '../src/shared/error-contract.js';
+import {flushUsageReceiptJournal} from '../src/shared/ai-usage.js';
 let checks=0;async function test(name,fn){await fn();checks++;console.log('PASS '+name);}
 const prompt=lang=>({version:'translation-plan-2',pieces:{systemPolicy:'POLICY',editableStyle:'STYLE SENTINEL',
  targetLanguageInstruction:targetLanguagePriority(lang).replace(/^Translate every source unit into /,'Target language: '),
@@ -22,14 +24,28 @@ const prompt=lang=>({version:'translation-plan-2',pieces:{systemPolicy:'POLICY',
 const ai={provider:'ollama',model:'fixture-model',base_url:'http://localhost:11434',thinking:'off',prompt:'STYLE SENTINEL',promptMode:'replace',
  local_adapter:{protocol:'ollama',baseUrl:'http://localhost:11434'},model_capabilities:{limits:{contextTokens:8192,maxOutputTokens:4096},reasoning:{supported:false},structuredOutput:{supported:false}}};
 const savedFetch=globalThis.fetch;
+// Replace runtime metadata I/O, while retaining the real model-owned preflight.
+async function refreshFixtureModel(ai,route,options){
+ const fetch=globalThis.fetch,paths=[];
+ globalThis.fetch=async(url,init={})=>{
+  const path=new URL(url).pathname;paths.push(path);
+  if(path==='/api/tags')return Response.json({models:[{name:ai.model}]});
+  if(path==='/api/ps')return Response.json({models:[{name:ai.model,context_length:65536}]});
+  assert.equal(path,'/api/show');assert.equal(JSON.parse(init.body).model,ai.model);
+  return Response.json({capabilities:['completion'],thinking:{values:[false,true],default:false},
+   model_info:{'general.architecture':'fixture','fixture.context_length':65536}});
+ };
+ try{return await refreshLocalAiCapabilities(ai,route,{...options,get:async()=>({}),set:async()=>{},emitTrace:()=>{}});}
+ finally{globalThis.fetch=fetch;assert.deepEqual([...paths].sort(),['/api/ps','/api/show','/api/tags']);}
+}
 function reply(text){return new Response(JSON.stringify({model:'fixture-model',message:{role:'assistant',content:text},done:true,done_reason:'stop',prompt_eval_count:750,eval_count:24,prompt_eval_cached_count:512}),{status:200,headers:{'content-type':'application/json'}});}
 function ledger(){
- const c=spawn('python',['-u','scripts/repair-ledger-fixture.py'],{stdio:['pipe','pipe','inherit']}),q=[];
+ const c=spawn(process.env.PYTHON||'python',['-u','scripts/repair-ledger-fixture.py'],{stdio:['pipe','pipe','inherit']}),q=[];
  createInterface({input:c.stdout}).on('line',s=>{const p=q.shift(),r=JSON.parse(s);r.ok?p.resolve(r.value):p.reject(new Error(r.code));});
  c.on('exit',code=>{for(const p of q.splice(0))p.reject(new Error('ledger exited '+code));});
  return {api(run,action='',body={}){return new Promise((resolve,reject)=>{q.push({resolve,reject});c.stdin.write(JSON.stringify({run,action,body})+'\n');});},close(){c.stdin.end();}};
 }
-const generated=spawnSync('python',['-c',`import sys,json
+const generated=spawnSync(process.env.PYTHON||'python',['-c',`import sys,json
 sys.path.insert(0,'api')
 from backend.grouping.detector_free_service import group_vertical_lens
 from backend.grouping.ai_source_tree import build_ai_source_tree
@@ -52,7 +68,7 @@ await test('uncertain geometry reaches AI preparation and one failed unit repair
    trace:(name,data)=>events.push({name,data}),onCheckpoint:async row=>{
     if(row.stage==='prepared')page=await makePageCheckpoint({...row,ctx:{jobId:'generation'}});
     if(row.stage==='finished'){page.accepted=row.accepted;page.failures=row.failures;page.phase='finished';}
-   },dependencies:{workloadController:ctl,translateUnits:async rows=>{
+   },dependencies:{refreshLocalAiCapabilities:refreshFixtureModel,workloadController:ctl,translateUnits:async rows=>{
     calls.push(rows);return {translations:rows.map((u,i)=>({id:u.id,text:i===0?'คำแปลที่ดีเดิม':'日本語のままです'})),missing:[],meta:{finishReason:'stop',generationAttempts:1,providerAttempts:1}};
    }}});
   assert(result.usable);assert(page);assert.equal(page.failures.length,1);assert.equal(page.accepted.length,1);
@@ -106,6 +122,7 @@ await test('actual Local/Cloud route owners preserve repair reason and account e
   }
   assert.equal(wire.length,2);assert.match(wire[0].body.messages[1].content,/ซ่อมคำแปล — ผิดภาษาปลายทาง/);
   assert.deepEqual(wire[1].body.repair,{owner:'extension',enabled:false,reason:'wrong_target_script'});
+  await flushUsageReceiptJournal();
   const sessions=Object.values(storage.aiUsageV1.models).flatMap(m=>m.sessions||[]);
   assert.equal(sessions.reduce((n,s)=>n+s.requests,0),2);
   assert.equal(sessions.reduce((n,s)=>n+s.inputTokens,0),1500);
@@ -138,7 +155,7 @@ await test('generated malformed output becomes a repairable terminal page instea
  const out=await translateLensPage({base:'http://test',payload:{lang:'th',metadata:{image_id:'page-error'},context:{}},
   result:{lensDocument:structuredClone(fixture.doc),eraseBoxes:[]},plan:{route:'direct-local',ai},
   log:{info(){},warn:(...a)=>warnings.push(a)},trace:(...a)=>events.push(a),onCheckpoint:async row=>checkpoints.push(row),
-  dependencies:{workloadController:createWorkloadController({read:async()=>({}),write:async()=>{}}),translateUnits:async()=>{throw fail;}}});
+  dependencies:{refreshLocalAiCapabilities:refreshFixtureModel,workloadController:createWorkloadController({read:async()=>({}),write:async()=>{}}),translateUnits:async()=>{throw fail;}}});
  assert.equal(out.usable,false);assert.equal(out.translated,0);assert.equal(warnings.length,0);
  assert(checkpoints.some(row=>row.stage==='progress'&&row.failures?.length));
  assert(checkpoints.some(row=>row.stage==='finished'&&row.failures?.length),
@@ -146,8 +163,8 @@ await test('generated malformed output becomes a repairable terminal page instea
 });
 await test('non-generated runtime failure keeps trace-only classification and is rethrown',async()=>{
  const warnings=[],events=[];const fail=Object.assign(new Error('offline before provider ownership'),{code:'NET_OFFLINE'});
- await assert.rejects(translateLensPage({base:'http://test',payload:{lang:'th',metadata:{image_id:'page-error-network'},context:{}},result:{lensDocument:structuredClone(fixture.doc),eraseBoxes:[]},plan:{route:'direct-local',ai},log:{info(){},warn:(...a)=>warnings.push(a)},trace:(...a)=>events.push(a),dependencies:{workloadController:createWorkloadController({read:async()=>({}),write:async()=>{}}),translateUnits:async()=>{throw fail;}}}),e=>e.code==='NET_OFFLINE');
+ await assert.rejects(translateLensPage({base:'http://test',payload:{lang:'th',metadata:{image_id:'page-error-network'},context:{}},result:{lensDocument:structuredClone(fixture.doc),eraseBoxes:[]},plan:{route:'direct-local',ai},log:{info(){},warn:(...a)=>warnings.push(a)},trace:(...a)=>events.push(a),dependencies:{refreshLocalAiCapabilities:refreshFixtureModel,workloadController:createWorkloadController({read:async()=>({}),write:async()=>{}}),translateUnits:async()=>{throw fail;}}}),e=>e.code==='NET_OFFLINE');
  assert.equal(warnings.length,1);assert(events.some(e=>e[0]==='translationFailure'));
  const jobs=readFileSync('src/background/jobs.js','utf8');assert.match(jobs,/reportFailure\("the extension route threw before it could draw", e/);
 });
-console.log(`Recovery runtime: ${checks}/${checks} PASS; real modules+durable ledger, mocked provider HTTP.`);
+console.log(`Recovery runtime: ${checks}/${checks} PASS; real modules+process-memory repair pool+durable usage journal, mocked provider HTTP.`);

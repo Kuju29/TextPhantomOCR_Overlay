@@ -1,11 +1,8 @@
 /**
- *
- * Remote-configured default API URLs.
- *
- * The extension ships with no hard-coded API endpoint. Instead it fetches a
- * tiny JSON file from GitHub that supplies the `defaultApiUrl` (used when the
- * user has not set a custom one) and `resetApiUrl` (used by the popup's reset
- * button). The result is cached in `chrome.storage.local` for 12 hours.
+ * Remote-configured default API URLs. The extension ships with no hard-coded
+ * API endpoint: it fetches a tiny JSON file from GitHub with `defaultApiUrl`
+ * (used when the user has no custom URL) and `resetApiUrl` (the popup's reset
+ * button), cached in `chrome.storage.local` for 12 hours.
  */
 
 import { normalizeUrl } from "./url.js";
@@ -157,6 +154,10 @@ export async function resolveApiBase({
 } = {}) {
   const stored = await getStorage({ customApiUrl: "" });
   const custom = coerceUrl(stored.customApiUrl);
+  // A custom URL is the answer; the remote default cannot change it, so do
+  // not contact GitHub on every API call (a failed fetch is not cached and
+  // would be retried, up to FETCH_TIMEOUT_MS each, by every request).
+  if (custom && !preferRemote) return custom;
   const defaults = await ensureApiDefaults({ force });
   const remote = coerceUrl(defaults.defaultApiUrl);
   return preferRemote ? remote || custom || "" : custom || remote || "";

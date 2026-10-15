@@ -113,8 +113,8 @@ class DeepSeekAdapter(OpenAIProviderAdapter):
         control_verified = _verified_reasoning(dict(request.model_capabilities))
         reasoning = request.model_capabilities.get("reasoning", {})
         reasoning = reasoning if isinstance(reasoning, dict) else {}
-        efforts = {str(value).strip().lower() for value in reasoning.get("supported_efforts", [])
-                   if isinstance(value, str)}
+        from backend.ai.providers.provider_helpers import normalized_efforts
+        efforts = set(normalized_efforts(reasoning))
         if control_verified:
             if request.thinking == "off":
                 payload["thinking"] = {"type": "disabled"}

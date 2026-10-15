@@ -1,6 +1,6 @@
 // Shared, testable ordering for page/session transitions. Cancellation must
 // always receive the old session before a new session is created.
-export function cancelBeforeSessionBump(tabId, reason, href, dependencies) {
+function cancelBeforeSessionBump(tabId, reason, href, dependencies) {
   const oldSessionId = dependencies.getTabSessionId(tabId);
   dependencies.cancelTabWork(tabId, reason, oldSessionId);
   return dependencies.bumpTabSession(tabId, href || "");

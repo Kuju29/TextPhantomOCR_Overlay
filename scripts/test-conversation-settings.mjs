@@ -10,7 +10,7 @@ import {resolveJobAiProfile} from '../src/background/ai-profile-resolver.js';
 import {translateWithLocalOpenAi} from '../src/shared/ai/direct-local/generation.js';
 import {getCanonicalPrompt} from '../src/background/ai/prompt-cache.js';
 import {createAiWireRecorder} from '../src/background/ai/wire-trace.js';
-const defaults={thinking:'off',memoryMode:'off',styleExamples:true,translationMode:'conversation',conversationReset:'0'};
+const defaults={thinking:'off',memoryMode:'off',styleExamples:false,styleExamplesPreferenceVersion:1,translationMode:'conversation',conversationReset:'0'};
 const target={provider:'huggingface',model:'fixture',endpoint:'https://router.huggingface.co/v1',runtime:'cloud'};
 let state=createAiProfiles();
 assert.equal(resolveAiProfile(state,{...target,defaults:{}}).profile.translationMode,'conversation','migrate missing option to new default');
@@ -24,7 +24,10 @@ state=updateAiProfile(state,{...target,defaults,patch:{translationMode:'conversa
 controller=createAiProfileActivationController({state,defaults});selected=resolveEffectiveAiProfile(controller.select(target,{language:'th'}));
 const a=buildEffectiveAiPayload(selected,{engine:'runsextension'}),b=buildEffectiveAiPayload(selected,{engine:'runsapi'});
 assert.deepEqual(a,b);assert.equal(a.ai.conversation_reset,'new-session');assert.equal(a.ai.translation_mode,'conversation');
-assert.equal(a.ai.style_examples,true,'Conversation must report its fixed twenty-example anchor');assert.equal(a.ai.memory_mode,'off','session history setting does not rewrite Series memory');
+assert.equal(a.ai.style_examples,false,'Conversation examples default OFF independently of its memory mode');assert.equal(a.ai.memory_mode,'off','session history setting does not rewrite Series memory');
+state=updateAiProfile(state,{...target,defaults,patch:{styleExamples:true},select:true,now:2});
+const optedIn=resolveEffectiveAiProfile(createAiProfileActivationController({state,defaults}).select(target,{language:'th'}));
+for(const engine of ['runsextension','runsapi'])assert.equal(buildEffectiveAiPayload(optedIn,{engine}).ai.style_examples,true,'Explicit scoped ON attaches the Conversation example anchor');
 const localTarget={provider:'ollama',model:'fixture-local',endpoint:'http://127.0.0.1:11434',runtime:'local'};
 state=updateAiProfile(state,{...localTarget,defaults,patch:{translationMode:'conversation',styleExamples:true},select:true,now:3});
 const local=resolveEffectiveAiProfile(createAiProfileActivationController({state,defaults}).select(localTarget,{language:'th'}));
@@ -104,15 +107,19 @@ for(const spec of cloudProviderCatalog()) {
     setStorage:async patch=>Object.assign(stored,structuredClone(patch))});
   await popup.initialize(stored);
   assert.equal(els.aiTranslationMode.value,'conversation',`${spec.id}: popup renders Conversation`);
-  assert.equal(els.aiStyleExamples.disabled,true,`${spec.id}: Conversation hides style examples`);
+  assert.equal(els.aiStyleExamples.disabled,false,`${spec.id}: Conversation exposes the example preference`);
+  assert.equal(els.aiStyleExamples.checked,false,`${spec.id}: fresh profile defaults OFF`);
+  assert.equal(els.aiStyleExamplesWrap.style.display,'');
   const job=await resolveJobAiProfile(stored,{language:'th'});
   assert.equal(job.settings.aiTranslationMode,'conversation',`${spec.id}: background resolves Conversation`);
 }
 const html=await readFile(new URL('../src/popup/popup.html',import.meta.url),'utf8');
-assert.ok(html.indexOf('ai-translation-mode')>html.indexOf('Optional Cloud-only request-rate cap'));
+// .68: the token ceiling replaced the request-rate cap, before the mode field.
+assert.ok(html.indexOf('id="ai-token-ceiling-wrap"') >= 0 && !html.includes('rate-limit-enabled'));
+assert.ok(html.indexOf('ai-translation-mode')>html.indexOf('id="ai-token-ceiling-wrap"'));
 assert.ok(html.indexOf('ai-translation-mode')<html.indexOf('<section class="panel" id="panel-tools"'));
 assert.ok(html.includes('value="conversation" selected'));assert.ok(html.includes('value="independent">Independent</option>'));assert.match(html,/id="ai-translation-mode"\s+disabled/);
-assert.match(html,/All Local AI providers, including LM Studio, use Independent/);
+assert.match(html,/Assigned automatically: Cloud → Conversation; Local → Independent/);
 let called=0;const oldFetch=globalThis.fetch;
 try{
  globalThis.fetch=()=>{called++;throw new Error('Unexpected network');};

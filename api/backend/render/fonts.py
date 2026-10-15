@@ -13,6 +13,7 @@ from __future__ import annotations
 from PIL import ImageFont
 
 import httpx, tempfile, json, sys, struct, os
+from collections import OrderedDict
 
 from backend.lens.languages import normalize as normalize_lang
 from backend.render.text_utils import contains_thai
@@ -36,7 +37,25 @@ class UnsupportedFontError(RuntimeError):
 
 _resolve_cache: dict[str, str] = {}
 _pair_cache: dict[tuple[str, str, int], tuple[PILFont, PILFont]] = {}
-_coverage_cache: dict[tuple[str, str], bool] = {}
+# Keys include the exact code points of rendered text, so this grows
+# with every user's text on a shared API. Bounded LRU (OrderedDict).
+_COVERAGE_CACHE_MAX = 4096
+_coverage_cache: "OrderedDict[tuple[str, str], bool]" = OrderedDict()
+
+
+def _coverage_get(key):
+    value = _coverage_cache.get(key)
+    if value is not None:
+        _coverage_cache.move_to_end(key)
+    return value
+
+
+def _coverage_put(key, value: bool) -> bool:
+    _coverage_cache[key] = value
+    _coverage_cache.move_to_end(key)
+    while len(_coverage_cache) > _COVERAGE_CACHE_MAX:
+        _coverage_cache.popitem(last=False)
+    return value
 
 def _system_font_dirs() -> tuple[str, ...]:
     """Return native scalable-font roots without assuming a Linux host."""
@@ -44,10 +63,14 @@ def _system_font_dirs() -> tuple[str, ...]:
         "/usr/share/fonts",
         "/usr/local/share/fonts",
         os.path.expanduser("~/.fonts"),
+        os.path.expanduser("~/.local/share/fonts"),
         "/System/Library/Fonts",
         "/Library/Fonts",
         os.path.expanduser("~/Library/Fonts"),
     ]
+    xdg_data_home = os.environ.get("XDG_DATA_HOME")
+    if xdg_data_home and os.path.isabs(xdg_data_home):
+        roots.append(os.path.join(xdg_data_home, "fonts"))
     windows_root = os.environ.get("WINDIR") or os.environ.get("SystemRoot")
     local_app_data = os.environ.get("LOCALAPPDATA")
     if windows_root:
@@ -216,16 +239,16 @@ def _font_has_codepoint(data: bytes, point: int) -> bool:
 
 def _font_supports_script(path: str, script: str) -> bool:
     key = (path, script)
-    if key in _coverage_cache:
-        return _coverage_cache[key]
+    cached = _coverage_get(key)
+    if cached is not None:
+        return cached
     try:
         with open(path, "rb") as font_file:
             data = font_file.read()
         supported = all(_font_has_codepoint(data, point) for point in _SCRIPT_PROBES[script])
     except (OSError, KeyError, struct.error):
         supported = False
-    _coverage_cache[key] = supported
-    return supported
+    return _coverage_put(key, supported)
 
 def _required_codepoints(text: str) -> tuple[int, ...]:
     def required(char: str) -> bool:
@@ -243,16 +266,16 @@ def _font_supports_text(path: str, text: str) -> bool:
     if not points:
         return True
     key = (path, "text:" + ",".join(map(str, points)))
-    if key in _coverage_cache:
-        return _coverage_cache[key]
+    cached = _coverage_get(key)
+    if cached is not None:
+        return cached
     try:
         with open(path, "rb") as font_file:
             data = font_file.read()
         supported = all(_font_has_codepoint(data, point) for point in points)
     except (OSError, struct.error):
         supported = False
-    _coverage_cache[key] = supported
-    return supported
+    return _coverage_put(key, supported)
 
 def _find_system_font(
     names: tuple[str, ...], script: str, *, scan_all: bool = True, required_text: str = ""
@@ -373,23 +396,6 @@ def ensure_font(path: str, urls: list[str]) -> str | None:
     )
     return None
 
-def is_truetype(font: PILFont) -> bool:
-    """True only for a scalable TTF/OTF loaded from a validated disk file.
-
-    Pillow's default may be bitmap or, since Pillow 12, an in-memory
-    ``FreeTypeFont``. Neither is accepted because tofu/default metrics silently
-    break fit-size calculations.
-    """
-    if not isinstance(font, ImageFont.FreeTypeFont):
-        return False
-    # Pillow 12 implements load_default() with an in-memory FreeTypeFont.
-    # Runtime fonts here always originate from validated files, so requiring
-    # a real path prevents that default/tofu face from masquerading as usable.
-    path = getattr(font, "path", None)
-    try:
-        return isinstance(path, (str, bytes, os.PathLike)) and os.path.isfile(os.fspath(path))
-    except (OSError, TypeError):
-        return False
 
 def pick_font(text: str, thai_path: str, latin_path: str, size: int) -> PILFont:
     """Choose the Thai or Latin font for ``text`` and load it at ``size``.

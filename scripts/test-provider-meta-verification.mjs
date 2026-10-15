@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import { createProviderMetaController } from "../src/popup/controllers/provider-meta-controller.js";
 
 const val = (value = "") => ({ value });
-function fixture({ provider = "huggingface", model = "stale-model", resolveModels = ["good-model"], modelCandidates = null, probeStatus = "passed", probeCapabilities = null } = {}) {
+function fixture({ provider = "huggingface", model = "stale-model", resolveModels = ["good-model"], modelCandidates = null, resolveCapabilities = {}, mark = null } = {}) {
   const els = {
     mode: val("lens_text"), sources: val("ai"), lang: val("th"), apiUrl: val("http://api.local"),
     aiProvider: val(provider), aiBaseUrl: val(provider === "huggingface" ? "https://router.huggingface.co/v1" : ""),
     aiKey: val("hf_fixture"), aiModel: val(model), aiModelWrap: {}, aiProviderWrap: {}, aiKeyWrap: { style:{} },
   };
-  const state = { aiMetaSeq:0, aiProbeSeq:0, localConnectSeq:0, localConnectInFlight:null,
-    desiredAiModel:model, lastAiResolve:null, lastAiProbe:null, aiModelBlocked:false, modelDirty:true };
+  const state = { aiMetaSeq:0, localConnectSeq:0, localConnectInFlight:null,
+    desiredAiModel:model, lastAiResolve:null, manualModelBlock:null, aiModelBlocked:false, modelDirty:true };
   const requests=[]; const messages=[];
   const api = { fetchJson: async (url, body) => {
     requests.push({url, body:structuredClone(body)});
@@ -22,10 +22,9 @@ function fixture({ provider = "huggingface", model = "stale-model", resolveModel
       model_candidates: structuredClone(modelCandidates || resolveModels.map((id) => ({
         id, eligibility: "usable", evidence: "account_catalogue_translation_filter",
       }))),
-      model_capabilities:{},
+      model_capabilities:structuredClone(resolveCapabilities),
     };
-    if (url.endsWith("/probe")) return { ok:probeStatus === "passed", provider, model:String(els.aiModel.value), status:probeStatus, cached:false, ...(probeCapabilities ? { model_capabilities: structuredClone(probeCapabilities) } : {}) };
-    throw new Error("unexpected URL");
+    throw new Error(`unexpected URL (10491: no selected-model probe): ${url}`);
   }};
   const setModelOptions=(models,{keepValue="",placeholder="",selectFirst=true}={})=>{
     const list=models.map(value=>String(value?.id ?? value)); const current=String(keepValue||"");
@@ -33,14 +32,17 @@ function fixture({ provider = "huggingface", model = "stale-model", resolveModel
     els.aiModel.placeholder=placeholder;
     els.aiModel.value=list.includes(current)?current:(selectFirst&&list.length?list[0]:"");
   };
-  const controller=createProviderMetaController({els,state,api,
-    constants:{paths:{AI_RESOLVE:"/resolve",AI_PROBE:"/probe"},metaTimeout:100,probeTimeout:100},
+  const reads=[];
+  const readModelBlock=async(selection)=>{reads.push(structuredClone(selection));
+    return typeof mark === "function" ? mark(selection) : mark;};
+  const controller=createProviderMetaController({els,state,api,readModelBlock,
+    constants:{paths:{AI_RESOLVE:"/resolve"},metaTimeout:100},
     provider:{isLocal:id=>id==="lmstudio",label:x=>x,protocolLabel:()=>"chat"},
     profile:{saveModelCapabilities:async()=>{},selectModel:()=>{}}, prompt:{render:async()=>{},scheduleSave:()=>{}}, local:{}, usage:{},
     persist:async()=>{}, normalizeUrl:x=>x, setModelOptions,
     setFieldMessage:(wrap,type,text)=>messages.push({wrap,type,text}), setStatus:()=>{}, toggleUi:()=>{},
   });
-  return {controller,els,state,requests,messages};
+  return {controller,els,state,requests,messages,reads};
 }
 
 // Only positively eligible models enter the picker. Unknown and blocked
@@ -91,50 +93,42 @@ function fixture({ provider = "huggingface", model = "stale-model", resolveModel
     "missing model must be rejected by catalogue before generation probe");
 }
 
-// An account-listed model remains blocked while its explicit generation probe
-// is in flight and becomes usable only after a successful probe.
+// 10491: an account-listed model is usable as soon as the live catalogue
+// lists it. Selecting it sends no generation request.
 {
-  const t=fixture({model:"good-model",resolveModels:["good-model"],probeStatus:"passed"});
+  const t=fixture({model:"good-model",resolveModels:["good-model"]});
   await t.controller.refresh();
-  assert.equal(t.requests.filter(x=>x.url.endsWith("/probe")).length,1);
-  assert.equal(t.state.lastAiProbe.status,"passed");
+  assert.deepEqual(t.requests.map(x=>x.url),["http://api.local/resolve"]);
   assert.equal(t.state.aiModelBlocked,false);
+  assert.doesNotMatch(t.messages.map(x=>x.text).join(" "),/Testing selected model|Explicit test/);
 }
 
-
-// A selected-model probe may supplement a catalogue that could not describe
-// native reasoning controls. The exact verified capability must reach popup
-// state instead of being lost after the health probe.
+// AI think / image capabilities come from the catalogue record already loaded.
 {
   const reasoning={ supported:true, mandatory:false, control:"levels", supported_efforts:["none","low"], dynamic:true };
-  const t=fixture({provider:"openai",model:"good-model",resolveModels:["good-model"],probeCapabilities:{reasoning}});
+  const t=fixture({provider:"openai",model:"good-model",resolveModels:["good-model"],resolveCapabilities:{reasoning}});
   await t.controller.refresh();
   assert.deepEqual(t.state.lastAiResolve.model_capabilities.reasoning, reasoning);
+  assert.equal(t.requests.length,1);
 }
 
-// Changing provider/account/model closes the translate gate immediately, before
-// the asynchronous catalogue request resolves. A previously verified model
-// must not remain clickable during this refresh race.
+// Changing provider/account/model closes the gate immediately, before the
+// asynchronous catalogue request resolves; the fresh catalogue reopens it.
 {
   let releaseResolve;
-  const t=fixture({model:"good-model",resolveModels:["good-model"],probeStatus:"passed"});
+  const t=fixture({model:"good-model",resolveModels:["good-model"]});
   t.state.aiModelBlocked=false;
-  t.state.lastAiProbe={provider:"old-provider",model:"old-model",status:"passed"};
-  const original=t.controller;
-
-  // Build a second controller with an explicitly deferred resolve request so
-  // we can observe state before network completion.
+  t.state.manualModelBlock={provider:"old-provider",model:"old-model",row:{code:"provider_model_not_found"}};
   const els=t.els; const state=t.state; const requests=[];
   const deferred=new Promise(resolve=>{ releaseResolve=resolve; });
   const controller=createProviderMetaController({
-    els,state,
+    els,state,readModelBlock:async()=>null,
     api:{fetchJson:async(url,body)=>{
       requests.push({url,body:structuredClone(body)});
       if(url.endsWith("/resolve")) return deferred;
-      if(url.endsWith("/probe")) return {ok:true,provider:"huggingface",model:String(els.aiModel.value),status:"passed"};
       throw new Error("unexpected URL");
     }},
-    constants:{paths:{AI_RESOLVE:"/resolve",AI_PROBE:"/probe"},metaTimeout:100,probeTimeout:100},
+    constants:{paths:{AI_RESOLVE:"/resolve"},metaTimeout:100},
     provider:{isLocal:()=>false,label:x=>x,protocolLabel:()=>"chat"},
     profile:{saveModelCapabilities:async()=>{},selectModel:()=>{}}, prompt:{render:async()=>{},scheduleSave:()=>{}}, local:{}, usage:{},
     persist:async()=>{}, normalizeUrl:x=>x,
@@ -148,7 +142,7 @@ function fixture({ provider = "huggingface", model = "stale-model", resolveModel
   const refreshPromise=controller.refresh();
   await Promise.resolve();
   assert.equal(state.aiModelBlocked,true,"refresh must block translation before catalogue I/O completes");
-  assert.equal(state.lastAiProbe,null,"old probe must be invalidated at refresh start");
+  assert.equal(state.manualModelBlock,null,"an old selection's mark is dropped at refresh start");
   releaseResolve({
     ok:true,requested_model:"good-model",provider:"huggingface",backend_supported:true,
     provider_protocol:"openai_chat_completions",key_status:"valid",models_verified:true,models_source:"live",
@@ -156,53 +150,31 @@ function fixture({ provider = "huggingface", model = "stale-model", resolveModel
     model:"good-model",model_status:"available",model_capabilities:{},
   });
   await refreshPromise;
-  assert.equal(state.lastAiProbe?.status,"passed");
-  assert.equal(state.aiModelBlocked,false,"only the exact successful probe may release the gate");
+  assert.deepEqual(requests.map(x=>x.url),["http://api.local/resolve"]);
+  assert.equal(state.aiModelBlocked,false,"the fresh catalogue releases the gate without a probe");
 }
 
-// Catalogue eligibility is not silently treated as current generation health.
-for (const status of ["unreachable","rate_limited","rejected","invalid_model_output","model_access_denied","probe_failed"]) {
-  const t=fixture({model:"good-model",resolveModels:["good-model"],probeStatus:status});
-  await t.controller.refresh();
-  assert.equal(t.state.aiModelBlocked,true, `${status} must keep translation paused until a probe passes`);
-}
-
-
-// Deterministic probe failure removes the exact model immediately and invalidates
-// stale resolve-cache evidence so a refresh cannot resurrect it for 60 seconds.
+// A real translation that failed deterministically marked this exact
+// provider + key + model: the model stays in the picker (so it can be
+// selected again), translation stays paused and the page's message is shown.
 {
-  const t=fixture({model:"good-model",resolveModels:["good-model","other-model"],probeStatus:"rejected"});
+  const t=fixture({provider:"openrouter",model:"good-model",resolveModels:["good-model","other-model"],
+    mark:(selection)=>selection.model==="good-model"?{code:"provider_model_not_found",status:502,upstreamStatus:404}:null});
   await t.controller.refresh();
-  assert.deepEqual(t.els.aiModel.options.map(x=>x.value),["other-model"]);
-  assert.equal(t.els.aiModel.value,"");
-  const firstResolveCount=t.requests.filter(x=>x.url.endsWith("/resolve")).length;
-  await t.controller.refresh();
-  assert.equal(t.requests.filter(x=>x.url.endsWith("/resolve")).length,firstResolveCount+1,
-    "hard probe failure must invalidate stale resolve-cache evidence");
-  assert.equal(t.els.aiModel.options.includes?.("good-model"),false);
-  assert.deepEqual(t.els.aiModel.options.map(x=>x.value),["other-model"]);
-}
-
-// Transient provider health does not prove the model unusable. Keep it visible
-// while translation remains paused until a later probe succeeds.
-{
-  const t=fixture({model:"good-model",resolveModels:["good-model"],probeStatus:"rate_limited"});
-  await t.controller.refresh();
-  assert.deepEqual(t.els.aiModel.options.map(x=>x.value),["good-model"]);
+  assert.deepEqual(t.els.aiModel.options.map(x=>x.value),["good-model","other-model"]);
+  assert.equal(t.els.aiModel.value,"good-model");
   assert.equal(t.state.aiModelBlocked,true);
-}
-{
-  const t=fixture({provider:"groq",model:"good-model",resolveModels:["good-model"],probeStatus:"rate_limited"});
-  await t.controller.refresh();
-  assert.deepEqual(t.els.aiModel.options.map(x=>x.value),["good-model"]);
-  assert.equal(t.state.aiModelBlocked,false,
-    "Groq's probe 429 must not override a verified live account model list");
-}
-{
-  const t=fixture({provider:"groq",model:"good-model",resolveModels:["good-model"],probeStatus:"probe_inconclusive"});
-  await t.controller.refresh();
-  assert.equal(t.state.aiModelBlocked,false,
-    "a tiny Groq reasoning probe must not demote a live account-listed model");
+  assert.deepEqual(t.reads.at(-1),{provider:"openrouter",baseUrl:"",apiKey:"hf_fixture",model:"good-model"});
+  const text=t.messages.filter(x=>x.wrap===t.els.aiModelWrap).at(-1).text;
+  // Same text as the page error: imageErrorMessage() shows `${userMessage} · ${code}`.
+  assert.match(text,/✕ ไม่พบโมเดลที่เลือกใน Provider · provider_model_not_found/);
+  assert.match(text,/select this model again to retry/);
+  assert.equal(t.requests.length,1,"a marked model still sends no generation request");
+  // The background writes/clears the mark while the popup is open.
+  t.els.aiModel.value="other-model";
+  await t.controller.refreshBlock();
+  assert.equal(t.state.aiModelBlocked,false);
+  assert.equal(t.state.manualModelBlock,null);
 }
 
 // If the catalogue itself cannot be verified, old models are cleared rather
@@ -216,4 +188,4 @@ for (const status of ["unreachable","rate_limited","rejected","invalid_model_out
   assert.match(src,/setModelOptions\(\[\], \{ placeholder: "Model list could not be verified" \}\)[\s\S]*setModelBlocked\(true\)/);
 }
 
-console.log("Provider picker verification passed: no stale models, selected model must explicitly probe before translation.");
+console.log("Provider picker verification passed: no stale models, no selected-model probe, deterministic failure marks shown.");

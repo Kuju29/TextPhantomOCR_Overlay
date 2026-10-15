@@ -1,10 +1,13 @@
 (function(){
   const TP=window.__TP;if(!TP||TP.bail)return;
+  // Selected-interface-language copy (shared/page-ui-text.js); English without it.
+  const pt=(source,values)=>globalThis.TPPageText?globalThis.TPPageText.t(source,values)
+    :String(source).replace(/\{([a-z]+)\}/g,(match,name)=>values&&name in values?String(values[name]):match);
   let root=null,main=null,textEl=null,body=null,toggleBtn=null,timer=0,hideTimer=0,paintTimer=0,latest=null,pending=null,collapsed=true,pageStarted=Date.now();
   const versions=new Map(),batchStates=new Map(),terminalDeadlines=new Map();
   const TERMINAL=new Set(['done','skipped','error','cancelled']);
   const processingDone=batch=>batch?.processingComplete===true && batch?.lifecycle==='completed';
-  const repairActive=batch=>!batch?.processingComplete && !['cancelled','failed','empty'].includes(batch?.lifecycle) && ['collecting','repairing','repair_request','repair_wave','repair_circuit_open','applying','apply_pending','blocked'].includes(String(batch?.repair?.phase||''));
+  const repairActive=batch=>!batch?.processingComplete && !['cancelled','failed','empty'].includes(batch?.lifecycle) && ['collecting','repairing','repair_request','repair_wave','repair_circuit_open','applying','apply_pending'].includes(String(batch?.repair?.phase||''));
   const batchActive=batch=>!['cancelled','failed','empty'].includes(batch?.lifecycle) && (batch?.lifecycle==='discovering'||(batch?.placement?.released===true&&Number(batch?.placement?.waiting)>0)||(!processingDone(batch)&&(repairActive(batch)||Number(batch?.terminal||0)<Number(batch?.total||0))));
   const chooseVisible=()=>{const all=[...batchStates.values()];const active=all.filter(batchActive).sort((a,b)=>(Number(b.startedAt)||0)-(Number(a.startedAt)||0));if(active.length)return active[0];return all.sort((a,b)=>(Number(b.ts)||0)-(Number(a.ts)||0))[0]||null;};
   const fmtMs=ms=>{ms=Math.max(0,Number(ms)||0);if(ms<1000)return `${Math.round(ms)}ms`;const sec=ms/1000;return `${sec>=10?sec.toFixed(0):sec.toFixed(1)}s`;};
@@ -24,13 +27,18 @@
     const starts=(items||[]).map(item=>{const lane=item?.progress?.ai||{};return Number(lane.startedAt)||Number(lane.queuedAt)||0;}).filter(Boolean);
     return starts.length?fmtMs(Math.max(0,Date.now()-Math.min(...starts))):'';
   };
+  // label/action name the English copy; each combination is one authored phrase.
+  const LANE_TEXT={Lens:{run:'Lens reading text {done}/{total}',queue:'Lens reading text {done}/{total} · Lens queue {count}',wait:'Lens waiting {count} · {done}/{total}'},
+    Group:{run:'Group grouping text {done}/{total}',queue:'Group grouping text {done}/{total} · Group queue {count}',wait:'Group waiting {count} · {done}/{total}'}};
   const simpleLaneSummary=(batch,laneName,label,action)=>{
     const lane=laneSet(batch,laneName);if(!lane.running.length&&!lane.queued.length)return '';
+    const copy=LANE_TEXT[label],values={done:lane.finished,total:lane.total,count:lane.queued.length};
     if(lane.running.length){
+      if(copy)return pt(lane.queued.length?copy.queue:copy.run,values);
       const queue=lane.queued.length?` · ${label} queue ${lane.queued.length}`:'';
       return `${label} ${action} ${lane.finished}/${lane.total}${queue}`;
     }
-    return `${label} waiting ${lane.queued.length} · ${lane.finished}/${lane.total}`;
+    return copy?pt(copy.wait,values):`${label} waiting ${lane.queued.length} · ${lane.finished}/${lane.total}`;
   };
   const AI_FUNCTION_LABEL=Object.freeze({
     waiting_slot:'waiting for slot',preparing_request:'preparing request',sending_request:'sending request',
@@ -53,9 +61,61 @@
     if(detail.includes('connecting'))return 'connecting';
     return 'working';
   };
+  // Live provider-stream phase of the request (API progress rows).
+  // The thinking timer advances on the 500 ms tick between updates.
+  const STREAM_STOP_TEXT=Object.freeze({ai_thinking_too_long:'AI thought too long — stopping',
+    ai_output_no_progress:'No new lines — stopping',ai_stream_ceiling:'Safety time limit — stopping'});
+  const streamPhaseText=(lane,units)=>{
+    const phase=lane?.function==='provider_stream'?lane.streamPhase:null;if(!phase)return '';
+    if(phase.phase==='waiting')return pt('Waiting for provider…');
+    if(phase.phase==='thinking'){
+      const received=Number(phase.receivedAt)||Date.now(),ms=(Number(phase.phaseElapsedMs)||0)+Math.max(0,Date.now()-received);
+      return pt('AI is thinking… ({seconds}s)',{seconds:Math.floor(ms/1000)});
+    }
+    if(phase.phase==='writing'){
+      const done=Math.max(0,Number(phase.linesDone)||0),total=Number(phase.linesTotal)||Number(units)||0;
+      return total?pt('Translating {done}/{total} lines',{done:Math.min(done,total),total}):pt('Translating {done} lines',{done});
+    }
+    return stopPhaseText(phase);
+  };
+  const stopPhaseText=phase=>phase.phase==='stopping'&&STREAM_STOP_TEXT[phase.reason]?pt(STREAM_STOP_TEXT[phase.reason]):pt('No response — stopping');
+  // A provider stop stays readable for at least 1.5 s even when the page's
+  // error arrives right after it. Display only: the work is never delayed.
+  const STOP_HOLD_MS=1500,stopSeen=new Map();
+  const heldStopText=batch=>{
+    const now=Date.now();let text='';
+    for(const item of itemsOf(batch)){
+      const phase=item?.progress?.ai?.streamPhase;
+      if(!phase||(phase.phase!=='stalled'&&phase.phase!=='stopping'))continue;
+      const received=Number(phase.receivedAt)||0;if(!received||now-received>10000)continue;
+      const key=`${batch?.id}:${item?.imageKey||item?.label}:${received}`;
+      if(!stopSeen.has(key)){stopSeen.set(key,now);while(stopSeen.size>64)stopSeen.delete(stopSeen.keys().next().value);}
+      if(now-stopSeen.get(key)<STOP_HOLD_MS)text=stopPhaseText(phase);
+    }
+    return text;
+  };
+  // Reader page numbers (1-based) of the pages in one AI request.
+  const pageNumber=item=>{
+    const index=Number(item?.pageIndex);if(item?.pageIndex!=null&&Number.isSafeInteger(index)&&index>=0)return index+1;
+    const n=Number(String(item?.label||'').match(/\d+/)?.[0]);return Number.isSafeInteger(n)&&n>0?n:0;
+  };
+  const pagesText=items=>{
+    const count=items.length;if(!count)return '';
+    const numbers=[...new Set(items.map(pageNumber))].sort((a,b)=>a-b);
+    if(numbers.includes(0))return pt(count===1?' (1 page)':' ({count} pages)',{count});
+    const ranges=[];
+    for(let i=0;i<numbers.length;){let j=i;while(j+1<numbers.length&&numbers[j+1]===numbers[j]+1)j++;ranges.push(i===j?String(numbers[i]):`${numbers[i]}–${numbers[j]}`);i=j+1;}
+    if(ranges.length>3)return pt(' ({count} pages)',{count});
+    return pt(numbers.length===1?' (page {pages})':' (pages {pages})',{pages:ranges.join(', ')});
+  };
+  // The shared API limited this browser install; work goes on by itself.
+  const rateWaitText=batch=>{
+    const left=(Number(batch?.rateWait?.until)||0)-Date.now();
+    return left>0?pt('Server busy — waiting {seconds}s before continuing',{seconds:Math.ceil(left/1000)}):'';
+  };
   const aiSummary=batch=>{
     const lane=laneSet(batch,'ai');if(!lane.running.length&&!lane.queued.length)return '';
-    if(!lane.running.length)return `AI waiting for slot ${lane.queued.length}p`;
+    if(!lane.running.length)return pt('AI waiting for slot {count}p',{count:lane.queued.length});
     const active=lane.running.map(item=>item?.progress?.ai||{});
     const mostRecentTurn=Math.max(...active.map(x=>Number(x.turn)||0),0);
     const focus=active.find(x=>Number(x.turn)===mostRecentTurn && x.function)||active.find(x=>x.function)||active[0]||{};
@@ -67,32 +127,43 @@
     const repairGenerating=repairActive(batch) && batch?.repair?.phase!=='collecting';
     if(batch?.conversation?.phase==='turn_complete' && !repairGenerating &&
        Number(batch.conversation.turn)>=mostRecentTurn)
-      return 'AI reply complete · delivering page results';
-    const fn=aiFunction(focus),conversation=active.some(x=>x.conversation===true);
-    let pages=0,units=0;
-    if(conversation){pages=Math.max(...active.map(x=>Number(x.pageCount)||0),lane.running.length);units=Math.max(...active.map(x=>Number(x.unitCount)||0),0);}
-    else {pages=lane.running.length;units=active.reduce((sum,x)=>sum+(Number(x.unitCount)||0),0);}
-    const scope=units>0?`${pages}p/${units}u`:`${pages}p`;
+      return pt('AI reply complete · delivering page results');
+    const fn=pt(aiFunction(focus)),conversation=active.some(x=>x.conversation===true);
+    const units=conversation?Math.max(...active.map(x=>Number(x.unitCount)||0),0):active.reduce((sum,x)=>sum+(Number(x.unitCount)||0),0);
+    // Name the pages of the request the counts belong to (one provider
+    // request may cover several pages); page/unit totals stay in traces.
+    const stamp=focus?.function==='provider_stream'?Number(focus?.streamPhase?.receivedAt)||0:0;
+    let requestItems=stamp?lane.running.filter(item=>Number(item?.progress?.ai?.streamPhase?.receivedAt)===stamp)
+      :conversation?lane.running.filter(item=>(Number(item?.progress?.ai?.turn)||0)===mostRecentTurn):lane.running;
+    if(!requestItems.length)requestItems=lane.running;
+    const pages=pagesText(requestItems);
+    const live=streamPhaseText(focus,units);
+    if(live){
+      let text=`${live}${pages}`;
+      const waiting=Math.max(...active.map(x=>Number(x.queuedPageCount)||0),0,lane.queued.length);
+      if(waiting>0)text+=pt(' · queue {count}p',{count:waiting});
+      return text;
+    }
     const elapsed=oldestElapsed(lane.running);
     // The running lane belongs to the whole request, including pages that
     // already received a provisional overlay while later pages stream in.
-    let text=conversation?`AI request ${fn} (${scope} turn)`:`AI ${fn} ${scope}`;
+    let text=pt(conversation?'AI request {function}':'AI {function}',{function:fn})+pages;
     if(elapsed)text+=` · ${elapsed}`;
     const hinted=Math.max(...active.map(x=>Number(x.queuedPageCount)||0),0),queue=Math.max(hinted,lane.queued.length);
-    if(queue>0)text+=` · queue ${queue}p`;
+    if(queue>0)text+=pt(' · queue {count}p',{count:queue});
     return text;
   };
   const insertSummary=batch=>{
     const lane=laneSet(batch,'insert');if(!lane.running.length&&!lane.queued.length)return '';
-    if(lane.running.length){const queue=lane.queued.length?` · Insert queue ${lane.queued.length}`:'';return `Insert placing ${lane.running.length}p${queue}`;}
-    return `Insert waiting ${lane.queued.length}p`;
+    if(lane.running.length)return pt(lane.queued.length?'Insert placing {count}p · Insert queue {queue}':'Insert placing {count}p',{count:lane.running.length,queue:lane.queued.length});
+    return pt('Insert waiting {count}p',{count:lane.queued.length});
   };
   const resultAlerts=batch=>{
     const items=itemsOf(batch),counts={skipped:0,error:0,cancelled:0};
     for(const item of items){const state=String(item?.progress?.result?.state||'pending');if(state in counts)counts[state]++;}
     const stats=batch?.stats||{};counts.skipped=Math.max(counts.skipped,Number(stats.skipped||0)+Number(stats.scanSkipped||0));
     counts.error=Math.max(counts.error,Number(stats.error)||0);counts.cancelled=Math.max(counts.cancelled,Number(stats.aborted)||0);
-    const parts=[];if(counts.skipped)parts.push(`skip ${counts.skipped}`);if(counts.error)parts.push(`error ${counts.error}`);if(counts.cancelled)parts.push(`cancel ${counts.cancelled}`);return parts;
+    const parts=[];if(counts.skipped)parts.push(pt('skip {count}',{count:counts.skipped}));if(counts.error)parts.push(pt('error {count}',{count:counts.error}));if(counts.cancelled)parts.push(pt('cancel {count}',{count:counts.cancelled}));return parts;
   };
   const batchElapsed=batch=>{
     const start=Number(batch?.startedAt)||Date.now(),end=processingDone(batch)
@@ -103,42 +174,49 @@
   const compactText=batch=>{
     const items=itemsOf(batch),total=Math.max(Number(batch?.total)||0,items.length),terminal=items.filter(item=>item?.terminal||TERMINAL.has(String(item?.progress?.overall?.state||''))).length;
     const inserted=items.filter(item=>item?.inserted===true).length;
-    if (!total) return batch?.lifecycle==='discovering' ? 'TextPhantom: discovering images…'
-      : `TextPhantom: ${batch?.stage || (batch?.lifecycle==='cancelled' ? 'Cancelled' : 'No eligible images')}`;
-    const parts=[`TextPhantom: inserted ${inserted}/${total}`];
-    if(batch?.lifecycle==='cancelled')parts.push('cancelled');
-    else if(batch?.processingComplete)parts.push(`processing complete · ${terminal}/${total} pages processed${batch?.placement?.waiting ? ` · ${batch.placement.waiting} saved for display` : ''}`);
+    const display=value=>globalThis.TPPageText?.display?.(value) ?? value;
+    if (!total) return batch?.lifecycle==='discovering' ? display('TextPhantom: discovering images…')
+      : `TextPhantom: ${display(batch?.stage || (batch?.lifecycle==='cancelled' ? 'Cancelled' : 'No eligible images'))}`;
+    const parts=[pt('TextPhantom: inserted {inserted}/{total}',{inserted,total})];
+    if(batch?.lifecycle==='cancelled')parts.push(pt('cancelled'));
+    else if(batch?.processingComplete)parts.push(pt(batch?.placement?.waiting ? 'processing complete · {done}/{total} pages processed · {count} saved for display'
+      : 'processing complete · {done}/{total} pages processed',{done:terminal,total,count:batch?.placement?.waiting}));
     const lens=simpleLaneSummary(batch,'lens','Lens','reading text');if(lens)parts.push(lens);
     const group=simpleLaneSummary(batch,'grouping','Group','grouping text');if(group)parts.push(group);
     const repair=batch?.repair||{};
     if(Number(repair.failedUnits)>0) {
-      const remaining=Number(repair.unresolved)||0;
-      if(repair.phase==='done')parts.push(`Repair complete ${Number(repair.repaired)||0}/${repair.failedUnits}${remaining?` · unresolved ${remaining}`:''}`);
-      else if(repair.phase==='apply_pending' && batch?.processingComplete)parts.push(`Repair translated ${Number(repair.repaired)||0}/${repair.failedUnits}${Number(repair.unappliedRepairedUnits)>0?` · ${repair.unappliedRepairedUnits} unit(s) ready when displayed`:''}`);
-      else if(repairActive(batch))parts.push(`Repair ${repair.phase==='collecting'?'waiting':'active'} · ${Number(repair.repaired)||0}/${repair.failedUnits} fixed`);
+      const remaining=Number(repair.unresolved)||0,values={done:Number(repair.repaired)||0,total:repair.failedUnits};
+      if(repair.phase==='done')parts.push(pt(remaining?'Repair complete {done}/{total} · unresolved {count}':'Repair complete {done}/{total}',{...values,count:remaining}));
+      else if(repair.phase==='apply_pending' && batch?.processingComplete)parts.push(pt(Number(repair.unappliedRepairedUnits)>0?'Repair translated {done}/{total} · {count} unit(s) ready when displayed'
+        :'Repair translated {done}/{total}',{...values,count:repair.unappliedRepairedUnits}));
+      else if(repairActive(batch))parts.push(pt(repair.phase==='collecting'?'Repair waiting · {done}/{total} fixed':'Repair active · {done}/{total} fixed',values));
     }
+    let held='';
     if(!processingDone(batch)){
-      const ai=aiSummary(batch);if(ai)parts.push(ai);
+      const wait=batch?.lifecycle==='cancelled'?'':rateWaitText(batch);if(wait)parts.splice(1,0,wait);
+      const ai=aiSummary(batch);held=heldStopText(batch);
+      if(held&&!ai.includes(held))parts.push(held);else{held='';if(ai)parts.push(ai);}
       const insert=insertSummary(batch);if(insert)parts.push(insert);
     }
+    if(held)return parts.join(' · ');
     parts.push(...resultAlerts(batch));
     if(total>0&&batch?.lifecycle!=="cancelled"&&batch?.placement?.waiting&&processingDone(batch))
-      parts.splice(1,0,`AI finished in ${batchElapsed(batch)}`);
+      parts.splice(1,0,pt('AI finished in {time}',{time:batchElapsed(batch)}));
     else if(total>0&&batch?.lifecycle!=="cancelled"&&(!batch?.placement?.waiting&&(processingDone(batch)||(terminal>=total&&!repairActive(batch)))))
-      parts.splice(1,0,`done ${batchElapsed(batch)}`);
+      parts.splice(1,0,pt('done {time}',{time:batchElapsed(batch)}));
     return parts.join(' · ');
   };
 
 
   function setCollapsed(value){
-    const opening=collapsed && !Boolean(value);
+    const opening=collapsed && !value;
     collapsed=Boolean(value);if(!body||!toggleBtn||!main||!root||!textEl)return;
     if(opening && latest)renderDetails(latest);
     body.style.display=collapsed?'none':'block';
     toggleBtn.textContent=collapsed?'+':'−';
-    toggleBtn.title=collapsed?'Show per-image TextPhantom progress':'Hide per-image TextPhantom progress';
+    toggleBtn.title=pt(collapsed?'Show per-image TextPhantom progress':'Hide per-image TextPhantom progress');
     toggleBtn.setAttribute('aria-expanded',String(!collapsed));
-    toggleBtn.setAttribute('aria-label',collapsed?'Show TextPhantom details':'Hide TextPhantom details');
+    toggleBtn.setAttribute('aria-label',pt(collapsed?'Show TextPhantom details':'Hide TextPhantom details'));
     main.style.borderBottom=collapsed?'0':'1px solid rgba(255,255,255,.10)';
     root.style.width=collapsed?'auto':'min(1180px, calc(100vw - 20px))';
     root.style.maxWidth=collapsed?'68vw':'calc(100vw - 20px)';
@@ -179,20 +257,20 @@
   const laneCell=(lane,name)=>{
     const wrap=document.createElement('div');wrap.className='tp-pg-cell';css(wrap,{minWidth:'0',padding:'5px 6px',borderLeft:'1px solid rgba(255,255,255,.06)'});
     const state=stateText(lane),stateMain=document.createElement('div');stateMain.dataset.role='state';stateMain.dataset.lane=name;stateMain.textContent=state.main;css(stateMain,{fontWeight:state.cls==='running'||state.cls==='error'?'700':'600',whiteSpace:'nowrap',color:state.cls==='error'?'#ffb4b4':state.cls==='running'?'#fff':state.cls==='done'?'#d8ffd8':state.cls==='queued'?'#ffe7a3':'#c8c8ce'});
-    const baseDetail=String(lane?.detail||'').trim(),queueWait=Number(lane?.queueWaitMs)||0,detail=[baseDetail,queueWait>0?`queue ${fmtMs(queueWait)}`:''].filter(Boolean).join(' · ');wrap.appendChild(stateMain);
+    const laneDetail=String(lane?.detail||'').trim(),baseDetail=globalThis.TPPageText?.display?.(laneDetail) ?? laneDetail,queueWait=Number(lane?.queueWaitMs)||0,detail=[baseDetail,queueWait>0?pt('queue {time}',{time:fmtMs(queueWait)}):''].filter(Boolean).join(' · ');wrap.appendChild(stateMain);
     if(detail&&state.cls!=='done'&&state.cls!=='skipped'&&state.cls!=='idle'){const sub=css(document.createElement('div'),{marginTop:'2px',color:'#aeb0b8',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',fontSize:'10px'});sub.textContent=detail;sub.title=detail;wrap.appendChild(sub);}
     wrap.dataset.startedAt=String(Number(lane?.startedAt)||Number(lane?.queuedAt)||0);wrap.dataset.finishedAt=String(Number(lane?.finishedAt)||0);wrap.dataset.state=String(lane?.state||'idle');return wrap;
   };
   function resultCell(item){
-    const result=item?.progress?.result||{},cell=css(document.createElement('div'),{minWidth:'0',padding:'5px 6px',borderLeft:'1px solid rgba(255,255,255,.06)'}),state=String(result.state||'pending'),resultMain=document.createElement('div');resultMain.textContent=state==='done'?'✓ done':state==='skipped'?'skip':state==='error'?'✕ error':state==='cancelled'?'cancel':'…';css(resultMain,{fontWeight:'700',color:state==='error'?'#ffb4b4':state==='done'?'#d8ffd8':state==='skipped'?'#d0d0d5':'#bbb'});cell.appendChild(resultMain);
+    const result=item?.progress?.result||{},cell=css(document.createElement('div'),{minWidth:'0',padding:'5px 6px',borderLeft:'1px solid rgba(255,255,255,.06)'}),state=String(result.state||'pending'),resultMain=document.createElement('div');resultMain.textContent=pt(state==='done'?'✓ done':state==='skipped'?'skip':state==='error'?'✕ error':state==='cancelled'?'cancel':'…');css(resultMain,{fontWeight:'700',color:state==='error'?'#ffb4b4':state==='done'?'#d8ffd8':state==='skipped'?'#d0d0d5':'#bbb'});cell.appendChild(resultMain);
     const detail=String(result.detail||item?.error||'').trim();if(detail&&state!=='done'){const sub=css(document.createElement('div'),{marginTop:'2px',fontSize:'10px',color:'#aeb0b8',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'});sub.textContent=detail;sub.title=detail;cell.appendChild(sub);}return cell;
   }
   function renderDetails(batch){
     if(!body)return;const scrollTop=body.scrollTop;body.textContent='';
     const grid=css(document.createElement('div'),{display:'grid',gridTemplateColumns:'54px 76px minmax(100px,1fr) minmax(100px,1fr) minmax(130px,1.25fr) minmax(100px,1fr) minmax(90px,1fr)',minWidth:'720px'});
-    for(const title of ['Page','Total','Lens','Group','AI / queue','Insert','Result']){const h=css(document.createElement('div'),{padding:'5px 6px',position:'sticky',top:'0',zIndex:'1',background:'#18181b',fontWeight:'700',color:'#ddd',borderBottom:'1px solid rgba(255,255,255,.1)'});h.textContent=title;grid.appendChild(h);}
+    for(const title of ['Page','Total','Lens','Group','AI / queue','Insert','Result']){const h=css(document.createElement('div'),{padding:'5px 6px',position:'sticky',top:'0',zIndex:'1',background:'#18181b',fontWeight:'700',color:'#ddd',borderBottom:'1px solid rgba(255,255,255,.1)'});h.textContent=pt(title);grid.appendChild(h);}
     const items=itemsOf(batch).slice();items.sort((a,b)=>Number(a.terminal)-Number(b.terminal)||Number(a?.label?.match(/\d+/)?.[0]||999)-Number(b?.label?.match(/\d+/)?.[0]||999));
-    for(const item of items){const p=item.progress||{},rowCells=[],page=css(document.createElement('div'),{padding:'6px',fontWeight:'700',borderBottom:'1px solid rgba(255,255,255,.05)'});page.textContent=String(item.label||'Image').replace('Image ','#');rowCells.push(page);rowCells.push(laneCell(p.overall,'overall'),laneCell(p.lens,'lens'),laneCell(p.grouping,'grouping'),laneCell(p.ai,'ai'),laneCell(p.insert,'insert'),resultCell(item));for(const c of rowCells){c.style.borderBottom='1px solid rgba(255,255,255,.05)';grid.appendChild(c);}}
+    for(const item of items){const p=item.progress||{},rowCells=[],page=css(document.createElement('div'),{padding:'6px',fontWeight:'700',borderBottom:'1px solid rgba(255,255,255,.05)'});page.textContent=item.label?String(item.label).replace('Image ','#'):pt('Image');rowCells.push(page);rowCells.push(laneCell(p.overall,'overall'),laneCell(p.lens,'lens'),laneCell(p.grouping,'grouping'),laneCell(p.ai,'ai'),laneCell(p.insert,'insert'),resultCell(item));for(const c of rowCells){c.style.borderBottom='1px solid rgba(255,255,255,.05)';grid.appendChild(c);}}
     body.appendChild(grid);body.scrollTop=scrollTop;
   }
   function render(batch){

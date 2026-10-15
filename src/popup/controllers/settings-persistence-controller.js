@@ -7,7 +7,6 @@ import {
   promptHistoryPush,
 } from "../../shared/prompt.js";
 import {
-  KNOWN_KEY_PREFIXES,
   SK_STYLE_PROVIDERS,
   providerFromKey,
   providerLabel,
@@ -42,7 +41,6 @@ export function createSettingsPersistenceController(deps) {
     },
   });
   const promptRecord = (key, text = els.aiPrompt?.value || "") => {
-    const current = state.aiPromptByLang[key];
     return {
       text: normalizePrompt(String(text || "")),
       mode: "replace",
@@ -163,7 +161,6 @@ export function createSettingsPersistenceController(deps) {
     await profileController.savePrompt(
       l,
       state.aiPromptByLang[key].text,
-      state.aiPromptByLang[key].mode,
     );
     // Each saved edit becomes a history version (browser-like: truncates any
     // forward branch left over from earlier Back navigation).
@@ -182,7 +179,9 @@ export function createSettingsPersistenceController(deps) {
       state.aiPromptByLang[key] = promptRecord(key);
     const saveCredential = Boolean(state.pendingCredentialSave);
     if (!dirty && !saveCredential && !state.modelDirty) {
-      return Promise.resolve({ ok: true, status: "nothing_pending" });
+      return Promise.resolve(profileController.whenIdle?.()).then(
+        () => ({ok:true,status:"nothing_pending"}),
+        error => ({ok:false,status:"write_failed",error}));
     }
     state.aiPromptDirtyByLang[key] = false;
     return profilePagehideFlush.flush({

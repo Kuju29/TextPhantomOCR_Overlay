@@ -121,7 +121,9 @@ def safe_http_error(provider: str, response: httpx.Response, model: str) -> Prov
     metadata = error.get("metadata") if isinstance(error, dict) else None
     upstream = safe_diagnostic_label(metadata.get("provider_name")) if isinstance(metadata, dict) else ""
     retry_after = 0.0
-    if response.status_code == 429:
+    details = error.get('details') if isinstance(error, dict) else None
+    paid_limited = provider == 'paid' and isinstance(details, dict) and details.get('upstream_http_status') == 429
+    if response.status_code == 429 or paid_limited:
         raw_wait = str(response.headers.get("retry-after") or "").strip()[:100]
         try:
             retry_after = float(raw_wait)
@@ -131,6 +133,10 @@ def safe_http_error(provider: str, response: httpx.Response, model: str) -> Prov
             except (ValueError, TypeError, OverflowError):
                 pass
         retry_after = min(3600.0, retry_after) if math.isfinite(retry_after) and retry_after > 0 else 0.0
+        if paid_limited and type(details.get('retry_after_seconds')) in (int, float):
+            reported = details['retry_after_seconds']
+            if math.isfinite(reported) and 0 < reported <= 3600:
+                retry_after = max(retry_after, reported)
     fields = [f"{provider} HTTP {response.status_code}", f"model={_scrub(model)}", "attempts=1"]
     if code:
         fields.append(f"providerCode={code}")

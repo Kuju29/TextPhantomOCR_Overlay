@@ -5,7 +5,7 @@ function verificationResult(model, status, extra = {}) {
   return { model: String(model || "").trim(), status, ...extra };
 }
 
-export function verifyLocalModelAvailability(models, capability, model) {
+function verifyLocalModelAvailability(models, capability, model) {
   const selected = String(model || "").trim();
   if (!selected) return verificationResult("", "not_selected", { evidence: "model_list" });
   const hint = capability?.models?.[selected];
@@ -53,15 +53,10 @@ export async function discoverLocalModels(settings = {}, options = {}) {
     throw new LocalAiError("Local AI model discovery was cancelled", {
       code: "cancelled",
     });
-  let adapter;
-  try {
-    adapter = resolveLocalProvider(
-      settings,
-      options.provider || settings.provider,
-    );
-  } catch (error) {
-    throw error;
-  }
+  const adapter = resolveLocalProvider(
+    settings,
+    options.provider || settings.provider,
+  );
   try {
     const result = await adapter.listModels({
       ...options,

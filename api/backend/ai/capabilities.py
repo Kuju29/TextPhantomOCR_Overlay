@@ -7,7 +7,6 @@ from typing import Any, Final
 from dataclasses import dataclass
 
 STRICT_JSON: Final[str] = "strict_json"
-ID_MARKERS: Final[str] = "id_markers"
 SCHEMA_OBJECT: Final[str] = "json_schema_object_v1"
 COMPACT_MARKERS: Final[str] = "compact_markers_v1"
 

@@ -1,5 +1,6 @@
 import { conversationBatchProfile } from '../conversation/batch-policy.js';
 import { observedReasoningRisk, estimateRequest, takeWorkloadBatch } from './model.js';
+import { cloudProviderSpec } from '../providers/cloud-registry.js';
 // Retain an absolute source bound, above the ordinary 8K output window's
 // marker capacity. A short-text vertical page must not lose its place merely
 // because eight images contain more than 128 independent OCR records.
@@ -23,6 +24,16 @@ export function planConversationBatch({ rows, pageSizes = [], conversationState 
     // model's reasoning cannot be switched off. Planning against 16K here
     // would admit pages the API can only reject before generation.
     reasoningUnbounded,applicationCompletionCeiling:context.provider==='openrouter'?8192:reasoningUnbounded?16384:8192,
+    // Manual Cloud and Paid Conversation share one ceiling between this
+    // turn's new input and its reply. Login (web chat, no published window)
+    // and Local keep their own sizing. Paid uses the operator's Center ceiling.
+    conversationTurnBudget:context.provider==='paid'||Boolean(cloudProviderSpec(context.provider))||
+      // Login: only when the user set a ceiling; OFF keeps the automatic size.
+      (context.provider==='login'&&Number.isSafeInteger(context.userTokenCeiling)),
+    userSizedTurn:context.provider==='login'&&Number.isSafeInteger(context.userTokenCeiling),
+    // A user ceiling for this model first; else Paid's Center ceiling;
+    // else the reply ceiling (application 8192 or the model's lower maximum).
+    turnBudgetCeiling:context.userTokenCeiling||(context.provider==='paid'?context.paidRequestBudget:null),
     estimateFixedInput:units=>estimateFixedInput(units,[],sourceContextForUnits ? sourceContextForUnits(units) : sourceContext)+units.length*12};
   const sizes=(Array.isArray(pageSizes)?pageSizes:[]).map(Number).filter(n=>Number.isSafeInteger(n)&&n>0);
   if(!sizes.length) {

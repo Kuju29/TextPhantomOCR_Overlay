@@ -3,7 +3,8 @@
 // only dispatch IDs, provider-result deltas and delivery ACK state so those
 // transitions never rewrite the OCR/render payload.
 import { noteSessionStorageFailure } from '../session-storage-diagnostics.js';
-export const TRANSLATION_DISPATCH_PREFIX = 'tpTranslationDispatchV1:';
+import { translationSessions } from '../translation-session-store.js';
+const TRANSLATION_DISPATCH_PREFIX = 'tpTranslationDispatchV1:';
 const enc = value => encodeURIComponent(String(value || ''));
 export const translationDispatchKey = (runId, pageId) => `${TRANSLATION_DISPATCH_PREFIX}${enc(runId)}:${enc(pageId)}`;
 
@@ -19,7 +20,13 @@ const normalize = (value, runId = '', pageId = '', now = Date.now) => {
     blocked:Array.isArray(value.blocked)?value.blocked:[],delivered:value.delivered===true,phase:String(value.phase || 'prepared')};
 };
 
-export function createDispatchJournal({area = () => globalThis.chrome?.storage?.session, now = Date.now} = {}) {
+const entryBytes = (key, value) => new TextEncoder().encode(JSON.stringify(key)).length + 1 +
+  new TextEncoder().encode(JSON.stringify(value)).length;
+// `budget`: see prepared-page-journal.js. Receipts are small but count
+// against the same run checkpoint budget; a refused admission fails this write
+// (repair becomes unavailable for the run) rather than losing a receipt.
+export function createDispatchJournal({area = () => globalThis.chrome?.storage?.session, now = Date.now,
+  budget = null} = {}) {
   const cache = new Map();
   const requireArea = () => {
     const storage = area();
@@ -33,6 +40,7 @@ export function createDispatchJournal({area = () => globalThis.chrome?.storage?.
     return normalize(value,runId,pageId,now);
   }
   async function write(key, next) {
+    const undo = budget ? await budget.admit(next.runId, key, entryBytes(key, next)) : null;
     cache.set(key, next);
     try { await requireArea().set({[key]: next}); }
     catch (error) {
@@ -40,6 +48,7 @@ export function createDispatchJournal({area = () => globalThis.chrome?.storage?.
       // cache forces the next read to recover the last durable receipt instead
       // of exposing a synthesized/half-written value.
       cache.delete(key);
+      undo?.();
       noteSessionStorageFailure('dispatch_receipt',error);
       throw error;
     }
@@ -97,6 +106,7 @@ export function createDispatchJournal({area = () => globalThis.chrome?.storage?.
     const key = translationDispatchKey(runId, pageId);
     cache.delete(key);
     await requireArea().remove?.(key);
+    budget?.forget(runId, key);
   }
   async function listRun(runId) {
     const prefix = `${TRANSLATION_DISPATCH_PREFIX}${enc(runId)}:`;
@@ -118,8 +128,15 @@ export function createDispatchJournal({area = () => globalThis.chrome?.storage?.
     const keys = Object.keys(all || {}).filter(key => key.startsWith(prefix));
     for (const key of keys) cache.delete(key);
     if (keys.length) await requireArea().remove?.(keys);
+    budget?.forget(runId, keys);
   }
-  return {record,checkpointResult,markDelivered,get,remove,listRun,clearRun};
+  async function removeMany(runId, pageIds) {
+    const keys = pageIds.map(pageId => translationDispatchKey(runId,pageId));
+    if (keys.length) await requireArea().remove?.(keys);
+    for (const key of keys) cache.delete(key);
+    budget?.forget(runId, keys);
+  }
+  return {record,checkpointResult,markDelivered,get,remove,removeMany,listRun,clearRun};
 }
 
-export const conversationDispatchJournal = createDispatchJournal();
+export const conversationDispatchJournal = createDispatchJournal({budget:translationSessions.journalBudget});

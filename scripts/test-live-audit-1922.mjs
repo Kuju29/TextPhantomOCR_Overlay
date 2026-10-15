@@ -97,7 +97,9 @@ await check('failed/stale ACK and settings or navigation during rendering never 
   f.setReply(async()=>{if(why==='epoch')f.setEpoch(8);if(why==='navigation')f.setSession('new');if(why==='cancel')f.batch.cancelled=true;
    return why==='reject'?{ok:false,applied:false,stale:true}:{ok:true,applied:true,drawn:true};});
   if(why==='reject')await assert.rejects(f.send(2));else await f.send(2);
-  assert.equal(batchPassStats(f.batch).inserted,1,why);assert.equal(batchPassStats(f.batch).finished,1);
+  // .70 owner rule: a settings change during rendering does not stop the job;
+  // its own result is inserted. Navigation and Cancel still stop it.
+  assert.equal(batchPassStats(f.batch).inserted,why==='epoch'?2:1,why);assert.equal(batchPassStats(f.batch).finished,1);
  }
 });
 function page(i,doc,extra={}){const payload={source:'ai',lang:'th',context:{page_url:doc,tp_tab_session:'owner',page_index:i},metadata:{image_id:`${doc}-${i}`},ai:{provider:'huggingface',model:'fixture',api_key:'fixture-key',translation_mode:'conversation',thinking:'minimum',...extra}};reserveConversationJob(payload,17);return {payload,ai:payload.ai,imageId:payload.metadata.image_id,targetLang:'th',route:'api-cloud',sourceFingerprint:'a'.repeat(64)};}

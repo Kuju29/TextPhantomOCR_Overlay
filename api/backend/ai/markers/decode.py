@@ -9,7 +9,6 @@ from .wire import PREFIX, SUFFIX, END_MARKER, DONE_MARKER
 
 _MARKER_RE: Final[re.Pattern[str]] = re.compile(r"<<TP_P(\d+)>>")
 _WIRE_MARKER_RE: Final[re.Pattern[str]] = re.compile(r"<<(?:TP_P\d+|I[1-9][0-9]{0,6}_P[0-9]{1,6}):")
-_GENERIC_ID_PATTERN: Final[str] = r"(?:P\d+|I[1-9][0-9]{0,6}_P[0-9]{1,6})"
 _GENERIC_HEADER_RE: Final[re.Pattern[str]] = re.compile(rf"<<(?:TP_(P\d+)|(I[1-9][0-9]{{0,6}}_P[0-9]{{1,6}}))(?::|\s)")
 _GENERIC_CLAIM_RE: Final[re.Pattern[str]] = re.compile(rf"<<(?:TP_(P\d+)|(I[1-9][0-9]{{0,6}}_P[0-9]{{1,6}}))")
 
@@ -43,6 +42,7 @@ class DecodedTranslation:
     formatting_whitespace_chars: int = 0
     unexpected_prose_chars: int = 0
     redundant_closing_delimiter_chars: int = 0
+    record_header_recovery_count: int = 0
 
 class _DuplicateJsonKey(ValueError):
     def __init__(self, key: str) -> None:
@@ -141,7 +141,7 @@ def _decode_strict_records(raw: str, expected: list[str]) -> DecodedTranslation:
         island_invalid = True
         island_invalid_ids.update(frame["id"] for frame in stack)
         island_invalid_ids.update(item for item, _ in pending)
-    whitespace = prose = redundant_closers = 0
+    whitespace = prose = redundant_closers = recovered_headers = 0
     at = 0
     while at < len(text):
         if text.startswith("<<>>", at) and stack:
@@ -161,6 +161,19 @@ def _decode_strict_records(raw: str, expected: list[str]) -> DecodedTranslation:
             claimed_id = _claim_id(claim)
             if claimed_id:
                 all_claims.append(claimed_id)
+            # One misplaced bracket before ':' is attributable only when this
+            # is a standalone, closed physical line with an expected ID. Keep
+            # the translated value exact; duplicate claims still invalidate it.
+            if not header and not stack and claimed_id in expected:
+                line_start = max(text.rfind('\n', 0, at), text.rfind('\r', 0, at)) + 1
+                corrected = re.match(r'<<(?:TP_(P\d+)|(I[1-9][0-9]{0,6}_P[0-9]{1,6}))>:', rest)
+                line = re.split(r'[\r\n]', rest, maxsplit=1)[0]
+                closed = re.fullmatch(r'<<[^<>]+>:(?P<value>[^<>\r\n]*)>>[ \t]*', line)
+                if corrected and closed and not text[line_start:at].strip():
+                    parsed.append((claimed_id, closed.group('value')))
+                    recovered_headers += 1
+                    at += len(line)
+                    continue
             if header:
                 item = _claim_id(header)
                 # Compact records are a physical-line contract. If a new record
@@ -219,7 +232,6 @@ def _decode_strict_records(raw: str, expected: list[str]) -> DecodedTranslation:
         malformed.extend(frame["id"] for frame in stack)
         malformed.extend(item for item, _ in pending)
         malformed.extend(island_invalid_ids)
-    received = [item for item, _ in parsed]
     duplicates = sorted({item for item in all_claims if all_claims.count(item) > 1})
     extra = [item for item in all_claims if item not in expected]
     malformed = list(dict.fromkeys(malformed))
@@ -237,6 +249,7 @@ def _decode_strict_records(raw: str, expected: list[str]) -> DecodedTranslation:
         ignored_prose_chars=max(0, len(text) - record_chars),
         formatting_whitespace_chars=whitespace, unexpected_prose_chars=prose,
         redundant_closing_delimiter_chars=redundant_closers,
+        record_header_recovery_count=recovered_headers,
     )
 
 # Rejects an ambiguous id set. A missing id is not ambiguous: it is one unit the
@@ -269,8 +282,8 @@ def _decode_marker_text(
     text: str, expected: list[str], shape: str
 ) -> tuple[list[str], str, list[str], bool]:
     """Decode a complete marker answer; any structural uncertainty is fatal."""
-    # New generations terminate explicitly.  Historical marker responses did
-    # not, so absence remains accepted as decoder-only compatibility.
+    # New generations terminate explicitly; legacy marker responses did not,
+    # so absence is still accepted for decoding only.
     if text.count(END_MARKER) > 1:
         _contract_error("AI answer contains duplicate end markers", shape, duplicateFields=["end"])
     end_present = END_MARKER in text
@@ -416,7 +429,7 @@ def decode_legacy_translation_response(
             malformed_line_count=malformed_line_count,
         )
 
-    # Legacy response shapes historically allowed surrounding whitespace.
+    # Legacy response shapes allow surrounding whitespace.
     text = text.strip()
 
     if text.startswith("{") or text.endswith("}"):

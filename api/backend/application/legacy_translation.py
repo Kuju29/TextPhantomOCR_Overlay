@@ -34,7 +34,8 @@ def idempotency_scope(request: Any, payload: dict[str, Any]) -> str:
 def semantic_fingerprint(payload: dict[str, Any]) -> str:
     excluded = {
         "idempotency_key", "apikey", "api_key", "authorization", "tp_trace",
-        "request_id", "operationid", "batch_id", "batchid", "tp_tab_session", "session",
+        "request_id", "requestid", "operationid", "operation_id", "batch_id", "batchid",
+        "job_id", "jobid", "image_id", "imageid", "tp_tab_session", "session", "timestamp",
     }
 
     def clean(value: Any, path: tuple[str, ...] = ()) -> Any:
@@ -42,7 +43,9 @@ def semantic_fingerprint(payload: dict[str, Any]) -> str:
             output: dict[str, Any] = {}
             for raw_key, item in value.items():
                 key = str(raw_key)
-                if key.lower() in excluded or (not path and key.lower() == "rate"):
+                if (key.lower() in excluded or (not path and key.lower() == "rate") or
+                        (path == ("ai",) and key.lower() in {"model_capabilities", "workload", "rate", "on_device", "conversation_reset"}) or
+                        (path == ("metadata",) and key.lower() in {"pipeline", "ocr_image", "extra"})):
                     continue
                 output[key] = clean(item, (*path, key))
             return output
@@ -91,10 +94,11 @@ async def poll_jobs(queue: Any, ids: list[str], *, wait: float,
     jobs: list[dict[str, Any]] = []
     inlined = 0
     for job_id in ids:
-        record = queue.get_scoped(job_id, caller_scope=caller_scope)
+        record = queue.get_scoped(job_id, caller_scope=caller_scope, deliver=False)
         if str(record.get("status") or "") == "done" and record.get("result") is not None:
             if inlined < max_inline:
                 inlined += 1
+                queue.note_delivered(job_id)  # only an inlined result was delivered
             else:
                 record = {key: value for key, value in record.items() if key != "result"}
                 record["result_ready"] = True

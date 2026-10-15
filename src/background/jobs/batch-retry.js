@@ -31,7 +31,19 @@ export function createBatchRetryCoordinator({
   classifyJobError,
   enqueue,
   onComplete = null,
+  onCompletionError = () => {},
 }) {
+  const completions = new WeakMap();
+  function complete(batch, label) {
+    if (completions.has(batch)) return;
+    const work = Promise.resolve().then(() => onComplete(batch, label)).catch(async error => {
+      try { onCompletionError(error, batch); } catch {}
+      updateToast(batch, 'Translation completion failed; check the image errors', true);
+      await stopKeepAlive(batch);
+    }).catch(() => {});
+    completions.set(batch, work);
+    void work.finally(() => { if (completions.get(batch) === work) completions.delete(batch); });
+  }
   function finalizeBatch(batch) {
     if (!batch) return;
     const stats = batchPassStats(batch);
@@ -47,7 +59,7 @@ export function createBatchRetryCoordinator({
       const permanentErrors = candidates.permanentErrors + candidates.failed.length - failed.length;
       if (!failed.length) {
         const label = permanentErrors ? `Done (${permanentErrors} errors)` : "Done";
-        if (onComplete) void onComplete(batch, label);
+        if (onComplete) complete(batch, label);
         else { updateToast(batch, label, true); void stopKeepAlive(batch); }
         return;
       }
@@ -78,7 +90,7 @@ export function createBatchRetryCoordinator({
     }
 
     const label = stats.error ? `Done (${stats.error} errors)` : "Done";
-    if (onComplete) void onComplete(batch, label);
+    if (onComplete) complete(batch, label);
     else { updateToast(batch, label, true); void stopKeepAlive(batch); }
   }
 

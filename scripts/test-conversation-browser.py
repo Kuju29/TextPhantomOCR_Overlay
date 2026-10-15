@@ -1,6 +1,8 @@
-"""Real Chromium: production popup events and persistent Direct Local history.
+"""Real Chromium: assigned popup modes and optional Local history persistence.
 
 No browser extension installation, credentials, provider, or model are used.
+Local translation jobs are Independent. The low-level IndexedDB history checks
+exercise optional Conversation storage, not an editable Local mode selector.
 """
 from pathlib import Path
 import argparse
@@ -18,7 +20,7 @@ start = html.index('          <div class="field" id="ai-rate-wrap"')
 end = html.index('        </section>', html.index('id="ai-translation-mode"', start))
 fragment = html[start:end].replace('id="ai-rate-wrap" style="display: none"', 'id="ai-rate-wrap"')
 css = (root / 'src/shared/theme.css').read_text() + '\n' + (root / 'src/popup/popup.css').read_text()
-report = {'scope': 'Chromium production HTML/CSS/events and IndexedDB with synthetic history, no live provider', 'checks': []}
+report = {'scope': 'Chromium production HTML/CSS/profile hydration/events and optional IndexedDB history with synthetic data, no live provider', 'checks': []}
 
 def check(name, actual):
     report['checks'].append({'name': name, 'passed': bool(actual)})
@@ -66,18 +68,77 @@ with sync_playwright() as pw:
     events = module('src/popup/controllers/popup-event-controller.js')
     page.evaluate('''async url=>{
       window.saved=[];window.broadcasts=[];window.networkCalls=0;
+      globalThis.fetch=async()=>{networkCalls++;throw new Error('Unexpected provider request');};
       globalThis.chrome={runtime:{sendMessage:(m,cb)=>{broadcasts.push(m);cb?.();},lastError:null},storage:{onChanged:{addListener:()=>{}}}};
       const els=new Proxy({aiTranslationMode:document.querySelector('#ai-translation-mode'),aiConversationReset:document.querySelector('#ai-conversation-reset')},
         {get:(t,k)=>t[k]||(t[k]=document.createElement('input'))});
       (await import(url)).bindPopupEvents({els,state:{},profileController:{saveProfile:async patch=>{saved.push(patch);}},profilePagehideFlush:{},
         usageController:{},providerMetaController:{},localConnectionController:{},apiHealthController:{}});
     }''', events)
-    check('Conversation is selected and Independent remains visible', page.locator('#ai-translation-mode').input_value() == 'conversation' and 'Independent (original)' in page.locator('#ai-translation-mode').inner_text())
-    check('Independent option is disabled', page.locator('#ai-translation-mode option[value="independent"]').is_disabled())
-    check('Translation mode selector remains inspectable', not page.locator('#ai-translation-mode').is_disabled())
-    check('Selector is immediately after rate-cap block', page.evaluate("document.querySelector('#ai-rate-wrap').nextElementSibling.id==='ai-translation-mode-wrap'"))
-    check('Mode explanation stays short and English', len(page.locator('#ai-translation-mode-wrap .hint').inner_text()) < 120 and not re.search('[\u0e00-\u0e7f]',page.locator('#ai-translation-mode-wrap').inner_text()))
-    check('No Independent change event or warmup request',page.locator('#ai-conversation-reset').count()==0 and page.evaluate('saved.length===0 && broadcasts.length===0 && networkCalls===0'))
+    check('Both assigned modes remain visible', page.locator('#ai-translation-mode').input_value() == 'conversation' and
+          page.locator('#ai-translation-mode option').all_text_contents() == ['Conversation', 'Independent'])
+    check('Translation mode is read-only with an accessible assignment label',
+          page.locator('#ai-translation-mode').is_disabled() and
+          page.locator('#ai-translation-mode').get_attribute('aria-label') == 'Assigned translation mode')
+    check('Assigned mode follows the separate Cloud and Local rate-cap blocks', page.evaluate('''()=>{
+      const cloud=document.querySelector('#ai-rate-wrap'), local=document.querySelector('#ai-local-rate-wrap');
+      return cloud.nextElementSibling===local && local.nextElementSibling.id==='ai-translation-mode-wrap';
+    }'''))
+    explanation = page.locator('#ai-translation-mode-wrap .hint').inner_text()
+    check('Mode explanation describes Cloud and every Local provider including LM Studio',
+          'Cloud uses Conversation.' in explanation and 'including LM Studio, use Independent.' in explanation and
+          'follows the provider automatically.' in explanation and len(explanation) < 180 and
+          not re.search('[\u0e00-\u0e7f]', explanation))
+    page.evaluate("document.querySelector('#ai-translation-mode').dispatchEvent(new Event('change',{bubbles:true}))")
+    check('No manual mode change save, reset control, broadcast, or warmup request',
+          page.locator('#ai-conversation-reset').count()==0 and
+          page.evaluate('saved.length===0 && broadcasts.length===0 && networkCalls===0'))
+    profiles = module('src/popup/controllers/ai-profile-controller.js')
+    cloud_catalog = module('src/shared/ai/providers/cloud-registry.js')
+    local_catalog = module('src/shared/ai/providers/local-registry.js')
+    assignments = page.evaluate('''async ({profiles,cloud,local})=>{
+      const {createAiProfileController}=await import(profiles);
+      const choices=[
+        ...(await import(cloud)).cloudProviderCatalog().map(p=>({id:p.id,endpoint:p.baseUrl,mode:'conversation'})),
+        ...(await import(local)).localProviderCatalog().map(p=>({id:p.id,endpoint:p.baseUrl,mode:'independent'})),
+        {id:'customlocal',endpoint:'http://127.0.0.1:9999/v1',mode:'independent'},
+      ];
+      const results=[];
+      for(const {id,endpoint,mode} of choices){
+        const stored={aiProvider:id,aiBaseUrl:endpoint,aiModel:`${id}-fixture`,aiTranslationMode:'conversation'};
+        const input=value=>Object.assign(document.createElement('input'),{value});
+        const els={aiProvider:input(id),aiBaseUrl:input(endpoint),aiModel:input(stored.aiModel),
+          aiTranslationMode:document.querySelector('#ai-translation-mode'),aiThinking:document.createElement('select'),
+          aiPageImage:input(''),aiMemoryMode:input('off'),aiStyleExamples:input(''),
+          aiStyleExamplesWrap:document.createElement('div'),aiLocalCapacityMode:input('auto'),
+          aiLocalManualConcurrency:input('1'),aiPrompt:input('')};
+        const profile=createAiProfileController({els,state:{desiredAiModel:stored.aiModel,desiredLang:'th'},
+          setStorage:async patch=>Object.assign(stored,structuredClone(patch))});
+        await profile.initialize(stored);
+        const provider=stored.aiProfilesV1.providers[stored.aiProfilesV1.active.providerIdentity];
+        const hydrated={mode:els.aiTranslationMode.value,readonly:els.aiTranslationMode.disabled,
+          examples:!els.aiStyleExamples.disabled,previousPreference:provider.models[stored.aiModel].profile.translationMode};
+        els.aiModel.value=`${id}-fresh-model`;
+        profile.selectModel(els.aiModel.value);
+        await profile.saveProfile({});
+        const persisted=stored.aiProfilesV1.providers[stored.aiProfilesV1.active.providerIdentity]
+          .models[els.aiModel.value].profile.translationMode;
+        results.push({id,expected:mode,...hydrated,persisted});
+      }
+      return results;
+    }''', {'profiles': profiles, 'cloud': cloud_catalog, 'local': local_catalog})
+    report['provider_assignments'] = assignments
+    check('Current catalogs cover 9 Cloud and 10 Local choices',
+          sum(v['expected']=='conversation' for v in assignments)==9 and
+          sum(v['expected']=='independent' for v in assignments)==10)
+    for assignment in assignments:
+        check(f"{assignment['id']}: real popup hydration and new-profile save follow the provider assignment",
+              assignment['mode']==assignment['expected'] and assignment['readonly'] and
+              assignment['examples']==(assignment['expected']=='independent') and
+              assignment['previousPreference']=='conversation' and
+              assignment['persisted']==assignment['expected'])
+    check('Profile hydration and save never call a provider or broadcast a mode change',
+          page.evaluate('saved.length===0 && broadcasts.length===0 && networkCalls===0'))
     check('No horizontal overflow',page.evaluate('document.documentElement.scrollWidth<=380'))
     page.locator('#fixture').screenshot(path=str(args.out/'conversation-option.png'))
     if persistent_origin:

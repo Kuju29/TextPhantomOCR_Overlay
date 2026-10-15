@@ -119,7 +119,7 @@
     try {
       chrome.runtime.sendMessage(
         { type: "TP_TRACE", record },
-        () => void chrome.runtime.lastError,
+        () => { try { void chrome.runtime.lastError; } catch {} },
       );
     } catch {}
   }

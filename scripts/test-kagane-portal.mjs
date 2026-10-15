@@ -26,7 +26,7 @@ document.body=new Element('body');document.documentElement.appendChild(document.
 const window={__TP:null,innerWidth:800,innerHeight:650,addEventListener(){}};
 let image=null;
 const key='tp-reader:kagane:series:chapter:24';
-const TP=window.__TP={bail:false,log:{debug(){}},overlayBackground:{release(){}},overlayFontScale:{register(){}},
+const TP=window.__TP={bail:false,log:{debug(){}},overlayBackground:{release(){}},overlayFontScale:{register(){},unregister(){}},
  onNextFrame:fn=>setTimeout(fn,0),readerImageForKey:query=>query===key?image:null,
  readerOriginalFor:()=> 'https://kstatic.to/original.jxl',getBestImgUrl:img=>img.src,
  normUrl:value=>value,imageIdentity:value=>value,

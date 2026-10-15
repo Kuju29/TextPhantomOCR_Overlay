@@ -31,7 +31,7 @@ class ConversationTests(unittest.TestCase):
      terminal_completed=self.complete,terminal_evidence='provider_done',finish_reason='stop',cached_input_tokens=self.cached)
   self.mock=patch.object(provider_registry.require('huggingface').adapter,'generate',side_effect=generate);self.mock.start();self.addCleanup(self.mock.stop)
   self.ai=AiConfig(api_key='PRIVATE_TEST_CREDENTIAL',provider='huggingface',model='fixture',base_url='https://router.huggingface.co/v1',
-   translation_mode='conversation',source_lang='en',memory_mode='off',thinking='default',
+   translation_mode='conversation',source_lang='en',memory_mode='off',thinking='default',style_examples=True,
    conversation=descriptor({'documentId':'test-document'},context={'tp_tab_session':'caller-one'}),
    model_capabilities={'structured_output':{'supported':False},'limits':{'contextTokens':65536}})
  def call(self,text='Hello',ai=None,**kw):return translate(markers.apply([text]),'th',ai or self.ai,**kw)
@@ -160,6 +160,22 @@ class ConversationTests(unittest.TestCase):
   self.assertEqual(request.expected_ids,('P0',))
   self.assertFalse(request.history_messages)
 
+ def test_misplaced_header_bracket_keeps_canonical_conversation_history(self):
+  a=copy.deepcopy(self.ai)
+  a.conversation['origins']=[{'pageId':'page-1','pageOrder':1,'pageIndex':0,
+    'unitIds':['I1_P0'],'originalIds':['g0']}]
+  self.next_answer='<<I1_P0>:ภาษาไทย>>'
+  first=self.call(ai=a)
+  self.assertEqual(first['meta']['conversation']['commitStatus'],'committed')
+  self.assertEqual(first['meta']['record_header_recovery_count'],1)
+  b=copy.deepcopy(a)
+  b.conversation['origins']=[{'pageId':'page-2','pageOrder':2,'pageIndex':1,
+    'unitIds':['I2_P0'],'originalIds':['g0']}]
+  self.next_answer='<<I2_P0:ถัดไป>>'
+  second=self.call(ai=b)
+  self.assertEqual(second['meta']['conversation']['historyTurns'],1)
+  self.assertEqual(build_messages(self.requests[-1])[2]['content'],'<<I1_P0:ภาษาไทย>>')
+
  def test_independent_never_enters_store(self):
   with patch('backend.ai.translation_paths.store.store',side_effect=AssertionError('store touched')):
    self.call(ai=replace(self.ai,translation_mode='independent'));self.call(ai=replace(self.ai,translation_mode='independent'))
@@ -196,13 +212,17 @@ class ConversationTests(unittest.TestCase):
   self.assertEqual([r['meta']['conversation']['providerCacheStatus'] for r in (a,b,c)],['not_reported','reported_zero','reported_hit'])
   self.assertEqual(c['meta']['conversation']['historyTurns'],2)
   self.assertEqual(c['meta']['usage']['totalTokens'],110)
- def test_private_scope_separates_user_key_model_language_document_reset(self):
+ def test_private_scope_separates_user_key_model_style_document_reset(self):
   self.call();scope=self.call()['meta']['conversation']['scope']
-  for field,value in [('api_key','other-private'),('model','different'),('source_lang','ja'),('prompt_editable','Use a calm voice')]:
+  for field,value in [('api_key','other-private'),('model','different'),('prompt_editable','Use a calm voice')]:
    a=replace(self.ai,**{field:value});self.assertEqual(self.call(ai=a)['meta']['conversation']['historyTurns'],0)
   for field,value in [('owner','another'),('documentId','new-doc'),('reset','reset-2')]:
    a=copy.deepcopy(self.ai);a.conversation[field]=value;self.assertEqual(self.call(ai=a)['meta']['conversation']['historyTurns'],0)
   self.assertEqual(self.call()['meta']['conversation']['scope'],scope)
+ def test_detected_source_language_keeps_scope_and_history(self):
+  first=self.call();second=self.call(ai=replace(self.ai,source_lang='ja'))
+  self.assertEqual(second['meta']['conversation']['scope'],first['meta']['conversation']['scope'])
+  self.assertEqual(second['meta']['conversation']['historyTurns'],1)
  def test_ephemeral_is_explicit_not_global_shared_state(self):
   a=replace(self.ai,conversation={});self.call(ai=a);b=self.call(ai=a)
   self.assertEqual(b['meta']['conversation']['historyTurns'],0)

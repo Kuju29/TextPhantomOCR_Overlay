@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { createUsageViewController } from "../src/popup/controllers/usage-view-controller.js";
 import { currentUsage, applyUsageSelectionBoundary, recordProviderGeneration,
   resetActiveUsage, normalizeUsageLedger, usageDetailedRows, usageHistoryRows, usageToday } from "../src/shared/ai-usage.js";
+import { requestGroups } from "../src/shared/ai/pricing/details.js";
 
 class Element {
   constructor(value = "") { this.value=value; this.textContent=""; this.title=""; this.style={}; this.children=[]; }
@@ -18,16 +19,18 @@ const field = value => new Element(value);
 const els = {aiProvider:field("openrouter"),aiModel:field("gpt-4"),aiUsageWrap:field(),
   aiUsageKind:field(),aiUsageModel:field(),aiUsageCounts:field(),aiUsageTotal:field(),aiUsageLabel:field(),
   aiUsageDetailedList:field(),aiUsageDetailedDialog:field(),aiUsageHistoryList:field(),aiUsageHistoryDialog:field()};
+els.aiPriceInput=field();els.aiPriceSettings=field();els.aiPriceProviderRates=field();
 const at=Date.parse("2026-09-25T03:00:00Z"), fx={rate:"34",date:"2026-09-25",source:"manual",manualRate:"34"};
 const cloud={runtime:"cloud",provider:"openrouter",model:"gpt-4"};
 let ledger=normalizeUsageLedger(null); ledger.pricing.fx=fx;
-const add=(target,operationId,inputTokens,outputTokens,usd,stamp)=>{
+const add=(target,operationId,inputTokens,outputTokens,usd,stamp,extra={})=>{
   ledger=recordProviderGeneration(ledger,{...target,operationId,engine:"runsextension",
     inputTokens,outputTokens,totalTokens:inputTokens+outputTokens,providerCostUsd:usd,
-    cachedInputTokens:0,imageCount:1,jobId:operationId,startedAt:stamp},
+    cachedInputTokens:0,imageCount:1,jobId:operationId,startedAt:stamp,...extra},
     {now:stamp,id:()=>`session-${operationId}`});
 };
-const ui=createUsageViewController({els,state:{},isLocalProvider:p=>p==="ollama",storageKey:"usage",
+const state={};
+const ui=createUsageViewController({els,state,isLocalProvider:p=>p==="ollama",storageKey:"usage",
   getStorage:async()=>({usage:ledger}),currentUsage,historyRows:usageHistoryRows,detailedRows:usageDetailedRows});
 add(cloud,"first",1000,100,"1.25",at);
 await ui.refresh(ledger);
@@ -85,6 +88,47 @@ assert.equal(els.aiUsageKind.textContent,"Local");
 assert.match(els.aiUsageTotal.textContent,/^2,100\s+≈ ฿0\.00$/);
 assert.match(els.aiUsageCounts.textContent,/API cost \$0\.00 · ≈ ฿0\.00/);
 assert.doesNotMatch(els.aiUsageCounts.textContent,/\$1\.25|\$0\.50/);
+
+const paid={runtime:"cloud",provider:"paid",model:"google/flash-lite"};
+state.paidActive=true;state.paidModel=paid.model;
+ledger=applyUsageSelectionBoundary(ledger,{...paid,reason:"model_switch"},{now:at+700});
+await ui.refresh(ledger);
+assert.equal(els.aiUsageKind.textContent,"Paid");
+assert.equal(els.aiUsageModel.textContent,"paid / google/flash-lite",
+  "Paid usage must follow its selector even when the hidden Manual selector still names ollama/qwen");
+assert.equal(els.aiUsageTotal.textContent,"0");
+add(paid,"paid-page-one",1000,100,null,at+800,{batchId:"bulk-paid",reason:"translation_success"});
+add(paid,"paid-page-two",2000,200,null,at+900,{batchId:"bulk-paid",reason:"translation_success"});
+add(paid,"paid-repair",300,30,null,at+1000,{batchId:"bulk-paid",reason:"repair"});
+add(paid,"paid-repair",300,30,null,at+1100,{batchId:"bulk-paid",reason:"repair"});
+await ui.refresh(ledger);
+assert.equal(els.aiUsageTotal.textContent,"3,630","one aggregate includes initial and repair; receipt replay adds nothing");
+assert.match(els.aiUsageCounts.textContent,/Requests: 3/);
+assert.doesNotMatch(els.aiUsageCounts.textContent,/API cost|unpriced|\$/);
+await ui.openDetailed();
+const paidDetails=JSON.stringify(els.aiUsageDetailedList);
+assert.match(paidDetails,/paid \/ google\/flash-lite/);
+assert.match(paidDetails,/Repair/);
+assert.doesNotMatch(paidDetails,/unpriced|\$|ollama/);
+assert.equal(els.aiPriceSettings.hidden,true,"Paid cannot edit Manual USD/THB rates");
+const paidSession=usageDetailedRows(ledger).find(row=>row.current&&row.provider==="paid");
+const groups=requestGroups([paidSession]);
+assert.equal(groups.length,1,"different image jobs from Translate all remain in the same round");
+assert.equal(groups[0].requests,3);
+assert.equal(groups[0].totalTokens,3630);
+
+state.paidModel="google/other-model";
+ledger=applyUsageSelectionBoundary(ledger,{...paid,model:state.paidModel,reason:"model_switch"},{now:at+1200});
+await ui.refresh(ledger);
+assert.equal(els.aiUsageModel.textContent,"paid / google/other-model");
+assert.equal(els.aiUsageTotal.textContent,"0","an unused Paid model starts with its own session");
+state.paidActive=false;
+ledger=applyUsageSelectionBoundary(ledger,{...local,reason:"provider_switch"},{now:at+1300});
+await ui.refresh(ledger);
+assert.equal(els.aiUsageModel.textContent,"ollama / qwen");
+assert.equal(els.aiUsageKind.textContent,"Local");
+await ui.openDetailed();
+assert.equal(els.aiPriceSettings.hidden,false,"Manual restores its own pricing controls");
 const css=await readFile(new URL("../src/popup/popup.css",import.meta.url),"utf8");
 assert.doesNotMatch(css,/\.ai-summary-value\s*\{[^}]*float\s*:\s*right/,
   "a floated monetary summary squeezes the expanded metrics into a narrow column");

@@ -1,15 +1,16 @@
-import {submitConversationPage} from "../ai/translation-paths/batch-dispatch.js";
+import {submitConversationPage,submitIndependentPage} from "../ai/translation-paths/batch-dispatch.js";
+import {pageImageEnabled} from "../../shared/page-image-policy.js";
 import {selectedMode} from "../ai/translation-paths/order.js";
 import { enterConversationJob, finishConversationJob } from "../ai/translation-paths/order.js";
-import {enterLocalIndependentJob,finishLocalIndependentJob} from '../ai/translation-paths/independent-order.js';
+import {enterLocalIndependentJob,finishLocalIndependentJob,localIndependentTicket} from '../ai/translation-paths/independent-order.js';
 import { providerLearningSample } from "../../shared/ai/execution-timing.js";
 import { updateImagePresentation } from "../batches.js";
 import { attachTpError } from "../../shared/error-contract.js";
 import { classifyAiRuntime } from "../../shared/ai-settings-contract.js";
 import { shouldUseDirectLocalAi } from "../../shared/ai/direct-local/route-policy.js";
 import { getTrace, note as traceNote } from "../../shared/trace.js";
-import { translationUnits } from "../../shared/lens-document.js";
 import { imageKeyFromPayload } from "../job-keys.js";
+import { createLocalPhaseTracker } from "../../shared/ai/stream-phase.js";
 import {
   getBatch,
   markBatchInitialAi,
@@ -131,6 +132,12 @@ export function createAiExecution({ log, markJobPhase, traceUnitLayout, onCheckp
     onLocalDispatch = null,
   ) {
     const traceId = String(payload?.context?.tp_trace || getTrace() || "");
+    // The browser-direct Local stream has no API phase rows; derive the
+    // same waiting / thinking / writing n/N status from its own reader.
+    const localPhase = plan.route === "direct-local"
+      ? createLocalPhaseTracker(phase =>
+          updateImagePresentation(cancelBatchId, imageKeyFromPayload(payload), {providerPhase:phase}))
+      : null;
     return translateLensPage({
       base,
       payload,
@@ -151,17 +158,22 @@ export function createAiExecution({ log, markJobPhase, traceUnitLayout, onCheckp
       isCancelled: () =>
         signal?.aborted === true ||
         Boolean(cancelBatchId && getBatch(cancelBatchId)?.cancelled),
-      onStreamProgress: ({state}) => {
-        if (["usage_pending", "sending_request", "http_wait", "response_headers", "receiving_content", "validating"].includes(state))
+      onStreamProgress: (event = {}) => {
+        const {state, phase} = event;
+        // Live provider phase (waiting / thinking / writing n/N / stalled).
+        if (state === "provider_phase" && phase)
+          updateImagePresentation(cancelBatchId, imageKeyFromPayload(payload), {providerPhase:phase});
+        else if (["usage_pending", "sending_request", "http_wait", "response_headers", "receiving_content", "validating"].includes(state))
           updateImagePresentation(cancelBatchId, imageKeyFromPayload(payload), {phase:state});
-        else if (plan.route === "direct-local") markLocalAiStreamProgress(cancelBatchId, imageKeyFromPayload(payload), state);
+        else if (plan.route === "direct-local" && !localPhase?.observe(state, event))
+          markLocalAiStreamProgress(cancelBatchId, imageKeyFromPayload(payload), state);
       },
       trace: (event, data, eventTraceId = traceId) =>
         traceNote("background/jobs.js", event, data, eventTraceId || traceId),
       traceLayout: (document, eventTraceId, phase, imageId) =>
         traceUnitLayout(document, eventTraceId || traceId, phase, imageId),
       log,
-    });
+    }).finally(() => localPhase?.close());
   }
   
   // Abortable delay used only for safe no-generation orchestration retries.
@@ -216,19 +228,26 @@ export function createAiExecution({ log, markJobPhase, traceUnitLayout, onCheckp
     jobId = "",
     capabilities = null,
   ) {
-    if (selectedMode(payload.ai) === "conversation") {
-      updateImagePresentation(batchId,imageKeyFromPayload(payload),{translationMode:'conversation'});
+    // Text-only Local Independent pages share requests like
+    // Conversation (whole pages, webpage order, filled to the live window) but
+    // stay stateless. With page images on, Conversation's own image boundary
+    // (one page per request) applies, so those keep the per-page path below.
+    const independentCrossPage = selectedMode(payload.ai) === "independent" && plan?.route === "direct-local" &&
+      payload?.engine !== "api" && !pageImageEnabled(payload.ai?.send_image) && Boolean(localIndependentTicket(payload));
+    if (selectedMode(payload.ai) === "conversation" || independentCrossPage) {
+      const crossMode = independentCrossPage ? "independent" : "conversation";
+      updateImagePresentation(batchId,imageKeyFromPayload(payload),{translationMode:crossMode});
       // Keep OCR and page preparation concurrent. Only the cross-page dispatch
       // owns an AI slot; the original per-page execution stays below unchanged.
       const start=performance.now(), traceId=String(payload?.context?.tp_trace||"");
       traceNote("background/pipeline/ai-execution.js","imageStage",{stage:"ai",state:"started",route:"extension",
-        planner:"conversation_cross_page",imageId:String(payload?.metadata?.image_id||""),providerMs:null},traceId);
+        planner:`${crossMode}_cross_page`,imageId:String(payload?.metadata?.image_id||""),providerMs:null},traceId);
       try {
         markJobPhase(jobId, "ai_queued");
         const done=await runLocalAi(base,payload,result,plan,batchId,signal,null,onGenerationAttempt,
-          jobId,async()=>{},capabilities,submitConversationPage);
+          jobId,async()=>{},capabilities,independentCrossPage ? submitIndependentPage : submitConversationPage);
         traceNote("background/pipeline/ai-execution.js","imageStage",{stage:"ai",state:"finished",route:"extension",
-          planner:"conversation_cross_page",imageId:String(payload?.metadata?.image_id||""),providerMs:null,
+          planner:`${crossMode}_cross_page`,imageId:String(payload?.metadata?.image_id||""),providerMs:null,
           roundTripMs:performance.now()-start,usable:done?.usable===true,complete:done?.complete===true,
           missingUnitIds:done?.missing||[],latencySource:"page_projection_not_provider"},traceId);
         return done;
@@ -247,12 +266,10 @@ export function createAiExecution({ log, markJobPhase, traceUnitLayout, onCheckp
     const localCapacity = configureLocalCapacityForPayload(payload);
     if (!localCapacity) {
       setLaneUnlimited(key, false);
-      // Cloud lanes were already pinned to the API's advertised executable
-      // capacity by applyRuntimeCapacityHints(). Clearing that ceiling here
-      // made every successful request widen the browser lane back toward 64,
-      // overfilling the server's 24 active + bounded-waiter admission gate.
-      // Local lanes have their own key and policy, so cloud setup must leave
-      // the server-owned ceiling intact.
+      // Cloud lanes are already pinned to the API's advertised executable
+      // capacity by applyRuntimeCapacityHints(); clearing that ceiling here would
+      // let successful requests widen the lane past the server's admission gate.
+      // Local lanes have their own key and policy.
     }
     const unlimited = false;
     const traceId = String(payload?.context?.tp_trace || getTrace() || "");
@@ -460,9 +477,6 @@ export function createAiExecution({ log, markJobPhase, traceUnitLayout, onCheckp
             )
           : retryAfterMs;
   
-        const generationAttempts = Number(
-          e?.generationAttempts || e?.providerAttempts || 0,
-        );
         if (slotHeld) {
           releaseAiLaneFailure(key, payload, e, {
             retryAfterMs,

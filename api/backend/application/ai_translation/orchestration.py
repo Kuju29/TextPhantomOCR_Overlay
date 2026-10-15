@@ -5,6 +5,7 @@ from typing import Any, Callable
 from fastapi import HTTPException, Request
 
 import time
+import asyncio
 
 from backend import cancellation, trace
 from backend.ai import markers, prompts as ai_prompts, wire_trace
@@ -134,6 +135,11 @@ async def execute(
 ) -> dict:
     """Validate, admit, invoke and map exactly one translation request."""
     started = time.perf_counter()
+    # Outcomes of earlier answers this extension validated (script check)
+    # arrive with the next request; unknown tokens are ignored.
+    if isinstance(payload.get("routingFeedback"), list):
+        from backend.ai import routing as provider_routing
+        provider_routing.feedback(payload["routingFeedback"])
     raw_context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
     raw_provider = payload.get("provider") if isinstance(payload.get("provider"), dict) else {}
     provisional_operation = str(
@@ -203,6 +209,22 @@ async def execute(
         wire_trace.end(wire_token)
         raise HTTPException(409, detail=detail) from exc
     if reservation.replay is not None:
+        if ctx.resolved_provider == "login":
+            from backend.ai.login.login_translation import authorize_model
+            try:
+                await asyncio.to_thread(authorize_model, ctx.config.api_key, ctx.config.model)
+            except BaseException as exc:
+                wire_trace.record_error(exc, stage="login_replay_auth")
+                wire_trace.end(wire_token)
+                raise
+        if ctx.resolved_provider == "paid":
+            from backend.paid_center import authorize_replay
+            try:
+                await authorize_replay(ctx.config.api_key, correlation=dict(ctx.correlation))
+            except BaseException as exc:
+                wire_trace.record_error(exc, stage="paid_replay_auth")
+                wire_trace.end(wire_token)
+                raise
         trace.write("api", "api/routes/ai_v1.py", "ai_translate_v1", "<-",
                     {"replayed": True, "providerAttempts": 0, "generationAttempts": 0,
                      "httpAttempts": 0, "automaticContentRetry": False,
@@ -248,6 +270,7 @@ async def execute(
             admission_wait_ms=execution.admission_wait_ms, provider_ms=execution.provider_ms,
             route_identity=dict(ctx.route_identity), rate=dict(ctx.rate), unlimited=ctx.unlimited,
             resolved_provider=ctx.resolved_provider, config=ctx.config, prompt_meta=dict(ctx.prompt_meta))
+        _routing_validation(execution.result, body, missing)
         wire_trace.terminal(state="partial" if missing else "succeeded", stage="response_mapping",
                             languageValidation="pending_extension", placement="not_started",
                             translated=len(body.get("translations") or []),
@@ -266,6 +289,20 @@ async def execute(
                            route_identity=dict(ctx.route_identity), rate_entry=rate_entry,
                            trace_id=ctx.trace_id, correlation=dict(ctx.correlation))
     return body
+
+def _routing_validation(result: dict, body: dict, missing) -> None:
+    """Missing ids finalise the provider attempts here; otherwise the extension
+    still checks the script and returns the outcome with this opaque token."""
+    attempts = (result.get("meta") or {}).get("routing_attempts") or []
+    if not attempts:
+        return
+    from backend.ai import routing as provider_routing
+    if missing:
+        provider_routing.finalize(attempts, "missing_ids")
+        return
+    token = provider_routing.issue_token(list(attempts))
+    if token:
+        body.setdefault("meta", {})["routingFeedback"] = {"token": token}
 
 async def ai_schema() -> dict:
     return {"ok": True, "request": REQUEST_SCHEMA, "result": RESULT_SCHEMA,

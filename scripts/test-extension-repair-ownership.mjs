@@ -16,7 +16,7 @@ const repairCoordinator = await readFile(new URL("../src/background/repair/coord
 
 assert.match(transport, /repair:\s*\{\s*owner:\s*"extension",\s*enabled:\s*false\s*\}/,
   "every extension-owned server AI generation must explicitly suppress backend repair");
-assert.match(route, /return await execute\(request, payload, idempotency_key\)/,
+assert.match(route, /return await until_disconnect\(request, lambda \*\*kwargs: execute\(request, payload, idempotency_key, \*\*kwargs\)\)/,
   "the HTTP route must delegate repair policy to the application service");
 assert.match(application, /repair_enabled=not ai_request\.extension_owns_repair\(payload\)/,
   "the application service must consume the explicit ownership contract");

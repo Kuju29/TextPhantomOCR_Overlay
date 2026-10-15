@@ -88,7 +88,8 @@ def _proven_off(provider: str, model: str, cap: dict[str, Any]) -> bool:
                 or "none" in efforts or control in {"toggle", "boolean"})
     if not optional:
         return False
-    if provider == "openrouter":
+    if provider in {"openrouter", "paid", "login"}:
+        # Paid forwards the saved intent; Center verifies its own fresh catalogue.
         # The OpenRouter adapter sends effort:none for optional models or
         # enabled:false for explicit boolean controls.
         return True
@@ -109,20 +110,21 @@ def _proven_off(provider: str, model: str, cap: dict[str, Any]) -> bool:
     if provider == "together":
         native = native_reasoning_capability(provider, model)
         return bool(native) and native.get("mandatory") is False and control == "boolean"
-    # Featherless and the operator's Paid service lack a verified disable
-    # field for the selected model/template in their current adapters.
+    # Featherless lacks a verified disable field for the selected template.
     return False
 
 
 def _proven_active(provider: str, model: str, selected: str, cap: dict[str, Any]) -> bool:
     control, efforts = cap.get("control"), _efforts(cap)
     if selected == "on":
-        if provider in {"deepseek", "openrouter", "anthropic"} and control in {"toggle", "boolean"}:
+        if provider in {"deepseek", "openrouter", "paid"} and control in {"toggle", "boolean"}:
             return True
+        if provider == "anthropic":
+            return bool(native_reasoning_capability(provider, model)) and control in {"toggle", "boolean"}
         return provider == "together" and bool(native_reasoning_capability(provider, model)) and control == "boolean"
     if control != "levels" or selected not in efforts:
         return False
-    if provider in {"openrouter", "openai", "deepseek", "huggingface"}:
+    if provider in {"openrouter", "paid", "login", "openai", "deepseek", "huggingface"}:
         return True
     if provider == "anthropic":
         return bool(native_reasoning_capability(provider, model))

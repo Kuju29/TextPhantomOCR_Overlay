@@ -54,7 +54,7 @@ function nativeUsage(result) {
       ? {completion_tokens_details:{reasoning_tokens:stats.reasoning_output_tokens}}:{}),
   }},'openai');
 }
-export function normalizeLmStudioNativeLine(line) {
+function normalizeLmStudioNativeLine(line) {
   let value=String(line || '').trim();
   if (!value || value.startsWith(':') || /^(?:event|id|retry):/.test(value)) return {kind:'empty'};
   if (!value.startsWith('data:')) return {kind:'malformed',subtype:'sse_non_data_line',chars:value.length};

@@ -1,3 +1,4 @@
+import { diagnosticFetch } from "../../shared/diagnostics.js";
 import { note as traceNote, isTracing } from "../../shared/trace.js";
 import { API_PATHS, engineApiPath } from "../../shared/constants.js";
 import { readLimitedText } from "../images.js";
@@ -8,6 +9,7 @@ import {
   networkFailure,
   readJson,
 } from "./http-error.js";
+import { installReady } from "./install-header.js";
 import { noteRetryAfter } from "./polling.js";
 import { noteApiActivity, noteApiSuccess } from "../api.js";
 
@@ -49,6 +51,7 @@ export async function fetchLensRawViaRest(
   form.append("batch_id", String(batchId || ""));
   form.append("tp_tab_session", String(tabSession || ""));
 
+  await installReady();
   let res;
   try {
     noteApiActivity(base);
@@ -60,7 +63,7 @@ export async function fetchLensRawViaRest(
     httpStarted = performance.now();
     // This marks the fetch invocation, NOT socket dispatch/network queue exit.
     note("http_started", {requestSetupMs:httpStarted-setupStarted, httpAttempts:1});
-    res = await fetch(base.replace(/\/+$/, "") + path, {
+    res = await diagnosticFetch(base.replace(/\/+$/, "") + path, {
       method: "POST",
       headers: limitHeaders(
         base,

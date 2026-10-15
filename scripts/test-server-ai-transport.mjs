@@ -53,7 +53,7 @@ try {
   } });
   assert.equal(captured.body.prompt_mode, "replace");
   assert.equal(captured.body.memory.enabled, true);
-  assert.equal(captured.body.memory.styleExamples, true);
+  assert.equal(captured.body.memory.styleExamples, false, "Missing example preference defaults OFF on the API wire");
   assert.equal(captured.body.image.dataUri, "data:image/png;base64,AQ==");
 
   globalThis.fetch = async (url, init) => {
