@@ -621,9 +621,22 @@ def _run_extension(args: argparse.Namespace, image_path: Path) -> int:
             return 2
 
     mime = mimetypes.guess_type(image_path.name)[0] or "image/jpeg"
+    api_url = str(args.api_url).strip().rstrip("/")
+    if api_url and not api_url.lower().startswith(("http://", "https://")):
+        print("error: --api-url must be an http(s) URL", file=sys.stderr)
+        return 2
+    _MAX_CLI_FIELD_LEN = 4096
+    for _name, _val in (
+        ("--ai-key", args.ai_key), ("--ai-model", args.ai_model),
+        ("--ai-provider", args.ai_provider), ("--ai-base-url", args.ai_base_url),
+        ("--ai-prompt", args.ai_prompt), ("--ai-conversation", args.ai_conversation),
+    ):
+        if not isinstance(_val, str) or len(_val) > _MAX_CLI_FIELD_LEN:
+            print(f"error: {_name} value is invalid or too long", file=sys.stderr)
+            return 2
     config = {
         "outDir": str(out_dir.resolve()),
-        "apiUrl": str(args.api_url).strip().rstrip("/"),
+        "apiUrl": api_url,
         "imageName": image_path.name,
         "imageBase64": base64.b64encode(image_path.read_bytes()).decode("ascii"),
         "mime": mime,
