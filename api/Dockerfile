@@ -22,7 +22,6 @@ COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY backend ./backend
-COPY third_party ./third_party
 
 # Hugging Face Docker Spaces Dev Mode requires /app to be writable by uid 1000.
 # Create a real home directory as well because the injected Dev Mode layer runs
