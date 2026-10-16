@@ -14,6 +14,8 @@ import pytest
 _ancestor=Path(__file__).resolve().parents[1]
 ROOT=Path(os.environ.get('TP_TEST_ROOT',str(_ancestor if (_ancestor/'api/backend').is_dir() else Path(__file__).resolve().parents[2]/'source/TextPhantom')))
 sys.path.insert(0,str(ROOT/'api'))
+sys.path.insert(0,str(Path(__file__).resolve().parent/'lib'))
+from paid_center_fake import HealthzClient, reset_protocol_cache
 from backend.ai import accounting
 from backend.ai.clients.provider_error import ProviderHttpError
 from backend.ai.provider_contract import GenerationRequest
@@ -35,10 +37,8 @@ EVIDENCE=[
 @pytest.mark.parametrize('evidence,details,possibly_dispatched',EVIDENCE,ids=[row[0] for row in EVIDENCE])
 def test_provider_budget_admission_requires_explicit_negative_dispatch_evidence(code,status,evidence,details,possibly_dispatched):
     calls=[]
-    class CenterClient:
-        def __init__(self,**kwargs):pass
-        def __enter__(self):return self
-        def __exit__(self,*args):pass
+    reset_protocol_cache()
+    class CenterClient(HealthzClient):  # also answers the Paid protocol health read
         def post(self,*args,**kwargs):
             url = args[0]
             if url.endswith("/chat/receipt"): return httpx.Response(200, json={"found": False})

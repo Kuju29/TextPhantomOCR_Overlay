@@ -5,6 +5,8 @@ import {createTab,getTab,queryTabs} from '../../../shared/browser-api.js';
 import {getApiBase} from '../../api.js';
 import {recordDiagnostic} from '../../../shared/diagnostics.js';
 import {ENDPOINT_PROVIDERS,captureEndpointLogin} from './login_endpoint_capture.js';
+import {COOKIE_LOGIN_PROVIDERS,hasDataConsent} from '../../../shared/data-consent.js';
+import {readAccountSession,withAccountSignal,accountSignal} from '../../../shared/account-gate.js';
 import {RELAY_PROVIDERS,acquireBrowserRelay} from './login_browser_relay.js';
 import {OFFICIAL_REDIRECT,beginOfficialSignIn,readCallback,finishOfficialSignIn,officialAccount,officialAccessToken,forgetOfficial} from './login_chatgpt_official.js';
 import {forgetWebchats} from './login_chatgpt_web.js';
@@ -19,6 +21,7 @@ const flowAlarm={arm(){if(alarmArmed===true)return;alarmArmed=true;try{chrome.al
   disarm(){if(alarmArmed===false)return;alarmArmed=false;try{chrome.alarms?.clear?.(ALARM,()=>{void chrome.runtime?.lastError;});}catch{}}};
 const importingFlows=new Set();
 const failureMessages={
+  login_data_consent_required:'Open TextPhantom and allow account data to continue.',
   login_organization_required:'Select the intended organization on the Claude website, then reconnect from the extension.',
   login_reconnect_required:'Update the extension and API together, then sign in again to verify the provider account and workspace.',
   login_chatgpt_auth_sdk_unavailable:'ChatGPT sign-in could not be read from this page version. Reload the provider tab and reconnect. If this continues, send the Login diagnostic reference to support.',
@@ -107,15 +110,19 @@ chrome.runtime.onMessage.addListener((message,sender,reply)=>{
 });
 const random=()=>[...crypto.getRandomValues(new Uint8Array(24))].map(x=>x.toString(16).padStart(2,'0')).join('');
 async function context(){
-  const values=await readLoginState([LOGIN_PENDING_AUTH,'paidApiBase','paidSessionToken','loginProvider','loginModel']);
-  const flow=values[LOGIN_PENDING_AUTH],base=String(values.paidApiBase || '').replace(/\/+$/,'');
-  if(flow?.transport !== 'web_endpoint' || !ENDPOINT_PROVIDERS[flow.provider] || values.loginProvider !== flow.provider || !/^lgf_[a-f0-9]{48}$/.test(flow.flow_id || '') || !values.paidSessionToken || base !== flow.apiBase || await getApiBase({warm:false}) !== base || flow.scope !== await loginAuthScope(base,values.paidSessionToken))return null;
+  // 10495: every Login provider uses the TextPhantom account; its token only
+  // through the gate (data-use consent first). The cookie read keeps its own checks.
+  const account=await readAccountSession({read:readLoginState,keys:[LOGIN_PENDING_AUTH,'loginProvider','loginModel']});
+  if(!account.ok)return null;
+  const values=account.values;
+  const flow=values[LOGIN_PENDING_AUTH],base=account.base;
+  if(flow?.transport !== 'web_endpoint' || !ENDPOINT_PROVIDERS[flow.provider] || values.loginProvider !== flow.provider || !/^lgf_[a-f0-9]{48}$/.test(flow.flow_id || '') || base !== flow.apiBase || await getApiBase({warm:false}) !== base || flow.scope !== await loginAuthScope(base,account.token))return null;
   const url=new URL(base);if(url.username || url.password || !(url.protocol === 'https:' || url.protocol === 'http:' && ['127.0.0.1','localhost','[::1]'].includes(url.hostname)))return null;
-  return {flow,base,token:values.paidSessionToken,model:String(values.loginModel || '')};
+  return {flow,base,token:account.token,model:String(values.loginModel || '')};
 }
 async function same(ctx){const current=await context();return current?.flow.flow_id === ctx.flow.flow_id && current.flow.scope === ctx.flow.scope && current.flow.provider === ctx.flow.provider && current.flow.tabId === ctx.flow.tabId && current.flow.browserInstance === ctx.flow.browserInstance;}
 async function post(ctx,suffix,body){
-  const response=await fetch(ctx.base+'/login/providers/'+ctx.flow.provider+'/auth/'+suffix,{method:'POST',cache:'no-store',credentials:'omit',redirect:'error',signal:AbortSignal.timeout(suffix === 'cancel'?5000:suffix === 'endpoint-import' && RELAY_PROVIDERS[ctx.flow.provider]?120000:45000),
+  const response=await fetch(ctx.base+'/login/providers/'+ctx.flow.provider+'/auth/'+suffix,{method:'POST',cache:'no-store',credentials:'omit',redirect:'error',signal:withAccountSignal(AbortSignal.timeout(suffix === 'cancel'?5000:suffix === 'endpoint-import' && RELAY_PROVIDERS[ctx.flow.provider]?120000:45000)),
     headers:{Authorization:'Bearer '+ctx.token,'Content-Type':'application/json','X-TP-Trace-ID':ctx.flow.traceId || ''},body:JSON.stringify(body)});
   let data;try{data=await response.json();}catch{throw Object.assign(new Error('The selected API did not return a Login response.'),{code:'login_endpoint_api_invalid'});}
   if(!response.ok)throw Object.assign(new Error(data?.error?.message || 'Endpoint Login failed.'),{code:data?.error?.code,status:response.status,stage:data?.error?.stage,upstreamStatus:data?.error?.upstream_status});
@@ -216,7 +223,7 @@ export async function wakeEndpointLogin(){
       importingFlowId=ctx.flow.flow_id;importingFlows.add(importingFlowId);
       await setLoginSession({[LOGIN_OUTCOME]:{scope:ctx.flow.scope,provider:ctx.flow.provider,flow_id:ctx.flow.flow_id,status:'processing',stage:'endpoint_validation',expiresAt:ctx.flow.expiresAt,traceId:ctx.flow.traceId || ''}});
       // The API verifies Claude through this browser's own claude.ai tab.
-      const releaseRelay=RELAY_PROVIDERS[ctx.flow.provider]?acquireBrowserRelay(ctx.base,ctx.token):()=>{};
+      const releaseRelay=RELAY_PROVIDERS[ctx.flow.provider]?acquireBrowserRelay(ctx.base,ctx.token,{gate:accountSignal()}):()=>{};
       let data;
       try{data=await post(ctx,'endpoint-import',{flow_id:ctx.flow.flow_id,state:ctx.flow.state,browser_instance:ctx.flow.browserInstance,expected_identity:capture.expected_identity,credentials:capture.credentials});}
       finally{releaseRelay();}
@@ -267,18 +274,24 @@ chrome.runtime.onMessage.addListener((message,sender,reply)=>{
  * (that needs a click in the popup) and never types or submits anything.
  */
 export async function autoConnectLogin(){
-  const values=await readLoginState([LOGIN_PENDING_AUTH,'paidApiBase','paidSessionToken','loginProvider']);
+  // 10495: every Login provider uses the TextPhantom account. Without data-use
+  // consent nothing is started and nothing is sent (before the API is contacted).
+  const account=await readAccountSession({read:readLoginState,keys:[LOGIN_PENDING_AUTH,'loginProvider']});
+  const values=account.values;
   const provider=String(values.loginProvider || ''),spec=ENDPOINT_PROVIDERS[provider];
   if(!spec)return {started:false,reason:'not_website_login'};
+  if(!account.consent)return {started:false,reason:'data_consent_required'};
   const pending=values[LOGIN_PENDING_AUTH];
   if(pending?.provider === provider && /^lgf_[a-f0-9]{48}$/.test(pending.flow_id || '') && (pending.expiresAt || 0)>Date.now())return {started:true,reason:'already_connecting'};
-  const base=String(values.paidApiBase || '').replace(/\/+$/,''),token=String(values.paidSessionToken || '');
+  const base=account.base,token=account.ok?account.token:'';
   if(!base || !token || await getApiBase({warm:false}) !== base)return {started:false,reason:'paid_sign_in_required'};
+  // 10494: a website cookie is never read without the user's data consent.
+  if(COOKIE_LOGIN_PROVIDERS.includes(provider) && !await hasDataConsent())return {started:false,reason:'data_consent_required'};
   const granted=await new Promise(resolve=>{try{chrome.permissions.contains({permissions:['cookies']},value=>resolve(!chrome.runtime.lastError && value === true));}catch{resolve(false);}});
   if(!granted)return {started:false,reason:'permission_required'};
   let data;
   try{
-    const response=await fetch(base+'/login/providers/'+provider+'/auth/start',{method:'POST',cache:'no-store',credentials:'omit',redirect:'error',signal:AbortSignal.timeout(20000),
+    const response=await fetch(base+'/login/providers/'+provider+'/auth/start',{method:'POST',cache:'no-store',credentials:'omit',redirect:'error',signal:withAccountSignal(AbortSignal.timeout(20000)),
       headers:{Accept:'application/json','Content-Type':'application/json',Authorization:'Bearer '+token},body:'{}'});
     data=await response.json().catch(()=>null);
     if(!response.ok)return {started:false,reason:/^login_[a-z_]{1,60}$/.test(data?.error?.code || '')?data.error.code:'login_start_failed'};

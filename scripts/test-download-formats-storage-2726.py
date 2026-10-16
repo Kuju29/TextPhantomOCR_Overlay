@@ -3,6 +3,10 @@ A tiny test extension uses the production download scripts and synthetic art.
 Default storage is a test shim (not native chrome.storage); --native-storage requires
 an environment permitting unpacked extensions. No AI/OCR/provider is invoked.
 """
+import sys as _tp_sys
+from pathlib import Path as _TpPath
+_tp_sys.path.insert(0, str(_TpPath(__file__).resolve().parent / 'lib'))
+from chromium_path import chromium_executable  # the one shared Chromium resolver
 from pathlib import Path
 import argparse,base64,io,json,shutil,tempfile,zipfile
 from PIL import Image
@@ -46,7 +50,7 @@ with tempfile.TemporaryDirectory(prefix='tp-real-storage-') as temp:
   def write_storage(_source,patch):
    values=read_storage();values.update(patch);storage_file.write_text(json.dumps(values));return values
   def launch():
-   c=pw.chromium.launch_persistent_context(str(profile),executable_path='/usr/bin/chromium',headless=True,ignore_default_args=['--disable-extensions'],accept_downloads=True,viewport={'width':1280,'height':1000},args=['--no-sandbox','--disable-dev-shm-usage']+(['--enable-unsafe-extension-debugging'] if a.native_storage else []))
+   c=pw.chromium.launch_persistent_context(str(profile),executable_path=chromium_executable(),headless=True,ignore_default_args=['--disable-extensions'],accept_downloads=True,viewport={'width':1280,'height':1000},args=['--no-sandbox','--disable-dev-shm-usage']+(['--enable-unsafe-extension-debugging'] if a.native_storage else []))
    if not a.native_storage:
     c.expose_binding('fixtureRead',lambda _source:read_storage())
     c.expose_binding('fixtureWrite',write_storage)

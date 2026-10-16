@@ -1,4 +1,8 @@
 """Production inline account + shared renderer in a real browser, offline fixtures."""
+import sys as _tp_sys
+from pathlib import Path as _TpPath
+_tp_sys.path.insert(0, str(_TpPath(__file__).resolve().parent / 'lib'))
+from chromium_path import chromium_executable  # the one shared Chromium resolver
 import asyncio
 import json
 import os
@@ -26,7 +30,8 @@ INIT = """async () => {
   const {createInlineAccount} = await import('/paid/inline.js');
   const {createPaidViewCache, accountViewScope} = await import('/paid/view-cache.js');
   const base = location.origin, token = 'offline-customer-fixture';
-  window.store = {customApiUrl:base,paidApiBase:base,paidSessionToken:token};
+  // 10495: this customer allowed data use (the account gate needs the consent record).
+  window.store = {tpDataConsentV1:{version:1,granted:true,at:1},customApiUrl:base,paidApiBase:base,paidSessionToken:token};
   const read = async () => structuredClone(store);
   const write = async patch => Object.assign(store,structuredClone(patch));
   window.cached = {email:'customer@example.com',credits:{available:'12000',held:'0'},
@@ -54,7 +59,7 @@ async def main():
     checks = []
     try:
         async with async_playwright() as p:
-            browser_path = os.getenv('TP_BROWSER_EXECUTABLE')
+            browser_path = chromium_executable()
             browser = await p.chromium.launch(**({'executable_path': browser_path} if browser_path else {}), headless=True)
             page = await browser.new_page(viewport={'width': 430, 'height': 800})
             errors = []

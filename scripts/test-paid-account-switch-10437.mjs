@@ -1,20 +1,21 @@
 import assert from 'node:assert/strict';
-import {webcrypto} from 'node:crypto';
+import {installSettle} from './lib/settle.mjs';
 import {createPaidServiceController} from '../src/popup/controllers/paid-service-controller.js';
 
-Object.defineProperty(globalThis,'crypto',{value:webcrypto,configurable:true});
+// The account view scope is a WebCrypto digest: wait for it, not for a fixed turn count.
+const tick=installSettle({turns:15});
 const element=(value='')=>({value,textContent:'',style:{},disabled:false,handlers:{},
   addEventListener(name,fn){this.handlers[name]=fn;},removeEventListener(){},
   setAttribute(){},replaceChildren(...children){this.children=children;},focus(){}});
 globalThis.document={createElement:()=>element(),visibilityState:'visible'};
-const tick=async()=>{for(let i=0;i<15;i++)await new Promise(resolve=>setImmediate(resolve));};
 const base='http://localhost:7860';
 const customer=(letter)=>({email:`account-${letter}@example.com`,credits:{available:letter==='a'?'1234':'9876',held:'0'},
   models:[{id:'demo/model',name:'Demo',eligible_tp:'1234'}],paid_paused:false});
 
 function fixture({signedIn=true,deferReads=false}={}){
   const changes=new Set(),store={aiServiceMode:'paid',customApiUrl:base,paidApiBase:signedIn?base:'',
-    paidSessionToken:signedIn?'account-a-session':'',paidEmail:signedIn?customer('a').email:'',paidModel:'demo/model'};
+    paidSessionToken:signedIn?'account-a-session':'',paidEmail:signedIn?customer('a').email:'',paidModel:'demo/model',
+    tpDataConsentV1:{version:1,granted:true}}; // 10495: this user allowed account data
   globalThis.chrome={runtime:{},storage:{session:{get:(_keys,callback)=>callback({})},
     onChanged:{addListener:fn=>changes.add(fn),removeListener:fn=>changes.delete(fn)}}};
   const emit=patch=>{const event={};for(const[key,value]of Object.entries(patch)){if(store[key]!==value)event[key]={oldValue:store[key],newValue:value};store[key]=value;}

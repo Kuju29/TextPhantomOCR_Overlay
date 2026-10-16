@@ -1,22 +1,19 @@
 import assert from 'node:assert/strict';
-import { webcrypto } from 'node:crypto';
+import { installSettle } from './lib/settle.mjs';
 import { createAiProfileController } from '../src/popup/controllers/ai-profile-controller.js';
 import { createAiProfileStorageWriter } from '../src/popup/controllers/ai-profile-storage-writer.js';
 import { createPaidServiceController } from '../src/popup/controllers/paid-service-controller.js';
-import { createRateSettingsController } from '../src/popup/controllers/rate-settings-controller.js';
 import { paidEntry, paidScope, PAID_PROFILE_KEY } from '../src/shared/paid-profile.js';
 import { userMessageForCode } from '../src/shared/error-contract.js';
-Object.defineProperty(globalThis,'crypto',{value:webcrypto,configurable:true});
 const checks=[];const check=(name,fn)=>{fn();checks.push({name,passed:true});};
-const settle=async()=>{for(let n=0;n<8;n++)await new Promise(r=>setImmediate(r));};
+const settle=installSettle({turns:8}); // waits for WebCrypto work, not a fixed turn count
 const el=(value='')=>({value,checked:false,style:{display:''},dataset:{},options:[],textContent:'',disabled:false,handlers:{},
  addEventListener(k,fn){this.handlers[k]=fn;},replaceChildren(...v){this.children=v;this.options=v;}});
 globalThis.document={createElement:()=>el()};
 const els=Object.fromEntries(['aiProvider','aiModel','aiBaseUrl','aiPrompt','aiThinking','aiMemoryMode','aiPageImage','aiTranslationMode',
  'aiStyleExamples','aiStyleExamplesWrap','lang','aiService','mode','sources','apiUrl','aiServiceWrap','aiPaidPanel','aiProviderWrap','aiKeyWrap','aiModelWrap','aiEndpointWrap',
- 'aiThinkingWrap','aiPromptWrap','aiCharactersWrap','aiPageImageWrap','aiRateWrap','aiTranslationModeWrap','aiPaidStatus','aiPaidUnavailable',
- 'aiPaidModel','aiPaidLogin','aiPaidAccount','aiPaidEmailLabel','aiPaidCredits','aiPaidHeld','aiPaidAccountState',
- 'rateLimitEnabled','rateProfile','rateRpm','rateBurst','ratePresetHint'].map(k=>[k,el()]));
+ 'aiThinkingWrap','aiPromptWrap','aiCharactersWrap','aiPageImageWrap','aiTranslationModeWrap','aiPaidStatus','aiPaidUnavailable',
+ 'aiPaidModel','aiPaidLogin','aiPaidAccount','aiPaidEmailLabel','aiPaidCredits','aiPaidHeld','aiPaidAccountState'].map(k=>[k,el()]));
 Object.assign(els.aiProvider,{value:'huggingface'});els.aiModel.value='manual/model';els.lang.value='th';
 els.mode.value='lens_text';els.sources.value='ai';els.apiUrl.value='http://localhost:7860';
 let store={aiProvider:'huggingface',aiModel:'manual/model',aiThinking:'low',aiMemoryMode:'terms',aiPageImage:'off',

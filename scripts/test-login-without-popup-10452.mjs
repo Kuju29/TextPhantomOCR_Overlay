@@ -37,7 +37,8 @@ async function fixture({provider='login_gemini',selected='',models=[model('web-d
   const base='http://localhost:7860',writes=[],requests=[],messages=[],timers=new Map();
   const local={mode:'lens_text',sources:'ai',lang:'th',customApiUrl:base,apiUrlDefault:base,
     apiDefaultsFetchedAt:Date.now(),aiServiceMode:'paid',paidTranslationSource:'login',
-    paidSessionToken:owner,paidApiBase:base,loginProvider:provider,loginModel:selected};
+    paidSessionToken:owner,paidApiBase:base,loginProvider:provider,loginModel:selected,
+    tpDataConsentV1:{version:1,granted:true,at:1}}; // 10494: this user allowed account data
   const ram={},listeners=new Set();let nextTimer=0,captureCount=0,emitEnabled=true,clock=Date.now();
   const signal=()=>{const handlers=new Set();return {addListener:fn=>handlers.add(fn),removeListener:fn=>handlers.delete(fn),
     emit:(...args)=>{for(const fn of handlers)fn(...args);}};};
@@ -122,6 +123,8 @@ async function fixture({provider='login_gemini',selected='',models=[model('web-d
     '../../../shared/browser-api.js':browserApi,
     '../../api.js':{getApiBase},
     '../../../shared/diagnostics.js':diagnostics,
+    '../../../shared/data-consent.js':{hasDataConsent:async()=>true,COOKIE_LOGIN_PROVIDERS:['login_gemini','login_deepseek']},
+    '../../../shared/account-gate.js':{readAccountSession:async({read,keys=[]}={})=>{const v=await read(['paidSessionToken','paidApiBase','paidEmail',...keys]);const token=String(v.paidSessionToken||''),base=String(v.paidApiBase||'').replace(/\/+$/,''),values={...v};delete values.paidSessionToken;return token?{ok:true,consent:true,signedIn:true,token,base,values,signal:new AbortController().signal}:{ok:false,consent:true,signedIn:false,base,values};},withAccountSignal:signal=>signal,accountSignal:()=>new AbortController().signal}, // 10495: the account gate (this user allowed data use)
     './login_browser_relay.js':{RELAY_PROVIDERS:{login_claude:{}},acquireBrowserRelay:()=>()=>{}},
     './login_chatgpt_official.js':{OFFICIAL_REDIRECT:'http://127.0.0.1:1455/auth/callback',beginOfficialSignIn:async()=>{throw Error('ChatGPT not used');},readCallback:()=>({error:'unused'}),finishOfficialSignIn:async()=>{throw Error('ChatGPT not used');},officialAccount:async()=>'',officialAccessToken:async()=>null,forgetOfficial:async()=>{}},
     './login_chatgpt_web.js':{forgetWebchats:async()=>{}},

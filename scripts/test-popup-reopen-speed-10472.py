@@ -4,6 +4,10 @@ Paid model, the Login model and Account details become usable, with every API
 round trip taking RTT ms and the API health check finishing after HEALTH ms.
 Prints the timings; with --assert, enforces the .72 targets.
 Offline fixtures only; no account, network or secret."""
+import sys as _tp_sys
+from pathlib import Path as _TpPath
+_tp_sys.path.insert(0, str(_TpPath(__file__).resolve().parent / 'lib'))
+from chromium_path import chromium_executable  # the one shared Chromium resolver
 import asyncio
 import json
 import os
@@ -42,7 +46,8 @@ INIT = """async ({saved=null,source='tp',rtt=0,health=0}={})=>{
  const {createPaidServiceController}=await import('/popup/controllers/paid-service-controller.js');
  const {els}=await import('/popup/dom.js');
  window.t0=performance.now();
- window.store=saved?.store||{customApiUrl:location.origin,aiServiceMode:'paid',paidTranslationSource:source,paidSessionToken:'fixture-customer',paidApiBase:location.origin,paidServiceApiBase:location.origin,paidModel:'tp-demo',loginProvider:'login_gemini',loginModel:'web-default'};
+ // 10495: this customer allowed data use (the account gate reads the consent record).
+ window.store=saved?.store||{tpDataConsentV1:{version:1,granted:true,at:1},customApiUrl:location.origin,aiServiceMode:'paid',paidTranslationSource:source,paidSessionToken:'fixture-customer',paidApiBase:location.origin,paidServiceApiBase:location.origin,paidModel:'tp-demo',loginProvider:'login_gemini',loginModel:'web-default'};
  window.auth=saved?.auth||{};const listeners=new Set();
  const get=(area,keys,fn)=>fn(keys==null?structuredClone(area):Object.fromEntries([].concat(keys).map(k=>[k,structuredClone(area[k])])));
  const set=(area,patch,fn,name)=>{const changes=Object.fromEntries(Object.entries(patch).map(([k,v])=>[k,{oldValue:area[k],newValue:v}]));Object.assign(area,structuredClone(patch));fn?.();queueMicrotask(()=>listeners.forEach(listener=>listener(changes,name)));};
@@ -132,7 +137,7 @@ async def main():
     results = []
     try:
         async with async_playwright() as p:
-            executable = os.getenv('TP_BROWSER_EXECUTABLE')
+            executable = chromium_executable()
             browser = await p.chromium.launch(headless=True, **({'executable_path': executable} if executable else {}))
             for source in ('tp', 'login'):
                 results.append(await scenario(browser, server.server_port, source))

@@ -1,6 +1,8 @@
-/** Bounded, API-scoped, durable diagnostic journal. TP_LOG_FILE decides shipping.
- * Unknown metadata keeps only explicit diagnostic records locally. Authoritative
- * disabled clears them. Transient failures retain/retry, never replay business calls.
+/** Bounded, API-scoped, durable diagnostic journal. Shipping needs BOTH the
+ * user's "Send diagnostic logs" switch (default off, 10494) and TP_LOG_FILE.
+ * With the switch off nothing is recorded or kept. Unknown metadata keeps only
+ * explicit diagnostic records locally. Authoritative disabled clears them.
+ * Transient failures retain/retry, never replay business calls.
  */
 import './log-serialization.js';
 const MAX_BUFFER=400,MAX_BYTES=512*1024,MAX_BATCH=100,MAX_REQUEST_BYTES=48*1024,TTL=7*86400000;
@@ -8,6 +10,8 @@ const KEY='tpDiagnosticJournalV1';
 const RUN_ID=globalThis.crypto?.randomUUID?.()||Math.random().toString(36).slice(2);
 let lineNo=0,buffer=[],dropped=0,timer=null,shipping=false,enabled=false,known=false,baseUrlProvider=null,activeBaseKey='';
 let revision=0,failures=0,restored=false,restoreTask=null,saveTask=null,saveDirty=false,storageFailures=0;
+// The user's switch. Fail closed until the worker has read it.
+let userAllowed=false;
 const unsupportedBases=new Set();
 const normalize=base=>String(base||'').replace(/\/+$/,'');
 const cloneSafe=value=>globalThis.__TPLogSerialization?.normalize(value)??value;
@@ -34,7 +38,7 @@ function cap(){
   while(bytes>MAX_BYTES&&buffer.length){const row=buffer.shift();bytes-=new TextEncoder().encode(JSON.stringify(row)).length;dropped++;}
 }
 function schedule(delay=1500){
-  if(!enabled||shipping||timer||!buffer.length)return;
+  if(!enabled||!userAllowed||shipping||timer||!buffer.length)return;
   timer=setTimeout(()=>{timer=null;void flushLogs();},delay);timer?.unref?.();
 }
 export async function initializeLogJournal(base){
@@ -49,7 +53,7 @@ export async function initializeLogJournal(base){
     try{
       const stored=await globalThis.chrome?.storage?.local?.get?.(KEY),saved=stored?.[KEY];
       if(epoch!==revision||target!==activeBaseKey)return;
-      if(saved?.base===target&&Array.isArray(saved.records)&&saved.updatedAt>Date.now()-TTL){
+      if(userAllowed&&saved?.base===target&&Array.isArray(saved.records)&&saved.updatedAt>Date.now()-TTL){
         const existing=new Set(buffer.map(x=>`${x.run}:${x.n}`));
         buffer=[...saved.records.filter(x=>x?.t>Date.now()-TTL&&!existing.has(`${x.run}:${x.n}`)).map(cloneSafe),...buffer];
         dropped+=Math.max(0,Number(saved.dropped)||0);cap();
@@ -72,11 +76,21 @@ export function setLogShippingEnabled(on,getBaseUrl,baseKey='',{authoritative=fa
   if(!enabled){revision++;buffer=[];dropped=0;if(timer)clearTimeout(timer);timer=null;}
   failures=0;void persist();schedule(0);
 }
+/** The user's "Send diagnostic logs to the API server" switch. Off drops the journal. */
+export function setDiagnosticsUploadAllowed(on){
+  const next=on===true;
+  if(next===userAllowed)return;
+  userAllowed=next;
+  if(!userAllowed){revision++;buffer=[];dropped=0;if(timer)clearTimeout(timer);timer=null;void persist();return;}
+  schedule(0);
+}
+export const diagnosticsUploadAllowed=()=>userAllowed;
 export function resetLogShippingSupport(baseKey=''){
   const key=normalize(baseKey);if(key)unsupportedBases.delete(key);else unsupportedBases.clear();
   failures=0;
 }
 export function recordLogLine(record){
+  if(!userAllowed)return;
   if(!enabled&&(!record?.diagnostic||known))return;
   try{
     const clean=cloneSafe(record);
@@ -87,15 +101,15 @@ export function recordLogLine(record){
     if(buffer.length>=40)void flushLogs();else schedule();
   }catch{}
 }
-export function logShippingState(){return {enabled,known,pending:buffer.length,dropped,consecutiveFailures:failures,persistent:restored&&storageFailures===0,storageFailures};}
+export function logShippingState(){return {enabled,userAllowed,known,pending:buffer.length,dropped,consecutiveFailures:failures,persistent:restored&&storageFailures===0,storageFailures};}
 export function persistLogJournal(){return persist();}
 export async function flushLogs(){
   if(timer){clearTimeout(timer);timer=null;}
-  if(!enabled||shipping||!buffer.length)return;
+  if(!enabled||!userAllowed||shipping||!buffer.length)return;
   shipping=true;const epoch=revision;let deadline;
   try{
     const base=normalize(await baseUrlProvider?.());
-    if(!base||!enabled||epoch!==revision||activeBaseKey&&base!==activeBaseKey)return;
+    if(!base||!enabled||!userAllowed||epoch!==revision||activeBaseKey&&base!==activeBaseKey)return;
     const batch=[];let bytes=256;
     for(const item of buffer.slice(0,MAX_BATCH)){
       const n=new TextEncoder().encode(JSON.stringify(item)).length+1;

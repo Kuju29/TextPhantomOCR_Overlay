@@ -67,7 +67,6 @@ export function bindPopupEvents(deps) {
     renderLocalCapacityHint,
     persistSelectedLocalCapacityHint,
     clearLocalCapacitySnapshot,
-    rateSettingsController,
     renderAiUsage,
     refreshSeriesMemory,
     openAiUsageHistory,
@@ -344,7 +343,6 @@ export function bindPopupEvents(deps) {
         () => selectedUsageTarget("auto"),
       );
       traceProviderTransition("committed", { provider, revision, local });
-      rateSettingsController.renderHint();
       validateAiKey();
       providerMetaController.schedule({ immediate: true });
     } catch (error) {

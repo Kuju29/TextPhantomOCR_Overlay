@@ -14,7 +14,12 @@ const unavailable={status:'unavailable',unit:'TP_PER_1000_TOKENS',input_tp:null,
 const modelRows=()=>ids.map((id,index)=>({id,name:'Synthetic model '+(index+1),eligible_tp:'1250',max_output:8192,
  catalogue_pricing:pricing(index+2,index+4),pricing:unavailable,
  price_sync:{automatic:true,status:'current',checked_at:1700000000},route_price_sync:{status:'unavailable',account_policy_verified:false}}));
-const savedFor=id=>({mode:'lens_text',sources:'ai',lang:'th',customApiUrl:A,apiUrlDefault:A,apiDefaultsFetchedAt:Date.now(),aiServiceMode:'paid',paidTranslationSource:'tp',paidSessionToken:'synthetic-a',paidApiBase:A,paidServiceApiBase:A,paidModel:id});
+const savedFor=id=>({mode:'lens_text',sources:'ai',lang:'th',customApiUrl:A,apiUrlDefault:A,apiDefaultsFetchedAt:Date.now(),aiServiceMode:'paid',paidTranslationSource:'tp',paidSessionToken:'synthetic-a',paidApiBase:A,paidServiceApiBase:A,paidModel:id,tpDataConsentV1:{version:1,granted:true}}); // 10495: this user allowed account data
+// .90 owner: no periodic catalogue polling. A visible popup re-reads the account
+// and catalogue on change signals (X-TP-Changes prices/account token), usage,
+// open and return to view; a fixed 10-minute timer never does (test-price-periodic-popup-10444).
+let changeSeq=0;
+const pricesChanged=popup=>popup.writeLocal({tpChangeTokensV1:{scope:'f'.repeat(32),tokens:{b:'aaaaaa',account:'bbbbb'+(++changeSeq),prices:'ccccc'+changeSeq},changed:['prices'],seq:changeSeq,at:Date.now()}});
 async function check(name,fn){try{await fn();checks.push(name);}catch(error){failures.push({name,error:error.message});}}
 function environment(id=ids[0]){
  let status=503,code='PAID_ROUTE_UNAVAILABLE',holdQuotes=false,holdMe=false,clock=Date.now(),rows=modelRows(),tariff='base';
@@ -74,7 +79,7 @@ await check('Selected option failure retains catalogue while fresh model refresh
  const env=environment();env.code='PAID_MODEL_PARAMETER_UNSUPPORTED';const popup=await env.open();
  try{
   await popup.settle(180);assert.equal(popup.fields.get('ai-paid-model-input').textContent,'≈ 2 TP');
-  const rows=modelRows().slice(1);rows[0].catalogue_pricing=pricing(23,45);env.rows=rows;env.advance();popup.runDueTimers();await popup.settle(200);
+  const rows=modelRows().slice(1);rows[0].catalogue_pricing=pricing(23,45);env.rows=rows;env.advance();pricesChanged(popup);await popup.settle(200);
   assert.equal(popup.fields.get('ai-paid-model').options.length,12);assert.equal(popup.fields.get('ai-paid-model').value,ids[1]);assert.equal(popup.fields.get('ai-paid-model-input').textContent,'≈ 23 TP');
   assert.match(popup.fields.get('ai-paid-status').textContent,/options|model|support/i);
  }finally{popup.close();}
@@ -104,7 +109,7 @@ await check('Permanent quote failures are asked again once on reopen, never by a
   await popup.settle(180);assert.equal(count(),2,'Reopen asks the saved failure again once');
   env.advance();popup.runDueTimers();await popup.settle(180);assert.equal(count(),2,'No timer replays the quote');
   popup.fields.get('ai-paid-refresh').click();await popup.settle(180);assert.equal(count(),3,'Explicit refresh retries');
-  const rows=modelRows();rows[0].catalogue_pricing.model_revision++;env.rows=rows;env.advance();popup.runDueTimers();await popup.settle(180);assert.equal(count(),4,'Current catalogue revision invalidates failed context');
+  const rows=modelRows();rows[0].catalogue_pricing.model_revision++;env.rows=rows;env.advance();pricesChanged(popup);await popup.settle(180);assert.equal(count(),4,'A prices change signal re-reads the catalogue and asks the failed quote again');
  }finally{popup.close();}
 });
 await check('Model change while a selected quote is pending queues its own fresh quote and rejects the previous model response',async()=>{
@@ -128,7 +133,7 @@ await check('Selected option changes invalidate a permanent failure, while tempo
   assert.equal(count(),2);assert(env.requests.filter(x=>x.path==='/paid/price-quote').at(-1).body.image);
   env.code='PAID_PRICE_REFRESHING';popup.fields.get('ai-paid-refresh').click();await popup.settle(200);assert.equal(count(),3);
   assert.match(popup.fields.get('ai-paid-status').textContent,/updating.*Refresh/i);assert.equal(popup.fields.get('ai-paid-model-input').textContent,'≈ 2 TP');
-  env.status=200;env.advance();popup.runDueTimers();await popup.settle(200);assert.equal(count(),4);assert.equal(popup.fields.get('ai-paid-model-input').textContent,'≈ 80 TP');
+  env.status=200;env.advance();pricesChanged(popup);await popup.settle(200);assert.equal(count(),4);assert.equal(popup.fields.get('ai-paid-model-input').textContent,'≈ 80 TP');
  }finally{popup.close();}
 });
 await check('Catalogue cached during a pending quote survives close and is display-only on the next unchanged open',async()=>{
@@ -191,7 +196,7 @@ await check('Actual400 thinking, image and output unsupported errors keep catalo
    await popup.settle(180);assert.equal(count(),2,'Reopen asks '+code+' again once');assert.match(popup.fields.get('ai-paid-status').textContent,reason);
    if(code==='PAID_THINKING_UNSUPPORTED'){const thinking=popup.fields.get('ai-thinking');thinking.value='minimum';thinking.dispatchEvent({type:'change',preventDefault(){}});}
    else if(code==='PAID_IMAGE_UNSUPPORTED'){const image=popup.fields.get('ai-page-image');image.checked=false;image.dispatchEvent({type:'change',preventDefault(){}});}
-   else{rows[0].max_output=4096;env.rows=rows;env.advance();popup.runDueTimers();}
+   else{rows[0].max_output=4096;env.rows=rows;env.advance();pricesChanged(popup);}
    await popup.settle(200);assert.equal(count(),3,'Changed owned context retries '+code+' '+JSON.stringify({profiles:Object.values(env.local.paidAiProfilesV1.entries).map(x=>({thinking:x.profile.thinking,image:x.profile.pageImage})),thinking:popup.fields.get('ai-thinking').value}));assert.equal(popup.fields.get('ai-paid-model-input').textContent,'≈ 2 TP');
    const sent=env.requests.filter(x=>x.path==='/paid/price-quote').at(-1).body;
    if(code==='PAID_THINKING_UNSUPPORTED')assert.equal(sent.thinking,'minimum');
@@ -205,12 +210,14 @@ await check('Thinking verification and temporary price refresh errors remain ret
   const env=environment();env.status=400;env.code=code;const first=await env.open();await first.settle(180);
   assert.equal(first.fields.get('ai-paid-model-input').textContent,'≈ 2 TP');assert.match(first.fields.get('ai-paid-status').textContent,code==='PAID_THINKING_UNVERIFIED'?/thinking options.*verified.*Refresh/i:/updating.*Refresh/i);first.close();
   const count=()=>env.requests.filter(x=>x.path==='/paid/price-quote').length;env.advance();const popup=await env.open();
-  try{await popup.settle(180);assert.equal(count(),2);assert(!JSON.stringify(env.local.paidAccountViewCacheV1?.me).includes('route_quote_failure'));env.advance();popup.runDueTimers();await popup.settle(180);assert.equal(count(),3);}
+  try{await popup.settle(180);assert.equal(count(),2);assert(!JSON.stringify(env.local.paidAccountViewCacheV1?.me).includes('route_quote_failure'));env.advance();pricesChanged(popup);await popup.settle(180);assert.equal(count(),3);}
   finally{popup.close();}
  }
 });
 await check('An edit while the first quote is held survives later Manual-profile initialization and is used by the replacement quote',async()=>{
  const env=environment();env.status=200;env.hold=true;
+ // 10488: only a model with a proven AI think control is quoted with a thinking choice.
+ const rows=modelRows();rows[0].model_capabilities={reasoning:{supported:true,control:'levels',supported_efforts:['low','high'],can_disable:true,mandatory:false}};env.rows=rows;
  const key=JSON.stringify([A,ids[0]]);env.local.paidAiProfilesV1={version:1,entries:{[key]:{profile:{thinking:'high',pageImage:'always',styleExamples:true,styleExamplesPreferenceVersion:1},prompts:{th:{text:'EXACT EARLY STYLE',mode:'replace'}}}}};
  const popup=await env.open();
  try{

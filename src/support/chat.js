@@ -9,6 +9,10 @@ import { createLiveUpdates, waitPath } from './live.js';
 import { createLogger } from '../shared/logger.js';
 import { installId } from '../paid/install-id.js';
 import { supportEventParts } from './events.js';
+import { usesBuiltinDataConsent, DATA_CONSENT_REQUIRED } from '../shared/data-consent.js';
+import { consentText } from '../shared/data-consent-dialog.js';
+import { accountAllowed, showConsentScreen, onAccountGateChanged } from '../shared/account-gate.js';
+import { createTab } from '../shared/browser-api.js';
 
 const $ = id => document.getElementById(id), client = createSupportClient();
 const uuid = () => crypto.randomUUID(), dock = new URL(location.href).searchParams.has('dock');
@@ -35,6 +39,20 @@ const runtime = message => new Promise(resolve => {
   }); } catch { resolve(); }
 });
 function failure(error) { $('error').textContent = error?.message || String(error); }
+// 10494: messages, files and the sign-in email are personal data. The first
+// time, the one consent screen asks; "Not now" sends nothing. Firefox cannot
+// show its prompt inside a web page, so the dock opens the consent tab instead.
+async function supportConsent() {
+  if (await accountAllowed().catch(() => false)) return true;
+  const inPage = parent !== window && usesBuiltinDataConsent();
+  const answer = await showConsentScreen(inPage ? { delegate: () => {
+    void createTab({ url: chrome.runtime.getURL('popup/consent.html') }).catch(failure);
+    return { consent: false, permissions: false, tab: true };
+  } } : {});
+  if (answer.consent) { $('error').textContent = ''; return true; }
+  failure(new Error(await consentText(answer.tab ? 'openedTab' : 'declined')));
+  return false;
+}
 async function changeView(next) {
   view = next;
   if (next !== 'expanded') { closeLightbox(false); toggleAccount(false); }
@@ -350,10 +368,23 @@ async function refresh() {
     live.start();
   } catch (error) {
     if (guard !== generation) return;
+    // 10495: without data-use consent nothing is read; say why (no dialog pops up).
+    if (error.code === DATA_CONSENT_REQUIRED) { showLocked(); return; }
     if (error.status === 401 || ['SIGN_IN_REQUIRED', 'SESSION_SCOPE_MISMATCH', 'STALE_SUPPORT_RESPONSE'].includes(error.code)) { clearPrivate(); controls(); }
     failure(error);
   } finally { polling = false; }
 }
+async function showLocked() {
+  clearPrivate(); controls();
+  $('error').textContent = await consentText('lockedChat');
+}
+// Consent withdrawn while the chat is open: the long-poll and every request
+// stop at once (the gate aborts them); the conversation is cleared from view.
+onAccountGateChanged(detail => {
+  if (detail?.reason === 'session') return;
+  if (detail?.consent === false) { live.stop(); client.invalidate(); void showLocked(); }
+  else if (view === 'expanded' && !busy) void refresh();
+});
 function mergeMessages(data, incremental) {
   if (!incremental) hasOlder = data.has_more;
   const byId = new Map([...messages, ...data.items].map(x => [x.id, x]));
@@ -408,7 +439,7 @@ const live = createLiveUpdates({
   wait: signal => client.request(waitPath({ ...liveCursor(), timeout: 25 }), { identity: authIdentity, signal, timeoutMs: 40000 }),
   onResult: applyLive,
   onFallbackTick: async () => { await refresh(); if (view !== 'expanded') await notify(); },
-  onAuthError: async error => { clearPrivate(); controls(); failure(error); },
+  onAuthError: async error => { if (error?.code === DATA_CONSENT_REQUIRED) { await showLocked(); return; } clearPrivate(); controls(); failure(error); },
   log,
 });
 async function hydrateDraft() {
@@ -448,6 +479,8 @@ async function uploadItem(item) {
   if (!item || busy || uploading || !state?.enabled) return;
   const guard = generation, account = draftScope, identity = authIdentity;
   if (!identity) return;
+  if (!(await accountAllowed().catch(() => false))) { failure(new Error(await consentText('declined'))); return; }
+  if (guard !== generation || account !== draftScope || busy || uploading) return;
   uploading = true; controls(); $('error').textContent = 'Uploading…';
   try {
     const meta = await client.request('/paid/support/attachments', { file: item.file, commandId: item.command, identity });
@@ -475,6 +508,9 @@ async function attachFiles(selected) {
   if (!selected.length || !state?.enabled || !authIdentity || !sharedDraft) return;
   if (busy || uploading || attaching) throw new Error('Wait for the current upload or send to finish.');
   const account = draftScope, guard = generation;
+  attaching = true; controls();
+  try { if (!(await supportConsent())) return; } finally { attaching = false; controls(); }
+  if (guard !== generation || account !== draftScope || busy || uploading || attaching) return;
   attaching = true; controls();
   try {
     await draftWrite;
@@ -516,6 +552,8 @@ $('compose').addEventListener('submit', async event => {
   if (!identity) return;
   const restoreFocus = document.activeElement === $('text'), text = $('text').value;
   busy = true; controls();
+  if (!(await supportConsent())) { busy = false; controls(); return; }
+  if (key !== draftScope || guard !== generation || identity !== authIdentity) { busy = false; controls(); return; }
   let pending;
   try {
     await draftWrite;
@@ -558,6 +596,7 @@ $('request-code').addEventListener('click', async () => {
   if (Date.now() < resendAt) { failure(new Error('Please wait before requesting another code.')); return; }
   $('request-code').disabled = true;
   try {
+    if (!(await supportConsent())) return;
     const values = await getStorage(['uiLanguageV1']);
     // One install id per browser profile (reuses an older paidDeviceId if present).
     const device = await installId({ read: getStorage, write: setStorage });
@@ -573,7 +612,7 @@ $('login').addEventListener('submit', async event => {
   if (busy) return;
   if (!loginEmail || loginEmail !== $('email').value.trim()) { failure(new Error('Request a code for this email first.')); return; }
   busy = true; $('verify').disabled = true;
-  try { await client.signIn(loginEmail, $('code').value); $('code').value = ''; loginEmail = ''; await activateSupport(client); await refresh(); }
+  try { if (!(await supportConsent())) return; await client.signIn(loginEmail, $('code').value); $('code').value = ''; loginEmail = ''; await activateSupport(client); await refresh(); }
   catch (error) { failure(error); }
   finally { busy = false; $('verify').disabled = false; }
 });

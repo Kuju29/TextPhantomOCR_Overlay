@@ -1,10 +1,14 @@
 """Optional actual Chromium display check; no server, credentials or network.
 python scripts/test-display-browser.py --browser /usr/bin/chromium --out /tmp/tp-display
 """
+import sys as _tp_sys
+from pathlib import Path as _TpPath
+_tp_sys.path.insert(0, str(_TpPath(__file__).resolve().parent / 'lib'))
+from chromium_path import chromium_executable  # the one shared Chromium resolver
 from pathlib import Path
 import argparse, json, re, subprocess, sys
 from playwright.sync_api import sync_playwright
-parser=argparse.ArgumentParser();parser.add_argument('--project',type=Path,default=Path(__file__).resolve().parents[1]);parser.add_argument('--browser',default='/usr/bin/chromium');parser.add_argument('--out',type=Path,default=Path('/tmp/tp-display-browser'))
+parser=argparse.ArgumentParser();parser.add_argument('--project',type=Path,default=Path(__file__).resolve().parents[1]);parser.add_argument('--browser',default=chromium_executable(required=False));parser.add_argument('--out',type=Path,default=Path('/tmp/tp-display-browser'))
 args=parser.parse_args();args.out.mkdir(parents=True,exist_ok=True)
 sys.path.insert(0,str(args.project/'api'))
 from backend.render.html.translated import render_translated_overlay

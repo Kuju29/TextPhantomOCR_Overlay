@@ -1,6 +1,10 @@
 """Real Chromium DOM, canvas and browser downloads. No AI, erasing or API.
 Pixel fixtures are generated here; no user source art or credentials are embedded.
 """
+import sys as _tp_sys
+from pathlib import Path as _TpPath
+_tp_sys.path.insert(0, str(_TpPath(__file__).resolve().parent / 'lib'))
+from chromium_path import chromium_executable  # the one shared Chromium resolver
 from pathlib import Path
 import argparse,json,base64,io,zipfile
 from PIL import Image
@@ -14,7 +18,7 @@ def ck(name,value):
  checks.append({'name':name,'passed':bool(value)})
  assert value,name
 with sync_playwright() as pw:
- browser=pw.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox','--disable-dev-shm-usage'])
+ browser=pw.chromium.launch(executable_path=chromium_executable(),headless=True,args=['--no-sandbox','--disable-dev-shm-usage'])
  context=browser.new_context(accept_downloads=True,viewport={'width':1280,'height':900})
  page=context.new_page();errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
  # No actual network, all external page image routes deterministically mocked.

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { webcrypto } from 'node:crypto';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 globalThis.crypto ??= webcrypto;
-const saved={supportActivated:true,paidSessionToken:'a'.repeat(64),paidApiBase:'http://localhost:7860',customApiUrl:'http://localhost:7860'};
+const saved={tpDataConsentV1:{version:1,granted:true,at:1},supportActivated:true,paidSessionToken:'a'.repeat(64),paidApiBase:'http://localhost:7860',customApiUrl:'http://localhost:7860'};
 const listeners=[],requests=[],notices=[];let next=async()=>new Response(JSON.stringify({thread:{unread:1,last_seq:4}}),{status:200});
 globalThis.chrome={runtime:{getManifest:()=>({version:'qa'}),sendMessage:()=>{},lastError:null},storage:{local:{get:(keys,cb)=>queueMicrotask(()=>cb(Object.fromEntries(keys.map(k=>[k,saved[k]])))),set:(patch,cb)=>queueMicrotask(()=>{Object.assign(saved,patch);cb?.();})},onChanged:{addListener:fn=>listeners.push(fn)}},tabs:{query:(_opts,cb)=>cb([{id:5}]),sendMessage:(id,msg,cb)=>{notices.push({id,msg});cb?.();}}};
 globalThis.fetch=async(url,opts)=>{if (url.endsWith('/meta')) return new Response(JSON.stringify({ok:true,paid:{configured:true}}),{status:200});requests.push({url,opts});return next(url,opts);};

@@ -32,12 +32,6 @@ import {
   FALLBACK_SOURCES,
   PINNED_LANG_CODES,
   API_PATHS,
-  RATE_RPM_MIN,
-  RATE_RPM_MAX,
-  RATE_BURST_MIN,
-  RATE_BURST_MAX,
-  RATE_PRESETS,
-  RATE_PRESET_DEFAULT,
   isLocalAiProvider,
 } from "../shared/constants.js";
 import {
@@ -65,7 +59,6 @@ import { createAiProfileController } from "./controllers/ai-profile-controller.j
 import { createFontScaleController } from "./controllers/font-scale-controller.js";
 import { createLocalPickerController } from "./controllers/local-picker-controller.js";
 import { createSeriesMemoryController } from "./controllers/series-memory-controller.js";
-import { createRateSettingsController } from "./controllers/rate-settings-controller.js";
 import { createLocalConnectionController } from "./controllers/local-connection-controller.js";
 import { createApiHealthController } from "./controllers/api-health-controller.js";
 import { createProviderMetaController } from "./controllers/provider-meta-controller.js";
@@ -79,10 +72,14 @@ import { createApiAvailabilityGate } from "./controllers/api-availability-gate.j
 import { createResetDefaultsController } from "./controllers/reset-defaults-controller.js";
 import { createUpdateBannerController } from "./controllers/update-banner-controller.js";
 import { createPaidServiceController } from "./controllers/paid-service-controller.js";
+import { createAccountLockController } from "./controllers/account-lock-controller.js";
+import { createDiagnosticsController } from "./controllers/diagnostics-controller.js";
 import {
   protocolLabel,
   providerLabel,
 } from "./controllers/provider-model-display.js";
+import { initHoverTips } from "../shared/hover-tip.js";
+initHoverTips(); // 10496: option explanations on the option name (hover, focus, tap)
 const state = {
   userInteractedApi: false,
   lastApiOk: false,
@@ -190,10 +187,9 @@ const popupUiController = createPopupUiController({
   applyPaidMode: () => paidServiceController?.applyVisibility(),
 });
 const toggleUi = popupUiController.toggle;
-let rateSettingsController;
 paidServiceController = createPaidServiceController({
   els, state, getStorage, setStorage, toggleUi,
-  onProfileContext: context => { profileController.setPaidContext(context); rateSettingsController?.setContext(context.active); },
+  onProfileContext: context => profileController.setPaidContext(context),
   beforeSwitch: () => settingsPersistenceController.flushPendingAiEditsForSwitch(state.desiredLang, state.desiredAiModel),
   onUsageSelection: async () => {
     await usageController.select(selectedUsageTarget(), selectedUsageTarget);
@@ -205,19 +201,6 @@ const traceProviderTransition = popupUiController.traceProviderTransition;
 const setProviderTransitionPending =
   popupUiController.setProviderTransitionPending;
 
-rateSettingsController = createRateSettingsController({
-  els,
-  constants: {
-    presets: RATE_PRESETS,
-    fallback: RATE_PRESET_DEFAULT,
-    rpmMin: RATE_RPM_MIN,
-    rpmMax: RATE_RPM_MAX,
-    burstMin: RATE_BURST_MIN,
-    burstMax: RATE_BURST_MAX,
-  },
-  persist: setStorage,
-  toggleUi,
-});
 
 const localCapacityController = createLocalCapacityController({
   els,
@@ -361,7 +344,6 @@ const settingsPersistenceController = createSettingsPersistenceController({
 fontScaleController.bind();
 localPickerController.bind();
 seriesMemoryController.bind();
-rateSettingsController.bind();
 resetDefaultsController.bind();
 localConnectionController.bind();
 bindPopupEvents({
@@ -397,7 +379,6 @@ bindPopupEvents({
   renderLocalCapacityHint,
   persistSelectedLocalCapacityHint,
   clearLocalCapacitySnapshot,
-  rateSettingsController,
   renderAiUsage: usageViewController.refresh,
   refreshSeriesMemory: seriesMemoryController.refresh,
   openAiUsageHistory,
@@ -414,7 +395,6 @@ void loadPopupSettings({
   profileController,
   fontScaleController,
   seriesMemoryController,
-  rateSettingsController,
   usageViewController,
   providerMetaController,
   apiHealthController,
@@ -431,7 +411,18 @@ void loadPopupSettings({
     String(error?.message || "Unknown settings error"));
   setEmojiStatus("error", "Settings could not be loaded. Reopen the popup.");
 });
+// 10495: one account gate. Account controls are greyed while data use is not
+// allowed (a click opens the consent screen); diagnostics confirm before on.
+const accountLockController = createAccountLockController({
+  whenReady: () => paidServiceController.whenReady?.(),
+  loginProvider: () => state.loginProvider || "",
+});
+void accountLockController.initialize().catch(() => {});
+const diagnosticsController = createDiagnosticsController({ el: els.diagnosticsUpload });
+void diagnosticsController.initialize().catch(() => {});
 window.addEventListener("pagehide", () => {
+  accountLockController.dispose();
+  diagnosticsController.dispose();
   paidServiceController.dispose();
   apiHealthController.dispose();
   apiAvailabilityGate.dispose();

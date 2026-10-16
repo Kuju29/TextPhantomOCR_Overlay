@@ -4,6 +4,10 @@ No browser extension installation, credentials, provider, or model are used.
 Local translation jobs are Independent. The low-level IndexedDB history checks
 exercise optional Conversation storage, not an editable Local mode selector.
 """
+import sys as _tp_sys
+from pathlib import Path as _TpPath
+_tp_sys.path.insert(0, str(_TpPath(__file__).resolve().parent / 'lib'))
+from chromium_path import chromium_executable  # the one shared Chromium resolver
 from pathlib import Path
 import argparse
 import json
@@ -16,9 +20,10 @@ args = parser.parse_args()
 args.out.mkdir(parents=True, exist_ok=True)
 root = Path(__file__).resolve().parents[1]
 html = (root / 'src/popup/popup.html').read_text()
-start = html.index('          <div class="field" id="ai-rate-wrap"')
+# .68: the per-model token ceiling block replaced the Cloud/Local rate-cap blocks.
+start = html.index('          <div class="field" id="ai-token-ceiling-wrap"')
 end = html.index('        </section>', html.index('id="ai-translation-mode"', start))
-fragment = html[start:end].replace('id="ai-rate-wrap" style="display: none"', 'id="ai-rate-wrap"')
+fragment = html[start:end].replace('id="ai-token-ceiling-wrap" style="display: none"', 'id="ai-token-ceiling-wrap"')
 css = (root / 'src/shared/theme.css').read_text() + '\n' + (root / 'src/popup/popup.css').read_text()
 report = {'scope': 'Chromium production HTML/CSS/profile hydration/events and optional IndexedDB history with synthetic data, no live provider', 'checks': []}
 
@@ -28,7 +33,7 @@ def check(name, actual):
     assert actual, name
 
 with sync_playwright() as pw:
-    browser = pw.chromium.launch(executable_path='/usr/bin/chromium', headless=True,
+    browser = pw.chromium.launch(executable_path=chromium_executable(), headless=True,
         args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu'])
     page = browser.new_page(viewport={'width': 380, 'height': 630})
     errors = []
@@ -80,14 +85,16 @@ with sync_playwright() as pw:
     check('Translation mode is read-only with an accessible assignment label',
           page.locator('#ai-translation-mode').is_disabled() and
           page.locator('#ai-translation-mode').get_attribute('aria-label') == 'Assigned translation mode')
-    check('Assigned mode follows the separate Cloud and Local rate-cap blocks', page.evaluate('''()=>{
-      const cloud=document.querySelector('#ai-rate-wrap'), local=document.querySelector('#ai-local-rate-wrap');
-      return cloud.nextElementSibling===local && local.nextElementSibling.id==='ai-translation-mode-wrap';
+    check('Assigned mode follows the token ceiling block', page.evaluate('''()=>{
+      const ceiling=document.querySelector('#ai-token-ceiling-wrap');
+      return ceiling.nextElementSibling.id==='ai-translation-mode-wrap';
     }'''))
-    explanation = page.locator('#ai-translation-mode-wrap .hint').inner_text()
-    check('Mode explanation describes Cloud and every Local provider including LM Studio',
-          'Cloud uses Conversation.' in explanation and 'including LM Studio, use Independent.' in explanation and
-          'follows the provider automatically.' in explanation and len(explanation) < 180 and
+    # 10496: the explanation is the hover tip of the option name, not text under it.
+    explanation = page.locator('#ai-translation-mode-tip').inner_text() if page.locator('#ai-translation-mode-tip').is_visible() else page.evaluate("document.querySelector('#ai-translation-mode-tip').textContent")
+    check('Mode explanation states the automatic Cloud/Local assignment',
+          page.locator('#ai-translation-mode-wrap [data-tip-src="ai-translation-mode-tip"]').count() == 1 and
+          'Cloud → Conversation' in explanation and 'Local → Independent' in explanation and
+          'automatically' in explanation and len(explanation) < 180 and
           not re.search('[\u0e00-\u0e7f]', explanation))
     page.evaluate("document.querySelector('#ai-translation-mode').dispatchEvent(new Event('change',{bubbles:true}))")
     check('No manual mode change save, reset control, broadcast, or warmup request',
@@ -134,7 +141,7 @@ with sync_playwright() as pw:
     for assignment in assignments:
         check(f"{assignment['id']}: real popup hydration and new-profile save follow the provider assignment",
               assignment['mode']==assignment['expected'] and assignment['readonly'] and
-              assignment['examples']==(assignment['expected']=='independent') and
+              assignment['examples'] is True and  # 10447: the Human examples switch serves Conversation and Independent
               assignment['previousPreference']=='conversation' and
               assignment['persisted']==assignment['expected'])
     check('Profile hydration and save never call a provider or broadcast a mode change',

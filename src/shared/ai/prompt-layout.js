@@ -40,6 +40,8 @@ export async function promptLayout(system, user, {targetLang, sourceLang="", str
     systemChars:Array.from(system).length, userStaticChars:Array.from(prefix).length,
     userPersistentStaticChars:Array.from(persistentPrefix).length,
     bootstrapExamplesChars:independentExamples?.source === 'story' ? 0 : Array.from(actualExamples).length,
+    // Every example text actually sent (human or story); mirrors api/backend/ai/prompts/layout.py.
+    exampleChars:Array.from(actualExamples).length,
     dynamicChars:Array.from(user).length-Array.from(prefix).length,
     systemSha256, userStaticSha256, userPersistentStaticSha256, staticPrefixSha256,
     countUnit:"unicode_characters", styleCountScope:"instruction_blocks", cacheHit:null, cacheSupport:"unknown"};

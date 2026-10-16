@@ -100,7 +100,7 @@ await test('Hidden chat (shouldRun false) never starts a wait', async () => {
 });
 
 // ---- client.js ----
-const store = { customApiUrl: 'https://api.example', paidApiBase: 'https://api.example', paidSessionToken: 'a'.repeat(64) };
+const store = { tpDataConsentV1: { version: 1, granted: true, at: 1 }, customApiUrl: 'https://api.example', paidApiBase: 'https://api.example', paidSessionToken: 'a'.repeat(64) };
 const read = async keys => Object.fromEntries(keys.map(key => [key, store[key]]));
 await test('Client allows the wait path, sends the bearer and honours the caller signal and timeout', async () => {
   const seen = [];

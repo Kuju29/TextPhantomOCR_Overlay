@@ -10,7 +10,7 @@ const {syncSupportVisibility,activateSupport}=await import(pathToFileURL(join(ro
 const {supportScopeId}=await import(pathToFileURL(join(root,'src/support/client.js')));
 const select=(store,keys)=>typeof keys==='string'?{[keys]:structuredClone(store[keys])}:Object.fromEntries((Array.isArray(keys)?keys:Object.keys(keys)).map(key=>[key,structuredClone(store[key]??(Array.isArray(keys)?undefined:keys[key]))]));
 async function fixture(patch={}){
-  const saved={paidSessionToken:'a'.repeat(64),paidApiBase:'http://localhost:7860',customApiUrl:'http://localhost:7860',...patch},writes=[];
+  const saved={tpDataConsentV1:{version:1,granted:true,at:1},paidSessionToken:'a'.repeat(64),paidApiBase:'http://localhost:7860',customApiUrl:'http://localhost:7860',...patch},writes=[];
   globalThis.chrome={runtime:{lastError:null},storage:{local:{get:(keys,cb)=>queueMicrotask(()=>cb(select(saved,keys))),set:(value,cb)=>queueMicrotask(()=>{writes.push(structuredClone(value));Object.assign(saved,structuredClone(value));cb?.();})}}};
   const scope=await supportScopeId({base:saved.customApiUrl,token:saved.paidSessionToken});return {saved,writes,scope};
 }

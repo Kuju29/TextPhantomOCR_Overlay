@@ -2,7 +2,7 @@
 // Callout x/y and box values are percentages of the image size.
 window.TP_GUIDE_DATA = {
  "generatedBy": "scripts/guide/capture-guide.py",
- "version": "2026.10.4.91",
+ "version": "2026.10.16.2",
  "scale": 1.5,
  "shots": {
   "header": {
@@ -95,19 +95,19 @@ window.TP_GUIDE_DATA = {
    "img": "img/translate.webp",
    "alt": "แท็บ Translate เมื่อเลือก Lens translation",
    "width": 516,
-   "height": 1023,
+   "height": 884,
    "callouts": [
     {
      "key": "mode",
      "sel": "#mode",
      "scope": "popup",
      "x": 5.8,
-     "y": 6.9,
+     "y": 8,
      "box": {
       "x": 9,
-      "y": 4.4,
+      "y": 5.1,
       "w": 82,
-      "h": 5
+      "h": 5.8
      }
     },
     {
@@ -115,12 +115,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#lang",
      "scope": "popup",
      "x": 5.8,
-     "y": 16.6,
+     "y": 19.2,
      "box": {
       "x": 9,
-      "y": 14.1,
+      "y": 16.3,
       "w": 82,
-      "h": 5
+      "h": 5.8
      }
     },
     {
@@ -128,12 +128,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#sources",
      "scope": "popup",
      "x": 5.8,
-     "y": 26.2,
+     "y": 30.4,
      "box": {
       "x": 9,
-      "y": 23.7,
+      "y": 27.5,
       "w": 82,
-      "h": 5
+      "h": 5.8
      }
     },
     {
@@ -141,12 +141,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#relayout-translated",
      "scope": "popup",
      "x": 9.6,
-     "y": 46,
+     "y": 53.3,
      "box": {
       "x": 12.8,
-      "y": 44.5,
+      "y": 51.5,
       "w": 74.4,
-      "h": 3.1
+      "h": 3.6
      }
     },
     {
@@ -154,12 +154,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#font-scale-down",
      "scope": "popup",
      "x": 5.8,
-     "y": 68,
+     "y": 71.9,
      "box": {
       "x": 9,
-      "y": 66.2,
+      "y": 69.8,
       "w": 9.3,
-      "h": 3.7
+      "h": 4.2
      }
     },
     {
@@ -167,12 +167,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#translate-all-button-toggle",
      "scope": "popup",
      "x": 9.6,
-     "y": 81.9,
+     "y": 87.2,
      "box": {
       "x": 12.8,
-      "y": 80.4,
+      "y": 85.4,
       "w": 74.4,
-      "h": 3.1
+      "h": 3.6
      }
     },
     {
@@ -180,12 +180,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#img-buttons-toggle",
      "scope": "popup",
      "x": 9.6,
-     "y": 89.7,
+     "y": 92.1,
      "box": {
       "x": 12.8,
-      "y": 88.1,
+      "y": 90.3,
       "w": 74.4,
-      "h": 3.1
+      "h": 3.6
      }
     },
     {
@@ -196,9 +196,9 @@ window.TP_GUIDE_DATA = {
      "y": 97,
      "box": {
       "x": 12.8,
-      "y": 95.9,
+      "y": 95.3,
       "w": 74.4,
-      "h": 3.1
+      "h": 3.6
      }
     }
    ]
@@ -241,19 +241,19 @@ window.TP_GUIDE_DATA = {
    "img": "img/manual-top.webp",
    "alt": "แท็บ AI settings แบบ Manual ใช้ API key ของตัวเอง",
    "width": 516,
-   "height": 581,
+   "height": 564,
    "callouts": [
     {
      "key": "usage",
      "sel": "#ai-usage-wrap",
      "scope": "popup",
      "x": 5.8,
-     "y": 5.6,
+     "y": 5.7,
      "box": {
       "x": 9,
-      "y": 2.6,
+      "y": 2.7,
       "w": 82,
-      "h": 5.9
+      "h": 6.1
      }
     },
     {
@@ -261,12 +261,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#ai-service",
      "scope": "popup",
      "x": 5.8,
-     "y": 22.2,
+     "y": 22.8,
      "box": {
       "x": 9,
-      "y": 17.8,
+      "y": 18.3,
       "w": 82,
-      "h": 8.8
+      "h": 9
      }
     },
     {
@@ -274,12 +274,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#ai-provider",
      "scope": "popup",
      "x": 5.8,
-     "y": 39.3,
+     "y": 40.3,
      "box": {
       "x": 9,
-      "y": 34.9,
+      "y": 35.8,
       "w": 82,
-      "h": 8.8
+      "h": 9
      }
     },
     {
@@ -287,12 +287,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#ai-key",
      "scope": "popup",
      "x": 5.8,
-     "y": 56.3,
+     "y": 57.8,
      "box": {
       "x": 9,
-      "y": 51.9,
+      "y": 53.3,
       "w": 82,
-      "h": 8.8
+      "h": 9
      }
     },
     {
@@ -300,12 +300,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#ai-key-get",
      "scope": "popup",
      "x": 41.7,
-     "y": 48.7,
+     "y": 50,
      "box": {
       "x": 22.8,
-      "y": 46.8,
+      "y": 48.1,
       "w": 14.6,
-      "h": 3.7
+      "h": 3.8
      }
     },
     {
@@ -313,12 +313,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#ai-model",
      "scope": "popup",
      "x": 5.8,
-     "y": 74.7,
+     "y": 75.3,
      "box": {
       "x": 9,
-      "y": 70.3,
+      "y": 70.8,
       "w": 82,
-      "h": 8.8
+      "h": 9
      }
     },
     {
@@ -326,12 +326,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#ai-thinking",
      "scope": "popup",
      "x": 5.8,
-     "y": 91.7,
+     "y": 92.8,
      "box": {
       "x": 9,
-      "y": 87.3,
+      "y": 88.3,
       "w": 82,
-      "h": 8.8
+      "h": 9
      }
     }
    ]
@@ -340,19 +340,19 @@ window.TP_GUIDE_DATA = {
    "img": "img/manual-bottom.webp",
    "alt": "ตัวเลือกเพิ่มเติมของ AI: prompt, ความจำเรื่อง, ภาพหน้า, เพดานโทเคน",
    "width": 516,
-   "height": 1175,
+   "height": 819,
    "callouts": [
     {
      "key": "prompt",
      "sel": "#ai-prompt",
      "scope": "popup",
      "x": 5.8,
-     "y": 7.1,
+     "y": 10.2,
      "box": {
       "x": 9,
-      "y": 5,
+      "y": 7.1,
       "w": 82,
-      "h": 20.9
+      "h": 29.9
      }
     },
     {
@@ -363,9 +363,9 @@ window.TP_GUIDE_DATA = {
      "y": 3,
      "box": {
       "x": 51.5,
-      "y": 1.3,
+      "y": 1.8,
       "w": 7,
-      "h": 3.1
+      "h": 4.4
      }
     },
     {
@@ -373,12 +373,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#ai-characters-clear",
      "scope": "popup",
      "x": 95.3,
-     "y": 29.5,
+     "y": 42.4,
      "box": {
       "x": 84,
-      "y": 28,
+      "y": 40.2,
       "w": 7,
-      "h": 3.1
+      "h": 4.4
      }
     },
     {
@@ -386,12 +386,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#ai-memory-mode",
      "scope": "popup",
      "x": 5.8,
-     "y": 33.9,
+     "y": 48.6,
      "box": {
       "x": 9,
-      "y": 31.7,
+      "y": 45.5,
       "w": 82,
-      "h": 5.7
+      "h": 8.2
      }
     },
     {
@@ -399,12 +399,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#ai-style-examples",
      "scope": "popup",
      "x": 5.8,
-     "y": 39.3,
+     "y": 63.1,
      "box": {
       "x": 9,
-      "y": 38.1,
+      "y": 61.4,
       "w": 82,
-      "h": 2.4
+      "h": 3.5
      }
     },
     {
@@ -412,12 +412,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#ai-page-image",
      "scope": "popup",
      "x": 5.8,
-     "y": 59.4,
+     "y": 68.8,
      "box": {
       "x": 9,
-      "y": 58.2,
+      "y": 67.1,
       "w": 82,
-      "h": 2.4
+      "h": 3.5
      }
     },
     {
@@ -425,12 +425,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#ai-token-ceiling-enabled",
      "scope": "popup",
      "x": 5.8,
-     "y": 68.1,
+     "y": 74.5,
      "box": {
       "x": 9,
-      "y": 66.9,
+      "y": 72.7,
       "w": 82,
-      "h": 2.4
+      "h": 3.5
      }
     },
     {
@@ -438,12 +438,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#ai-translation-mode",
      "scope": "popup",
      "x": 5.8,
-     "y": 91.8,
+     "y": 95.1,
      "box": {
       "x": 9,
-      "y": 89.7,
+      "y": 91.9,
       "w": 82,
-      "h": 4.3
+      "h": 6.2
      }
     }
    ]
@@ -452,19 +452,19 @@ window.TP_GUIDE_DATA = {
    "img": "img/local.webp",
    "alt": "AI แบบ Local ที่รันบนคอมพิวเตอร์ของคุณ",
    "width": 516,
-   "height": 510,
+   "height": 473,
    "callouts": [
     {
      "key": "provider",
      "sel": "#ai-provider",
      "scope": "popup",
      "x": 5.8,
-     "y": 13.8,
+     "y": 14.9,
      "box": {
       "x": 9,
-      "y": 8.8,
+      "y": 9.5,
       "w": 82,
-      "h": 10
+      "h": 10.8
      }
     },
     {
@@ -472,12 +472,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#ai-base-url",
      "scope": "popup",
      "x": 5.8,
-     "y": 33.1,
+     "y": 35.8,
      "box": {
       "x": 9,
-      "y": 28.2,
+      "y": 30.5,
       "w": 82,
-      "h": 10
+      "h": 10.8
      }
     },
     {
@@ -485,12 +485,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#ai-local-test",
      "scope": "popup",
      "x": 5.8,
-     "y": 52.5,
+     "y": 50.1,
      "box": {
       "x": 9,
-      "y": 47.5,
+      "y": 44.7,
       "w": 82,
-      "h": 10
+      "h": 10.8
      }
     },
     {
@@ -498,12 +498,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#ai-model",
      "scope": "popup",
      "x": 5.8,
-     "y": 73.3,
+     "y": 71.1,
      "box": {
       "x": 9,
-      "y": 68.3,
+      "y": 65.7,
       "w": 82,
-      "h": 10
+      "h": 10.8
      }
     },
     {
@@ -511,12 +511,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#ai-local-capacity-mode",
      "scope": "popup",
      "x": 5.8,
-     "y": 92.1,
+     "y": 91.4,
      "box": {
       "x": 9,
-      "y": 87.1,
+      "y": 86,
       "w": 82,
-      "h": 10
+      "h": 10.8
      }
     }
    ]
@@ -525,19 +525,19 @@ window.TP_GUIDE_DATA = {
    "img": "img/paid-signin.webp",
    "alt": "เลือก AI service เป็น Paid แล้วเข้าสู่ระบบด้วยอีเมล",
    "width": 516,
-   "height": 611,
+   "height": 561,
    "callouts": [
     {
      "key": "service",
      "sel": "#ai-service",
      "scope": "popup",
      "x": 5.8,
-     "y": 11.5,
+     "y": 12.5,
      "box": {
       "x": 9,
-      "y": 7.4,
+      "y": 8,
       "w": 82,
-      "h": 8.4
+      "h": 9.1
      }
     },
     {
@@ -545,12 +545,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#ai-paid-email",
      "scope": "popup",
      "x": 10.8,
-     "y": 65.3,
+     "y": 70.9,
      "box": {
       "x": 14,
-      "y": 61.2,
+      "y": 66.4,
       "w": 72.1,
-      "h": 10.8
+      "h": 11.7
      }
     },
     {
@@ -558,12 +558,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#ai-paid-send",
      "scope": "popup",
      "x": 10.8,
-     "y": 79.3,
+     "y": 86.1,
      "box": {
       "x": 14,
-      "y": 75.2,
+      "y": 81.6,
       "w": 72.1,
-      "h": 10.8
+      "h": 11.7
      }
     }
    ]
@@ -632,19 +632,19 @@ window.TP_GUIDE_DATA = {
    "img": "img/paid-account.webp",
    "alt": "บัญชี Paid หลังเข้าสู่ระบบ: เครดิต โมเดล และราคา",
    "width": 516,
-   "height": 1017,
+   "height": 969,
    "callouts": [
     {
      "key": "credits",
      "sel": "#ai-paid-credits",
      "scope": "popup",
      "x": 14.8,
-     "y": 20.3,
+     "y": 21.3,
      "box": {
       "x": 18,
-      "y": 18,
+      "y": 18.9,
       "w": 64,
-      "h": 4.6
+      "h": 4.8
      }
     },
     {
@@ -652,12 +652,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#ai-paid-buy",
      "scope": "popup",
      "x": 10.8,
-     "y": 33.3,
+     "y": 35,
      "box": {
       "x": 14,
-      "y": 30.8,
+      "y": 32.3,
       "w": 34.9,
-      "h": 6.5
+      "h": 6.8
      }
     },
     {
@@ -665,12 +665,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#ai-paid-details",
      "scope": "popup",
      "x": 48,
-     "y": 33.3,
+     "y": 35,
      "box": {
       "x": 51.2,
-      "y": 30.8,
+      "y": 32.3,
       "w": 34.9,
-      "h": 6.5
+      "h": 6.8
      }
     },
     {
@@ -678,12 +678,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#ai-paid-source",
      "scope": "popup",
      "x": 10.8,
-     "y": 46.6,
+     "y": 48.9,
      "box": {
       "x": 14,
-      "y": 44.1,
+      "y": 46.3,
       "w": 72.1,
-      "h": 6.5
+      "h": 6.8
      }
     },
     {
@@ -691,12 +691,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#ai-paid-model-picker",
      "scope": "popup",
      "x": 10.8,
-     "y": 56.6,
+     "y": 59.4,
      "box": {
       "x": 14,
-      "y": 54.1,
+      "y": 56.8,
       "w": 72.1,
-      "h": 6.3
+      "h": 6.7
      }
     },
     {
@@ -704,12 +704,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#ai-paid-model-input",
      "scope": "popup",
      "x": 10.8,
-     "y": 64.4,
+     "y": 67.6,
      "box": {
       "x": 14,
-      "y": 61.9,
+      "y": 65,
       "w": 34.9,
-      "h": 11.6
+      "h": 12.2
      }
     },
     {
@@ -717,12 +717,12 @@ window.TP_GUIDE_DATA = {
      "sel": ".paid-pricing-help summary",
      "scope": "popup",
      "x": 10.8,
-     "y": 85.2,
+     "y": 89.4,
      "box": {
       "x": 14,
-      "y": 83.7,
+      "y": 87.9,
       "w": 72.1,
-      "h": 2.8
+      "h": 3
      }
     },
     {
@@ -730,12 +730,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#ai-paid-refresh",
      "scope": "popup",
      "x": 28.4,
-     "y": 93.1,
+     "y": 97,
      "box": {
       "x": 14,
-      "y": 88.3,
+      "y": 92.7,
       "w": 28.9,
-      "h": 3.8
+      "h": 4
      }
     },
     {
@@ -743,12 +743,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#ai-paid-logout",
      "scope": "popup",
      "x": 78.7,
-     "y": 93.1,
+     "y": 97,
      "box": {
       "x": 71.4,
-      "y": 88.3,
+      "y": 92.7,
       "w": 14.7,
-      "h": 3.8
+      "h": 4
      }
     }
    ]
@@ -1060,21 +1060,21 @@ window.TP_GUIDE_DATA = {
   },
   "login": {
    "img": "img/login.webp",
-   "alt": "เลือก Translation source เป็น Login เพื่อใช้บัญชี AI ของคุณเอง",
+   "alt": "เลือก Translation source เป็น Login เพื่อใช้บัญชี AI ของคุณเอง ชี้ที่ชื่อ Provider เพื่อดูคำอธิบาย",
    "width": 516,
-   "height": 812,
+   "height": 474,
    "callouts": [
     {
      "key": "source",
      "sel": "#ai-paid-source",
      "scope": "popup",
      "x": 10.8,
-     "y": 9.8,
+     "y": 16.7,
      "box": {
       "x": 14,
-      "y": 6.6,
+      "y": 11.4,
       "w": 72.1,
-      "h": 8.1
+      "h": 13.9
      }
     },
     {
@@ -1082,25 +1082,25 @@ window.TP_GUIDE_DATA = {
      "sel": "#ai-login-provider",
      "scope": "popup",
      "x": 10.8,
-     "y": 23,
+     "y": 39.5,
      "box": {
       "x": 14,
-      "y": 19.9,
+      "y": 34.1,
       "w": 72.1,
-      "h": 8.1
+      "h": 13.9
      }
     },
     {
      "key": "support",
-     "sel": "#ai-login-support",
+     "sel": "#tp-tip",
      "scope": "popup",
-     "x": 10.8,
-     "y": 39.3,
+     "x": 97,
+     "y": 37.5,
      "box": {
       "x": 14,
-      "y": 36.2,
-      "w": 72.1,
-      "h": 33.4
+      "y": 32.2,
+      "w": 81.4,
+      "h": 67.4
      }
     },
     {
@@ -1108,12 +1108,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#ai-login-connect",
      "scope": "popup",
      "x": 10.8,
-     "y": 75.3,
+     "y": 57.8,
      "box": {
       "x": 14,
-      "y": 72.2,
+      "y": 52.4,
       "w": 34.9,
-      "h": 8.1
+      "h": 13.9
      }
     },
     {
@@ -1121,12 +1121,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#ai-login-refresh",
      "scope": "popup",
      "x": 68.6,
-     "y": 71.1,
+     "y": 50.5,
      "box": {
       "x": 51.2,
-      "y": 72.2,
+      "y": 52.4,
       "w": 34.9,
-      "h": 8.1
+      "h": 13.9
      }
     },
     {
@@ -1134,12 +1134,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#ai-login-status",
      "scope": "popup",
      "x": 10.8,
-     "y": 86.8,
+     "y": 77.4,
      "box": {
       "x": 14,
-      "y": 83.6,
+      "y": 72,
       "w": 72.1,
-      "h": 14.9
+      "h": 25.4
      }
     }
    ]
@@ -1148,19 +1148,19 @@ window.TP_GUIDE_DATA = {
    "img": "img/tools.webp",
    "alt": "แท็บ Tools",
    "width": 516,
-   "height": 996,
+   "height": 866,
    "callouts": [
     {
      "key": "local-images",
      "sel": "#open-local-images",
      "scope": "popup",
      "x": 5.8,
-     "y": 7.5,
+     "y": 8.7,
      "box": {
       "x": 9,
-      "y": 5,
+      "y": 5.7,
       "w": 39.8,
-      "h": 5.4
+      "h": 6.2
      }
     },
     {
@@ -1168,12 +1168,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#open-local-folder",
      "scope": "popup",
      "x": 95.3,
-     "y": 7.5,
+     "y": 8.7,
      "box": {
       "x": 51.2,
-      "y": 5,
+      "y": 5.7,
       "w": 39.8,
-      "h": 5.4
+      "h": 6.2
      }
     },
     {
@@ -1181,12 +1181,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#open-auto-translate",
      "scope": "popup",
      "x": 5.8,
-     "y": 27.4,
+     "y": 24.3,
      "box": {
       "x": 9,
-      "y": 24.8,
+      "y": 21.3,
       "w": 39.8,
-      "h": 5.4
+      "h": 6.2
      }
     },
     {
@@ -1194,12 +1194,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#api-url",
      "scope": "popup",
      "x": 5.8,
-     "y": 47.1,
+     "y": 43.3,
      "box": {
       "x": 9,
-      "y": 44.5,
+      "y": 40.4,
       "w": 73.3,
-      "h": 5.1
+      "h": 5.9
      }
     },
     {
@@ -1207,12 +1207,25 @@ window.TP_GUIDE_DATA = {
      "sel": "#reset-api",
      "scope": "popup",
      "x": 95.3,
-     "y": 47.1,
+     "y": 43.3,
      "box": {
       "x": 84,
-      "y": 45.3,
+      "y": 41.2,
       "w": 7,
-      "h": 3.6
+      "h": 4.2
+     }
+    },
+    {
+     "key": "diagnostics",
+     "sel": "#diagnostics-upload",
+     "scope": "popup",
+     "x": 5.8,
+     "y": 50.2,
+     "box": {
+      "x": 9,
+      "y": 48.5,
+      "w": 82,
+      "h": 3.3
      }
     },
     {
@@ -1220,12 +1233,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#engine-mode",
      "scope": "popup",
      "x": 5.8,
-     "y": 60.1,
+     "y": 60.3,
      "box": {
       "x": 9,
-      "y": 57.6,
+      "y": 57.4,
       "w": 82,
-      "h": 5.1
+      "h": 5.9
      }
     },
     {
@@ -1233,12 +1246,12 @@ window.TP_GUIDE_DATA = {
      "sel": "#reset-defaults",
      "scope": "popup",
      "x": 5.8,
-     "y": 77.3,
+     "y": 75.6,
      "box": {
       "x": 9,
-      "y": 74.7,
+      "y": 72.6,
       "w": 82,
-      "h": 5.4
+      "h": 6.2
      }
     },
     {
@@ -1246,12 +1259,398 @@ window.TP_GUIDE_DATA = {
      "sel": "#contact-admin",
      "scope": "popup",
      "x": 5.8,
-     "y": 92.3,
+     "y": 91.2,
      "box": {
       "x": 9,
-      "y": 89.8,
+      "y": 88.2,
       "w": 82,
-      "h": 9
+      "h": 10.4
+     }
+    }
+   ]
+  },
+  "privacy-consent-th": {
+   "img": "img/privacy-consent-th.webp",
+   "alt": "หน้าจอขออนุญาตใช้ข้อมูล (ภาษาไทย)",
+   "width": 516,
+   "height": 764,
+   "callouts": [
+    {
+     "key": "title",
+     "sel": "#tp-consent-title",
+     "scope": "shared/data-consent-dialog.js",
+     "x": 5.2,
+     "y": 5.4,
+     "box": {
+      "x": 8.4,
+      "y": 3.3,
+      "w": 83.1,
+      "h": 4.1
+     }
+    },
+    {
+     "key": "always",
+     "sel": ".tp-consent-group1",
+     "scope": "shared/data-consent-dialog.js",
+     "x": 5.2,
+     "y": 11.1,
+     "box": {
+      "x": 8.4,
+      "y": 9.4,
+      "w": 83.1,
+      "h": 3.4
+     }
+    },
+    {
+     "key": "permission",
+     "sel": ".tp-consent-group2",
+     "scope": "shared/data-consent-dialog.js",
+     "x": 5.2,
+     "y": 39,
+     "box": {
+      "x": 8.4,
+      "y": 35.7,
+      "w": 83.1,
+      "h": 6.9
+     }
+    },
+    {
+     "key": "note",
+     "sel": ".tp-consent-note",
+     "scope": "shared/data-consent-dialog.js",
+     "x": 5.2,
+     "y": 73.5,
+     "box": {
+      "x": 8.4,
+      "y": 70.2,
+      "w": 83.1,
+      "h": 10.8
+     }
+    },
+    {
+     "key": "details",
+     "sel": "#tp-consent-details",
+     "scope": "shared/data-consent-dialog.js",
+     "x": 89.6,
+     "y": 84.6,
+     "box": {
+      "x": 61.4,
+      "y": 83.1,
+      "w": 23.9,
+      "h": 2.9
+     }
+    },
+    {
+     "key": "later",
+     "sel": "#tp-consent-later",
+     "scope": "shared/data-consent-dialog.js",
+     "x": 28.6,
+     "y": 97,
+     "box": {
+      "x": 8.4,
+      "y": 89.2,
+      "w": 40.4,
+      "h": 7.5
+     }
+    },
+    {
+     "key": "allow",
+     "sel": "#tp-consent-allow",
+     "scope": "shared/data-consent-dialog.js",
+     "x": 71.4,
+     "y": 97,
+     "box": {
+      "x": 51.2,
+      "y": 89.2,
+      "w": 40.4,
+      "h": 7.5
+     }
+    }
+   ]
+  },
+  "privacy-consent-en": {
+   "img": "img/privacy-consent-en.webp",
+   "alt": "The data-use permission screen (English)",
+   "width": 516,
+   "height": 849,
+   "callouts": [
+    {
+     "key": "title",
+     "sel": "#tp-consent-title",
+     "scope": "shared/data-consent-dialog.js",
+     "x": 5.2,
+     "y": 4.8,
+     "box": {
+      "x": 8.4,
+      "y": 3,
+      "w": 83.1,
+      "h": 3.7
+     }
+    },
+    {
+     "key": "always",
+     "sel": ".tp-consent-group1",
+     "scope": "shared/data-consent-dialog.js",
+     "x": 5.2,
+     "y": 10,
+     "box": {
+      "x": 8.4,
+      "y": 8.4,
+      "w": 83.1,
+      "h": 3.1
+     }
+    },
+    {
+     "key": "permission",
+     "sel": ".tp-consent-group2",
+     "scope": "shared/data-consent-dialog.js",
+     "x": 5.2,
+     "y": 35.1,
+     "box": {
+      "x": 8.4,
+      "y": 32.1,
+      "w": 83.1,
+      "h": 6.2
+     }
+    },
+    {
+     "key": "note",
+     "sel": ".tp-consent-note",
+     "scope": "shared/data-consent-dialog.js",
+     "x": 5.2,
+     "y": 69.6,
+     "box": {
+      "x": 8.4,
+      "y": 66.6,
+      "w": 83.1,
+      "h": 13.1
+     }
+    },
+    {
+     "key": "details",
+     "sel": "#tp-consent-details",
+     "scope": "shared/data-consent-dialog.js",
+     "x": 94.9,
+     "y": 84.6,
+     "box": {
+      "x": 8.4,
+      "y": 81.7,
+      "w": 82.1,
+      "h": 5.8
+     }
+    },
+    {
+     "key": "later",
+     "sel": "#tp-consent-later",
+     "scope": "shared/data-consent-dialog.js",
+     "x": 28.6,
+     "y": 97,
+     "box": {
+      "x": 8.4,
+      "y": 90.3,
+      "w": 40.4,
+      "h": 6.7
+     }
+    },
+    {
+     "key": "allow",
+     "sel": "#tp-consent-allow",
+     "scope": "shared/data-consent-dialog.js",
+     "x": 71.4,
+     "y": 97,
+     "box": {
+      "x": 51.2,
+      "y": 90.3,
+      "w": 40.4,
+      "h": 6.7
+     }
+    }
+   ]
+  },
+  "privacy-locked": {
+   "img": "img/privacy-locked.webp",
+   "alt": "หน้าต่าง TextPhantom เมื่อยังไม่อนุญาต: ปุ่มของบัญชีเป็นสีเทา ใช้ Sign out ได้",
+   "width": 516,
+   "height": 879,
+   "callouts": [
+    {
+     "key": "note",
+     "sel": "#ai-paid-consent",
+     "scope": "popup",
+     "x": 10.8,
+     "y": 17.7,
+     "box": {
+      "x": 14,
+      "y": 14.8,
+      "w": 72.1,
+      "h": 14.9
+     }
+    },
+    {
+     "key": "buy",
+     "sel": "#ai-paid-buy",
+     "scope": "popup",
+     "x": 10.8,
+     "y": 50.7,
+     "box": {
+      "x": 14,
+      "y": 47.8,
+      "w": 34.9,
+      "h": 7.5
+     }
+    },
+    {
+     "key": "model",
+     "sel": "#ai-paid-model-picker",
+     "scope": "popup",
+     "x": 10.8,
+     "y": 65.3,
+     "box": {
+      "x": 14,
+      "y": 62.4,
+      "w": 72.1,
+      "h": 7.3
+     }
+    },
+    {
+     "key": "signout",
+     "sel": "#ai-paid-logout",
+     "scope": "popup",
+     "x": 78.7,
+     "y": 97,
+     "box": {
+      "x": 71.4,
+      "y": 92,
+      "w": 14.7,
+      "h": 4.4
+     }
+    }
+   ]
+  },
+  "privacy-diagnostics": {
+   "img": "img/privacy-diagnostics.webp",
+   "alt": "Tools › Advanced: สวิตช์ส่ง log วินิจฉัย (ปิดเป็นค่าเริ่มต้น) และคำอธิบายเมื่อชี้ที่ชื่อ",
+   "width": 516,
+   "height": 246,
+   "callouts": [
+    {
+     "key": "switch",
+     "sel": "#diagnostics-upload",
+     "scope": "popup",
+     "x": 5.8,
+     "y": 41.7,
+     "box": {
+      "x": 9,
+      "y": 35.9,
+      "w": 82,
+      "h": 11.6
+     }
+    },
+    {
+     "key": "hint",
+     "sel": "#tp-tip",
+     "scope": "popup",
+     "x": 5.8,
+     "y": 60.3,
+     "box": {
+      "x": 9,
+      "y": 49.9,
+      "w": 81.4,
+      "h": 42.7
+     }
+    }
+   ]
+  },
+  "privacy-diagnostics-confirm-th": {
+   "img": "img/privacy-diagnostics-confirm-th.webp",
+   "alt": "หน้าต่างยืนยันก่อนเปิดส่ง log วินิจฉัย (ภาษาไทย)",
+   "width": 516,
+   "height": 314,
+   "callouts": [
+    {
+     "key": "body",
+     "sel": "#tp-diag-body",
+     "scope": "popup/controllers/diagnostics-controller.js",
+     "x": 5.2,
+     "y": 29.4,
+     "box": {
+      "x": 8.4,
+      "y": 21.3,
+      "w": 83.1,
+      "h": 46.7
+     }
+    },
+    {
+     "key": "cancel",
+     "sel": "#tp-diag-cancel",
+     "scope": "popup/controllers/diagnostics-controller.js",
+     "x": 28.6,
+     "y": 94.7,
+     "box": {
+      "x": 8.4,
+      "y": 74.6,
+      "w": 40.4,
+      "h": 17.2
+     }
+    },
+    {
+     "key": "confirm",
+     "sel": "#tp-diag-confirm-on",
+     "scope": "popup/controllers/diagnostics-controller.js",
+     "x": 71.4,
+     "y": 94.7,
+     "box": {
+      "x": 51.2,
+      "y": 74.6,
+      "w": 40.4,
+      "h": 17.2
+     }
+    }
+   ]
+  },
+  "privacy-diagnostics-confirm-en": {
+   "img": "img/privacy-diagnostics-confirm-en.webp",
+   "alt": "The confirmation before diagnostic logs turn on (English)",
+   "width": 516,
+   "height": 342,
+   "callouts": [
+    {
+     "key": "body",
+     "sel": "#tp-diag-body",
+     "scope": "popup/controllers/diagnostics-controller.js",
+     "x": 5.2,
+     "y": 26.9,
+     "box": {
+      "x": 8.4,
+      "y": 19.5,
+      "w": 83.1,
+      "h": 51.2
+     }
+    },
+    {
+     "key": "cancel",
+     "sel": "#tp-diag-cancel",
+     "scope": "popup/controllers/diagnostics-controller.js",
+     "x": 28.6,
+     "y": 95.2,
+     "box": {
+      "x": 8.4,
+      "y": 76.8,
+      "w": 40.4,
+      "h": 15.8
+     }
+    },
+    {
+     "key": "confirm",
+     "sel": "#tp-diag-confirm-on",
+     "scope": "popup/controllers/diagnostics-controller.js",
+     "x": 71.4,
+     "y": 95.2,
+     "box": {
+      "x": 51.2,
+      "y": 76.8,
+      "w": 40.4,
+      "h": 15.8
      }
     }
    ]

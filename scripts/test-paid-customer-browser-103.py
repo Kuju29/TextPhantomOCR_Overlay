@@ -1,4 +1,8 @@
 """Native Chromium DOM + production controllers; synthetic browser API/storage/network."""
+import sys as _tp_sys
+from pathlib import Path as _TpPath
+_tp_sys.path.insert(0, str(_TpPath(__file__).resolve().parent / 'lib'))
+from chromium_path import chromium_executable  # the one shared Chromium resolver
 from pathlib import Path
 import json,re,base64,argparse,hashlib
 from urllib.parse import urlsplit
@@ -24,23 +28,23 @@ def modules(page):
   return cache[name]
  return module
 with sync_playwright() as pw:
- b=pw.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox','--disable-dev-shm-usage','--disable-gpu'])
+ b=pw.chromium.launch(executable_path=chromium_executable(),headless=True,args=['--no-sandbox','--disable-dev-shm-usage','--disable-gpu'])
  page=b.new_page(viewport={'width':470,'height':1500});errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
  page.route('**/*',lambda r:r.abort());page.set_content(html('src/popup/popup.html'))
  page.expose_function('_qaSha256',lambda data:list(hashlib.sha256(bytes(data)).digest()))
  page.evaluate('''()=>{if(!crypto.subtle)Object.defineProperty(crypto,'subtle',{value:{digest:async(name,data)=>new Uint8Array(await window._qaSha256(Array.from(new Uint8Array(data)))).buffer}})}''')
  mod=modules(page)
- urls=[mod(x) for x in ['src/popup/dom.js','src/popup/controllers/ai-profile-controller.js','src/popup/controllers/paid-service-controller.js','src/popup/controllers/popup-ui-controller.js','src/popup/controllers/popup-event-controller.js','src/popup/controllers/settings-persistence-controller.js','src/popup/controllers/rate-settings-controller.js','src/popup/controllers/ai-profile-storage-writer.js']]
+ urls=[mod(x) for x in ['src/popup/dom.js','src/popup/controllers/ai-profile-controller.js','src/popup/controllers/paid-service-controller.js','src/popup/controllers/popup-ui-controller.js','src/popup/controllers/popup-event-controller.js','src/popup/controllers/settings-persistence-controller.js','src/popup/controllers/ai-profile-storage-writer.js']]
  result=page.evaluate('''async urls=>{
- const [dom,profiles,paid,ui,events,persistence,rates,writers]=await Promise.all(urls.map(u=>import(u)));
+ const [dom,profiles,paid,ui,events,persistence,writers]=await Promise.all(urls.map(u=>import(u)));
  const {els}=dom,noop=()=>{},asyncNoop=async()=>{},sleep=ms=>new Promise(r=>setTimeout(r,ms));
  const checks=[],check=(name,ok,actual)=>{checks.push({name,passed:!!ok});if(!ok)throw Error(name+': '+JSON.stringify(actual));};
- const store={aiServiceMode:'paid',paidSessionToken:'QA_customer_only',paidEmail:'tester@example.com',paidApiBase:'http://localhost:7860',paidModel:'qa/vision',customApiUrl:'http://localhost:7860',apiUrlDefault:'http://api-default.test',apiDefaultsFetchedAt:Date.now(),aiProvider:'huggingface',aiModel:'manual/text',lang:'th',aiPrompt:'Translate naturally into Thai.',aiThinking:'minimum'};
+ const store={tpDataConsentV1:{version:1,granted:true,at:1},aiServiceMode:'paid',paidSessionToken:'QA_customer_only',paidEmail:'tester@example.com',paidApiBase:'http://localhost:7860',paidModel:'qa/vision',customApiUrl:'http://localhost:7860',apiUrlDefault:'http://api-default.test',apiDefaultsFetchedAt:Date.now(),aiProvider:'huggingface',aiModel:'manual/text',lang:'th',aiPrompt:'Translate naturally into Thai.',aiThinking:'minimum'};
  window.__store=store;window.__opened=[];
- window.chrome={storage:{local:{get(keys,cb){const value=Object.fromEntries((Array.isArray(keys)?keys:typeof keys==='string'?[keys]:Object.keys(keys||store)).map(k=>[k,store[k]]));cb?.(value);return Promise.resolve(value);},set(patch,cb){Object.assign(store,structuredClone(patch));cb?.();return Promise.resolve();}},onChanged:{addListener:noop}},runtime:{getURL:x=>'https://ui.test/'+x,sendMessage:asyncNoop,getManifest:()=>({version:'2026.10.1.3'})},tabs:{create:x=>window.__opened.push(x)}};
+ window.chrome={storage:{local:{get(keys,cb){const value=Object.fromEntries((Array.isArray(keys)?keys:typeof keys==='string'?[keys]:Object.keys(keys||store)).map(k=>[k,store[k]]));cb?.(value);return Promise.resolve(value);},set(patch,cb){Object.assign(store,structuredClone(patch));cb?.();return Promise.resolve();}},onChanged:{addListener:noop,removeListener:noop}},runtime:{getURL:x=>'https://ui.test/'+x,sendMessage:asyncNoop,getManifest:()=>({version:'2026.10.1.3'})},tabs:{create:x=>window.__opened.push(x)}};
  let isPaused=false;window.__pause=()=>{isPaused=true;};
  const caps={reasoning:{supported:true,mandatory:false,control:'levels',supported_efforts:['none','low','high']},vision:{supported:true,source:'QA verified catalogue'}};
- window.fetch=async (url,opts)=>({ok:true,status:200,json:async()=>(/\/paid\/(me|account)$/.test(String(url)))?{email:'tester@example.com',paid_paused:isPaused,credits:{available:'10000',held:'0'},packages:[],history:{orders:{items:[],total:0},payments:{items:[],total:0},lots:{items:[],total:0},usage:{items:[],total:0}},models:[{id:'qa/vision',name:'QA Vision · test model',eligible_tp:'10000',model_capabilities:caps}]}:{available:true,paid:{available:true}}});
+ window.fetch=async (url,opts)=>({ok:true,status:200,json:async()=>(/\\/paid\\/(me|account)$/.test(String(url)))?{email:'tester@example.com',paid_paused:isPaused,credits:{available:'10000',held:'0'},packages:[],history:{orders:{items:[],total:0},payments:{items:[],total:0},lots:{items:[],total:0},usage:{items:[],total:0}},models:[{id:'qa/vision',name:'QA Vision · test model',eligible_tp:'10000',model_capabilities:caps}]}:{available:true,paid:{available:true}}});
  const options=(el,v,val)=>{el.replaceChildren(...v.map(x=>new Option(x,x)));el.value=val;};
  options(els.mode,['lens_text'],'lens_text');options(els.sources,['ai'],'ai');options(els.lang,['th','en'],'th');options(els.aiProvider,['huggingface'],'huggingface');options(els.aiModel,['manual/text'],'manual/text');els.apiUrl.value=store.customApiUrl;
  const state={desiredLang:'th',desiredSources:'ai',desiredAiModel:'manual/text',lastSavedApiUrl:store.customApiUrl,aiPromptByLang:{},aiPromptDirtyByLang:{},apiDefaults:{},aiMetaSeq:0,aiProbeSeq:0};
@@ -49,12 +53,11 @@ with sync_playwright() as pw:
  let pc;const uic=ui.createPopupUiController({els,state,isLocalProvider:()=>false,toggleDom:dom.toggleUi,applyPaidMode:()=>pc?.applyVisibility(),updatePromptWarning:noop,validateAiKey:noop,validateLangSource:noop});
  const persist=persistence.createSettingsPersistenceController({els,state,profileController:profile,providerMetaController:{schedule:noop,renderStatus:noop},apiHealthController:{},persist:write,setStatus:noop,setFieldMessage:noop,toggleUi:uic.toggle,canUseAiUi:()=>true,isRemoteDefaultApiUrl:()=>false,refreshPromptHistoryButtons:asyncNoop});
  pc=paid.createPaidServiceController({els,state,getStorage:async keys=>Object.fromEntries(keys.map(k=>[k,store[k]])),setStorage:write,toggleUi:uic.toggle,onProfileContext:c=>profile.setPaidContext(c),beforeSwitch:()=>persist.flushPendingAiEditsForSwitch(state.desiredLang,state.desiredAiModel)});
- const rc=rates.createRateSettingsController({els,constants:{presets:{},fallback:{rpm:30,burst:4},rpmMin:1,rpmMax:600,burstMin:1,burstMax:60},persist:write,toggleUi:uic.toggle});rc.bind();
  events.bindPopupEvents({els,state,profileController:profile,profilePagehideFlush:persist.profilePagehideFlush,providerMetaController:{cancelSchedule:noop},localConnectionController:{refreshThinkingCompatibility:noop},apiHealthController:{},usageController:{},applyPromptForLang:noop,updatePromptCount:noop,toggleUi:uic.toggle,canUseAiUi:()=>true,fieldMessageType:()=>'',setFieldMessage:noop,updateAiPromptWarning:noop,scheduleSaveAi:persist.scheduleSaveAi,flushPromptForLang:persist.flushPromptForLang,flushPendingAiEditsForSwitch:persist.flushPendingAiEditsForSwitch,refreshSeriesMemory:asyncNoop});
  await pc.initialize();pc.setAvailability(true,store.customApiUrl);await sleep(150);uic.toggle();
  document.querySelector('#panel-translate').hidden=true;document.querySelector('#panel-tools').hidden=true;document.querySelector('#panel-ai').hidden=false;document.querySelector('#panel-ai').classList.add('active');document.querySelector('#tab-ai').setAttribute('aria-selected','true');document.querySelector('#tab-translate').setAttribute('aria-selected','false');
  check('Signed-in Paid account retains shared options',state.paidReady,state);
- for(const key of ['aiThinkingWrap','aiPromptWrap','aiCharactersWrap','aiPageImageWrap','aiRateWrap','aiTranslationModeWrap'])check(key+' is visible',getComputedStyle(els[key]).display!=='none' && els[key].getBoundingClientRect().height>0);
+ for(const key of ['aiThinkingWrap','aiPromptWrap','aiCharactersWrap','aiPageImageWrap','aiTokenCeilingWrap','aiTranslationModeWrap'])check(key+' is visible',getComputedStyle(els[key]).display!=='none' && els[key].getBoundingClientRect().height>0);
  for(const key of ['aiProviderWrap','aiKeyWrap','aiModelWrap'])check(key+' is hidden',getComputedStyle(els[key]).display==='none');
  els.aiThinking.value='high';els.aiThinking.dispatchEvent(new Event('change'));await sleep(30);
  els.aiMemoryMode.value='full';els.aiMemoryMode.dispatchEvent(new Event('change'));await sleep(30);

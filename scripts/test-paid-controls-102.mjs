@@ -1,15 +1,13 @@
 import assert from 'node:assert/strict';
-import { webcrypto } from 'node:crypto';
+import { installSettle } from './lib/settle.mjs';
 import { createAiProfileController } from '../src/popup/controllers/ai-profile-controller.js';
 import { createAiProfileStorageWriter } from '../src/popup/controllers/ai-profile-storage-writer.js';
 import { createPaidServiceController } from '../src/popup/controllers/paid-service-controller.js';
-import { createRateSettingsController } from '../src/popup/controllers/rate-settings-controller.js';
 import { paidEntry, paidScope, PAID_PROFILE_KEY } from '../src/shared/paid-profile.js';
 import { BUNDLED_CANONICAL_PROMPT_PLANS } from '../src/generated/canonical-prompt-plans.js';
 import { userMessageForCode } from '../src/shared/error-contract.js';
-Object.defineProperty(globalThis,'crypto',{value:webcrypto,configurable:true});
 const checks=[];const check=(name,fn)=>{fn();checks.push({name,passed:true});};
-const settle=async()=>{for(let n=0;n<8;n++)await new Promise(r=>setImmediate(r));};
+const settle=installSettle({turns:8}); // waits for WebCrypto work, not a fixed turn count
 const el=(value='')=>({value,checked:false,style:{display:''},dataset:{},options:[],textContent:'',disabled:false,handlers:{},
  addEventListener(k,fn){this.handlers[k]=fn;},
  setAttribute(k,v){(this.attributes ||= {})[k]=v;},
@@ -24,12 +22,11 @@ globalThis.document={createElement:()=>el(),createDocumentFragment:()=>({...el()
  createTextNode:text=>({textContent:text})};
 const els=Object.fromEntries(['aiProvider','aiModel','aiBaseUrl','aiPrompt','aiThinking','aiMemoryMode','aiPageImage','aiTranslationMode',
  'aiStyleExamples','aiStyleExamplesWrap','lang','aiService','mode','sources','apiUrl','aiServiceWrap','aiPaidPanel','aiProviderWrap','aiKeyWrap','aiModelWrap','aiEndpointWrap',
- 'aiThinkingWrap','aiPromptWrap','aiCharactersWrap','aiPageImageWrap','aiRateWrap','aiTranslationModeWrap','aiPaidStatus','aiPaidUnavailable',
- 'aiPaidModel','aiPaidLogin','aiPaidAccount','aiPaidEmailLabel','aiPaidCredits','aiPaidHeld','aiPaidAccountState',
- 'rateLimitEnabled','rateProfile','rateRpm','rateBurst','ratePresetHint'].map(k=>[k,el()]));
+ 'aiThinkingWrap','aiPromptWrap','aiCharactersWrap','aiPageImageWrap','aiTokenCeilingWrap','aiTranslationModeWrap','aiPaidStatus','aiPaidUnavailable',
+ 'aiPaidModel','aiPaidLogin','aiPaidAccount','aiPaidEmailLabel','aiPaidCredits','aiPaidHeld','aiPaidAccountState'].map(k=>[k,el()]));
 Object.assign(els.aiProvider,{value:'huggingface'});els.aiModel.value='manual/model';els.lang.value='th';
 els.mode.value='lens_text';els.sources.value='ai';els.apiUrl.value='http://localhost:7860';
-let store={aiProvider:'huggingface',aiModel:'manual/model',aiThinking:'low',aiMemoryMode:'terms',aiPageImage:'off',
+let store={tpDataConsentV1:{version:1,granted:true,at:1},aiProvider:'huggingface',aiModel:'manual/model',aiThinking:'low',aiMemoryMode:'terms',aiPageImage:'off',
  aiKey:'hf_manual-only-fixture',lang:'th',aiPrompt:'Manual Thai style',customApiUrl:els.apiUrl.value};
 const storage=createAiProfileStorageWriter(patch=>{Object.assign(store,structuredClone(patch));});
 const state={desiredLang:'th',desiredAiModel:'manual/model',lastSavedApiUrl:els.apiUrl.value,aiPromptDirtyByLang:{}};
@@ -62,33 +59,25 @@ const controller=createPaidServiceController({els,state,getStorage:async keys=>O
  toggleUi:()=>controller.applyVisibility(),onProfileContext:v=>profile.setPaidContext(v),beforeSwitch:()=>Promise.resolve()});
 globalThis.fetch=async()=>({ok:true,json:async()=>({available:false,code:'OTP_DISABLED'})});
 await controller.initialize();controller.setAvailability(true,els.apiUrl.value);els.aiService.value='paid';await els.aiService.handlers.change();await settle();
+// .68: the token ceiling replaced the request-rate cap among the Paid controls.
 check('Paid shows all six controls even before sign-in',()=>{
- for(const k of ['aiThinkingWrap','aiPromptWrap','aiCharactersWrap','aiPageImageWrap','aiRateWrap','aiTranslationModeWrap']) assert.equal(els[k].style.display,'',k);
+ for(const k of ['aiThinkingWrap','aiPromptWrap','aiCharactersWrap','aiPageImageWrap','aiTokenCeilingWrap','aiTranslationModeWrap']) assert.equal(els[k].style.display,'',k);
  for(const k of ['aiProviderWrap','aiKeyWrap','aiModelWrap']) assert.equal(els[k].style.display,'none',k);});
 controller.dispose();
-const rates=createRateSettingsController({els,constants:{presets:{huggingface:{rpm:999,burst:99},paid:{rpm:60,burst:8}},fallback:{rpm:60,burst:8},rpmMin:1,rpmMax:9999,burstMin:1,burstMax:100},persist:storage,toggleUi:()=>{}});
-rates.bind();els.rateLimitEnabled.checked=true;els.rateProfile.value='auto';await els.rateLimitEnabled.handlers.change();
-check('Paid rate preset is not borrowed from hidden Manual provider',()=>{assert.equal(store.rateRpm,60);assert.equal(store.rateBurst,8);assert.equal(store.rateLimitEnabled,true);});
-els.rateProfile.value='custom';els.rateRpm.value='7';els.rateBurst.value='2';await els.rateProfile.handlers.change();
-check('Custom Paid cap persists real numeric settings',()=>{assert.equal(store.rateRpm,7);assert.equal(store.rateBurst,2);});
-check('Paid pacing translates the public sentence while preserving exact limits',()=>{
- const template=els.ratePresetHint.children[0];
- assert.equal(template.dataset.tpUiTemplate,'Paid request pacing: {rpm}/min, burst {burst}. Service limits still apply.');
- assert.deepEqual(template.querySelectorAll('[data-tp-ui-value]').map(v=>[v.dataset.tpUiValue,v.textContent,v.attributes.translate]),
-   [['rpm','7','no'],['burst','2','no']]);
-});
+// (The Paid request-pacing checks retired with the rate cap in .68; its controller was removed.)
 check('Paid pause has meaningful customer message without setup instructions',()=>{assert.equal(userMessageForCode('paid_paused'),userMessageForCode('PAID_PAUSED'));assert.match(userMessageForCode('paid_paused'),/พักชั่วคราว/);assert(!/Control Center|ยังไม่มีคำอธิบาย/.test(userMessageForCode('paid_paused')));});
 // Actual background resolver: fresh account is source of model evidence; only GETs during preflight.
-globalThis.chrome={storage:{local:{get(keys,cb){const v={...store,customApiUrl:ctx.apiBase,apiDefaultsFetchedAt:Date.now()};cb(Object.fromEntries((Array.isArray(keys)?keys:typeof keys==="string"?[keys]:Object.keys(keys||v)).map(k=>[k,v[k]])));},set(patch,cb){Object.assign(store,patch);cb?.();}}}};
+// 10495: the signed-in session is in storage (the resolver reads it through the account gate).
+globalThis.chrome={storage:{local:{get(keys,cb){const v={...store,customApiUrl:ctx.apiBase,apiDefaultsFetchedAt:Date.now(),paidSessionToken:'customer-session',paidApiBase:ctx.apiBase};cb(Object.fromEntries((Array.isArray(keys)?keys:typeof keys==="string"?[keys]:Object.keys(keys||v)).map(k=>[k,v[k]])));},set(patch,cb){Object.assign(store,patch);cb?.();}}}};
 const {resolveJobAiProfile}=await import('../src/background/ai-profile-resolver.js');
 let paused=false;const calls=[];
 globalThis.fetch=async(url,opts={})=>{calls.push({url,opts});return {ok:true,json:async()=>String(url).endsWith('/paid/me')?
  {paid_paused:paused,paid_status:{state:paused?'paused':'ready'},models:[{id:ctx.model,model_capabilities:capabilities}]}:{paid:{available:true}}};};
 const settings={...store,aiServiceMode:'paid',paidApiBase:ctx.apiBase,paidSessionToken:'customer-session',paidModel:ctx.model};
 let resolved=await resolveJobAiProfile(settings,{language:'th'});
-check('Job uses paid controls plus manual cap but no Manual credential',()=>{
+check('Job uses paid controls but no Manual credential and no request-rate cap',()=>{
  assert.equal(resolved.settings.aiThinking,'high');assert.equal(resolved.settings.aiPageImage,'always');assert.equal(resolved.settings.aiMemoryMode,'full');assert.equal(resolved.settings.aiPrompt,'');
- assert.equal(resolved.settings.aiKey,'customer-session');assert.equal(resolved.settings.rateRpm,7);assert.equal(resolved.settings.aiModelCapabilities.vision.supported,true);assert.equal(resolved.settings.aiTranslationMode,'conversation');});
+ assert.equal(resolved.settings.aiKey,'customer-session');assert.notEqual(resolved.settings.rateLimitEnabled,true);assert.equal(resolved.settings.aiModelCapabilities.vision.supported,true);assert.equal(resolved.settings.aiTranslationMode,'conversation');});
 paused=true;await assert.rejects(()=>resolveJobAiProfile(settings),err=>err.code==='PAID_PAUSED');
 check('Paused account preflight fails without POST or any provider key',()=>{assert(calls.every(c=>!c.opts.method||c.opts.method==='GET'));assert(!JSON.stringify(calls).includes('hf_manual'));});
 

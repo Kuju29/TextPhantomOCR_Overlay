@@ -21,7 +21,8 @@ const base='http://localhost:7860',provider='login_deepseek',model='deepseek-cha
 const identity={id:'lgs_'+'a'.repeat(48),account_id:'b'.repeat(32),provider,transport:'web_endpoint'};
 const flowId='lgf_'+'c'.repeat(48);
 const account={email:'fixture@example.test',credits:{available:'1000',held:'0'},models:[{id:'tp-fixture',name:'TP fixture',eligible_tp:'1000',pricing:{status:'estimated',unit:'TP_PER_1000_TOKENS',input_tp:'2',output_tp:'6'}}],addons:{entitlements:[{code:'ai_login',status:'active'}]}};
-const local=()=>({mode:'lens_text',sources:'ai',customApiUrl:base,apiDefaultsFetchedAt:Date.now(),aiServiceMode:'paid',paidTranslationSource:'login',paidSessionToken:'synthetic-customer',paidApiBase:base,paidServiceApiBase:base,paidModel:'tp-fixture',loginProvider:provider,loginModel:'',aiProvider:'openrouter',aiModel:'fixture-model',aiKey:'synthetic-key'});
+const local=()=>({mode:'lens_text',sources:'ai',customApiUrl:base,apiDefaultsFetchedAt:Date.now(),aiServiceMode:'paid',paidTranslationSource:'login',paidSessionToken:'synthetic-customer',paidApiBase:base,paidServiceApiBase:base,paidModel:'tp-fixture',loginProvider:provider,loginModel:'',aiProvider:'openrouter',aiModel:'fixture-model',aiKey:'synthetic-key',
+  tpDataConsentV1:{version:1,granted:true,at:1}}); // 10494: this user allowed account data (Gemini connect reads the cookie)
 const response=(value,status=200)=>new Response(JSON.stringify(value),{status,headers:{'Content-Type':'application/json'}});
 const checks=[],failures=[];
 async function check(name,fn){try{await fn();checks.push(name);}catch(error){failures.push({name,error:error.message});}}
@@ -110,7 +111,9 @@ await check('.75 Claude has no unsupported label and explains its claude.ai tab'
  try{
   await popup.settle(150);
   assert.doesNotMatch(popup.fields.get('ai-login-provider').selectedOptions[0]?.textContent||'',/Not supported yet/);
-  assert.match(popup.fields.get('ai-login-support')?.textContent||'',/claude\.ai tab in this browser/);
+  // 10496: the explanation is on the "Provider" name (hover/focus/tap); before sign-in no inline tab warning.
+  assert.match(popup.fields.get('ai-login-provider-tip')?.textContent||'',/^Use your own AI account ?Claude Login translates through one claude\.ai tab in this browser/);
+  assert.equal(popup.fields.get('ai-login-support')?.textContent||'','');
   assert.equal(popup.fields.get('ai-login-connect').disabled,false);
  }finally{popup.close();}
 });
@@ -129,6 +132,9 @@ await check('.77 ChatGPT has no unsupported label and says which route it connec
    env.hold();await env.complete(popup,{patch:{chatgpt_mode:mode,chatgpt_reason:reason}});await popup.settle(180);
    assert.match(popup.fields.get('ai-login-account').textContent,/Signed in|Connected to/);
    assert.match(popup.fields.get('ai-login-status').textContent,text,mode+' '+reason);
+   // 10496: signed in through the website tab → the inline warning that matters while translating.
+   assert.equal(popup.fields.get('ai-login-support').textContent,'Keep the chatgpt.com tab open while translating; closing it stops the translation.');
+   assert.notEqual(popup.fields.get('ai-login-support').style.display,'none');
    assert.equal(popup.fields.get('ai-login-model').disabled,false);
   }finally{popup.close();}
  }

@@ -386,7 +386,8 @@ await check('An unresolved Reader-only page neither borrows nor accumulates webs
   const sent=[],fixture=popupFixture({tab:{id:1,url:'https://reader.test/chapter/123',title:'Reader'},
     send:(message,actualSend)=>{sent.push(message);return actualSend(message);}});
   await fixture.controller.refresh();assert.equal(fixture.state.seriesMemory.identityKnown,false);
-  assert.match(fixture.els.aiCharactersCount.textContent,/identity unavailable/i);
+  // 10496: the same warning, now a small warning chip: "Series not recognised on this page — memory is not shared."
+  assert.match(fixture.els.aiCharactersCount.textContent,/^Series not recognised on this page — memory is not shared\.$/);
   await fixture.click();assert.equal(sent.filter(message=>message.type==='TP_CLEAR_SERIES_MEMORY').length,0);
   assert.deepEqual(storage.aiSeriesMemory,poisoned);
 });

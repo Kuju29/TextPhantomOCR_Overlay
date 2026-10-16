@@ -5,6 +5,8 @@
 
 import { isLocalAiProvider } from "../shared/constants.js";
 import { setUiText } from "../shared/ui-template.js";
+import { setTip } from "../shared/hover-tip.js";
+import { THINKING_TIP } from "./controllers/popup-ui-controller.js";
 import { localProviderCatalog } from "../shared/ai/providers/local-registry.js";
 import { cloudProviderCatalog } from "../shared/ai/providers/cloud-registry.js";
 
@@ -22,10 +24,13 @@ export const els = {
   aiKeyGet: document.getElementById("ai-key-get"),
   aiModelWrap: document.getElementById("ai-model-wrap"),
   aiModel: document.getElementById("ai-model"),
-  aiLocalModelHint: document.getElementById("ai-local-model-hint"),
   aiThinkingWrap: document.getElementById("ai-thinking-wrap"),
   aiThinking: document.getElementById("ai-thinking"),
   aiThinkingHint: document.getElementById("ai-thinking-hint"),
+  // 10496: hidden explanation sources shown by shared/hover-tip.js on the option name.
+  aiThinkingTip: document.getElementById("ai-thinking-tip"),
+  aiPageImageTip: document.getElementById("ai-page-image-tip"),
+  aiLoginProviderTip: document.getElementById("ai-login-provider-tip"),
   aiGroup: document.getElementById("ai-group"),
   aiProvider: document.getElementById("ai-provider"),
   aiProviderWrap: document.getElementById("ai-provider-wrap"),
@@ -68,6 +73,9 @@ export const els = {
   aiPaidDetails: document.getElementById("ai-paid-details"),
   aiPaidRefresh: document.getElementById("ai-paid-refresh"),
   aiPaidLogout: document.getElementById("ai-paid-logout"),
+  // 10495: the locked banner of the Paid area and its Allow link.
+  aiPaidConsent: document.getElementById("ai-paid-consent"),
+  aiPaidConsentAllow: document.getElementById("ai-paid-consent-allow"),
   aiPaidStatus: document.getElementById("ai-paid-status"),
   aiUsageLabel: document.getElementById("ai-usage-label"),
   aiUsageTotal: document.getElementById("ai-usage-total"),
@@ -119,7 +127,6 @@ export const els = {
   aiLocalAdapter: document.getElementById("ai-local-adapter"),
   aiCharactersWrap: document.getElementById("ai-characters-wrap"),
   aiCharactersCount: document.getElementById("ai-characters-count"),
-  aiMemoryHint: document.getElementById("ai-memory-hint"),
   aiCharactersClear: document.getElementById("ai-characters-clear"),
   aiMemoryMode: document.getElementById("ai-memory-mode"),
   aiStyleExamplesWrap: document.getElementById("ai-style-examples-wrap"),
@@ -128,18 +135,12 @@ export const els = {
   aiTranslationModeWrap: document.getElementById("ai-translation-mode-wrap"),
   aiPageImageWrap: document.getElementById("ai-page-image-wrap"),
   aiPageImage: document.getElementById("ai-page-image"),
-  aiRateWrap: document.getElementById("ai-rate-wrap"),
   // Per-model token ceiling (replaces the request-rate cap UI).
   aiTokenCeilingWrap: document.getElementById("ai-token-ceiling-wrap"),
   aiTokenCeilingEnabled: document.getElementById("ai-token-ceiling-enabled"),
   aiTokenCeiling: document.getElementById("ai-token-ceiling"),
   aiTokenCeilingDefault: document.getElementById("ai-token-ceiling-default"),
   aiTokenCeilingWarning: document.getElementById("ai-token-ceiling-warning"),
-  aiLocalRateWrap: document.getElementById("ai-local-rate-wrap"),
-  aiLocalRateEnabled: document.getElementById("ai-local-rate-enabled"),
-  aiLocalRateRpm: document.getElementById("ai-local-rate-rpm"),
-  aiLocalRateBurst: document.getElementById("ai-local-rate-burst"),
-  aiLocalRateHint: document.getElementById("ai-local-rate-hint"),
   aiLocalCapacityWrap: document.getElementById("ai-local-capacity-wrap"),
   aiLocalCapacityMode: document.getElementById("ai-local-capacity-mode"),
   aiLocalManualConcurrencyWrap: document.getElementById(
@@ -152,12 +153,7 @@ export const els = {
   apiLocalUnlimitedWrap: document.getElementById("api-local-unlimited-wrap"),
   apiLocalUnlimited: document.getElementById("api-local-unlimited"),
   engineMode: document.getElementById("engine-mode"),
-  rateLimitEnabled: document.getElementById("rate-limit-enabled"),
-  rateProfile: document.getElementById("rate-profile"),
-  rateCustomFields: document.getElementById("rate-custom-fields"),
-  rateRpm: document.getElementById("rate-rpm"),
-  rateBurst: document.getElementById("rate-burst"),
-  ratePresetHint: document.getElementById("rate-preset-hint"),
+  diagnosticsUpload: document.getElementById("diagnostics-upload"),
   relayoutWrap: document.getElementById("relayout-wrap"),
   relayoutTranslated: document.getElementById("relayout-translated"),
   aiPromptWrap: document.getElementById("ai-prompt-wrap"),
@@ -193,7 +189,6 @@ export const els = {
   openLocalImages: document.getElementById("open-local-images"),
   openLocalFolder: document.getElementById("open-local-folder"),
   localImagesInput: document.getElementById("local-images-input"),
-  localFolderInput: document.getElementById("local-folder-input"),
   openAutoTranslate: document.getElementById("open-auto-translate"),
   localPickerMsg: document.getElementById("local-picker-msg"),
   resetDefaults: document.getElementById("reset-defaults"),
@@ -493,8 +488,6 @@ export function toggleUi() {
   // models. The remaining controls still require a usable engine.
   const canConfigureAi = local || (els.aiKey.value || "").trim().length > 0;
   els.aiModelWrap.style.display = showAi ? "" : "none";
-  if (els.aiLocalModelHint)
-    els.aiLocalModelHint.style.display = showAi && local ? "" : "none";
   if (els.aiLocalCapacityWrap)
     els.aiLocalCapacityWrap.style.display = showAi && local ? "" : "none";
   if (els.aiLocalManualConcurrencyWrap) {
@@ -513,15 +506,14 @@ export function toggleUi() {
     for (const option of els.aiThinking.options) {
       option.disabled = true;
     }
-    els.aiThinkingHint.textContent =
-      "Thinking control is unavailable until this exact model is verified.";
+    els.aiThinkingHint.textContent = "";
+    // 10496: the reason is the highlighted line of the "AI thinking" explanation.
+    setTip(els.aiThinkingTip, THINKING_TIP,
+      { reason: "Thinking control is unavailable until this exact model is verified." });
   }
   els.aiPromptWrap.style.display = showAi && canConfigureAi ? "" : "none";
   if (els.aiCharactersWrap)
     els.aiCharactersWrap.style.display = showAi && canConfigureAi ? "" : "none";
-  if (els.aiMemoryHint) {
-    els.aiMemoryHint.textContent = "Full also includes story and characters.";
-  }
   if (els.aiPageImageWrap)
     els.aiPageImageWrap.style.display = showAi && canConfigureAi ? "" : "none";
   // One per-model token ceiling for Manual Cloud and Local (Paid shows it

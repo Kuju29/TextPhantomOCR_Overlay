@@ -9,8 +9,8 @@ from .wire import PREFIX, SUFFIX, END_MARKER, DONE_MARKER
 
 _MARKER_RE: Final[re.Pattern[str]] = re.compile(r"<<TP_P(\d+)>>")
 _WIRE_MARKER_RE: Final[re.Pattern[str]] = re.compile(r"<<(?:TP_P\d+|I[1-9][0-9]{0,6}_P[0-9]{1,6}):")
-_GENERIC_HEADER_RE: Final[re.Pattern[str]] = re.compile(rf"<<(?:TP_(P\d+)|(I[1-9][0-9]{{0,6}}_P[0-9]{{1,6}}))(?::|\s)")
-_GENERIC_CLAIM_RE: Final[re.Pattern[str]] = re.compile(rf"<<(?:TP_(P\d+)|(I[1-9][0-9]{{0,6}}_P[0-9]{{1,6}}))")
+_GENERIC_HEADER_RE: Final[re.Pattern[str]] = re.compile(r"<<(?:TP_(P\d+)|(I[1-9][0-9]{0,6}_P[0-9]{1,6}))(?::|\s)")
+_GENERIC_CLAIM_RE: Final[re.Pattern[str]] = re.compile(r"<<(?:TP_(P\d+)|(I[1-9][0-9]{0,6}_P[0-9]{1,6}))")
 
 def _claim_id(match: re.Match[str] | None) -> str | None:
     if match is None:

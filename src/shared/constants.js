@@ -1,7 +1,5 @@
 /** Constants shared across the extension (API paths, defaults, fallbacks). */
 
-import { cloudRatePresets } from "./ai/providers/cloud-registry.js";
-
 /** REST/meta endpoints on the TextPhantom API. */
 export const API_PATHS = {
   HEALTH: "/health",
@@ -97,22 +95,6 @@ export const DEFAULT_RELAYOUT_TRANSLATED = true;
 export const DEFAULT_RATE_LIMIT_ENABLED = false;
 export const DEFAULT_RATE_RPM = 30;
 export const DEFAULT_RATE_BURST = 4;
-
-/**
- * Hard bounds for the rate inputs. These exist to stop a typo from breaking
- * translation silently: 1000000 RPM is not "no limit", it just guarantees the
- * provider answers 429 and the whole batch fails; 0.5 RPM would pace one page
- * every two minutes and look like a hang.
- */
-export const RATE_RPM_MIN = 1;
-export const RATE_RPM_MAX = 600;
-export const RATE_BURST_MIN = 1;
-export const RATE_BURST_MAX = 60;
-
-export const RATE_PRESETS = Object.freeze(cloudRatePresets());
-
-/** Fallback policy for providers not listed above. */
-export const RATE_PRESET_DEFAULT = { rpm: 30, burst: 4 };
 
 /** Port name used by the content-script keep-alive connection. */
 export const KEEPALIVE_PORT_NAME = "TP_KEEPALIVE";

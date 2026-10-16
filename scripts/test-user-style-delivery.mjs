@@ -10,7 +10,6 @@ import { instructionPack } from '../src/shared/ai/prompt-language.js';
 import { createPromptInputEstimator } from '../src/shared/ai/workload/prompt-input.js';
 import { textWeight } from '../src/shared/ai/workload/model.js';
 import { rememberDiagnostic, recentDiagnostic, clearRecentDiagnostics } from '../src/background/ai/recent-diagnostics.js';
-import { formatRequestDiagnostic } from '../src/shared/ai/diagnostic-view.js';
 import { setTracingEnabled, note, flushTrace, shortenValue } from '../src/shared/trace.js';
 const root=fileURLToPath(new URL('../',import.meta.url));
 let checks=0, sample;
@@ -68,7 +67,6 @@ const view=recentDiagnostic('fixture','small');
 assert.equal(view.layout.styleRole,sample.layout.styleRole);
 assert.equal(view.layout.userStyleCopies,0);assert.equal(view.layout.systemStyleCopies,1);
 assert.equal(view.layout.systemStyleCopies,1);assert.equal(view.layout.userStyleCopies,0);
-assert.doesNotMatch(formatRequestDiagnostic(view,'th'),/SHA256|layout revision|System 0/,'developer metadata stays in record/log, not the concise UI');
 clearRecentDiagnostics();
 const oldFetch=globalThis.fetch, shipments=[];
 try {

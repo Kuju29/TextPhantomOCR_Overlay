@@ -15,7 +15,7 @@ assert.match(popup, /localConnectSeq:\s*0/);
 assert.match(popup, /localConnectInFlight:\s*null/);
 assert.match(providerMeta, /if \(state\.localConnectInFlight\) return;/,
   "automatic discovery must not start a duplicate Local connection");
-assert.match(providerMeta, /await local\.connect\(\{ automatic: true \}\)/,
+assert.match(providerMeta, /await local\.connect\(\{ automatic, implicit: true \}\)/,
   "Local provider selection requests automatic discovery, with Custom ownership verified by the connection controller");
 
 assert.match(localConnection, /clearResolveTimer\(\)/,
@@ -89,7 +89,10 @@ function fixture({ persistGate = null, snapshotGate = null, saveGate = null } = 
   return { els, state, storage, requests, writes, controller, passed };
 }
 async function until(check) {
-  for (let i = 0; i < 100 && !check(); i++) await Promise.resolve();
+  // Wait for the milestone itself, across macrotasks too (WebCrypto digests used
+  // for the display-cache scope settle outside the microtask queue).
+  const deadline = Date.now() + 5000;
+  while (!check() && Date.now() < deadline) await new Promise((resolve) => setImmediate(resolve));
   assert.ok(check(), "expected asynchronous milestone");
 }
 

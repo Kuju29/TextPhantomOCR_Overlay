@@ -1,13 +1,17 @@
 """Production popup change events + native selects, with isolated storage/catalogue.
 No live requests, credentials, provider generation, or installed-extension claims.
 """
+import sys as _tp_sys
+from pathlib import Path as _TpPath
+_tp_sys.path.insert(0, str(_TpPath(__file__).resolve().parent / 'lib'))
+from chromium_path import chromium_executable  # the one shared Chromium resolver
 from pathlib import Path
 import argparse,json,re
 from playwright.sync_api import sync_playwright
 p=argparse.ArgumentParser();p.add_argument('--root',type=Path,default=Path(__file__).resolve().parents[1]);p.add_argument('--out',type=Path,default=Path('/tmp/tp-model-browser'));a=p.parse_args();a.out.mkdir(parents=True,exist_ok=True)
 report={'scope':'Real Chromium, production event/profile controllers, native selects; mocked account catalogue/storage; no live generation','checks':[]}
 with sync_playwright() as pw:
- browser=pw.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox','--disable-dev-shm-usage','--disable-gpu'])
+ browser=pw.chromium.launch(executable_path=chromium_executable(),headless=True,args=['--no-sandbox','--disable-dev-shm-usage','--disable-gpu'])
  page=browser.new_page();errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
  page.route('**/*',lambda route:route.abort())
  page.set_content('<!doctype html><meta charset="utf-8"><body></body>')
@@ -19,13 +23,15 @@ with sync_playwright() as pw:
   source=re.sub(r'(\b(?:from\s*|import\s*))([\'"])(\.[^\'"]+)\2',replace,source)
   cache[name]=page.evaluate("s=>URL.createObjectURL(new Blob([s],{type:'text/javascript'}))",source)
   return cache[name]
- urls=[module(path) for path in ['src/popup/controllers/popup-event-controller.js','src/popup/controllers/ai-profile-controller.js','src/shared/ai/providers/cloud-registry.js','src/shared/ai/providers/local-registry.js']]
+ urls=[module(path) for path in ['src/popup/controllers/popup-event-controller.js','src/popup/controllers/ai-profile-controller.js','src/shared/ai/providers/cloud-registry.js','src/shared/ai/providers/local-registry.js','src/popup/controllers/reasoning-select.js','src/shared/thinking-state.js']]
  result=page.evaluate('''async urls=>{
- window.chrome={storage:{onChanged:{addListener:()=>{}},local:{get:async()=>({}),set:async()=>{}}},runtime:{sendMessage:async()=>{},getURL:x=>x}};
+ window.chrome={storage:{onChanged:{addListener:()=>{},removeListener:()=>{}},local:{get:(keys,cb)=>{const v={};cb?.(v);return Promise.resolve(v);},set:(patch,cb)=>{cb?.();return Promise.resolve();}}},runtime:{sendMessage:async()=>{},getURL:x=>x}};
  const {bindPopupEvents}=await import(urls[0]);
  const {createAiProfileController}=await import(urls[1]);
  const {cloudProviderCatalog}=await import(urls[2]);
  const {localProviderCatalog}=await import(urls[3]);
+ const {renderThinkingControl}=await import(urls[4]);
+ const {classifyThinkingState}=await import(urls[5]);
  const specs=[...cloudProviderCatalog(),...localProviderCatalog(),{id:'customlocal',baseUrl:'http://localhost:8089/v1'}];
  const checks=[];const check=(name,condition,actual)=>{checks.push({name,passed:!!condition,actual});if(!condition)throw Error(name+': '+JSON.stringify(actual));};
  const sleep=ms=>new Promise(r=>setTimeout(r,ms));
@@ -47,9 +53,18 @@ with sync_playwright() as pw:
   const change=value=>{els.aiModel.value=value;els.aiModel.dispatchEvent(new Event('change'));};
   change('model-b');await until(()=>checksFinished===1);
   check(spec.id+' actual change persists model-b',storage.aiProfilesV1.active.model==='model-b',storage.aiProfilesV1.active);
-  // Native select initially has no high option. A saved capability must insert
-  // it before assignment, and reopening must preserve the saved preference.
-  await controller.saveModelCapabilities({reasoning:{supported:true,mandatory:false,control:'levels',supported_efforts:['none','low','high']}},'aaaaaaaaaaaaaaaa');
+  // Native select initially has no high option. Since .88 the popup UI renders
+  // the AI think options from the model's classified record (shared/thinking-state.js);
+  // the profile only applies the saved value within that state. Render the state
+  // the popup reaches once this capability record is fresh, then a profile
+  // re-render and a reopen must keep the saved preference.
+  const reasoning={supported:true,mandatory:false,control:'levels',supported_efforts:['none','low','high']};
+  await controller.saveModelCapabilities({reasoning},'aaaaaaaaaaaaaaaa');
+  check(spec.id+' unverified record stays Checking model',classifyThinkingState(reasoning,{fresh:false})==='loading','loading');
+  const thinkingState=classifyThinkingState(reasoning,{fresh:true});
+  check(spec.id+' fresh levels record is controllable',thinkingState==='controllable',thinkingState);
+  renderThinkingControl(els.aiThinking,{state:thinkingState,reasoning});
+  check(spec.id+' native select offers high only after the record',[...els.aiThinking.options].some(o=>o.value==='high')&&!els.aiThinking.disabled,[...els.aiThinking.options].map(o=>o.value));
   controller.selectModel('model-b');
   els.aiThinking.value='high';els.aiThinking.dispatchEvent(new Event('change'));
   await until(()=>storage.aiProfilesV1.providers[storage.aiProfilesV1.active.providerIdentity].models['model-b'].profile.thinking==='high');

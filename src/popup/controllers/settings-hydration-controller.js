@@ -14,9 +14,6 @@ import {
   FALLBACK_SOURCES,
   PINNED_LANG_CODES,
   DEFAULT_RELAYOUT_TRANSLATED,
-  DEFAULT_RATE_LIMIT_ENABLED,
-  DEFAULT_RATE_RPM,
-  DEFAULT_RATE_BURST,
   isLocalAiProvider,
 } from "../../shared/constants.js";
 import {
@@ -101,7 +98,6 @@ export async function loadPopupSettings(deps) {
     profileController,
     fontScaleController,
     seriesMemoryController,
-    rateSettingsController,
     usageViewController,
     providerMetaController,
     apiHealthController,
@@ -327,42 +323,6 @@ export async function loadPopupSettings(deps) {
         ? stored.relayoutTranslated
         : DEFAULT_RELAYOUT_TRANSLATED;
   }
-  if (els.rateLimitEnabled) {
-    if (els.aiLocalRateEnabled) {
-      els.aiLocalRateEnabled.checked = stored.aiLocalRateLimitEnabled === true;
-    }
-    if (els.aiLocalRateRpm) els.aiLocalRateRpm.value = String(Number(stored.aiLocalRateRpm) > 0 ? stored.aiLocalRateRpm : (els.aiLocalRateEnabled?.checked ? "" : 6));
-    if (els.aiLocalRateBurst) els.aiLocalRateBurst.value = String(Number(stored.aiLocalRateBurst) > 0 ? stored.aiLocalRateBurst : (els.aiLocalRateEnabled?.checked ? "" : 1));
-    els.rateLimitEnabled.checked =
-      typeof stored.rateLimitEnabled === "boolean"
-        ? stored.rateLimitEnabled
-        : DEFAULT_RATE_LIMIT_ENABLED;
-  }
-  if (els.rateProfile) {
-    els.rateProfile.value = [
-      "auto",
-      "stable",
-      "balanced",
-      "fast",
-      "custom",
-    ].includes(stored.rateProfile)
-      ? stored.rateProfile
-      : stored.rateLimitEnabled === true
-        ? "custom"
-        : "auto";
-  }
-  if (els.rateRpm)
-    els.rateRpm.value = String(
-      Number(stored.rateRpm) > 0 ? stored.rateRpm : (els.rateLimitEnabled?.checked ? "" : DEFAULT_RATE_RPM),
-    );
-  if (els.rateBurst) {
-    els.rateBurst.value = String(
-      Number(stored.rateBurst) > 0 ? stored.rateBurst : (els.rateLimitEnabled?.checked ? "" : DEFAULT_RATE_BURST),
-    );
-  }
-  await rateSettingsController.initialize?.(stored);
-  rateSettingsController.renderHint();
-  rateSettingsController.renderLocalHint();
   // Storage is the source of truth during first paint. Live verification is
   // advisory and must never erase a saved selection.
   const hydratedModel = aiProfileReady

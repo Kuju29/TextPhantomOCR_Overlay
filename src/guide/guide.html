@@ -19,13 +19,19 @@
         <strong translate="no">TextPhantom</strong>
         <span>คู่มือการใช้งานแบบมีภาพ <span id="guide-version" class="version" translate="no"></span></span>
       </div>
-      <button type="button" class="toc-toggle" id="toc-toggle" aria-controls="toc" aria-expanded="false">
+      <button type="button" class="toc-toggle" id="toc-toggle" aria-controls="toc privacy-toc" aria-expanded="false">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h10" /></svg>
         <span>สารบัญ</span>
       </button>
     </div>
+    <!-- 10495: two top-level tabs. guide.html#privacy opens the second one. -->
+    <nav class="guide-tabs" role="tablist" aria-label="TextPhantom">
+      <button type="button" role="tab" id="guide-tab-guide" data-guide-tab="guide" aria-controls="guide-panel" aria-selected="true">คู่มือการใช้งาน</button>
+      <button type="button" role="tab" id="guide-tab-privacy" data-guide-tab="privacy" aria-controls="privacy-panel" aria-selected="false" translate="no">Privacy &amp; data</button>
+    </nav>
   </header>
 
+  <div id="guide-panel" role="tabpanel" data-guide-panel="guide" aria-labelledby="guide-tab-guide">
   <div class="layout">
     <nav class="toc" id="toc" aria-label="สารบัญ">
       <p class="toc-title">สารบัญ</p>
@@ -55,6 +61,9 @@
             ถ้าคุณเปลี่ยนภาษาหน้าจอเป็น “ไทย” ชื่อปุ่มจะถูกแปล แต่ตำแหน่งเหมือนเดิม</li>
           <li>อีเมล ตัวเลขเครดิต ชื่อเรื่อง และราคาในภาพเป็นเพียงตัวอย่าง</li>
           <li>การตั้งค่าที่เลือกในหน้าต่าง TextPhantom ถูกบันทึกไว้ให้เอง ไม่มีปุ่มบันทึก</li>
+          <li>ชี้เมาส์ที่ชื่อตัวเลือกเพื่อดูคำอธิบาย (บนจอสัมผัสให้แตะที่ชื่อ)
+            ชื่อที่มีคำอธิบายจะเปลี่ยนสีเมื่อชี้ ถ้าตัวเลือกใช้ไม่ได้ (เป็นสีจาง) คำอธิบายจะมีบรรทัดสีเหลืองบอกเหตุผล
+            ข้อความที่อยู่ใต้ช่องจะมีเฉพาะสถานะหรือคำเตือนที่สำคัญตอนนั้น</li>
         </ul>
       </section>
 
@@ -197,7 +206,8 @@
             <li data-key="get-key"><b>“(get key)”</b> เปิดหน้าเว็บของบริษัทนั้นเพื่อสร้าง key</li>
             <li data-key="model"><b>“Model (required)”</b> เลือกโมเดล (จำเป็น) เมื่อใส่ key ที่ใช้ได้ รายชื่อจะอัปเดตจากบริษัท AI</li>
             <li data-key="thinking"><b>“AI thinking”</b> ให้ AI “คิด” ก่อนตอบ แนะนำ “Lowest available”
-              ตัวเลือกขึ้นกับโมเดล ช่องนี้แสดงหลังระบบตรวจโมเดลแล้ว ถ้าโมเดลทำตามที่เลือกไม่ได้ จะมีคำเตือนใต้ช่อง
+              ตัวเลือกขึ้นกับโมเดล ช่องนี้แสดงหลังระบบตรวจโมเดลแล้ว ถ้ายังเลือกไม่ได้ ชี้ที่ชื่อ “AI thinking” เพื่อดูเหตุผล
+              ถ้าโมเดลทำตามที่บันทึกไว้ไม่ได้ จะมีคำเตือนสีเหลืองใต้ช่อง
               (การคิดอาจทำให้ใช้โทเคนมากขึ้น)</li>
           </ol>
         </div>
@@ -217,13 +227,16 @@
                 <li>“Terms only” จำคำเฉพาะ</li>
                 <li>“Full (+ characters)” จำเนื้อเรื่องและตัวละครด้วย</li>
               </ul>
-              บรรทัดใต้ช่องบอกว่าจำอะไรไว้แล้วบ้าง</li>
+              บรรทัดใต้ช่องบอกว่าจำอะไรไว้แล้วบ้าง ถ้าเป็นแถบสีเหลือง “Series not recognised on this page…”
+              แปลว่าหน้านี้ระบุเรื่องไม่ได้ ความจำจะไม่ถูกใช้ร่วมกัน</li>
             <li data-key="examples"><b>“Use human translation examples”</b> ให้ AI ใช้ตัวอย่างคำแปลที่คนแปล
               (อังกฤษ ญี่ปุ่น และไทย) เป็นแนวทาง บันทึกแยกตามโมเดล</li>
             <li data-key="page-image"><b>“Send page image to AI”</b> ส่งภาพทั้งหน้าให้ AI ดูด้วย
-              อาจใช้เวลาและค่าใช้จ่ายมากขึ้น ใช้ได้เฉพาะโมเดลที่ยืนยันว่ารับภาพได้ ถ้าไม่ได้ ช่องจะกดไม่ได้</li>
+              อาจใช้เวลาและค่าใช้จ่ายมากขึ้น ใช้ได้เฉพาะโมเดลที่ยืนยันว่ารับภาพได้ ถ้าไม่ได้ ช่องจะเป็นสีจางและกดไม่ได้
+              ชี้ที่ชื่อเพื่อดูเหตุผล</li>
             <li data-key="ceiling"><b>“Set a token ceiling”</b> กำหนดขนาดสูงสุดของแต่ละคำขอ ค่าสูงขึ้น = ส่งข้อความต่อครั้งมากขึ้น
-              จำนวนครั้งน้อยลง แต่ถ้าสูงเกินที่โมเดลตอบได้ คำตอบอาจไม่ครบและล้มเหลว ปิดไว้ = ใช้ค่าเริ่มต้น</li>
+              จำนวนครั้งน้อยลง แต่ถ้าสูงเกินที่โมเดลตอบได้ คำตอบอาจไม่ครบและล้มเหลว ปิดไว้ = ใช้ค่าเริ่มต้น
+              (ค่าเริ่มต้นของโมเดลที่เลือกดูได้เมื่อชี้ที่ชื่อ หรือในช่องตัวเลข)</li>
             <li data-key="request-mode"><b>“AI request mode”</b> ระบบเลือกให้อัตโนมัติ: Cloud ใช้ “Conversation”,
               Local ใช้ “Independent” เปลี่ยนเองไม่ได้</li>
           </ol>
@@ -302,6 +315,14 @@
             <li data-key="columns"><b>หัวตาราง</b> “Model” ชื่อ · “Input” และ “Output” ราคาประมาณ TP ต่อ 1,000 โทเคน</li>
           </ol>
         </div>
+        <h3 id="paid-consent">หน้าจอขออนุญาตใช้ข้อมูล</h3>
+        <p>Paid, Login และแชทกับแอดมินใช้บัญชี TextPhantom ของคุณ จึงต้องกดอนุญาตก่อน
+          หน้าจอ “ขออนุญาตใช้ข้อมูล” จะขึ้นเมื่อคุณเลือก “AI service” เป็น Paid, เมื่อกด “Continue with email”
+          หรือเมื่อกดปุ่มของบัญชีที่เป็นสีเทา กด “อนุญาต” เพื่อใช้งานต่อ ถ้ากด “ไม่อนุญาต” จะไม่มีอะไรถูกส่งออกไป
+          และการแปลภาพแบบอื่นยังใช้ได้ตามปกติ</p>
+        <p>ถ้าเข้าสู่ระบบไว้แต่ยังไม่อนุญาต คุณยังเข้าสู่ระบบอยู่ แต่ปุ่มของบัญชีจะเป็นสีเทา
+          และมีแถบ “ยังไม่อนุญาตข้อมูลบัญชี…” (อังกฤษ: “Account data is not allowed…”) ให้กด “ดูและอนุญาต” (Review and allow) ส่วน “Sign out” ใช้ได้เสมอ
+          อ่านว่าส่งข้อมูลอะไร ไปที่ไหน และยกเลิกการอนุญาตได้ที่แท็บ <a href="#privacy">Privacy &amp; data</a></p>
         <p class="hint">เมื่อใช้ Paid ช่อง “AI thinking”, “Set prompt”, “Series memory”, “Send page image to AI”
           และ “Set a token ceiling” ยังใช้ได้ ทำงานเหมือน<a href="#manual">หัวข้อ 5</a>
           ถ้าเปลี่ยน “AI thinking” หรือ “Send page image to AI” ราคาจะถูกตรวจใหม่</p>
@@ -436,10 +457,11 @@
             <li data-key="source"><b>“Translation source”</b> เลือก “Login”</li>
             <li data-key="provider"><b>“Provider”</b> เลือก ChatGPT, Claude, Gemini หรือ DeepSeek
               ข้อความต่อท้าย เช่น “· Checking…” หรือ “· Unavailable” บอกสถานะของผู้ให้บริการนั้น</li>
-            <li data-key="support"><b>Claude และ ChatGPT ใช้แท็บในเบราว์เซอร์นี้</b>
+            <li data-key="support"><b>คำอธิบายเมื่อชี้ที่ชื่อ “Provider”</b> Claude และ ChatGPT ใช้แท็บในเบราว์เซอร์นี้
               การแปลทำผ่านแท็บ claude.ai หรือ chatgpt.com เว็บละ 1 แท็บ ถ้าเปิดไว้แล้วระบบใช้แท็บนั้น
               ถ้ายังไม่มีระบบเปิดให้ 1 แท็บเบื้องหลัง ระบบไม่ปิดแท็บเอง ปิดเองได้เมื่อไม่ใช้แล้ว ใช้แท็บอื่นต่อได้ตามปกติ
-              <strong>ต้องเปิดเบราว์เซอร์ค้างไว้และล็อกอินเว็บนั้นไว้</strong> ถ้าปิดแท็บนั้นระหว่างแปล การแปลจะหยุด</li>
+              <strong>ต้องเปิดเบราว์เซอร์ค้างไว้และล็อกอินเว็บนั้นไว้</strong> ถ้าปิดแท็บนั้นระหว่างแปล การแปลจะหยุด
+              เมื่อเชื่อมต่อแล้ว จะมีแถบสีเหลืองใต้ช่องเตือนให้เปิดแท็บนั้นค้างไว้ระหว่างแปล</li>
             <li data-key="connect"><b>“Sign in”</b> เริ่มเชื่อมต่อบัญชี กดครั้งแรกครั้งเดียว เบราว์เซอร์อาจถามสิทธิ์เข้าถึงข้อมูลการเข้าสู่ระบบของเว็บผู้ให้บริการ
               ให้กดอนุญาต แล้วทำตามขั้นตอนในแท็บของเว็บนั้น
               หลังจากนั้นถ้ากดแปลตอนยังไม่ได้เชื่อมต่อ (เช่น หลัง API เริ่มใหม่) ระบบจะเชื่อมต่อให้เองและขึ้น “กำลังเชื่อมต่อ…” ที่มุมขวาล่าง แล้วเริ่มแปลเอง ระหว่างรอ ปุ่มเป็น “Waiting for sign-in…” และมีปุ่ม “Cancel” ให้ยกเลิก
@@ -450,7 +472,7 @@
         </div>
         <ul class="tips">
           <li>“Logout” ตัดการเชื่อมต่อกับ TextPhantom เท่านั้น คุณยังล็อกอินเว็บไซต์นั้นในเบราว์เซอร์ตามเดิม</li>
-          <li>บางเว็บไซต์เลือกการคิดของ AI เอง ช่อง “AI thinking” จะถูกล็อกและมีข้อความอธิบายใต้ช่อง</li>
+          <li>บางเว็บไซต์เลือกการคิดของ AI เอง ช่อง “AI thinking” จะถูกล็อก ชี้ที่ชื่อช่องเพื่อดูเหตุผล</li>
         </ul>
       </section>
 
@@ -465,13 +487,16 @@
               <code>brave://flags/#file-system-access-api</code> ก่อน)</li>
             <li data-key="auto"><b>“Auto translate”</b> เปิดแท็บใหม่สำหรับวาง ลาก หรืออัปโหลดภาพทีละภาพ
               แท็บนี้มีโหมด ภาษา และแหล่งแปลของตัวเอง</li>
-            <li data-key="api-url"><b>“Custom API URL”</b> ที่อยู่เซิร์ฟเวอร์ ปล่อยว่างเพื่อใช้เซิร์ฟเวอร์เริ่มต้น
-              (ถ้าเป็นเซิร์ฟเวอร์ในเครื่องหรือในวงแลน จะมีช่อง “Remove server pacing for this local API” เพิ่ม)</li>
+            <li data-key="api-url"><b>“Custom API URL”</b> ที่อยู่เซิร์ฟเวอร์ ปล่อยว่าง (ช่องขึ้นว่า “Default server”) เพื่อใช้เซิร์ฟเวอร์เริ่มต้น
+              (ถ้าเป็นเซิร์ฟเวอร์ในเครื่องหรือในวงแลน จะมีช่อง “Remove server pacing for this local API” เพิ่มใต้ช่องนี้)</li>
             <li data-key="reset-api"><b>⟲</b> กลับไปใช้เซิร์ฟเวอร์เริ่มต้น</li>
+            <li data-key="diagnostics"><b>“Send diagnostic logs to the API server”</b> อยู่ใต้ช่อง “Custom API URL” ปิดเป็นค่าเริ่มต้น
+              เปิดเฉพาะตอนผู้พัฒนาขอให้ช่วยตรวจปัญหา (มีหน้าต่างถามยืนยันก่อนเปิด) ดูแท็บ <a href="#privacy-diagnostics">Privacy &amp; data</a></li>
             <li data-key="engine"><b>“Where the work runs”</b> ตอนนี้ใช้ได้เฉพาะ “Extension (default)”</li>
             <li data-key="reset"><b>“Reset defaults”</b> คืนค่าการตั้งค่าทั้งหมดเป็นค่าเริ่มต้น (มีหน้าต่างถามยืนยันก่อน)</li>
             <li data-key="contact"><b>“Contact admin”</b> แชทกับผู้ดูแล TextPhantom
-              แสดงเมื่อเข้าสู่ระบบบัญชี Paid แล้ว และต้องเปิดจากหน้าเว็บทั่วไป</li>
+              แสดงเมื่อเข้าสู่ระบบบัญชี Paid แล้ว และต้องเปิดจากหน้าเว็บทั่วไป
+              ถ้ายังไม่ได้อนุญาตการใช้ข้อมูล ปุ่มนี้เป็นสีเทา กดแล้วจะขออนุญาตก่อน</li>
           </ol>
         </div>
       </section>
@@ -603,9 +628,23 @@
       </footer>
     </main>
   </div>
+  </div>
+
+  <!-- 10495: Privacy & data. Rendered by privacy.js from shared/privacy-content.js
+       (the same text as the consent screen). Thai and English, authored. -->
+  <div id="privacy-panel" role="tabpanel" data-guide-panel="privacy" aria-labelledby="guide-tab-privacy" translate="no" hidden>
+    <div class="layout">
+      <nav class="toc" id="privacy-toc" aria-label="Privacy &amp; data"></nav>
+      <main id="privacy-content" tabindex="-1"></main>
+    </div>
+  </div>
 
   <script src="guide-data.js"></script>
   <script src="guide.js"></script>
+  <script src="../shared/privacy-content.js"></script>
+  <script src="privacy.js"></script>
+  <!-- "Your choice" (Allow / Revoke) works only inside the extension. -->
+  <script type="module" src="privacy-choice.js"></script>
 </body>
 
 </html>

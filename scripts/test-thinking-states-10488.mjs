@@ -50,7 +50,7 @@ const harness = (overrides = {}) => {
   const els = {
     aiProvider: { value: 'openrouter' }, aiBaseUrl: { value: 'https://openrouter.ai/api/v1' },
     aiModel: { value: 'vendor/a' }, aiKey: { value: 'key-1' }, mode: { value: 'lens_text' },
-    sources: { value: 'ai' }, aiThinking: select(), aiThinkingHint: { textContent: '' },
+    sources: { value: 'ai' }, aiThinking: select(), aiThinkingHint: { textContent: '' }, aiThinkingTip: { textContent: '' },
     aiThinkingWrap: { style: {} }, ...overrides.els,
   };
   const state = { lastAiResolve: null, lastResolvedKey: 'key-1', ...overrides.state };
@@ -63,7 +63,9 @@ const resolved = (model, reasoning, extra = {}) => ({ provider: 'openrouter', mo
   model_capabilities: reasoning === undefined ? {} : { reasoning }, ...extra });
 const view = els => ({ state: els.aiThinking.dataset.thinkingState, disabled: els.aiThinking.disabled,
   value: els.aiThinking.value, labels: els.aiThinking.options.map(option => option.textContent),
-  values: els.aiThinking.options.map(option => option.value), hint: els.aiThinkingHint.textContent });
+  values: els.aiThinking.options.map(option => option.value), hint: els.aiThinkingHint.textContent,
+  // 10496: a state reason is the highlighted line of the "AI thinking" explanation (hover the name).
+  reason: els.aiThinkingTip?.tipReason || '' });
 
 {
   const { els, state, ui } = harness();
@@ -71,19 +73,19 @@ const view = els => ({ state: els.aiThinking.dataset.thinkingState, disabled: el
   let v = view(els);
   eq([v.state, v.disabled, v.value, v.labels], ['loading', true, 'high', ['Checking model…']],
     'Manual: no record yet → disabled "Checking model…", saved value kept');
-  ok(UI_TEXT.has(v.hint), 'loading hint registered');
+  ok(UI_TEXT.has(v.reason) && v.hint === '', 'loading reason registered, in the explanation, not inline');
   state.lastAiResolve = resolved('vendor/a', undefined);
   ui.toggle();
   v = view(els);
   eq([v.state, v.disabled, v.value, v.labels], ['default', true, 'high', [THINKING_STATE_LABELS.default]],
     'Manual: silent catalogue → disabled provider default; saved High kept');
-  ok(UI_TEXT.has(v.hint) && /provider default/i.test(v.hint), 'default hint');
+  ok(UI_TEXT.has(v.reason) && /provider default/i.test(v.reason) && v.hint === '', 'default reason');
   state.lastAiResolve = resolved('vendor/a', { supported: false });
   ui.toggle();
   v = view(els);
   eq([v.state, v.disabled, v.value, v.labels], ['none', true, 'high', [THINKING_STATE_LABELS.none]],
     'Manual: no-reasoning model → disabled "Provider default (this model has no AI think)"');
-  ok(UI_TEXT.has(v.hint) && /no AI think/i.test(v.hint), 'none hint');
+  ok(UI_TEXT.has(v.reason) && /no AI think/i.test(v.reason) && v.hint === '', 'none reason');
   state.lastAiResolve = resolved('vendor/a', { supported: true, control: 'provider' });
   ui.toggle();
   eq(view(els).state, 'default', 'reasoning present but control "provider" → default');
@@ -92,7 +94,7 @@ const view = els => ({ state: els.aiThinking.dataset.thinkingState, disabled: el
   v = view(els);
   eq([v.state, v.disabled, v.value, v.values], ['controllable', false, 'high', ['minimum', 'off', 'low', 'high']],
     'switching back to a controllable model restores the saved High');
-  eq(v.hint, '', 'an executable saved choice needs no hint');
+  eq([v.hint, v.reason], ['', ''], 'an executable saved choice needs no hint and no reason');
   // A different selected model: the A record never applies to B.
   els.aiModel.value = 'vendor/b';
   ui.toggle();
@@ -183,7 +185,7 @@ const view = els => ({ state: els.aiThinking.dataset.thinkingState, disabled: el
   login.state.loginModelCapabilities = { reasoning: { supported: true, control: 'provider', app_controlled: false } };
   login.state.loginModelCapabilitiesFresh = true;
   login.ui.toggle();
-  eq([view(login.els).disabled, login.els.aiThinkingHint.textContent],
+  eq([view(login.els).disabled, view(login.els).reason],
     [true, 'This website chooses its own thinking for this model. TextPhantom cannot change it.'],
     'Login website-controlled thinking stays disabled with its own hint');
   login.state.loginModelCapabilities = { reasoning: LEVELS };

@@ -3,6 +3,7 @@
 // and kept in chrome.storage.local. It is not derived from hardware or browser
 // attributes. It is sent only to the configured TextPhantom API as X-TP-Install;
 // the operator's service keeps only a keyed commitment of it.
+// Required, no switch (10494): the shared API's per-install quotas/abuse limits need it; random, not personal, in the privacy policy.
 import { getStorage, setStorage } from '../shared/storage.js';
 import { recordDiagnostic } from '../shared/diagnostics.js';
 

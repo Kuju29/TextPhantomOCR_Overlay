@@ -2,8 +2,9 @@ import './login-auth.js';
 import './series-memory-messages.js';
 import './login/endpoint/login_endpoint_background.js';
 import { writeProfileChanges } from '../shared/profile-storage.js';
-import './support.js';
-import { startDiagnosticShipping,configureDiagnosticShipping,acceptDiagnosticEvent } from "./diagnostics-control.js";
+import { supportLocked } from './support.js';
+import { installAccountGateBackground } from '../shared/account-gate.js';
+import { startDiagnosticShipping,configureDiagnosticShipping,acceptDiagnosticEvent,watchDiagnosticsUpload } from "./diagnostics-control.js";
 import { readDownloadImage, cancelDownloadRead, cancelTabDownloadReads } from "./download-images.js";
 import { handleReaderReceipt } from "./reader-events.js";
 import { recentDiagnostic, clearRecentDiagnostics } from "./ai/recent-diagnostics.js";
@@ -153,6 +154,17 @@ ensureThunderbirdMessageScripts().catch((error) => {
 });
 
 setLogSink(recordLogLine);
+// 10495: one account gate. Withdrawn data use (Chrome: storage; Firefox:
+// permissions.onRemoved, registered here at worker start) stops account work
+// at once: in-flight requests abort through the gate signal, new Paid/Login
+// jobs get a new settings epoch, queued ones stop before their next request.
+installAccountGateBackground({ onLocked: () => {
+  bumpSettingsEpoch();
+  supportLocked();
+  traceNote("background/index.js", "accountGateLocked", { semanticChange: true });
+} });
+// Diagnostics ship only after the user's switch is read as on (10494).
+void watchDiagnosticsUpload().catch(() => {});
 void startDiagnosticShipping().catch(() => {});
 // Read the install id once per service-worker start for work requests.
 void installReady();
@@ -338,11 +350,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     case "TP_GET_TRANSLATION_SESSIONS":
       if (sender?.tab) { sendResponse({ok:false, error:"trusted_ui_only"}); return true; }
       repairCoordinator.summaries().then(runs => sendResponse({ok:true, runs}));
-      return true;
-
-    case "TP_RESUME_REPAIRS":
-      if (sender?.tab) { sendResponse({ok:false, error:"trusted_ui_only"}); return true; }
-      repairCoordinator.resume().then(() => sendResponse({ok:true}));
       return true;
 
     case "GET_API_STATUS":
@@ -560,6 +567,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             ok: false,
             error: e?.message || String(e),
             tpError: publicTpError(e),
+            // The background already showed this on the page (no second toast).
+            shown: e?.toastShown === true,
           }),
         );
       return true;

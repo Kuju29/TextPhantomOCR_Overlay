@@ -1,10 +1,14 @@
 """Optional real Chromium regression for both native Lens vertical encodings.
 Constructed geometry, not a replay of the latest screenshot's absent Lens tree.
 """
+import sys as _tp_sys
+from pathlib import Path as _TpPath
+_tp_sys.path.insert(0, str(_TpPath(__file__).resolve().parent / 'lib'))
+from chromium_path import chromium_executable  # the one shared Chromium resolver
 from pathlib import Path
 import argparse, copy, json, math, re, sys
 from playwright.sync_api import sync_playwright
-p=argparse.ArgumentParser();p.add_argument('--project',type=Path,default=Path(__file__).resolve().parents[1]);p.add_argument('--browser',default='/usr/bin/chromium');p.add_argument('--out',type=Path,default=Path('/tmp/tp-native-axis'))
+p=argparse.ArgumentParser();p.add_argument('--project',type=Path,default=Path(__file__).resolve().parents[1]);p.add_argument('--browser',default=chromium_executable(required=False));p.add_argument('--out',type=Path,default=Path('/tmp/tp-native-axis'))
 a=p.parse_args();a.out.mkdir(parents=True,exist_ok=True);sys.path.insert(0,str(a.project/'api'))
 from backend.render.html.translated import render_translated_overlay
 from backend.render.html.overlay import render_tree_overlay

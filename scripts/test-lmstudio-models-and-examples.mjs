@@ -83,12 +83,15 @@ try {
   const repairRows=[{id:'missing-0',text:'HELLO.',reason:'missing'}];
   const repair=await controller.open({ai:{...ai,prompt:missingPrompt,repair_reason:'wrong_target_script'},
     route:'direct-local',targetLang:'th',sourceLang:'en',pageUnits:repairRows,phase:'repair'});
-  assert.throws(()=>planIndependentExamples(repair,repairRows,0,ai.independent_examples),
-    e=>e.code==='ai_workload_budget_insufficient',
-    'the wrong-language instruction can falsely reject an ordinary missing unit');
+  // A repair sends no repair instruction (intended: repairs add no prompt text), so the
+  // wrong-language reason costs no budget and cannot reject an ordinary missing unit.
+  const withReason=planIndependentExamples(repair,repairRows,0,ai.independent_examples);
   repair.setRepairReason('');
   const missing=planIndependentExamples(repair,repairRows,0,ai.independent_examples);
   assert.ok(missing.includedExamplePairs>=1&&missing.includedExamplePairs<=4);
+  assert.equal(withReason.includedExamplePairs,missing.includedExamplePairs,
+    'the repair reason does not change the request budget');
+  assert.deepEqual(withReason.chunk.units.map(u=>u.id),missing.chunk.units.map(u=>u.id));
   assert.equal(repair.ai.repair_reason,'');
   const repairResult=await translateWithLocalOpenAi(missing.chunk.units,{ai:{...repair.ai,
     workload:{version:1,...missing.chunk.estimate}},

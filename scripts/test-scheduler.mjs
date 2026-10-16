@@ -2,6 +2,12 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
+// Local Auto capacity is capped by the browser's logical CPU count
+// (local-capacity.js: navigator.hardwareConcurrency). Pin an 8-core browser so
+// the window expectations below do not depend on the machine running the test.
+Object.defineProperty(globalThis, "navigator", { configurable: true,
+  value: { ...(globalThis.navigator || {}), hardwareConcurrency: 8 } });
+
 const {
   acquire,
   releaseSuccess,

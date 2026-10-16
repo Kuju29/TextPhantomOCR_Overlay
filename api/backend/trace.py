@@ -177,6 +177,10 @@ _handle_path: Path | None = None
 # "overdue" by the whole uptime of the machine and drains on its own, which
 # looks like buffering that does not work.
 _last_flush = time.monotonic()
+# Monotonic time of the last automatic drain that could not write (0 = none).
+# A broken sink is retried at most once per _FLUSH_AFTER_SEC by write();
+# flush() always tries. Without this every write re-scanned the whole buffer.
+_last_drain_failure = 0.0
 
 def enabled() -> bool:
     return _ENABLED
@@ -811,9 +815,13 @@ def _drain_locked() -> bool:
 
 def _emit_locked(text: str, target: Path | None = None) -> None:
     """Buffer one line and maybe drain it. Caller holds ``_LOCK``."""
+    global _last_drain_failure
     _queue_locked(target or path(), text)
-    if len(_buffer) >= _BUFFER_LINES or (time.monotonic() - _last_flush) >= _FLUSH_AFTER_SEC:
-        _drain_locked()
+    now = time.monotonic()
+    if _last_drain_failure and now - _last_drain_failure < _FLUSH_AFTER_SEC:
+        return
+    if len(_buffer) >= _BUFFER_LINES or (now - _last_flush) >= _FLUSH_AFTER_SEC:
+        _last_drain_failure = 0.0 if _drain_locked() else now
 
 
 def flush() -> None:

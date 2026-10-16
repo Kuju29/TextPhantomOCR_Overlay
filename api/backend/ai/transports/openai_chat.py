@@ -9,9 +9,7 @@ from __future__ import annotations
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
-import httpx  # pyright: ignore[reportUnusedImport] -- tests patch openai_chat.httpx
 from backend.ai.clients.base import ChatResult
-from backend.ai import wire_trace  # pyright: ignore[reportUnusedImport] -- tests patch openai_chat.wire_trace
 from backend.ai.prompt_cache import apply_chat_cache
 from backend.ai.transports.openai_compat import execute_openai_compatible_request
 from backend.ai.transports.openai_compat.streaming import JsonClosureGate as _JsonClosureGate, JsonObjectCompletionDetector as _JsonObjectCompletionDetector, WireStreamCapture as _WireStreamCapture

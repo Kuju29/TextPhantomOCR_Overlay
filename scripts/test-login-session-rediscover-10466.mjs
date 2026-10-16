@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 Object.defineProperty(globalThis, 'crypto', {value:webcrypto, configurable:true});
 
-const memory = {local:{}, session:{}};
+const memory = {local:{tpDataConsentV1:{version:1, granted:true, at:1}}, session:{}}; // 10494: account data allowed
 const area = data => ({get(keys, done){const list=Array.isArray(keys)?keys:typeof keys==='string'?[keys]:Object.keys(keys||data);
   done(Object.fromEntries(list.map(key=>[key,structuredClone(data[key])])));}, set(patch, done){Object.assign(data, structuredClone(patch));done?.();},
   remove(keys, done){for(const key of [].concat(keys))delete data[key];done?.();}});
@@ -44,7 +44,7 @@ async function run({liveSession}) {
     customApiUrl:base, apiUrlDefault:base, loginProvider:provider, loginModel:'deepseek-web', lang:'th',
     loginConnectionsV2:{[scope + ':' + provider]:{session:{id:stale, provider, account_id:account, transport:'web_endpoint'},
       model:'deepseek-web', verifiedAt:1}}};
-  memory.local.customApiUrl = base; memory.local.apiUrlDefault = base; memory.local.apiDefaultsFetchedAt = Date.now();
+  memory.local.customApiUrl = base; memory.local.apiUrlDefault = base; memory.local.apiDefaultsFetchedAt = Date.now(); memory.local.paidSessionToken = token; memory.local.paidApiBase = base; // 10495: the session is read through the account gate
   return resolveJobAiProfile(settings, {language:'th'});
 }
 

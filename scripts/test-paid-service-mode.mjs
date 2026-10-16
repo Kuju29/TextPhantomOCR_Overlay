@@ -18,7 +18,7 @@ els.mode.value = "lens_text";
 els.sources.value = "ai";
 els.apiUrl.value = "http://127.0.0.1:7860";
 els.aiPaidEmail.value = "person@gmail.com";
-let storage = {}, updates = 0;
+let storage = { tpDataConsentV1: { version: 1, granted: true, at: 1 } }, updates = 0; // 10495: this user allowed data use
 const state = {};
 const requests = [];
 let otpStatus = "disabled";
@@ -42,6 +42,7 @@ const controller = createPaidServiceController({ els, state,
   getStorage: async keys => Object.fromEntries(keys.map(key => [key, storage[key]])),
   setStorage: async patch => { storage = { ...storage, ...patch }; },
   toggleUi: () => { updates++; controller.applyVisibility(); },
+  ensureConsent: async () => ({ consent: true, shown: false }), // 10494: this user allowed account data
 });
 await controller.initialize();
 assert.equal(els.aiServiceWrap.style.display, "none", "No Center means old controls only");
@@ -114,6 +115,9 @@ storage.aiServiceMode = "paid";
 els.apiUrl.value = "";
 state.lastSavedApiUrl = "";
 controller.setAvailability(false, "");
+// 10495: each account request first asks the account gate (one storage read), so the
+// sign-out's own status check lands a few ticks later; let it settle before counting.
+for (let i = 0; i < 5; i++) await settle();
 const beforeRestore = requests.length;
 await controller.initialize();
 assert.equal(storage.aiServiceMode, "paid", "a saved Paid profile stays owned by the user");
@@ -124,14 +128,17 @@ assert.equal(requests.length, beforeRestore, "restoring Paid without an API URL 
 controller.dispose();
 const { resolveJobAiProfile } = await import("../src/background/ai-profile-resolver.js");
 const { PAID_PROFILE_KEY, putPaidEntry } = await import("../src/shared/paid-profile.js");
+// 10495: the resolver reads the signed-in session from storage through the account gate.
+const signedIn = {};
 globalThis.chrome = { storage: { local: { get(_keys, callback) {
-  callback({ customApiUrl: "http://127.0.0.1:7999", apiDefaultsFetchedAt: Date.now() });
+  callback({ customApiUrl: "http://127.0.0.1:7999", apiDefaultsFetchedAt: Date.now(), tpDataConsentV1: { version: 1, granted: true, at: 1 }, ...signedIn });
 } } } };
+const resolvePaid = (settings, ...rest) => { Object.assign(signedIn, { paidSessionToken: settings.paidSessionToken, paidApiBase: settings.paidApiBase }); return resolveJobAiProfile(settings, ...rest); };
 globalThis.fetch = async (url) => ({ ok: true, json: async () => String(url).endsWith("/paid/me") ? ({paid_paused:false, models:[{id:"qa/test"}]}) : ({ paid: { available: true } }) });
-await assert.rejects(() => resolveJobAiProfile({ aiServiceMode: "paid",
+await assert.rejects(() => resolvePaid({ aiServiceMode: "paid",
   paidSessionToken: "old-session", paidModel: "qa/test",
   paidApiBase: "http://localhost:7860" }), error => error.code === "PAID_LOGIN_REQUIRED");
-const paidProfile = await resolveJobAiProfile({ aiServiceMode: "paid",
+const paidProfile = await resolvePaid({ aiServiceMode: "paid",
   paidSessionToken: "valid-customer-session", paidModel: "qa/test",
   paidApiBase: "http://localhost:7999", aiTranslationMode: "independent", aiThinking: "high",
   [PAID_PROFILE_KEY]: putPaidEntry({}, "http://localhost:7999", "qa/test", {profile:{thinking:"off"},prompts:{}}) });
@@ -139,12 +146,12 @@ assert.equal(paidProfile.settings.aiThinking, "off", "Paid preserves intent; Cen
 assert.equal(paidProfile.settings.aiTranslationMode, "conversation", "Paid keeps the cloud Conversation policy");
 assert.equal(paidProfile.settings.aiKey, "valid-customer-session", "Only the customer session goes to the API");
 assert.deepEqual(paidProfile.settings.aiModelCapabilities, {}, "Manual model metadata cannot prove Paid controls");
-const freshProfile = await resolveJobAiProfile({ aiServiceMode: "paid",
+const freshProfile = await resolvePaid({ aiServiceMode: "paid",
   paidSessionToken: "valid-customer-session", paidModel: "qa/test",
   paidApiBase: "http://localhost:7999", aiThinking: "off" });
 assert.equal(freshProfile.settings.aiThinking, "minimum", "An unseen Paid model uses Lowest, independently of flat Manual settings");
 globalThis.fetch = async () => ({ ok: true, json: async () => ({ paid: { available: false } }) });
-await assert.rejects(() => resolveJobAiProfile({ aiServiceMode: "paid",
+await assert.rejects(() => resolvePaid({ aiServiceMode: "paid",
   paidSessionToken: "old-session", paidModel: "qa/test",
   paidApiBase: "http://localhost:7999" }), error => error.code === "PAID_CENTER_UNAVAILABLE" && /Select Manual/.test(error.message));
 console.log("Conditional Paid/Manual UI and OTP account flow passed.");

@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
 const read = (path) => readFile(new URL(path, import.meta.url), "utf8");
-const [popup, font, picker, series, rate, local, health, providerMeta, hydration, persistence, events, usageView, capacity, popupUi] = await Promise.all([
+const [popup, font, picker, series, local, health, providerMeta, hydration, persistence, events, usageView, capacity, popupUi] = await Promise.all([
   read("../src/popup/popup.js"), read("../src/popup/controllers/font-scale-controller.js"),
   read("../src/popup/controllers/local-picker-controller.js"), read("../src/popup/controllers/series-memory-controller.js"),
-  read("../src/popup/controllers/rate-settings-controller.js"), read("../src/popup/controllers/local-connection-controller.js"),
+  read("../src/popup/controllers/local-connection-controller.js"),
   read("../src/popup/controllers/api-health-controller.js"),
   read("../src/popup/controllers/provider-meta-controller.js"),
   read("../src/popup/controllers/settings-hydration-controller.js"),
@@ -21,16 +21,17 @@ for (const symbol of ["saveFontScale", "openLocalViewerFromFiles", "refreshSerie
 assert.match(font, /FONT_SCALE_CHANGED/);
 assert.match(picker, /saveLocalSession/);
 assert.match(series, /resolveSeriesKey/);
-assert.match(rate, /rateBurst/);
+// The request-rate cap and its popup controller were retired (.68).
+assert.doesNotMatch(popup, /rate-settings-controller|createRateSettingsController/);
 assert.match(local, /TP_LOCAL_AI_DISCOVER/);
 assert.match(local, /sequence !== state\.localConnectSeq/);
 assert.doesNotMatch(local, /fetch\s*\(/);
 assert.match(health, /checkHealthOnce/);
-assert.match(health, /sequence !== state\.healthSeq/);
+assert.match(health, /sequence === state\.healthSeq/, "a late health answer is ignored unless it is the current check");
 assert.match(providerMeta, /AI_RESOLVE/);
-assert.match(providerMeta, /AI_PROBE/);
+// .91: selecting a Manual model sends no test request (no AI_PROBE).
+assert.doesNotMatch(providerMeta, /AI_PROBE/);
 assert.match(providerMeta, /sequence === state\.aiMetaSeq && selectionMatches\(selection\)/);
-assert.match(providerMeta, /metaRevision === state\.aiMetaSeq && selectionMatches\(snapshot\)/);
 assert.doesNotMatch(popup, /function refreshAiMeta|function probeSelectedModel|function renderAiVerificationMessages/);
 // The existing 26.13 composition root has 416 lines. Keep a bounded growth
 // guard while the ownership checks above enforce actual controller isolation.

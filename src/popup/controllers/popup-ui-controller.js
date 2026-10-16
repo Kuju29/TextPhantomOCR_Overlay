@@ -9,6 +9,13 @@ import {
 
 import { renderThinkingControl } from "./reasoning-select.js";
 import { classifyThinkingState } from "../../shared/thinking-state.js";
+import { setTip } from "../../shared/hover-tip.js";
+
+// 10496: explanations on the option names (hover/focus/tap). A reason why the
+// option is unavailable is the tooltip's highlighted line; only warnings that
+// need action now (a saved mode this model cannot run) stay inline.
+export const THINKING_TIP = "Lets the AI think before it answers. The options depend on the model; thinking can use more tokens.";
+export const PAGE_IMAGE_TIP = Object.freeze(["Sends the page image with the text so the AI can see the context.", "Images may increase time and cost."]);
 
 const THINKING_STATE_HINTS = Object.freeze({
   loading: "AI think options appear after the selected model is checked. Translation waits for them; your saved choice is kept.",
@@ -180,13 +187,16 @@ export function createPopupUiController({
         state: websiteThinking ? "default" : thinkingState, reasoning,
       });
     }
-    if (els.aiThinkingHint) {
+    if (els.aiThinkingHint || els.aiThinkingTip) {
       const requested = normalizeUserReasoningPreference(els.aiThinking?.value);
       const executable = reasoningOptionsForCapability(reasoning).some(option => option.value === requested);
-      els.aiThinkingHint.textContent = websiteThinking
+      const reason = websiteThinking
         ? "This website chooses its own thinking for this model. TextPhantom cannot change it."
         : thinkingState !== "controllable"
         ? THINKING_STATE_HINTS[thinkingState] || THINKING_STATE_HINTS.loading
+        : "";
+      setTip(els.aiThinkingTip, THINKING_TIP, { reason });
+      if (els.aiThinkingHint) els.aiThinkingHint.textContent = reason ? ""
         : local && provider === "lmstudio" && !executable && requested !== "minimum"
         ? `Saved ${requested === "off" ? "Thinking off" : `Thinking ${requested}`}; LM Studio cannot execute this mode with the selected model. Choose Lowest available or a verified mode before translation.`
         : !executable && requested !== "minimum"
@@ -194,14 +204,13 @@ export function createPopupUiController({
         : "";
     }
     if (els.aiPageImage) els.aiPageImage.disabled = visionSupport !== true && !els.aiPageImage.checked;
-    const imageHint = els.aiPageImageWrap?.querySelector?.(".hint");
-    if (imageHint) imageHint.textContent = visionSupport === true
-      ? els.aiPageImage?.checked
-        ? "Images may increase time and cost."
-        : "Images may increase time and cost."
-      : visionSupport === false
+    setTip(els.aiPageImageTip, PAGE_IMAGE_TIP, {
+      reason: visionSupport === true ? ""
+        : visionSupport === false
         ? "The selected model does not support page images."
-        : "Page images require verified image support for this selected model.";
+        : "Page images require verified image support for this selected model.",
+      unavailable: els.aiPageImage?.disabled === true,
+    });
     updatePromptWarning();
     validateAiKey();
     validateLangSource();

@@ -14,7 +14,9 @@ PROJECT = next((candidate for parent in HERE.parents
     if (candidate/'api/backend/ai/provider_contract.py').is_file()),None)
 if PROJECT is None: raise RuntimeError('Cannot locate TextPhantom API source')
 sys.path.insert(0, str(PROJECT / 'api'))
+sys.path.insert(0, str(HERE.parent / 'lib'))
 import httpx
+from paid_center_fake import reset_protocol_cache, with_healthz
 import pytest
 from backend.ai.providers import (cloud_anthropic, cloud_deepseek, cloud_featherless,
     cloud_gemini, cloud_groq, cloud_huggingface, cloud_openai, cloud_openrouter,
@@ -58,11 +60,13 @@ def synthetic(monkeypatch):
                     text=''.join('data: '+json.dumps(f,ensure_ascii=False)+'\n\n' for f in frames)+'data: [DONE]\n\n')
         return httpx.Response(200,json=data)
     def client(*args,**kwargs):
-        kwargs['transport'] = httpx.MockTransport(handle)
+        # The Center health read (Paid protocol check) is answered by the shared fake.
+        kwargs['transport'] = httpx.MockTransport(with_healthz(handle))
         return ORIGINAL_CLIENT(*args,**kwargs)
     monkeypatch.setattr(httpx,'Client',client)
     monkeypatch.setattr(cloud_paid,'center_base_url',lambda:'https://center.example')
     monkeypatch.setattr(cloud_paid,'center_origin',lambda:'https://center.example')
+    reset_protocol_cache()
     return calls
 
 

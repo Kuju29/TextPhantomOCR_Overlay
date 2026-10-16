@@ -1,5 +1,6 @@
 import { createSupportClient, supportScopeId } from './client.js';
 import { activateSupport } from './visibility.js';
+import { accountState, onAccountGateChanged } from '../shared/account-gate.js';
 const client = createSupportClient();
 const button = document.getElementById('contact-admin');
 const status = document.getElementById('contact-admin-status');
@@ -20,8 +21,15 @@ const request = message => new Promise((resolve, reject) => {
 const configured = (force = false) => request({ type: 'TP_SUPPORT_CONFIG', force }).then(result => result?.configured === true, () => false);
 // Configuration alone does not prove a completed Paid customer sign-in.
 // This read is authenticated, works in every AI mode and creates no chat.
+// 10495: chat is tied to the TextPhantom account. Without data-use consent a
+// signed-in customer sees Contact admin greyed ([data-account-control]: a click
+// opens the consent screen) and nothing is read from the account service.
+let locked = false;
 async function signedIn(force = false) {
   try {
+    const account = await accountState();
+    locked = account.signedIn && !account.consent;
+    if (!account.consent) return locked && await configured(false);
     const identity = await client.scope();
     if (!(await configured(force))) return false;
     const data = await client.request('/paid/support', { identity });
@@ -39,7 +47,7 @@ function update({ fresh = false } = {}) {
   if (status) { status.hidden = true; status.textContent = ''; }
   const run = (async () => {
     const ready = await signedIn(true);
-    if (id === checkId) { button.hidden = !ready; renderUnread(ready ? unread : 0); }
+    if (id === checkId) { button.hidden = !ready; renderUnread(ready && !locked ? unread : 0); }
   })().finally(() => { if (checking === run) checking = null; });
   checking = run;
   return run;
@@ -48,7 +56,7 @@ button?.addEventListener('click', async () => {
   button.disabled = true;
   if (status) { status.hidden = true; status.textContent = ''; }
   try {
-    if (!(await signedIn())) { await update(); return; }
+    if (!(await signedIn()) || locked) { await update(); return; }
     // Only explicit Contact admin unhides the launcher. This never ends a case.
     await activateSupport(client);
     const opened = await request({ type: 'TP_SUPPORT_SHOW' });
@@ -77,6 +85,7 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
 });
 window.addEventListener('focus', () => { if (button) void update(); });
+onAccountGateChanged(detail => { if (button && detail?.reason !== 'session') { client.invalidate(); void update({ fresh: true }); } });
 document.addEventListener('visibilitychange', () => {
   if (button && document.visibilityState === 'visible') void update();
 });

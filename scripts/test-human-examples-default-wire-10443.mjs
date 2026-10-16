@@ -59,7 +59,7 @@ const {createAiProfileController} = await import('../src/popup/controllers/ai-pr
 const fixtures = [], checks = [], failures = [];
 for (const provider of providers) for (const kind of ['fresh', 'legacy-forced-off', 'saved-on']) {
   currentProvider = provider;
-  store = {customApiUrl:base,apiUrlDefault:base,apiDefaultsFetchedAt:Date.now(),
+  store = {tpDataConsentV1:{version:1,granted:true,at:1},customApiUrl:base,apiUrlDefault:base,apiDefaultsFetchedAt:Date.now(),
     aiServiceMode:'paid',paidTranslationSource:provider === 'tp' ? 'tp' : 'login',
     paidSessionToken:'synthetic-customer-session',paidApiBase:base,paidModel:'qa/test',
     loginProvider:provider,loginModel:'web-default',lang:'th',aiStyleExamples:false};

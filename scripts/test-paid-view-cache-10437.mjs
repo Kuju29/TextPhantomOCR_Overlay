@@ -66,7 +66,7 @@ await check('A late invalidation cannot remove a newly cached account with anoth
 });
 await check('Concurrent account view reads coalesce; the next refresh still checks the server', async () => {
   let release, calls = 0;
-  const identity = { customApiUrl: base, paidApiBase: base, paidSessionToken: token };
+  const identity = { tpDataConsentV1: { version: 1, granted: true, at: 1 }, customApiUrl: base, paidApiBase: base, paidSessionToken: token };
   const client = createAccountClient({ read: async () => identity, fetchFn: async () => {
     calls++; return new Promise(resolve => { release = () => resolve(new Response(JSON.stringify(account))); });
   } });
@@ -78,7 +78,7 @@ await check('Concurrent account view reads coalesce; the next refresh still chec
 });
 await check('Explicit orders are never coalesced or replayed', async () => {
   let calls = 0;
-  const identity = { customApiUrl: base, paidApiBase: base, paidSessionToken: token };
+  const identity = { tpDataConsentV1: { version: 1, granted: true, at: 1 }, customApiUrl: base, paidApiBase: base, paidSessionToken: token };
   const client = createAccountClient({ read: async () => identity, fetchFn: async () => {
     calls++; return new Response(JSON.stringify({ ok: true }));
   } });
@@ -89,7 +89,7 @@ await check('Explicit orders are never coalesced or replayed', async () => {
 await check('Invalidation during the initial asynchronous storage read prevents dispatch', async () => {
   let release, calls = 0;
   const client = createAccountClient({ read: async () => new Promise(resolve => { release = () => resolve({
-    customApiUrl: base, paidApiBase: base, paidSessionToken: token,
+    tpDataConsentV1: { version: 1, granted: true, at: 1 }, customApiUrl: base, paidApiBase: base, paidSessionToken: token,
   }); }), fetchFn: async () => { calls++; return new Response('{}'); } });
   const old = client.request('/paid/account'); client.invalidate(); release();
   await assert.rejects(old, { code: 'STALE_ACCOUNT_RESPONSE' });
@@ -97,7 +97,7 @@ await check('Invalidation during the initial asynchronous storage read prevents 
 });
 await check('A delayed storage event cannot cache the replacement account under the former account scope', async () => {
   let calls = 0;
-  const identity = {customApiUrl:base,paidApiBase:base,paidSessionToken:'replacement-session'};
+  const identity = {tpDataConsentV1:{version:1,granted:true,at:1},customApiUrl:base,paidApiBase:base,paidSessionToken:'replacement-session'};
   const client = createAccountClient({read:async()=>identity,fetchFn:async()=>{
     calls++; return new Response(JSON.stringify(account));
   }});

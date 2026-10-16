@@ -44,7 +44,7 @@ await check('Normal Manual popup startup refreshes and displays OpenRouter model
 
 await check('Paid normal reopen preserves old display then silently replaces selected model rates from fresh account response',async()=>{
  const paidModel='tp-model';
- const local={mode:'lens_text',sources:'ai',lang:'th',customApiUrl:base,apiDefaultsFetchedAt:Date.now(),aiServiceMode:'paid',paidTranslationSource:'tp',paidSessionToken:'synthetic-customer',paidApiBase:base,paidServiceApiBase:base,paidModel:paidModel,aiProvider:'openrouter',aiModel:model,aiKey:'synthetic-key'};
+ const local={mode:'lens_text',sources:'ai',lang:'th',customApiUrl:base,apiDefaultsFetchedAt:Date.now(),tpDataConsentV1:{version:1,granted:true,at:1},aiServiceMode:'paid',paidTranslationSource:'tp',paidSessionToken:'synthetic-customer',paidApiBase:base,paidServiceApiBase:base,paidModel:paidModel,aiProvider:'openrouter',aiModel:model,aiKey:'synthetic-key'};
  const session={};let clock=Date.now(),held=false,pending=[];
  let account={email:'fixture@example.test',credits:{available:'1250',held:'0'},models:[{id:paidModel,name:'Selected TP model',eligible_tp:'1250',pricing:{status:'estimated',unit:'TP_PER_1000_TOKENS',input_tp:'2',output_tp:'6',model_revision:1,policy_revision:1},price_sync:{automatic:true,status:'current',checked_at:Math.floor(clock/1000)}}],addons:{entitlements:[]}};
  const fetchReply=async(url,options)=>{

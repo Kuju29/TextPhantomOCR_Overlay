@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 Object.defineProperty(globalThis,'crypto',{value:webcrypto,configurable:true});
 const base='http://localhost:7860';
-const store={customApiUrl:base,apiDefaultsFetchedAt:Date.now()};
+// 10495: the signed-in session lives in storage; the resolver reads it only through the account gate.
+const store={customApiUrl:base,apiDefaultsFetchedAt:Date.now(),tpDataConsentV1:{version:1,granted:true,at:1},paidSessionToken:'synthetic-customer',paidApiBase:base};
 globalThis.chrome={runtime:{id:'fixture',getManifest:()=>({version:'2026.10.4.58'})},storage:{local:{get(keys,cb){const v=Object.fromEntries((Array.isArray(keys)?keys:Object.keys(keys)).map(k=>[k,store[k]??keys[k]]));cb?.(v);return Promise.resolve(v);},set(v,cb){Object.assign(store,v);cb?.();return Promise.resolve();}},onChanged:{addListener(){}}}};
 const settings={...store,aiServiceMode:'paid',paidTranslationSource:'tp',paidSessionToken:'synthetic-customer',paidApiBase:base,paidModel:'tp-model',customPreservedSetting:'manual-rate-cap'};
 const makeAccount=()=>({price_quote_available:true,credits:{available:'1250',held:'0'},models:[{id:'tp-model',max_output:2048,price_sync:{automatic:true,status:'unavailable'},model_capabilities:{limits:{maxOutputTokens:2048,contextTokens:16384}}},{id:'tp-other',max_output:8192,model_capabilities:{limits:{maxOutputTokens:8192,contextTokens:32768}}}]});
@@ -30,7 +31,9 @@ const resolved=await same;assert.deepEqual(resolved.map(r=>r.settings.aiModel),[
 const before=calls.length;await resolveJobAiProfile(settings);assert.equal(calls.length,before+2);checks++;
 // Separate authenticated accounts must never share a read, even at one origin.
 calls=[];blocked=true;
-const separate=Promise.all([resolveJobAiProfile(settings),resolveJobAiProfile({...settings,paidSessionToken:'synthetic-other'})]);
+// The account switches between the two starts (each start reads its session from storage).
+const firstAccount=resolveJobAiProfile(settings);store.paidSessionToken='synthetic-other';
+const separate=Promise.all([firstAccount,resolveJobAiProfile({...settings,paidSessionToken:'synthetic-other'})]);store.paidSessionToken='synthetic-customer';
 await until(()=>calls.filter(c=>c.url.endsWith('/paid/me')).length===2);
 assert.deepEqual(calls.filter(c=>c.url.endsWith('/paid/me')).map(c=>c.auth).sort(),['Bearer synthetic-customer','Bearer synthetic-other']);checks++;
 blocked=false;release();release=null;await separate;
@@ -39,11 +42,11 @@ blocked=false;release();release=null;await separate;
 calls=[];blocked=true;
 const oldOrigin=resolveJobAiProfile(settings);
 await until(()=>calls.some(c=>c.url===base+'/paid/me'));
-const alternate='http://localhost:7861';store.customApiUrl=alternate;
+const alternate='http://localhost:7861';store.customApiUrl=alternate;store.paidApiBase=alternate;
 const newOrigin=resolveJobAiProfile({...settings,paidApiBase:alternate});
 await until(()=>calls.some(c=>c.url===alternate+'/paid/me'));
 assert.equal(calls.filter(c=>c.url.endsWith('/paid/me')).length,2);checks++;
-blocked=false;release();release=null;await Promise.all([oldOrigin,newOrigin]);store.customApiUrl=base;
+blocked=false;release();release=null;await Promise.all([oldOrigin,newOrigin]);store.customApiUrl=base;store.paidApiBase=base;
 // A shared invalid response rejects every waiter and cannot poison a later read.
 calls=[];blocked=true;invalidJson=true;
 const invalid=Promise.allSettled([resolveJobAiProfile(settings),resolveJobAiProfile(settings)]);

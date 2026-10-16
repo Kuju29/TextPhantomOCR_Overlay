@@ -1,4 +1,8 @@
 """Production controllers in Chromium; deferred synthetic account/order responses."""
+import sys as _tp_sys
+from pathlib import Path as _TpPath
+_tp_sys.path.insert(0, str(_TpPath(__file__).resolve().parent / 'lib'))
+from chromium_path import chromium_executable  # the one shared Chromium resolver
 from pathlib import Path
 from functools import partial
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
@@ -10,7 +14,7 @@ class Quiet(SimpleHTTPRequestHandler):
 srv=ThreadingHTTPServer(('127.0.0.1',0),partial(Quiet,directory=str(Path(__file__).resolve().parents[2])))
 Thread(target=srv.serve_forever,daemon=True).start();base=f'http://127.0.0.1:{srv.server_port}'
 with sync_playwright() as pw:
- b=pw.chromium.launch(executable_path=os.environ.get('TP_QA_CHROMIUM','/usr/bin/chromium'),headless=True,args=['--no-sandbox','--single-process','--no-zygote'])
+ b=pw.chromium.launch(executable_path=chromium_executable(),headless=True,args=['--no-sandbox','--single-process','--no-zygote'])
  context=b.new_context();checks=[]
  for surface in ['inline','account']:
   for race in ['old_account_after_cancel','fresh_account_before_poll']:
@@ -20,9 +24,9 @@ with sync_playwright() as pw:
     document.body.innerHTML='<div id="account"></div>';
     const id='ord_'+'a'.repeat(32);
     window.order={id,status:'waiting',method:'checkout',package_id:'qa',package_version:1,package_name:'QA',amount_satang:2900,credits:250000,months:6};
-    window.fixture={email:'qa@example.com',credits:{available:0},purchase:{ready:true},packages:[{id:'qa',version:1,name:'QA',price_satang:2900,credits:250000,months:6}],history:{orders:{items:[order],total:1}}};
+    window.fixture={email:'qa@example.com',credits:{available:0},models:[],purchase:{ready:true},packages:[{id:'qa',version:1,name:'QA',price_satang:2900,credits:250000,months:6}],history:{orders:{items:[order],total:1}}};
     window.cancelNow=false;window.deferNext=false;window.deferred=null;
-    const store={paidSessionToken:'QA-customer-session',paidApiBase:location.origin,customApiUrl:location.origin};
+    const store={tpDataConsentV1:{version:1,granted:true,at:1},paidSessionToken:'QA-customer-session',paidApiBase:location.origin,customApiUrl:location.origin};
     window.chrome={runtime:{getURL:path=>location.origin+'/TextPhantom/src/'+path},storage:{local:{get:(keys,cb)=>cb(Object.fromEntries(keys.map(k=>[k,store[k]]))),set:(patch,cb)=>{Object.assign(store,patch);cb?.()}},onChanged:{addListener(){},removeListener(){}}}};
     const nativeFetch=window.fetch.bind(window);
     const transport=async(url,opts)=>{
@@ -40,7 +44,7 @@ with sync_playwright() as pw:
     if(surface==='inline'){
      const {createInlineAccount}=await import('/TextPhantom/src/paid/inline.js');
      window.controller=createInlineAccount({mount:document.getElementById('account'),read:async()=>store,write:async patch=>Object.assign(store,patch),fetchFn:transport});
-     controller.sync({active:true,base:location.origin,token:store.paidSessionToken});await controller.open('buy');
+     const {safeAccountBase}=await import('/TextPhantom/src/paid/client.js');controller.sync({active:true,base:safeAccountBase(location.origin),token:store.paidSessionToken});await controller.open('buy');
     }else await import('/TextPhantom/src/paid/account.js');
    }''',surface)
    page.get_by_role('button',name='Resume payment',exact=True).wait_for()

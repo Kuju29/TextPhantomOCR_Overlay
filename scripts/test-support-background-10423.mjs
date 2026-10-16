@@ -6,7 +6,7 @@ import { join } from 'node:path';
 globalThis.crypto ??= webcrypto;
 const adjacent=fileURLToPath(new URL('..',import.meta.url));
 const root=process.env.TP_QA_EXTENSION_ROOT||(existsSync(join(adjacent,'src'))?adjacent:fileURLToPath(new URL('../../source/TextPhantom',import.meta.url)));
-const saved={supportActivated:true,paidSessionToken:'a'.repeat(64),paidApiBase:'http://localhost:7860',customApiUrl:'http://localhost:7860'};
+const saved={tpDataConsentV1:{version:1,granted:true,at:1},supportActivated:true,paidSessionToken:'a'.repeat(64),paidApiBase:'http://localhost:7860',customApiUrl:'http://localhost:7860'};
 const session={},listeners=[],runtimeListeners=[],tabRemoved=[],startup=[],requests=[],notices=[];
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
 const response=thread=>new Response(JSON.stringify({email:'customer@example.invalid',enabled:true,thread:{unread:1,last_seq:4,last_admin_seq:4,closed_seq:0,notification_muted:false,...thread}}));

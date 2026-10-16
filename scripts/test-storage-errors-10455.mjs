@@ -1,12 +1,14 @@
 // Production integration with synthetic storage, DOM and provider-boundary replies.
 // No live OCR, provider, payment or account access. Production files are read-only.
 import assert from 'node:assert/strict';
-import {createHash,webcrypto} from 'node:crypto';
+import {createHash} from 'node:crypto';
 import {readFile} from 'node:fs/promises';
 import path from 'node:path';
 import {pathToFileURL,fileURLToPath} from 'node:url';
 import {imageRuntime} from './test-storage-finalization-10455.mjs';
-globalThis.crypto ||= webcrypto;
+import {installSettle} from './lib/settle.mjs';
+// Settling waits for WebCrypto (thread pool) digests, not a fixed number of turns.
+const settle=installSettle({turns:40});
 const root=process.env.TP_PAID_SOURCE || path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const at=rel=>import(pathToFileURL(path.join(root,rel)).href);
 const [{createRepairCoordinator},{createTranslationSessionStore},{createPreparedPageJournal},
@@ -28,7 +30,7 @@ const hashSource=async()=>Object.fromEntries(await Promise.all(productionFiles.m
  [rel,createHash('sha256').update(await readFile(path.join(root,rel))).digest('hex')])));
 const beforeHashes=await hashSource();
 const noop=()=>{},clone=structuredClone,tick=()=>new Promise(resolve=>setImmediate(resolve));
-const spin=async()=>{for(let i=0;i<40;i++)await tick();};
+const spin=()=>settle(40);
 const size=value=>new TextEncoder().encode(JSON.stringify(value)).length;
 const latch=()=>{let resolve;const promise=new Promise(r=>resolve=r);return{promise,resolve};};
 const observed=[],failures=[],unhandled=[];

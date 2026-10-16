@@ -3,13 +3,17 @@ No extension service worker, provider, Lens call, or user key is used. The real
 checkpoint, renderer, eraser, target-generation and content message modules run.
 Usage: python scripts/test-repair-browser.py --browser /usr/bin/chromium --out /tmp/tp-browser
 """
+import sys as _tp_sys
+from pathlib import Path as _TpPath
+_tp_sys.path.insert(0, str(_TpPath(__file__).resolve().parent / 'lib'))
+from chromium_path import chromium_executable  # the one shared Chromium resolver
 from pathlib import Path
 import argparse, json, re, subprocess
 from playwright.sync_api import sync_playwright
 
 parser=argparse.ArgumentParser()
 parser.add_argument('--project',type=Path,default=Path(__file__).resolve().parents[1])
-parser.add_argument('--browser',default='/usr/bin/chromium')
+parser.add_argument('--browser',default=chromium_executable(required=False))
 parser.add_argument('--producer-replay',action='store_true',help='Use the real recorded Lens decoder, not hand-owned fixture masks; leave one unit unresolved after repair')
 parser.add_argument('--out',type=Path,default=Path('/tmp/tp-repair-browser'))
 args=parser.parse_args(); args.out.mkdir(parents=True,exist_ok=True)

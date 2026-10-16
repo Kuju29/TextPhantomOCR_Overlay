@@ -359,11 +359,6 @@ textarea {
   line-height: 1.45;
 }
 
-.engine-mode-availability {
-  color: var(--tp-warn);
-  font-weight: 600;
-}
-
 .ai-compact-panel { margin: 0 0 4px; font-size: 12px; min-width: 0; }
 .ai-compact-panel > summary { cursor: pointer; padding: 4px 0; font-weight: 600; }
 .ai-summary-value { color: var(--tp-text); font-weight: 700; font-variant-numeric: tabular-nums; }
@@ -848,3 +843,45 @@ input[type="number"] { min-width: 0; box-sizing: border-box; }
 .contact-admin-card:hover .contact-admin-chevron { transform: translateX(2px); stroke: var(--tp-text); }
 .contact-admin-status { font-size: 11px; color: var(--tp-warn); line-height: 1.4; }
 .contact-admin-status[hidden] { display: none; }
+
+/* 10495: the locked banner of the Paid area (data use not allowed). */
+.paid-consent-note { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin: 8px 0; padding: 8px 10px;
+  border-radius: var(--tp-radius-sm); background: color-mix(in srgb, var(--tp-warn) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--tp-warn) 35%, transparent); font-size: 12.5px; line-height: 1.45; }
+.paid-consent-note[hidden] { display: none; }
+
+/* 10495: account controls are greyed (still clickable: a click opens the
+   consent screen) while data use is not allowed. Sign out stays normal. */
+[data-account-locked] #ai-paid-panel [data-account-control]:not([data-account-free]),
+[data-account-locked] .contact-admin-card[data-account-control] { opacity: .45; filter: grayscale(.7); cursor: not-allowed; }
+[data-account-locked] .paid-model-picker[data-account-control] summary { cursor: not-allowed; }
+
+/* ============ 10496: explanations on the option name (shared/hover-tip.js) ============
+   No underline: the name tints on hover, the cursor becomes "help". */
+.tp-tip { cursor: help; transition: color .12s ease; }
+.tp-tip:not(button):hover, .tp-tip:not(button)[data-tip-open] { color: var(--tp-accent-2, #a99bff); }
+button.tp-tip { cursor: pointer; }
+.tp-tip:not(button):focus-visible { outline: none; box-shadow: var(--tp-focus); border-radius: 4px; }
+.tp-tip-src { display: none; }
+#tp-tip {
+  position: fixed; z-index: 2147483000; left: 0; top: 0; max-width: 280px; padding: 8px 10px; border-radius: 9px;
+  font-size: 12px; font-weight: 400; line-height: 1.45; text-align: left; white-space: normal; overflow-wrap: anywhere;
+  background: #1d2540; color: #e9edfa; border: 1px solid rgba(255, 255, 255, .14); box-shadow: 0 10px 28px rgba(0, 0, 0, .45);
+  pointer-events: none; opacity: 0; transform: translateY(2px); transition: opacity .12s ease, transform .12s ease;
+}
+#tp-tip[hidden] { display: none; }
+#tp-tip.show { opacity: 1; transform: none; }
+#tp-tip .tp-tip-part { display: block; }
+#tp-tip .tp-tip-part + .tp-tip-part { margin-top: 4px; }
+#tp-tip .tp-tip-reason { display: block; margin-top: 6px; color: #ffd38a; font-weight: 600; }
+#tp-tip code { font-size: 11px; overflow-wrap: anywhere; }
+.is-unavailable { opacity: .6; }
+/* Live status / warning chip that stays inline (only while its condition holds). */
+.tp-status { font-size: 11px; line-height: 1.35; padding: 4px 7px; border-radius: 6px; }
+.tp-status:empty, .hint:empty, .paid-footnote:empty { display: none; }
+.tp-status.warn, #ai-characters-count[data-kind="warn"], #ai-thinking-hint:not(:empty) {
+  color: #ffe6b3; background: color-mix(in srgb, #d29a2b 18%, transparent);
+  border: 1px solid color-mix(in srgb, #d29a2b 40%, transparent); border-radius: 6px; padding: 4px 7px; font-size: 11px; line-height: 1.35;
+}
+/* The short "Tokens per AI request" label starts at the left like the other field labels. */
+.rate-field > span { align-self: flex-start; }

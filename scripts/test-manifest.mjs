@@ -99,22 +99,57 @@ for (const rule of base.web_accessible_resources || []) {
     check(await isFile(path.join(sourceRoot, pattern)), `web_accessible_resources missing: ${pattern}`);
   }
 }
+// The in-page support dock frames support/chat.html on every site. Chromium
+// (Chrome/Edge/Opera) serves it only through the per-session dynamic URL so a
+// page cannot probe chrome-extension://<id>/support/chat.html to detect the
+// extension. Firefox/Thunderbird do not support use_dynamic_url (MDN BCD:
+// version_added false) and already use a random per-install moz-extension UUID,
+// so they keep the base rules. The Chromium overlay must otherwise equal base.
+{
+  const chromium = await json(path.join(projectRoot, "platform/chromium.json"));
+  const plain = rules => JSON.stringify((rules || []).map(({ use_dynamic_url, ...rule }) => rule));
+  check(plain(chromium.web_accessible_resources) === plain(base.web_accessible_resources),
+    "chromium web_accessible_resources must equal base apart from use_dynamic_url");
+  const chat = (chromium.web_accessible_resources || []).find(rule => rule.resources?.includes("support/chat.html"));
+  check(chat?.use_dynamic_url === true && chat.resources.length === 1, "chromium: support/chat.html needs its own use_dynamic_url rule");
+  check(!(chromium.web_accessible_resources || []).some(rule => rule !== chat && rule.use_dynamic_url),
+    "chromium: only the support frame uses a dynamic URL (content-script imports keep static URLs)");
+  for (const name of ["firefox", "thunderbird"]) {
+    const overlay = await json(path.join(projectRoot, `platform/${name}.json`));
+    check(!JSON.stringify(overlay.web_accessible_resources || []).includes("use_dynamic_url"),
+      `${name}: use_dynamic_url is not supported by Gecko`);
+  }
+}
 
 // --- per-platform overlays --------------------------------------------------
 for (const [platform, expectations] of Object.entries({
-  chromium: { serviceWorker: true, require: ["scripting"], forbid: ["menus", "messagesRead"] },
-  firefox: { serviceWorker: false, require: ["scripting"], forbid: ["messagesRead"] },
-  thunderbird: { serviceWorker: false, require: ["menus", "messagesRead", "scripting"] },
+  chromium: { serviceWorker: true, require: ["scripting"], forbid: ["menus", "messagesRead", "sensitiveDataUpload"] },
+  firefox: { serviceWorker: false, require: ["scripting"], forbid: ["messagesRead", "sensitiveDataUpload"] },
+  thunderbird: { serviceWorker: false, require: ["menus", "messagesRead", "sensitiveDataUpload", "scripting"] },
 })) {
   const overlay = await json(path.join(projectRoot, `platform/${platform}.json`));
   const permissions = new Set(overlay.permissions || []);
   // AMO 19.23-new-id used this stable identity. Do not generate a new ID at build time.
   if (platform === "firefox") {
     check(overlay.browser_specific_settings?.gecko?.id === "textphantom-v3@kuju29", "firefox: restore the AMO identity from 19.23-new-id (textphantom-v3@kuju29)");
-    check(Boolean(overlay.browser_specific_settings?.gecko?.data_collection_permissions?.required?.length), "firefox: data collection disclosure missing");
   }
   if (platform === "thunderbird")
     check(overlay.browser_specific_settings?.gecko?.id === "textphantom@kuju29", "thunderbird: do not replace the ATN identity with the Firefox AMO identity");
+  // 10494 (AMO policy 6): only what translation itself needs is required.
+  // Account data, the Login session cookie, support messages and diagnostics
+  // are optional and asked for at runtime (diagnostics: install checkbox).
+  if (platform === "firefox" || platform === "thunderbird") {
+    const declared = overlay.browser_specific_settings?.gecko?.data_collection_permissions || {};
+    check(JSON.stringify(declared.required) === JSON.stringify(["websiteContent", "browsingActivity"]),
+      `${platform}: required data collection must be exactly websiteContent, browsingActivity`);
+    check(JSON.stringify([...(declared.optional || [])].sort()) === JSON.stringify(["authenticationInfo", "financialAndPaymentInfo",
+      "personalCommunications", "personallyIdentifyingInfo", "technicalAndInteraction"]),
+      `${platform}: optional data collection must list the account, cookie, support and diagnostics types`);
+    check(Number.parseFloat(overlay.browser_specific_settings?.gecko?.strict_min_version) >= 140,
+      `${platform}: built-in data consent needs strict_min_version 140`);
+  } else {
+    check(!overlay.browser_specific_settings, `${platform}: Gecko-only settings do not belong in this manifest`);
+  }
   if (expectations.serviceWorker) {
     check(Boolean(overlay.background?.service_worker), `${platform}: service_worker missing`);
     check(!overlay.background?.scripts, `${platform}: background.scripts is forbidden`);

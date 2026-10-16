@@ -4,6 +4,7 @@
 // refresh, sending is optimistic, and an API without the wait endpoint falls back explicitly.
 // Offline fixture server + simulated chrome.* (not an installed-extension test).
 // Run: node scripts/test-support-dock-live-browser-10478.mjs   (TP_QA_CHROMIUM=/path/to/chrome, TP_QA_SHOTS=dir optional)
+import { chromiumExecutable } from './lib/chromium-path.mjs';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -113,7 +114,7 @@ await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const BASE = `http://127.0.0.1:${server.address().port}`;
 
 // ---------- Minimal CDP driver ----------
-const chromium = process.env.TP_QA_CHROMIUM || ['/opt/pw-browsers/chromium', '/usr/bin/chromium', '/usr/bin/google-chrome'].find(existsSync);
+const chromium = chromiumExecutable(); // shared resolver: scripts/lib/chromium-path.mjs
 assert(chromium && existsSync(chromium), 'Chromium not found; set TP_QA_CHROMIUM');
 const profile = mkdtempSync(join(tmpdir(), 'tp-chat-10478-'));
 const browser = spawn(chromium, ['--headless=new', '--no-sandbox', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--hide-scrollbars',
@@ -192,7 +193,8 @@ async function openPage(path, store, { width, height }) {
   await send('Page.navigate', { url: BASE + path }, sessionId);
   return page;
 }
-const session = { customApiUrl: BASE, paidApiBase: BASE, paidSessionToken: TOKEN, paidEmail: 'customer@example.com', supportActivated: true, supportDockHidden: false };
+const session = { customApiUrl: BASE, paidApiBase: BASE, paidSessionToken: TOKEN, paidEmail: 'customer@example.com', supportActivated: true, supportDockHidden: false,
+  tpDataConsentV1: { version: 1, granted: true, at: 1 } }; // 10494: this customer allowed account data (support messages)
 const hostRect = `(() => { const r = document.getElementById('tp-support-dock').getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height, display: getComputedStyle(document.getElementById('tp-support-dock')).display }; })()`;
 const near = (a, b, label) => assert(Math.abs(a - b) <= 1, label + ': ' + a + ' vs ' + b);
 const openDock = page => page.eval(`new Promise(resolve => __runtimeListeners.forEach(fn => fn({ type: 'TP_SUPPORT_OPEN' }, {}, resolve)))`);

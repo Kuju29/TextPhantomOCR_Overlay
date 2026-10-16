@@ -8,6 +8,8 @@ import pytest
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'api'))
+sys.path.insert(0,str(ROOT/'scripts'/'lib'))
+from paid_center_fake import HealthzClient, reset_protocol_cache
 from backend.ai.provider_contract import GenerationRequest
 from backend.ai.providers import cloud_paid
 from backend.ai.clients.provider_error import ProviderHttpError, ProviderTransportError
@@ -18,13 +20,14 @@ def boundary(monkeypatch):
     state = {"posts": [], "dispatched": [], "response": None}
     monkeypatch.setattr(cloud_paid, "center_base_url", lambda: "https://center.example")
     monkeypatch.setattr(cloud_paid, "center_origin", lambda: "https://center.example")
+    # The busy-admission wait queue is covered by test-paid-admission-wait-10466.py;
+    # here one Center answer must surface at once so its evidence can be checked.
+    monkeypatch.setattr(cloud_paid, "ADMISSION_WAIT_SECONDS", 0)
     monkeypatch.setattr(cloud_paid.accounting, "mark_dispatched", lambda: state["dispatched"].append(True))
     monkeypatch.setattr(cloud_paid.wire_trace, "provider_request", lambda **kwargs: None)
     monkeypatch.setattr(cloud_paid.wire_trace, "write_json", lambda *args, **kwargs: None)
-    class Client:
-        def __init__(self, **kwargs): pass
-        def __enter__(self): return self
-        def __exit__(self, *args): pass
+    reset_protocol_cache()
+    class Client(HealthzClient):  # also answers the Paid protocol health read
         def post(self, url, *, json, headers):
             if url.endswith("/chat/receipt"): return httpx.Response(200, json={"found": False})
             if url.endswith("/price-quote"): return httpx.Response(200, json={"quote_token": "qa-fresh-quote"})

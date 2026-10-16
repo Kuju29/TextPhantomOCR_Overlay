@@ -10,10 +10,15 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "api"))
+sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 os.environ["TP_CENTER_URL"] = "http://127.0.0.1:8787"
+# The busy-admission wait queue (≤90 s) is covered by test-paid-admission-wait-10466.py;
+# here a busy answer must surface at once so its evidence can be checked.
+os.environ["TP_PAID_ADMISSION_WAIT_SECONDS"] = "0"
 
 import httpx
 from fastapi import HTTPException
+from paid_center_fake import HealthzClient, reset_protocol_cache
 from backend.ai import accounting
 from backend.ai.clients.provider_error import ProviderHttpError, ProviderTransportError
 from backend.ai.provider_contract import GenerationRequest
@@ -22,6 +27,10 @@ from backend.api.errors import classify_failure
 from backend.application.ai_translation.provider_errors import raise_execution_error
 
 checks = []
+# The Center chat route performs the owned replay itself (cloud_paid.generate:
+# "No separate receipt or price-quote round trip for every new operation"), so
+# one admission request is the whole Center conversation for a new operation.
+CHAT_URL = "http://127.0.0.1:8787/api/customer/chat/completions"
 
 def check(name, passed):
     checks.append({"name": name, "passed": bool(passed)})
@@ -36,10 +45,8 @@ context = SimpleNamespace(unit_count=1, char_count=5, trace_id="qa10414",
 
 def run_response(status, body=None, transport_error=False):
     calls = []
-    class CenterClient:
-        def __init__(self, **kwargs): pass
-        def __enter__(self): return self
-        def __exit__(self, *args): return False
+    reset_protocol_cache()
+    class CenterClient(HealthzClient):  # also answers the Paid protocol health read
         def post(self, url, **kwargs):
             calls.append(url)
             if url.endswith('/chat/receipt'):
@@ -69,8 +76,8 @@ for status, code in [(402, "INSUFFICIENT_CREDITS"), (429, "PAID_CAPACITY_BUSY"),
                      (503, "PAID_PAUSED"), (503, "PAID_MODEL_PAUSED"), (401, "AUTH_REQUIRED"),
                      (503, "MODEL_PRICE_UNVERIFIED")]:
     error, detail, receipts, calls = run_response(status, {"error": {"code": code}})
-    check(code + " has receipt lookup and admission request and zero provider generations",
-          len(calls) == 2 and error.requestDispatched is False
+    check(code + " has exactly one Center chat request (no receipt round trip) and zero provider generations",
+          calls == [CHAT_URL] and error.requestDispatched is False
           and error.providerAttempts == error.generationAttempts == 0)
     check(code + " does not create an unknown provider usage receipt", not receipts)
     check(code + " public failure distinguishes admission from upstream AI",
@@ -98,13 +105,13 @@ for name, status, body in [
 ]:
     error, detail, receipts, calls = run_response(status, body)
     check(name + " preserves possible dispatch and a usage observation",
-          len(calls) == 2 and error.requestDispatched is True and len(receipts) == 1
+          calls == [CHAT_URL] and error.requestDispatched is True and len(receipts) == 1
           and detail["requestDispatched"] is True
           and detail["origin"] == "upstream_ai" and "centerAdmissionRejected" not in detail)
 
 error, detail, receipts, calls = run_response(0, transport_error=True)
 check("lost Center response remains uncertain after possible dispatch",
-      len(calls) == 2 and error.requestDispatched is True and len(receipts) == 1
+      calls == [CHAT_URL] and error.requestDispatched is True and len(receipts) == 1
       and detail["code"] == "paid_outcome_pending" and detail["origin"] == "upstream_ai")
 
 print(json.dumps({"scope": "Actual Paid adapter, provider receipt and public error mapping; synthetic Center responses only",

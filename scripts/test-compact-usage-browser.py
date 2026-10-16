@@ -1,4 +1,8 @@
 """Real Chromium UI check with fixture data; no installed extension/live model."""
+import sys as _tp_sys
+from pathlib import Path as _TpPath
+_tp_sys.path.insert(0, str(_TpPath(__file__).resolve().parent / 'lib'))
+from chromium_path import chromium_executable  # the one shared Chromium resolver
 from pathlib import Path
 import json,re,argparse
 from playwright.sync_api import sync_playwright
@@ -7,7 +11,7 @@ r=Path(__file__).resolve().parents[1];html=(r/'src/popup/popup.html').read_text(
 css=(r/'src/shared/theme.css').read_text()+'\n'+(r/'src/popup/popup.css').read_text()
 report={'scope':'actual Chromium, production HTML/CSS/controller, fixture usage and request; no live provider','checks':[]}
 with sync_playwright() as pw:
- browser=pw.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox','--disable-dev-shm-usage','--disable-gpu'])
+ browser=pw.chromium.launch(executable_path=chromium_executable(),headless=True,args=['--no-sandbox','--disable-dev-shm-usage','--disable-gpu'])
  page=browser.new_page(viewport={'width':344,'height':520},device_scale_factor=1)
  page.route('**/*',lambda route:route.abort())
  page.set_content('<!doctype html><meta charset="utf-8"><style>'+css+'</style><main style="padding:10px" id="fixture">'+fragment+'</main>')

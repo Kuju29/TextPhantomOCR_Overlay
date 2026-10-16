@@ -4,6 +4,8 @@ import {spawn} from 'node:child_process';
 import {createInterface} from 'node:readline';
 import {webcrypto} from 'node:crypto';
 globalThis.crypto ||= webcrypto;
+// 10495: a signed-in Paid user who allowed data use (Paid repair asks the account gate).
+globalThis.chrome ||= {runtime:{},storage:{local:{get:(keys,cb)=>cb(Object.fromEntries([].concat(keys).map(k=>[k,{tpDataConsentV1:{version:1,granted:true,at:1},paidSessionToken:'synthetic-session',paidApiBase:'http://fixture.invalid'}[k]]))),remove:(_keys,cb)=>cb?.()},session:{get:(_keys,cb)=>cb({})}}};
 const rootUrl=new URL('../',import.meta.url);const root=fileURLToPath(rootUrl);
 const from=p=>import(new URL('src/'+p,rootUrl));
 const {translateLensPage}=await from('background/pipeline/page-translation.js');

@@ -2,7 +2,11 @@
 This is NOT installed-extension evidence. It verifies the production dock script
 against context invalidation and asynchronous/synchronous failure scenarios.
 """
-import argparse, asyncio, hashlib, json, os, threading, traceback
+import sys as _tp_sys
+from pathlib import Path as _TpPath
+_tp_sys.path.insert(0, str(_TpPath(__file__).resolve().parent / 'lib'))
+from chromium_path import chromium_executable  # the one shared Chromium resolver
+import argparse, asyncio, hashlib, json, os, tempfile, threading, traceback
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from playwright.async_api import async_playwright
@@ -44,7 +48,10 @@ class Handler(BaseHTTPRequestHandler):
 async def main(args):
  out=Path(args.out).resolve();out.mkdir(parents=True,exist_ok=True);Handler.source=Path(args.source).resolve();server=ThreadingHTTPServer(('127.0.0.1',0),Handler);threading.Thread(target=server.serve_forever,daemon=True).start();base='http://127.0.0.1:'+str(server.server_port)
  results=[];report={'installedExtension':False,'chromeBoundaries':'explicitly simulated','nativeDom':True,'productionSource':str(Handler.source),'sourceSha256':hashlib.sha256(Handler.source.read_bytes()).hexdigest(),'checks':results}
- env=dict(os.environ);env['LD_LIBRARY_PATH']=str(Path(args.runtime_lib).resolve());env['FONTCONFIG_FILE']=str(Path(args.font_config).resolve())
+ # Optional: a private runtime library folder / fontconfig for minimal hosts; by default the system's.
+ env=dict(os.environ)
+ if args.runtime_lib:env['LD_LIBRARY_PATH']=str(Path(args.runtime_lib).resolve())
+ if args.font_config:env['FONTCONFIG_FILE']=str(Path(args.font_config).resolve())
  async with async_playwright() as p:
   browser=await p.chromium.launch(executable_path=str(Path(args.browser).resolve()),headless=True,args=['--no-sandbox'],env=env)
   async def fixture(activated=True,setup=''):
@@ -59,13 +66,14 @@ async def main(args):
    print(json.dumps(results[-1]),flush=True)
   def mounted(v):
    assert v['hostCount']==1 and v['host']['display']=='block',v
-   assert v['runtimeListeners']==1 and v['storageListeners']==1 and v['timers']==2,v
+   # .90 change-driven sync: the dock keeps no interval timers (layout follows events).
+   assert v['runtimeListeners']==1 and v['storageListeners']==1 and v['timers']==0,v
    assert not v['unhandled'],v
   def disposed(v):
    assert v['hostCount']==0 and v['runtimeListeners']==0 and v['storageListeners']==0 and v['timers']==0 and not v['alive'],v
    assert not v['unhandled'],v
   async def ordinary():
-   c,page=await fixture();v=await snapshot(page);mounted(v);assert v['host']['width']==390 and v['host']['height']==630 and v['host']['right']=='18px' and v['host']['bottom']=='84px',v
+   c,page=await fixture();v=await snapshot(page);mounted(v);assert v['host']['width']==390 and v['host']['height']==640 and v['host']['right']=='18px' and v['host']['bottom']=='18px',v
    await page.screenshot(path=str(out/'ordinary-native-dock.png'));await c.close();return {'snapshot':v}
   await check('Native DOM mounts one expanded bottom-right dock',ordinary)
   async def unauthenticated():
@@ -83,13 +91,19 @@ async def main(args):
   await check('Changing the selected API hides the previous account dock synchronously',lambda:auth_change('customApiUrl'))
   async def stale_auth():
    c,page=await fixture();mounted(await snapshot(page))
-   await page.evaluate('''()=>{__qa.deferNext=true;for(const fn of [...__qa.storage])fn({supportConfiguration:{newValue:{configured:true}}},'local');__qa.authenticated=false;for(const fn of [...__qa.storage])fn({paidSessionToken:{newValue:''}},'local');__qa.pending.shift()()}''')
+   # The check reads the consent mirror before it asks, so wait until the (successful) auth request is in flight.
+   await page.evaluate('''async()=>{__qa.deferNext=true;for(const fn of [...__qa.storage])fn({supportConfiguration:{newValue:{configured:true}}},'local');await new Promise(r=>{const t=()=>__qa.pending.length?r():setTimeout(t,0);t();});__qa.authenticated=false;for(const fn of [...__qa.storage])fn({paidSessionToken:{newValue:''}},'local');__qa.pending.shift()()}''')
    await page.wait_for_timeout(80);v=await snapshot(page);assert v['host']['display']=='none' and not v['unhandled'],v;await c.close();return {'snapshot':v}
   await check('Delayed successful authentication cannot restore the dock after logout',stale_auth)
+  # .90: a confirmed dock follows storage/account changes (covered above), not focus.
+  # Focus re-checks only a page whose first check did not confirm chat yet.
   async def auth_expired():
-   c,page=await fixture();mounted(await snapshot(page));await page.evaluate('__qa.authenticated=false;window.dispatchEvent(new Event("focus"))');await page.wait_for_timeout(80)
-   v=await snapshot(page);assert v['host']['display']=='none' and not v['unhandled'],v;await c.close();return {'snapshot':v}
-  await check('Returning to a page rechecks expired Paid authentication',auth_expired)
+   c,page=await fixture(setup='__qa.authenticated=false');v=await snapshot(page);assert v['hostCount']==0 and not v['unhandled'],v
+   before=len(v['requestTypes']);await page.evaluate('__qa.authenticated=true;window.dispatchEvent(new Event("focus"))');await page.wait_for_timeout(80)
+   v=await snapshot(page);assert v['requestTypes'][before:].count('TP_SUPPORT_AUTH')==1,v;mounted(v)
+   after=len(v['requestTypes']);await page.evaluate('window.dispatchEvent(new Event("focus"))');await page.wait_for_timeout(80)
+   v=await snapshot(page);assert 'TP_SUPPORT_AUTH' not in v['requestTypes'][after:],v;await c.close();return {'snapshot':v}
+  await check('Returning to a page re-checks only an unconfirmed dock (confirmed docks follow changes)',auth_expired)
   async def reinject():
    c,page=await fixture();before=await page.evaluate('__tpSupportDock');await page.evaluate('window.__qaOriginal=__tpSupportDock');
    for _ in range(5):await inject(page)
@@ -103,13 +117,13 @@ async def main(args):
    c,page=await fixture();await page.evaluate('__qa.id=undefined;window.dispatchEvent(new Event("focus"));window.dispatchEvent(new Event("resize"));document.dispatchEvent(new Event("visibilitychange"))');await page.wait_for_timeout(1150);v=await snapshot(page);disposed(v);await c.close();return {'snapshot':v}
   await check('Missing runtime.id disposes listeners, host and intervals without unhandled work',id_invalid)
   async def throw_race():
-   c,page=await fixture();await page.evaluate('__qa.throwNext=true;window.dispatchEvent(new Event("focus"))');await page.wait_for_timeout(80);v=await snapshot(page);disposed(v);await c.close();return {'snapshot':v}
+   c,page=await fixture();await page.evaluate('__qa.throwNext=true;for(const fn of [...__qa.storage])fn({paidSessionToken:{newValue:"next"}},"local")');await page.wait_for_timeout(80);v=await snapshot(page);disposed(v);await c.close();return {'snapshot':v}
   await check('Synchronous sendMessage invalidation race disposes without unhandled rejection',throw_race)
   async def storage_throw():
    c,page=await fixture(False);await page.evaluate('__qa.throwNext=true;for(const fn of [...__qa.storage])fn({supportConfiguration:{newValue:{configured:true}}},"local")');await page.wait_for_timeout(80);v=await snapshot(page);disposed(v);await c.close();return {'snapshot':v}
   await check('Storage-triggered configuration request handles synchronous invalidation',storage_throw)
   async def deferred_invalid():
-   c,page=await fixture();await page.evaluate('__qa.deferNext=true;window.dispatchEvent(new Event("focus"));__qa.id=undefined;__qa.pending.shift()()');await page.wait_for_timeout(80);v=await snapshot(page);disposed(v);await c.close();return {'snapshot':v}
+   c,page=await fixture();await page.evaluate('async()=>{__qa.deferNext=true;for(const fn of [...__qa.storage])fn({paidSessionToken:{newValue:"next"}},"local");await new Promise(r=>{const t=()=>__qa.pending.length?r():setTimeout(t,0);t();});__qa.id=undefined;__qa.pending.shift()()}');await page.wait_for_timeout(80);v=await snapshot(page);disposed(v);await c.close();return {'snapshot':v}
   await check('Context becomes invalid between send and callback without unhandled rejection',deferred_invalid)
   async def current_sender():
    c,page=await fixture(False);ping=await page.evaluate('__qaEmit({type:"TP_SUPPORT_PING"})');assert ping=={'ready':True,'version':'2026.10.4.24'},ping;opened=await page.evaluate('__qaEmit({type:"TP_SUPPORT_OPEN"},{id:"qa-current",url:location.href,tab:{id:5},frameId:0})');assert opened=={'ok':True},opened;v=await snapshot(page);mounted(v);await c.close();return {'ping':ping,'opened':opened,'snapshot':v}
@@ -124,8 +138,8 @@ async def main(args):
    c,page=await fixture();await page.evaluate('document.getElementById("tp-support-dock").remove()');opened=await page.evaluate('__qaEmit({type:"TP_SUPPORT_OPEN"})');assert opened=={'ok':True};v=await snapshot(page);mounted(v);await c.close();return {'snapshot':v}
   await check('Explicit open reattaches externally removed host without duplicates',remote_removed)
   async def narrow():
-   c,page=await fixture();await page.set_viewport_size({'width':375,'height':700});await page.wait_for_timeout(100);v=await snapshot(page);mounted(v);h=v['host'];assert h['x']>=0 and h['y']>=0 and h['width']==351 and h['height']==590,v;await page.screenshot(path=str(out/'narrow-native-dock.png'));await c.close();return {'snapshot':v}
-  await check('Narrow viewport dock remains fully within bottom-right bounds',narrow)
+   c,page=await fixture();await page.set_viewport_size({'width':375,'height':700});await page.wait_for_timeout(100);v=await snapshot(page);mounted(v);h=v['host'];assert h['x']==0 and h['y']==0 and h['width']==375 and h['height']==700,v;await page.screenshot(path=str(out/'narrow-native-dock.png'));await c.close();return {'snapshot':v}
+  await check('Phone-width viewport opens the expanded dock as a full-screen sheet within bounds',narrow)
   async def missing_ready():
    c,page=await fixture(False,setup='__qa.frameMode="missing"');started=asyncio.get_running_loop().time();opened=await page.evaluate('__qaEmit({type:"TP_SUPPORT_OPEN"})');elapsed=asyncio.get_running_loop().time()-started;assert opened=={'ok':False},opened;assert elapsed>=4.5,elapsed;v=await snapshot(page);assert 'TP_SUPPORT_CHANNEL' not in v['requestTypes'],v;assert not v['unhandled'],v;await c.close();return {'opened':opened,'elapsedSeconds':round(elapsed,3),'snapshot':v}
   await check('A loaded private iframe without READY returns OPEN false after bounded wait',missing_ready)
@@ -145,4 +159,4 @@ async def main(args):
  server.shutdown();report['passed']=sum(r['passed'] for r in results);report['total']=len(results);report['allPassed']=report['passed']==report['total'];(out/'native-dock-lifecycle-report.json').write_text(json.dumps(report,indent=2));print(json.dumps({'passed':report['passed'],'total':report['total'],'allPassed':report['allPassed']}));return report['allPassed']
 
 if __name__=='__main__':
- p=argparse.ArgumentParser();p.add_argument('--source',required=True);p.add_argument('--browser',required=True);p.add_argument('--runtime-lib',required=True);p.add_argument('--font-config',required=True);p.add_argument('--out',required=True);raise SystemExit(0 if asyncio.run(main(p.parse_args())) else 1)
+ p=argparse.ArgumentParser();p.add_argument('--source',default=str(Path(__file__).resolve().parents[1]/'src/content/support-dock.js'));p.add_argument('--browser',default=chromium_executable(required=False));p.add_argument('--runtime-lib');p.add_argument('--font-config');p.add_argument('--out',default=str(Path(tempfile.gettempdir())/'tp-dock-lifecycle'));raise SystemExit(0 if asyncio.run(main(p.parse_args())) else 1)

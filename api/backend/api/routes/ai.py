@@ -86,8 +86,6 @@ def _resolve(payload: dict[str, Any]) -> dict:
         result = _refused_base_url(payload, exc)
         result["lang"] = str(payload.get("lang") or "en")
         return result
-    except Exception as exc:
-        raise
 
 @router.get("/ai/prompt/default")
 async def prompt_default(

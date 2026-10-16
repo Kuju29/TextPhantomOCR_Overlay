@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'api'))
 from backend.ai.login import login_routes as routes, login_translation as translation
+from backend.ai import accounting
 from backend.ai.login import login_session_store as store
 from backend.ai.login.endpoint import login_endpoint_session as flows, login_endpoint_runs as runs
 from backend.ai.login.login_provider_contract import LoginError
@@ -79,7 +80,7 @@ class PublicCapabilities(unittest.TestCase):
                     cache_context={'webchatRunId':'fixture-run','operationId':'fixture-op',
                                    'conversationSource':'<<P0:Hello>>'},cancel_check=None)
                 with patch.object(translation.native,'module',return_value=module), \
-                        patch.object(translation.accounting,'mark_dispatched') as mark:
+                        patch.object(accounting,'mark_dispatched') as mark:
                     with self.assertRaises(LoginError) as caught:
                         translation.ADAPTER.generate(request)
                     self.assertEqual(caught.exception.code,'login_translation_unsupported')

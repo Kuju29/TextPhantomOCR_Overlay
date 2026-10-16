@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {popupEntryFixture} from './lib/popup-entry-fixture.mjs';
 const base='http://localhost:7860',model='tp-model',provider='login_deepseek',loginModel='deepseek-chat';
-const local={mode:'lens_text',sources:'ai',lang:'th',customApiUrl:base,apiDefaultsFetchedAt:Date.now(),aiServiceMode:'paid',paidTranslationSource:'login',paidSessionToken:'synthetic-customer',paidApiBase:base,paidServiceApiBase:base,paidModel:model,loginProvider:provider,loginModel,aiProvider:'openrouter',aiModel:'fixture-model',aiKey:'synthetic-key'};
+const local={mode:'lens_text',sources:'ai',lang:'th',customApiUrl:base,apiDefaultsFetchedAt:Date.now(),aiServiceMode:'paid',paidTranslationSource:'login',paidSessionToken:'synthetic-customer',paidApiBase:base,paidServiceApiBase:base,paidModel:model,loginProvider:provider,loginModel,aiProvider:'openrouter',aiModel:'fixture-model',aiKey:'synthetic-key',tpDataConsentV1:{version:1,granted:true}}; // 10495: this user allowed account data
 const session={},providerSession={id:'lgs_'+'a'.repeat(48),account_id:'b'.repeat(32),provider,transport:'web_endpoint'};
 const account={email:'fixture@example.test',credits:{available:'1250',held:'0'},models:[{id:model,name:'TP saved model',eligible_tp:'1250',pricing:{status:'estimated',unit:'TP_PER_1000_TOKENS',input_tp:'2',output_tp:'6'}}],addons:{entitlements:[{code:'ai_login',status:'active'}]}};
 const catalog={...account,packages:[{id:'fixture-pack',name:'Saved TP package',version:1,enabled:true,visible:true,price_satang:9900,credits_tp:'5000'}],history:{orders:{items:[],total:0},payments:{items:[],total:0},usage:{items:[],total:0},lots:{items:[],total:0},refunds:{items:[],total:0},ledger:{items:[],total:0}}};
@@ -9,7 +9,7 @@ let held=false,releases=[],accountStatus=200;const response=(value,status=200)=>
 const fetchReply=(url,opts)=>{
   const value=url.endsWith('/meta')?{ok:true,paid:{configured:true}}:url.endsWith('/paid/me')?account:url.endsWith('/paid/account')?catalog:url.endsWith('/login/providers')?{providers:[{id:provider,name:'DeepSeek',available:true,supported:true,session:providerSession}]}:url.includes('/login/providers/')?{models:[{id:loginModel,name:'DeepSeek saved model'}]}:url.includes('/ai/resolve')?{provider:'openrouter',backend_supported:true,key_status:'valid',models_verified:true,models:['fixture-model'],model_candidates:[{id:'fixture-model',eligibility:'usable'}]}:url.includes('/ai/probe')?{provider:'openrouter',model:'fixture-model',status:'passed'}:{};
   const status=url.endsWith('/paid/me')?accountStatus:200;
-  if(held&&(url.endsWith('/meta')||url.includes('/paid/')||url.includes('/login/')))return new Promise((resolve,reject)=>{releases.push(()=>resolve(response(value,status)));opts.signal?.addEventListener('abort',()=>reject(Object.assign(new Error('Aborted'),{name:'AbortError'})));});
+  if(held&&(url.endsWith('/meta')||url.includes('/paid/')||url.includes('/login/')))return new Promise((resolve,reject)=>{releases.push(Object.assign(()=>resolve(response(value,status)),{url}));opts.signal?.addEventListener('abort',()=>reject(Object.assign(new Error('Aborted'),{name:'AbortError'})));});
   return Promise.resolve(response(value));
 };
 let clock=Date.now();
@@ -21,6 +21,10 @@ assert.equal(first.fields.get('ai-login-model').value,loginModel);
 first.fields.get('ai-paid-details').click();await first.settle(100);assert.equal(first.errors.length,0,first.errors.join('\n'));assert.match(first.fields.get('ai-paid-inline').textContent,/fixture@example.test/,'The actual account click must seed its scoped account/catalog display: '+JSON.stringify(first.calls.map(x=>x.url))+' status='+first.fields.get('ai-paid-status').textContent);
 first.close();held=true;
 const savedLocal=structuredClone(local),savedSession=structuredClone(session),checks=[];
+// Release one held request by its path: the popup also reads Account details ahead (.72),
+// so the order of held requests is not the order of the startup chain.
+const take=path=>{const index=releases.findIndex(fn=>new URL(fn.url).pathname===path);assert(index>=0,'held '+path+' in '+releases.map(fn=>fn.url).join(' '));return releases.splice(index,1)[0];};
+const release=path=>take(path)();
 // A normal reopen must reuse its display even when the freshness interval has
 // elapsed: fresh authorization still comes only from the held current request.
 clock+=Number(process.env.TP_REOPEN_DELAY_MS||61000);
@@ -32,14 +36,16 @@ try{
  assert.equal(reopened.fields.get('ai-login-provider').selectedOptions[0]?.textContent,'DeepSeek','Reopened normal popup must retain provider label rather than Checking.');
  assert.equal(reopened.fields.get('ai-login-model').value,loginModel);
  assert.doesNotMatch(reopened.fields.get('ai-login-status').textContent,/Checking|Verifying/i);
- assert.equal(reopened.fields.get('ai-login-model').disabled,true,'Saved display cannot authorize Login before fresh account and model responses.');
+ // .72/.73: the remembered Login model is selectable at once (re-verified in the background); the
+ // translation itself is authorized only by the job's fresh account/session/model check.
+ assert.equal(reopened.fields.get('ai-login-model').disabled,false,'.72: the remembered Login model is selectable at once while fresh responses are pending.');
  assert.equal(reopened.fields.get('ai-paid-model-input').textContent,'≈ 2 TP');
  assert.equal(reopened.fields.get('ai-paid-model-output').textContent,'≈ 6 TP');
  assert.equal(reopened.fields.get('ai-paid-inline').hidden,true,'A new popup must start on the normal panel even if Account details was open when the prior popup closed.');
- checks.push('Unchanged reopen after freshness expires retains provider/model/TP/rates and disables unverified controls');
+ checks.push('Unchanged reopen after freshness expires retains provider/model/TP/rates; the remembered model stays selectable (.72)');
  const since=reopened.paints.length;
- for(const next of [2,3,4]){releases.shift()();await reopened.settle(100);assert.equal(reopened.calls.filter(x=>/\/meta$|\/paid\/me$|\/login\//.test(x.url)).length,next);assert.equal(reopened.fields.get('ai-login-model').disabled,true);assert.equal(reopened.fields.get('ai-paid-credits').textContent,'1,250 TP');}
- releases.shift()();await reopened.settle(100);
+ for(const [next,path] of [[2,'/meta'],[3,'/paid/me'],[4,'/login/providers']]){release(path);await reopened.settle(100);assert.equal(reopened.calls.filter(x=>/\/meta$|\/paid\/me$|\/login\//.test(x.url)).length,next);assert.equal(reopened.fields.get('ai-login-model').disabled,false,'.72: stays selectable while the quiet chain re-verifies');assert.equal(reopened.fields.get('ai-paid-credits').textContent,'1,250 TP');}
+ release('/login/providers/'+provider+'/models');await reopened.settle(100);
  assert.equal(reopened.fields.get('ai-login-model').disabled,false);
  assert(!reopened.paints.slice(since).filter(x=>['ai-login-status','ai-paid-account-state','ai-paid-credits'].includes(x.id)).some(x=>/Checking|Verifying|Reconnecting|— TP/.test(x.text)),'Automatic metadata/account/provider/model stages must stay quiet when unchanged.');
  checks.push('Real startup metadata→account→provider→model chain stays quiet; fresh final response verifies controls');
@@ -58,11 +64,11 @@ for(const [name,patch]of [['account',{paidSessionToken:'synthetic-other'}],['API
  }finally{changed.close();}
 }
 releases=[];
-const switched=await popupEntryFixture({local:structuredClone(savedLocal),session:structuredClone(savedSession),fetchReply,now:()=>clock});await switched.settle(100);releases.shift()();await switched.settle(100);const oldReply=releases.shift();
+const switched=await popupEntryFixture({local:structuredClone(savedLocal),session:structuredClone(savedSession),fetchReply,now:()=>clock});await switched.settle(100);release('/meta');await switched.settle(100);const oldReply=take('/paid/me');
 switched.writeLocal({paidSessionToken:'synthetic-other'});await switched.settle(100);
 assert.equal(switched.fields.get('ai-paid-credits').textContent,'— TP');assert.equal(switched.fields.get('ai-login-model').options.length,0);oldReply();await switched.settle(100);assert.equal(switched.fields.get('ai-paid-credits').textContent,'— TP');switched.close();checks.push('Account switch during held account request clears old data and ignores its late reply');
 releases=[];accountStatus=401;
-const expired=await popupEntryFixture({local:structuredClone(savedLocal),session:structuredClone(savedSession),fetchReply,now:()=>clock});await expired.settle(100);assert.equal(expired.fields.get('ai-paid-credits').textContent,'1,250 TP');releases.shift()();await expired.settle(100);releases.shift()();await expired.settle(100);
+const expired=await popupEntryFixture({local:structuredClone(savedLocal),session:structuredClone(savedSession),fetchReply,now:()=>clock});await expired.settle(100);assert.equal(expired.fields.get('ai-paid-credits').textContent,'1,250 TP');release('/meta');await expired.settle(100);release('/paid/me');await expired.settle(100);
 assert.equal(expired.local.paidSessionToken,'');assert.equal(expired.fields.get('ai-paid-credits').textContent,'— TP');assert.equal(expired.fields.get('ai-login-model').options.length,0);assert.match(expired.fields.get('ai-paid-status').textContent,/expired/i);expired.close();checks.push('Fresh server401 overrides stale display and clears session/account/Login state');
 accountStatus=200;releases=[];
 const cold=await popupEntryFixture({local:{...structuredClone(savedLocal),paidAccountViewCacheV1:null},session:{...structuredClone(savedSession),loginProviderViewCacheV1:null},fetchReply,now:()=>clock});await cold.settle(100);assert.equal(cold.fields.get('ai-paid-credits').textContent,'— TP');assert.equal(cold.fields.get('ai-login-model').disabled,true);cold.close();checks.push('First open without a snapshot shows honest unknown data and remains unverified');

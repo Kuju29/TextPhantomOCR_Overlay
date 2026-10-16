@@ -66,8 +66,11 @@
     }
   }
   let extensionUrl;
-  try { extensionUrl = new URL(chrome.runtime.getURL('support/chat.html')); } catch { dispose(); return; }
-  const origin = extensionUrl.protocol + '//' + extensionUrl.host;
+  // Chromium serves the frame through a per-session dynamic URL (use_dynamic_url),
+  // but the loaded frame's origin stays the extension base (getURL('')), which
+  // is what its messages carry and what postMessage must target.
+  let origin;
+  try { extensionUrl = new URL(chrome.runtime.getURL('support/chat.html')); const base = new URL(chrome.runtime.getURL('')); origin = base.protocol + '//' + base.host; } catch { dispose(); return; }
   const adminPage = () => Boolean(document.querySelector('meta[name="textphantom-surface"][content="control-center"]'));
   // The chat opens anchored to the launcher's corner, in place of the bubble (like a
   // messenger web chat), not floating above it. Phone-sized pages get a full-screen sheet.
@@ -134,8 +137,21 @@
     checking = run;
     return run;
   }
+  // 10495: the background mirrors the data-use consent here. Without it the
+  // dock never appears and this page asks for nothing (no auth/poll request).
+  function consentMirror() {
+    return new Promise(resolve => {
+      try { chrome.storage.local.get(['tpAccountGateV1'], saved => { try { void chrome.runtime.lastError; resolve(saved?.tpAccountGateV1?.consent); } catch { resolve(undefined); } }); }
+      catch { resolve(undefined); }
+    });
+  }
   async function checkOnce() {
     const id = ++checkId;
+    if (await consentMirror() === false) {
+      if (!alive() || id !== checkId) return;
+      configured = false; if (host) layout('hidden'); return;
+    }
+    if (!alive() || id !== checkId) return;
     const result = await request({ type: 'TP_SUPPORT_AUTH' });
     if (!alive() || id !== checkId) return;
     configured = result?.authenticated === true;
@@ -171,7 +187,7 @@
   function onStorage(changes, area) {
     if (!alive()) return;
     if (area !== 'local') return;
-    if (['paidSessionToken', 'paidApiBase', 'customApiUrl', 'apiUrlDefault'].some(key => changes[key])) {
+    if (['paidSessionToken', 'paidApiBase', 'customApiUrl', 'apiUrlDefault', 'tpAccountGateV1'].some(key => changes[key])) {
       checkId++; configured = false; requestedView = 'minimized';
       if (host) layout('hidden');
       void check({ fresh: true });

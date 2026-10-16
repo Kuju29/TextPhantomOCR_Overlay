@@ -38,7 +38,11 @@ export function createAddonActions({ client, read, write, load, live, open, dela
         if (updated.status !== 'creating' && updated.status !== 'waiting') armed = '';
       }
       await load();
-    } catch { next(); }
+    } catch (error) {
+      // 10495: data use withdrawn: stop polling (nothing more is sent).
+      if (/^DATA_CONSENT_/.test(error?.code || '')) { stop(); return; }
+      next();
+    }
   }
   async function buy(pack) {
     if (busy) return;

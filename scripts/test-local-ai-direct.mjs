@@ -226,7 +226,7 @@ try {
     "saved AI Style replaces the built-in style exactly like Cloud");
   assert.doesNotMatch(calls[0].body.messages[1].content, /BUILT-IN STYLE|SERIES NOTES HEADING/);
   assert.doesNotMatch(calls[0].body.messages[0].content, /USER TRANSLATION NOTES/);
-  assert.match(calls[0].body.messages[1].content, /บริบทประกอบ[\s\S]*ความจำเนื้อเรื่อง[\s\S]*ข้อมูลตัวละคร[\s\S]*ศัพท์และชื่อจากความจำเรื่อง[\s\S]*หน้าก่อนหน้า[\s\S]*รูปแบบคำตอบ —/,
+  assert.match(calls[0].body.messages[1].content, /บริบทประกอบ[\s\S]*ความจำเนื้อเรื่อง[\s\S]*ข้อมูลตัวละคร[\s\S]*ศัพท์และชื่อจากความจำเรื่อง[\s\S]*บริบทเรื่องที่เคยแปล[\s\S]*\[Rey\] Where are we\?[\s\S]*รูปแบบคำตอบ —/,
     "Local context is carried in the user task before its exact output contract");
   assert.doesNotMatch(calls[0].body.messages[1].content, /Hi → หวัดดี/,
     "short context-dependent fragments are filtered exactly like Cloud glossary memory");
@@ -337,9 +337,10 @@ try {
   assert.equal(calls[0].body.reasoning_effort, "medium",
     "custom OpenAI-compatible runtimes receive only their declared thinking mapping");
 
-  // A local OpenAI-shaped endpoint can contradict the selected model's
-  // non-reasoning metadata. The shared response guard must reject the turn
-  // even when the wire adapter initially had exact loaded-model evidence.
+  // 10488: a model whose loaded-instance metadata proves it has no reasoning
+  // is offered no AI think control; the saved Off is kept but not sent (the
+  // runtime default applies), so a reasoning trace from that runtime is not an
+  // Off violation and the answer stands.
   calls.length = 0;
   globalThis.fetch = async (url, init) => {
     calls.push({ url: String(url), init });
@@ -347,22 +348,51 @@ try {
       content: "<<TP_P0:ทดสอบ>>", reasoning_content: "unexpected hidden reasoning",
     } }], usage: { prompt_tokens: 10, completion_tokens: 5 } }), { status: 200 });
   };
+  const offLocal = (reasoning) => translateWithLocalOpenAi([{ id: "real-id", text: "test" }], {
+    ai: {
+      provider: "local-openai", model: "loaded-model", thinking: "off",
+      base_url: "http://localhost:1234/v1",
+      model_capabilities: { reasoning: { ...reasoning, source: "lmstudio_native_loaded_instance" } },
+      local_adapter: { id: "lmstudio", version: 1, protocol: "openai",
+        baseUrl: "http://localhost:1234/v1",
+        thinking: { parameter: "reasoning_effort", off: "none", on: "medium" } },
+    },
+  });
+  const nonReasoning = await offLocal({ supported: false });
+  assert.equal(nonReasoning.translations[0].text, "ทดสอบ");
+  assert.equal(calls.length, 1);
+  assert.equal("reasoning_effort" in JSON.parse(calls[0].init.body), false,
+    "no thinking field is sent for a model without a reasoning control");
+
+  // With a provable Off control (here Ollama's native think switch), Off is a
+  // user constraint: the shared response guard rejects an answer that still
+  // reports reasoning, and the turn is not retained.
+  calls.length = 0;
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url: String(url), init });
+    return new Response(JSON.stringify({ message: { content: "<<TP_P0:ทดสอบ>>",
+      thinking: "unexpected hidden reasoning" }, done_reason: "stop",
+      prompt_eval_count: 10, eval_count: 5 }), { status: 200 });
+  };
+  const ollamaOffTrace = [];
   await assert.rejects(
     translateWithLocalOpenAi([{ id: "real-id", text: "test" }], {
-      ai: {
-        provider: "local-openai", model: "loaded-model", thinking: "off",
-        base_url: "http://localhost:1234/v1",
-        model_capabilities: { reasoning: { supported: false,
-          source: "lmstudio_native_loaded_instance" } },
-        local_adapter: { id: "lmstudio", version: 1, protocol: "openai",
-          baseUrl: "http://localhost:1234/v1" },
-      },
+      ai: { provider: "ollama", model: "qwen3", thinking: "off", base_url: "http://localhost:11434",
+        model_capabilities: { reasoning: { supported: true, mandatory: false, control: "toggle",
+          source: "ollama-api-show" } },
+        local_adapter: { protocol: "ollama", baseUrl: "http://localhost:11434" } },
+      wireTrace: (stage, value) => ollamaOffTrace.push({ stage, value }),
     }),
     (error) => error.code === "local_model_thinking_unsupported" &&
       error.providerResponded === true && error.generationAttempts === 1,
     "an observed reasoning trace violates explicit Off on every Local wire format",
   );
   assert.equal(calls.length, 1);
+  assert.equal(JSON.parse(calls[0].init.body).think, false, "Off was actually requested");
+  assert.equal(ollamaOffTrace.find(event=>event.stage==='providerAssembled')?.value.text,
+    '<omitted-provider-body>','non-stream raw body must not reach a custom Ollama Off trace');
+  assert.equal(JSON.stringify(ollamaOffTrace).includes('unexpected hidden reasoning'),false,
+    'hidden reasoning must not leak through any Ollama Off wire stage');
 
   globalThis.fetch = async () => new Response(JSON.stringify({
     message: { content: [{ type: "text", text: '<<TP_P0:ส่วนคำตอบ>>' }] }, done_reason: "stop",
@@ -397,16 +427,15 @@ try {
         thinking: "minimum", local_adapter: { protocol: "ollama", baseUrl: "http://localhost:11434" } },
       wireTrace: (stage, value) => offWireTrace.push({ stage, value }),
     }),
-    error => error.code === "local_model_thinking_unsupported" &&
-      error.diagnostics?.validatorSubtype === "reasoning_reported_with_thinking_off" &&
+    // 10488: without a provable control (no model metadata) Lowest is kept but
+    // not sent; the runtime default applies, and its reasoning-only answer is
+    // rejected as an exhausted non-answer.
+    error => error.code === "output_budget_exhausted" &&
+      error.diagnostics?.validatorSubtype === "reasoning_only_exhausted" &&
       error.requestDispatched === true && error.providerResponded === true,
-    "unknown Lowest requests native Off and rejects a model that still thinks",
+    "unknown Lowest sends no think switch and rejects a reasoning-only answer",
   );
-  assert.equal(reasoningBodies[0].think, false);
-  assert.equal(offWireTrace.find(event=>event.stage==='providerAssembled')?.value.text,
-    '<omitted-provider-body>','non-stream raw body must not reach a custom Ollama Off trace');
-  assert.equal(JSON.stringify(offWireTrace).includes('reasoning consumed the output'),false,
-    'hidden reasoning must not leak through any Ollama Off wire stage');
+  assert.equal("think" in reasoningBodies[0], false);
   await assert.rejects(
     translateWithLocalOpenAi([{ id: "P0", text: "x" }], {
       ai: { provider: "ollama", model: "qwen", base_url: "http://localhost:11434",

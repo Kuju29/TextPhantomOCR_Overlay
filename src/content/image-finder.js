@@ -247,9 +247,17 @@
 
   // Converts technical terminal errors into short text a normal reader can
   // report from a screenshot. The full diagnostic remains in the title.
+  // 10495: data-use messages are authored in both languages (English for any
+  // interface language other than Thai).
+  const CONSENT_ENGLISH = {
+    DATA_CONSENT_REQUIRED: "Allow data use first. A permission tab is open. Nothing was sent and no credits were used.",
+    DATA_CONSENT_REVOKED: "Data use was turned off. Account work stopped; finished translations stay.",
+  };
   function shortImageError(msg) {
     if (msg && typeof msg === "object" && msg.schema === "tp.error/1") {
-      return `${String(msg.userMessage || "เกิดข้อผิดพลาด")} · ${String(msg.code || "PROCESSING_FAILED")}`;
+      const english = CONSENT_ENGLISH[msg.code];
+      const text = english && globalThis.TPPageText?.language !== "th" ? english : String(msg.userMessage || "เกิดข้อผิดพลาด");
+      return `${text} · ${String(msg.code || "PROCESSING_FAILED")}`;
     }
     const raw = String(msg || "PROCESSING_FAILED").trim();
     const lower = raw.toLowerCase();

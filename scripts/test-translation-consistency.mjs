@@ -62,14 +62,15 @@ for row in json.load(sys.stdin):
  style,_=select_style(lang,prompt)
  out.append(dict(system=build_translator_identity_system(style,lang),source=source,
    context=build_source_context_block(config.source_context),
-   user=build_translation_user_message(lang,prompt,source,ids,structured_output=structured,source_lang=config.source_lang,source_context=config.source_context,repair_reason='wrong_target_script')))
+   user=build_translation_user_message(lang,prompt,source,ids,structured_output=structured,source_lang=config.source_lang,source_context=config.source_context,repair_reason='wrong_target_script',style_examples=True)))
 print(json.dumps(out,ensure_ascii=False))
 `],{cwd:root,input:JSON.stringify(rows),encoding:'utf8'});
 assert.equal(py.status,0,py.stderr);
 const outputs=JSON.parse(py.stdout);
 for(let index=0;index<rows.length;index++) {
  const r=rows[index], expected=outputs[index], ids=['P0','P1'], kind=r.structured?'schema_object':'compact_records';
- const ai={prompt:r.custom?'CUSTOM STYLE SENTINEL':'',source_context:evidence,repair_reason:'wrong_target_script'};
+ // Human examples are opt-in (style_examples / the Human examples switch); enabled on both runtimes here.
+ const ai={prompt:r.custom?'CUSTOM STYLE SENTINEL':'',source_context:evidence,repair_reason:'wrong_target_script',style_examples:true};
  const c=composeCanonicalPrompt(plans[r.targetLang],ai,false,r.structured,r.targetLang,targets);
  const system=composeTranslatorIdentitySystem(`${c.sections.language}\n${c.sections.style}`,r.lang || r.targetLang);
  const user=composeTranslationUserMessage({sections:{...c.sections,source:r.structured?'INPUT — tp.translation.schema-object/1\nEach source record is Pn:source text.':c.sections.source},requestOutputContract:exactOutputInstruction(ids,{kind},r.targetLang),sourceRecords:expected.source,targetLang:r.targetLang,sourceLang:r.sourceLang,repairReason:ai.repair_reason,expectedIds:ids,structuredOutput:r.structured});

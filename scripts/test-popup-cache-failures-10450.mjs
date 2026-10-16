@@ -18,7 +18,7 @@ for(let i=0;i<args.length;i++){
 const run=async(name,fn)=>{if(selected&&selected!==name)return;await fn();checks.push(name);};
 function harness(source='tp'){
  let phase='healthy',clock=Date.now(),models=me.models,credits=me.credits,inventory;const session={};
- const local={mode:'lens_text',sources:'ai',lang:'th',uiLanguageV1:'en',customApiUrl:base,apiDefaultsFetchedAt:clock,aiServiceMode:'paid',paidTranslationSource:source,paidSessionToken:'synthetic-owner',paidApiBase:base,paidServiceApiBase:base,paidModel:'tp-model',loginProvider:provider,loginModel:model};
+ const local={mode:'lens_text',sources:'ai',lang:'th',uiLanguageV1:'en',customApiUrl:base,apiDefaultsFetchedAt:clock,aiServiceMode:'paid',paidTranslationSource:source,paidSessionToken:'synthetic-owner',paidApiBase:base,paidServiceApiBase:base,paidModel:'tp-model',loginProvider:provider,loginModel:model,tpDataConsentV1:{version:1,granted:true,at:1}}; // 10495: this user allowed account data
  const fetchReply=async url=>{
   assert.equal(new URL(url).origin,base,'Fixture must not request a live service');const path=new URL(url).pathname;
   if(path==='/meta')return reply(phase==='metadata-failure'?{error:{message:'Synthetic metadata unavailable'}}:{ok:true,paid:{configured:true}},phase==='metadata-failure'?503:200);

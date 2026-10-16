@@ -16,7 +16,7 @@ function harness(){
   const account=who=>({...me(who,balance(who)),purchase:{ready:true},packages:[pack],
     history:Object.fromEntries(['orders','payments','usage','lots','refunds','ledger'].map(kind=>[kind,{items:kind==='orders'&&['waiting','credited'].includes(phase)?[{...order,status:phase==='credited'?'credited':'waiting'}]:[],total:0,offset:0,limit:25}])),addons:{products:[],orders:[],entitlements:[]}});
   const local={mode:'lens_text',sources:'ai',lang:'th',uiLanguageV1:'en',customApiUrl:A,apiUrlDefault:A,apiDefaultsFetchedAt:clock,
-    aiServiceMode:'paid',paidTranslationSource:'tp',paidSessionToken:'synthetic-a',paidApiBase:A,paidServiceApiBase:A,paidModel:'qa/test'};
+    tpDataConsentV1:{version:1,granted:true,at:1},aiServiceMode:'paid',paidTranslationSource:'tp',paidSessionToken:'synthetic-a',paidApiBase:A,paidServiceApiBase:A,paidModel:'qa/test'};
   const reply=(value,status=200)=>Response.json(value,{status});
   const fetchReply=async(url,options={})=>{
     const parsed=new URL(url);assert([A,B].includes(parsed.origin),'No external fixture request');

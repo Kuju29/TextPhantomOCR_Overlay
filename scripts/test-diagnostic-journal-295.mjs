@@ -4,11 +4,28 @@ import fs from 'node:fs';
 const checks=[];let moduleNo=0;
 const done=name=>checks.push({name,passed:true});
 const settle=async()=>{for(let n=0;n<8;n++)await new Promise(r=>setImmediate(r));};
-const fresh=()=>import(`../src/shared/log-sink.js?test=${++moduleNo}`);
+// 10494: these cases are about a user who switched "Send diagnostic logs" on.
+const fresh=async({allowed=true}={})=>{const s=await import(`../src/shared/log-sink.js?test=${++moduleNo}`);s.setDiagnosticsUploadAllowed(allowed);return s;};
 let db={},writes=0;
 globalThis.chrome={storage:{local:{async get(key){return {[key]:structuredClone(db[key])};},async set(data){writes++;db={...db,...structuredClone(data)};}}}};
 let payloads=[];
 globalThis.fetch=async(_url,opt)=>{payloads.push(JSON.parse(opt.body));return{ok:true,json:async()=>({ok:true})};};
+{
+ // Default (switch off): nothing is recorded, kept or sent, even when the API accepts logs.
+ db={tpDiagnosticJournalV1:{base:'http://localhost:7860',records:[{t:Date.now(),run:'old',n:1,event:'old'}],dropped:0,enabled:true,updatedAt:Date.now()}};
+ const s=await fresh({allowed:false});await s.initializeLogJournal('http://localhost:7860');
+ s.setLogShippingEnabled(true,()=> 'http://localhost:7860','http://localhost:7860',{authoritative:true});
+ s.recordLogLine({diagnostic:true,event:'off.by.default'});await s.flushLogs();await s.persistLogJournal();
+ assert.equal(payloads.length,0);assert.equal(s.logShippingState().pending,0);assert.equal(s.logShippingState().userAllowed,false);
+ assert.deepEqual(db.tpDiagnosticJournalV1.records,[]);
+ s.setDiagnosticsUploadAllowed(true);s.recordLogLine({diagnostic:true,event:'after.switch.on'});await s.flushLogs();
+ assert.equal(payloads.length,1);assert.deepEqual(payloads[0].records.map(r=>r.event),['after.switch.on']);
+ s.setDiagnosticsUploadAllowed(false);s.recordLogLine({diagnostic:true,event:'after.switch.off'});await s.flushLogs();
+ assert.equal(payloads.length,1);assert.equal(s.logShippingState().pending,0);
+ s.setLogShippingEnabled(false,null,'http://localhost:7860');await s.persistLogJournal();
+ db={};payloads=[];
+ done('Diagnostics switch off (default): nothing recorded, kept or shipped; on ships; off again stops');
+}
 {
  const s=await fresh();await s.initializeLogJournal('http://localhost:7860');
  s.recordLogLine({diagnostic:true,event:'otp.click',email:'private@example.com',otp_code:'123456',body:'PRIVATE-SENTINEL',token:'PRIVATE-SENTINEL'});

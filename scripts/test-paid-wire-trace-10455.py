@@ -22,10 +22,12 @@ _parser.add_argument("--app-root", type=Path,
 _options, _unittest_args = _parser.parse_known_args()
 sys.argv = [sys.argv[0], *_unittest_args]
 sys.path.insert(0, str(_options.app_root.resolve() / "api"))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 os.environ["TP_CENTER_URL"] = "https://center.fixture.invalid"
 os.environ["TP_LOG_FILE"] = "0"
 
 import httpx
+from paid_center_fake import reset_protocol_cache, with_healthz
 from backend.ai import accounting, wire_trace
 from backend.ai.clients.provider_error import ProviderTransportError
 from backend.ai.provider_contract import GenerationRequest
@@ -88,20 +90,21 @@ class PaidWireTraceTests(unittest.TestCase):
             self.assertEqual(request.headers["authorization"], "Bearer " + CUSTOMER_KEY)
             outgoing = json.loads(request.content)
             calls.append({"path": request.url.path, "body": outgoing})
-            if request.url.path == "/api/customer/chat/receipt":
-                self.assertEqual(len(outgoing["operation_id"]), 64)
-                self.assertNotIn(CUSTOMER_KEY, outgoing["operation_id"])
-                return httpx.Response(200, json={"found": True, "result": response_body}
-                                      if replay else {"found": False})
-            if request.url.path == "/api/customer/price-quote":
-                self.assertEqual(outgoing["expected_quote_token"],
-                                 "synthetic-click-approved-token")
-                return httpx.Response(200, json={"quote_token": "synthetic-current-token"})
+            # No separate receipt or price-quote hop: the chat route admits the
+            # current route atomically and performs the owned replay itself.
             self.assertEqual(request.url.path, "/api/customer/chat/completions")
+            self.assertEqual(len(outgoing["operation_id"]), 64)
+            self.assertNotIn(CUSTOMER_KEY, outgoing["operation_id"])
             self.assertNotIn("price_quote_token", outgoing)  # Center admits the current route atomically.
-            self.assertEqual(outgoing["max_tokens"], 2048)
+            # Paid sends the same workload output budget Manual would (prepare_payload).
+            manual = cloud_paid.prepare_payload(self.request())
+            self.assertEqual(outgoing["max_tokens"],
+                             max(64, min(32768, manual.get("max_completion_tokens", manual.get("max_tokens")))))
             if raw_body is not None:
                 return httpx.Response(status, content=raw_body)
+            if replay:
+                return httpx.Response(status, json={**response_body, "operation_replayed": True},
+                                      headers={"x-tp-operation-replayed": "true"})
             return httpx.Response(status, json=response_body)
 
         def faulty_open(path, mode="r", *args, **kwargs):
@@ -124,8 +127,9 @@ class PaidWireTraceTests(unittest.TestCase):
             folder = wire_trace.active_folder()
             result = failure = None
             try:
+                reset_protocol_cache()  # + the Paid protocol health read (shared fake)
                 with patch.object(cloud_paid.httpx, "Client", side_effect=lambda **kw:
-                        real_client(transport=httpx.MockTransport(handle), **kw)), \
+                        real_client(**{**kw, "transport": httpx.MockTransport(with_healthz(handle))})), \
                         patch.object(accounting, "mark_dispatched",
                                      wraps=accounting.mark_dispatched) as dispatched, \
                         (patch.object(Path, "open", faulty_open)
@@ -149,8 +153,7 @@ class PaidWireTraceTests(unittest.TestCase):
 
     def assert_calls(self, outcome, *, replay=False, dispatch=1):
         self.assertEqual([row["path"] for row in outcome["calls"]],
-                         ["/api/customer/chat/receipt"] if replay else [
-                             "/api/customer/chat/receipt", "/api/customer/chat/completions"])
+                         ["/api/customer/chat/completions"])
         self.assertEqual(outcome["dispatchCount"], dispatch)
 
     def assert_success(self, outcome, *, text=VISIBLE, replay=False):
@@ -210,8 +213,12 @@ class PaidWireTraceTests(unittest.TestCase):
         outcome = self.invoke(replay=True, body=self.completion(text), prime_previous_secret=True)
         self.assert_success(outcome, text=text, replay=True)
         self.assert_safe_capture(outcome, visible=text.replace(CUSTOMER_KEY, "<redacted>"))
-        self.assertEqual(json.loads(outcome["artifacts"]["04_provider_request.json"]),
-                         {"status": "not_reached"})
+        # The replay now comes back from the Center chat route itself, so the
+        # request to the Center is recorded (redacted) though no AI was dispatched.
+        request = json.loads(outcome["artifacts"]["04_provider_request.json"])
+        self.assertEqual(request["url"], "https://center.fixture.invalid/api/customer/chat/completions")
+        self.assertEqual(request["headers"]["Authorization"], "<redacted>")
+        self.assertNotIn("SYNTHETIC_OLD_SECRET", "\n".join(outcome["artifacts"].values()))
 
     def test_trace_off_creates_no_files_and_preserves_result_and_requests(self):
         captured = self.invoke()

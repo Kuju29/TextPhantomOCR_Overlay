@@ -1,4 +1,8 @@
 """Independent real-DOM chat checks with offline API/storage fixtures only."""
+import sys as _tp_sys
+from pathlib import Path as _TpPath
+_tp_sys.path.insert(0, str(_TpPath(__file__).resolve().parent / 'lib'))
+from chromium_path import chromium_executable  # the one shared Chromium resolver
 import asyncio, hashlib, json, threading, os, tempfile, traceback, uuid, time
 from pathlib import Path
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -25,13 +29,14 @@ results=[]
 INIT="""window.__handlers=[]; window.__runtimeHandlers=[];window.__runtimeRequests=[];window.__supportConfigured=true;
 window.__emitStorage=(changes)=>__handlers.forEach(fn=>fn(changes,'local'));
 window.__emitRuntime=(message)=>Promise.all(__runtimeHandlers.map(fn=>new Promise(resolve=>{const pending=fn(message,{id:'qa-support'},resolve);if(pending!==true)resolve();})));
-globalThis.chrome={runtime:{id:'qa-support',lastError:null,getManifest:()=>({version:'qa-support'}),getURL:path=>location.origin+'/'+path,onMessage:{addListener:fn=>__runtimeHandlers.push(fn),removeListener:fn=>window.__runtimeHandlers=__runtimeHandlers.filter(item=>item!==fn)},sendMessage:(msg,cb)=>{__runtimeRequests.push(msg);if(msg.type==='TP_SUPPORT_CHANNEL'){_supportChannel().then(channel=>cb?.({channel}));return;}if(msg.type==='TP_SUPPORT_TAB_VIEW'){_supportTabView(msg).then(value=>cb?.(value));return;}cb?.(msg.type==='TP_SUPPORT_CONFIG'?{configured:__supportConfigured}:{ok:true});}},
+globalThis.chrome={runtime:{id:'qa-support',lastError:null,getManifest:()=>({version:'qa-support'}),getURL:path=>location.origin+'/'+path,onMessage:{addListener:fn=>__runtimeHandlers.push(fn),removeListener:fn=>window.__runtimeHandlers=__runtimeHandlers.filter(item=>item!==fn)},sendMessage:(msg,cb)=>{__runtimeRequests.push(msg);if(msg.type==='TP_SUPPORT_CHANNEL'){_supportChannel().then(channel=>cb?.({channel}));return;}if(msg.type==='TP_SUPPORT_TAB_VIEW'){_supportTabView(msg).then(value=>cb?.(value));return;}if(msg.type==='TP_SUPPORT_AUTH'){_storageGet(['paidSessionToken','tpDataConsentV1']).then(saved=>cb?.({authenticated:__supportConfigured&&saved?.tpDataConsentV1?.granted===true&&Boolean(saved?.paidSessionToken)}));return;}cb?.(msg.type==='TP_SUPPORT_CONFIG'?{configured:__supportConfigured}:{ok:true});}},
 storage:{local:{get:(keys,cb)=>_storageGet(keys).then(cb),set:(patch,cb)=>_storageSet(patch).then(()=>cb?.()),remove:(keys,cb)=>_storageRemove(keys).then(()=>cb?.())},onChanged:{addListener:fn=>__handlers.push(fn),removeListener:fn=>window.__handlers=__handlers.filter(item=>item!==fn)}},
 tabs:{query:(_opts,cb)=>cb([{id:10}]),create:(opts,cb)=>{window.__createdTab=opts;cb?.({id:11});},update:(id,opts,cb)=>{window.__updatedTab={id,...opts};cb?.({id});},sendMessage:(_id,msg,cb)=>{window.__tabMessage=msg;cb?.({ok:true});}}};"""
 
 async def fixture(browser,dock=False,disabled=False,extra=None,handler=None):
     ctx=await browser.new_context(viewport={'width':390,'height':650})
-    store={'customApiUrl':BASE,'paidApiBase':BASE,'paidSessionToken':TOKEN,'paidEmail':'customer@example.com',
+    # 10495: the customer already allowed data use (the account gate is tested in test-account-gate-10495.mjs).
+    store={'tpDataConsentV1':{'version':1,'granted':True,'at':1},'customApiUrl':BASE,'paidApiBase':BASE,'paidSessionToken':TOKEN,'paidEmail':'customer@example.com',
         'aiServiceMode':'manual','aiProvider':'ollama','aiModel':'gemma4:e2b','aiPrompt':'private prompt',**(extra or {})}
     requests=[]
     async def get(_source,keys):
@@ -238,15 +243,30 @@ async def run(browser):
     await check('Identity change removes old-file retry closures and filenames',stale_upload)
     async def reply_badge_only():
         scope=hashlib.sha256((BASE+'\0'+TOKEN).encode()).hexdigest()[:32]
-        c,p,s,requests,_,_=await fixture(browser,extra={'supportActivated':True,'supportDockView':'minimized','supportNotification':'open'})
+        c,p,s,requests,state,_=await fixture(browser,extra={'supportActivated':True,'supportDockView':'minimized','supportNotification':'open'})
         host=await c.new_page();await host.goto(BASE.replace('localhost','127.0.0.1')+'/support-host-fixture');requests.clear()
         await host.add_script_tag(path=str(ROOT/'content/support-dock.js'));await host.locator('#tp-support-dock').wait_for()
         for _ in range(50):
             if any('/support/chat.html' in f.url for f in host.frames):break
             await host.wait_for_timeout(100)
         frame=await dock_frame(host);await frame.locator('#minimized').wait_for(state='visible')
+        # The dock forwards a notice only once its frame reported ready; the first
+        # private command (it asks for the channel) marks that point deterministically.
+        await host.wait_for_function('__runtimeRequests.some(m=>m.type==="TP_SUPPORT_CHANNEL")')
+        # ...and the launcher's first account read has stored its (older) unread state,
+        # so that read cannot land after the notice below.
+        for _ in range(50):
+            if (s.get('supportUnread') or {}).get('scope')==scope:break
+            await host.wait_for_timeout(100)
+        assert (s.get('supportUnread') or {}).get('scope')==scope,'Launcher never synced its unread state'
+        # The server and the stored hint agree (a launcher refresh re-renders the badge from /paid/support).
+        state['thread'].update(unread=3,last_seq=4,last_admin_seq=4)
         s['supportUnread']={'scope':scope,'unread':3,'lastSeq':4};await host.evaluate('__emitRuntime({type:"TP_SUPPORT_NOTICE"})')
         await frame.wait_for_function('document.getElementById("unread").textContent==="3"')
+        for _ in range(50):
+            if s.get('supportNoticeSeen')==scope+':4':break
+            await host.wait_for_timeout(100)
+        assert s.get('supportNoticeSeen')==scope+':4','The reply notice was not handled by the private frame'
         assert not await frame.locator('#expanded').is_visible() and not await frame.locator('#preview').is_visible()
         assert not any('/messages' in r['url'] or '/action' in r['url'] for r in requests),'Unread reply fetched/read despite collapsed chat'
         color_scheme=await frame.evaluate('getComputedStyle(document.documentElement).colorScheme')
@@ -393,7 +413,9 @@ async def run(browser):
         await host.screenshot(path=str(OUT/'dock-desktop-download.png'));await c.close()
     await check('Desktop Download and private chat remain expanded side by side without overlap',dock_desktop_download)
     async def support_popup_tools():
-        c,p,s,req,*_=await fixture(browser,disabled=True,extra={'paidSessionToken':'','paidApiBase':'','supportDockHidden':True,'supportChatMuted':{'scope':'old'},'aiServiceMode':'manual'})
+        # Contact admin is offered only to a signed-in Paid customer (popup-entry.js:
+        # an authenticated /paid/support read), in any AI mode, with explicit configuration.
+        c,p,s,req,*_=await fixture(browser,disabled=True,extra={'supportDockHidden':True,'supportChatMuted':{'scope':'old'},'aiServiceMode':'manual'})
         await c.route('**/popup/popup.js',lambda route:route.fulfill(status=200,content_type='application/javascript',body='// Other popup controllers are tested independently.'))
         popup=await c.new_page();await popup.set_viewport_size({'width':420,'height':900})
         await popup.goto(BASE+'/popup/popup.html');await popup.locator('#tab-tools').click()
@@ -407,9 +429,11 @@ async def run(browser):
         await popup.evaluate('__supportConfigured=true;__emitStorage({supportConfiguration:{newValue:{configured:true}}});window.close=()=>window.__closed=true');await contact.wait_for(state='visible')
         await contact.click();await popup.wait_for_timeout(100)
         assert s['supportActivated'] is True and s['supportDockHidden'] is False and s['supportChatMuted'] is None
-        assert s['aiServiceMode']=='manual' and s['aiProvider']=='ollama' and s['aiPrompt']=='private prompt' and not s['paidSessionToken']
+        assert s['aiServiceMode']=='manual' and s['aiProvider']=='ollama' and s['aiPrompt']=='private prompt' and s['paidSessionToken']==TOKEN
         assert await popup.evaluate('__runtimeRequests.some(m=>m.type==="TP_SUPPORT_SHOW")')
         assert not await popup.evaluate('Boolean(window.__createdTab || window.__updatedTab)')
+        # Signing out hides the entry again (configuration alone is not a customer sign-in).
+        s['paidSessionToken']='';await popup.evaluate('__emitStorage({paidSessionToken:{oldValue:"a".repeat(64),newValue:""}})');await contact.wait_for(state='hidden')
         await c.close()
     await check('Tools has one plain Contact below Reset only explicit configuration; click preserves Manual/login',support_popup_tools)
     async def admin_unconfigured_exclusion():
@@ -611,11 +635,14 @@ async def run(browser):
             await popup.screenshot(path=str(OUT/'popup-failure.png'),full_page=True)
             raise
         assert not errors,errors
-        try:await popup.wait_for_function('document.querySelector("#ai-model").value==="qa/chat-translator" && document.querySelector("#ai-model-wrap").innerText.includes("Explicit test passed")',timeout=6000)
+        # .91: selecting/restoring a Manual model sends no test request; the resolved catalogue makes it usable.
+        try:await popup.wait_for_function('document.querySelector("#ai-model").value==="qa/chat-translator" && !document.querySelector("#ai-model").disabled',timeout=6000)
         except Exception:
             print('READY_DIAGNOSTIC',await popup.evaluate('({keyLength:document.querySelector("#ai-key").value.length,provider:document.querySelector("#ai-provider").value,model:document.querySelector("#ai-model").value,modelText:document.querySelector("#ai-model-wrap").innerText,title:document.querySelector("#api-status-emoji").title,requests:__runtimeRequests})'),'ERRORS',errors,'API',api_requests,flush=True)
             raise
-        await popup.locator('#tab-tools').click();await popup.locator('#contact-admin').wait_for(state='visible')
+        await popup.locator('#tab-tools').click();await popup.locator('#reset-defaults').wait_for(state='visible')
+        # Signed out (Manual only): Contact admin is not offered; Tools stays usable.
+        await popup.wait_for_timeout(200);assert await popup.locator('#contact-admin').is_hidden()
         assert not await popup.locator('#local-picker').is_disabled() if await popup.locator('#local-picker').count() else not await popup.locator('#reset-defaults').is_disabled()
         assert await popup.locator('#mode').input_value()=='lens_text' and await popup.locator('#sources').input_value()=='ai'
         await popup.wait_for_timeout(250);await popup.screenshot(path=str(OUT/'tools-10423-real-controller.png'),full_page=True)
@@ -624,7 +651,7 @@ async def run(browser):
         assert await popup.locator('#ai-model').input_value()=='qa/chat-translator' and not await popup.locator('#ai-model').is_disabled()
         await popup.wait_for_timeout(300);await popup.screenshot(path=str(OUT/'ai-10423-real-controller.png'),full_page=True)
         await popup.locator('#ai-page-image').scroll_into_view_if_needed();await popup.screenshot(path=str(OUT/'ai-10423-memory-image.png'),full_page=True)
-        assert '/health' in api_requests and '/meta' in api_requests and not errors,{'requests':api_requests,'errors':errors}
+        assert '/health' in api_requests and '/meta' in api_requests and '/ai/probe' not in api_requests and not errors,{'requests':api_requests,'errors':errors}
         assert s['aiServiceMode']=='manual' and not s['paidSessionToken']
         await c.close()
     await check('Actual popup controller hydrates and operates Tools and AI fields with offline browser/API fixtures',actual_popup_controller,timeout=25)
@@ -689,7 +716,7 @@ async def run(browser):
 
 async def main():
     async with async_playwright() as p:
-        browser_path=os.getenv('TP_QA_CHROMIUM')
+        browser_path=chromium_executable()
         browser=await p.chromium.launch(**({'executable_path':browser_path} if browser_path else {}),headless=True,args=['--no-sandbox'])
         await run(browser);await browser.close()
     server.shutdown(); OUT.mkdir(parents=True,exist_ok=True)

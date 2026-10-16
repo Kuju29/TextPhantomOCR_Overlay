@@ -12,6 +12,29 @@
     "service_worker": "background/index.js",
     "type": "module"
   },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "processors/*.js",
+        "processors/render/*.js",
+        "shared/lens-document.js",
+        "shared/ai-markers.js",
+        "shared/ai-source-filter.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    },
+    {
+      "resources": [
+        "support/chat.html"
+      ],
+      "matches": [
+        "<all_urls>"
+      ],
+      "use_dynamic_url": true
+    }
+  ],
   "action": {
     "default_title": "TextPhantom",
     "default_popup": "popup/popup.html",

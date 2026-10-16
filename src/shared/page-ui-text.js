@@ -13,6 +13,12 @@
     "🔍 Translate this image": "🔍 แปลภาพนี้",
     "🔍 Translate all images on page": "🔍 แปลภาพทั้งหมดในหน้านี้",
     "Open TextPhantom": "เปิด TextPhantom",
+    // 10495: data-use consent missing (Paid, Login, chat): the consent tab was
+    // opened, nothing was sent. Same Thai as shared/privacy-content.js.
+    "Allow data use first. A permission tab is open. Nothing was sent and no credits were used.":
+      "ต้องอนุญาตข้อมูลก่อน เปิดแท็บขออนุญาตให้แล้ว ยังไม่ได้ส่งคำขอและไม่หักเครดิต",
+    "Data use was turned off. Account work stopped; finished translations stay.":
+      "ยกเลิกการอนุญาตข้อมูลแล้ว งานที่ใช้บัญชีหยุดแล้ว ผลที่แปลเสร็จยังอยู่",
     "Open translation controls": "เปิดปุ่มควบคุมการแปล",
     "🔍 Translate all": "🔍 แปลทั้งหน้า",
     "Translate all images on this page": "แปลภาพทั้งหมดในหน้านี้",

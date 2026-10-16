@@ -15,7 +15,7 @@ import { repairCoordinator } from "./repair/coordinator.js";
 import { generationFingerprint, resultCache, resultCacheKey } from "./result-cache.js";
 // Orchestrates a translation job from enqueue through submit, result handling and batch finalisation.
 import { createLogger, setLogLevel } from "../shared/logger.js";
-import { setLogShippingEnabled } from "../shared/log-sink.js";
+import { setLogShippingEnabled, diagnosticsUploadAllowed } from "../shared/log-sink.js";
 import { getApiBase } from "./api.js";
 import {
   ensureBatch,
@@ -132,6 +132,8 @@ import {
 import { createBatchRetryCoordinator } from "./jobs/batch-retry.js";
 import { createResultDelivery } from "./jobs/result-delivery.js";
 import { cancelBatchProviderViaRest } from "./jobs/cancellation.js";
+import { traceUnitLayout } from "./jobs/unit-layout-trace.js";
+import { deliverCachedResult } from "./jobs/result-cache-replay.js";
 
 export { bumpSettingsEpoch, markDomainNeedsDataUri, setCurrentBatchId };
 
@@ -139,81 +141,6 @@ const log = createLogger("SW.jobs");
 const reportFailure = (message, error, details = {}, traceId = "") =>
   reportTranslationFailure(log, (event, data, id) =>
     traceNote("background/jobs.js", event, data, id), message, error, details, traceId);
-
-// Structural trace only: IDs, reading order and geometry. Never include OCR
-// or translated strings, so TP_TRACE can diagnose reversal and rotation signs
-// without exporting page dialogue.
-function traceUnitLayout(doc, traceId, phase, imageId = "") {
-  if (!traceId) return;
-  const paragraphs = Array.isArray(doc?.paragraphs) ? doc.paragraphs : [];
-  const paragraphById = new Map(
-    paragraphs.map((paragraph) => [String(paragraph?.id || ""), paragraph]),
-  );
-  const groupByMember = new Map();
-  for (const group of Array.isArray(doc?.canonicalOriginalTree?.paragraphs)
-    ? doc.canonicalOriginalTree.paragraphs
-    : []) {
-    for (const id of group?.source?.documentParagraphIds || [])
-      groupByMember.set(String(id), group);
-  }
-  const units = translationUnits(doc);
-  for (let offset = 0; offset < units.length; offset += 10) {
-    traceNote(
-      "background/jobs.js",
-      "unitLayout",
-      {
-        phase,
-        imageId: String(imageId || ""),
-        offset,
-        units: units.slice(offset, offset + 10).map((unit, localIndex) => {
-          const paragraphIds = (unit?.paragraphIds || []).map(String);
-          const group = paragraphIds
-            .map((id) => groupByMember.get(id))
-            .find(Boolean);
-          const members = paragraphIds.map((paragraphId) => {
-            const paragraph = paragraphById.get(paragraphId);
-            const rotations = (paragraph?.items || paragraph?.lensItems || [])
-              .map((item) => Number(item?.box?.rotation_deg ?? item?.rotation))
-              .filter(Number.isFinite);
-            return {
-              paragraphId,
-              inputRotations: rotations,
-              inputSigns: rotations.map((rotation) => Math.sign(rotation)),
-            };
-          });
-          const memberRotations = members.flatMap(
-            (member) => member.inputRotations,
-          );
-          const groupRotation = Number(group?.rotation);
-          // Groups carry the server-selected output rotation. Ungrouped units
-          // preserve Lens geometry, so the first finite member rotation is the
-          // renderer's input rather than reporting an unhelpful null.
-          const outputRotation = Number.isFinite(groupRotation)
-            ? groupRotation
-            : memberRotations[0];
-          return {
-            index: offset + localIndex,
-            id: String(unit?.id || ""),
-            paragraphIds,
-            readingOrder: paragraphIds,
-            members,
-            direction: String(group?.direction || ""),
-            outputRotation: Number.isFinite(outputRotation)
-              ? outputRotation
-              : null,
-            outputSign: Number.isFinite(outputRotation)
-              ? Math.sign(outputRotation)
-              : null,
-            outputRotationSource: Number.isFinite(groupRotation)
-              ? "group"
-              : "lens",
-          };
-        }),
-      },
-      traceId,
-    );
-  }
-}
 
 // Advances the canonical per-image progress record for a registered job.
 // Keeping this lookup here lets stage owners report their real boundary without
@@ -608,35 +535,8 @@ async function processJobInner(payload, tabId, frameId = 0) {
     ...extra,
   });
 
-  if (cacheKey) {
-    const hit = resultCache.get(cacheKey);
-    traceNote("background/jobs.js", "resultCache", {
-      outcome: hit ? "hit" : "miss", imageId: imageKey, batchId,
-      identity: cacheKey.slice(0, cacheKey.indexOf(":")), mode: payload?.mode || "",
-      ...(hit ? { imageOmitted: hit.imageOmitted, bytes: hit.bytes, providerCalls: 0, usageRecorded: false } : {}),
-    }, traceId);
-    if (hit) {
-      // Same image + same effective settings: reuse the finished result. No
-      // Lens/AI request, no usage receipt or charge, and no Conversation
-      // history append (the page never reaches the provider path).
-      const jobId = crypto.randomUUID();
-      rememberJob(jobId, makeContext({ startedAt: Date.now(), transport: "result_cache", resultCacheHit: true }));
-      await wf.lensRequested(workflowId, `result-cache:${jobId}`);
-      await wf.lensReady(workflowId);
-      await wf.textReady(workflowId);
-      if (batchId && imageKey) {
-        // Repair has nothing to do for a reused page (a repaired result
-        // replaces the cached text when repair applies it).
-        await repairCoordinator.capture(batchId, { stage: "skipped", imageId: imageKey, jobId, reason: "result_cache_hit" });
-        markBatchInitialAi(batchId, imageKey);
-      }
-      // The cached result carries the first job's ids; this delivery belongs
-      // to the current image/batch.
-      hit.result.metadata = { ...(hit.result.metadata || {}), ...(payload.metadata || {}) };
-      await handleResult(jobId, hit.result);
-      return;
-    }
-  }
+  if (cacheKey && await deliverCachedResult({ cacheKey, payload, imageKey, batchId, workflowId,
+    traceId, makeContext, handleResult })) return;
 
   // Reuse the trace stamped before acquisition for capability/engine routing.
   setTrace(traceId);
@@ -653,11 +553,14 @@ async function processJobInner(payload, tabId, frameId = 0) {
   // Configure tracing from this API response before emitting a first-job
   // compatibility stop. Otherwise that event is lost until the second job.
   setLogLevel(caps.consoleLevel || "warn");
+  // 10494: diagnostics leave the browser only when the user switched them on
+  // (log-sink also enforces it) AND the API accepts them. Translation is the
+  // same either way.
   setLogShippingEnabled(caps.logFile !== false, getApiBase, base, {
     authoritative: caps.logFile === true,
   });
   setTracingEnabled(
-    caps.trace,
+    caps.trace === true && diagnosticsUploadAllowed(),
     getApiBase,
     caps.traceDetail,
     caps.traceSession,
@@ -711,16 +614,7 @@ async function processJobInner(payload, tabId, frameId = 0) {
     return;
   }
   applyRuntimeCapacityHints(caps, payload);
-  await sendToTab(
-    tabId,
-    {
-      type: "TP_DIAGNOSTICS_STATE",
-      enabled: caps.trace,
-      detail: caps.traceDetail,
-      consoleLevel: caps.consoleLevel || "warn",
-    },
-    frameId,
-  );
+  await sendDiagnosticsState(tabId, caps, frameId);
 
   traceNote(
     "background/jobs.js",
@@ -783,6 +677,12 @@ async function processJobInner(payload, tabId, frameId = 0) {
         ),
     },
   );
+}
+
+// Tells the page which diagnostics this API run reports.
+function sendDiagnosticsState(tabId, caps, frameId) {
+  return sendToTab(tabId, { type: "TP_DIAGNOSTICS_STATE", enabled: caps.trace,
+    detail: caps.traceDetail, consoleLevel: caps.consoleLevel || "warn" }, frameId);
 }
 
 function payloadForFullServer(payload) {

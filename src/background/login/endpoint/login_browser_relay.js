@@ -210,8 +210,21 @@ export function relayJobKind(job) {
 
 const pumps = new Map();
 
+// 10495: the pump's token came from the account gate; a withdrawn consent
+// aborts the poll in flight and stops the pump (row.gate).
+function joined(signal, gate) {
+  if (!gate) return signal;
+  if (typeof AbortSignal.any === 'function') return AbortSignal.any([signal, gate]);
+  const controller = new AbortController();
+  for (const source of [signal, gate]) {
+    if (source.aborted) { controller.abort(source.reason); break; }
+    source.addEventListener('abort', () => controller.abort(source.reason), {once: true});
+  }
+  return controller.signal;
+}
 async function post(pumpRow, path, body, signal) {
-  const response = await fetch(pumpRow.base + path, {method: 'POST', cache: 'no-store', credentials: 'omit', redirect: 'error', signal,
+  if (pumpRow.gate?.aborted) throw pumpRow.gate.reason || new Error('account locked');
+  const response = await fetch(pumpRow.base + path, {method: 'POST', cache: 'no-store', credentials: 'omit', redirect: 'error', signal: joined(signal, pumpRow.gate),
     headers: {Authorization: 'Bearer ' + pumpRow.token, 'Content-Type': 'application/json'}, body: JSON.stringify(body)});
   if (!response.ok) throw Object.assign(new Error('relay ' + response.status), {status: response.status});
   return response.json();
@@ -227,7 +240,7 @@ async function answer(row, job) {
   const body = {id: job.id, ...(result.error ? {error: result.error, ...(detail ? {detail} : {})} : {status: result.status, content_type: result.content_type || '',
     headers: result.headers || {}, body: result.body || ''}), elapsed_ms: elapsed};
   let accepted = null;
-  for (let attempt = 0; attempt < 3 && accepted === null; attempt++) {
+  for (let attempt = 0; attempt < 3 && accepted === null && !row.gate?.aborted; attempt++) {
     try { accepted = (await post(row, '/login/relay/result', body, AbortSignal.timeout(30000)))?.accepted === true; }
     catch { await sleep(500 * (attempt + 1)); }
   }
@@ -251,16 +264,16 @@ async function answer(row, job) {
 
 async function loop(key, row) {
   let failures = 0;
-  while (row.refs > 0) {
+  while (row.refs > 0 && !row.gate?.aborted) {
     try {
-      // A poll that is in flight is never aborted: the API may already have
-      // handed it a job, and an aborted fetch would drop that answer while the
-      // job stays claimed and the run waits for nothing.
+      // A poll that is in flight is not aborted on release: the API may already
+      // have handed it a job, and an aborted fetch would drop that answer while
+      // the job stays claimed. Only a withdrawn data-use consent aborts it.
       const data = await post(row, '/login/relay/poll', {wait_ms: POLL_WAIT_MS}, AbortSignal.timeout(POLL_WAIT_MS + 10000));
       failures = 0;
       if (data?.job) void answer(row, data.job);
     } catch (error) {
-      if (row.refs <= 0) break;
+      if (row.refs <= 0 || row.gate?.aborted) break;
       // 401/403: the TextPhantom session is not allowed; the request that
       // started this pump fails on its own. Back off instead of hammering.
       failures++;
@@ -268,6 +281,7 @@ async function loop(key, row) {
     }
   }
   row.running = false;
+  if (row.gate?.aborted) { if (pumps.get(key) === row) pumps.delete(key); return; }
   // Acquired again while the last poll was finishing: keep going with this row.
   if (row.refs > 0) { row.running = true; void loop(key, row); return; }
   if (pumps.get(key) === row) pumps.delete(key);
@@ -276,12 +290,15 @@ async function loop(key, row) {
 /** Keep a relay pump running while a Login request may need the website tab.
  * Returns a release function; the pump stops after its current poll once the
  * last holder releases. */
-export function acquireBrowserRelay(base, token) {
+// `gate`: the account gate's revocation signal (the token came from the gate);
+// it aborts the poll in flight and stops the pump when consent is withdrawn.
+export function acquireBrowserRelay(base, token, {gate = null} = {}) {
   base = String(base || '').replace(/\/+$/, '');
-  if (!base || !token) return () => {};
+  if (!base || !token || gate?.aborted) return () => {};
   const key = base + '\n' + token;
   let row = pumps.get(key);
-  if (!row) { row = {base, token, refs: 0, running: false}; pumps.set(key, row); }
+  if (row && gate && (!row.gate || row.gate.aborted)) row.gate = gate;
+  if (!row) { row = {base, token, refs: 0, running: false, gate}; pumps.set(key, row); }
   row.refs++;
   if (!row.running) { row.running = true; void loop(key, row); }
   let released = false;

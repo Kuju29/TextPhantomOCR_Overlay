@@ -177,7 +177,8 @@
       chrome.runtime.sendMessage({ type: "TP_RUN_TRANSLATE_ONE", srcUrl }, (resp) => {
         try { if (chrome.runtime.lastError) { unavailable(); return; } } catch { unavailable(); return; }
         setTimeout(reset, 4000);
-        if (resp?.ok === false) TP.showToast?.("TextPhantom: " + (resp.error || pageText("translate failed")), 4000);
+        // The background already toasted this error on the page (one message).
+        if (resp?.ok === false && resp.shown !== true) TP.showToast?.("TextPhantom: " + (resp.error || pageText("translate failed")), 4000);
       });
     } catch { unavailable(); }
 

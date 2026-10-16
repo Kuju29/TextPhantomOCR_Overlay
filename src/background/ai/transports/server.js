@@ -22,6 +22,7 @@ import {
   manualModelFailureCode, rememberManualModelFailure,
 } from "../../../shared/ai/manual-model-block.js";
 import { recordPaidRouteOutcome } from "../../../shared/paid-route-outcome.js";
+import { accountRequestGate, withAccountSignal, revokedRequestError } from "../../../shared/account-gate.js";
 
 /** Read only the negotiated transport envelope; model output is never reparsed here. */
 export async function readAiStream(response, onDelta, onPhase = null) {
@@ -104,6 +105,11 @@ export async function translateViaServer(
   const usageStartedAt = Date.now();
   const apiBase = String(base || "").replace(/\/+$/, "");
   if (!apiBase) throw new Error("server AI route has no API base URL");
+  // 10495: Paid and Login send the TextPhantom account token. Every request
+  // asks the account gate first (nothing is sent without data-use consent) and
+  // aborts at once when consent is withdrawn.
+  const accountGate = await accountRequestGate(ai?.provider);
+  if (accountGate) signal = withAccountSignal(signal);
 
   // Manual (own key) models are not probed when selected (10491). A model that
   // already failed deterministically for this key is not sent again until the
@@ -314,6 +320,9 @@ export async function translateViaServer(
       modelFallback: false,
       schemaFallback: false,
     });
+    if (cancelled && accountGate?.aborted) {
+      throw revokedRequestError({requestDispatched:httpAttempts>0});
+    }
     if (cancelled) {
       // DOMException.code is read-only in browsers. Do not mask AbortError with
       // a TypeError while annotating cancellation evidence.
@@ -377,6 +386,10 @@ export async function translateViaServer(
         usageStatus:"unconfirmed_transport", automaticContentRetry:false,
         automaticTransportRetry:false, modelFallback:false, schemaFallback:false,
       });
+      // 10495: consent withdrawn while the answer streamed. The abort is not a
+      // tab cancellation: the page gets the revoked message (not a silent stop).
+      if (accountGate?.aborted) throw Object.assign(revokedRequestError({requestDispatched:true}),
+        {generationAttempts:error.generationAttempts, stage:"response_stream"});
       throw error;
     }
     phases.close();

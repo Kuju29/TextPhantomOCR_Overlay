@@ -177,6 +177,17 @@ globalThis.fetch = async (url, options = {}) => {
   }
   throw new Error(`unexpected test request ${href}`);
 };
+// 10494: "Send diagnostic logs to the API server" is off by default — a
+// trace-enabled API gets nothing until the user switches it on.
+const logSink = await import("../src/shared/log-sink.js");
+assert.equal(logSink.diagnosticsUploadAllowed(), false, "diagnostics are off by default");
+const offByDefault = await handshake.ensureTraceHandshake("http://trace-on");
+assert.equal(offByDefault.trace, false, "switch off: the handshake never enables trace shipping");
+trace.traceLine("background/index.js", "localModelDiscovery", "..", { event: "start" }, "switch-off");
+await trace.flushTrace();
+assert.equal(connectRequests.length, 0, "switch off: nothing is shipped to the API");
+handshake.resetTraceHandshakeIdentity();
+logSink.setDiagnosticsUploadAllowed(true);
 trace.traceLine("background/index.js", "localModelDiscovery", "..", { event: "start" }, "connect-before-job");
 const on = await handshake.ensureTraceHandshake("http://trace-on");
 assert.equal(on.known, true);

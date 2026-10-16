@@ -6,7 +6,7 @@ import {userMessageForCode} from '../src/shared/error-contract.js';
 Object.defineProperty(globalThis,'crypto',{value:webcrypto,configurable:true});
 const checks=[];
 const test=async(name,fn)=>{await fn();checks.push({name,passed:true});};
-let saved={customApiUrl:'http://localhost:7860',paidApiBase:'http://localhost:7860',paidSessionToken:'customer-test-session'};
+let saved={tpDataConsentV1:{version:1,granted:true,at:1},customApiUrl:'http://localhost:7860',paidApiBase:'http://localhost:7860',paidSessionToken:'customer-test-session'}; // 10495: this customer allowed data use
 let calls=[],next=()=>new Response(JSON.stringify({ok:true,id:'ord_'+'a'.repeat(32)}),{status:200});
 const client=createAccountClient({read:async()=>({...saved}),write:async p=>Object.assign(saved,p),fetchFn:async(url,options)=>{calls.push([url,options]);return next();}});
 await test('Only secure or loopback saved API targets accepted',()=>{

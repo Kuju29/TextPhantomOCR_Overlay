@@ -163,7 +163,7 @@ const { createPopupUiController } = await import(new URL(
 const thinkingEls = {
   aiProvider: { value: "ollama" }, aiBaseUrl: { value: "http://localhost:11434" }, aiModel: { value: "selected" },
   mode: { value: "lens_text" }, sources: { value: "ai" }, aiThinkingWrap: { style: {} },
-  aiThinking: { value: "off", options: ["off", "on"].map((value) => ({ value })) }, aiThinkingHint: {},
+  aiThinking: { value: "off", options: ["off", "on"].map((value) => ({ value })) }, aiThinkingHint: {}, aiThinkingTip: {},
 };
 const thinkingState = { localAiCapability: selectedCapability };
 const thinkingUi = createPopupUiController({ els: thinkingEls, state: thinkingState, isLocalProvider: () => true,
@@ -192,7 +192,9 @@ assert.equal(thinkingEls.aiThinkingWrap.style.display, "",
   "unknown thinking capability must be distinguishable from unsupported");
 assert.equal(thinkingEls.aiThinking.disabled, true, "no record yet: Checking model…");
 assert.equal(thinkingEls.aiThinking.value, "off");
-assert.match(thinkingEls.aiThinkingHint.textContent, /appear after the selected model is checked/i);
+// 10496: the reason is the highlighted line of the "AI thinking" explanation (hover the name), not inline.
+assert.match(thinkingEls.aiThinkingTip.tipReason, /appear after the selected model is checked/i);
+assert.equal(thinkingEls.aiThinkingHint.textContent, "");
 
 const geminiReasoning = { supported: true, mandatory: false, default_enabled: true, dynamic: true, control: "toggle" };
 const cloudThinkingEls = {

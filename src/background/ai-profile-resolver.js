@@ -1,4 +1,6 @@
 /** Resolves one immutable Provider + Model settings snapshot per job batch. */
+import { dataConsentError } from "../shared/data-consent.js";
+import { readAccountSession, withAccountSignal } from "../shared/account-gate.js";
 import { loginEntry, loginModelUnavailable } from "../shared/login-profile.js";
 import { loginAuthScope } from "../shared/login-auth.js";
 import { paidEntry } from "../shared/paid-profile.js";
@@ -228,6 +230,11 @@ async function paidProfileRead(url, options, fetcher) {
 export async function resolveJobAiProfile(settings, { language = "en" } = {}) {
   if (settings.aiServiceMode !== "paid")
     return resolveManualJobAiProfile(settings, { language });
+  // 10495: Paid and every Login provider use the TextPhantom account. Without
+  // data-use consent nothing is sent (not even the public /meta read) and the
+  // balance is untouched; the account token is read only through the gate.
+  const session = await readAccountSession();
+  if (!session.consent) throw dataConsentError();
   const base = await resolveApiBase();
   if (!base) {
     const error = new Error("Paid requires the TextPhantom API URL");
@@ -251,16 +258,16 @@ export async function resolveJobAiProfile(settings, { language = "en" } = {}) {
     error.code = "PAID_CENTER_UNAVAILABLE";
     throw error;
   }
-  const token = String(settings.paidSessionToken || "").trim();
+  const token = session.ok ? String(session.token).trim() : "";
   const model = String(settings.paidModel || "").trim();
-  if (!token || (settings.paidTranslationSource !== "login" && !model) || normalizeUrl(settings.paidApiBase) !== normalizeUrl(base)) {
+  if (!token || (settings.paidTranslationSource !== "login" && !model) || normalizeUrl(session.base) !== normalizeUrl(base)) {
     const error = new Error("Sign in and select a Paid model in AI option");
     error.code = "PAID_LOGIN_REQUIRED";
     throw error;
   }
   const response = await paidProfileRead(base.replace(/\/+$/, "") + "/paid/me", {
     method: "GET", cache: "no-store", credentials: "omit", redirect: "error",
-    headers: {Authorization: "Bearer " + token}, signal: AbortSignal.timeout(16000),
+    headers: {Authorization: "Bearer " + token}, signal: withAccountSignal(AbortSignal.timeout(16000)),
   }, diagnosticFetch).catch(() => { const error = new Error("Cannot verify your Paid account. No translation was started."); error.code = "PAID_CENTER_UNAVAILABLE"; throw error; });
   if (!response.ok) {
     const error = new Error("Paid account verification failed. Refresh your account in AI option.");
@@ -282,7 +289,7 @@ export async function resolveJobAiProfile(settings, { language = "en" } = {}) {
       // Discover the selected provider under the authenticated Center owner.
       // Popup hydration is presentation, never a prerequisite for translation.
       const response = await diagnosticFetch(apiRoot + "/login/providers", {
-        method:"GET",cache:"no-store",credentials:"omit",redirect:"error",headers:{Authorization:"Bearer "+token},signal:AbortSignal.timeout(16000)});
+        method:"GET",cache:"no-store",credentials:"omit",redirect:"error",headers:{Authorization:"Bearer "+token},signal:withAccountSignal(AbortSignal.timeout(16000))});
       const discovered = await response.json();
       if (!response.ok) throw Object.assign(new Error(discovered?.error?.message || "Could not verify Login connections."), {code:discovered?.error?.code || "LOGIN_UNAVAILABLE"});
       const current = discovered.providers?.find(row => row.id === provider)?.session;
@@ -291,7 +298,7 @@ export async function resolveJobAiProfile(settings, { language = "en" } = {}) {
     };
     const readModels = async id => {
       const res = await diagnosticFetch(apiRoot + "/login/providers/" + provider + "/models?session_id=" + encodeURIComponent(id), {
-        method:"GET",cache:"no-store",credentials:"omit",redirect:"error",headers:{Authorization:"Bearer "+token},signal:AbortSignal.timeout(16000)});
+        method:"GET",cache:"no-store",credentials:"omit",redirect:"error",headers:{Authorization:"Bearer "+token},signal:withAccountSignal(AbortSignal.timeout(16000))});
       return {res, data: await res.json()};
     };
     const fromStorage = /^lgs_[a-f0-9]{48}$/.test(sessionId);

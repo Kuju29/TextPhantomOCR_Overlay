@@ -35,7 +35,51 @@ import { classifyAiRuntime } from "./ai-settings-contract.js";
 import { normalizeEngineModePreference } from "./engine-mode.js";
 import { normalizeUserReasoningPreference } from "./reasoning-preference.js";
 
+import { DIAGNOSTICS_DATA_TYPE, hasDataCollection, invokeNow, markBuiltinConsentUnsupported, usesBuiltinDataConsent } from "./data-consent.js";
+
 // aiProfilesV1 is not read here; readFullSettings() is the compatibility boundary.
+
+/**
+ * "Send diagnostic logs to the API server" (10494). Default OFF: logs and
+ * traces leave the browser only when the user switched this on AND the API
+ * accepts them. Firefox/Thunderbird keep the answer in the built-in
+ * technicalAndInteraction permission (offered at install, changeable here);
+ * other browsers keep it in storage.
+ */
+export const DIAGNOSTICS_UPLOAD_KEY = "diagnosticsUploadV1";
+export const DEFAULT_DIAGNOSTICS_UPLOAD = false;
+
+export async function readDiagnosticsUpload() {
+  if (usesBuiltinDataConsent()) {
+    const granted = await hasDataCollection([DIAGNOSTICS_DATA_TYPE]);
+    // Thunderbird without built-in data consent: the storage switch below.
+    if (usesBuiltinDataConsent()) return granted;
+  }
+  const saved = await getStorage([DIAGNOSTICS_UPLOAD_KEY]);
+  return readBool(saved[DIAGNOSTICS_UPLOAD_KEY], DEFAULT_DIAGNOSTICS_UPLOAD);
+}
+
+/**
+ * Change the switch. Call synchronously from the user's click (the switch, or
+ * the confirm button of its dialog): Firefox asks for technicalAndInteraction
+ * only during a user action. A browser that refuses `data_collection` keeps
+ * the switch in storage.
+ * @returns {Promise<boolean>} the setting now in effect
+ */
+export function writeDiagnosticsUpload(on) {
+  if (usesBuiltinDataConsent()) {
+    const permissions = globalThis.browser?.permissions || globalThis.chrome.permissions;
+    const request = { data_collection: [DIAGNOSTICS_DATA_TYPE] };
+    let changed;
+    try { changed = invokeNow(permissions, on ? "request" : "remove", [request]); }
+    catch { markBuiltinConsentUnsupported(); changed = null; }
+    if (changed) return changed.then(() => readDiagnosticsUpload(), () => {
+      markBuiltinConsentUnsupported();
+      return setStorage({ [DIAGNOSTICS_UPLOAD_KEY]: on === true }).then(() => readDiagnosticsUpload());
+    });
+  }
+  return setStorage({ [DIAGNOSTICS_UPLOAD_KEY]: on === true }).then(() => readDiagnosticsUpload());
+}
 
 /** @returns {"lens_images"|"lens_text"} */
 function normalizeMode(value) {
@@ -160,7 +204,8 @@ export async function readFullSettings(options = {}) {
     "apiLocalUnlimited",
     "engineMode",
     "aiServiceMode",
-    "paidSessionToken",
+    // 10495: the account token is not part of settings; the background reads
+    // it only through shared/account-gate.js (consent first).
     "paidModel",
     "paidApiBase",
     "paidAiProfilesV1", "loginAiProfilesV1", "paidTranslationSource", "loginProvider", "loginModel", "loginSessionId", "loginAccountId", "loginConnectionsV2",
@@ -266,7 +311,6 @@ export async function readFullSettings(options = {}) {
     aiModel,
     aiProvider,
     aiServiceMode: it.aiServiceMode === "paid" ? "paid" : "manual",
-    paidSessionToken: typeof it.paidSessionToken === "string" ? it.paidSessionToken : "",
     paidModel: typeof it.paidModel === "string" ? it.paidModel : "",
     paidApiBase: typeof it.paidApiBase === "string" ? it.paidApiBase : "",
     paidAiProfilesV1: it.paidAiProfilesV1 || {},

@@ -62,7 +62,8 @@ export function createPaymentMonitor({request,onOrder=()=>{},onSettled=()=>{},on
       } catch(e){
         if(!disposed&&!paused&&expected===generation&&isVisible()){
           onError(e);
-          if(e.status===401||e.status===403){blocked=true;clear();}
+          // 10495: data use withdrawn: stop polling (nothing more is sent).
+          if(e.status===401||e.status===403||/^DATA_CONSENT_/.test(e.code||'')){blocked=true;clear();}
         }
         throw e;
       }

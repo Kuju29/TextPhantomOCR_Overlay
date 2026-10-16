@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import {translateViaServer} from '../src/background/ai/transports/server.js';
-import {mountTranslationSessionStatus} from '../src/popup/controllers/translation-session-controller.js';
 import {diagnoseTargetScripts} from '../src/background/ai/script-diagnostics.js';
 import {repairRequest} from '../src/background/repair/client.js';
 const savedFetch=globalThis.fetch;
@@ -18,17 +17,7 @@ try {
  assert.deepEqual(captured.body.units,[{id:'R0',text:'Hello'}]);assert.equal(answer.translations[0].id,'R0');
  assert.equal(captured.body.repair.enabled,false);
 } finally {globalThis.fetch=savedFetch}
-{
- const sent=[],elements=Object.fromEntries(['translation-session-panel','translation-session-status','translation-session-resume'].map(id=>[id,{hidden:true,addEventListener(_event,fn){this.click=fn;}}]));
- const callbacks={};
- mountTranslationSessionStatus({document:{getElementById:id=>elements[id]},events:{addListener:f=>callbacks.change=f,removeListener(){}},page:{addEventListener(){}},
-  send:async m=>{sent.push(m.type);return {ok:true,runs:[{phase:'blocked',repaired:2,failedUnits:3,unresolved:1,wrongLanguageCount:1}]}}});
- await new Promise(r=>setTimeout(r,0));assert.deepEqual(sent,['TP_GET_TRANSLATION_SESSIONS']);
- assert.equal(elements['translation-session-resume'].hidden,false);
- assert.match(elements['translation-session-status'].textContent,/unresolved 1 \(1 wrong target language\)/);
- await elements['translation-session-resume'].click();assert.ok(sent.includes('TP_RESUME_REPAIRS'));
-}
-
+// (The popup translation-session status panel was dead code — not in popup.html — and was removed.)
 {
  let seen;
  try {
@@ -42,4 +31,4 @@ for(const text of ['@official_scan','++ KUMO TRANSLATION']) {
  const r=diagnoseTargetScripts([{id:'x',text}],'th',[{id:'x',text}]);assert.ok(r.every(x=>x.decision!=='reject'),text);
 }
 assert.ok(diagnoseTargetScripts([{id:'x',text:'I WILL GO HOME'}],'th',[{id:'x',text:'I WILL GO HOME'}]).some(x=>x.decision==='reject'));
-console.log('Repair HTTP dispatch + popup read-only/external resume + narrow preservation boundaries passed.');
+console.log('Repair HTTP dispatch + tab-session quota identity + narrow preservation boundaries passed.');

@@ -5,7 +5,7 @@ import {createInterface} from 'node:readline';
 import {webcrypto} from 'node:crypto';
 globalThis.crypto ||= webcrypto;
 const storedToken=process.env.TP_TEST_SWITCH_PAID === '1' ? 'synthetic-other-session' : 'synthetic-session';
-globalThis.chrome={runtime:{},storage:{local:{get:(keys,cb)=>cb(Object.fromEntries([].concat(keys).map(k=>[k,k==='paidSessionToken'?storedToken:k==='paidApiBase'?'http://fixture.invalid':undefined]))),remove:(_keys,cb)=>cb?.()},session:{get:(_keys,cb)=>cb({})}}};
+globalThis.chrome={runtime:{},storage:{local:{get:(keys,cb)=>cb(Object.fromEntries([].concat(keys).map(k=>[k,k==='paidSessionToken'?storedToken:k==='paidApiBase'?'http://fixture.invalid':k==='tpDataConsentV1'?{version:1,granted:true,at:1}:undefined]))),remove:(_keys,cb)=>cb?.()},session:{get:(_keys,cb)=>cb({})}}};
 const rootUrl=new URL('../',import.meta.url);const root=fileURLToPath(rootUrl);
 const from=p=>import(new URL('src/'+p,rootUrl));
 const {translateLensPage}=await from('background/pipeline/page-translation.js');

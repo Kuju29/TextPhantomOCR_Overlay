@@ -290,7 +290,10 @@ export function createAiProfileController({
     if (focused !== els.aiTokenCeiling)
       els.aiTokenCeiling.value = els.aiTokenCeilingEnabled.checked && saved !== null ? String(saved)
         : els.aiTokenCeilingEnabled.checked || !info?.tokens ? (saved !== null ? String(saved) : "") : String(info.tokens);
-    els.aiTokenCeiling.placeholder = info?.tokens ? String(info.tokens) : "";
+    // 10496: an automatic default (no number) is said in the field itself;
+    // the full default sentence is part of the "Set a token ceiling" explanation.
+    els.aiTokenCeiling.placeholder = info?.tokens ? String(info.tokens)
+      : info?.source === "login" ? "Auto · about 3–5 images" : "Auto · context loaded in your Local app";
     const model = paidActive() ? String(paidContext?.model || "") : modelValue();
     if (els.aiTokenCeilingDefault) {
       if (info?.source === "login") setTemplate(els.aiTokenCeilingDefault,

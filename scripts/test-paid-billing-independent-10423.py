@@ -15,6 +15,8 @@ import pytest
 _candidate=Path(__file__).resolve().parents[1]
 ROOT=Path(os.getenv('TP_TEST_ROOT',str(_candidate if (_candidate/'api/backend').is_dir() else Path(__file__).resolve().parents[2]/'source/TextPhantom')))
 sys.path.insert(0,str(ROOT/'api'))
+sys.path.insert(0,str(Path(__file__).resolve().parent/'lib'))
+from paid_center_fake import HealthzClient, reset_protocol_cache
 from backend.application.ai_translation import provider_execution
 from backend.ai.translation.contracts import AiConfig
 from backend.ai import accounting
@@ -45,10 +47,8 @@ def test_independent_calls_use_center_admission_and_later_attempt_recovers(cente
                 request=NS(app=NS(state=shared)),identity=label,correlation={'requestId':'request-'+label,'imageId':'image-'+label,'batchId':'batch-'+wallet,'operationId':label},resolved_provider='paid',resolved_model='qa/'+label,
                 rate={'enabled':False},unlimited=unlimited,unit_count=1,char_count=1,
                 requested_route='/synthetic/ai/translate',route_identity={})
-        class CenterClient:
-            def __init__(self,**kwargs):pass
-            def __enter__(self):return self
-            def __exit__(self,*args):pass
+        reset_protocol_cache()
+        class CenterClient(HealthzClient):  # also answers the Paid protocol health read
             def post(self,url,*,json,headers):
                 if url.endswith('/chat/receipt'):return httpx.Response(200,json={'found':False})
                 if url.endswith('/price-quote'):return httpx.Response(200,json={'quote_token':'synthetic-independent-click-quote'})

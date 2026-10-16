@@ -69,7 +69,7 @@ await check('Authentication or ownership rejection stops automatic polling witho
  await assert.rejects(()=>h.monitor.refresh(),{status:403});assert.equal(h.errors.length,1);assert.equal(h.timers.size,0);assert.equal(h.monitor.getOrder().id,id);h.monitor.dispose();
 });
 await check('Customer order reads carry customer session only; account switch is rejected',async()=>{
- let saved={customApiUrl:'http://localhost:7860',paidApiBase:'http://localhost:7860',paidSessionToken:'customer-session'};let captured;
+ let saved={tpDataConsentV1:{version:1,granted:true,at:1},customApiUrl:'http://localhost:7860',paidApiBase:'http://localhost:7860',paidSessionToken:'customer-session'};let captured;
  const client=createAccountClient({read:async()=>saved,write:async()=>{},fetchFn:async(url,opts)=>{
   captured={url,opts};return new Response(JSON.stringify({id,status:'waiting',qr:{image_url:'data:image/png;base64,AA=='}}));}});
  await client.request('/paid/orders/'+id);assert.equal(captured.opts.headers.Authorization,'Bearer customer-session');

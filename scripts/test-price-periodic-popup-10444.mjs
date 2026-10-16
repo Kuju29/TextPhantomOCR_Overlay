@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {popupEntryFixture} from './lib/popup-entry-fixture.mjs';
 const base='http://localhost:7860',model='owner/model',response=value=>Response.json(value),checks=[],failures=[];
 async function check(name,run){try{await run();checks.push(name);}catch(error){failures.push({name,error:error.message});}}
-const localFor=mode=>({mode:'lens_text',sources:'ai',lang:'th',customApiUrl:base,apiDefaultsFetchedAt:Date.now(),aiServiceMode:mode,paidTranslationSource:'tp',paidSessionToken:'synthetic-customer',paidApiBase:base,paidServiceApiBase:base,paidModel:'tp-model',aiProvider:'openrouter',aiModel:model,aiKey:'synthetic-key'});
+const localFor=mode=>({mode:'lens_text',sources:'ai',lang:'th',customApiUrl:base,apiDefaultsFetchedAt:Date.now(),aiServiceMode:mode,paidTranslationSource:'tp',paidSessionToken:'synthetic-customer',paidApiBase:base,paidServiceApiBase:base,paidModel:'tp-model',aiProvider:'openrouter',aiModel:model,aiKey:'synthetic-key',tpDataConsentV1:{version:1,granted:true}}); // 10495: Paid requests need the data-use consent
 // .90 owner: no periodic polling and no fixed-time staleness. A visible popup
 // re-reads only on use/changes (open, model change, usage ledger, X-TP-Changes
 // account/prices token, return to view); nothing runs while hidden or closed.

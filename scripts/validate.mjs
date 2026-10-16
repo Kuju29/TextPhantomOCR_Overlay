@@ -118,7 +118,7 @@ for (const target of targets) {
     assert(!manifest.background?.scripts, `${target}: background.scripts is forbidden`);
     assert(!manifest.browser_specific_settings, `${target}: Gecko settings are forbidden`);
     assert(!manifest.message_display_action, `${target}: Thunderbird action is forbidden`);
-    for (const permission of ["menus", "messagesRead"]) {
+    for (const permission of ["menus", "messagesRead", "sensitiveDataUpload"]) {
       assert(!permissions.has(permission), `${target}: ${permission} is forbidden`);
     }
   }
@@ -127,7 +127,7 @@ for (const target of targets) {
     assert(Boolean(manifest.background?.scripts), "firefox: background.scripts missing");
     assert(!manifest.background?.service_worker, "firefox: service_worker is forbidden");
     assert(!manifest.message_display_action, "firefox: Thunderbird action is forbidden");
-    for (const permission of ["messagesRead"]) {
+    for (const permission of ["messagesRead", "sensitiveDataUpload"]) {
       assert(!permissions.has(permission), `firefox: ${permission} is forbidden`);
     }
   }
@@ -136,7 +136,9 @@ for (const target of targets) {
     assert(Boolean(manifest.background?.scripts), "thunderbird: background.scripts missing");
     assert(!manifest.background?.service_worker, "thunderbird: service_worker is forbidden");
     assert(Boolean(manifest.message_display_action), "thunderbird: message action missing");
-    for (const permission of ["menus", "messagesRead", "scripting"]) {
+    // ATN review guide: uploading message content to a hardcoded remote server
+    // requires the sensitiveDataUpload permission (Thunderbird 115+).
+    for (const permission of ["menus", "messagesRead", "sensitiveDataUpload", "scripting"]) {
       assert(permissions.has(permission), `thunderbird: ${permission} is required`);
     }
     assert(

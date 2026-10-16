@@ -24,7 +24,7 @@ const ok = (value, message) => { assert.ok(value, message); ++checks; };
 const eq = (a, b, message) => { assert.deepEqual(a, b, message); ++checks; };
 
 // ---------------------------------------------------------------- browser stubs
-const memory = {local:{}, session:{}}, listeners = new Set();
+const memory = {local:{tpDataConsentV1:{version:1, granted:true, at:1}}, session:{}}, listeners = new Set(); // 10494: account data allowed
 const area = data => ({get(keys, done){const list=Array.isArray(keys)?keys:typeof keys==='string'?[keys]:Object.keys(keys||data);
   done(Object.fromEntries(list.map(key=>[key,structuredClone(data[key])])));}, set(patch, done){Object.assign(data, structuredClone(patch));done?.();},
   remove(keys, done){for(const key of [].concat(keys))delete data[key];done?.();}});
@@ -139,7 +139,7 @@ globalThis.fetch = async url => {
   throw new Error('Unexpected request ' + path);
 };
 const resolve = model => {
-  memory.local.customApiUrl = base; memory.local.apiUrlDefault = base; memory.local.apiDefaultsFetchedAt = Date.now();
+  memory.local.customApiUrl = base; memory.local.apiUrlDefault = base; memory.local.apiDefaultsFetchedAt = Date.now(); memory.local.paidSessionToken = token; memory.local.paidApiBase = base; // 10495: the session is read through the account gate
   return resolveJobAiProfile({aiServiceMode:'paid', paidTranslationSource:'login', paidSessionToken:token, paidApiBase:base,
     customApiUrl:base, apiUrlDefault:base, loginProvider:'login_claude', loginModel:model, lang:'th',
     loginConnectionsV2:{[scope + ':login_claude']:{session, model, verifiedAt:1}}}, {language:'th'});

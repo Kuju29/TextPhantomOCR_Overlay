@@ -2,8 +2,12 @@ import { LOGIN_PENDING_AUTH, LOGIN_OUTCOME, loginAuthScope, loginCallbackMetadat
 import { getLoginSession, setLoginSession } from "../../shared/login-session.js";
 import { createTab } from "../../shared/browser-api.js";
 import {createLoginViewCache,authenticationOnlyStatus} from './login-view-cache.js';
-import { setUiText } from "../../shared/ui-template.js";
+import { setUiText, setUiTemplate } from "../../shared/ui-template.js";
+import { setTip } from "../../shared/hover-tip.js";
 import { loginModelUnavailable, loginModelPlanBadge } from "../../shared/login-profile.js";
+import { COOKIE_LOGIN_PROVIDERS, DATA_CONSENT_REQUIRED, hasDataConsent } from "../../shared/data-consent.js";
+import { dataConsentKnown, consentText } from "../../shared/data-consent-dialog.js";
+import { readAccountSession, showConsentScreen, accountReplay } from "../../shared/account-gate.js";
 /** Login is an own-account source. UI state never grants the add-on. */
 const show = (el, visible) => {
   if (el) el.style.display = visible ? "" : "none";
@@ -69,7 +73,7 @@ export function createLoginServiceController({
     timer = null,
     lastFailure = "", lastLoadFailure = "",
     appliedOutcome = "";
-  let authority=false,displayLoaded=false,displaySignedIn=false,cacheScope='',statusMessage='',statusKind='info',providerSignature='',modelSignature='';
+  let authority=false,accountProblem=false,displayLoaded=false,displaySignedIn=false,cacheScope='',statusMessage='',statusKind='info',providerSignature='',modelSignature='';
   const viewCache=createLoginViewCache({read:readAuth,write:writeAuth,now});
   const displayCache=createLoginViewCache({read:getStorage,write:setStorage,now,displayOnly:true});
   const clearView=hash=>Promise.all([viewCache.clear(hash),displayCache.clear(hash)]);
@@ -95,9 +99,10 @@ export function createLoginServiceController({
     if(disposed||expected!==epoch||scope!==savedScope)return;
     cacheScope=hash;
     const live=async()=>{
-      const current=await getStorage(['paidSessionToken','paidApiBase','loginProvider','loginModel']);
-      return !disposed&&expected===epoch&&scope===savedScope&&String(current.paidSessionToken||'')===token&&
-        String(current.paidApiBase||'').replace(/\/+$/,'')===apiBase&&current.loginProvider===provider&&String(current.loginModel||'')===selected;
+      // 10495: the session only through the account gate.
+      const current=await readAccountSession({read:getStorage,keys:['loginProvider','loginModel']});
+      return !disposed&&expected===epoch&&scope===savedScope&&current.ok&&current.token===token&&
+        current.base===apiBase&&current.values.loginProvider===provider&&String(current.values.loginModel||'')===selected;
     };
     const value={provider,selected,session,signedIn:displaySignedIn,list,models,status:statusMessage,kind:statusKind};
     await Promise.all([viewCache.remember(hash,value,live),displayCache.remember(hash,value,live)]);
@@ -125,7 +130,9 @@ export function createLoginServiceController({
     ) === true;
   const failureText = error => [error.message || "AI Login failed.", error.code, error.stage && "Stage: " + error.stage,
     error.upstreamStatus && "Provider HTTP: " + error.upstreamStatus, (error.traceId || error.trace_id) && "Trace: " + (error.traceId || error.trace_id)].filter(Boolean).join(" · ");
-  const memoryChoice = () => displayLoaded && !lastFailure && !lastLoadFailure;
+  // .73: the remembered list is selectable until the API reports a problem
+  // (its own load, or the account/service read the Paid controller reports).
+  const memoryChoice = () => displayLoaded && !lastFailure && !lastLoadFailure && !accountProblem;
   function failure(error) { lastFailure = failureText(error); message(lastFailure, "warning"); }
   function clearLoadFailure() {
     if (lastLoadFailure && lastFailure === lastLoadFailure) lastFailure = '';
@@ -202,13 +209,20 @@ export function createLoginServiceController({
       // re-validated by the background read) until the API reports a problem.
       els.aiLoginModel.disabled = !((verified && authority) || memoryChoice()) || !translationAvailable() || !models.some(row=>row.id===selected);
     }
-    text(
-      els.aiLoginAccount,
-      displaySession ? "Signed in to your AI account" : "Use your own AI account",
-    );
-    show(els.aiLoginSupport,improvingProvider(provider)||browserTabProvider(provider));
-    text(els.aiLoginSupport,improvingProvider(provider)?providerNames[provider]+" Login translation is not supported yet. It is under improvement. You can sign in and test translation; if the website requires browser checks, translation stops before anything is sent.":
-      browserTabProvider(provider)?providerNames[provider]+" Login translates through one "+tabSite[provider]+" tab in this browser. An open one is used; if none is open, TextPhantom opens one in the background. TextPhantom never closes it — close it yourself when you are done. You can keep browsing other tabs. Keep the browser open and stay signed in; closing that tab during a translation stops it. If you translate before connecting, TextPhantom connects by itself.":'');
+    // 10496: what Login is and how the website tab is used is the explanation
+    // of the "Provider" name (hover/focus/tap); only live state stays inline:
+    // the signed-in line and, while signed in to a website-tab provider, the
+    // warning that matters during translation (closing the tab stops it; the
+    // page itself shows LOGIN_WORK_TAB_CLOSED when that happens).
+    text(els.aiLoginAccount, displaySession ? "Signed in to your AI account" : "");
+    const tabWarning = displaySession && browserTabProvider(provider) && !improvingProvider(provider);
+    show(els.aiLoginSupport, tabWarning);
+    if (tabWarning) setUiTemplate(els.aiLoginSupport, "Keep the {site} tab open while translating; closing it stops the translation.", { site: tabSite[provider] });
+    else text(els.aiLoginSupport, "");
+    setTip(els.aiLoginProviderTip, ["Use your own AI account",
+      browserTabProvider(provider)?providerNames[provider]+" Login translates through one "+tabSite[provider]+" tab in this browser. An open one is used; if none is open, TextPhantom opens one in the background. TextPhantom never closes it — close it yourself when you are done. You can keep browsing other tabs. Keep the browser open and stay signed in; closing that tab during a translation stops it. If you translate before connecting, TextPhantom connects by itself.":
+      "Your provider account quota applies. TP credits are not used."],
+      { reason: improvingProvider(provider)?providerNames[provider]+" Login translation is not supported yet. It is under improvement. You can sign in and test translation; if the website requires browser checks, translation stops before anything is sent.":'' });
   }
   function stop() {
     if (timer) clearTimeout(timer);
@@ -377,9 +391,9 @@ export function createLoginServiceController({
       }
     }
   }
-  function sync({ active, account, accountVerified, apiBase, token }) {
+  function sync({ active, account, accountVerified, apiBase, token, locked = false, serviceProblem = false }) {
     const displayRight=owned(account),hasRight=accountVerified&&displayRight;
-    authority=hasRight;
+    authority=hasRight;accountProblem=serviceProblem===true;
     show(els.aiPaidSourceWrap, active && displayRight);
     if(els.aiPaidSource)els.aiPaidSource.disabled=!hasRight;
     const login = active && source === "login";
@@ -393,7 +407,9 @@ export function createLoginServiceController({
       discard({clearCache:Boolean(scope&&(!next&&accountVerified || next&&next!==scope))});
       scope = next;
     }
-    if (login && !hasRight && !(displayRight&&displayLoaded))
+    // Locked (data use not allowed): the controls are grey; nothing is checked.
+    if (login && locked) message('');
+    else if (login && !hasRight && !(displayRight&&displayLoaded))
       message(
         accountVerified
           ? "AI Login access is inactive. Contact support."
@@ -562,13 +578,34 @@ export function createLoginServiceController({
     if (pending || !scope || !authority || !signInAvailable()) return;
     const expected = ++epoch;
     const startScope = scope, startProvider = provider;
+    // 10494/10495: every Login provider uses the TextPhantom account, so data
+    // use must be allowed first. Gemini/DeepSeek also send that website's
+    // session cookie: the consent screen's Allow click asks for the cookies
+    // permission too (Firefox: one browser prompt). A click replayed after
+    // Allow (the greyed button) already holds that answer.
+    const cookies = COOKIE_LOGIN_PROVIDERS.includes(provider);
+    const replay = accountReplay();
+    let consent = replay ? true : dataConsentKnown();
     pending = true;
     render();
     try {
-      // Keep the permission request in the original click gesture; fence every await.
-      const permission = new Promise(resolve => chrome.permissions.request({permissions:["cookies"]},
-        granted => resolve(!chrome.runtime.lastError && granted === true)));
-      const granted = await permission;
+      if (consent === null) consent = await hasDataConsent();
+      let granted;
+      if (!cookies && consent === true) granted = true;
+      else if (replay && cookies) granted = replay.permissions === true || await new Promise(resolve => {
+        try { chrome.permissions.contains({permissions:["cookies"]}, value => resolve(!chrome.runtime.lastError && value === true)); } catch { resolve(false); }
+      });
+      else if (consent !== true) {
+        const answer = await showConsentScreen(cookies ? {permissions:["cookies"]} : {});
+        if (disposed || expected !== epoch || scope !== startScope || provider !== startProvider || !pending) return;
+        if (!answer.consent) {pending=false;failure({code:DATA_CONSENT_REQUIRED,message:await consentText("declined")});render();return;}
+        granted = !cookies || answer.permissions === true;
+      } else {
+        // Keep the permission request in the original click gesture; fence every await.
+        const permission = new Promise(resolve => chrome.permissions.request({permissions:["cookies"]},
+          granted => resolve(!chrome.runtime.lastError && granted === true)));
+        granted = await permission;
+      }
       if (disposed || expected !== epoch || scope !== startScope || provider !== startProvider || !pending) return;
       if (!granted) {pending=false;failure({code:"login_cookie_permission_required",message:"Allow provider session access to use endpoint Login."});render();return;}
       const flushed = await flush();

@@ -378,26 +378,28 @@ class LensCookie(unittest.TestCase):
             gate.wait(5)
             fetched.append(1)
             return {"NID": str(len(fetched))}
+        def settled():
+            # Wait for the background prefetch itself (bounded), not a fixed
+            # number of short sleeps that a loaded runner can outlast.
+            deadline = time.monotonic() + 30
+            while self.c._prefetching and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertFalse(self.c._prefetching, "prefetch thread did not finish")
         with patch.object(self.c, "_order", return_value=("direct",)), \
                 patch.object(self.c, "_fetch_direct", side_effect=slow):
-            started = time.monotonic()
             self.assertTrue(self.c.prefetch(""))          # cold jar
-            self.assertLess(time.monotonic() - started, 0.5)
+            # Non-blocking: the fetch cannot finish before the gate opens, yet
+            # prefetch() has already returned.
+            self.assertEqual(fetched, [])
             self.assertFalse(self.c.prefetch(""))         # one in flight
             gate.set()
-            for _ in range(100):
-                if not self.c._prefetching:
-                    break
-                time.sleep(0.02)
+            settled()
             self.assertEqual(fetched, [1])
             self.assertFalse(self.c.prefetch(""))         # fresh jar: nothing to do
             with self.c._condition:
                 self.c._cache["ts"] -= self.c.settings.firebase_cookie_ttl_sec * 0.9
             self.assertTrue(self.c.prefetch(""))          # near expiry
-            for _ in range(100):
-                if not self.c._prefetching:
-                    break
-                time.sleep(0.02)
+            settled()
             self.assertEqual(len(fetched), 2)
 
 

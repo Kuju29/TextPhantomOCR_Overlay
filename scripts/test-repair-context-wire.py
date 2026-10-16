@@ -1,4 +1,7 @@
-"""19.18: captured context targets must match the final selected wire contract."""
+"""19.18: captured context targets must match the final selected wire contract.
+
+Since .66 a repair request sends no repair prompt and no captured context (both
+runtimes drop it for the repair branch); the mapping is still validated."""
 import copy, hashlib, json, re, sys, time, unittest
 from contextlib import ExitStack
 from pathlib import Path
@@ -79,9 +82,14 @@ class RepairContextWire(unittest.TestCase):
                                 _translate_once(source,'th',cfg,is_retry=True)
                         self.assertEqual(len(requests),1)
                         req=requests[0];user='\n'.join(req.user_parts)
-                        targets=[uid for group in re.findall(r'"appliesTo":(\[[^\]]*\])',user) for uid in json.loads(group)]
-                        self.assertTrue(targets,user)
-                        self.assertEqual(targets,list(req.expected_ids))
+                        # The captured mapping is still validated against the final wire IDs...
+                        mapped=[uid for group in (cfg.source_context or []) for uid in group['targetIds']]
+                        self.assertEqual(mapped,list(req.expected_ids) if conversation else [f'P{i}' for i in range(len(units))])
+                        # ...but a repair adds no repair prompt and no extra context: the
+                        # Conversation repair continues the history and the request carries
+                        # only the selected source lines (invocation.py: branch == "repair").
+                        self.assertNotIn('appliesTo',user)
+                        self.assertNotIn('READ ONLY EVIDENCE',user)
                         self.assertEqual(list(req.expected_ids),selected if conversation else [f'P{i}' for i in range(len(units))])
 
 if __name__=='__main__':unittest.main(verbosity=2)

@@ -3,6 +3,10 @@
 Google is an explicit deterministic adapter, including natural Thai/Japanese
 labels and malformed replies. This does not certify live Google wording.
 """
+import sys as _tp_sys
+from pathlib import Path as _TpPath
+_tp_sys.path.insert(0, str(_TpPath(__file__).resolve().parent / 'lib'))
+from chromium_path import chromium_executable  # the one shared Chromium resolver
 import json
 import os
 import re
@@ -108,7 +112,10 @@ def fixture(route):
     if mode == 'merged' and len(lines) > 1:
         translated = ' '.join(lines)
     elif mode == 'lost-marker':
-        translated = re.sub(r'ZXQ[A-Z]+QXZ', '', translated, count=1)
+        # Every line loses one identifier (lines are validated one by one, and
+        # the batch also carries other UI strings, so losing only the first
+        # marker of the whole batch would hit an unrelated line).
+        translated = '\n'.join(re.sub(r'ZXQ[A-Z]+QXZ', '', line, count=1) for line in translated.split('\n'))
     elif mode == 'duplicate-marker' and (marker := re.search(r'ZXQ[A-Z]+QXZ', translated)):
         translated += ' ' + marker[0]
     elif mode == 'one-lost-marker':
@@ -125,7 +132,7 @@ def check(name, condition):
 
 try:
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(executable_path=os.getenv('TP_CHROMIUM') or None, headless=True)
+        browser = pw.chromium.launch(executable_path=chromium_executable(), headless=True)
         page = browser.new_page(viewport={'width': 700, 'height': 820})
         page.on('pageerror', lambda error: errors.append(str(error)))
         page.route('https://translate.googleapis.com/**', fixture)

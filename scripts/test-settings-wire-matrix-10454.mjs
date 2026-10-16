@@ -8,7 +8,7 @@ globalThis.crypto ||= webcrypto;
 const {seriesMemoryKey}=await import('../src/shared/series.js');
 const SERIES='reader.invalid/manga/settings-fixture';
 const memoryFor=lang=>({glossary:[{src:'name',tgt:lang==='th'?'ชื่อ':'Name'}],characters:[{name:lang==='th'?'บทบาท':'Role'}],state:lang==='th'?'ฉากภาษาไทย':'English scene',prevContext:[{src:'source',tgt:lang==='th'?'เนื้อเรื่องภาษาไทย':'English story'}]});
-const state={},requests=[];
+const state={tpDataConsentV1:{version:1,granted:true,at:1}},requests=[]; // 10494: Paid/Login user allowed account data
 globalThis.chrome={runtime:{getManifest:()=>({version:'test'})},storage:{local:{
  get(keys,cb){cb(Array.isArray(keys)?Object.fromEntries(keys.map(k=>[k,structuredClone(state[k])])):typeof keys==='string'?{[keys]:structuredClone(state[keys])}:{...keys,...structuredClone(state)});},
  set(p,cb){Object.assign(state,structuredClone(p));cb?.();}}},contextMenus:{removeAll(){},create(){}}};
@@ -19,7 +19,6 @@ const {resolveEffectiveAiProfile}=await import('../src/shared/ai-profile-activat
 const {migrateAiProfiles}=await import('../src/shared/ai-profiles.js');
 const {resolveJobAiProfile}=await import('../src/background/ai-profile-resolver.js');
 const {buildOllamaGeneration}=await import('../src/shared/ai/providers/local-ollama.js');
-const {createRateSettingsController}=await import('../src/popup/controllers/rate-settings-controller.js');
 globalThis.fetch=async(url,init)=>{const body=JSON.parse(init.body);requests.push({url,body,headers:init.headers});
  const result={schema:'tp.ai.result/1',translations:body.units.map(u=>({id:u.id,text:'คำตอบ'})),missing:[],meta:{resolvedProvider:body.provider.id,resolvedModel:body.provider.model,generationAttempts:1,providerAttempts:1}};
  const progressive=init.headers.Accept==='application/x-ndjson';
@@ -128,39 +127,15 @@ const excessiveLocalRpm=await readFullSettings();
 assert.equal(excessiveLocalRpm.aiLocalRateRpm,601);
 // .68 request-rate cap retired: saved cap values have no effect.
 assert.equal(buildRatePayload('lens_text','ai',excessiveLocalRpm).enabled,false,'An out-of-range enabled Local RPM must not be silently clamped');
-// The popup can show example numbers while a disabled cap has stored zeroes.
-// When the user checks the switch, the numbers they saw must be stored in the
-// SAME write as enabled=true, or the next job would fail after appearing ready.
-const toggleEvents={};
-const rateElement=(id,value='')=>({id,value,checked:false,
-  addEventListener(type,handler){toggleEvents[`${id}:${type}`]=handler;}});
-const cloudSwitch=rateElement('cloudSwitch');
-const localSwitch=rateElement('localSwitch');
-const cloudProfile=rateElement('cloudProfile','custom');
-const cloudRpm=rateElement('cloudRpm','30');
-const cloudBurst=rateElement('cloudBurst','4');
-const localRpm=rateElement('localRpm','6');
-const localBurst=rateElement('localBurst','1');
-const rateController=createRateSettingsController({
- els:{rateLimitEnabled:cloudSwitch,rateProfile:cloudProfile,rateRpm:cloudRpm,
-  rateBurst:cloudBurst,ratePresetHint:{textContent:'',dataset:{}},
-  aiProvider:rateElement('provider','openrouter'),aiLocalRateEnabled:localSwitch,
-  aiLocalRateRpm:localRpm,aiLocalRateBurst:localBurst,aiLocalRateHint:{textContent:''}},
- constants:{presets:{},fallback:{rpm:30,burst:4},rpmMin:1,rpmMax:600,burstMin:1,burstMax:60},
- persist:async patch=>Object.assign(state,structuredClone(patch)),toggleUi:()=>{},
-});
-rateController.bind();
+// The popup rate-cap controls were removed with the retired cap (.68). A cap an
+// older popup saved (switch on, numbers set) still cannot throttle a job.
 Object.assign(state,{aiProvider:'openrouter',aiBaseUrl:'https://openrouter.ai/api/v1',
- rateLimitEnabled:false,rateProfile:'custom',rateRpm:0,rateBurst:0});
-cloudSwitch.checked=true;
-await toggleEvents['cloudSwitch:change']();
+ rateLimitEnabled:true,rateProfile:'custom',rateRpm:30,rateBurst:4});
 const toggledCloudRate=buildRatePayload('lens_text','ai',await readFullSettings());
 // .68: the request-rate cap is retired; a stored switch can no longer throttle jobs.
 assert.equal(toggledCloudRate.enabled,false,'Cloud request-rate cap retired');
 Object.assign(state,{aiProvider:'ollama',aiBaseUrl:'http://127.0.0.1:11434',
- aiLocalRateLimitEnabled:false,aiLocalRateRpm:0,aiLocalRateBurst:0});
-localSwitch.checked=true;
-await toggleEvents['localSwitch:change']();
+ aiLocalRateLimitEnabled:true,aiLocalRateRpm:6,aiLocalRateBurst:1});
 const toggledLocalRate=buildRatePayload('lens_text','ai',await readFullSettings());
 assert.equal(toggledLocalRate.enabled,false,'Local request-rate cap retired');
 checks++;
@@ -236,7 +211,7 @@ globalThis.fetch=async(url,init={})=>{
 };
 
 async function popup(service,engineMode,targetLang) {
-  for(const key of Object.keys(state))delete state[key];
+  for(const key of Object.keys(state))delete state[key];state.tpDataConsentV1={version:1,granted:true,at:1};
   for(const key of Object.keys(sessionState))delete sessionState[key];
   // Login identifiers belong to chrome.storage.session, not retired local auth.
   Object.assign(sessionState,{loginSessionId:LOGIN_SESSION,loginAccountId:ACCOUNT});

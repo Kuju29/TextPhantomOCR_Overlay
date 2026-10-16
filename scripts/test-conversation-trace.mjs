@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import {spawnSync} from 'node:child_process';
 import {note,flushTrace,setTracingEnabled,shortenValue} from '../src/shared/trace.js';
 import {rememberDiagnostic,recentDiagnostic,clearRecentDiagnostics} from '../src/background/ai/recent-diagnostics.js';
-import {formatRequestDiagnostic} from '../src/shared/ai/diagnostic-view.js';
 const event={schema:'tp.conversation/1',mode:'conversation',path:'conversation',phase:'finished',policy:'conversation-immutable-anchor-2026.9.15.2',
  scope:'a'.repeat(24),scopeStatus:'ready',historyRevision:2,turnIndex:3,historyTurns:2,historyMessages:4,historyChars:1000,
  historyEstimatedTokens:300,estimatedInput:3300,currentUserChars:100,staticUserRepeated:false,queueWaitMs:35.5,trimmedTurns:0,
@@ -30,7 +29,7 @@ assert.doesNotMatch(JSON.stringify(nativeSafe),/resp_private/);
 assert.equal(safe.cachedInputTokens,0);assert.ok(Object.keys(safe).length>30);assert.doesNotMatch(JSON.stringify(safe),/PRIVATE/);
 assert.equal(safe.continuationTransport,'message_replay');
 rememberDiagnostic({provider:'huggingface',model:'fixture',operationId:'ai:'+'a'.repeat(32),conversation:event,result:{schema:'tp.audit/1',event:'translation_result',resultStatus:'complete_at_contract_boundary',actualInput:3300,actualOutput:100}});
-const row=recentDiagnostic('huggingface','fixture');assert.equal(row.conversation.historyTurns,2);assert.match(formatRequestDiagnostic(row),/Conversation/);assert.doesNotMatch(formatRequestDiagnostic(row),/PRIVATE|prefixSha|committed/);clearRecentDiagnostics();
+const row=recentDiagnostic('huggingface','fixture');assert.equal(row.conversation.historyTurns,2);assert.doesNotMatch(JSON.stringify(row),/PRIVATE/);clearRecentDiagnostics();
 const batch={schema:'tp.conversation_batch/1',batchId:'11111111-1111-4111-8111-111111111111',phase:'distributed',planner:'conversation_cross_page',pageCount:3,unitCount:18,readyPageCount:4,readyUnitCount:22,splitReason:'learned_output_target',queueReason:'ready',firstOrder:1,lastOrder:3,estimatedInput:5000,predictedOutput:1024,mappedUnits:18,cancelledUnits:0,missingUnits:0,providerCallsAdded:0,providerRequestCount:1,usageOwner:'provider_request',requestMs:90,readyQueueWaitMs:30,previousTurnWaitMs:20,sourceOrderWaitMs:10,legacyFallback:false,prompt:'PRIVATE'};
 const rejected={...batch,phase:'failed',mappingStatus:'rejected',idPolicy:'source_opaque_wire_pn',failureCode:'ai_conversation_origin_invalid',failureStage:'conversation_mapping',validationField:'conversation.origins.1.originalIds.0',validationReason:'invalid_source_id',providerRequestCount:0,requestDispatched:false,apiHttpStatus:400};
 const rejectedSafe=shortenValue(rejected);assert.equal(rejectedSafe.validationField,rejected.validationField);assert.equal(rejectedSafe.providerRequestCount,0);

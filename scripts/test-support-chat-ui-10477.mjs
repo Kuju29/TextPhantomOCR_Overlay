@@ -2,6 +2,7 @@
 // the popup Contact admin entry gating. Real Chromium DOM over CDP; offline API and
 // simulated chrome.* boundaries only (not an installed-extension test).
 // Run: node scripts/test-support-chat-ui-10477.mjs   (TP_QA_CHROMIUM=/path/to/chrome optional)
+import { chromiumExecutable } from './lib/chromium-path.mjs';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -96,7 +97,7 @@ const freshState = () => ({ enabled: true, email: 'customer@example.com', max_fi
   thread: { state: 'waiting_admin', unread: 2, read_seq: 6, last_seq: 6, last_admin_seq: 6, notification_muted: false, closed_seq: 0 } });
 
 // ---------- Minimal CDP driver ----------
-const chromium = process.env.TP_QA_CHROMIUM || ['/opt/pw-browsers/chromium', '/usr/bin/chromium', '/usr/bin/google-chrome'].find(existsSync);
+const chromium = chromiumExecutable(); // shared resolver: scripts/lib/chromium-path.mjs
 assert(chromium && existsSync(chromium), 'Chromium not found; set TP_QA_CHROMIUM');
 const profile = mkdtempSync(join(tmpdir(), 'tp-chat-ui-10477-'));
 const browser = spawn(chromium, ['--headless=new', '--no-sandbox', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
@@ -162,7 +163,7 @@ async function openPage(path, store, { configured = true, width = 390, height = 
   await send('Page.navigate', { url: BASE + path }, sessionId);
   return page;
 }
-const session = { customApiUrl: BASE, paidApiBase: BASE, paidSessionToken: TOKEN, paidEmail: 'customer@example.com', aiServiceMode: 'manual' };
+const session = { tpDataConsentV1: { version: 1, granted: true, at: 1 }, customApiUrl: BASE, paidApiBase: BASE, paidSessionToken: TOKEN, paidEmail: 'customer@example.com', aiServiceMode: 'manual' };
 
 try {
   supportState = freshState();

@@ -259,7 +259,10 @@ export function createLocalConnectionController({
     );
   };
 
-  const connect = async ({ automatic = false,displayOnly=false } = {}) => {
+  // `implicit`: discovery the user did not ask for with Connect/Save (provider,
+  // mode or language selection). Like `automatic`, it never adopts an unsaved
+  // Custom adapter JSON as owned; unlike `automatic`, it refreshes the display.
+  const connect = async ({ automatic = false,displayOnly=false,implicit=false } = {}) => {
     if (state.localConnectInFlight) return;
     if(!automatic)void viewCache.clear();
     state.aiModelBlocked=true;
@@ -267,7 +270,7 @@ export function createLocalConnectionController({
     const provider = String(els.aiProvider?.value || "")
       .trim()
       .toLowerCase();
-    if (automatic && provider === "customlocal") {
+    if ((automatic || implicit) && provider === "customlocal") {
       const revision = state.providerTransitionRevision;
       const saved = await getStorage(["localAiAdapter", "localAiAdapterOwner"]);
       if (revision !== state.providerTransitionRevision ||

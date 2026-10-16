@@ -13,7 +13,8 @@ let checks = 0;
 const test = async (name, fn) => { await fn(); checks++; console.log(`PASS ${name}`); };
 
 // ---------------------------------------------------------------- background
-const store = {};
+// 10495: a signed-in Paid user who allowed data use (each Paid request asks the account gate).
+const store = {tpDataConsentV1: {version: 1, granted: true, at: 1}, paidSessionToken: "synthetic-session", paidApiBase: "http://localhost:7860"};
 globalThis.chrome = { runtime: { getManifest: () => ({ version: "test" }) }, storage: { local: {
   get(keys, cb) { const list = Array.isArray(keys) ? keys : [keys];
     cb(Object.fromEntries(list.filter((k) => k in store).map((k) => [k, structuredClone(store[k])]))); },
@@ -48,6 +49,7 @@ await test("a saved popup quote failure never stops the background: Translate is
 
 await test("the real result replaces the saved state: refusal saved with Center's message, success clears it", async () => {
   for (const key of Object.keys(store)) delete store[key];
+  Object.assign(store, {tpDataConsentV1: {version: 1, granted: true, at: 1}, paidSessionToken: "synthetic-session", paidApiBase: A}); // 10495: same signed-in user
   sent = 0;
   const error = await translate(refused(503, "paid_route_unavailable")).catch((e) => e);
   assert.equal(error.code, "paid_route_unavailable"); assert.equal(sent, 1);
@@ -96,7 +98,7 @@ function environment() {
     pricing: unavailable, price_sync: { automatic: true, status: "current", checked_at: 1700000000 },
     route_price_sync: { status: "unavailable", account_policy_verified: false } }));
   const local = { mode: "lens_text", sources: "ai", lang: "th", customApiUrl: A, apiUrlDefault: A, apiDefaultsFetchedAt: Date.now(),
-    aiServiceMode: "paid", paidTranslationSource: "tp", paidSessionToken: "synthetic-a", paidApiBase: A, paidServiceApiBase: A, paidModel: MODEL };
+    tpDataConsentV1: {version: 1, granted: true, at: 1}, aiServiceMode: "paid", paidTranslationSource: "tp", paidSessionToken: "synthetic-a", paidApiBase: A, paidServiceApiBase: A, paidModel: MODEL };
   const requests = [];
   const reply = async (url, options = {}) => {
     const parsed = new URL(url), path = parsed.pathname;

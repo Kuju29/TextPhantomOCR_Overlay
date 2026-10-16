@@ -140,7 +140,8 @@ for (const [provider, url] of Object.entries(officialKeyUrls)) {
   assert.equal(links.providerKeyUrl(provider), url, `${provider} Get key URL`);
 }
 assert.equal(links.providerKeyUrl("ollama"), "");
-assert.match(popupHtml, /class="label-row label-row--inline"[\s\S]*<label for="ai-key">API key<\/label>\s*<a id="ai-key-get"[^>]*target="_blank"[^>]*rel="noopener noreferrer">\(get key\)<\/a>/);
+// 10496: the name "API key" carries its explanation (hover/focus/tap); the link stays next to it.
+assert.match(popupHtml, /class="label-row label-row--inline"[\s\S]*<label for="ai-key"><span data-tip-src="ai-key-tip">API key<\/span><\/label>\s*<a id="ai-key-get"[^>]*target="_blank"[^>]*rel="noopener noreferrer">\(get key\)<\/a>/);
 assert.match(popupHtml, /id="ai-key"[\s\S]*aria-describedby="ai-key-hint"/);
 assert.match(popupUi, /applyProviderKeyLink\(els\.aiKeyGet, local \? "" : provider\)/,
   "popup UI controller must uniquely own provider key-link updates");

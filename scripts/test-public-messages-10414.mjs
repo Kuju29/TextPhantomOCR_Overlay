@@ -21,13 +21,15 @@ for (const code of codes) {
   assert.equal(error.userMessage, message);
   assert.ok(!JSON.stringify(error).includes('PRIVATE-OPERATOR-STEP'));
 }
-assert.match(userMessageForCode('PAID_INSUFFICIENT_CREDITS'), /เครดิต.*หมดแล้ว/);
+// .69: the Center refuses an image the balance cannot cover before any AI call (log: credit-confirm).
+assert.match(userMessageForCode('PAID_INSUFFICIENT_CREDITS'), /เครดิตไม่พอสำหรับภาพนี้.*ยังไม่ได้ส่ง AI.*ไม่หักเครดิต/);
 assert.ok(!userMessageForCode('PAID_INSUFFICIENT_CREDITS').includes('วงเงินจอง'));
 assert.match(userMessageForCode('PAID_MODEL_NOT_ALLOWED'), /โมเดล/);
 const texts = [
   'Refunds are temporarily unavailable. Contact support.',
   'Payments are not available yet. Your existing credits and orders remain available.',
-  'Thinking is unverified for this model. Translation requires verified controls; your selection is kept.',
+  // 10488: the per-state AI think hint (loading) replaced the single 'Thinking is unverified' hint.
+  'AI think options appear after the selected model is checked. Translation waits for them; your saved choice is kept.',
 ];
 for (const text of texts) assert.ok(UI_TEXT.has(text), `authored translation source: ${text}`);
 const popup = readFileSync(new URL('../src/popup/controllers/popup-ui-controller.js', import.meta.url), 'utf8');

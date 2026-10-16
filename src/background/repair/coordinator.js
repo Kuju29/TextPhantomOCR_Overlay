@@ -13,6 +13,8 @@ import { findContext } from '../job-registry.js';
 import { getBatch, ensureBatch, registerBatchPayload, batchMark, batchUpdateToast, batchStopKeepAlive, updateImagePresentation } from '../batches.js';
 import { getTabSessionId } from '../tab-sessions.js';
 import { getSettingsEpoch, abortBatchInFlight } from '../jobs/lifecycle.js';
+import { readAccountSession } from '../../shared/account-gate.js';
+import { dataConsentError } from '../../shared/data-consent.js';
 import { cancelBatchProviderViaRest } from '../jobs/cancellation.js';
 import { enqueueDomInsert } from '../insert-queue.js';
 import { getStorage } from '../../shared/storage.js';
@@ -458,16 +460,20 @@ export function createRepairCoordinator({
   async function credentials(page, run) {
     const runtime = runtimePages.get(`${run.id}:${page.pageId}`);
     const ai = { ...page.ai };
+    // 10495: Paid/Login repair sends the account token. Without data-use consent
+    // (never given, or withdrawn) nothing is sent; an automatic resume is a no-op.
+    const account = ["paid", "login"].includes(ai.provider)
+      ? await readAccountSession({ read: readLoginState, keys: ["loginSessionId"] }) : null;
+    if (account && !account.consent) throw dataConsentError({ revoked: Boolean(runtime?.ai) });
     if (runtime?.ai) {
       ai.api_key = runtime.ai.api_key || '';
       if(runtime.ai.price_quote_token)ai.price_quote_token=runtime.ai.price_quote_token;
     }
     else if (["paid", "login"].includes(ai.provider)) {
-      const stored = await readLoginState(["paidSessionToken", "paidApiBase", "loginSessionId"]);
-      if (!stored?.paidSessionToken || String(stored.paidApiBase || "").replace(/\/+$/, "") !== String(run.base || "").replace(/\/+$/, "") ||
-          (ai.provider === "login" && !String(ai.model || "").startsWith(String(stored.loginSessionId || "missing") + "/")))
+      if (!account.ok || account.base !== String(run.base || "").replace(/\/+$/, "") ||
+          (ai.provider === "login" && !String(ai.model || "").startsWith(String(account.values.loginSessionId || "missing") + "/")))
         throw Object.assign(new Error("Sign in to the original account before retrying repair."), {code:"repair_account_unavailable"});
-      ai.api_key = stored.paidSessionToken;
+      ai.api_key = account.token;
       if (ai.provider === 'paid' && !await checkpointCredentialMatches(page, ai.api_key))
         throw Object.assign(new Error('The saved repair belongs to a different Paid session. Restore the original session before retrying.'), {code:'repair_account_unavailable'});
     }

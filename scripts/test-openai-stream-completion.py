@@ -253,9 +253,9 @@ class StreamTests(unittest.TestCase):
 
     def test_chunked_json_keeps_golden_result_and_drains_terminal_frames(self):
         raw, assembled = [], []
-        with patch("backend.ai.transports.openai_chat.wire_trace.append_text",
+        with patch("backend.ai.wire_trace.append_text",
                    side_effect=lambda name, value: raw.append((name, value))), \
-             patch("backend.ai.transports.openai_chat.wire_trace.assembled_response",
+             patch("backend.ai.wire_trace.assembled_response",
                    side_effect=assembled.append):
             result = run(['{"P0":"one with } text",', '"P1":"two"', '}'], after=(
                 'data: {"choices":[],"usage":{"prompt_tokens":11}}',
@@ -276,9 +276,9 @@ class StreamTests(unittest.TestCase):
 
     def test_wire_buffer_preserves_exact_order_and_bounds_pending_memory(self):
         writes = []
-        with patch("backend.ai.transports.openai_chat.wire_trace.append_text",
+        with patch("backend.ai.wire_trace.append_text",
                    side_effect=lambda name, value: writes.append((name, value))), \
-             patch("backend.ai.transports.openai_chat.wire_trace.assembled_response") as assembled:
+             patch("backend.ai.wire_trace.assembled_response") as assembled:
             capture = _WireStreamCapture(max_lines=2, max_chars=1024)
             for line in ("one\n", "two\n", "three\n"):
                 capture.raw(line)
@@ -291,9 +291,9 @@ class StreamTests(unittest.TestCase):
         Client.lines = sse(["partial"], after=("data: not-json",), terminal=False)
         raw, assembled = [], []
         with patch.object(httpx, "Client", Client), \
-             patch("backend.ai.transports.openai_chat.wire_trace.append_text",
+             patch("backend.ai.wire_trace.append_text",
                    side_effect=lambda _name, value: raw.append(value)), \
-             patch("backend.ai.transports.openai_chat.wire_trace.assembled_response",
+             patch("backend.ai.wire_trace.assembled_response",
                    side_effect=assembled.append):
             with self.assertRaisesRegex(RuntimeError, "invalid SSE"):
                 execute_chat_completion(
@@ -390,9 +390,9 @@ class StreamTests(unittest.TestCase):
             calls += 1
             return calls >= 3
         with patch.object(httpx, "Client", Client), \
-             patch("backend.ai.transports.openai_chat.wire_trace.append_text",
+             patch("backend.ai.wire_trace.append_text",
                    side_effect=lambda _name, value: raw.append(value)), \
-             patch("backend.ai.transports.openai_chat.wire_trace.assembled_response",
+             patch("backend.ai.wire_trace.assembled_response",
                    side_effect=assembled.append):
             from backend.ai.clients.base import ProviderGenerationCancelled
             with self.assertRaises(ProviderGenerationCancelled):

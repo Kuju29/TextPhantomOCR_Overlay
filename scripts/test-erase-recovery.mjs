@@ -25,6 +25,8 @@ const {makePageCheckpoint,buildPatchedResult,pageInitialReport}=await load('src/
 const {executeRepairPool}=await load('src/background/repair/executor.js');
 const {createRepairCoordinator}=await load('src/background/repair/coordinator.js');
 const {createTranslationSessionStore}=await load('src/background/translation-session-store.js');
+const {createDispatchJournal}=await load('src/background/repair/dispatch-journal.js');
+const {createPreparedPageJournal}=await load('src/background/repair/prepared-page-journal.js');
 const {ensureBatch}=await load('src/background/batches.js');
 const policy=await load('src/background/pipeline/result-policy.js');
 const {reportTranslationFailure}=await load('src/shared/diagnostic-policy.js');
@@ -124,15 +126,16 @@ await test('ownership failures are trace-only but named for UI; actual programmi
  reportTranslationFailure(log,trace,'bug',new TypeError('bug'));assert.equal(warnings.length,1);
 });
 async function coordinatorCase({corrupt=true,ack=true,cancel=false}={}){
- let stored={},epoch=7,executions=0;const contexts=new Map(),rendered=[],events=[],deletes=[];
+ let stored={},epoch=7,session='s',executions=0;const contexts=new Map(),rendered=[],events=[],deletes=[];
  const area={get:async k=>({[k]:structuredClone(stored[k])}),set:async v=>Object.assign(stored,structuredClone(v))};
  const sessions=createTranslationSessionStore({area:()=>area}),tabId=73033;
  const batch=ensureBatch(crypto.randomUUID(),tabId,0);batch.total1=2;
  const payloads=['bad','good'].map(id=>({engine:'extension',mode:'lens_text',source:'ai',lang:'th',src:`https://fixture.invalid/${id}`,metadata:{image_id:id}}));
  for(const payload of payloads)batch.items.set(payload.metadata.image_id,{attempt:1,status:'done',phase:'done',payload});
- const co=createRepairCoordinator({sessions,currentEpoch:()=>epoch,currentSession:()=> 's',getBase:async()=> 'http://fixture.invalid',getContext:id=>contexts.get(id),getCapabilitiesFor:async()=>({}),emit:(ev,d)=>events.push({ev,d}),
+ // Durable prepared-page and dispatch journals share the run's session storage area.
+ const co=createRepairCoordinator({sessions,dispatchJournal:createDispatchJournal({area:()=>area}),preparedPages:createPreparedPageJournal({area:()=>area}),currentEpoch:()=>epoch,currentSession:()=>session,getBase:async()=> 'http://fixture.invalid',getContext:id=>contexts.get(id),getCapabilitiesFor:async()=>({}),emit:(ev,d)=>events.push({ev,d}),
   api:async(_run,action,_body,opts)=>{if(opts?.method==='DELETE')deletes.push(action);return action==='seal'?{phase:'repairing',pending:[]}:{};},
-  insert:async(_tab,msg)=>{if(msg.type!=='OVERLAY_HTML')return {ok:true,applied:true};rendered.push(msg);if(cancel)epoch++;return ack?{ok:true,applied:true}:{ok:true};},
+  insert:async(_tab,msg)=>{if(msg.type!=='OVERLAY_HTML')return {ok:true,applied:true};rendered.push(msg);if(cancel)session='navigated';return ack?{ok:true,applied:true}:{ok:true};},
   execute:async opt=>{executions++;const rows=[];
    for(const id of ['bad','good']){const p=await opt.getPage(id),u=p.units.find(u=>u.id==='g1');rows.push({id:`R-${id}`,pageId:id,unitId:u.id,generationId:p.generationId,sourceHash:u.sourceHash,translation:`ซ่อม ${id}`});}
    opt.onProgress({phase:'applying',repaired:2,unresolved:2,failedUnits:4});
@@ -174,6 +177,8 @@ await test('fixed decoder allows both partially repaired images to finish and re
  assert.equal(r.final.summary.appliedRepairedUnits,2);assert.equal(r.final.summary.applyFailedPages,0);assert.deepEqual(r.final.pages,{});assert.equal(r.deletes.length,1);
 });
 await test('cancellation during delivery never commits saved patches or cleans up as success',async()=>{
+ // Only reload/navigation cancels a run (.70: a settings change mid-run affects new jobs only), so the
+ // page navigates away while the repaired result is being placed.
  const r=await coordinatorCase({corrupt:false,cancel:true});assert.equal(r.final,null,'cancelled run releases session storage');
  assert(!r.events.some(e=>e.ev==='repairPatch'&&e.d.applied===true));assert.equal(r.deletes.length,0);
 });

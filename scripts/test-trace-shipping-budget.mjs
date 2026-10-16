@@ -5,6 +5,7 @@ const root=pathToFileURL(`${process.env.TP_TEST_ROOT || process.cwd()}/`);
 globalThis.chrome={runtime:{getManifest:()=>({version:'test43'})}};
 const trace=await import(new URL('src/shared/trace.js',root));
 const log=await import(new URL('src/shared/log-sink.js',root));
+log.setDiagnosticsUploadAllowed(true); // 10494: the user switched diagnostics on
 const results=[];
 async function check(name,fn){try{await fn();results.push({name,pass:true});}catch(e){results.push({name,pass:false,error:e.stack});}finally{trace.setTracingEnabled(false);log.setLogShippingEnabled(false);}}
 const delay=()=>new Promise(r=>setTimeout(r,0));

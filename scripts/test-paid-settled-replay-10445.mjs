@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {webcrypto} from 'node:crypto';
 globalThis.crypto ||= webcrypto;
 const savedChrome=globalThis.chrome,savedFetch=globalThis.fetch;
-const stored={},writes=[],checks=[],failures=[];
+const stored={tpDataConsentV1:{version:1,granted:true,at:1},paidSessionToken:'synthetic-session',paidApiBase:'http://localhost:7860'},writes=[],checks=[],failures=[]; // 10495: a signed-in user who allowed data use
 globalThis.chrome={runtime:{getManifest:()=>({version:'fixture10445'})},storage:{local:{
   get(keys,cb){const value=keys==null?structuredClone(stored):typeof keys==='string'?{[keys]:structuredClone(stored[keys])}:
     Array.isArray(keys)?Object.fromEntries(keys.map(k=>[k,structuredClone(stored[k])])):{...keys,...structuredClone(stored)};

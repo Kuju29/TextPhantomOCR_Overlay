@@ -10,6 +10,7 @@ async function load() {
   const syn = values => new vm.SyntheticModule(Object.keys(values), function () { for (const [k, v] of Object.entries(values)) this.setExport(k, v); }, {context});
   const mod = new vm.SourceTextModule(source, {context});
   await mod.link(name => name.endsWith('login-session.js') ? syn({readLoginState: async () => ({})})
+    : name.endsWith('data-consent.js') ? syn({dataConsentError: () => Object.assign(new Error('Open TextPhantom and allow account data to continue.'), {code: 'DATA_CONSENT_REQUIRED', requestDispatched: false})})
     : syn({LOGIN_PENDING_AUTH: 'loginPendingAuthV1', LOGIN_OUTCOME: 'loginOutcomeV1'}));
   await mod.evaluate();
   return mod.namespace;

@@ -12,7 +12,7 @@ globalThis.document = { createElement: () => element(), visibilityState: 'visibl
 const base = 'http://localhost:7860', token = 'test-customer-session', time = Date.now();
 const account = { email: 'customer@example.com', credits: { available: '10000', held: '20' },
   models: [{ id: 'demo/model', name: 'Demo model', eligible_tp: '10000' }], paid_paused: false };
-const storage = { aiServiceMode: 'paid', paidSessionToken: token, paidApiBase: base, paidModel: 'demo/model',
+const storage = { tpDataConsentV1: {version: 1, granted: true, at: 1}, aiServiceMode: 'paid', paidSessionToken: token, paidApiBase: base, paidModel: 'demo/model',
   paidAccountViewCacheV1: { version: 1, scope: await accountScope(base, token), updatedAt: time, me: account } };
 const names = ['mode', 'sources', 'apiUrl', 'aiService', 'aiPaidCredits', 'aiPaidHeld', 'aiPaidAccountState',
   'aiPaidModel', 'aiPaidLogin', 'aiPaidAccount', 'aiPaidRefresh', 'aiPaidLogout', 'aiPaidStatus'];

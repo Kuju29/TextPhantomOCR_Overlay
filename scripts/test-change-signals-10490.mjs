@@ -52,7 +52,7 @@ globalThis.fetch = async (url, options = {}) => {
   requests.push({ url: String(url), options });
   return reply(String(url), options);
 };
-Object.assign(local, { supportActivated: true, paidSessionToken: 'a'.repeat(64), paidApiBase: 'http://localhost:7860', customApiUrl: 'http://localhost:7860' });
+Object.assign(local, { tpDataConsentV1: { version: 1, granted: true, at: 1 }, supportActivated: true, paidSessionToken: 'a'.repeat(64), paidApiBase: 'http://localhost:7860', customApiUrl: 'http://localhost:7860' });
 const runtime = (message, sender) => new Promise(resolve => {
   let answered = false;
   for (const fn of runtimeListeners) { const async = fn(message, sender, value => { answered = true; resolve(value); }); if (async === true) answered = true; }
@@ -264,7 +264,7 @@ await check('Login alarms exist only while a sign-in flow is pending', async () 
   await alarm.disarm();
   assert.deepEqual(created, [['qa', { periodInMinutes: 0.5 }]]);
   assert.deepEqual(cleared, ['qa', 'qa']);
-  for (const path of ['background/login-auth.js', 'background/login/webchat/login_webchat_background.js', 'background/login/endpoint/login_endpoint_background.js']) {
+  for (const path of ['background/login-auth.js', 'background/login/endpoint/login_endpoint_background.js']) {
     const text = src(path);
     assert(!/^chrome\.alarms\.create\(/m.test(text), path + ' creates no alarm at load');
     assert(/arm\(\)/.test(text) && /disarm\(\)/.test(text), path + ' arms/disarms with the flow');

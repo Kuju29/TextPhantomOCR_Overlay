@@ -438,6 +438,7 @@ class PaidAdapter:
                 failure.center_http_status = response.status_code
                 failure.status = upstream
             raise failure
+        dispatch_marked = False
         try:
             data = response.json()
             if getattr(response, "headers", {}).get("x-tp-operation-replayed") == "true" or data.get("operation_replayed") is True:
@@ -445,6 +446,7 @@ class PaidAdapter:
                 diagnostics.emit("paid.center.receipt_replayed", operation_id=data.get("operation_id"), provider_dispatched=False)
             else:
                 accounting.mark_dispatched()
+                dispatch_marked = True
             text = data["choices"][0]["message"]["content"]
             if not isinstance(text, str):
                 raise ValueError("bad content")
@@ -491,7 +493,12 @@ class PaidAdapter:
                                "centerOperationReplayed": replay_response is not None,
                                "chargedTp": data.get("charged_tp"),
                                "balanceTp": data.get("balance_tp")})
-        except (ValueError, TypeError, KeyError, IndexError) as exc:
+        except (ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
+            if replay_response is None and not dispatch_marked:
+                # A success status whose body is not a JSON object: the Center
+                # accepted the request and may have sent it to AI, so the
+                # outcome is uncertain (one usage observation), never "not sent".
+                accounting.mark_dispatched()
             diagnostics.emit("paid.center.invalid_completion", outcome="uncertain", **diagnostics.fault(exc))
             raise ProviderTransportError("Center returned an invalid Paid completion",
                                          provider="paid", model=request.model) from None

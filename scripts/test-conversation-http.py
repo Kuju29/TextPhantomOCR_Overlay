@@ -48,8 +48,9 @@ class LoopbackClient:
 try:
  with tempfile.TemporaryDirectory() as temp,patch.dict(os.environ,{'TP_CONVERSATION_STATE_FILE':temp+'/state.sqlite','TP_AI_WIRE_TRACE':'1','TP_AI_WIRE_TRACE_DIR':temp+'/wire','TP_USAGE_RECEIPTS':'off'}),patch.object(httpx,'Client',LoopbackClient),patch('backend.ai.provider_resolution.discovered_model_capabilities',return_value=(False,{})):
   # This fixture tests transcript replay, not a verified HF thinking control.
+  # Human examples are opt-in (style_examples / the Human examples switch); this user has them on.
   # Explicit Provider default permits the mocked account with no model catalogue.
-  cfg=AiConfig(provider='huggingface',model='fixture',api_key='PRIVATE_ACCOUNT',base_url='https://router.huggingface.co/v1',thinking='default',source_lang='en',memory_mode='off',translation_mode='conversation',conversation=descriptor({'documentId':'doc'},context={'tp_tab_session':'owner'}),model_capabilities={'limits':{'contextTokens':32768,'maxOutputTokens':4096}})
+  cfg=AiConfig(provider='huggingface',model='fixture',api_key='PRIVATE_ACCOUNT',base_url='https://router.huggingface.co/v1',thinking='default',source_lang='en',memory_mode='off',translation_mode='conversation',style_examples=True,conversation=descriptor({'documentId':'doc'},context={'tp_tab_session':'owner'}),model_capabilities={'limits':{'contextTokens':32768,'maxOutputTokens':4096}})
   def translate(i,config=cfg,text=None):
    token=wire_trace.begin({'traceId':'conversation','operationId':f'conversation-http-{i}'})
    try:return invocation.translate(markers.apply([text or 'Hello '+str(i)]),'th',config)

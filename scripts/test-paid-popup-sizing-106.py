@@ -5,6 +5,10 @@ action-popup request before simulating the host honoring it. This is explicitly
 not an installed action-popup host test (the bundled headless shell cannot load
 extensions). TP_CHROMIUM selects a Chromium executable.
 """
+import sys as _tp_sys
+from pathlib import Path as _TpPath
+_tp_sys.path.insert(0, str(_TpPath(__file__).resolve().parent / 'lib'))
+from chromium_path import chromium_executable  # the one shared Chromium resolver
 import argparse,json,os,re,shutil,tempfile
 from pathlib import Path
 from playwright.sync_api import sync_playwright
@@ -21,7 +25,8 @@ def check(name,ok):
 hook=r'''
 import {els} from './dom.js';
 import {createPaidServiceController} from './controllers/paid-service-controller.js';
-const store={aiServiceMode:'paid',paidSessionToken:'qa_session_only',paidApiBase:'http://localhost:7860',customApiUrl:'http://localhost:7860',paidEmail:'QA@example.com',paidModel:'qa/model'};
+// 10495: this customer allowed data use (the account gate reads the consent record).
+const store={tpDataConsentV1:{version:1,granted:true,at:1},aiServiceMode:'paid',paidSessionToken:'qa_session_only',paidApiBase:'http://localhost:7860',customApiUrl:'http://localhost:7860',paidEmail:'QA@example.com',paidModel:'qa/model'};
 const data={email:'QA@example.com',credits:{available:'40000',held:'0',trial:'50000',granted:'10000'},models:[{id:'qa/model',name:'QA model',eligible_tp:'40000'}],packages:[],history:{orders:{items:[],total:0},payments:{items:[],total:0},lots:{items:[],total:0},usage:{items:[],total:0}}};
 const listeners=[];
 window.chrome={extension:{getViews:()=>window.qaSurface==='popup'?[window]:[]},storage:{onChanged:{addListener:fn=>listeners.push(fn),removeListener:fn=>{const i=listeners.indexOf(fn);if(i>=0)listeners.splice(i,1);}}}};
@@ -42,7 +47,7 @@ with tempfile.TemporaryDirectory(prefix='tp-popup-106-') as temporary,sync_playw
     htmlpath=fixture/'popup/popup.html';html=re.sub(r'<script\b[^>]*>.*?</script>','',htmlpath.read_text(),flags=re.S)
     htmlpath.write_text(html.replace('</body>','<script type="module" src="sizing-hook.js"></script></body>'))
     (fixture/'popup/sizing-hook.js').write_text(hook)
-    browser=pw.chromium.launch(executable_path=os.getenv('TP_CHROMIUM') or None,headless=True,args=['--no-sandbox','--single-process','--no-zygote','--disable-dev-shm-usage','--allow-file-access-from-files'])
+    browser=pw.chromium.launch(executable_path=chromium_executable(),headless=True,args=['--no-sandbox','--single-process','--no-zygote','--disable-dev-shm-usage','--allow-file-access-from-files'])
     context=browser.new_context();errors=[]
     def page(surface,width):
         p=context.new_page();p.set_viewport_size({'width':width,'height':600});p.on('pageerror',lambda e:errors.append(str(e)))

@@ -21,6 +21,8 @@ const context=vm.createContext({window:{__TP:TP,scrollX:0,scrollY:0},document,ch
   preflightPaths.push(new URL(String(url)).pathname);
   if(String(url).endsWith('/meta'))return new Response(JSON.stringify({ok:true,paid:{available:true}}),{status:200});
   if(String(url).endsWith('/paid/me'))return new Response(JSON.stringify({email:'fixture@example.test',credits:{available:'100'},models:[{id:'tp-model'}],addons:{entitlements:[{code:'ai_login',status:'active'}]},...(requestMode==='paid-paused'?{paid_paused:true}:{})}),{status:200});
+  // The resolver discovers this owner's current Login session (no popup needed), then admits the model.
+  if(new URL(String(url)).pathname==='/login/providers')return new Response(JSON.stringify({providers:[{id:'login_gemini',session:{id:'lgs_'+'a'.repeat(48),provider:'login_gemini'}}]}),{status:200});
   if(String(url).includes('/login/providers/')){loginPreflightCalls++;if(requestMode==='model-denied-navigate')TP.resetPageInstance('fixture-navigation-during-preflight');return new Response(JSON.stringify({error:{code:'login_model_access_denied',message:'Synthetic account has no access to this Login model.'}}),{status:403});}
   throw new Error('Unexpected fixture network path');
 }});
@@ -45,7 +47,7 @@ async function moduleAt(file){if(modules.has(file))return modules.get(file);cons
 const menu=await moduleAt(path.join(root,'background/context-menu.js'));await menu.link((name,from)=>moduleAt(path.resolve(path.dirname(from.identifier),name)));await menu.evaluate();
 const run=async({source='login',mode='model-denied',capture=true}={})=>{
  TP.clearImageError(image);messages.length=0;requestMode=mode;captureGeneration=capture;
- settings={mode:'lens_text',sources:'ai',lang:'th',aiServiceMode:'paid',paidTranslationSource:source,paidSessionToken:'synthetic-customer',paidApiBase:'http://localhost:7860',customApiUrl:'http://localhost:7860',apiUrlDefault:'http://localhost:7860',apiUrlReset:'http://localhost:7860',apiDefaultsFetchedAt:Date.now(),paidModel:'tp-model',loginProvider:'login_gemini',loginSessionId:'lgs_'+'a'.repeat(48),loginModel:'web-default'};
+ settings={mode:'lens_text',sources:'ai',lang:'th',aiServiceMode:'paid',paidTranslationSource:source,paidSessionToken:'synthetic-customer',paidApiBase:'http://localhost:7860',customApiUrl:'http://localhost:7860',apiUrlDefault:'http://localhost:7860',apiUrlReset:'http://localhost:7860',apiDefaultsFetchedAt:Date.now(),paidModel:'tp-model',loginProvider:'login_gemini',loginSessionId:'lgs_'+'a'.repeat(48),loginModel:'web-default',tpDataConsentV1:{version:1,granted:true}}; // 10495: this user allowed account data
  await menu.namespace.onContextMenuClicked({menuItemId:'img_one',srcUrl:original,frameId:0},{id:41,url:'https://fixture.invalid/chapter',title:'Fixture'});for(let n=0;n<20;n++)await new Promise(r=>setImmediate(r));
  return{messages:[...messages],badges:[...badges]};
 };
@@ -69,7 +71,10 @@ assert.equal(badges.length,1,'Actual Login process failure must paint the owning
 // Replay the actual .42 failure shape through the production HTTP transport,
 // page validation and job error consumer. These are synthetic HTTP responses,
 // not a live Login provider call or a re-created upstream SSE transport.
-const savedFetch=globalThis.fetch;let generationCalls=0;const sourceDoc=text=>({schema:'tp.lens-document/1',image:{width:100,height:100},languages:{source:'en',target:'th'},paragraphs:[{id:'p0',sourceText:text,items:[]}]});
+const savedFetch=globalThis.fetch,savedChrome=globalThis.chrome;let generationCalls=0;
+// 10495: a Login request asks the account gate first; this signed-in customer allowed data use.
+const accountStore={tpDataConsentV1:{version:1,granted:true,at:1},paidSessionToken:'synthetic-session',paidApiBase:'http://fixture.invalid',customApiUrl:'http://fixture.invalid'};
+globalThis.chrome={runtime:{lastError:null,getManifest:()=>({version:'fixture'})},storage:{local:{get:(keys,fn)=>{const v=structuredClone(accountStore);fn?.(v);return Promise.resolve(v);}},onChanged:{addListener(){},removeListener(){}}}};const sourceDoc=text=>({schema:'tp.lens-document/1',image:{width:100,height:100},languages:{source:'en',target:'th'},paragraphs:[{id:'p0',sourceText:text,items:[]}]});
 try{
  globalThis.fetch=async(_url,options)=>{generationCalls++;const request=JSON.parse(options.body);assert.equal(request.provider.id,'login');assert.equal(request.repair.enabled,false);const body={schema:'tp.ai.result/1',translations:[],missing:request.units.map(x=>x.id),meta:{generationAttempts:1,providerTerminalComplete:true}};return new Response(JSON.stringify({schema:'tp.ai.stream/1',sequence:1,type:'result',body})+'\n',{status:200,headers:{'Content-Type':'application/x-ndjson'}});};
  const translate=text=>translateLensPage({base:'http://fixture.invalid',payload:{lang:'th',metadata:{image_id:'zero-marker-page'},context:{}},result:{lensDocument:sourceDoc(text),eraseBoxes:{schema:'tp.erase-boxes/1',boxes:[]}},plan:{route:'server',ai:{provider:'login',model:'login_gemini/web-default',api_key:'synthetic-session',translation_mode:'conversation',memory_mode:'off'}},jobId:'zero-marker-job',conversationSubmit:(units,options)=>translateViaServer(units,{...options,capabilities:{aiConversation:'tp.conversation/1',aiConversationBatch:'tp.conversation_batch/1'}})});
@@ -77,7 +82,7 @@ try{
  TP.clearImageError(image);pending.set('zero-marker-job',{...job,generation:TP.generationFor(image)});actualDelivery.handleJobError('zero-marker-job',{...aiPageFailure(outcome),message:outcome.reason});for(let n=0;n<20;n++)await new Promise(r=>setImmediate(r));
  assert.equal(badges.length,1,'HTTP200 with zero accepted markers must show the owning image error when there is no active repair owner.');assert.match(badges[0].textContent,/AI_OUTPUT_INVALID/);
  TP.clearImageError(image);const skipped=await translate('A');assert.equal(skipped.skipped,true);assert.deepEqual(skipped.missing,[]);assert.equal(generationCalls,1,'Deliberate singleton/no-text skip must never request the provider.');assert.equal(badges.length,0);
-}finally{globalThis.fetch=savedFetch;}
+}finally{globalThis.fetch=savedFetch;globalThis.chrome=savedChrome;}
 TP.clearImageError(image);TP.resetPageInstance('navigation');await TP.applyInsertMessage({type:'IMAGE_ERROR',original,generation,error:{schema:'tp.error/1',code:'LOGIN_SESSION_REQUIRED',userMessage:'Old Login error'}});assert.equal(badges.length,0,'Late old Login errors must remain suppressed.');
 const recycledGeneration=TP.generationFor(image);image.src=image.currentSrc='https://fixture.invalid/recycled.jpg';const latestGeneration=TP.generationFor(image);assert.notEqual(latestGeneration.targetRevision,recycledGeneration.targetRevision);await TP.applyInsertMessage({type:'IMAGE_ERROR',original:image.src,generation:recycledGeneration,error:{schema:'tp.error/1',code:'AI_OUTPUT_INVALID',userMessage:'Old image failure'}});assert.equal(badges.length,0,'A new source generation on the same IMG must refuse the older image error.');
 console.log(JSON.stringify({passed:true,scope:'Actual context-menu + Paid/Login preflight + HTTP200 response/page validation + result-delivery + image-finder/target-key/message-controller',modules:modules.size,providerCalls:generationCalls,generationEnqueued:enqueued}));

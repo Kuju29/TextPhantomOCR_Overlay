@@ -38,6 +38,8 @@ import { describeLimits } from "./job-queue.js";
 import { imageKeyFromPayload } from "./job-keys.js";
 import { enqueue, setCurrentBatchId } from "./jobs.js";
 import { getSettingsEpoch } from "./jobs/lifecycle.js";
+import { DATA_CONSENT_REQUIRED, DATA_CONSENT_MESSAGE } from "../shared/data-consent.js";
+import { openConsentTab } from "./consent-tab.js";
 import { resolveJobAiProfile } from "./ai-profile-resolver.js";
 import { waitForLoginConnect, resolveWithAutoConnect } from "./login/login-ready-gate.js";
 import { ensureLocalAiBatchReady } from "./local-ai-preflight.js";
@@ -732,6 +734,9 @@ async function handleTranslateAll(menuInfo, tab, ctx) {
  */
 async function dispatchContextMenuClick(menuInfo, tab, options = {}) {
   let startingBatch = null;
+  // One user action (a click, a page button, Translate all): the dedupe key for
+  // the consent tab.
+  const actionKey = crypto.randomUUID();
   let errorGeneration = null;
   const diagnosticId=menuInfo?.menuItemId==='img_all' ? crypto.randomUUID() : '';
   const diagnosticTrigger=menuInfo?.diagnosticTrigger==='page_action'?'page_action':'context_menu';
@@ -974,10 +979,18 @@ async function dispatchContextMenuClick(menuInfo, tab, options = {}) {
         getTrace(),
       );
       e = showAiConfigurationError(menuInfo, tab, e);
+    } else if (e?.code === DATA_CONSENT_REQUIRED) {
+      // 10495: Paid/Login without data-use consent. Nothing was sent; open (or
+      // focus) the consent tab once for this action, and say so on the page in
+      // the selected language (English source, Thai in page-ui-text.js).
+      void openConsentTab(actionKey).catch(() => {});
+      sendToastToTab(tab?.id, Number(menuInfo?.frameId) || 0, `TextPhantom: ${DATA_CONSENT_MESSAGE}`, 12000);
+      e.toastShown = true;
     } else {
       const shown = publicTpError(e);
       sendToastToTab(tab?.id, Number(menuInfo?.frameId) || 0,
         `TextPhantom: ${shown.userMessage} · ${shown.code}`, 12000);
+      e.toastShown = true;
     }
     if (menuInfo?.menuItemId === 'img_one' && menuInfo?.srcUrl && errorGeneration)
       await sendToTab(tab.id, imageErrorMessage({imgUrl:menuInfo.srcUrl,

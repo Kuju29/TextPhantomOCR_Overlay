@@ -1,14 +1,17 @@
 import assert from 'node:assert/strict';
-import { webcrypto } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { installSettle } from './lib/settle.mjs';
 
 // 10493: owner logs (Center .91, extension .92) showed 3-5 identical
 // GET /paid/support reads in the same second on every popup open, and per page
 // load from each tab's dock. Each surface now shares one in-flight read; an
 // account/API change still starts a fresh one. Nothing is cached after a read
 // settles (the next popup open or page load asks again).
-globalThis.crypto ??= webcrypto;
-const saved = { supportActivated: true, paidSessionToken: 'a'.repeat(64), paidApiBase: 'http://localhost:7860', customApiUrl: 'http://localhost:7860' };
+// Settling waits for WebCrypto (thread pool) work, not a fixed number of turns.
+const settle = installSettle({ turns: 40 });
+const saved = { supportActivated: true, paidSessionToken: 'a'.repeat(64), paidApiBase: 'http://localhost:7860', customApiUrl: 'http://localhost:7860',
+  // 10495: support requests need the data-use consent (shared/account-gate.js).
+  tpDataConsentV1: { version: 1, granted: true } };
 const storageListeners = [], runtimeListeners = [], reads = [];
 let release = null;
 const pick = keys => Object.fromEntries((Array.isArray(keys) ? keys : [keys]).map(key => [key, structuredClone(saved[key])]));
@@ -26,7 +29,6 @@ globalThis.fetch = async url => {
   await new Promise(resolve => { const previous = release; release = () => { previous?.(); resolve(); }; });
   return new Response(JSON.stringify({ email: 'customer@example.invalid', enabled: true, thread: { unread: 0, last_seq: 1 } }));
 };
-const settle = async () => { for (let i = 0; i < 40; i++) await new Promise(resolve => setImmediate(resolve)); };
 const supportReads = () => reads.filter(url => url.endsWith('/paid/support')).length;
 function dispatch(message, sender) {
   return new Promise(resolve => {

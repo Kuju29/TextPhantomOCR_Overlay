@@ -27,7 +27,8 @@ const fixtureCrypto={
   getRandomValues:value=>webcrypto.getRandomValues(value),
   randomUUID:()=>webcrypto.randomUUID(),
 };
-const popupEntryFixture=options=>originalFixture({...options,cryptoProvider:fixtureCrypto});`;
+// 10495: this signed-in customer allowed data use (account requests go through the account gate).
+const popupEntryFixture=options=>{if(options?.local)options.local.tpDataConsentV1={version:1,granted:true,at:1};return originalFixture({...options,cryptoProvider:fixtureCrypto});};`;
 const executed=original.replace(fixtureImport,injected);
 const restored=executed.replace(injected,fixtureImport);
 assert.equal(restored,original,'Every original byte, including every assertion and case, must be conserved');

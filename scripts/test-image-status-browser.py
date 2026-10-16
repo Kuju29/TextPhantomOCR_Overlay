@@ -1,8 +1,12 @@
 """Offline Chromium: one batch progress board plus image-specific terminal errors."""
+import sys as _tp_sys
+from pathlib import Path as _TpPath
+_tp_sys.path.insert(0, str(_TpPath(__file__).resolve().parent / 'lib'))
+from chromium_path import chromium_executable  # the one shared Chromium resolver
 from pathlib import Path
 import argparse, json, subprocess
 from playwright.sync_api import sync_playwright
-p=argparse.ArgumentParser();p.add_argument('--browser',default='/usr/bin/chromium');p.add_argument('--out',type=Path,default=Path('/tmp/tp-image-status'));a=p.parse_args()
+p=argparse.ArgumentParser();p.add_argument('--browser',default=chromium_executable(required=False));p.add_argument('--out',type=Path,default=Path('/tmp/tp-image-status'));a=p.parse_args()
 r=Path(__file__).resolve().parents[1];a.out.mkdir(parents=True,exist_ok=True)
 run=subprocess.run(['node','scripts/test-image-status.mjs'],cwd=r,capture_output=True,text=True)
 assert run.returncode==0,run.stderr

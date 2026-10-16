@@ -48,7 +48,7 @@ for spec in registry:
         def apost(*args,**kw):
             captured.append(kw['json']);return Response({'content':[{'type':'text','text':h['ANSWER']}],'stop_reason':'end_turn','usage':{'input_tokens':23,'output_tokens':7}})
         with ExitStack() as stack:
-            stack.enter_context(patch.object(openai_chat.httpx,'Client',
+            stack.enter_context(patch.object(sys.modules["httpx"], 'Client',
                 NativeClient if spec.provider_id=='lmstudio' else Client))
             stack.enter_context(patch.object(gemini,'_post_once',side_effect=gpost))
             stack.enter_context(patch.object(anthropic,'post_json',side_effect=apost))

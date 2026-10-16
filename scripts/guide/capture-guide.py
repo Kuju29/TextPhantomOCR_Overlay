@@ -161,6 +161,9 @@ BASE_LOCAL = {
     "relayoutTranslated": True,
     "fontScale": 1,
     "engineMode": "extension",
+    # 10495: the account shots show a user who allowed data use (account
+    # controls are greyed otherwise); privacy_locked removes it on purpose.
+    "tpDataConsentV1": {"version": 1, "granted": True, "at": 1},
 }
 
 SERIES_REPLY = {"ok": True, "memory": {
@@ -257,11 +260,13 @@ MANUAL_STAGE = """() => {
   __guide.show('#ai-provider-wrap'); __guide.show('#ai-model-wrap'); __guide.show('#ai-thinking-wrap');
   __guide.show('#ai-prompt-wrap'); __guide.show('#ai-characters-wrap'); __guide.show('#ai-page-image-wrap');
   __guide.show('#ai-token-ceiling-wrap'); __guide.show('#ai-translation-mode-wrap');
-  for (const o of document.querySelectorAll('#ai-thinking option')) o.disabled = false;
-  document.querySelector('#ai-thinking').value = 'minimum'; document.querySelector('#ai-thinking').disabled = false;
+  // A verified model: the thinking choices are offered (not dimmed, no reason line).
+  __guide.options('#ai-thinking', [['minimum', 'Lowest available'], ['off', 'Thinking off'], ['on', 'Thinking on']], 'minimum');
   __guide.text('#ai-thinking-hint', '');
+  document.querySelector('#ai-thinking-wrap').classList.remove('is-unavailable');
   document.querySelector('#ai-memory-mode').value = 'terms';
   document.querySelector('#ai-page-image').checked = false; document.querySelector('#ai-page-image').disabled = false;
+  document.querySelector('#ai-page-image').closest('.label-row').classList.remove('is-unavailable');
   document.querySelector('#ai-style-examples').checked = true;
   __guide.text('#ai-characters-count', 'blue-sky - 2 characters (Ren, Mio), 6 terms, 0 excerpts');
 }"""
@@ -562,28 +567,36 @@ def buy_done(page):
     ])]
 
 
-LOGIN_SUPPORT = ("Claude Login translates through a claude.ai tab in this browser. TextPhantom opens one in the background "
-                 "when needed and closes the tabs it opened once they are idle; your own tabs stay open. You can keep browsing "
-                 "other tabs. Keep the browser open and stay signed in; closing that tab during a translation stops it.")
+def hover_tip(page, name_selector):
+    """10496: the real hover behaviour (shared/hover-tip.js): point at an
+    option name and wait for its explanation to appear under it."""
+    page.mouse.move(2, 2)
+    page.hover(name_selector)
+    page.wait_for_function("() => { const t = document.getElementById('tp-tip'); return t && !t.hidden && t.classList.contains('show'); }")
+    page.wait_for_timeout(200)
 
 
 @state(local={"sources": "ai", "aiServiceMode": "paid", "paidTranslationSource": "login", "loginProvider": "login_claude"}, tab="ai")
 def login(page):
     page.evaluate(PAID_STAGE)
     page.evaluate(PAID_ACCOUNT_STAGE, "login")
-    page.evaluate("""(support) => {
+    page.evaluate("""() => {
       __guide.options('#ai-login-provider', [['login_chatgpt','ChatGPT'],['login_claude','Claude'],['login_gemini','Gemini'],['login_deepseek','DeepSeek']], 'login_claude');
-      __guide.text('#ai-login-account', 'Use your own AI account');
-      __guide.show('#ai-login-support'); __guide.text('#ai-login-support', support);
+      // Not signed in: no status line and no tab warning (login-service-controller).
+      __guide.text('#ai-login-account', ''); __guide.text('#ai-login-support', ''); __guide.hide('#ai-login-support');
       const c = document.querySelector('#ai-login-connect'); c.textContent = 'Sign in'; c.disabled = false;
       document.querySelector('#ai-login-refresh').disabled = false;
       __guide.hide('#ai-login-cancel'); __guide.hide('#ai-login-logout'); __guide.hide('#ai-login-model-wrap'); __guide.hide('#ai-login-project-wrap');
       __guide.text('#ai-login-status', 'Login opens the provider website. Your session will be sent to the selected API; translation runs through its endpoints. API: https://api.example.test');
-    }""", LOGIN_SUPPORT)
-    return [("login", "เลือก Translation source เป็น Login เพื่อใช้บัญชี AI ของคุณเอง", ("#ai-paid-source-wrap", "#ai-login-panel", 8), [
+    }""")
+    # The explanation the login controller wrote for Claude, shown by hovering "Provider".
+    if "claude.ai tab" not in page.text_content("#ai-login-provider-tip"):
+        raise RuntimeError("the login controller did not write the Claude explanation")
+    hover_tip(page, '[data-tip-src="ai-login-provider-tip"]')
+    return [("login", "เลือก Translation source เป็น Login เพื่อใช้บัญชี AI ของคุณเอง ชี้ที่ชื่อ Provider เพื่อดูคำอธิบาย", ("#ai-paid-source-wrap", "#ai-login-panel", 8), [
         {"key": "source", "sel": "#ai-paid-source"},
         {"key": "provider", "sel": "#ai-login-provider"},
-        {"key": "support", "sel": "#ai-login-support"},
+        {"key": "support", "sel": "#tp-tip", "anchor": "right"},
         {"key": "connect", "sel": "#ai-login-connect"},
         {"key": "refresh", "sel": "#ai-login-refresh", "anchor": "top"},
         {"key": "status", "sel": "#ai-login-status"},
@@ -603,10 +616,105 @@ def tools(page):
         {"key": "auto", "sel": "#open-auto-translate"},
         {"key": "api-url", "sel": "#api-url"},
         {"key": "reset-api", "sel": "#reset-api", "anchor": "right"},
+        {"key": "diagnostics", "sel": "#diagnostics-upload", "box": "label"},
         {"key": "engine", "sel": "#engine-mode"},
         {"key": "reset", "sel": "#reset-defaults"},
         {"key": "contact", "sel": "#contact-admin"},
     ])]
+
+
+# --------------------------------------------------------------------------
+# 10495: Privacy & data tab of the guide. The consent screen and the
+# diagnostics confirmation are drawn by the real modules (authored Thai and
+# English from shared/privacy-content.js); the locked popup is the real lock
+# (no data-use consent) over a staged signed-in account. The popup UI itself is
+# captured in English (its Thai comes from the interface translator, which
+# needs the network); the consent screen and the confirmation in both languages.
+# --------------------------------------------------------------------------
+def consent_state(lang):
+    def capture(page):
+        page.evaluate("""async (lang) => {
+          const m = await import('/shared/data-consent-dialog.js');
+          void m.openDataConsentDialog({ lang });
+          for (let i = 0; i < 50 && !document.getElementById('tp-consent-allow'); i++) await new Promise(r => setTimeout(r, 20));
+          document.getElementById('tp-consent-allow').blur();
+        }""", lang)
+        alt = "หน้าจอขออนุญาตใช้ข้อมูล (ภาษาไทย)" if lang == "th" else "The data-use permission screen (English)"
+        scope = "shared/data-consent-dialog.js"
+        return [(f"privacy-consent-{lang}", alt, (".tp-consent-card", ".tp-consent-card", 0), [
+            {"key": "title", "sel": "#tp-consent-title", "scope": scope},
+            {"key": "always", "sel": ".tp-consent-group1", "scope": scope},
+            {"key": "permission", "sel": ".tp-consent-group2", "scope": scope},
+            {"key": "note", "sel": ".tp-consent-note", "scope": scope},
+            {"key": "details", "sel": "#tp-consent-details", "anchor": "right", "scope": scope},
+            {"key": "later", "sel": "#tp-consent-later", "anchor": "bottom", "scope": scope},
+            {"key": "allow", "sel": "#tp-consent-allow", "anchor": "bottom", "scope": scope},
+        ])]
+    capture.__name__ = f"privacy_consent_{lang}"
+    return capture
+
+
+state(viewport={"width": POPUP_WIDTH, "height": 760})(consent_state("th"))
+state(viewport={"width": POPUP_WIDTH, "height": 760})(consent_state("en"))
+
+
+@state(local={"sources": "ai", "aiServiceMode": "paid", "tpDataConsentV1": None}, tab="ai")
+def privacy_locked(page):
+    page.evaluate(PAID_STAGE)
+    page.evaluate(PAID_ACCOUNT_STAGE, "tp")
+    stage_paid_models(page)
+    page.evaluate("""() => {
+      // What paid-service-controller renders for a signed-in user without consent.
+      __guide.text('#ai-paid-credits', '— TP'); __guide.text('#ai-paid-held', '');
+      __guide.text('#ai-paid-model-name', 'Select model…');
+      for (const s of ['#ai-paid-model-input', '#ai-paid-model-output']) __guide.text(s, '—');
+      __guide.text('#ai-paid-model-price-status', '');
+      const badge = document.querySelector('#ai-paid-account-state'); badge.textContent = 'Signed in'; badge.dataset.kind = 'warning';
+      document.querySelector('#ai-paid-consent').hidden = false;
+      __guide.hide('#ai-paid-source-wrap');
+      for (const s of ['#ai-thinking-wrap','#ai-prompt-wrap','#ai-characters-wrap','#ai-page-image-wrap','#ai-token-ceiling-wrap','#ai-translation-mode-wrap']) __guide.hide(s);
+      if (!document.documentElement.hasAttribute('data-account-locked')) throw new Error('the real account lock did not engage');
+    }""")
+    return [("privacy-locked", "หน้าต่าง TextPhantom เมื่อยังไม่อนุญาต: ปุ่มของบัญชีเป็นสีเทา ใช้ Sign out ได้", ("#ai-paid-panel", "#ai-paid-panel", 6), [
+        {"key": "note", "sel": "#ai-paid-consent"},
+        {"key": "buy", "sel": "#ai-paid-buy"},
+        {"key": "model", "sel": "#ai-paid-model-picker"},
+        {"key": "signout", "sel": "#ai-paid-logout", "anchor": "bottom"},
+    ])]
+
+
+@state()
+def privacy_diagnostics(page):
+    page.evaluate("() => { __guide.tab('tools'); }")
+    # 10496: the switch sits under Custom API URL; its explanation appears on hover.
+    hover_tip(page, '[data-tip-src="diagnostics-upload-hint"]')
+    return [("privacy-diagnostics", "Tools › Advanced: สวิตช์ส่ง log วินิจฉัย (ปิดเป็นค่าเริ่มต้น) และคำอธิบายเมื่อชี้ที่ชื่อ", ("#api-url", "#tp-tip", 12), [
+        {"key": "switch", "sel": "#diagnostics-upload", "box": "label"},
+        {"key": "hint", "sel": "#tp-tip"},
+    ])]
+
+
+def diagnostics_confirm_state(lang):
+    def capture(page):
+        page.evaluate("""async (lang) => {
+          __guide.tab('tools');
+          const m = await import('/popup/controllers/diagnostics-controller.js');
+          void m.confirmDiagnostics({ lang });
+          for (let i = 0; i < 50 && !document.getElementById('tp-diag-cancel'); i++) await new Promise(r => setTimeout(r, 20));
+        }""", lang)
+        alt = "หน้าต่างยืนยันก่อนเปิดส่ง log วินิจฉัย (ภาษาไทย)" if lang == "th" else "The confirmation before diagnostic logs turn on (English)"
+        scope = "popup/controllers/diagnostics-controller.js"
+        return [(f"privacy-diagnostics-confirm-{lang}", alt, (".tp-diag-card", ".tp-diag-card", 0), [
+            {"key": "body", "sel": "#tp-diag-body", "scope": scope},
+            {"key": "cancel", "sel": "#tp-diag-cancel", "anchor": "bottom", "scope": scope},
+            {"key": "confirm", "sel": "#tp-diag-confirm-on", "anchor": "bottom", "scope": scope},
+        ])]
+    capture.__name__ = f"privacy_diagnostics_confirm_{lang}"
+    return capture
+
+
+state(viewport={"width": POPUP_WIDTH, "height": 760})(diagnostics_confirm_state("th"))
+state(viewport={"width": POPUP_WIDTH, "height": 760})(diagnostics_confirm_state("en"))
 
 
 # --------------------------------------------------------------------------
@@ -688,7 +796,10 @@ def capture_demo(context, origin, debug_dir):
 
 
 # Where a newly added shot goes in guide-data.js when only some states are re-captured.
-ANCHORS = {"buy-packages": ("paid-picker",), "buy-payment": ("buy-packages",), "buy-done": ("buy-payment",)}
+ANCHORS = {"buy-packages": ("paid-picker",), "buy-payment": ("buy-packages",), "buy-done": ("buy-payment",),
+           "privacy-consent-th": ("tools",), "privacy-consent-en": ("privacy-consent-th",), "privacy-locked": ("privacy-consent-en",),
+           "privacy-diagnostics": ("privacy-locked",), "privacy-diagnostics-confirm-th": ("privacy-diagnostics",),
+           "privacy-diagnostics-confirm-en": ("privacy-diagnostics-confirm-th",)}
 
 
 def save_webp(png_bytes, name):

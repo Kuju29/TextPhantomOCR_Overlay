@@ -3,6 +3,10 @@
 Native clipboard coverage is reported separately from synthetic file ClipboardEvents.
 This does not claim an installed extension or a live Center/email test.
 """
+import sys as _tp_sys
+from pathlib import Path as _TpPath
+_tp_sys.path.insert(0, str(_TpPath(__file__).resolve().parent / 'lib'))
+from chromium_path import chromium_executable  # the one shared Chromium resolver
 import argparse
 import ast
 import asyncio
@@ -18,7 +22,7 @@ from pathlib import Path
 parser = argparse.ArgumentParser()
 parser.add_argument('--extension-root', type=Path, required=True)
 parser.add_argument('--output', type=Path, default=None)
-parser.add_argument('--browser', default=os.getenv('TP_QA_CHROMIUM'))
+parser.add_argument('--browser', default=chromium_executable(required=False))
 args = parser.parse_args()
 PROJECT = args.extension_root.resolve()
 OUT = (args.output or Path(tempfile.mkdtemp(prefix='tp-composer-qa-'))).resolve()

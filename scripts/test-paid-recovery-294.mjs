@@ -12,6 +12,7 @@ const elNames=['mode','sources','lang','apiUrl','aiService','aiServiceWrap','aiP
 globalThis.document={createElement:()=>el(),visibilityState:'visible'};
 const account={email:'customer@example.com',credits:{available:'10000',held:'20'},models:[{id:'demo/model',name:'Demo model',eligible_tp:'10000'}],paid_paused:false};
 const make=(storage={},options={})=>{
+ if(!('tpDataConsentV1' in storage))storage.tpDataConsentV1={version:1,granted:true,at:1}; // 10495: this user allowed data use (every account request asks the gate)
  const time=clock(),els=Object.fromEntries(elNames.map(n=>[n,el()]));els.mode.value='lens_text';els.sources.value='ai';els.apiUrl.value='http://localhost:7860';els.aiPaidEmail.value='customer@example.com';
  const state={lastApiOk:true,lastSavedApiUrl:els.apiUrl.value,healthSeq:0};let controller;
  const requests=[];let behavior={online:true,otp:true,unauthorized:false,meta:'configured'};
@@ -23,7 +24,8 @@ const make=(storage={},options={})=>{
   if(url.endsWith('/paid/me')&&behavior.unauthorized)return{ok:false,status:401,json:async()=>({error:{code:'SESSION_EXPIRED',message:'Expired'}})};
   return{ok:true,status:200,json:async()=>meta?{ok:true,paid:behavior.meta==='configured'?{available:true}:null}:url.endsWith('/status')?{available:behavior.otp,code:behavior.otp?'READY':'OTP_DISABLED',message:behavior.otp?'Ready':'Operator has disabled OTP'}:url.endsWith('/me')?account:url.endsWith('/verify')?{token:'customer-token'}:{ok:true}};
  };
- controller=createPaidServiceController({els,state,getStorage:async()=>structuredClone(storage),setStorage:async p=>Object.assign(storage,structuredClone(p)),toggleUi:()=>controller.applyVisibility(),...time,recoveryMs:1000,requestTimeoutMs:2000,recheckApi:options.recheckApi});
+ controller=createPaidServiceController({els,state,getStorage:async()=>structuredClone(storage),setStorage:async p=>Object.assign(storage,structuredClone(p)),toggleUi:()=>controller.applyVisibility(),...time,recoveryMs:1000,requestTimeoutMs:2000,recheckApi:options.recheckApi,
+  ensureConsent:async()=>({consent:true,shown:false})}); // 10494: this user allowed account data
  return{controller,els,state,storage,time,requests,behavior};
 };
 const event={preventDefault(){}};

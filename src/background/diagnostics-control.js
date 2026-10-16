@@ -1,6 +1,8 @@
 import { getApiBase } from './api.js';
-import { initializeLogJournal,setLogShippingEnabled,recordLogLine,persistLogJournal,flushLogs,logShippingState } from '../shared/log-sink.js';
+import { initializeLogJournal,setLogShippingEnabled,recordLogLine,persistLogJournal,flushLogs,logShippingState,setDiagnosticsUploadAllowed,diagnosticsUploadAllowed } from '../shared/log-sink.js';
 import { diagnosticRecord,setDiagnosticSink } from '../shared/diagnostics.js';
+import { DIAGNOSTICS_UPLOAD_KEY,readDiagnosticsUpload } from '../shared/settings.js';
+import { setTracingEnabled } from '../shared/trace.js';
 const normalize=x=>String(x||'').replace(/\/+$/,'');
 let probing=false,retry=null;
 export async function configureDiagnosticShipping(base,on){
@@ -25,7 +27,8 @@ export async function acceptDiagnosticEvent(record,base){
   recordLogLine(safe);await persistLogJournal();void flushLogs();return {ok:true,...logShippingState()};
 }
 export async function startDiagnosticShipping(){
-  if(probing)return;probing=true;
+  // Nothing to negotiate while the user's switch is off (10494).
+  if(probing||!diagnosticsUploadAllowed())return;probing=true;
   let timer;
   try{
     const base=normalize(await getApiBase({warm:false}));if(!base)return;
@@ -40,6 +43,28 @@ export async function startDiagnosticShipping(){
   }catch(error){
     recordLogLine(diagnosticRecord('logging.discovery_failed',{error_type:error?.name||'NetworkError',outcome:'error'}));
     await persistLogJournal();
-    if(!retry){retry=setTimeout(()=>{retry=null;void startDiagnosticShipping();},15000);retry?.unref?.();}
+    if(!retry&&diagnosticsUploadAllowed()){retry=setTimeout(()=>{retry=null;void startDiagnosticShipping();},15000);retry?.unref?.();}
   }finally{if(timer)clearTimeout(timer);probing=false;}
+}
+
+// 10494: the user's "Send diagnostic logs to the API server" switch (default
+// off). Off stops log and trace shipping at once and drops what was buffered;
+// on takes effect with the next API handshake. Translation never depends on it.
+let uploadRead=0;
+export async function applyDiagnosticsUpload(){
+  const id=++uploadRead;let on=false;
+  try{on=await readDiagnosticsUpload();}catch{on=false;}
+  if(id!==uploadRead)return on;
+  setDiagnosticsUploadAllowed(on);
+  if(!on)setTracingEnabled(false);
+  else void startDiagnosticShipping().catch(()=>{});
+  return on;
+}
+export function watchDiagnosticsUpload(){
+  setDiagnosticSink(recordLogLine); // records are dropped by log-sink while off
+  const apply=()=>void applyDiagnosticsUpload();
+  try{chrome.storage.onChanged.addListener((changes,area)=>{if(area==='local'&&changes?.[DIAGNOSTICS_UPLOAD_KEY])apply();});}catch{}
+  // Firefox/Thunderbird: the technicalAndInteraction permission is the switch.
+  try{chrome.permissions?.onAdded?.addListener(apply);chrome.permissions?.onRemoved?.addListener(apply);}catch{}
+  return applyDiagnosticsUpload();
 }

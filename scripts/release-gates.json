@@ -29,8 +29,8 @@
   },
   "separate": {
     "browser": {
-      "reason": "Requires a local Chromium executable; offline real DOM/canvas gate, not live provider.",
-      "command": "npm run test:browser-display && python scripts/test-repair-browser.py --browser /path/to/chromium --out /tmp/tp-repair && npm run test:browser-status && npm run test:browser-usage && npm run test:browser-conversation && python scripts/test-account-layout-1031.py && python scripts/test-cancel-recovery-1033.py && python scripts/test-compact-usage-browser.py && python scripts/test-conversation-browser.py && python scripts/test-display-browser.py && python scripts/test-download-browser-2725.py && python scripts/test-download-formats-storage-2726.py && python scripts/test-image-status-browser.py && python scripts/test-native-axis-browser.py && python scripts/test-paid-controls-browser-102.py && python scripts/test-paid-customer-browser-103.py && python scripts/test-paid-popup-sizing-106.py && python scripts/test-paid-session-expiry-1034.py && python scripts/test-payment-races-1032.py && python scripts/test-payment-resume-1036.py && python scripts/test-provider-selection-browser-2722.py && python scripts/test-reader-sources-browser.py && npm run test:browser-ui-language && npm run test:browser-support",
+      "reason": "Requires a local Chromium executable (resolved by scripts/lib/chromium_path.py: TP_CHROMIUM / TP_QA_CHROMIUM / TP_BROWSER_EXECUTABLE, then /opt/pw-browsers/chromium-*/chrome-linux/chrome); offline real DOM/canvas gate, not live provider. test-display-browser.py \"horizontal target reflow fits the group height\" depends on installed Thai font metrics (translated-fit.js estimates 0.55 em per Thai glyph) and fails where fonts are wider.",
+      "command": "npm run test:browser-display && python scripts/test-repair-browser.py --out /tmp/tp-repair && npm run test:browser-status && npm run test:browser-usage && npm run test:browser-conversation && python scripts/test-account-layout-1031.py && python scripts/test-cancel-recovery-1033.py && python scripts/test-compact-usage-browser.py && python scripts/test-conversation-browser.py && python scripts/test-display-browser.py && python scripts/test-download-browser-2725.py && python scripts/test-download-formats-storage-2726.py && python scripts/test-image-status-browser.py && python scripts/test-native-axis-browser.py && python scripts/test-paid-controls-browser-102.py && python scripts/test-paid-customer-browser-103.py && python scripts/test-paid-popup-sizing-106.py && python scripts/test-paid-session-expiry-1034.py && python scripts/test-payment-races-1032.py && python scripts/test-payment-resume-1036.py && python scripts/test-provider-selection-browser-2722.py && python scripts/test-reader-sources-browser.py && npm run test:browser-ui-language && npm run test:browser-support && python scripts/test-popup-cache-browser-10437.py && python scripts/test-popup-login-cache-browser.py && python scripts/test-popup-reopen-speed-10472.py --assert && python scripts/test-login-chatgpt-codeblock-10482.py && python scripts/test-support-dock-lifecycle-browser-10424.py",
       "files": [
         "scripts/test-account-layout-1031.py",
         "scripts/test-cancel-recovery-1033.py",
@@ -51,7 +51,12 @@
         "scripts/test-reader-sources-browser.py",
         "scripts/test-repair-browser.py",
         "scripts/test-ui-language-browser-10411.py",
-        "scripts/test-support-drafts-browser-10423.py"
+        "scripts/test-support-drafts-browser-10423.py",
+        "scripts/test-popup-cache-browser-10437.py",
+        "scripts/test-popup-login-cache-browser.py",
+        "scripts/test-popup-reopen-speed-10472.py",
+        "scripts/test-login-chatgpt-codeblock-10482.py",
+        "scripts/test-support-dock-lifecycle-browser-10424.py"
       ]
     },
     "windows": {
@@ -72,18 +77,19 @@
         "scripts/test-chat-composer-browser-10425.py"
       ]
     },
-    "support_dock_lifecycle": {
-      "reason": "Native DOM with explicitly simulated Chrome boundaries; requires Chromium/runtime libs/font config.",
-      "command": "python scripts/test-support-dock-lifecycle-browser-10424.py --source src/content/support-dock.js --browser /path/to/chromium --runtime-lib /path/to/runtime --font-config /path/to/fonts.conf --out /tmp/tp-dock",
-      "files": [
-        "scripts/test-support-dock-lifecycle-browser-10424.py"
-      ]
-    },
     "support_installed": {
-      "reason": "Requires full Chromium/Chrome for Testing with actual unpacked MV3 runtime and UNIX sockets; blocked in this execution environment.",
-      "command": "python scripts/test-support-installed-browser-10424.py --extension dist/chrome --browser /path/to/full-chromium --out /tmp/tp-installed",
+      "reason": "Requires full Chromium (not headless shell) loading the unpacked dist/chrome MV3 build. The extension-reload case calls chrome.runtime.reload(); with --load-extension on headless Chromium 141 the extension is unloaded instead of restarted, so that last case needs a desktop Chrome/Chromium.",
+      "command": "python scripts/test-support-installed-browser-10424.py --extension dist/chrome --out /tmp/tp-installed",
       "files": [
         "scripts/test-support-installed-browser-10424.py"
+      ]
+    },
+    "center_pair": {
+      "reason": "Needs the Control Center source tree (and its Python dependencies) next to this project. test-paid-version-pair-10463.py additionally needs a Center release older than the tp-paid-v2 protocol as CENTER_SOURCE (it reproduces the .63 old/fixed pairing); with the current Center it reaches the chat route and reports PROVIDER_OUTCOME_UNKNOWN by design.",
+      "command": "PYTHONPATH=api python scripts/test-paid-stream-e2e-10467.py ../TextPhantom-Control-Center . && PYTHONPATH=api python scripts/test-paid-version-pair-10463.py /path/to/old-center-source . fixed",
+      "files": [
+        "scripts/test-paid-stream-e2e-10467.py",
+        "scripts/test-paid-version-pair-10463.py"
       ]
     }
   }

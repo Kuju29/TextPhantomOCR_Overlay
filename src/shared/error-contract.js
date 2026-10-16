@@ -125,6 +125,11 @@ const USER_MESSAGES = Object.freeze({
   PAID_REFUND_PENDING: "พัก Paid ชั่วคราวระหว่างคำนวณและยืนยันคืนเงิน ยังเปิดดูบัญชีและประวัติได้",
   PAID_ACCOUNT_RESTRICTED: "บัญชีถูกระงับ Paid ระหว่างตรวจ refund/dispute กรุณาติดต่อผู้ดูแล ยังเปิดดูบัญชีและประวัติได้",
   PAID_LOGIN_REQUIRED: "กรุณาเข้าสู่บัญชี Paid และเลือกโมเดลที่ AI settings",
+  // 10495: Paid/Login need data-use consent; the background opened the consent
+  // tab. Nothing was sent or charged. (Same text as privacy-content.js pageBlocked.)
+  DATA_CONSENT_REQUIRED: "ต้องอนุญาตข้อมูลก่อน เปิดแท็บขออนุญาตให้แล้ว ยังไม่ได้ส่งคำขอและไม่หักเครดิต",
+  // A running Paid/Login job stopped because data use was withdrawn.
+  DATA_CONSENT_REVOKED: "ยกเลิกการอนุญาตข้อมูลแล้ว งานที่ใช้บัญชีหยุดแล้ว ผลที่แปลเสร็จยังอยู่",
   LOGIN_ADDON_REQUIRED: "สิทธิ์ AI Login ไม่พร้อมใช้งาน กรุณาตรวจแพ็กเสริมในบัญชี",
   LOGIN_SESSION_REQUIRED: "กรุณาเชื่อมต่อบัญชี AI Login และเลือกโมเดลก่อนแปล",
   LOGIN_SESSION_EXPIRED: "การเชื่อมต่อ AI Login หมดอายุ กรุณาเชื่อมต่อบัญชีใหม่",

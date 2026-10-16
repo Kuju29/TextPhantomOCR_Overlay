@@ -61,7 +61,8 @@ with tempfile.TemporaryDirectory(prefix='tp-user-style-') as tmp, patch.dict(os.
                 assert len(request.user_parts)==1 and request.user_parts[0].count(style)==0
                 assert request.expected_ids==('P0',) and request.thinking==cfg.thinking
                 user=request.user_parts[0]
-                assert 'NEIGHBOR_CONTEXT_SENTINEL' in user
+                # A repair (is_retry) sends only its failed lines: no page context (invocation.py).
+                assert ('NEIGHBOR_CONTEXT_SENTINEL' in user) is (not repair)
                 assert (instruction_pack(lang)['examplesHeading'] in user) is (not repair)
                 expected_example_count = 4 if spec.local else 20
                 if not repair:
@@ -80,7 +81,13 @@ with tempfile.TemporaryDirectory(prefix='tp-user-style-') as tmp, patch.dict(os.
                 assert layout['staticPrefixSha256']==hashlib.sha256((request.system_text+'\0'+prefix).encode()).hexdigest()
                 assert result['meta']['prompt_audit']['styleRole']=='system'
                 assert result['meta']['prompt_audit']['effectiveStyleChars']==len(style)
-                assert sanitize_prompt_layout(layout)==layout
+                # The diagnostic layout is a fixed allowlist (counts/hashes/enums): every
+                # allowlisted field survives unchanged; anything else (example evidence
+                # records, extra counts) is dropped, and no prompt text is ever retained.
+                sanitized=sanitize_prompt_layout(layout)
+                assert sanitized=={k:v for k,v in layout.items() if k in sanitized},sanitized
+                assert set(layout)-set(sanitized)<={'exampleChars','independentExamples'},set(layout)-set(sanitized)
+                assert 'USER_STYLE_SENTINEL' not in json.dumps(sanitized,ensure_ascii=False)
                 diag=request_diagnostics({'promptLayout':layout})
                 assert diag['instructionLayout']['styleRole']=='system'
                 assert diag['inputActual'] is None and diag['cache']['status']=='not_reported'

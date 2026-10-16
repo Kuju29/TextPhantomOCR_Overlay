@@ -14,6 +14,7 @@ async function loadGate() {
   const syn = values => new vm.SyntheticModule(Object.keys(values), function () { for (const [k, v] of Object.entries(values)) this.setExport(k, v); }, {context});
   const mod = new vm.SourceTextModule(await read('background/login/login-ready-gate.js'), {context});
   await mod.link(name => name.endsWith('login-session.js') ? syn({readLoginState: async () => ({})})
+    : name.endsWith('data-consent.js') ? syn({dataConsentError: () => Object.assign(new Error('Open TextPhantom and allow account data to continue.'), {code: 'DATA_CONSENT_REQUIRED', requestDispatched: false})})
     : syn({LOGIN_PENDING_AUTH: 'loginPendingAuthV1', LOGIN_OUTCOME: 'loginOutcomeV1'}));
   await mod.evaluate();
   return mod.namespace;
@@ -56,7 +57,7 @@ const missing = () => Object.assign(new Error('not connected'), {code: 'LOGIN_SE
 }
 
 // ---- the background step (autoConnectLogin) ----
-async function loadBackground({tabs = [], permission = true, startReply, apiBase = 'https://api.test'} = {}) {
+async function loadBackground({tabs = [], permission = true, consent = true, startReply, apiBase = 'https://api.test'} = {}) {
   const session = {loginProvider: 'login_claude', paidApiBase: apiBase, paidSessionToken: 't'.repeat(48)};
   const created = [], fetched = [], diag = [];
   const context = vm.createContext({URL, Promise, Object, Error, String, Number, RegExp, Date, Set, Map, JSON, Array, Math, crypto, TextEncoder,
@@ -77,6 +78,13 @@ async function loadBackground({tabs = [], permission = true, startReply, apiBase
       createTab: async props => { const tab = {id: 100 + created.length, url: props.url, active: props.active, status: 'loading'}; created.push(tab); return tab; }},
     '../../api.js': {getApiBase: async () => apiBase},
     '../../../shared/diagnostics.js': {recordDiagnostic: (name, data) => diag.push([name, data])},
+    '../../../shared/data-consent.js': {hasDataConsent: async () => consent, COOKIE_LOGIN_PROVIDERS: ['login_gemini', 'login_deepseek']},
+    // 10495: the account gate (token only with data-use consent).
+    '../../../shared/account-gate.js': {readAccountSession: async ({read, keys = []} = {}) => {
+      const v = await read(['paidSessionToken', 'paidApiBase', 'paidEmail', ...keys]), token = String(v.paidSessionToken || ''), values = {...v};
+      delete values.paidSessionToken; const base = String(v.paidApiBase || '').replace(/\/+$/, '');
+      return consent && token ? {ok: true, consent, signedIn: true, token, base, values} : {ok: false, consent, signedIn: Boolean(token), base, values}; },
+      withAccountSignal: signal => signal, accountSignal: () => new AbortController().signal},
     './login_endpoint_capture.js': {ENDPOINT_PROVIDERS: {login_claude: {origin: 'https://claude.ai', url: 'https://claude.ai/new'}, login_chatgpt: {origin: 'https://chatgpt.com', url: 'https://chatgpt.com/'}}, captureEndpointLogin: async () => null},
     './login_browser_relay.js': {RELAY_PROVIDERS: {}, acquireBrowserRelay: () => () => {}},
     './login_chatgpt_official.js': {OFFICIAL_REDIRECT: 'http://127.0.0.1:1455/auth/callback', beginOfficialSignIn: async () => ({}), readCallback() {}, finishOfficialSignIn: async () => ({}), officialAccount: async () => '', officialAccessToken: async () => '', forgetOfficial: async () => {}},

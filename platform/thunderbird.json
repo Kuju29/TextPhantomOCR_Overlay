@@ -5,6 +5,7 @@
     "activeTab",
     "tabs",
     "messagesRead",
+    "sensitiveDataUpload",
     "scripting",
     "alarms"
   ],
@@ -38,10 +39,15 @@
       "strict_min_version": "140.0",
       "data_collection_permissions": {
         "required": [
+          "websiteContent",
+          "browsingActivity"
+        ],
+        "optional": [
           "authenticationInfo",
+          "personallyIdentifyingInfo",
+          "financialAndPaymentInfo",
           "personalCommunications",
-          "browsingActivity",
-          "websiteContent"
+          "technicalAndInteraction"
         ]
       }
     }

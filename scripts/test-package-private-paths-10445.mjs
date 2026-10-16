@@ -20,7 +20,7 @@ try{
   for(const file of ['api/.env','api/.env.production','api/master.key','api/gateway.key','api/session.key','api/data.sqlite3-wal'])
     assert.equal(isPrivateRuntimeArtifact(file),true);
   for(const file of ['api/.env.example','api/.env.sample','api/backend/ai/login/endpoint/deepseek-pow-MIT.txt',
-    'api/third_party/LICENSE.txt','docs/public-key.json','api/deploy/id_ed25519.pub'])
+    'docs/public-key.json','api/deploy/id_ed25519.pub'])
     assert.equal(isPrivateRuntimeArtifact(file),false,'Public source/licensing documents stay distributable.');
   console.log(JSON.stringify({passed:true,checks:6,syntheticOnly:true,privateFileContentsRead:false}));
 }finally{

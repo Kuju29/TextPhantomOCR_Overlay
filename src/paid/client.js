@@ -3,6 +3,7 @@ import { diagnosticFetch, recordDiagnostic } from '../shared/diagnostics.js';
 import { normalizeUrl } from '../shared/url.js';
 import { accountViewScope } from './view-cache.js';
 import { installHeaders } from './install-id.js';
+import { readAccountSession, withAccountSignal, DATA_CONSENT_REQUIRED } from '../shared/account-gate.js';
 export function safeAccountBase(value) {
   const base = normalizeUrl(String(value || ''));
   if (!base) return '';
@@ -47,18 +48,23 @@ export function createAccountClient({
   const pending = new Set();
   const reads = new Map();
   let epoch = 0;
+  // 10495: the account session only through the gate. Without data-use
+  // consent every account request is refused before anything is sent.
   async function identity() {
-    const values = await read(['paidSessionToken', 'paidApiBase', 'customApiUrl', 'apiUrlDefault']);
+    const session = await readAccountSession({ read, keys: ['customApiUrl', 'apiUrlDefault'] });
+    const values = session.values;
     const base = safeAccountBase(values.paidApiBase),
       configured = configuredAccountBase(values);
-    if (!base || !values.paidSessionToken)
+    if (!session.consent)
+      throw Object.assign(fail(DATA_CONSENT_REQUIRED, 'Allow data use to open your account. You are still signed in.'), { locked: true, signedIn: session.signedIn, requestDispatched: false });
+    if (!base || !session.ok)
       throw fail('SIGN_IN_REQUIRED', 'Open the TextPhantom extension and sign in to Paid first.');
     if (base !== configured)
       throw fail(
         'SESSION_SCOPE_MISMATCH',
         'Your API address changed. Sign in on the selected API before opening this account.',
       );
-    return { base, token: String(values.paidSessionToken) };
+    return { base, token: session.token };
   }
   async function request(path, { body = null, expectedScope = '' } = {}) {
     if (!accountPathAllowed(path))
@@ -90,7 +96,7 @@ export function createAccountClient({
         cache: 'no-store',
         redirect: 'error',
         credentials: 'omit',
-        signal: controller.signal,
+        signal: withAccountSignal(controller.signal),
         headers: {
           Accept: 'application/json',
           Authorization: 'Bearer ' + id.token,
@@ -146,12 +152,19 @@ export function createAccountClient({
     pending.clear();
   }
   async function logout() {
-    const id = await identity();
+    let id;
+    try { id = await identity(); }
+    catch (error) {
+      // Without consent: sign out on this device only; no request is sent.
+      if (error.code !== DATA_CONSENT_REQUIRED) throw error;
+      await write({ paidSessionToken: '', paidApiBase: '', paidModel: '', paidPendingLogin: null });
+      invalidate(); return;
+    }
     try {
       await request('/paid/auth/logout', { body: {} });
     } finally {
-      const current = await read(['paidSessionToken', 'paidApiBase']);
-      if (current.paidSessionToken === id.token && safeAccountBase(current.paidApiBase) === id.base)
+      const current = await identity().catch(() => null);
+      if (!current || current.token === id.token && current.base === id.base)
         await write({
           paidSessionToken: '',
           paidApiBase: '',

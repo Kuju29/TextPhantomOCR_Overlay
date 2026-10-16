@@ -39,8 +39,9 @@ function check(name,fn){try{fn();checks.push(name)}catch(error){failures.push({n
 function observe(label){observations.push({label,input:els.aiPaidModelInput.textContent,output:els.aiPaidModelOutput.textContent,
  status:els.aiPaidModelPriceStatus.textContent,options:els.aiPaidModelOptions.children.map(n=>({text:n.textContent,title:n.title??n.getAttribute('title'),aria_label:n.getAttribute('aria-label'),disabled:n.disabled}))});}
 controller.render([model],model.id,true);observe('current conditional ceiling');
-check('Paired current ceiling remains precise168.426/673.704',()=>assert.deepEqual(paidModelRates(model),{input:'168.426',output:'673.704'}));
-check('Selected amount remains exact controller ceiling168.426/673.704',()=>{assert.equal(els.aiPaidModelInput.textContent,'≤ 168.426 TP');assert.equal(els.aiPaidModelOutput.textContent,'≤ 673.704 TP')});
+// Intended (TP-IMPROVEMENT-LOG table, ราคา UI): the popup shows whole TP; a conditional ceiling rounds up, other rates round half up.
+check('Paired current ceiling rounds up to whole TP 169/674',()=>assert.deepEqual(paidModelRates(model),{input:'169',output:'674'}));
+check('Selected amount shows the whole-TP controller ceiling 169/674',()=>{assert.equal(els.aiPaidModelInput.textContent,'≤ 169 TP');assert.equal(els.aiPaidModelOutput.textContent,'≤ 674 TP')});
 check('UI states final charge derives from reported usage',()=>assert.match(els.aiPaidModelPriceStatus.textContent,/reported usage/i));
 check('Current rates do not disable account selector',()=>assert.equal(els.aiPaidModelPicker.summary.attributes['aria-disabled'],'false'));
 if(requireClarity){
@@ -50,16 +51,17 @@ if(requireClarity){
 }
 const pending={...model,route_price_sync:{status:'refreshing'}};
 controller.render([pending],model.id,true);observe('route refreshing cataloguefallback');
-check('Route unavailable chooses catalogue25/109 instead of ceiling',()=>assert.deepEqual(paidModelRates(pending),{input:'25.264',output:'109.477'}));
+check('Route unavailable chooses catalogue 25/109 instead of ceiling',()=>assert.deepEqual(paidModelRates(pending),{input:'25',output:'109'}));
 check('Cataloguefallback keeps route-checking warning',()=>assert.match(els.aiPaidModelPriceStatus.textContent,/catalogue|comparison/i));
 const failed={...pending,route_price_sync:{status:'unavailable',error_code:'PAID_ROUTE_UNAVAILABLE'}};
 controller.render([failed],model.id,true);observe('route unavailable cataloguefallback');
 check('Unavailable route keeps explicit warning',()=>assert.match(els.aiPaidModelPriceStatus.textContent,/unavailable|could not/i));
 controller.render([model],model.id,false,true);observe('saved data unverified');
 check('Unverified saved model cannot be selected as ready',()=>assert.equal(els.aiPaidModelOptions.children[0].disabled,true));
-check('Small positive quote never displays free',()=>assert.deepEqual(paidModelRates({pricing:{...catalogue,input_tp:'0.001',output_tp:'0.1'}}),{input:'0.001',output:'0.1'}));
-check('Published ceiling rounds upward without binary float loss',()=>assert.deepEqual(paidModelRates({pricing:{...paired,input_tp:'1.00000000000000000001',output_tp:'2.1234'}}),{input:'1.001',output:'2.124'}));
-check('Tiny positive rate remains visibly positive',()=>assert.deepEqual(paidModelRates({pricing:{...paired,input_tp:'0.00001',output_tp:'0.00002'}}),{input:'<0.001',output:'<0.001'}));
+check('Small positive quote never displays free',()=>assert.deepEqual(paidModelRates({pricing:{...catalogue,input_tp:'0.001',output_tp:'0.1'}}),{input:'<1',output:'<1'}));
+check('Published ceiling rounds upward without binary float loss',()=>assert.deepEqual(paidModelRates({pricing:{...paired,input_tp:'1.00000000000000000001',output_tp:'2.1234'}}),{input:'2',output:'3'}));
+check('Whole-number ceiling is not rounded past itself',()=>assert.deepEqual(paidModelRates({pricing:{...paired,input_tp:'2.000',output_tp:'3'}}),{input:'2',output:'3'}));
+check('Tiny positive rate remains visibly positive',()=>assert.deepEqual(paidModelRates({pricing:{...paired,input_tp:'0.00001',output_tp:'0.00002'}}),{input:'<1',output:'<1'}));
 check('Invalid numericquote rejected',()=>assert.equal(paidModelRates({pricing:{...catalogue,input_tp:'Infinity'}}),null));
 console.log(JSON.stringify({passed:failures.length===0,count:checks.length+failures.length,passed_count:checks.length,
  checks,failures,observations,source_file:modulePath,source_sha256:createHash('sha256').update(await readFile(modulePath)).digest('hex'),

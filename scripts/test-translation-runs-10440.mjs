@@ -2,7 +2,9 @@
 import assert from 'node:assert/strict';
 import {createReadyQueue} from '../src/background/ai/translation-paths/ready-queue.js';
 import {reserveConversationJob, finishConversationJob} from '../src/background/ai/translation-paths/order.js';
-globalThis.chrome={runtime:{getManifest:()=>({version:'qa'})},storage:{local:{get:(keys,callback)=>callback({}),set:(_value,callback)=>callback?.()}}};
+// 10495: a signed-in Paid user who allowed data use (each Paid request asks the account gate).
+const local={tpDataConsentV1:{version:1,granted:true,at:1},paidSessionToken:'synthetic-session',paidApiBase:'http://localhost:7860'};
+globalThis.chrome={runtime:{getManifest:()=>({version:'qa'})},storage:{local:{get:(keys,callback)=>callback(Object.fromEntries((Array.isArray(keys)?keys:[keys]).filter(k=>k in local).map(k=>[k,local[k]]))),set:(_value,callback)=>callback?.()}}};
 const {translateViaServer}=await import('../src/background/ai/transports/server.js');
 const posts=[];
 globalThis.fetch=async(_url,init)=>{

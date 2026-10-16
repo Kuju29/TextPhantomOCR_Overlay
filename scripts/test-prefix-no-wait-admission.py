@@ -18,7 +18,7 @@ async def main():
   if text=='A1':started.set();assert release.wait(4)
   return {'meta':{'cacheCoordination':lease.finish(complete=True,cached=0)}}
  def ctx(name,key,identity):
-  return NS(trace_id='',payload={'operationId':name},marked=name,target_lang='th',config=NS(api_key=key,model='x'),
+  return NS(trace_id='',payload={'operationId':name},marked=name,target_lang='th',config=NS(api_key=key,model='x',provider='huggingface',translation_mode='independent',style_examples=False),
    request=NS(app=NS(state=NS(ai_admission_gate=gate,ai_executor=executor))),identity=identity,
    correlation={},resolved_provider='huggingface',rate={'enabled':False},unlimited=False)
  try:

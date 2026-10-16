@@ -14,7 +14,7 @@ const els = Object.fromEntries(['mode', 'sources', 'apiUrl', 'aiService', 'aiSer
   'aiPaidStatus', 'aiPaidUnavailable', 'aiPaidModel', 'aiPaidAccountState'].map(k => [k, element()]));
 const base = 'http://localhost:7860';
 els.mode.value = 'lens_text'; els.sources.value = 'ai'; els.apiUrl.value = base;
-let store = { aiServiceMode: 'paid', paidApiBase: base, paidSessionToken: 'qa-customer-session',
+let store = { tpDataConsentV1: { version: 1, granted: true, at: 1 }, aiServiceMode: 'paid', paidApiBase: base, paidSessionToken: 'qa-customer-session',
   paidModel: 'qa/test', customApiUrl: base, apiDefaultsFetchedAt: Date.now() };
 globalThis.chrome = { storage: { local: {
   get(keys, cb) { const list = Array.isArray(keys) ? keys : typeof keys === 'string' ? [keys] : Object.keys(keys || store);

@@ -25,7 +25,7 @@ for spec in registry:
     user_parts=('<<I2_P0:C_CURRENT_SOURCE>>',),unit_count=1,
     expected_ids=('I2_P0',),thinking='default',
     cache_context={'translationMode':'independent'})
-  with patch.object(h['openai_chat'].httpx,'Client',NativeClient):
+  with patch.object(sys.modules['httpx'],'Client',NativeClient):
    answer=spec.adapter.generate(req)
    try:spec.adapter.generate(replace(req,history_messages=prior))
    except ValueError as exc:assert 'cannot send conversation history' in str(exc)
@@ -45,7 +45,7 @@ for spec in registry:
   def apost(*args,**kw):
    captured.append(kw['json']);return Response({'content':[{'type':'text','text':h['ANSWER']}],'stop_reason':'end_turn','usage':{'input_tokens':23,'output_tokens':7}})
   with ExitStack() as stack:
-   stack.enter_context(patch.object(h['openai_chat'].httpx,'Client',Client));stack.enter_context(patch.object(gemini,'_post_once',side_effect=gpost));stack.enter_context(patch.object(anthropic,'post_json',side_effect=apost))
+   stack.enter_context(patch.object(sys.modules['httpx'],'Client',Client));stack.enter_context(patch.object(gemini,'_post_once',side_effect=gpost));stack.enter_context(patch.object(anthropic,'post_json',side_effect=apost))
    answer=spec.adapter.generate(request)
   captured += [x['json'] for x in Client.calls if x['method']=='POST'];assert len(captured)==1,(spec.provider_id,len(captured))
   return captured[0]

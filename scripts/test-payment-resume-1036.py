@@ -1,4 +1,8 @@
 """Real Paid controllers in Chromium; existing-order recovery with fake HTTP."""
+import sys as _tp_sys
+from pathlib import Path as _TpPath
+_tp_sys.path.insert(0, str(_TpPath(__file__).resolve().parent / 'lib'))
+from chromium_path import chromium_executable  # the one shared Chromium resolver
 import json
 import os
 from functools import partial
@@ -22,7 +26,7 @@ scenarios = ['cancelled', 'expired', 'failed', 'poll_cancelled', 'account_failed
              'switch_order_before_reply', 'blocked', 'receipt', 'error']
 try:
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(executable_path=os.environ.get('TP_QA_CHROMIUM', '/usr/bin/chromium'), headless=True,
+        browser = pw.chromium.launch(executable_path=chromium_executable(), headless=True,
                                      args=['--no-sandbox', '--single-process', '--no-zygote', '--disable-dev-shm-usage'])
         context = browser.new_context()
         for surface in ['inline', 'account']:
@@ -37,7 +41,7 @@ try:
                   window.order={id:'ord_'+'a'.repeat(32),status:scenario==='receipt'?'credited':'review_required',
                     recheck_allowed:scenario!=='blocked'&&scenario!=='receipt',method:'checkout',package_id:'qa',
                     package_version:1,package_name:'QA',amount_satang:2900,credits:250000,months:6};
-                  window.fixture={email:'qa@example.com',credits:{available:0},purchase:{ready:true},
+                  window.fixture={email:'qa@example.com',credits:{available:0},models:[],purchase:{ready:true},
                     packages:[{id:'qa',version:1,name:'QA',price_satang:2900,credits:250000,months:6}],
                     history:{orders:{items:[order],total:1}}};
                   if(scenario==='switch_order_before_reply'){
@@ -45,7 +49,7 @@ try:
                       package_id:'other',status:'waiting',recheck_allowed:false});
                     fixture.history.orders.total=2;
                   }
-                  const store={paidSessionToken:'QA-customer-session',paidApiBase:location.origin,customApiUrl:location.origin};
+                  const store={tpDataConsentV1:{version:1,granted:true,at:1},paidSessionToken:'QA-customer-session',paidApiBase:location.origin,customApiUrl:location.origin};
                   window.chrome={runtime:{getURL:p=>location.origin+'/TextPhantom/src/'+p},storage:{local:{
                     get:(keys,cb)=>cb(Object.fromEntries(keys.map(k=>[k,store[k]]))),
                     set:(patch,cb)=>{Object.assign(store,patch);cb?.()}},onChanged:{addListener(){},removeListener(){}}}};
@@ -74,7 +78,7 @@ try:
                     const {createInlineAccount}=await import('/TextPhantom/src/paid/inline.js');
                     window.controller=createInlineAccount({mount:document.getElementById('account'),read:async()=>store,
                       write:async patch=>Object.assign(store,patch),fetchFn:transport});
-                    controller.sync({active:true,base:location.origin,token:store.paidSessionToken});await controller.open('buy');
+                    const {safeAccountBase}=await import('/TextPhantom/src/paid/client.js');controller.sync({active:true,base:safeAccountBase(location.origin),token:store.paidSessionToken});await controller.open('buy');
                   }else await import('/TextPhantom/src/paid/account.js');
                 }''', {'surface': surface, 'scenario': scenario})
                 if scenario == 'receipt':

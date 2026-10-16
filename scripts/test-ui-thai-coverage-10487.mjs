@@ -243,7 +243,6 @@ const ALLOW_DYNAMIC = new Map(Object.entries({
   'src/popup/controllers/settings-persistence-controller.js': ['✕ This is a {0} key but the provider is set to', '{0} — paste a {1} key, or switch the provider back.'],
   'src/popup/controllers/reasoning-select.js': ['{0} (saved)', 'Thinking {0}'],
   'src/popup/controllers/settings-hydration-controller.js': ['✕ AI profile is incomplete ({0}). Open Provider and select/save a Provider and Model.'],
-  'src/popup/controllers/rate-settings-controller.js': ['{0}: {1}/min, burst {2}{3}.{4}','⚠️ {0}/min is well above that. Pages may fail with 429.', 'Paid request pacing: {0}/min, burst {1}. Service limits still apply.'],
   'src/popup/controllers/series-memory-controller.js': ['No memory for this series yet ({0})', ', {0} image page{1}',
     '{0} — {1} character{2}{3}, {4} term{5}, {6} excerpt{7}{8}{9}'], // non-DOM fallbacks of registered parts
   'src/popup/controllers/provider-model-display.js': ['{0} GB'],
@@ -258,9 +257,6 @@ const ALLOW_DYNAMIC = new Map(Object.entries({
     'Priced subtotal {0}', '· {0} unpriced', '{0} calls · {1} completed · {2} failed {3}', 'Provider reported {0} · saved-rate estimate {1}'],
   // Local AI capacity readout: model/VRAM/context numbers.
   'src/popup/controllers/local-capacity-controller.js': ['model {0}', 'VRAM {0}', 'context {0}', '{0} · max {1}'],
-  'src/popup/controllers/translation-session-controller.js': [
-    // Repair-run diagnostics line (phase id and unit counters).
-    '{0}: initial accepted {1} · repair {2}/{3} · unresolved {4}{5} · interrupted {6} · no-source images {7}{8}', '({0} wrong target language)'],
   'src/support/presence.js': ['{0} day{1}', '{0} hour{1}', '{0} minute{1}'], // text fallback; chat.js renders registered templates
   'src/auto/auto.js': ['{0} … cut here for display: {1} more characters. Copy takes the whole thing.', '{0} · {1}×{2} · {3} KB',
     'status {0}', 'Decoder warnings: {0}', 'This object could not be serialised: {0}'], // class name and developer raw-data notes

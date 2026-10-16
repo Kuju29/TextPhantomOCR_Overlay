@@ -6,7 +6,6 @@ import time
 from dataclasses import replace
 from backend.ai.provider_contract import ProviderSpec, ModelListResult, ProbeResponse
 from backend.ai.clients.base import ChatResult
-from backend.ai import accounting  # pyright: ignore[reportUnusedImport] -- tests patch login_translation.accounting
 from backend.ai.providers.cloud_openrouter import prepare_payload
 from . import login_entitlement, login_session_store as store, login_profiles, login_native as native
 from .login_provider_registry import (LoginError, get_provider,

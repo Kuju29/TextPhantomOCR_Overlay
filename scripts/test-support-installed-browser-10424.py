@@ -2,6 +2,10 @@
 Only the local operator API is a fixture. Run with a full Chrome/Chromium binary,
 not chrome-headless-shell; the latter does not support unpacked extensions.
 """
+import sys as _tp_sys
+from pathlib import Path as _TpPath
+_tp_sys.path.insert(0, str(_TpPath(__file__).resolve().parent / 'lib'))
+from chromium_path import chromium_executable  # the one shared Chromium resolver
 import argparse, asyncio, json, os, shutil, tempfile, threading, time, traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -64,8 +68,12 @@ async def main(args):
    for page in context.pages:await watch(page)
    context.on('page',lambda page:asyncio.create_task(watch(page)))
    worker=context.service_workers[0] if context.service_workers else await context.wait_for_event('serviceworker',timeout=15000)
+   # The worker's extension bindings attach shortly after the worker starts (observed ~1 s on Chromium 141).
+   for _ in range(150):
+    if await worker.evaluate('typeof chrome?.runtime?.getManifest==="function"'):break
+    await asyncio.sleep(0.1)
    extension_id=worker.url.split('/')[2];report['extensionId']=extension_id;report['manifest']=await worker.evaluate('chrome.runtime.getManifest()');report['realChromeApis']=True
-   await worker.evaluate('(v)=>chrome.storage.local.set(v)',{'customApiUrl':base,'apiUrlDefault':base,'paidApiBase':base,'paidSessionToken':TOKEN,'paidEmail':STATE['email'],'aiServiceMode':'manual','supportActivated':False,'supportDockHidden':False})
+   await worker.evaluate('(v)=>chrome.storage.local.set(v)',{'tpDataConsentV1':{'version':1,'granted':True,'at':int(time.time()*1000)},'customApiUrl':base,'apiUrlDefault':base,'paidApiBase':base,'paidSessionToken':TOKEN,'paidEmail':STATE['email'],'aiServiceMode':'manual','supportActivated':False,'supportDockHidden':False})
    publisher=await context.new_page();await publisher.goto(base+'/ordinary');await publisher.wait_for_timeout(400)
    # This is the shipped popup HTML/controller in an extension page. Activate
    # the publisher through the real tabs API before invoking its actual button.
@@ -76,7 +84,12 @@ async def main(args):
     await worker.evaluate('(id)=>chrome.tabs.update(id,{active:true})',target_id)
     before=await worker.evaluate('()=>chrome.tabs.query({})')
     await popup.evaluate('document.getElementById("contact-admin").click()')
-    try:await popup.wait_for_function('!document.getElementById("contact-admin").disabled',timeout=8000)
+    # Poll from Python: the popup's CSP (script-src 'self') blocks Playwright's string predicates.
+    try:
+     for _ in range(80):
+      if popup.is_closed() or not await popup.evaluate('()=>document.getElementById("contact-admin").disabled'):break
+      await asyncio.sleep(0.1)
+     else:raise TimeoutError('Contact admin stayed busy')
     except Exception:
      if not popup.is_closed():raise
     await target.wait_for_timeout(150)
@@ -98,7 +111,9 @@ async def main(args):
     start=len(report['runtimeErrors']);value={'name':name}
     try:
      if click:value.update(await click_contact(page))
-     value.update(await snapshot(page,name));h=value.get('host');value['bottomRightGeometry']=bool(h and h['x']>=0 and h['y']>=0 and h['x']+h['width']<=h['viewport']['width'] and h['y']+h['height']<=h['viewport']['height'] and h['right']=='18px' and h['bottom']=='84px');value['passed']=bool(h and h['display']=='block' and h['width']>300 and value['bottomRightGeometry'] and value.get('view')=='expanded' and value.get('conversation') and not value.get('error') and 'Installed extension private fixture reply' in value.get('history','') and value.get('newSupportTabs',0)==0)
+     value.update(await snapshot(page,name));h=value.get('host');value['bottomRightGeometry']=bool(h and h['x']>=0 and h['y']>=0 and h['x']+h['width']<=h['viewport']['width'] and h['y']+h['height']<=h['viewport']['height'] and (
+      # Phone widths (<=480 px) open the chat as a full-screen sheet; otherwise a bottom-right panel.
+      (h['x']==0 and h['y']==0 and h['width']==h['viewport']['width'] and h['height']==h['viewport']['height']) if h['viewport']['width']<=480 else (h['right']=='18px' and h['bottom']=='18px')));value['passed']=bool(h and h['display']=='block' and h['width']>300 and value['bottomRightGeometry'] and value.get('view')=='expanded' and value.get('conversation') and not value.get('error') and 'Installed extension private fixture reply' in value.get('history','') and value.get('newSupportTabs',0)==0)
     except Exception as exc:value.update({'passed':False,'error':str(exc),'traceback':traceback.format_exc()})
     value['runtimeErrors']=report['runtimeErrors'][start:];report['cases'].append(value);print(json.dumps(value),flush=True)
    await case('ordinary-contact',publisher)
@@ -127,4 +142,4 @@ async def main(args):
  return report['passed']
 
 if __name__=='__main__':
- parser=argparse.ArgumentParser();parser.add_argument('--extension',required=True);parser.add_argument('--browser',required=True);parser.add_argument('--out',required=True);parser.add_argument('--runtime-lib');parser.add_argument('--font-config');raise SystemExit(0 if asyncio.run(main(parser.parse_args())) else 1)
+ parser=argparse.ArgumentParser();parser.add_argument('--extension',required=True);parser.add_argument('--browser',default=chromium_executable(required=False));parser.add_argument('--out',required=True);parser.add_argument('--runtime-lib');parser.add_argument('--font-config');raise SystemExit(0 if asyncio.run(main(parser.parse_args())) else 1)

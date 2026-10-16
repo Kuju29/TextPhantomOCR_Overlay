@@ -57,15 +57,17 @@ try {
   const localCompatible = mkSelect("off");
   const compatibleEls = {...els, aiProvider:{value:"lmstudio"},
     aiBaseUrl:{value:"http://localhost:1234/v1"}, aiThinking:localCompatible,
-    aiThinkingHint:{}};
+    aiThinkingHint:{}, aiThinkingTip:{}};
   createPopupUiController({els:compatibleEls,state:{localAiCapability:{provider:"lmstudio",
     baseUrl:"http://localhost:1234/v1",models:{unknown:{generation:{supported:null}}}}},
     isLocalProvider:()=>true,toggleDom:()=>{},updatePromptWarning:()=>{},
     validateAiKey:()=>{},validateLangSource:()=>{}}).toggle();
   assert.equal(localCompatible.value, "off", "do not rewrite the user's Thinking intent");
   assert.equal(localCompatible.disabled, true, "no published control → provider default (10488)");
-  assert.match(compatibleEls.aiThinkingHint.textContent,/does not publish an AI think control/i);
-  assert.match(compatibleEls.aiThinkingHint.textContent,/provider default/i);
+  // 10496: the reason is the highlighted line of the "AI thinking" explanation (hover the name).
+  assert.match(compatibleEls.aiThinkingTip.tipReason,/does not publish an AI think control/i);
+  assert.match(compatibleEls.aiThinkingTip.tipReason,/provider default/i);
+  assert.equal(compatibleEls.aiThinkingHint.textContent,"","not repeated inline");
 
   const unsupported = mkSelect("off");
   const unsupportedEls = {...els, aiModel:{value:"plain"}, aiThinking:unsupported, aiThinkingHint:{}};

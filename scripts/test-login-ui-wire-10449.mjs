@@ -12,7 +12,7 @@ const caps={reasoning:{supported:false},vision:{supported:true}};
 const sessionFor=provider=>({id:sessionId,account_id:accountId,provider,transport:'web_endpoint'});
 function storageArea(data){return {get(keys,done){const list=Array.isArray(keys)?keys:Object.keys(keys||data);done(Object.fromEntries(list.map(k=>[k,data[k]??keys?.[k]])));},set(patch,done){Object.assign(data,structuredClone(patch));done?.();},remove(keys,done){for(const k of [].concat(keys))delete data[k];done?.();}};}
 await check('Login preferences cannot be silently saved to an unknown account while initial provider identity is pending',async()=>{
- const provider='login_gemini',local={mode:'lens_text',sources:'ai',lang:'th',customApiUrl:base,apiUrlDefault:base,apiDefaultsFetchedAt:Date.now(),aiServiceMode:'paid',paidTranslationSource:'login',paidSessionToken:'synthetic-owner',paidApiBase:base,paidServiceApiBase:base,loginProvider:provider,loginModel:model,aiProvider:'openrouter',aiModel:'synthetic-manual',aiCloudKey:'synthetic-key'};
+ const provider='login_gemini',local={mode:'lens_text',sources:'ai',lang:'th',customApiUrl:base,apiUrlDefault:base,apiDefaultsFetchedAt:Date.now(),tpDataConsentV1:{version:1,granted:true,at:1},aiServiceMode:'paid',paidTranslationSource:'login',paidSessionToken:'synthetic-owner',paidApiBase:base,paidServiceApiBase:base,loginProvider:provider,loginModel:model,aiProvider:'openrouter',aiModel:'synthetic-manual',aiCloudKey:'synthetic-key'};
  let release;
  const popup=await popupEntryFixture({local,session:{loginSessionId:sessionId,loginAccountId:accountId},manualTimers:true,fetchReply:async url=>{
   const path=new URL(url).pathname;
@@ -42,7 +42,7 @@ await check('Unknown Login profile save, prompt save and close flush never persi
  controller.setPaidContext({active:false});assert.equal(els.aiStyleExamples.disabled,false);assert.equal(els.aiPageImage.disabled,false);assert.equal(els.aiMemoryMode.disabled,false);assert.equal(els.aiPrompt.disabled,false);
 });
 for(const provider of ['login_gemini','login_deepseek'])await check(provider+' actual popup changes -> settings reader -> immutable job -> canonical serializer',async()=>{
- const local={mode:'lens_text',sources:'ai',lang:'th',customApiUrl:base,apiUrlDefault:base,apiDefaultsFetchedAt:Date.now(),aiServiceMode:'paid',paidTranslationSource:'login',paidSessionToken:'synthetic-owner',paidApiBase:base,paidServiceApiBase:base,loginProvider:provider,loginModel:model,aiProvider:'openrouter',aiModel:'synthetic-manual',aiCloudKey:'synthetic-key'};
+ const local={mode:'lens_text',sources:'ai',lang:'th',customApiUrl:base,apiUrlDefault:base,apiDefaultsFetchedAt:Date.now(),tpDataConsentV1:{version:1,granted:true,at:1},aiServiceMode:'paid',paidTranslationSource:'login',paidSessionToken:'synthetic-owner',paidApiBase:base,paidServiceApiBase:base,loginProvider:provider,loginModel:model,aiProvider:'openrouter',aiModel:'synthetic-manual',aiCloudKey:'synthetic-key'};
  const ram={loginSessionId:sessionId,loginAccountId:accountId};let last;
  const reply=(url,init={})=>{const path=new URL(url).pathname;
   if(path==='/meta')return Response.json({ok:true,paid:{available:true,configured:true}});

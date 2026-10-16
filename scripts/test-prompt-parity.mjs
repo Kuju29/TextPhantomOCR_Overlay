@@ -50,7 +50,8 @@ try {
   assert.match(call.body.messages[1].content, /ข้อมูลนำเข้า[\s\S]*รูปแบบคำตอบ — tp\.translation\.compact-records\/1/);
   assert.equal(call.body.messages[1].content.split("FULL USER STYLE SENTINEL").length - 1, 0);
   const composed = composeCanonicalPrompt(plan, { prompt: "Target language: Thai\nFULL USER STYLE SENTINEL", promptMode: "replace" }, false, false, "th");
-  assert.deepEqual(Object.keys(composed.sections), ["style", "useStyleExamples", "savedDefault", "policy", "language", "source", "output", "runtime"]);
+  // memoryMode (.73) selects the in-answer series summary instruction for Series memory "full".
+  assert.deepEqual(Object.keys(composed.sections), ["style", "useStyleExamples", "memoryMode", "savedDefault", "policy", "language", "source", "output", "runtime"]);
   assert.equal(composed.sections.runtime, "", "empty runtime remains an internal empty boundary");
   assert.doesNotMatch(system, /BUILT-IN STYLE SENTINEL|STRUCTURED JSON SENTINEL/);
   assert.doesNotMatch(system, /STRUCTURED JSON SENTINEL/);

@@ -15,8 +15,8 @@ import {
 import { awaitServerBackoff, noteRetryAfter } from "./polling.js";
 import { installReady } from "./install-header.js";
 import { beginApiRequest, noteApiActivity, noteApiSuccess } from "../api.js";
-import { readLoginState } from "../../shared/login-session.js";
-import { RELAY_PROVIDERS, acquireBrowserRelay } from "../login/endpoint/login_browser_relay.js";
+import { abortOnRevoke, revokedRequestError } from "../../shared/account-gate.js";
+import { accountRequest } from "./account-request.js";
 
 const log = createLogger("SW.transport.translate");
 const SUBMIT_TIMEOUT_MS = 90000;
@@ -37,6 +37,9 @@ export async function submitJobViaRest(
   payload,
   { idempotencyKey = "" } = {},
 ) {
+  // 10495: Paid/Login: the account gate first (see account-request.js). A
+  // Claude Login turn also keeps this browser's relay pump running meanwhile.
+  const { gate, releaseRelay } = await accountRequest(payload, base, { relay: true });
   await awaitServerBackoff();
   await installReady();
 
@@ -54,16 +57,8 @@ export async function submitJobViaRest(
   if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), SUBMIT_TIMEOUT_MS);
+  const unlink = abortOnRevoke(gate, ctrl);
   let res;
-  // A Claude Login turn is sent by the API through this browser's own
-  // claude.ai tab (browser relay); keep the relay pump running meanwhile.
-  let releaseRelay = () => {};
-  if (payload?.ai?.provider === "login") {
-    try {
-      const login = await readLoginState(["loginProvider", "paidSessionToken"]);
-      if (RELAY_PROVIDERS[login.loginProvider]) releaseRelay = acquireBrowserRelay(base, login.paidSessionToken);
-    } catch {}
-  }
   const finishApiRequest = beginApiRequest(base);
   try {
     noteApiActivity(base);
@@ -77,6 +72,7 @@ export async function submitJobViaRest(
       body,
     });
   } catch (e) {
+    if (gate?.aborted) throw revokedRequestError({ requestDispatched: true });
     if (e?.name === "AbortError") {
       throw networkFailure(
         new Error(
@@ -88,6 +84,7 @@ export async function submitJobViaRest(
     }
     throw networkFailure(e, "submit");
   } finally {
+    unlink();
     releaseRelay();
     finishApiRequest();
     clearTimeout(timer);
@@ -239,9 +236,10 @@ export async function translateViaSyncRest(
 ) {
   const t0 = Date.now();
   const traceId = String(payload?.context?.tp_trace || "");
+  const { gate } = await accountRequest(payload, base);
   await installReady();
   const requestBody = JSON.stringify(wirePayload(payload));
-  const ctrl = new AbortController();
+  const ctrl = new AbortController(), unlink = abortOnRevoke(gate, ctrl, "tp:account-revoked");
   const totalTimeoutMs = syncTotalTimeoutMs(payload, cloudTimeoutMs);
   const timer =
     totalTimeoutMs == null
@@ -310,6 +308,7 @@ export async function translateViaSyncRest(
     }
     res = await inFlight;
   } catch (e) {
+    if (e?.name === "AbortError" && gate?.aborted) throw revokedRequestError({ requestDispatched: true });
     if (e?.name === "AbortError") {
       if (ctrl.signal.reason === CANCELLED_REASON) {
         const err = networkFailure(
@@ -336,6 +335,7 @@ export async function translateViaSyncRest(
     if (timer != null) clearTimeout(timer);
     clearInterval(slowTimer);
     if (signal) signal.removeEventListener("abort", onOuterAbort);
+    unlink();
   }
 
   if (!res.ok) {

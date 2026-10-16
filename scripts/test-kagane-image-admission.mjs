@@ -1,11 +1,15 @@
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
+// The real install-limit classification (server-translation imports it; a busy API is not an install limit).
+import {INSTALL_RETRY_BUDGET_MS,installRetryDelayMs,isInstallRateLimited} from '../src/background/transports/install-header.js';
+import {isSettledPaidOperationReplay} from '../src/shared/ai-usage.js';
 const source=readFileSync(new URL('../src/background/pipeline/server-translation.js',import.meta.url),'utf8')
  .replace(/^import[\s\S]*?from\s+["'][^"']+["'];\s*/gm,'').replaceAll('export async function','async function');
 let acquireCalls=0,releases=0,sends=0,completed=0,cancelled=0,waits=0;
 let unlock;const barrier=new Promise(r=>unlock=r);let behavior='batch';
 const traces=[];
-const mocks={getTrace:()=>'',traceNote:(_f,_n,d)=>traces.push(d),isLocalAiPayload:()=>false,
+const mocks={INSTALL_RETRY_BUDGET_MS,installRetryDelayMs,isInstallRateLimited,waitInstallLimit:async()=>{throw new Error('no install limit in this fixture');},
+ isSettledPaidOperationReplay,getTrace:()=>'',traceNote:(_f,_n,d)=>traces.push(d),isLocalAiPayload:()=>false,
  laneKeyFor:()=> 'lens:direct',configureLocalCapacityForPayload(){},
  acquire:async()=>{acquireCalls++;if(behavior==='batch'&&acquireCalls>8)await new Promise(()=>{});return {waitMs:0,window:8,maxWindow:8}},
  releaseSuccess:()=>releases++,releaseReplay:()=>releases++,releaseFailed:()=>releases++,releaseRejected:()=>releases++,releaseGated:()=>releases++,releaseDeferred:()=>releases++,

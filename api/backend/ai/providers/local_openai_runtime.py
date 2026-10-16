@@ -51,10 +51,10 @@ def _runtime_error(reason: str) -> WorkloadBudgetError:
 
 def _numeric_path(data: Mapping[str, Any], fields: tuple[str, ...]) -> int | None:
     value: Any = data
-    for field in fields:
+    for name in fields:
         if not isinstance(value, Mapping):
             return None
-        value = value.get(field)
+        value = value.get(name)
     return positive(value) if fields else None
 
 @dataclass(frozen=True, slots=True)

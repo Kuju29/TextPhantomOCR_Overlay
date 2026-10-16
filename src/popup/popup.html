@@ -55,18 +55,21 @@
           <button type="button" id="api-gate-translate-open" class="secondary-btn">Open API settings</button>
         </div>
         <div class="field">
-          <label for="mode">Mode</label>
+          <label for="mode"><span data-tip-src="mode-tip">Mode</span></label>
           <select id="mode" aria-label="Mode"></select>
+          <span id="mode-tip" class="tp-tip-src" hidden>Google Lens (text) puts the translation over the image as text boxes; you can resize the text and translate with AI. Google Lens (image) returns the picture with the translation drawn in.</span>
         </div>
 
         <div class="field" id="lang-wrap">
-          <label for="lang">Target language</label>
+          <label for="lang"><span data-tip-src="lang-tip">Target language</span></label>
           <select id="lang" translate="no" aria-label="Target language"></select>
+          <span id="lang-tip" class="tp-tip-src" hidden>The language you want to read.</span>
         </div>
 
         <div class="field" id="sources-wrap" style="display: none">
-          <label for="sources">Text output</label>
+          <label for="sources"><span data-tip-src="sources-tip">Text output</span></label>
           <select id="sources" aria-label="Text output"></select>
+          <span id="sources-tip" class="tp-tip-src" hidden>Original text shows the text read from the image. Lens translation uses Google Lens (default). AI translation uses the AI you set up in AI settings.</span>
         </div>
 
         <div class="note">Right-click an image to translate, or enable Page actions below.</div>
@@ -79,10 +82,10 @@
           <div class="section-title">Reading direction</div>
           <div class="action-box">
             <label class="label-row toggle-row">
-              <span>↔️ Rotate Translated to fit language</span>
+              <span data-tip-src="relayout-tip">↔️ Rotate Translated to fit language</span>
               <input type="checkbox" id="relayout-translated" />
             </label>
-            <div class="hint">Reflows vertical text for horizontal reading. Turn off to keep Google Lens boxes.</div>
+            <span id="relayout-tip" class="tp-tip-src" hidden>Reflows vertical text for horizontal reading. Turn off to keep Google Lens boxes.</span>
           </div>
         </div>
 
@@ -94,7 +97,7 @@
 
           <div class="field" id="font-scale-wrap">
             <label class="label-row">
-              <span>Overlay font size</span>
+              <span data-tip-src="font-scale-tip" data-tip-control="font-scale-range">Overlay font size</span>
               <span id="font-scale-value" class="font-scale-value" aria-live="polite">100%</span>
             </label>
             <div class="font-scale-row">
@@ -107,7 +110,7 @@
               <button type="button" id="font-scale-reset" class="icon-btn" title="Reset to 100%"
                 aria-label="Reset font size">⟲</button>
             </div>
-            <div class="hint"></div>
+            <span id="font-scale-tip" class="tp-tip-src" hidden>Text size of the translation boxes. − and + change it by 10%; drag between 50% and 200%; ⟲ returns to 100%.</span>
           </div>
         </div>
 
@@ -117,20 +120,20 @@
         <div class="section-title">Page actions</div>
         <div class="action-box">
           <label class="label-row toggle-row">
-            <span>🔍 Translate all images on this page</span>
+            <span data-tip-src="translate-all-tip">🔍 Translate all images on this page</span>
             <input type="checkbox" id="translate-all-button-toggle" />
           </label>
-          <div class="hint">Hover or tap the right-edge handle.</div>
+          <span id="translate-all-tip" class="tp-tip-src" hidden>Shows a slim handle at the middle-right edge. Hover or tap to reveal Translate all.</span>
           <label class="label-row toggle-row">
-            <span>🔘 Translate buttons on images</span>
+            <span data-tip-src="img-buttons-tip">🔘 Translate buttons on images</span>
             <input type="checkbox" id="img-buttons-toggle" />
           </label>
-          <div class="hint">Appears when you hover over an image.</div>
+          <span id="img-buttons-tip" class="tp-tip-src" hidden>Appears when you hover over an image.</span>
           <label class="label-row toggle-row">
-            <span>⬇ Download images</span>
+            <span data-tip-src="download-images-tip">⬇ Download images</span>
             <input type="checkbox" id="download-images-toggle" />
           </label>
-          <div class="hint">Bottom-right button: save images individually or as a ZIP. Does not start a translation.</div>
+          <span id="download-images-tip" class="tp-tip-src" hidden>Bottom-right button: save images individually or as a ZIP. Does not start a translation.</span>
         </div>
       </section>
 
@@ -182,11 +185,12 @@
             <div id="ai-usage-history-list" class="ai-usage-history-list"></div>
           </dialog>
           <div class="field" id="ai-service-wrap" style="display: none">
-            <label for="ai-service">AI service</label>
+            <label for="ai-service"><span data-tip-src="ai-service-tip">AI service</span></label>
             <select id="ai-service" aria-label="AI service">
               <option value="manual">Manual · use your own key</option>
               <option value="paid">Paid · TextPhantom credits</option>
             </select>
+            <span id="ai-service-tip" class="tp-tip-src" hidden>Manual uses your own API key, or an AI running on your PC. Paid uses TextPhantom credits; no API key needed.</span>
           </div>
           <div id="ai-paid-unavailable" class="paid-connection" role="status" style="display: none">
             <span id="ai-paid-connection-message"></span>
@@ -198,11 +202,11 @@
               <h2 id="ai-paid-title">Sign in to TextPhantom</h2>
               <p id="ai-paid-subtitle" class="paid-subtitle">No API key needed.</p>
               <form id="ai-paid-email-step">
-                <label for="ai-paid-email">Email address</label>
+                <label for="ai-paid-email"><span data-tip-src="ai-paid-email-tip">Email address</span></label>
+                <span id="ai-paid-email-tip" class="tp-tip-src" hidden>Sign in with an emailed code.</span>
                 <input id="ai-paid-email" name="email" type="email" autocomplete="email" required
                        autocapitalize="none" spellcheck="false" maxlength="254" placeholder="you@example.com" />
                 <button type="submit" id="ai-paid-send" class="paid-primary">Continue with email <span aria-hidden="true">→</span></button>
-                <p class="paid-footnote">Sign in with an emailed code.</p>
               </form>
               <form id="ai-paid-code-step" style="display: none">
                 <p class="paid-recipient">For <strong id="ai-paid-code-email"></strong></p>
@@ -220,23 +224,29 @@
             <div id="ai-paid-account" style="display: none">
               <div class="paid-account-head"><span class="paid-brand">Your account</span><span id="ai-paid-account-state" class="paid-badge">Signed in</span></div>
               <div id="ai-paid-email-label" data-tp-ui-private class="paid-email"></div>
+              <div id="ai-paid-consent" class="paid-consent-note" role="status" hidden>
+                <span>Account data is not allowed, so Paid and Login translation is paused.</span>
+                <button type="button" id="ai-paid-consent-allow" class="paid-link">Review and allow</button>
+              </div>
               <div class="paid-wallet">
-                <span class="paid-wallet-label">Available credits</span>
+                <span class="paid-wallet-label" data-tip-src="ai-paid-credits-tip">Available credits</span>
+                <span id="ai-paid-credits-tip" class="tp-tip-src" hidden>Your balance is shared across devices.</span>
                 <strong id="ai-paid-credits" data-tp-ui-private>— TP</strong>
                 <span id="ai-paid-held" class="paid-footnote"></span>
               </div>
               <div class="paid-purchase-actions">
-                <button type="button" id="ai-paid-buy" class="paid-primary">Buy credits</button>
-                <button type="button" id="ai-paid-details" class="paid-secondary">Account details</button>
+                <button type="button" id="ai-paid-buy" class="paid-primary" data-account-control>Buy credits</button>
+                <button type="button" id="ai-paid-details" class="paid-secondary" data-account-control>Account details</button>
               </div>
               <div class="field" id="ai-paid-source-wrap" style="display:none">
-                <label for="ai-paid-source">Translation source</label>
-                <select id="ai-paid-source"><option value="tp">TP Model</option><option value="login">Login</option></select>
+                <label for="ai-paid-source"><span data-tip-src="ai-paid-source-tip">Translation source</span></label>
+                <span id="ai-paid-source-tip" class="tp-tip-src" hidden>TP Model translates with TextPhantom credits. Login uses your own AI account (ChatGPT, Claude, Gemini or DeepSeek); TP credits are not used.</span>
+                <select id="ai-paid-source" data-account-control><option value="tp">TP Model</option><option value="login">Login</option></select>
               </div>
               <div id="ai-paid-tp-model">
               <div class="paid-model-heading"><span>Translation model</span><small>TP / 1,000 tokens</small></div>
-              <select id="ai-paid-model" translate="no" aria-label="Paid model" hidden></select>
-              <details id="ai-paid-model-picker" class="paid-model-picker">
+              <select id="ai-paid-model" translate="no" aria-label="Paid model" hidden data-account-control></select>
+              <details id="ai-paid-model-picker" class="paid-model-picker" data-account-control>
                 <summary aria-label="Choose translation model"><span id="ai-paid-model-name" translate="no">Select model…</span></summary>
                 <div class="paid-model-search-row"><input id="ai-paid-model-search" class="paid-model-search" type="search" placeholder="Search models (name or id)" autocomplete="off" spellcheck="false" aria-label="Search translation models" aria-controls="ai-paid-model-options"></div>
                 <div class="paid-model-columns"><span>Model</span><span>Input</span><span>Output</span></div>
@@ -255,25 +265,26 @@
               </details>
                 </div>
               <section id="ai-login-panel" style="display:none" class="paid-login-source">
-                <div class="field"><label for="ai-login-provider">Provider</label><select id="ai-login-provider" translate="no"><option value="login_chatgpt">ChatGPT</option></select></div>
-                <div class="field" id="ai-login-project-wrap" style="display:none"><label for="ai-login-project">Google Cloud project ID</label><input type="text" id="ai-login-project" autocomplete="off" spellcheck="false" maxlength="63" placeholder="your-cloud-project" /><p class="paid-footnote">Uses your Google Cloud API billing. A Gemini website subscription does not cover these API requests.</p></div>
-                <p id="ai-login-account" class="paid-footnote">Use your own AI account</p>
-                <p id="ai-login-support" class="paid-footnote" role="note" style="display:none"></p>
-                <div class="paid-purchase-actions"><button type="button" id="ai-login-connect" class="paid-primary">Sign in</button><button type="button" id="ai-login-refresh" class="paid-secondary">Refresh</button><button type="button" id="ai-login-cancel" class="paid-secondary" style="display:none">Cancel</button><button type="button" id="ai-login-logout" class="paid-secondary" style="display:none">Logout</button></div>
-                <div class="field" id="ai-login-model-wrap" style="display:none"><label for="ai-login-model">Model</label><select id="ai-login-model" translate="no"></select></div>
+                <div class="field"><label for="ai-login-provider"><span data-tip-src="ai-login-provider-tip">Provider</span></label><select id="ai-login-provider" translate="no" data-account-control><option value="login_chatgpt">ChatGPT</option></select>
+                  <span id="ai-login-provider-tip" class="tp-tip-src" hidden>Use your own AI account</span></div>
+                <div class="field" id="ai-login-project-wrap" style="display:none"><label for="ai-login-project"><span data-tip-src="ai-login-project-tip">Google Cloud project ID</span></label><input type="text" id="ai-login-project" data-account-control autocomplete="off" spellcheck="false" maxlength="63" placeholder="your-cloud-project" /><span id="ai-login-project-tip" class="tp-tip-src" hidden>Uses your Google Cloud API billing. A Gemini website subscription does not cover these API requests.</span></div>
+                <p id="ai-login-account" class="paid-footnote" role="status"></p>
+                <p id="ai-login-support" class="tp-status warn" role="status" style="display:none"></p>
+                <div class="paid-purchase-actions"><button type="button" id="ai-login-connect" class="paid-primary" data-account-control>Sign in</button><button type="button" id="ai-login-refresh" class="paid-secondary" data-account-control>Refresh</button><button type="button" id="ai-login-cancel" class="paid-secondary" style="display:none" data-account-control>Cancel</button><button type="button" id="ai-login-logout" class="paid-secondary" style="display:none" data-account-control>Logout</button></div>
+                <div class="field" id="ai-login-model-wrap" style="display:none"><label for="ai-login-model">Model</label><select id="ai-login-model" translate="no" data-account-control></select></div>
                 <p id="ai-login-status" class="paid-footnote" role="status" aria-live="polite"></p>
               </section>
               <div class="paid-actions">
-                <button type="button" id="ai-paid-refresh" class="paid-link">Refresh balance</button>
-                <button type="button" id="ai-paid-logout" class="paid-link">Sign out</button>
+                <button type="button" id="ai-paid-refresh" class="paid-link" data-account-control>Refresh balance</button>
+                <button type="button" id="ai-paid-logout" class="paid-link" data-account-free>Sign out</button>
               </div>
-              <p class="paid-footnote">Your balance is shared across devices.</p>
             </div>
             <div id="ai-paid-inline" class="paid-inline" hidden></div>
             <div id="ai-paid-status" class="paid-status" role="status" aria-live="polite" aria-atomic="true"></div>
           </section>
           <div class="field" id="ai-provider-wrap">
-            <label for="ai-provider">Provider</label>
+            <label for="ai-provider"><span data-tip-src="ai-provider-tip">Provider</span></label>
+            <span id="ai-provider-tip" class="tp-tip-src" hidden>Cloud providers need an API key. Local providers run on your PC with no key.</span>
             <select id="ai-provider" translate="no" aria-label="AI provider">
               <option value="" disabled selected>Select provider…</option>
               <optgroup id="ai-cloud-provider-options" label="Cloud (needs API key)"></optgroup>
@@ -286,37 +297,38 @@
           <!-- Local endpoint: shown only for local providers -->
           <div class="field" id="ai-endpoint-wrap" style="display: none">
             <div class="label-row label-row--inline">
-              <label for="ai-base-url">Local server URL</label>
+              <label for="ai-base-url"><span data-tip-src="ai-base-url-tip">Local server URL</span></label>
               <a id="ai-local-website" href="#" target="_blank" rel="noopener noreferrer" hidden>(website)</a>
             </div>
             <input type="text" id="ai-base-url" placeholder="http://localhost:11434" />
-            <div class="hint">No API key needed.</div>
+            <span id="ai-base-url-tip" class="tp-tip-src" hidden><span>The address of the AI app on your PC.</span> <span>No API key needed.</span></span>
             <button type="button" id="ai-local-test" class="secondary-btn">Refresh models</button>
             <div class="hint" id="ai-local-status"></div>
             <div id="ai-local-adapter-wrap" style="display: none; margin-top: 10px">
-              <label for="ai-local-adapter">Custom adapter JSON</label>
+              <label for="ai-local-adapter"><span data-tip-src="ai-local-adapter-tip">Custom adapter JSON</span></label>
               <textarea id="ai-local-adapter" rows="9" spellcheck="false"
                 placeholder='{"version":1,"protocol":"openai","baseUrl":"http://localhost:8000/v1","modelsPath":"/models","chatPath":"/chat/completions","modelsResponsePath":"data.*.id","chatResponsePath":"choices.0.message.content"}'></textarea>
-              <div class="hint">Adapter settings only. No keys or scripts.</div>
+              <span id="ai-local-adapter-tip" class="tp-tip-src" hidden>Adapter settings only. No keys or scripts.</span>
             </div>
           </div>
 
           <!-- API key: shown only for cloud providers -->
           <div class="field" id="ai-key-wrap">
             <div class="label-row label-row--inline">
-              <label for="ai-key">API key</label>
+              <label for="ai-key"><span data-tip-src="ai-key-tip">API key</span></label>
               <a id="ai-key-get" data-tp-ui-private href="#" target="_blank" rel="noopener noreferrer">(get key)</a>
             </div>
             <input type="password" id="ai-key" aria-describedby="ai-key-hint" placeholder="Paste your API key" />
             <div class="hint" id="ai-key-hint"></div>
+            <span id="ai-key-tip" class="tp-tip-src" hidden>Paste the API key from your account with the selected provider. “(get key)” opens the page where you create one.</span>
           </div>
 
           <div class="field" id="ai-model-wrap" style="display: none">
             <label for="ai-model">Model <span aria-hidden="true">(required)</span></label>
             <select id="ai-model" translate="no" aria-label="AI Model"></select>
-            <div class="hint" id="ai-local-model-hint" style="display: none"></div>
             <div id="ai-local-capacity-wrap" style="display: none; margin-top: 10px">
-              <label for="ai-local-capacity-mode">Local AI capacity</label>
+              <label for="ai-local-capacity-mode"><span data-tip-src="ai-local-capacity-tip">Local AI capacity</span></label>
+              <span id="ai-local-capacity-tip" class="tp-tip-src" hidden>How many requests run at the same time on your PC. Auto (recommended) follows the model and your memory; Safe sends one request at a time; Manual lets you choose 1–4.</span>
               <select id="ai-local-capacity-mode" aria-label="Local AI capacity mode">
                 <option value="auto" selected>Auto (recommended)</option>
                 <option value="safe">Safe — 1 request</option>
@@ -336,18 +348,19 @@
           </div>
 
           <div class="field" id="ai-thinking-wrap" style="display: none">
-            <label for="ai-thinking">AI thinking</label>
+            <label for="ai-thinking"><span data-tip-src="ai-thinking-tip">AI thinking</span></label>
             <select id="ai-thinking" aria-label="AI thinking mode">
               <option value="minimum" selected>Lowest available</option>
               <option value="off">Thinking off</option>
               <option value="on">Thinking on</option>
             </select>
-            <div class="hint" id="ai-thinking-hint"></div>
+            <div class="hint" id="ai-thinking-hint" role="status"></div>
+            <span id="ai-thinking-tip" class="tp-tip-src" hidden><span class="tp-tip-part">Lets the AI think before it answers. The options depend on the model; thinking can use more tokens.</span> <span class="tp-tip-reason">Thinking control is unavailable until this exact model is verified.</span></span>
           </div>
 
           <div class="field" id="ai-prompt-wrap" style="display: none">
             <label for="ai-prompt" class="label-row">
-              <span>Set prompt</span>
+              <span data-tip-src="ai-prompt-tip">Set prompt</span>
               <span class="label-actions">
                 <button type="button" id="ai-prompt-back" class="icon-btn" title="Back to the previous prompt version"
                   aria-label="Back to the previous prompt version">↶</button>
@@ -364,60 +377,62 @@
             <textarea id="ai-prompt" rows="8"
               placeholder="Leave empty to use the built-in prompt."></textarea>
             <div id="ai-prompt-count" class="prompt-count" aria-live="polite"></div>
+            <span id="ai-prompt-tip" class="tp-tip-src" hidden>Extra instructions for the AI, such as a translation style. Leave empty to use the built-in prompt. Saved per language and model.</span>
           </div>
 
           <div class="field" id="ai-characters-wrap" style="display: none">
             <label class="label-row">
-              <span>Series memory</span>
+              <span data-tip-src="ai-characters-tip" data-tip-control="ai-characters-clear">Series memory</span>
               <button type="button" id="ai-characters-clear" class="icon-btn" title="Clear this series' memory"
                 aria-label="Clear this series' memory">🗑</button>
             </label>
             <label class="label-row" style="cursor: pointer">
-              <span>Story memory mode</span>
+              <span data-tip-src="ai-memory-mode-tip">Story memory mode</span>
               <select id="ai-memory-mode">
                 <option value="off">Off</option>
                 <option value="terms">Terms only</option>
                 <option value="full">Full (+ characters)</option>
               </select>
             </label>
+            <!-- 10496: the memory line (and its "not recognised" warning chip) belongs to Story memory mode. -->
+            <div id="ai-characters-count" class="hint" role="status">No memory for this series yet</div>
             <label class="label-row" id="ai-style-examples-wrap" style="cursor: pointer">
-              <span>Use human translation examples</span>
-              <input type="checkbox" id="ai-style-examples" aria-describedby="ai-style-examples-hint" />
+              <span data-tip-src="ai-style-examples-hint">Use human translation examples</span>
+              <input type="checkbox" id="ai-style-examples" />
             </label>
-            <div id="ai-style-examples-hint" class="hint">Local Independent: first use human examples (English, Japanese and Thai), then accepted AI translations from this run. This switch controls both. Saved for this model.</div>
-            <div id="ai-characters-count" class="hint">No memory for this series yet</div>
-            <div id="ai-memory-hint" class="hint"></div>
+            <span id="ai-characters-tip" class="tp-tip-src" hidden>What the AI remembers for the series open in this tab. 🗑 clears it.</span>
+            <span id="ai-memory-mode-tip" class="tp-tip-src" hidden>Off: no memory. Terms only: remembers names and terms for this series. Full: also the story and characters.</span>
+            <span id="ai-style-examples-hint" class="tp-tip-src" hidden>Local Independent: first use human examples (English, Japanese and Thai), then accepted AI translations from this run. This switch controls both. Saved for this model.</span>
           </div>
 
           <div class="field" id="ai-page-image-wrap" style="display: none">
             <label class="label-row" style="cursor: pointer">
-              <span>Send page image to AI</span>
+              <span data-tip-src="ai-page-image-tip">Send page image to AI</span>
               <input type="checkbox" id="ai-page-image" />
             </label>
-            <div class="hint">Images may increase time and cost.</div>
+            <span id="ai-page-image-tip" class="tp-tip-src" hidden><span class="tp-tip-part">Sends the page image with the text so the AI can see the context.</span> <span class="tp-tip-part">Images may increase time and cost.</span></span>
           </div>
 
           <!-- Per-model token ceiling (replaces the request-rate cap). -->
           <div class="field" id="ai-token-ceiling-wrap" style="display: none">
             <label class="label-row" style="cursor: pointer">
-              <span>Set a token ceiling</span>
-              <input type="checkbox" id="ai-token-ceiling-enabled" aria-describedby="ai-token-ceiling-default ai-token-ceiling-hint" />
+              <span data-tip-src="ai-token-ceiling-tip">Set a token ceiling</span>
+              <input type="checkbox" id="ai-token-ceiling-enabled" />
             </label>
             <label class="rate-field">
-              <span>Tokens per AI request (prompt + text + reply)</span>
-              <input type="number" id="ai-token-ceiling" min="256" max="2000000" step="256" inputmode="numeric" disabled />
+              <span>Tokens per AI request</span>
+              <input type="number" id="ai-token-ceiling" min="256" max="2000000" step="256" inputmode="numeric" disabled aria-describedby="ai-token-ceiling-tip" />
             </label>
-            <div id="ai-token-ceiling-default" class="hint" aria-live="polite"></div>
             <div id="ai-token-ceiling-warning" class="hint rate-preset" data-warn="1" aria-live="polite" hidden></div>
-            <div id="ai-token-ceiling-hint" class="hint">A higher ceiling puts more text in each request, so fewer requests are needed. Off uses the default. Above what the model can really answer, replies can run out of space and fail. Saved for this model.</div>
+            <span id="ai-token-ceiling-tip" class="tp-tip-src" hidden><span class="tp-tip-part">Limits the tokens of each AI request (prompt + text + reply).</span> <span id="ai-token-ceiling-default" class="tp-tip-part"></span> <span id="ai-token-ceiling-hint" class="tp-tip-part">A higher ceiling puts more text in each request, so fewer requests are needed. Off uses the default. Above what the model can really answer, replies can run out of space and fail. Saved for this model.</span></span>
           </div>
           <div class="field" id="ai-translation-mode-wrap">
-            <label class="label-row" for="ai-translation-mode">AI request mode</label>
+            <label class="label-row" for="ai-translation-mode"><span data-tip-src="ai-translation-mode-tip">AI request mode</span></label>
             <select id="ai-translation-mode" disabled aria-label="Assigned translation mode">
               <option value="conversation" selected>Conversation</option>
               <option value="independent">Independent</option>
             </select>
-            <div class="hint">Assigned automatically: Cloud → Conversation; Local → Independent.</div>
+            <span id="ai-translation-mode-tip" class="tp-tip-src" hidden>Assigned automatically: Cloud → Conversation; Local → Independent.</span>
           </div>
         </section>
       </section>
@@ -427,11 +442,12 @@
         <div class="section-title">Local viewer</div>
         <div class="field">
           <div class="file-actions">
-            <button type="button" id="open-local-images" class="action-btn primary">Select images</button>
-            <button type="button" id="open-local-folder" class="action-btn secondary">Select folder</button>
+            <button type="button" id="open-local-images" class="action-btn primary" data-tip-src="open-local-images-tip">Select images</button>
+            <button type="button" id="open-local-folder" class="action-btn secondary" data-tip-src="open-local-folder-tip">Select folder</button>
           </div>
-          <div class="hint">For folders in Brave, enable
-            <code>brave://flags/#file-system-access-api</code>.</div>
+          <span id="open-local-images-tip" class="tp-tip-src" hidden>Open image files from your computer in the TextPhantom viewer to translate them.</span>
+          <span id="open-local-folder-tip" class="tp-tip-src" hidden><span class="tp-tip-part">Open a whole folder of images in the TextPhantom viewer.</span> <span class="tp-tip-part">For folders in Brave, enable
+            <code>brave://flags/#file-system-access-api</code>.</span></span>
           <div id="local-picker-msg" class="hint local-picker-msg" role="status" aria-live="polite"></div>
           <input id="local-images-input" type="file" accept="image/*" multiple hidden />
         </div>
@@ -440,53 +456,61 @@
         <div class="section-title">Auto translate</div>
         <div class="field">
           <div class="file-actions">
-            <button type="button" id="open-auto-translate" class="action-btn primary">Auto translate</button>
+            <button type="button" id="open-auto-translate" class="action-btn primary" data-tip-src="open-auto-translate-tip">Auto translate</button>
           </div>
-          <div class="hint">Paste, drop or upload one image.</div>
+          <span id="open-auto-translate-tip" class="tp-tip-src" hidden>Paste, drop or upload one image.</span>
         </div>
 
         <div class="divider" role="separator"></div>
         <div class="section-title">Advanced</div>
         <div class="field">
-          <label for="api-url">Custom API URL <span id="api-status-emoji-2" class="api-dot-inline" aria-live="polite"
+          <label for="api-url"><span data-tip-src="api-url-tip">Custom API URL</span> <span id="api-status-emoji-2" class="api-dot-inline" aria-live="polite"
               title="Loading…">⏳</span></label>
           <div class="inline-row">
-            <input type="text" id="api-url" placeholder="https://plan291037-api-ocr-test.hf.space" />
+            <input type="text" id="api-url" placeholder="Default server" />
             <button id="reset-api" class="icon-btn" aria-label="Reset to default"
               title="Reset to default API">⟲</button>
           </div>
-          <div class="hint">Leave empty for the default server.</div>
+          <span id="api-url-tip" class="tp-tip-src" hidden>Leave empty for the default server.</span>
           <div id="api-local-unlimited-wrap" style="display: none">
             <label class="label-row" style="cursor: pointer; margin-top: 8px">
-              <span>Remove server pacing for this local API</span>
+              <span data-tip-src="api-local-unlimited-tip">Remove server pacing for this local API</span>
               <input type="checkbox" id="api-local-unlimited" />
             </label>
-            <div class="hint">Safety limits still apply.</div>
+            <span id="api-local-unlimited-tip" class="tp-tip-src" hidden>Removes API pacing on your local network. Safety limits stay active.</span>
+          </div>
+          <!-- 10495/10496: diagnostics (default off; confirm before on) sit directly
+               under the local-API pacing row, outside its wrap, so the switch
+               shows for every API. -->
+          <div id="diagnostics-upload-wrap">
+            <label class="label-row" style="cursor: pointer; margin-top: 8px">
+              <span data-tip-src="diagnostics-upload-hint">Send diagnostic logs to the API server</span>
+              <input type="checkbox" id="diagnostics-upload" />
+            </label>
+            <span id="diagnostics-upload-hint" class="tp-tip-src" hidden>Off by default. Turn on only when the developer asks you to; translation works the same either way.</span>
           </div>
         </div>
-
         <div class="field">
-          <label for="engine-mode">Where the work runs</label>
-          <select id="engine-mode" aria-describedby="engine-mode-availability engine-mode-hint">
+          <label for="engine-mode"><span data-tip-src="engine-mode-tip">Where the work runs</span></label>
+          <select id="engine-mode">
             <option value="extension">Extension (default)</option>
             <option value="api" disabled aria-disabled="true">API server (temporarily unavailable)</option>
           </select>
-          <div class="hint engine-mode-availability" id="engine-mode-availability" role="status">API server mode is unavailable.</div>
-          <div class="hint" id="engine-mode-hint"></div>
+          <span id="engine-mode-tip" class="tp-tip-src" hidden>Extension (default): the work runs in your browser. API server: temporarily unavailable.</span>
         </div>
 
         <div class="divider" role="separator"></div>
         <div class="section-title">Reset</div>
         <div class="field">
-          <button type="button" id="reset-defaults" class="action-btn secondary">Reset defaults</button>
-          <div class="hint"></div>
+          <button type="button" id="reset-defaults" class="action-btn secondary" data-tip-src="reset-defaults-tip">Reset defaults</button>
+          <span id="reset-defaults-tip" class="tp-tip-src" hidden>Resets all TextPhantom settings to current defaults. You are asked to confirm first.</span>
           <div id="reset-defaults-status" class="hint" role="status" aria-live="polite"></div>
         </div>
 
         <div class="contact-admin-section">
           <div class="divider" role="separator"></div>
           <div class="section-title">Support</div>
-          <button type="button" id="contact-admin" class="contact-admin-card" hidden>
+          <button type="button" id="contact-admin" class="contact-admin-card" hidden data-account-control>
             <span class="contact-admin-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M21 11.5a8.4 8.4 0 0 1-8.5 8.3H7.3L3 22.5l1.4-4.8A8.1 8.1 0 0 1 4 11.5 8.4 8.4 0 0 1 12.5 3.2 8.4 8.4 0 0 1 21 11.5Z"/><path d="M8.5 11.5h.01M12.5 11.5h.01M16.5 11.5h.01"/></svg></span>
             <span class="contact-admin-text"><strong>Contact admin</strong><small>Chat with the TextPhantom admin</small></span>
             <span id="contact-admin-badge" class="contact-admin-badge" hidden><span class="sr-only">Unread messages</span><span id="contact-admin-unread" translate="no"></span></span>
@@ -499,6 +523,9 @@
     </div>
 
   </div>
+  <!-- 10496: the one floating explanation (shared/hover-tip.js); it shows a
+       copy of already-translated text, so the interface translator skips it. -->
+  <div id="tp-tip" role="tooltip" translate="no" hidden></div>
 
   <script src="../shared/compat.js"></script>
   <script src="tabs.js"></script>

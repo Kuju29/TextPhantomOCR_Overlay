@@ -136,7 +136,7 @@ def main():
                             stack.enter_context(patch(
                                 "backend.ai.provider_resolution.refresh_hf_selected_metadata",
                                 return_value=(True, caps)))
-                            stack.enter_context(patch.object(h["openai_chat"].httpx, "Client", client))
+                            stack.enter_context(patch.object(sys.modules["httpx"], "Client", client))
                             stack.enter_context(patch.object(h["cloud_gemini"], "_post_once",
                                 side_effect=gemini_post))
                             stack.enter_context(patch.object(h["cloud_anthropic"], "post_json",

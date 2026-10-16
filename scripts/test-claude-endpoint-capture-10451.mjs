@@ -44,7 +44,9 @@ async function fixture(options={}){
     }},webNavigation:{getFrame:(_query,done)=>done({documentId:state.documentId,url:state.tab.url})}};
   const context=vm.createContext({chrome,URL});
   const helper=new vm.SyntheticModule(['getTab'],function(){this.setExport('getTab',async()=>({...state.tab}));},{context});
-  const module=new vm.SourceTextModule(source,{context});await module.link(()=>helper);await module.evaluate();
+  // 10494: the user already allowed account data (consent itself is tested in test-data-consent-10494).
+  const consent=new vm.SyntheticModule(['hasDataConsent'],function(){this.setExport('hasDataConsent',async()=>true);},{context});
+  const module=new vm.SourceTextModule(source,{context});await module.link(name=>name.endsWith('data-consent.js')?consent:helper);await module.evaluate();
   return {state,requests,scripts,cookieRequests,capture:module.namespace};
 }
 
@@ -113,6 +115,8 @@ async function backgroundFlow(changeOwner=false){
     '../../../shared/login-auth.js':virtual({LOGIN_PENDING_AUTH:pendingKey,LOGIN_OUTCOME:outcomeKey,loginAuthScope:async(api,user)=>api+'|'+user}),
     '../../../shared/browser-api.js':virtual({queryTabs:async()=>[],getTab:async()=>({...f.state.tab}),createTab:async()=>{throw Error('Original Login tab required');}}),
     '../../api.js':virtual({getApiBase:async()=>base}),
+    '../../../shared/data-consent.js':virtual({hasDataConsent:async()=>true,COOKIE_LOGIN_PROVIDERS:['login_gemini','login_deepseek']}),
+    '../../../shared/account-gate.js':virtual({readAccountSession:async({read,keys=[]}={})=>{const v=await read(['paidSessionToken','paidApiBase','paidEmail',...keys]);const token=String(v.paidSessionToken||''),base=String(v.paidApiBase||'').replace(/\/+$/,''),values={...v};delete values.paidSessionToken;return token?{ok:true,consent:true,signedIn:true,token,base,values,signal:new AbortController().signal}:{ok:false,consent:true,signedIn:false,base,values};},withAccountSignal:signal=>signal,accountSignal:()=>new AbortController().signal}), // 10495: the account gate (this user allowed data use)
     '../../../shared/diagnostics.js':virtual({recordDiagnostic:(...args)=>assert(!JSON.stringify(args).includes(cookieValue))}),
     './login_browser_relay.js':virtual({RELAY_PROVIDERS:{login_claude:{}},acquireBrowserRelay:(api,token)=>{relay.push(['acquire',api,token]);return ()=>relay.push(['release']);}}),
     './login_chatgpt_official.js':virtual({OFFICIAL_REDIRECT:'http://127.0.0.1:1455/auth/callback',beginOfficialSignIn:async()=>{throw Error('ChatGPT not used');},readCallback:()=>({error:'unused'}),finishOfficialSignIn:async()=>{throw Error('ChatGPT not used');},officialAccount:async()=>'',officialAccessToken:async()=>null,forgetOfficial:async()=>{}}),

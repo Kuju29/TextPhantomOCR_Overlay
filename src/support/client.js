@@ -2,6 +2,7 @@ import { getStorage, setStorage } from '../shared/storage.js';
 import { configuredAccountBase, safeAccountBase } from '../paid/client.js';
 import { diagnosticFetch } from '../shared/diagnostics.js';
 import { installHeaders } from '../paid/install-id.js';
+import { readAccountSession, DATA_CONSENT_REQUIRED } from '../shared/account-gate.js';
 
 const failure = (code, message, status) => Object.assign(new Error(message), { code, status });
 const allowed = path => ['/paid/support', '/paid/support/status', '/paid/support/messages', '/paid/support/action', '/paid/support/presence', '/paid/support/attachments',
@@ -12,13 +13,18 @@ const allowed = path => ['/paid/support', '/paid/support/status', '/paid/support
 export function createSupportClient({ read = getStorage, write = setStorage, fetchFn = diagnosticFetch } = {}) {
   let epoch = 0;
   const pending = new Set();
+  // 10495: chat is tied to the TextPhantom account. Every support request
+  // (messages, files, sign-in email, presence, unread) needs data-use consent;
+  // the token comes only from the account gate. Locked → nothing is sent.
   async function scope(auth = true) {
-    const values = await read(['paidSessionToken', 'paidApiBase', 'customApiUrl', 'apiUrlDefault']);
-    const base = configuredAccountBase(values), token = String(values.paidSessionToken || '');
+    const session = await readAccountSession({ read, keys: ['customApiUrl', 'apiUrlDefault'] });
+    const values = session.values, base = configuredAccountBase(values);
     if (!base) throw failure('API_UNAVAILABLE', 'The selected API is unavailable.');
+    if (!session.consent) throw Object.assign(failure(DATA_CONSENT_REQUIRED, 'Allow data use to contact the admin.'), { locked: true, signedIn: session.signedIn, requestDispatched: false });
+    const token = session.ok ? session.token : '';
     if (auth && (!token || safeAccountBase(values.paidApiBase) !== base))
       throw failure('SIGN_IN_REQUIRED', 'Sign in with your email to contact support.', 401);
-    return { base, token, tokenBase: safeAccountBase(values.paidApiBase) };
+    return { base, token, tokenBase: safeAccountBase(values.paidApiBase), signal: session.signal };
   }
   // signal: caller-owned cancellation (a long-poll stops when the chat closes); timeoutMs
   // overrides the default bound (the wait endpoint answers within ~25 s).
@@ -31,6 +37,9 @@ export function createSupportClient({ read = getStorage, write = setStorage, fet
     pending.add(controller);
     const cancel = () => controller.abort();
     if (signal?.aborted) controller.abort(); else signal?.addEventListener('abort', cancel, { once: true });
+    // A withdrawn consent aborts this request (long-polls included) at once.
+    const gate = identity.signal;
+    if (gate?.aborted) controller.abort(); else gate?.addEventListener('abort', cancel, { once: true });
     const timeout = setTimeout(() => controller.abort(), timeoutMs || (file || binary ? 45000 : 20000));
     try {
       const install = await installHeaders({ read, create: false });
@@ -49,7 +58,7 @@ export function createSupportClient({ read = getStorage, write = setStorage, fet
         throw failure('STALE_SUPPORT_RESPONSE', 'Your account changed. Reopen support to continue.');
       if (!response.ok) throw failure(value?.error?.code || 'SUPPORT_FAILED', value?.error?.message || 'Support request failed.', response.status);
       return value;
-    } finally { clearTimeout(timeout); pending.delete(controller); signal?.removeEventListener('abort', cancel); }
+    } finally { clearTimeout(timeout); pending.delete(controller); signal?.removeEventListener('abort', cancel); gate?.removeEventListener('abort', cancel); }
   }
   function invalidate() { epoch++; for (const item of pending) item.abort(); pending.clear(); }
   async function signIn(email, code) {
@@ -63,11 +72,18 @@ export function createSupportClient({ read = getStorage, write = setStorage, fet
     return result;
   }
   async function signOut() {
-    const identity = await scope();
+    let identity;
+    try { identity = await scope(); }
+    catch (error) {
+      // Without consent: sign out on this device only; no request is sent.
+      if (error.code !== DATA_CONSENT_REQUIRED) throw error;
+      await write({ paidSessionToken: '', paidApiBase: '', supportUnread: null });
+      invalidate(); return;
+    }
     try { await request('/paid/auth/logout', { body: {} }); }
     finally {
-      const current = await scope(false);
-      if (current.base === identity.base && current.token === identity.token)
+      const current = await scope(false).catch(() => null);
+      if (!current || current.base === identity.base && current.token === identity.token)
         await write({ paidSessionToken: '', paidApiBase: '', supportUnread: null });
       invalidate();
     }

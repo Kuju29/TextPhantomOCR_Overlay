@@ -28,6 +28,13 @@ const data = (() => {
   return JSON.parse(dataSource.slice(start + prefix.length).trim().replace(/;$/, ""));
 })();
 const shots = data.shots || {};
+// 10495: the "Privacy & data" tab draws its shots from shared/privacy-content.js
+// (Thai or English set, one language at a time) instead of static figures.
+globalThis.window ||= globalThis;
+await import("../src/shared/privacy-content.js");
+const PRIVACY = globalThis.TPPrivacyContent;
+const privacyShots = (lang) => PRIVACY.details(lang).flatMap((item) => item.shots || []);
+const PRIVACY_SCOPES = { "shared/data-consent-dialog.js": "consent", "popup/controllers/diagnostics-controller.js": "diagnosticsConfirm" };
 
 test("guide page exists and references only packaged local assets", () => {
   const refs = [...html.matchAll(/\b(?:src|href)\s*=\s*"([^"]+)"/g)].map((m) => m[1]);
@@ -64,7 +71,16 @@ test("every screenshot exists, is local and the total stays small", () => {
 
 test("figures and numbered explanation lists match the generated callouts", () => {
   const figures = [...html.matchAll(/<figure class="shot" data-shot="([^"]+)"/g)].map((m) => m[1]);
-  assert.deepEqual([...figures].sort(), Object.keys(shots).sort(), "every screenshot is shown exactly once");
+  // Privacy tab: each language shows its own set once; shared shots appear in both.
+  const privacy = [...new Set([...privacyShots("th"), ...privacyShots("en")])];
+  for (const lang of ["th", "en"]) assert.equal(new Set(privacyShots(lang)).size, privacyShots(lang).length, `privacy ${lang}: each shot once`);
+  assert.deepEqual(figures.filter((id) => privacy.includes(id)), [], "a privacy shot is not also a static figure");
+  assert.deepEqual([...figures, ...privacy].sort(), Object.keys(shots).sort(), "every screenshot is shown exactly once");
+  for (const id of privacy) {
+    const group = { "privacy-locked": "locked", "privacy-diagnostics": "diagnostics" }[id] || (id.startsWith("privacy-consent-") ? "consent" : "diagnosticsConfirm");
+    for (const lang of ["th", "en"]) for (const c of shots[id].callouts)
+      assert.ok(PRIVACY.guide(lang).callouts[group]?.[c.key], `${id}/${c.key}: ${lang} explanation in privacy-content.js`);
+  }
   for (const id of figures) {
     const list = html.match(new RegExp(`<ol class="callout-list" data-shot="${id}">([\\s\\S]*?)</ol>\\s*</div>`));
     assert.ok(list, `${id}: explanation list missing`);
@@ -121,10 +137,26 @@ test("account-view callouts still map to the customer portal renderer", () => {
   assert.ok(count >= 15, `expected the Buy credits callouts, found ${count}`);
 });
 
+test("privacy callouts still map to the module that draws the dialog", () => {
+  let count = 0;
+  for (const [id, shot] of Object.entries(shots)) {
+    for (const c of shot.callouts) {
+      if (!PRIVACY_SCOPES[c.scope]) continue;
+      count += 1;
+      const source = read(`src/${c.scope}`);
+      const token = c.sel.replace(/^[#.]/, "");
+      const derived = token.replace(/^tp-consent-/, "");
+      assert.ok(source.includes(token) || source.includes(`'tp-consent-' + group.heading`) && /^group\d$/.test(derived),
+        `${id}/${c.key}: ${c.sel} is no longer rendered by ${c.scope}`);
+    }
+  }
+  assert.ok(count >= 20, `expected the consent and confirmation callouts, found ${count}`);
+});
+
 test("on-page callouts still map to the content script that renders them", () => {
   for (const [id, shot] of Object.entries(shots)) {
     for (const c of shot.callouts) {
-      if (c.scope === "popup" || c.scope === ACCOUNT_VIEW) continue;
+      if (c.scope === "popup" || c.scope === ACCOUNT_VIEW || PRIVACY_SCOPES[c.scope]) continue;
       assert.match(c.scope, /^content\/[\w/-]+\.js$/, `${id}/${c.key}: scope`);
       const source = read(`src/${c.scope}`);
       const token = c.sel.replace(/^[#.]/, "");

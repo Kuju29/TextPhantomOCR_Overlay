@@ -9,6 +9,7 @@
  */
 import {readLoginState} from '../../shared/login-session.js';
 import {LOGIN_PENDING_AUTH, LOGIN_OUTCOME} from '../../shared/login-auth.js';
+import {dataConsentError} from '../../shared/data-consent.js';
 
 /** Longest connect TextPhantom waits for (endpoint import allows 120 s, plus margin). */
 const CONNECT_WAIT_MS = 150000;
@@ -79,6 +80,7 @@ export async function resolveWithAutoConnect(settings, resolve, {notify = () => 
     if (!isLoginSource(settings) || !AUTO_CODES.has(error?.code) || typeof connect !== 'function') throw error;
     const started = await connect().catch(() => ({started: false, reason: 'login_start_failed'}));
     if (!started?.started) {
+      if (started?.reason === 'data_consent_required') throw dataConsentError();
       if (started?.reason === 'permission_required') {
         throw Object.assign(new Error('Connect this Login once in the TextPhantom popup.'), {code: 'LOGIN_CONNECT_FIRST_TIME', requestDispatched: false});
       }

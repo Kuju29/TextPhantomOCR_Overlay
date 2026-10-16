@@ -10,6 +10,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'api'))
 from fastapi import HTTPException, FastAPI
 import httpx
+from starlette.requests import ClientDisconnect
 from starlette.requests import Request
 from backend.ai import content_stream
 from backend.ai.clients.base import ProviderGenerationCancelled
@@ -100,7 +101,9 @@ class StreamingTests(unittest.IsolatedAsyncioTestCase):
             return {}
         task=asyncio.create_task(respond(req,invoke))
         await messages.put({'type':'http.disconnect'})
-        with self.assertRaises(asyncio.CancelledError): await task
+        # A disconnect before any content is a client disconnect (the API middleware
+        # answers it as 499), not task cancellation (reserved for shutdown).
+        with self.assertRaises(ClientDisconnect): await task
         await asyncio.wait_for(finished.wait(),1)
 
     async def test_admission_cancel_removes_waiter_without_entering(self):

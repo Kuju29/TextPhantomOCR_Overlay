@@ -18,7 +18,7 @@ async function until(page,predicate,label){
   assert.fail(label+' did not complete: '+JSON.stringify({calls:page.calls.map(x=>x.url),status:field(page,'ai-login-status').textContent,errors:page.errors}));
 }
 function fixture(){
-  const local={mode:'lens_text',sources:'ai',lang:'th',customApiUrl:base,apiDefaultsFetchedAt:Date.now(),aiServiceMode:'paid',paidTranslationSource:'login',paidSessionToken:'synthetic-owner',paidApiBase:base,paidServiceApiBase:base,paidModel:'tp-model',loginProvider:provider,loginModel:model};
+  const local={mode:'lens_text',sources:'ai',lang:'th',customApiUrl:base,apiDefaultsFetchedAt:Date.now(),tpDataConsentV1:{version:1,granted:true,at:1},aiServiceMode:'paid',paidTranslationSource:'login',paidSessionToken:'synthetic-owner',paidApiBase:base,paidServiceApiBase:base,paidModel:'tp-model',loginProvider:provider,loginModel:model};
   const session={};let phase='healthy',modelName='Saved DeepSeek model',released=null;
   const reply=(value,status=200)=>Response.json(value,{status});
   const fetchReply=(url,options={})=>{
@@ -77,7 +77,7 @@ for(const phase of ['providers-failure','models-failure']){
 {
   const state=fixture();const seed=await state.seed();seed.close();state.phase='absent-provider';const page=await state.boot();
   try{
-    await until(page,()=>page.calls.some(x=>x.url.endsWith('/login/providers'))&&field(page,'ai-login-connect').disabled===false&&field(page,'ai-login-account').textContent==='Use your own AI account','Fresh absent provider response');
+    await until(page,()=>page.calls.some(x=>x.url.endsWith('/login/providers'))&&field(page,'ai-login-connect').disabled===false&&field(page,'ai-login-account').textContent===''&&/^Use your own AI account/.test(field(page,'ai-login-provider-tip').textContent),'Fresh absent provider response');
     assert.equal(field(page,'ai-login-model').options.length,0);assert.equal(field(page,'ai-login-model').disabled,true);
     assert(!JSON.stringify(state.local.loginProviderDisplayCacheV1).includes('Saved DeepSeek model'));
     checks.push('Fresh absent provider replaces cached signed-in presentation');

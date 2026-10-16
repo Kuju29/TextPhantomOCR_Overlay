@@ -17,27 +17,25 @@ import { getStorage, setStorage } from '../shared/storage.js';
 import { createTab } from '../shared/browser-api.js';
 import { diagnosticFetch, configureDiagnosticsFromMeta } from '../shared/diagnostics.js';
 import { createPaidViewCache, validPaidAccountView, paidInventoryDisplay, paidInventoryFailureMessage } from './view-cache.js';
+import { readAccountSession, showConsentScreen, onAccountGateChanged, DATA_CONSENT_REQUIRED } from '../shared/account-gate.js';
+// 10495: the current session (through the gate) for staleness checks only.
+const sameSession = async (id) => {
+  const current = await readAccountSession();
+  return current.ok && current.token === id.token && safeAccountBase(current.base) === id.base;
+};
 const viewCache = createPaidViewCache({read:getStorage,write:setStorage});
 let activityView = 'credits';
 const mount = document.getElementById('account'),
   client = createAccountClient({
     onSessionExpired: async (id) => {
-      const current = await getStorage(['paidSessionToken', 'paidApiBase']);
-      if (
-        closed ||
-        current.paidSessionToken !== id.token ||
-        safeAccountBase(current.paidApiBase) !== id.base
-      )
-        return;
+      if (closed || !(await sameSession(id))) return;
       checkout.cancel();
       checkoutError = '';
       const expiredEpoch = ++viewEpoch, expiredScope = scope;
       client.invalidate();
       monitor.stop();
       await viewCache.clear(expiredScope);
-      const beforeClear = await getStorage(['paidSessionToken', 'paidApiBase']);
-      if (closed || viewEpoch !== expiredEpoch || beforeClear.paidSessionToken !== id.token ||
-        safeAccountBase(beforeClear.paidApiBase) !== id.base) return;
+      if (closed || viewEpoch !== expiredEpoch || !(await sameSession(id))) return;
       scope = '';
       data = null;
       dataVerified = false;
@@ -49,8 +47,8 @@ const mount = document.getElementById('account'),
         paidModel: '',
         paidPendingLogin: null,
       });
-      const latest = await getStorage(['paidSessionToken', 'paidApiBase']);
-      if (closed || latest.paidSessionToken || safeAccountBase(latest.paidApiBase)) return;
+      const latest = await readAccountSession();
+      if (closed || latest.signedIn || safeAccountBase(latest.base)) return;
       failure(new Error('Your session has expired. Open the extension and sign in again.'));
     },
   });
@@ -148,6 +146,9 @@ async function acceptOrder(order) {
 }
 function failure(error) {
   monitor.pause();
+  // 10495: data use not allowed: nothing was read. Refresh opens the consent
+  // screen (the user's own click); no dialog pops up by itself.
+  const locked = error?.code === DATA_CONSENT_REQUIRED;
   mount.replaceChildren(
     renderAccountUnavailable(
       error?.message ||
@@ -155,7 +156,7 @@ function failure(error) {
       {
         compact: false,
         onBack: () => createTab({ url: chrome.runtime.getURL('popup/popup.html') }),
-        onRefresh: load,
+        onRefresh: locked ? async () => { if ((await showConsentScreen()).consent) await load(); } : load,
         theme: matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : '',
       },
     ),
@@ -473,6 +474,16 @@ const changed = (changes, area) => {
   );
 };
 chrome.storage.onChanged.addListener(changed);
+// Data use withdrawn here or elsewhere: requests stop (the gate aborts them),
+// polling stops and the account is no longer shown.
+onAccountGateChanged(detail => {
+  if (closed || detail?.reason === 'session') return;
+  if (detail?.consent === false) {
+    checkout.cancel(); client.invalidate(); monitor.stop();
+    ++viewEpoch; data = null; dataVerified = false; scope = '';
+    failure(Object.assign(new Error('Allow data use to open your account. You are still signed in.'), { code: DATA_CONSENT_REQUIRED }));
+  } else void load();
+});
 const visibilityChanged = () => {
   if (document.visibilityState === 'hidden') checkout.cancel();
   checkoutError = '';

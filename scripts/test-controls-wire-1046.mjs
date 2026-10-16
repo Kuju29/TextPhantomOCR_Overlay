@@ -1,26 +1,23 @@
 import assert from 'node:assert/strict';
-import { webcrypto } from 'node:crypto';
+import { installSettle } from './lib/settle.mjs';
 import { createAiProfileController } from '../src/popup/controllers/ai-profile-controller.js';
 import { createAiProfileStorageWriter } from '../src/popup/controllers/ai-profile-storage-writer.js';
 import { createPaidServiceController } from '../src/popup/controllers/paid-service-controller.js';
-import { createRateSettingsController } from '../src/popup/controllers/rate-settings-controller.js';
 import { paidEntry, paidScope, PAID_PROFILE_KEY } from '../src/shared/paid-profile.js';
 import { userMessageForCode } from '../src/shared/error-contract.js';
-Object.defineProperty(globalThis,'crypto',{value:webcrypto,configurable:true});
 const checks=[];const check=(name,fn)=>{fn();checks.push({name,passed:true});};
-const settle=async()=>{for(let n=0;n<8;n++)await new Promise(r=>setImmediate(r));};
+const settle=installSettle({turns:8}); // waits for WebCrypto work, not a fixed turn count
 const el=(value='')=>({value,checked:false,style:{display:''},dataset:{},options:[],textContent:'',disabled:false,handlers:{},
  addEventListener(k,fn){this.handlers[k]=fn;},replaceChildren(...v){this.children=v;this.options=v;}});
 globalThis.document={createElement:()=>el()};
 const els=Object.fromEntries(['aiProvider','aiModel','aiBaseUrl','aiPrompt','aiThinking','aiMemoryMode','aiPageImage','aiTranslationMode',
  'aiStyleExamples','aiStyleExamplesWrap','lang','aiService','mode','sources','apiUrl','aiServiceWrap','aiPaidPanel','aiProviderWrap','aiKeyWrap','aiModelWrap','aiEndpointWrap',
- 'aiThinkingWrap','aiPromptWrap','aiCharactersWrap','aiPageImageWrap','aiRateWrap','aiTranslationModeWrap','aiPaidStatus','aiPaidUnavailable',
+ 'aiThinkingWrap','aiPromptWrap','aiCharactersWrap','aiPageImageWrap','aiTranslationModeWrap','aiPaidStatus','aiPaidUnavailable',
  'aiPaidModel','aiPaidLogin','aiPaidAccount','aiPaidEmailLabel','aiPaidCredits','aiPaidHeld','aiPaidAccountState',
- 'rateLimitEnabled','rateProfile','rateRpm','rateBurst','ratePresetHint',
  'aiTokenCeilingWrap','aiTokenCeilingEnabled','aiTokenCeiling','aiTokenCeilingDefault','aiTokenCeilingWarning'].map(k=>[k,el()]));
 Object.assign(els.aiProvider,{value:'huggingface'});els.aiModel.value='manual/model';els.lang.value='th';
 els.mode.value='lens_text';els.sources.value='ai';els.apiUrl.value='http://localhost:7860';
-let store={aiProvider:'huggingface',aiModel:'manual/model',aiThinking:'low',aiMemoryMode:'terms',aiPageImage:'off',
+let store={tpDataConsentV1:{version:1,granted:true,at:1},aiProvider:'huggingface',aiModel:'manual/model',aiThinking:'low',aiMemoryMode:'terms',aiPageImage:'off',
  aiKey:'hf_manual-only-fixture',lang:'th',aiPrompt:'Manual Thai style',customApiUrl:els.apiUrl.value};
 const storage=createAiProfileStorageWriter(patch=>{Object.assign(store,structuredClone(patch));});
 const state={desiredLang:'th',desiredAiModel:'manual/model',lastSavedApiUrl:els.apiUrl.value,aiPromptDirtyByLang:{}};
@@ -44,10 +41,9 @@ globalThis.fetch=async(url,opts={})=>{
  const data=String(url).endsWith('/paid/me')?{email:'tester@gmail.com',paid_paused:paused,paid_status:{state:paused?'paused':'ready'},credits:{available:'10000',held:'0'},models:[{id:'paid/model',eligible_tp:'10000',model_capabilities:caps}]}:String(url).endsWith('/meta')?{paid:{available}}:{available:true};
  return {ok:true,json:async()=>data};
 };
-let pc, rates;
-pc=createPaidServiceController({els,state,getStorage:async keys=>Object.fromEntries(keys.map(k=>[k,store[k]])),setStorage:storage,toggleUi:()=>pc.applyVisibility(),onProfileContext:c=>{profile.setPaidContext(c);rates?.setContext(c.active);},beforeSwitch:async()=>({ok:true})});
+let pc;
+pc=createPaidServiceController({els,state,getStorage:async keys=>Object.fromEntries(keys.map(k=>[k,store[k]])),setStorage:storage,toggleUi:()=>pc.applyVisibility(),onProfileContext:c=>profile.setPaidContext(c),beforeSwitch:async()=>({ok:true})});
 await pc.initialize();pc.setAvailability(true,els.apiUrl.value);await settle();
-rates=createRateSettingsController({els,constants:{presets:{paid:{rpm:60,burst:8}},fallback:{rpm:30,burst:4},rpmMin:1,rpmMax:600,burstMin:1,burstMax:60},persist:storage,toggleUi:()=>pc.applyVisibility()});await rates.initialize(store);rates.bind();
 async function switchMode(mode){els.aiService.value=mode;await els.aiService.handlers.change();await settle();assert.equal(store.aiServiceMode,mode);}
 // .68: the per-mode request-rate cap was replaced by the per-model token ceiling.
 async function ceiling(tokens){await profile.saveProfile({tokenCeilingEnabled:true,tokenCeiling:tokens});}

@@ -66,11 +66,17 @@ assert.match(els.aiLocalStatus.textContent, /Saved model metadata.*Availability 
 assert.equal(modelUiOptions.at(-1).showUnknownHint, false);
 assert.equal(modelMessages.at(-1).type, "info");
 assert.match(modelMessages.at(-1).message, /the runtime is checked again before translation/);
-assert.equal(state.aiModelBlocked, false);
+assert.equal(state.lastAiResolve.verified_model, "qwen3.5:9b", "a current, fresh snapshot keeps its verified model");
+// A saved snapshot only restores the display: translation is authorized by the
+// live, provider-authoritative check the popup starts automatically on open
+// (settings-hydration: refresh({automatic:true})), never by stored metadata.
+assert.equal(state.aiModelBlocked, true, "a saved snapshot does not authorize translation by itself");
 const legacy = structuredClone(records);
 delete legacy[identity].verificationVersion;
 assert.equal(controller.restoreSnapshot(legacy), true, "legacy metadata remains available");
 assert.equal(state.aiModelBlocked, true, "older metadata schema must not authorize translation");
+assert.equal(state.lastAiResolve.verified_model, "", "older metadata schema is not a verified model");
+assert.equal(modelMessages.at(-1).type, "warn");
 assert.match(els.aiLocalStatus.textContent, /Refreshing installed models automatically/);
 
 let persistedHint = null;

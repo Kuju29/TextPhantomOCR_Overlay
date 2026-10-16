@@ -2,7 +2,11 @@
 import os, json, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "api"))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 os.environ["TP_CENTER_URL"] = "http://127.0.0.1:8787"
+# The busy-admission wait queue (≤90 s) is covered by test-paid-admission-wait-10466.py;
+# here a busy answer must surface at once so its evidence can be checked.
+os.environ["TP_PAID_ADMISSION_WAIT_SECONDS"] = "0"
 from unittest.mock import patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -12,6 +16,7 @@ from backend.ai.provider_contract import GenerationRequest
 from backend.ai.clients.provider_error import ProviderHttpError
 from backend.ai.failure_reason import provider_http_failure, is_rate_limited
 import httpx
+from paid_center_fake import HealthzClient, reset_protocol_cache
 app=FastAPI();app.include_router(router);calls=[];checks=[]
 def check(name,ok):
     checks.append({'name':name,'passed':bool(ok)});assert ok,name
@@ -36,10 +41,9 @@ with patch('backend.api.routes.paid.center_base_url',return_value='http://127.0.
     check('Order submit path fixed and ownership belongs to Center',c.post('/paid/orders/'+identifier+'/action',headers=auth,json={'action':'submit'}).status_code==200 and calls[-1][0]=='/api/customer/orders/'+identifier+'/action')
     n=len(calls);check('Unknown order identifier cannot select arbitrary Center path',c.post('/paid/orders/admin/action',json={'action':'submit'}).status_code==422 and len(calls)==n)
     check('No customer gateway endpoint can approve payment',c.post('/paid/orders/'+identifier+'/confirm',json={}).status_code==404)
-class Provider:
-    def __init__(self,**kwargs):pass
-    def __enter__(self):return self
-    def __exit__(self,*a):pass
+# The synthetic Center also answers the Paid protocol health read.
+reset_protocol_cache()
+class Provider(HealthzClient):
     def post(self,url,**kwargs):return httpx.Response(502,json={'error':{'code':'PAID_PROVIDER_ROUTE','message':'No matching route','request_id':'center103','details':{'upstream_http_status':404,'provider_error_category':'price_filter','credit_state':'released','next_action':'inspect_model_route'}}})
 with patch('backend.ai.providers.cloud_paid.httpx.Client',Provider):
     try:ADAPTER.generate(GenerationRequest(provider='paid',model='qa/test',api_key='customer-session',system_text='QA',user_parts=('hello',),cache_context={'operationId':'paid-account-103'}))

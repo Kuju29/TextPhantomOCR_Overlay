@@ -42,7 +42,7 @@ await test('Storage failure sends no header instead of blocking the request',asy
   assert.deepEqual(await installHeaders(broken),{});
 });
 await test('Account requests (me, orders, add-on orders, refunds) carry X-TP-Install',async()=>{
-  const s=store({customApiUrl:'http://localhost:7860',paidApiBase:'http://localhost:7860',paidSessionToken:'customer-test-session',[INSTALL_KEY]:'12'.repeat(16)});
+  const s=store({tpDataConsentV1:{version:1,granted:true,at:1},customApiUrl:'http://localhost:7860',paidApiBase:'http://localhost:7860',paidSessionToken:'customer-test-session',[INSTALL_KEY]:'12'.repeat(16)});
   const calls=[];
   const client=createAccountClient({read:s.read,write:s.write,fetchFn:async(url,options)=>{calls.push([url,options]);return new Response('{"ok":true}',{status:200});}});
   for(const [path,body] of [['/paid/account',null],['/paid/orders',{package_id:'pkg_1'}],['/paid/addon-orders',{code:'ai_login'}],['/paid/refunds',{payment_id:'pay_1'}]])
@@ -51,7 +51,7 @@ await test('Account requests (me, orders, add-on orders, refunds) carry X-TP-Ins
   for(const [,options] of calls)assert.equal(options.headers[INSTALL_HEADER],'12'.repeat(16));
 });
 await test('Support and sign-in requests carry X-TP-Install',async()=>{
-  const s=store({customApiUrl:'http://localhost:7860',paidApiBase:'http://localhost:7860',paidSessionToken:'t'.repeat(48),[INSTALL_KEY]:'34'.repeat(16)});
+  const s=store({tpDataConsentV1:{version:1,granted:true,at:1},customApiUrl:'http://localhost:7860',paidApiBase:'http://localhost:7860',paidSessionToken:'t'.repeat(48),[INSTALL_KEY]:'34'.repeat(16)});
   const calls=[];
   const client=createSupportClient({read:s.read,write:s.write,fetchFn:async(url,options)=>{calls.push([url,options]);return new Response('{"ok":true}',{status:200});}});
   await client.request('/paid/auth/request',{auth:false,body:{email:'a@example.com'}});

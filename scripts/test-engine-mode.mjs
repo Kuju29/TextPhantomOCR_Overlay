@@ -117,10 +117,14 @@ const {
   assert.match(optionFor.api.attributes, /\bdisabled\b/, "the API option must reject user selection");
   assert.match(optionFor.api.attributes, /aria-disabled="true"/, "the API option must expose its unavailable state");
   assert.match(optionFor.api.label, /temporarily unavailable/i, "the API option must explain its temporary state");
+  // 10496: the separate "API server mode is unavailable." line only repeated
+  // the option's own "(temporarily unavailable)" label; the selector's
+  // accessible description is now the explanation of "Where the work runs".
+  assert.doesNotMatch(popupHtml, /id="engine-mode-availability"/, "no duplicate availability line");
   assert.match(
     popupHtml,
-    /id="engine-mode-availability"[^>]*role="status"[^>]*>API server mode is unavailable\./i,
-    "the selector must have an accessible availability notice",
+    /data-tip-src="engine-mode-tip">Where the work runs<[\s\S]{0,600}?<span id="engine-mode-tip" class="tp-tip-src" hidden>[^<]*API server: temporarily unavailable\./i,
+    "the selector must have an accessible availability explanation",
   );
   assert.match(
     popupHydration,
@@ -144,12 +148,17 @@ const {
 // --- the service worker reads it onto every payload -------------------------
 {
   const menu = await readFile(path.join(projectRoot, "src/background/context-menu.js"), "utf8");
-  const engineStamps = menu.match(/engine:\s*engineMode/g) || [];
+  // The generation fingerprint (result-cache identity, 10493) also names the
+  // engine; count only the two job payloads.
+  const withoutFingerprint = menu.replace(/generationFingerprint\(\{[\s\S]*?\}\)/g, "");
+  const engineStamps = withoutFingerprint.match(/engine:\s*engineMode/g) || [];
   assert.equal(
     engineStamps.length,
     2,
     "both the single-image and whole-page payloads must carry the engine",
   );
+  assert.match(menu, /generationFingerprint\(\{[\s\S]*?engine:\s*engineMode[\s\S]*?\}\)/,
+    "the MangaDex generation fingerprint must include the effective engine");
   assert.ok(
     menu.includes("let resolvedSettings = profileSnapshot?.settings || flatSettings") &&
       menu.includes("engineMode: effectiveEngineMode(resolvedSettings.engineMode)"),

@@ -1,4 +1,4 @@
-import { setLogShippingEnabled, initializeLogJournal } from "../shared/log-sink.js";
+import { setLogShippingEnabled, initializeLogJournal, diagnosticsUploadAllowed } from "../shared/log-sink.js";
 // Authoritative, bounded trace negotiation used by UI actions that can occur
 // before the first translation job (notably Local-AI Connect).
 import { getCapabilities, forgetCapabilities } from "./capabilities.js";
@@ -78,9 +78,12 @@ export async function ensureTraceHandshake(rawBase) {
         caps,
       });
     await initializeLogJournal(base);
+    // 10494: shipped only with the user's diagnostics switch on (log-sink
+    // enforces it for logs) AND the API's consent.
+    const allowed = diagnosticsUploadAllowed();
     if (typeof caps.logFile === "boolean") setLogShippingEnabled(caps.logFile, () => base, base, {authoritative:true});
     setTracingEnabled(
-      caps.trace === true,
+      caps.trace === true && allowed,
       () => base,
       caps.traceDetail,
       caps.traceSession,
@@ -88,14 +91,14 @@ export async function ensureTraceHandshake(rawBase) {
         forgetCapabilities(base);
         const refreshed = await getCapabilities(base, { forceRefresh: true });
         if (!refreshed?.reason) rememberHandshake(base, {
-          known: true, trace: refreshed.trace === true, caps: refreshed,
+          known: true, trace: refreshed.trace === true && diagnosticsUploadAllowed(), caps: refreshed,
         });
         return refreshed;
       },
     );
-    if (caps.trace === true) await flushTrace();
+    if (caps.trace === true && allowed) await flushTrace();
     return rememberHandshake(base,
-      { known: true, trace: caps.trace === true, caps });
+      { known: true, trace: caps.trace === true && allowed, caps });
   })().finally(() => inFlight.delete(base));
   inFlight.set(base, task);
   return task;

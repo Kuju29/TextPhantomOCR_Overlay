@@ -1,4 +1,8 @@
 """Independent .23 durable chat QA: actual Chromium/IndexedDB, offline APIs only."""
+import sys as _tp_sys
+from pathlib import Path as _TpPath
+_tp_sys.path.insert(0, str(_TpPath(__file__).resolve().parent / 'lib'))
+from chromium_path import chromium_executable  # the one shared Chromium resolver
 import asyncio, hashlib, json, os, shutil, tempfile, threading, time, traceback, uuid
 from pathlib import Path
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -35,7 +39,8 @@ class Fixture:
         self.name=name;self.profile=OUT/('profile-'+name)
         shutil.rmtree(self.profile,ignore_errors=True)
         self.token=hashlib.sha256(name.encode()).hexdigest()
-        self.store={'customApiUrl':BASE,'paidApiBase':BASE,'paidSessionToken':self.token,'paidEmail':name+'@example.com','aiServiceMode':'manual','aiProvider':'ollama','aiModel':'gemma4:e2b','aiPrompt':'private prompt','supportActivated':True}
+        # 10494/10495: this customer allowed data use (the account gate reads the consent record).
+        self.store={'tpDataConsentV1':{'version':1,'granted':True,'at':1},'customApiUrl':BASE,'paidApiBase':BASE,'paidSessionToken':self.token,'paidEmail':name+'@example.com','aiServiceMode':'manual','aiProvider':'ollama','aiModel':'gemma4:e2b','aiPrompt':'private prompt','supportActivated':True}
         self.emails={self.token:self.store['paidEmail']}
         self.uploads=[];self.send_requests=[];self.committed=[];self.upload_commands={};self.message_commands={};self.pages={};self.channels={};self.views={};self.active=None;self.context=None
         self.upload_failure=False;self.send_failure=False;self.hold_send=None
@@ -112,7 +117,7 @@ class Fixture:
         await route.fulfill(status=200,content_type='application/json',headers={'Access-Control-Allow-Origin':'*'},body=json.dumps(body))
     async def start(self,playwright):
         options={'headless':True,'args':['--no-sandbox'],'viewport':{'width':390,'height':650}}
-        if os.getenv('TP_QA_CHROMIUM'):options['executable_path']=os.environ['TP_QA_CHROMIUM']
+        options['executable_path']=chromium_executable()
         self.context=await playwright.chromium.launch_persistent_context(str(self.profile),**options)
         self.pages={};self.channels={};self.views={};self.active=None
         for name,handler in [('_storageGet',self.read),('_storageSet',self.write),('_storageRemove',self.remove),('_runtime',self.runtime),('_tabsQuery',self.tabs_query),('_tabsSend',self.tabs_send)]:await self.context.expose_binding(name,handler)

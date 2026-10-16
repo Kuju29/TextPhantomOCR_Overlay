@@ -10,7 +10,9 @@ from unittest.mock import patch
 
 os.environ.setdefault('TP_CENTER_URL', 'http://127.0.0.1:8787')
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'api'))
+sys.path.insert(0, str(Path(__file__).resolve().parent / 'lib'))
 import httpx
+from paid_center_fake import reset_protocol_cache, with_healthz
 from fastapi.testclient import TestClient
 from backend.main import app
 from backend import paid_center
@@ -37,9 +39,13 @@ class ReplayTests(unittest.TestCase):
                              'translation_mode': 'independent'}}
         sync, asynchronous = httpx.Client, httpx.AsyncClient
         self.client = TestClient(app)
+        reset_protocol_cache()
+        # The synthetic Center also answers the Paid protocol health read; its
+        # transport replaces the shared Center pool transport.
+        center = httpx.MockTransport(with_healthz(self.center))
         self.patches = [
-            patch('httpx.Client', lambda **kw: sync(transport=httpx.MockTransport(self.center), **kw)),
-            patch('httpx.AsyncClient', lambda **kw: asynchronous(transport=httpx.MockTransport(self.center), **kw)),
+            patch('httpx.Client', lambda **kw: sync(**{**kw, 'transport': center})),
+            patch('httpx.AsyncClient', lambda **kw: asynchronous(**{**kw, 'transport': httpx.MockTransport(self.center)})),
             patch.object(translate_service, '_execute', self.image_pipeline)]
         for item in self.patches:
             item.start()

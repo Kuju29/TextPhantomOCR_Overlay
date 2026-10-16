@@ -19,6 +19,9 @@ import { changedTopics } from '../../shared/change-signals.js';
 import { createRecoveryBackoff } from '../../shared/retry-backoff.js';
 import { AI_USAGE_STORAGE_KEY } from '../../shared/ai-usage.js';
 import { PAID_ROUTE_OUTCOME_KEY, paidRouteFailureCode, samePaidRoute } from '../../shared/paid-route-outcome.js';
+import { consentText, consentLanguage } from '../../shared/data-consent-dialog.js';
+import { readAccountSession, ensureAccountConsent, showConsentScreen, onAccountGateChanged, withAccountSignal } from '../../shared/account-gate.js';
+import { DATA_CONSENT_REQUIRED } from '../../shared/data-consent.js';
 
 function safeApiBase(value) {
   const raw = normalizeUrl(value);
@@ -46,9 +49,16 @@ export function createPaidServiceController({ els, state, getStorage, setStorage
   recheckApi = null, now = Date.now, setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout,
   recoveryMs = 5000, requestTimeoutMs = 20000, onProfileContext = null, beforeSwitch = null,
   onUsageSelection = null,
+  // 10494/10495: the one consent screen, through the account gate (injectable for tests).
+  ensureConsent = (options = {}) => ensureAccountConsent({ read: getStorage, ...options }),
 }) {
   let available = false, capability = null, base = "", knownBase = "";
+  // 10495: `token` is set only from the account gate (data-use consent given);
+  // `signedIn` is the local session state used for display. A signed-in user
+  // without consent stays signed in, but every account control is greyed and
+  // nothing is sent.
   let token = "", account = null, accountVerified = false, selected = "", sessionBase = "", email = "";
+  let signedIn = false, consentGranted = false, ready = Promise.resolve();
   let mode = "manual", initialized = false, disposed = false, loginReady = false, registrationEnabled = true;
   let loading = false, statusLoading = false, sending = false, verifying = false, reconnecting = false;
   let identityEpoch = 0, accountRequestId = 0, statusRequestId = 0, statusCheckedAt = 0;
@@ -124,7 +134,7 @@ export function createPaidServiceController({ els, state, getStorage, setStorage
     run: () => {
       if (!retryNeeded()) return;
       if (globalThis.document?.visibilityState === "hidden") return; // visibilitychange resumes
-      if (token) void refreshAccount(); else void checkLoginStatus(true);
+      if (signedIn) void refreshAccount(); else void checkLoginStatus(true);
     },
     delays: [recoveryMs, recoveryMs * 3, recoveryMs * 6, recoveryMs * 12],
     setTimeoutFn, clearTimeoutFn });
@@ -187,8 +197,8 @@ export function createPaidServiceController({ els, state, getStorage, setStorage
     for (const controller of pending) controller.abort();
     pending.clear(); loading = statusLoading = sending = verifying = false;
   };
-  const retryNeeded = () => initialized && !disposed && available && active() &&
-    (token ? !accountVerified || (state.paidTranslationSource !== 'login' && (account?.paid_paused || account?.paid_restriction?.blocked)) : !loginReady);
+  const retryNeeded = () => initialized && !disposed && available && active() && consentGranted &&
+    (signedIn ? Boolean(token) && (!accountVerified || (state.paidTranslationSource !== 'login' && (account?.paid_paused || account?.paid_restriction?.blocked))) : !loginReady);
 
   function scheduleRecovery() {
     if (!retryNeeded()) { stopTimer(); return; }
@@ -198,7 +208,9 @@ export function createPaidServiceController({ els, state, getStorage, setStorage
 
   function syncLoginControls() {
     const busy = sending || verifying;
-    const ready = available && active() && loginReady && !busy && !token;
+    // Without consent the send button stays usable: it opens the consent screen
+    // first (nothing is checked or sent before Allow).
+    const ready = available && active() && (loginReady || !consentGranted) && !busy && !signedIn;
     if (els.aiPaidSend) { els.aiPaidSend.disabled = !ready; text(els.aiPaidSend, sending ? "Sending code…" : "Continue with email"); }
     if (els.aiPaidVerify) { els.aiPaidVerify.disabled = !ready; text(els.aiPaidVerify, verifying ? "Signing in…" : "Verify & sign in"); }
     if (els.aiPaidEmail) els.aiPaidEmail.disabled = busy;
@@ -213,12 +225,24 @@ export function createPaidServiceController({ els, state, getStorage, setStorage
     if (els.aiPaidRefresh) els.aiPaidRefresh.disabled = loading || reconnecting;
     if (els.aiPaidCheck) { els.aiPaidCheck.disabled = reconnecting; text(els.aiPaidCheck, reconnecting ? "Checking…" : "Try again"); }
     stopCooldown();
-    if (challenge && !token && active() && remaining > 0 && !disposed) {
+    if (challenge && !signedIn && active() && remaining > 0 && !disposed) {
       cooldownTimer = setTimeoutFn(syncLoginControls, 1000);
       cooldownTimer?.unref?.();
     }
   }
 
+  // The locked note's wording is authored in shared/privacy-content.js (Thai
+  // too, kept out of the machine translator) like the consent screen itself.
+  async function renderLockedNote() {
+    const note = els.aiPaidConsent, words = globalThis.TPPrivacyContent?.messages?.(await consentLanguage());
+    if (!note || !words) return;
+    const thai = words === globalThis.TPPrivacyContent.messages("th");
+    const span = note.querySelector?.("span");
+    if (span) span.textContent = words.lockedBanner;
+    if (els.aiPaidConsentAllow) els.aiPaidConsentAllow.textContent = words.reviewAllow;
+    if (thai) { note.setAttribute?.("translate", "no"); note.lang = "th"; }
+    else { note.removeAttribute?.("translate"); note.lang = ""; }
+  }
   function renderAccount() {
     text(els.aiPaidEmailLabel, account?.email || email || "Your account");
     text(els.aiPaidCredits, account
@@ -229,9 +253,12 @@ export function createPaidServiceController({ els, state, getStorage, setStorage
       els.aiPaidHeld.replaceChildren(uiTemplate(processing
         ? "Processing: {credits} TP temporarily locked; unused credits return after this request."
         : "Reserved: {credits} TP", {credits:account.credits?.held || "0"}));
-    } else text(els.aiPaidHeld, account ? (processing ? `Processing: ${account.credits?.held || "0"} TP temporarily locked; unused credits return after this request.` : `Reserved: ${account.credits?.held || "0"} TP`) : "Checking your balance…");
-    text(els.aiPaidAccountState, account ? (account?.paid_restriction?.blocked ? "Paid restricted · signed in" : account?.paid_paused ? "Service paused · signed in" : "Signed in") : "Reconnecting…");
-    els.aiPaidAccountState?.setAttribute?.("data-kind", !account || account?.paid_paused || account?.paid_restriction?.blocked ? "warning" : "success");
+    } else text(els.aiPaidHeld, account ? (processing ? `Processing: ${account.credits?.held || "0"} TP temporarily locked; unused credits return after this request.` : `Reserved: ${account.credits?.held || "0"} TP`) : signedIn && !consentGranted ? "" : "Checking your balance…");
+    const locked = signedIn && !consentGranted;
+    text(els.aiPaidAccountState, locked ? "Signed in" : account ? (account?.paid_restriction?.blocked ? "Paid restricted · signed in" : account?.paid_paused ? "Service paused · signed in" : "Signed in") : "Reconnecting…");
+    els.aiPaidAccountState?.setAttribute?.("data-kind", locked || !account || account?.paid_paused || account?.paid_restriction?.blocked ? "warning" : "success");
+    // The locked banner for the Paid area (kept wording; the goal is Allow).
+    if (els.aiPaidConsent) { els.aiPaidConsent.hidden = !locked; if (locked) void renderLockedNote(); }
     const modelsVerified = accountVerified && paidModelInventoryReady(account);
     // The remembered list is selectable at once; the choice is saved and
     // re-validated by the background /paid/me (a missing model is replaced).
@@ -247,7 +274,8 @@ export function createPaidServiceController({ els, state, getStorage, setStorage
     const sameKnownApi = configuredApiBase() && knownBase === inputBase();
     state.paidActive = showAi && active();
     state.paidAccountOpen = false;
-    const loginSelection = loginController.sync({active: state.paidActive, account, accountVerified, apiBase: inputBase(), token});
+    const loginSelection = loginController.sync({active: state.paidActive, account, accountVerified, apiBase: inputBase(), token, locked: signedIn && !consentGranted,
+      serviceProblem: Boolean(signedIn && (serviceIssue || metadataIssue))});
     show(els.aiPaidStatus, !accountVerified || loginSelection.source !== 'login');
     if (accountVerified && loginSelection.source === 'login') {
       text(els.aiPaidAccountState, 'Signed in');
@@ -289,24 +317,23 @@ export function createPaidServiceController({ els, state, getStorage, setStorage
     text(els.aiPaidConnectionMessage || els.aiPaidUnavailable, notice);
     if (!state.paidActive) { inlineAccount?.sync({active:false}); accountViewport(false);stopTimer(); stopCooldown();stopPriceRefresh(); return; }
     for (const wrap of [els.aiProviderWrap, els.aiKeyWrap, els.aiModelWrap, els.aiEndpointWrap,
-      els.aiLocalAdapterWrap, els.aiLocalCapacityWrap, els.aiLocalManualConcurrencyWrap,
-      els.aiLocalModelHint, els.aiLocalRateWrap]) show(wrap, false);
+      els.aiLocalAdapterWrap, els.aiLocalCapacityWrap, els.aiLocalManualConcurrencyWrap]) show(wrap, false);
     for (const wrap of [els.aiThinkingWrap, els.aiPromptWrap, els.aiCharactersWrap,
-      els.aiPageImageWrap, els.aiRateWrap, els.aiTranslationModeWrap]) show(wrap, true);
+      els.aiPageImageWrap, els.aiTranslationModeWrap]) show(wrap, true);
     // Login shows AI thinking too: native Login models and DeepSeek web use
     // it; a website without a verified switch shows it read-only.
     show(els.aiThinkingWrap, true);
     // Paid: the Center's model ceiling is the default. Login: OFF keeps
     // the current automatic size; ON uses the user's number for this model.
     show(els.aiTokenCeilingWrap, true);
-    show(els.aiPaidLogin, !token);
+    show(els.aiPaidLogin, !signedIn);
     inlineAccount?.sync({active:state.paidActive,base:sessionBase,token:sessionBase===inputBase()?token:""});
     const browsing = inlineAccount?.isOpen() === true;
     state.paidAccountOpen = browsing;
-    show(els.aiPaidAccount, Boolean(token) && !browsing);
+    show(els.aiPaidAccount, signedIn && !browsing);
     accountViewport(browsing);
     if (browsing) for (const wrap of [els.aiThinkingWrap, els.aiPromptWrap, els.aiCharactersWrap,
-      els.aiPageImageWrap, els.aiRateWrap, els.aiTranslationModeWrap, els.aiTokenCeilingWrap]) show(wrap, false);
+      els.aiPageImageWrap, els.aiTranslationModeWrap, els.aiTokenCeilingWrap]) show(wrap, false);
     const codeStep = Boolean(challenge && challenge.apiBase === inputBase());
     show(els.aiPaidEmailStep, !codeStep);
     show(els.aiPaidCodeStep, codeStep);
@@ -320,10 +347,17 @@ export function createPaidServiceController({ els, state, getStorage, setStorage
     const target = apiBase(), epoch = identityEpoch, requestToken = token;
     if (!target || !available) { recordDiagnostic("paid.request.not_sent",{path,reason:"API_UNAVAILABLE",outcome:"blocked"},target); throw new Error("Check the API connection before continuing."); }
     if (authenticated && (!token || sessionBase !== target)) { recordDiagnostic("paid.request.not_sent",{path,reason:"SESSION_SCOPE_MISMATCH",outcome:"blocked"},target); throw new Error("Sign in on this API before continuing."); }
+    // 10495: every Paid/Login/sign-in request (the email too) asks the account
+    // gate first; without data-use consent nothing leaves the extension.
+    const gate = await readAccountSession({ read: getStorage });
+    if (!gate.consent) {
+      recordDiagnostic("paid.request.not_sent",{path,reason:DATA_CONSENT_REQUIRED,outcome:"blocked"},target);
+      throw Object.assign(new Error(await consentText("declined")), {code:DATA_CONSENT_REQUIRED, requestDispatched:false});
+    }
     const requireCurrentSession = async () => {
-      const current = await getStorage(["paidSessionToken", "paidApiBase"]);
-      if (!disposed && epoch === identityEpoch && (String(current.paidSessionToken || "") !== requestToken || safeApiBase(current.paidApiBase) !== target)) {
-        storageChanged({paidSessionToken:{newValue:current.paidSessionToken},paidApiBase:{newValue:current.paidApiBase}}, "local", true);
+      const current = await readAccountSession({ read: getStorage });
+      if (!disposed && epoch === identityEpoch && ((current.ok ? current.token : "") !== requestToken || safeApiBase(current.base) !== target)) {
+        storageChanged({}, "local", true);
       }
       if (disposed || epoch !== identityEpoch)
         throw Object.assign(new Error("Discarded an outdated Paid response."), {code:"STALE_PAID_RESPONSE"});
@@ -338,7 +372,7 @@ export function createPaidServiceController({ els, state, getStorage, setStorage
     try {
       const install = await installHeaders({ read: getStorage, write: setStorage });
       const res = await diagnosticFetch(target + path, { method: body === null ? "GET" : "POST",
-        cache: "no-store", redirect: "error", credentials: "omit", signal: controller.signal,
+        cache: "no-store", redirect: "error", credentials: "omit", signal: withAccountSignal(controller.signal),
         headers: { Accept: "application/json", ...install, ...(traceId ? {"X-TP-Trace-ID":traceId} : {}), ...(body !== null ? { "Content-Type": "application/json" } : {}),
           ...(authenticated ? { Authorization: "Bearer " + requestToken } : {}) },
         body: body === null ? undefined : JSON.stringify(body) });
@@ -375,7 +409,8 @@ export function createPaidServiceController({ els, state, getStorage, setStorage
   }
 
   async function checkLoginStatus(force = false) {
-    if (!available || !active() || token || statusLoading || !initialized) return;
+    // 10495: automatic; without consent a silent no-op (nothing is sent).
+    if (!available || !active() || signedIn || !consentGranted || statusLoading || !initialized) return;
     if (!force && loginReady && now() - statusCheckedAt < 15000) return;
     const id = ++statusRequestId;
     statusLoading = true;
@@ -403,7 +438,7 @@ export function createPaidServiceController({ els, state, getStorage, setStorage
     const previousScope = viewScope;
     viewScope = "";
     loginController.invalidate();
-    token = ""; account = null; accountVerified = false; selected = ""; sessionBase = "";
+    token = ""; signedIn = false; account = null; accountVerified = false; selected = ""; sessionBase = "";
     await writeSession({ paidSessionToken: "", paidModel: "", paidApiBase: "" });
     await viewCache.clear(previousScope);
   }
@@ -568,7 +603,7 @@ export function createPaidServiceController({ els, state, getStorage, setStorage
       void setStorage({ paidServiceApiBase: base });
       // Never forward a customer's token to a newly selected API, including a
       // token without a saved origin from an old install.
-      if (token && sessionBase !== base) {
+      if (signedIn && sessionBase !== base) {
         void clearSession(); challenge = null;
         void setStorage({ paidPendingLogin: null });
         status("API URL changed. Sign in again on this service.", "warning");
@@ -580,27 +615,30 @@ export function createPaidServiceController({ els, state, getStorage, setStorage
     if (els.aiService) els.aiService.value = mode;
     toggleUi();
     if (initialized && active() && available && (recovered || changed)) {
-      if (token) void refreshAccount(); else void checkLoginStatus(true);
+      if (signedIn) void refreshAccount(); else void checkLoginStatus(true);
     }
   }
 
   async function initialize() {
     const expected = identityEpoch;
-    const values = {...await getStorage(["paidTranslationSource", "loginProvider", "loginModel", "aiServiceMode", "paidSessionToken", "paidModel", "paidEmail", "paidApiBase", "paidServiceApiBase", "paidPendingLogin", "paidDeviceIds"]),
+    const values = {...await getStorage(["paidTranslationSource", "loginProvider", "loginModel", "aiServiceMode", "paidModel", "paidEmail", "paidApiBase", "paidServiceApiBase", "paidPendingLogin", "paidDeviceIds"]),
       ...await getLoginSession(["loginSessionId", "loginAccountId"]).catch(()=>({}))};
+    // 10495: the token only through the account gate (consent first).
+    const session = await readAccountSession({ read: getStorage });
     if (disposed || expected !== identityEpoch) return;
     mode = values.aiServiceMode === "paid" ? "paid" : "manual";
-    token = String(values.paidSessionToken || ""); selected = String(values.paidModel || "");
+    signedIn = session.signedIn; consentGranted = session.consent;
+    token = session.ok ? session.token : ""; selected = String(values.paidModel || "");
     sessionBase = safeApiBase(values.paidApiBase); email = String(values.paidEmail || "");
     if (token && sessionBase && sessionBase === inputBase() && configuredApiBase()) {
       const restoredScope = await accountViewScope(sessionBase, token);
       if (disposed || expected !== identityEpoch) return;
       const restored = await viewCache.restore(restoredScope, 'me', {allowStale:true});
       if (disposed || expected !== identityEpoch) return;
-      const current = await getStorage(["paidSessionToken", "paidApiBase"]);
+      const current = await readAccountSession({ read: getStorage });
       if (disposed || expected !== identityEpoch) return;
-      if (String(current.paidSessionToken || "") !== token || safeApiBase(current.paidApiBase) !== sessionBase) {
-        storageChanged({paidSessionToken:{newValue:current.paidSessionToken},paidApiBase:{newValue:current.paidApiBase}}, "local", true);
+      if ((current.ok ? current.token : "") !== token || safeApiBase(current.base) !== sessionBase) {
+        storageChanged({}, "local", true);
         return;
       }
       viewScope = restoredScope;
@@ -622,10 +660,10 @@ export function createPaidServiceController({ els, state, getStorage, setStorage
     if (els.aiService) els.aiService.value = mode;
     initialized = true;
     if (challenge?.traceId && /^[A-Za-z0-9_-]{1,120}$/.test(challenge.traceId)) status({template: "Request received; email delivery not confirmed. Support reference: {reference}", values: {reference: challenge.traceId}});
-    if (available && token && sessionBase !== apiBase()) await clearSession();
+    if (available && signedIn && sessionBase !== apiBase()) await clearSession();
     toggleUi();
     if (active() && available) {
-      if (token) await refreshAccount({forceQuote:true}); else await checkLoginStatus(true);
+      if (signedIn) await refreshAccount({forceQuote:true}); else await checkLoginStatus(true);
     }
   }
 
@@ -636,16 +674,16 @@ export function createPaidServiceController({ els, state, getStorage, setStorage
       // A successful health snapshot is not a Paid catalogue. Always re-read
       // the same API's metadata before resuming account requests.
       await recheckApi?.();
-      if (available) { if (token) await refreshAccount({forceQuote:true}); else await checkLoginStatus(true); }
+      if (available) { if (signedIn) await refreshAccount({forceQuote:true}); else await checkLoginStatus(true); }
     } finally { reconnecting = false; toggleUi(); }
   }
 
   async function sendCode(event, resend = false) {
     event?.preventDefault?.();
     const flowId=diagnosticId();
-    recordDiagnostic("paid.otp.submit",{trace_id:flowId,action:resend?"resend":"request_code",available,configured:loginReady,session_present:!!token},apiBase());
-    if (!active() || !available || !loginReady || sending || verifying || token) {
-      recordDiagnostic("paid.otp.not_sent",{trace_id:flowId,reason:!active()?"MANUAL_MODE":!available?"API_UNAVAILABLE":!loginReady?"EMAIL_NOT_READY":token?"ALREADY_SIGNED_IN":"REQUEST_IN_PROGRESS",outcome:"blocked"},apiBase());return;
+    recordDiagnostic("paid.otp.submit",{trace_id:flowId,action:resend?"resend":"request_code",available,configured:loginReady,session_present:signedIn},apiBase());
+    if (!active() || !available || (consentGranted && !loginReady) || sending || verifying || signedIn) {
+      recordDiagnostic("paid.otp.not_sent",{trace_id:flowId,reason:!active()?"MANUAL_MODE":!available?"API_UNAVAILABLE":signedIn?"ALREADY_SIGNED_IN":!loginReady?"EMAIL_NOT_READY":"REQUEST_IN_PROGRESS",outcome:"blocked"},apiBase());return;
     }
     if (resend && (!challenge || challenge.resendAt > now())) {
       recordDiagnostic("paid.otp.not_sent",{trace_id:flowId,reason:"LOCAL_RESEND_COOLDOWN",outcome:"blocked"},apiBase());return;
@@ -655,6 +693,21 @@ export function createPaidServiceController({ els, state, getStorage, setStorage
       recordDiagnostic("paid.otp.not_sent",{trace_id:flowId,reason:"EMAIL_INPUT_INVALID",outcome:"blocked"},apiBase());
       status("Enter a valid email address.", "error"); els.aiPaidEmail?.focus?.(); return;
     }
+    // 10494: the email is personal data. Without consent the one consent
+    // screen asks first; "Not now" sends nothing.
+    const consentEpoch = identityEpoch;
+    sending = true; syncLoginControls();
+    const answer = await ensureConsent().catch(() => ({ consent: false })).finally(() => { sending = false; syncLoginControls(); });
+    if (consentEpoch !== identityEpoch || disposed) return;
+    if (!answer.consent) {
+      recordDiagnostic("paid.otp.not_sent",{trace_id:flowId,reason:"DATA_CONSENT_REQUIRED",outcome:"blocked"},apiBase());
+      status(await consentText("declined"), "error"); return;
+    }
+    consentGranted = true;
+    // Email sign-in readiness is checked only now (after Allow).
+    if (!loginReady) await checkLoginStatus(true);
+    if (consentEpoch !== identityEpoch || disposed) return;
+    if (!active() || !available || !loginReady || sending || verifying || signedIn) return;
     const epoch = identityEpoch;
     sending = true; syncLoginControls();
     try {
@@ -685,13 +738,26 @@ export function createPaidServiceController({ els, state, getStorage, setStorage
   async function verifyCode(event) {
     event?.preventDefault?.();
     const flowId=diagnosticId();
-    recordDiagnostic("paid.otp.verify_submit",{trace_id:flowId,available,configured:loginReady,session_present:!!token},apiBase());
-    if (!active() || !available || !loginReady || verifying || sending || token) {
+    recordDiagnostic("paid.otp.verify_submit",{trace_id:flowId,available,configured:loginReady,session_present:signedIn},apiBase());
+    if (!active() || !available || (consentGranted && !loginReady) || verifying || sending || signedIn) {
       recordDiagnostic("paid.otp.verify_not_sent",{trace_id:flowId,reason:!available?"API_UNAVAILABLE":!loginReady?"EMAIL_NOT_READY":"INVALID_UI_STATE",outcome:"blocked"},apiBase());return;
     }
     const value = String(challenge?.email || els.aiPaidEmail?.value || "").trim();
     const code = String(els.aiPaidCode?.value || "").trim();
     if (!/^[0-9]{6}$/.test(code)) { recordDiagnostic("paid.otp.verify_not_sent",{trace_id:flowId,reason:"CODE_FORMAT_INVALID",outcome:"blocked"},apiBase()); status("Enter the 6-digit email code.", "error"); return; }
+    // A code requested before 10494 (or after a revoke) still needs consent.
+    const consentEpoch = identityEpoch;
+    verifying = true; syncLoginControls();
+    const answer = await ensureConsent().catch(() => ({ consent: false })).finally(() => { verifying = false; syncLoginControls(); });
+    if (consentEpoch !== identityEpoch || disposed) return;
+    if (!answer.consent) {
+      recordDiagnostic("paid.otp.verify_not_sent",{trace_id:flowId,reason:"DATA_CONSENT_REQUIRED",outcome:"blocked"},apiBase());
+      status(await consentText("declined"), "error"); return;
+    }
+    consentGranted = true;
+    if (!loginReady) await checkLoginStatus(true);
+    if (consentEpoch !== identityEpoch || disposed) return;
+    if (!active() || !available || !loginReady || verifying || sending || signedIn) return;
     const epoch = identityEpoch;
     verifying = true; syncLoginControls();
     try {
@@ -702,7 +768,7 @@ export function createPaidServiceController({ els, state, getStorage, setStorage
       const nextSessionBase = apiBase();
       await writeSession({ paidSessionToken: nextToken, paidEmail: value, paidApiBase: nextSessionBase, paidPendingLogin: null });
       if (epoch !== identityEpoch) return;
-      token = nextToken; email = value; sessionBase = nextSessionBase; challenge = null;
+      token = nextToken; signedIn = true; email = value; sessionBase = nextSessionBase; challenge = null;
       if (els.aiPaidCode) els.aiPaidCode.value = "";
       recordDiagnostic("paid.otp.verified", { trace_id: flowId, outcome: "verified", registered: data.registered === true }, apiBase());
       status(data.registered ? "Account created. Loading your credits…" : "Restoring your account…"); toggleUi();
@@ -715,6 +781,24 @@ export function createPaidServiceController({ els, state, getStorage, setStorage
   }
 
   listen(els.aiService, "change", async () => {
+    // 10495: choosing Paid shows the consent screen at once when data use is
+    // not allowed. "Don't allow" puts the previous service back (and keeps it).
+    if (els.aiService.value === "paid" && mode !== "paid") {
+      const previous = mode;
+      const answer = await ensureConsent().catch(() => ({ consent: false }));
+      if (disposed) return;
+      if (!answer.consent) {
+        els.aiService.value = previous;
+        await setStorage({ aiServiceMode: previous });
+        recordDiagnostic("paid.mode.not_changed",{reason:DATA_CONSENT_REQUIRED},apiBase());
+        toggleUi(); return;
+      }
+      consentGranted = true;
+      // A signed-in session is re-read through the gate after Allow; then go on.
+      await ready;
+      if (disposed) return;
+      els.aiService.value = "paid";
+    }
     const flushed = await beforeSwitch?.();
     if (flushed?.ok === false) { els.aiService.value = mode; status("Could not save current AI settings. Service was not changed.", "error"); return; }
     mode = els.aiService.value === "paid" ? "paid" : "manual";
@@ -722,7 +806,7 @@ export function createPaidServiceController({ els, state, getStorage, setStorage
     cancelRequests(); stopTimer();
     await setStorage({ aiServiceMode: mode }); toggleUi();
     await onUsageSelection?.();
-    if (active() && available) { if (token) void refreshAccount(); else void checkLoginStatus(true); }
+    if (active() && available) { if (signedIn) void refreshAccount(); else void checkLoginStatus(true); }
     else if (active()) void reconnect();
   });
   listen(els.aiPaidCheck, "click", () => void reconnect());
@@ -755,6 +839,7 @@ export function createPaidServiceController({ els, state, getStorage, setStorage
     await onUsageSelection?.();
   });
   const openAccount = async tab => {
+    if (signedIn && !consentGranted) { void showConsentScreen(); return; }
     if (!token || sessionBase !== inputBase() || !configuredApiBase()) { status("Sign in on the saved API before opening your account.", "warning"); return; }
     try { await inlineAccount?.open(tab); }
     catch (error) { status(error.message || "Could not open the account page.", "error"); }
@@ -769,7 +854,9 @@ export function createPaidServiceController({ els, state, getStorage, setStorage
   listen(els.aiPaidDetails, "click", () => void openAccount("details"));
   listen(els.aiPaidRefresh, "click", () => void reconnect());
   listen(els.aiPaidLogout, "click", async () => {
-    const canRevoke = available && token && sessionBase === apiBase();
+    // 10495: without consent there is no token here: sign-out clears this
+    // device only and sends no request.
+    const canRevoke = available && consentGranted && token && sessionBase === apiBase();
     cancelRequests();
     // Clear this device immediately even if server-side revocation is offline.
     const revocation = canRevoke ? request("/paid/auth/logout", { body: {}, authenticated: true }).catch(() => {}) : Promise.resolve();
@@ -781,6 +868,7 @@ export function createPaidServiceController({ els, state, getStorage, setStorage
   });
   const storageChanged = (changes, area, storedMismatch = false) => {
     if (disposed || area !== "local") return;
+    if (changes?.[UI_LANGUAGE_KEY] && els.aiPaidConsent && !els.aiPaidConsent.hidden) void renderLockedNote();
     let identityChanged = storedMismatch;
     for (const [key, current] of [["paidSessionToken", token], ["paidApiBase", sessionBase]]) {
       if (!(key in changes)) continue;
@@ -809,7 +897,7 @@ export function createPaidServiceController({ els, state, getStorage, setStorage
     // Revoke authority and remove the former account before any asynchronous
     // storage/cache read can restore the replacement account.
     initialized = false;
-    token = sessionBase = email = selected = viewScope = "";
+    token = sessionBase = email = selected = viewScope = ""; signedIn = false;
     account = null; accountVerified = loginReady = false;
     loginController.invalidate();
     challenge = null; serviceIssue = ""; statusCheckedAt = 0;
@@ -821,13 +909,26 @@ export function createPaidServiceController({ els, state, getStorage, setStorage
     renderAccount(); toggleUi();
     if (previousScope) void viewCache.clear(previousScope);
     const expected = identityEpoch;
-    void initialize().catch(error => {
+    ready = initialize().catch(error => {
       if (!disposed && expected === identityEpoch) {
         status(error.message || "Could not restore the selected account.", "warning"); toggleUi();
       }
     });
     if (apiChanged) void recheckApi?.();
   };
+  // 10495: consent given or withdrawn (here or in another extension page):
+  // re-read the session through the gate. Withdrawn → requests in flight are
+  // cancelled, the token is dropped (still signed in) and the controls re-grey.
+  listeners.push(onAccountGateChanged(detail => {
+    if (disposed || detail?.reason === "session") return;
+    const next = detail?.consent === true;
+    // Not signed in: nothing to reload (a sign-in in progress continues).
+    if (!signedIn) { consentGranted = next; toggleUi(); return; }
+    if (next === consentGranted && (next ? Boolean(token) : !token)) return;
+    consentGranted = next;
+    storageChanged({}, "local", true);
+  }));
+  listen(els.aiPaidConsentAllow, "click", () => void showConsentScreen());
   globalThis.chrome?.storage?.onChanged?.addListener?.(storageChanged);
   listeners.push(() => globalThis.chrome?.storage?.onChanged?.removeListener?.(storageChanged));
   globalThis.chrome?.storage?.onChanged?.addListener?.(changeSignal);
@@ -836,9 +937,12 @@ export function createPaidServiceController({ els, state, getStorage, setStorage
   // Back in view (a pinned settings tab): one re-read, then only on signals.
   listen(globalThis.document,'visibilitychange',()=>{
     if(globalThis.document?.visibilityState==='hidden'){stopPriceRefresh();return;}
-    if(retryNeeded()){stopTimer();scheduleRecovery();if(token)void refreshAccount({forceQuote:true});else void checkLoginStatus(true);}
+    if(retryNeeded()){stopTimer();scheduleRecovery();if(signedIn)void refreshAccount({forceQuote:true});else void checkLoginStatus(true);}
     else signalRefresh('visible',{gapMs:60000,force:true});
   });
   function dispose() { recordDiagnostic("paid.ui.closed",{pending:pending.size},apiBase()); disposed = true; loginController.dispose(); for (const remove of listeners.splice(0)) remove(); inlineAccount?.dispose(); accountViewport(false);stopTimer(); stopCooldown(); cancelRequests(); }
-  return { initialize, setAvailability, applyVisibility, reconnect, dispose };
+  // Resolves once the session (re)read after a consent change has settled.
+  const whenReady = () => ready;
+  const accountLocked = () => signedIn && !consentGranted;
+  return { initialize: (...args) => (ready = initialize(...args)), setAvailability, applyVisibility, reconnect, dispose, whenReady, accountLocked };
 }

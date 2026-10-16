@@ -5,8 +5,11 @@ import { syncSupportVisibility } from '../support/visibility.js';
 import { queryTabs } from '../shared/browser-api.js';
 import { openSupportDock, injectSupportDocks } from './support-dock.js';
 import { changedTopics } from '../shared/change-signals.js';
+import { accountAllowed, ACCOUNT_GATE_STATE_KEY } from '../shared/account-gate.js';
 
 const client = createSupportClient(), configuration = createSupportConfiguration();
+/** 10495: consent withdrawn — abort support requests in flight, forget unread. */
+export function supportLocked() { client.invalidate(); authReads.clear(); void setStorage({ supportUnread: null }).catch(() => {}); }
 const dockChannels = new Map();
 // No unread alarm or presence timer. Unread is read when (a) the support change
 // token moves on any account/support response (shared/change-signals.js), (b)
@@ -32,7 +35,12 @@ async function pollState(patch = null) {
   await new Promise(resolve => { try { store.set({ [STATE_KEY]: next }, () => { void chrome.runtime.lastError; resolve(); }); } catch { resolve(); } });
   return next;
 }
-const extensionPage = path => { try { return chrome.runtime.getURL(path); } catch { return null; } };
+// The page's own URL as its sender reports it. support/chat.html is web
+// accessible through a dynamic URL on Chromium (use_dynamic_url), where
+// getURL('support/chat.html') returns the per-session GUID address while the
+// loaded page (sender.url, origin) keeps chrome-extension://<id>/. getURL('')
+// is always that stable base.
+const extensionPage = path => { try { return new URL(path, chrome.runtime.getURL('')).href; } catch { return null; } };
 const fromPage = (sender, path) => { const page = extensionPage(path); return Boolean(page) && String(sender?.url || '').startsWith(page); };
 async function activity(sender, message = {}) {
   // Only the private chat frame reports activity, and only while expanded or typing.
@@ -41,6 +49,8 @@ async function activity(sender, message = {}) {
   if (presenceBusy || Date.now() - presenceAt < PRESENCE_GAP_MS) return;
   presenceBusy = true;
   try {
+    // 10495: no support request without data-use consent (silent no-op).
+    if (!(await accountAllowed())) return;
     const saved = await getStorage(['supportActivated']);
     if (!saved.supportActivated || !(await configuration.check()).configured) return;
     if (sender.tab) {
@@ -92,6 +102,8 @@ export async function pollSupport(reason = 'signal') {
   polling = true;
   try {
     await pollState({ polledAt: Date.now(), reason });
+    // 10495: no unread read (or any support request) without data-use consent.
+    if (!(await accountAllowed())) return;
     const saved = await getStorage(['supportActivated', 'supportDockHidden', 'supportChatMuted']);
     const gate = await configuration.check();
     if (!saved.supportActivated || !gate.configured) return;
@@ -135,6 +147,8 @@ async function tabView(tab, next = null, expectedScope = '') {
 // same account share one /paid/support read; nothing is reused once it settled.
 const authReads = new Map();
 export async function supportAuthenticated() {
+  // 10495: without data-use consent the dock is unavailable: no /meta, no auth read.
+  if (!(await accountAllowed())) return false;
   if (!(await configuration.check()).configured) return false;
   const identity = await client.scope(), key = await supportScopeId(identity);
   let read = authReads.get(key);
@@ -152,6 +166,7 @@ globalThis.chrome?.runtime?.onMessage?.addListener((message, sender, reply) => {
       reply({ ok: false, code: 'SUPPORT_PAGE_UNAVAILABLE' }); return false;
     }
     (async () => {
+      if (!(await accountAllowed())) return { ok: false, code: 'DATA_CONSENT_REQUIRED' };
       const tabs = await queryTabs({ active: true, currentWindow: true });
       // openSupportDock injects the dock first when this tab does not have it yet.
       // Pages that cannot host the dock (brave://, chrome://, the
@@ -164,7 +179,7 @@ globalThis.chrome?.runtime?.onMessage?.addListener((message, sender, reply) => {
   if (message?.type === 'TP_SUPPORT_TAB_VIEW') {
     const tab = sender?.tab?.id;
     if (tab == null) { reply({ view: 'minimized' }); return false; }
-    const next = ['expanded', 'minimized'].includes(message.view) && String(sender.url || '').startsWith(chrome.runtime.getURL('support/chat.html')) ? message.view : null;
+    const next = ['expanded', 'minimized'].includes(message.view) && fromPage(sender, 'support/chat.html') ? message.view : null;
     tabView(tab, next, message.scope || '').then(reply, () => reply({ view: 'minimized' }));
     return true;
   }
@@ -218,7 +233,7 @@ globalThis.chrome?.windows?.onFocusChanged?.addListener?.(windowId => {
 globalThis.chrome?.storage?.onChanged?.addListener((changes, area) => {
   if (area !== 'local') return;
   if (changes.supportDockHidden?.newValue === true) viewWrites = viewWrites.then(() => viewStore('set', { supportTabViews: {} }));
-  if (['paidSessionToken', 'paidApiBase', 'customApiUrl', 'apiUrlDefault', 'supportActivated'].some(key => changes[key])) {
+  if (['paidSessionToken', 'paidApiBase', 'customApiUrl', 'apiUrlDefault', 'supportActivated', ACCOUNT_GATE_STATE_KEY].some(key => changes[key])) {
     client.invalidate(); configuration.invalidate(); presenceAt = 0; void pollSupport('account');
     return;
   }

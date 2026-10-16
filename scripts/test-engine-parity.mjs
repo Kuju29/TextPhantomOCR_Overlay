@@ -33,7 +33,10 @@ const pipeline = [
   await read("api/backend/jobs/stages/ai_repair.py"),
 ].join("\n");
 const queue = await read("api/backend/jobs/queue.py");
-const markersPy = await read("api/backend/ai/markers/sanitize.py");
+// The API filter lives in backend/ai/source_filter.py and is exported through
+// backend.ai.markers (which the pipeline calls as markers.has_translatable_text).
+const markersPy = await read("api/backend/ai/source_filter.py");
+const markersInit = await read("api/backend/ai/markers/__init__.py");
 const lensDoc = await read("src/shared/lens-document.js");
 
 const failures = [];
@@ -88,7 +91,8 @@ const check = (ok, message) => {
     "the extension engine must filter untranslatable units",
   );
   check(
-    markersPy.includes("def has_translatable_text"),
+    markersPy.includes("def has_translatable_text") &&
+      /from backend\.ai\.source_filter import [^\n]*\bhas_translatable_text\b/.test(markersInit),
     "the API-server engine must filter untranslatable units",
   );
   check(

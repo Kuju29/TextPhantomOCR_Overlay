@@ -1,3 +1,7 @@
+import sys as _tp_sys
+from pathlib import Path as _TpPath
+_tp_sys.path.insert(0, str(_TpPath(__file__).resolve().parent / 'lib'))
+from chromium_path import chromium_executable  # the one shared Chromium resolver
 import os
 import json, threading
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
@@ -16,12 +20,12 @@ class Handler(SimpleHTTPRequestHandler):
  def log_message(self,*a):pass
 s=ThreadingHTTPServer(('127.0.0.1',0),Handler);threading.Thread(target=s.serve_forever,daemon=True).start()
 with sync_playwright() as p:
- b=p.chromium.launch(executable_path=os.environ.get('TP_QA_CHROMIUM','/usr/bin/chromium'),headless=True,args=['--no-sandbox','--single-process','--no-zygote','--disable-dev-shm-usage']);ctx=b.new_context();page=ctx.new_page();page.goto('http://127.0.0.1:'+str(s.server_port)+'/qa');print(json.dumps(page.evaluate('''async()=>{
+ b=p.chromium.launch(executable_path=chromium_executable(),headless=True,args=['--no-sandbox','--single-process','--no-zygote','--disable-dev-shm-usage']);ctx=b.new_context();page=ctx.new_page();page.goto('http://127.0.0.1:'+str(s.server_port)+'/qa');print(json.dumps(page.evaluate('''async()=>{
  const {createPaidServiceController}=await import('/src/popup/controllers/paid-service-controller.js');
  const keys=['mode','sources','apiUrl','aiService','aiServiceWrap','aiPaidPanel','aiPaidUnavailable','aiPaidConnectionMessage','aiPaidLogin','aiPaidAccount','aiPaidModel','aiPaidBuy','aiPaidDetails','aiPaidRefresh','aiPaidLogout','aiPaidInline','aiPaidStatus','aiPaidTitle','aiPaidSubtitle','aiPaidCode','aiPaidEmail','aiPaidEmailLabel','aiPaidCredits','aiPaidAccountState'];
  const els=Object.fromEntries(keys.map(k=>{const el=document.createElement(k.includes('Inline')?'div':k.includes('Model')?'select':'button');document.body.append(el);return[k,el]}));
  els.mode.value='lens_text';els.sources.value='ai';els.apiUrl.value='http://127.0.0.1:7860';
- const store={customApiUrl:els.apiUrl.value,paidApiBase:els.apiUrl.value,paidSessionToken:'synthetic',paidModel:'qa/test',aiServiceMode:'paid'};
+ const store={tpDataConsentV1:{version:1,granted:true,at:1},customApiUrl:els.apiUrl.value,paidApiBase:els.apiUrl.value,paidSessionToken:'synthetic',paidModel:'qa/test',aiServiceMode:'paid'};
  const state={lastSavedApiUrl:els.apiUrl.value};let expired=false;
  const order={id:'ord_'+'a'.repeat(32),package_id:'pkg_qa',package_version:1,package_name:'QA',amount_satang:2900,credits:'250000',months:6,status:'waiting',method:'checkout',mode:'live',checkout_url:'https://checkout.stripe.com/c/pay/QA',checkout_expires_at:Date.now()+600000,cancel_allowed:true,recheck_allowed:true};
  const data={email:'qa@example.com',credits:{available:'10000',held:'0'},paid_paused:false,models:[{id:'qa/test',name:'QA',eligible_tp:'10000'}],packages:[{id:'pkg_qa',version:1,name:'QA',price_satang:2900,credits:'250000',months:6}],purchase:{ready:true},history:Object.fromEntries(['orders','payments','usage','lots'].map(k=>[k,{items:k==='orders'?[order]:[],total:k==='orders'?1:0,offset:0,limit:25,has_more:false}]))};
@@ -40,17 +44,17 @@ with sync_playwright() as p:
  page.goto('http://127.0.0.1:'+str(s.server_port)+'/qa')
  print(json.dumps(page.evaluate('''async()=>{
    document.body.innerHTML='<main id="account"></main>';
-   const store={customApiUrl:'http://127.0.0.1:7860',paidApiBase:'http://127.0.0.1:7860',paidSessionToken:'synthetic',paidModel:'qa/test',paidPendingLogin:{email:'qa@example.com'}};
+   const store={tpDataConsentV1:{version:1,granted:true,at:1},customApiUrl:'http://127.0.0.1:7860',paidApiBase:'http://127.0.0.1:7860',paidSessionToken:'synthetic',paidModel:'qa/test',paidPendingLogin:{email:'qa@example.com'}};
    const opened=[];globalThis.chrome={runtime:{getURL:path=>'http://extension.invalid/'+path},tabs:{create:(opts,callback)=>{opened.push(opts.url);callback?.({id:1});}},storage:{local:{get:(keys,cb)=>cb(Object.fromEntries(keys.map(k=>[k,store[k]]))),set:(patch,cb)=>{Object.assign(store,patch);cb?.();}},onChanged:{addListener(){},removeListener(){}}}};
    const row={id:'ord_'+'b'.repeat(32),status:'waiting',method:'checkout',package_id:'qa',package_version:1,package_name:'QA',amount_satang:2900,credits:'250000',months:6,cancel_allowed:true,recheck_allowed:true};
-   const account={email:'qa@example.com',credits:{available:'0',held:'0'},packages:[],purchase:{ready:true},history:Object.fromEntries(['orders','payments','lots','usage'].map(k=>[k,{items:k==='orders'?[row]:[],total:k==='orders'?1:0}]))};
+   const account={email:'qa@example.com',credits:{available:'0',held:'0'},models:[],packages:[],purchase:{ready:true},history:Object.fromEntries(['orders','payments','lots','usage'].map(k=>[k,{items:k==='orders'?[row]:[],total:k==='orders'?1:0}]))};
    let expired=false;
    const requests=[];
    globalThis.fetch=async(url)=>{requests.push(String(url));return String(url).endsWith('/meta')?new Response('{}'):expired?new Response('{"error":{"code":"AUTH_REQUIRED","message":"Sign in"}}',{status:401}):new Response(JSON.stringify(String(url).includes('/orders/')?row:account));};
    const wait=async()=>{for(let n=0;n<20;n++)await new Promise(r=>setTimeout(r,0));};
    await import('/src/paid/account.js');await wait();
    const find=text=>[...document.querySelectorAll('button')].find(b=>b.textContent===text||b.getAttribute('aria-label')===text);
-   if(!find('Reload'))throw Error('Initial standalone account not loaded');
+   if(!find('Reload')||!document.body.textContent.includes('qa@example.com'))throw Error('Initial standalone account not loaded');
    expired=true;find('Reload').click();await wait();
    if(!document.body.textContent.includes('session has expired')||!find('Back')||find('Resume payment'))throw Error('Standalone session expiry must replace stale controls with the extension return route');
    if(store.paidSessionToken!==''||store.paidApiBase!==''||store.paidModel!==''||store.paidPendingLogin!==null)throw Error('Standalone session expiry must clear only the expired saved identity');
@@ -65,20 +69,20 @@ with sync_playwright() as p:
  page.goto('http://127.0.0.1:'+str(s.server_port)+'/qa')
  print(json.dumps(page.evaluate('''async()=>{
    document.body.innerHTML='<main id="account"></main>';
-   const store={customApiUrl:'http://127.0.0.1:7860',paidApiBase:'http://127.0.0.1:7860',paidSessionToken:'old-session',paidModel:'old/model',paidPendingLogin:null};
-   let expired=false,holdExpiryRead=false,changed;const patches=[],requests=[];
+   const store={tpDataConsentV1:{version:1,granted:true,at:1},customApiUrl:'http://127.0.0.1:7860',paidApiBase:'http://127.0.0.1:7860',paidSessionToken:'old-session',paidModel:'old/model',paidPendingLogin:null};
+   let expired=false,holdExpiryRead=false;const patches=[],requests=[],listeners=new Set();const changed=(changes,area)=>{for(const listener of [...listeners])listener(changes,area);};
    window.releaseExpiryRead=null;
    const values=keys=>Object.fromEntries(keys.map(k=>[k,store[k]]));
    globalThis.chrome={runtime:{getURL:path=>'http://extension.invalid/'+path},storage:{local:{
      get:(keys,cb)=>{
-       if(holdExpiryRead&&keys.length===2&&keys.includes('paidSessionToken')&&keys.includes('paidApiBase')){
+       if(holdExpiryRead&&keys.includes('paidSessionToken')&&keys.includes('paidApiBase')&&!keys.includes('customApiUrl')){
          holdExpiryRead=false;window.releaseExpiryRead=()=>cb(values(keys));
        }else cb(values(keys));
      },
      set:(patch,cb)=>{patches.push(structuredClone(patch));Object.assign(store,patch);cb?.();},
-   },onChanged:{addListener:listener=>{changed=listener;},removeListener(){}}}};
+   },onChanged:{addListener:listener=>{listeners.add(listener);},removeListener:listener=>{listeners.delete(listener);}}}};
    const row={id:'ord_'+'c'.repeat(32),status:'waiting',method:'checkout',package_id:'qa',package_version:1,package_name:'QA',amount_satang:2900,credits:'250000',months:6};
-   const account={email:'old@example.com',credits:{available:'0'},packages:[],purchase:{ready:true},history:{orders:{items:[row],total:1}}};
+   const account={email:'old@example.com',credits:{available:'0'},models:[],packages:[],purchase:{ready:true},history:{orders:{items:[row],total:1}}};
    globalThis.fetch=async(url,options={})=>{
      requests.push({url:String(url),authorization:options.headers?.Authorization});
      if(String(url).endsWith('/meta'))return new Response('{}');
@@ -88,7 +92,7 @@ with sync_playwright() as p:
    const wait=async()=>{for(let n=0;n<30;n++)await new Promise(r=>setTimeout(r,0));};
    const find=text=>[...document.querySelectorAll('button')].find(b=>b.textContent===text||b.getAttribute('aria-label')===text);
    await import('/src/paid/account.js');await wait();
-   if(!find('Reload'))throw Error('Initial account missing for scoped expiry race');
+   if(!find('Reload')||!document.body.textContent.includes('old@example.com'))throw Error('Initial account missing for scoped expiry race');
    expired=true;holdExpiryRead=true;find('Reload').click();
    for(let n=0;n<100&&!window.releaseExpiryRead;n++)await new Promise(r=>setTimeout(r,0));
    if(!window.releaseExpiryRead)throw Error('Expiry fresh-storage read was not reached');

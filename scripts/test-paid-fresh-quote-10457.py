@@ -1,10 +1,15 @@
 """Synthetic Center transport; verify atomic price admission and replay boundaries (.60)."""
 import json
+import sys
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 import httpx
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'api'))
 from backend.ai.provider_contract import GenerationRequest
 from backend.ai.providers import cloud_paid
+sys.path.insert(0,str(Path(__file__).resolve().parent/'lib'))
+from paid_center_fake import reset_protocol_cache, with_healthz
 
 RESULT={'model':'qa/test','choices':[{'message':{'content':'<<TP_P0:Translated>>'},'finish_reason':'stop'}],
         'usage':{'prompt_tokens':10,'completion_tokens':4,'total_tokens':14},'charged_tp':'3','balance_tp':'97'}
@@ -13,13 +18,14 @@ class FreshQuoteTests(unittest.TestCase):
         self.calls=[];self.dispatches=[];self.replay=False;self.fail_admission=False;self.timeout=False;self.expired=False
         original=httpx.Client
         def client(*a,**kw):
-            kw["transport"] = httpx.MockTransport(self.handle)
+            kw["transport"] = httpx.MockTransport(with_healthz(self.handle))  # + Paid protocol health read
             return original(*a,**kw)
         for p in [patch.object(cloud_paid,'center_base_url',return_value='https://center.test'),
                   patch.object(cloud_paid,'center_origin',return_value='https://center.test'),
                   patch.object(cloud_paid.httpx,'Client',side_effect=client),
                   patch.object(cloud_paid.accounting,'mark_dispatched',side_effect=lambda:self.dispatches.append(True))]:
             p.start();self.addCleanup(p.stop)
+        reset_protocol_cache()
     def handle(self,request):
         path=request.url.path;body=json.loads(request.content);self.calls.append((path,body))
         if path.endswith('/chat/receipt'): return httpx.Response(200,json={'found':self.replay,**({'result':RESULT} if self.replay else {})})

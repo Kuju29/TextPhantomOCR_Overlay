@@ -1,5 +1,6 @@
 /** Login-only read. Secrets are returned directly to the trusted worker, never a content message. */
 import {getTab} from '../../../shared/browser-api.js';
+import {hasDataConsent} from '../../../shared/data-consent.js';
 export const ENDPOINT_PROVIDERS = {
   login_chatgpt:{origin:'https://chatgpt.com',url:'https://chatgpt.com/'},
   login_gemini:{origin:'https://gemini.google.com',url:'https://gemini.google.com/app'},
@@ -88,6 +89,8 @@ export async function captureEndpointLogin(tabId,provider){
   if(!spec || !before?.url || new URL(before.url).origin !== spec.origin)throw error('login_origin_invalid');
   // Claude and ChatGPT need no cookie read; their requests leave from this browser.
   const needsCookies=!['login_claude','login_chatgpt'].includes(provider);
+  // 10494: no cookie (or token) is read or sent without the user's data consent.
+  if(needsCookies && !await hasDataConsent())throw error('login_data_consent_required');
   if(needsCookies && !await chromeCall(chrome.permissions,'contains',[{permissions:['cookies']}]))throw error('login_cookie_permission_required');
   const results=await chromeCall(chrome.scripting,'executeScript',[{target:{tabId,frameIds:[0]},world:'ISOLATED',func:provider === 'login_chatgpt'?readChatGptPlan:readProviderLogin,args:[provider,spec.origin]}]);
   const result=results?.find(x=>x.frameId === 0),capture=result?.result;
@@ -102,6 +105,7 @@ export async function captureEndpointLogin(tabId,provider){
   return capture;
 }
 async function readProviderCookies(tabId,provider,spec,result,capture){
+  if(!await hasDataConsent())throw error('login_data_consent_required');
   const stores=await chromeCall(chrome.cookies,'getAllCookieStores',[]),store=stores?.find(x=>x.tabIds?.includes(tabId));
   if(!store?.id)throw error('login_cookie_store_unavailable');
   let partitionKey;

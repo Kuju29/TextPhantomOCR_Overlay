@@ -2,7 +2,9 @@
 // The server answers as soon as the conversation changes (or after ~25 s with fresh state).
 // When the API/Center has no wait endpoint (older release) the loop falls back to the
 // caller's 15 s refresh, logs that once, and probes the wait endpoint again later.
-const AUTH_CODES = new Set(['SIGN_IN_REQUIRED', 'SESSION_SCOPE_MISMATCH', 'STALE_SUPPORT_RESPONSE']);
+// DATA_CONSENT_REQUIRED (10495): data use is not allowed (or was withdrawn):
+// the loop stops at once instead of backing off and retrying.
+const AUTH_CODES = new Set(['SIGN_IN_REQUIRED', 'SESSION_SCOPE_MISMATCH', 'STALE_SUPPORT_RESPONSE', 'DATA_CONSENT_REQUIRED']);
 
 export const unsupportedWait = error => [404, 405, 501].includes(Number(error?.status));
 

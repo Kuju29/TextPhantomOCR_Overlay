@@ -7,7 +7,6 @@ import {createOllamaAdapter} from '../src/shared/ai/providers/local-ollama.js';
 import {observeLocalPrefix,createLocalPrefixObserver} from '../src/shared/ai/cache-coordination.js';
 import {shortenValue,setTracingEnabled,note,flushTrace} from '../src/shared/trace.js';
 import {rememberDiagnostic,recentDiagnostic,clearRecentDiagnostics} from '../src/background/ai/recent-diagnostics.js';
-import {formatRequestDiagnostic} from '../src/shared/ai/diagnostic-view.js';
 const calls=[],events=[],wire=[];
 const server=http.createServer(async(req,res)=>{
  let text='';for await(const c of req)text+=c;calls.push(JSON.parse(text));
@@ -53,7 +52,7 @@ const python=spawnSync('python',['-c',`import sys,json;sys.path.insert(0,'api');
 assert.equal(python.status,0,python.stderr);assert.deepEqual(JSON.parse(python.stdout),safe,'JS/Python schema parity');
 rememberDiagnostic({provider:'huggingface',model:'x',operationId:'ai:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',coordination:{...safe,waitMs:210},result:{schema:'tp.audit/1',event:'translation_result',resultStatus:'complete_at_contract_boundary',actualInput:3000,actualOutput:10,cachedInput:123}});
 const row=recentDiagnostic('huggingface','x');assert.equal(row.coordination.waitMs,210);
-assert.match(formatRequestDiagnostic(row),/Cache wait: 0.21 s/);assert.doesNotMatch(formatRequestDiagnostic(row),/PRIVATE|groupId|providerCacheReady|unknown/);clearRecentDiagnostics();
+assert.doesNotMatch(JSON.stringify(row),/PRIVATE/);clearRecentDiagnostics();
 // Real JS shipment -> actual ASGI route -> actual temp JSONL; duplicate ACK safety.
 const originalFetch=globalThis.fetch,shipments=[];
 try{

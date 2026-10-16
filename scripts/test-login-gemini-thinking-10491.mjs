@@ -26,7 +26,7 @@ const harness = (capabilities, fresh, saved = 'on') => {
     aiProvider: { value: 'openrouter' }, aiBaseUrl: { value: '' }, aiModel: { value: 'web-default' },
     aiKey: { value: '' }, mode: { value: 'lens_text' }, sources: { value: 'ai' },
     aiThinking: { value: saved, options: [], disabled: false, dataset: {} },
-    aiThinkingHint: { textContent: '' }, aiThinkingWrap: { style: {} },
+    aiThinkingHint: { textContent: '' }, aiThinkingTip: { textContent: '' }, aiThinkingWrap: { style: {} },
   };
   const state = { paidActive: true, paidTranslationSource: 'login', paidAccountOpen: false,
     loginModelCapabilities: capabilities, loginModelCapabilitiesFresh: fresh };
@@ -35,7 +35,9 @@ const harness = (capabilities, fresh, saved = 'on') => {
   ui.toggle();
   const s = els.aiThinking;
   return { state: s.dataset.thinkingState, disabled: s.disabled, value: s.value,
-    labels: s.options.map(o => o.textContent), values: s.options.map(o => o.value), hint: els.aiThinkingHint.textContent };
+    labels: s.options.map(o => o.textContent), values: s.options.map(o => o.value), hint: els.aiThinkingHint.textContent,
+    // 10496: the website reason is the highlighted line of the "AI thinking" explanation.
+    reason: els.aiThinkingTip.tipReason || '' };
 };
 
 for (const saved of ['on', 'high', 'off', 'minimum']) {
@@ -43,7 +45,7 @@ for (const saved of ['on', 'high', 'off', 'minimum']) {
   eq([v.state, v.disabled, v.labels], ['default', true, [THINKING_STATE_LABELS.default]],
     `Gemini web, saved ${saved}: disabled provider default, no "Thinking ${saved}" option`);
   eq(v.value, saved, 'saved preference is kept, not rewritten');
-  ok(/website chooses its own thinking/i.test(v.hint) && UI_TEXT.has(v.hint), 'website hint, translated');
+  ok(/website chooses its own thinking/i.test(v.reason) && UI_TEXT.has(v.reason) && v.hint === '', 'website reason in the explanation, translated');
 }
 
 {

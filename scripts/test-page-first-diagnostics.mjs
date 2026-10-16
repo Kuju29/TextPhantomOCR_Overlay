@@ -4,7 +4,6 @@ import { observeWorkload,learnWorkload } from '../src/shared/ai/workload/learnin
 import { budgetDiagnostic,resultDiagnostic } from '../src/shared/ai/request-diagnostics.js';
 import { enrichOperationalTrace } from '../src/shared/trace.js';
 import { rememberDiagnostic,recentDiagnostic,clearRecentDiagnostics } from '../src/background/ai/recent-diagnostics.js';
-import { formatRequestDiagnostic } from '../src/shared/ai/diagnostic-view.js';
 import { createWorkloadController } from '../src/background/ai/workload-controller.js';
 const rows=(n,text='Go!')=>Array.from({length:n},(_,i)=>({id:`P${i}`,text}));
 const ctx={wholePageFirst:true,phase:'initial',fixedInput:3000,contract:'compact_records',reasoningActive:false,reasoningSupported:false,limits:{contextTokens:32768,maxOutputTokens:8192,source:'fixture'}};
@@ -38,7 +37,7 @@ for(const cached of [undefined,null,0,128]){
  const item=resultDiagnostic({outcome:'structure',usage:{inputTokens:1000,outputTokens:46,thinkingTokens:0,cachedInput:cached},validation:{missingCount:1,wrongLanguageCount:0}});
  const clean=globalThis.TPAuditSchema.sanitize(item);assert.equal(clean.cachedInput,cached??null);assert.equal(clean.cacheStatus,cached==null?'not_reported':cached===0?'reported_zero':'reported_hit');assert.equal(clean.resultStatus,'incomplete_ids');
  rememberDiagnostic({provider:'fixture',model:'small',operationId:'ai:'+'a'.repeat(32),budget:d,result:item});
- const ui=recentDiagnostic('fixture','small');assert.equal(ui.result.cacheStatus,clean.cacheStatus);const rendered=formatRequestDiagnostic(ui,'th');assert.match(rendered,/Status: Missing text/);if(cached==null)assert.doesNotMatch(rendered,/Cached input/);else assert.ok(rendered.includes(`Cached input (included): ${cached}`));assert.doesNotMatch(rendered,/TPM|SHA256/);
+ const ui=recentDiagnostic('fixture','small');assert.equal(ui.result.cacheStatus,clean.cacheStatus);// (The popup text formatter for this record was dead code and was removed; the record itself is checked.)
 }
 assert.equal(recentDiagnostic('other','small'),null);clearRecentDiagnostics();assert.equal(recentDiagnostic('fixture','small'),null);
 // An unresolved storage write must never overlap a newer snapshot. Late success

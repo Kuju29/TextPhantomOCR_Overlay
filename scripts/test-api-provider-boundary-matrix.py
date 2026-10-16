@@ -344,7 +344,7 @@ def main() -> None:
         boundary = NativeLmStudioClient if spec.provider_id == "lmstudio" else BoundaryClient
         boundary.calls = []
         with ExitStack() as stack:
-            stack.enter_context(patch.object(openai_chat.httpx, "Client", boundary))
+            stack.enter_context(patch.object(sys.modules["httpx"], "Client", boundary))
             if spec.protocol == "gemini_generate_content":
                 stack.enter_context(patch.object(cloud_gemini, "_post_once", side_effect=gemini_post))
             elif spec.protocol == "anthropic_messages":
@@ -431,7 +431,7 @@ def main() -> None:
         candidate = replace(base_ollama_request, thinking=selected,
                             model_capabilities=capabilities,
                             cache_context={"reasoningCapabilityVerified":True})
-        with patch.object(openai_chat.httpx, "Client", BoundaryClient):
+        with patch.object(sys.modules["httpx"], "Client", BoundaryClient):
             ollama.adapter.generate(candidate)
         body = BoundaryClient.calls[0]["json"]
         if expected is None:
@@ -451,7 +451,7 @@ def main() -> None:
     assert any(call["url"].endswith("/api/show") for call in BoundaryClient.calls)
     mandatory = {"reasoning": {"supported": True, "mandatory": True, "control": "levels"}}
     BoundaryClient.calls = []
-    with patch.object(openai_chat.httpx, "Client", BoundaryClient):
+    with patch.object(sys.modules["httpx"], "Client", BoundaryClient):
         from backend.ai.translation_paths.store import ConversationError
         try:
             ollama.adapter.generate(replace(base_ollama_request, thinking="off",
@@ -471,7 +471,7 @@ def main() -> None:
     assert not any(call["url"].endswith("/api/chat") for call in BoundaryClient.calls)
     mandatory_bool = {"reasoning": {"supported": True, "mandatory": True, "control": "boolean"}}
     BoundaryClient.calls = []
-    with patch.object(openai_chat.httpx, "Client", BoundaryClient):
+    with patch.object(sys.modules["httpx"], "Client", BoundaryClient):
         try:
             ollama.adapter.generate(replace(base_ollama_request, thinking="off",
                 model_capabilities=mandatory_bool, cache_context={"reasoningCapabilityVerified":True}))
@@ -481,7 +481,7 @@ def main() -> None:
             raise AssertionError("mandatory boolean model must reject explicit Off before dispatch")
     assert not BoundaryClient.calls
     BoundaryClient.calls = []
-    with patch.object(openai_chat.httpx, "Client", BoundaryClient):
+    with patch.object(sys.modules["httpx"], "Client", BoundaryClient):
         ollama.adapter.generate(replace(base_ollama_request, thinking="on", model_capabilities=mandatory_bool,
             cache_context={"reasoningCapabilityVerified":True}))
     chat = next(call for call in BoundaryClient.calls if call["url"].endswith("/api/chat"))
@@ -507,7 +507,7 @@ def main() -> None:
         OllamaStreamClient.calls = []
         OllamaStreamClient.suffix = suffix
         OllamaStreamClient.terminal = True
-        with patch.object(openai_chat.httpx, "Client", OllamaStreamClient):
+        with patch.object(sys.modules["httpx"], "Client", OllamaStreamClient):
             result = ollama.adapter.generate(request)
         assert len(OllamaStreamClient.calls) == 1
         assert (result.input_tokens, result.output_tokens, result.total_tokens) == USAGE
@@ -532,7 +532,7 @@ def main() -> None:
     OllamaStreamClient.calls = []
     OllamaStreamClient.suffix = ""
     OllamaStreamClient.terminal = False
-    with patch.object(openai_chat.httpx, "Client", OllamaStreamClient):
+    with patch.object(sys.modules["httpx"], "Client", OllamaStreamClient):
         eof_result = ollama.adapter.generate(request)
     assert eof_result.text == ANSWER and eof_result.terminal_completed is False
     assert_pipeline_terminal_failure(
@@ -549,7 +549,7 @@ def main() -> None:
     for terminal in (True, False):
         OpenAIStreamClient.calls = []
         OpenAIStreamClient.terminal = terminal
-        with patch.object(openai_chat.httpx, "Client", OpenAIStreamClient):
+        with patch.object(sys.modules["httpx"], "Client", OpenAIStreamClient):
             stream_result = openai.adapter.generate(openai_request)
         assert len(OpenAIStreamClient.calls) == 1
         assert stream_result.text == ANSWER

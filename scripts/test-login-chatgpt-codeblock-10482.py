@@ -6,6 +6,10 @@ Runs the real login_provider_chatgpt.js + login_webchat_dom.js in Chromium on a
 synthetic chatgpt.com page (no account, no network). Needs Playwright:
     python3 scripts/test-login-chatgpt-codeblock-10482.py
 """
+import sys as _tp_sys
+from pathlib import Path as _TpPath
+_tp_sys.path.insert(0, str(_TpPath(__file__).resolve().parent / 'lib'))
+from chromium_path import chromium_executable  # the one shared Chromium resolver
 import asyncio
 import json
 import sys
@@ -61,7 +65,7 @@ STUB = """window.chrome = {runtime: {id: 'tp', lastError: null, sendMessage(m, c
 
 async def run(mode):
     async with async_playwright() as p:
-        browser = await p.chromium.launch(executable_path="/opt/pw-browsers/chromium", args=["--no-sandbox"])
+        browser = await p.chromium.launch(executable_path=chromium_executable(), args=["--no-sandbox"])
         page = await (await browser.new_context()).new_page()
 
         async def route(r):

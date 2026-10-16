@@ -43,6 +43,8 @@ async function fixture({plan='plus',token=null,callbackError='',consentTitle='Si
     '../../../shared/browser-api.js':{createTab:async()=>({id:8}),getTab:async()=>({...tab}),queryTabs:async()=>[]},
     '../../api.js':{getApiBase:async()=>state.paidApiBase},
     '../../../shared/diagnostics.js':{recordDiagnostic:(name,data)=>diagnostics.push([name,data])},
+    '../../../shared/data-consent.js':{hasDataConsent:async()=>true,COOKIE_LOGIN_PROVIDERS:['login_gemini','login_deepseek']},
+    '../../../shared/account-gate.js':{readAccountSession:async({read,keys=[]}={})=>{const v=await read(['paidSessionToken','paidApiBase','paidEmail',...keys]);const token=String(v.paidSessionToken||''),base=String(v.paidApiBase||'').replace(/\/+$/,''),values={...v};delete values.paidSessionToken;return token?{ok:true,consent:true,signedIn:true,token,base,values,signal:new AbortController().signal}:{ok:false,consent:true,signedIn:false,base,values};},withAccountSignal:signal=>signal,accountSignal:()=>new AbortController().signal}, // 10495: the account gate (this user allowed data use)
     './login_browser_relay.js':{RELAY_PROVIDERS:{login_claude:{},login_chatgpt:{}},acquireBrowserRelay:()=>{calls.push(['relay']);return ()=>{};}},
     './login_chatgpt_official.js':{OFFICIAL_REDIRECT:REDIRECT,
       beginOfficialSignIn:async tabId=>{calls.push(['consent',tabId]);tab={...tab,url:'https://auth.openai.com/api/accounts/authorize?client_id=x',status:'complete'};

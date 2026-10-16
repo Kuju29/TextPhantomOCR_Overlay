@@ -16,8 +16,16 @@ export function createSeriesMemoryController({
   const sameTab = (scope, tab) => scope.tabId === tab?.id && scope.pageUrl === String(tab?.url || "") &&
     scope.pageTitle === String(tab?.title || "");
   const emptyMemory = () => ({ glossary: [], characters: [], state: "", prevContext: [] });
+  // 10496: a problem with the memory line is a small warning chip (CSS
+  // #ai-characters-count[data-kind="warn"]); the normal summary is plain.
+  const kind = (warn) => {
+    const data = els.aiCharactersCount?.dataset;
+    if (!data) return;
+    if (warn) data.kind = "warn"; else delete data.kind;
+  };
   const showError = (text) => {
     if (els.aiCharactersCount) els.aiCharactersCount.textContent = text;
+    kind(true);
   };
   const domReady = () => typeof els.aiCharactersCount?.replaceChildren === "function" &&
     typeof els.aiCharactersCount.ownerDocument?.createDocumentFragment === "function" &&
@@ -25,9 +33,11 @@ export function createSeriesMemoryController({
   const render = () => {
     if (!els.aiCharactersCount) return;
     if (state.seriesMemory?.identityKnown === false) {
-      els.aiCharactersCount.textContent = "Series identity unavailable for this page; memory is not shared.";
+      els.aiCharactersCount.textContent = "Series not recognised on this page — memory is not shared.";
+      kind(true);
       return;
     }
+    kind(false);
     const characters = Array.isArray(state.seriesMemory?.characters)
       ? state.seriesMemory.characters
       : [];

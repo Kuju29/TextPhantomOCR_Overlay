@@ -5,19 +5,25 @@ import { queryTabs } from '../shared/browser-api.js';
 import { getApiBase } from './api.js';
 import { LOGIN_PENDING_AUTH, LOGIN_OUTCOME, loginAuthScope, loginCallback, loginCompletion } from '../shared/login-auth.js';
 import { createFlowAlarm } from './login/flow-alarm.js';
+import { readAccountSession, withAccountSignal } from '../shared/account-gate.js';
 const ALARM = 'textphantom-login-auth';
 export function createLoginAuthWorker({ read = readLoginState, write = writeLoginState,
   currentBase = () => getApiBase({warm:false}), tabs = queryTabs, fetchFn = diagnosticFetch,
-  schedule = fn => setTimeout(fn, 1500), unschedule = clearTimeout, onActive = () => {} } = {}) {
+  schedule = fn => setTimeout(fn, 1500), unschedule = clearTimeout, onActive = () => {},
+  session = () => readAccountSession({ read, keys: [LOGIN_PENDING_AUTH, LOGIN_OUTCOME, 'loginProvider'] }) } = {}) {
   let busy = false, timer = null, stopped = false, epoch = 0, rerun = false, writes = Promise.resolve(), networkFailure = '';
   const same = (a, b) => a?.flow_id === b?.flow_id && a?.scope === b?.scope;
   async function current() {
     const generation = epoch;
-    const values = await read([LOGIN_PENDING_AUTH, LOGIN_OUTCOME, 'paidApiBase', 'paidSessionToken', 'loginProvider']);
+    // 10495: the account token only through the gate; without data-use
+    // consent a pending OAuth flow is left alone (no status request).
+    const account = await session();
+    if (!account.ok) return null;
+    const values = account.values;
     const p = values[LOGIN_PENDING_AUTH];
     if (!p || ["browser_webchat","web_endpoint"].includes(p.transport) || !/^lgf_[a-f0-9]{48}$/.test(p.flow_id) || !/^login_(chatgpt|gemini|openrouter|huggingface)$/.test(p.provider) ||
       typeof p.state !== 'string' || p.state.length < 8 || p.state.length > 200 || !Number.isFinite(p.expiresAt)) return null;
-    const base = String(values.paidApiBase || '').replace(/\/+$/, ''), token = values.paidSessionToken;
+    const base = account.base, token = account.token;
     if (!token || p.apiBase !== base || await currentBase() !== base || p.scope !== await loginAuthScope(base, token) || stopped || generation !== epoch) return null;
     return {p, values, base, token, generation};
   }
@@ -37,7 +43,7 @@ export function createLoginAuthWorker({ read = readLoginState, write = writeLogi
     const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 15000);
     try {
       const response = await fetchFn(ctx.base + '/login/providers/' + ctx.p.provider + '/auth/' + suffix,
-        {method:body ? 'POST':'GET', cache:'no-store', credentials:'omit', redirect:'error', signal:controller.signal,
+        {method:body ? 'POST':'GET', cache:'no-store', credentials:'omit', redirect:'error', signal:withAccountSignal(controller.signal),
           headers:{Authorization:'Bearer ' + ctx.token, Accept:'application/json', 'X-TP-Trace-ID':ctx.p.traceId || '', ...(body ? {'Content-Type':'application/json'} : {})},
           ...(body ? {body:JSON.stringify(body)} : {})});
       const data = await response.json();
@@ -142,7 +148,7 @@ navigation?.addListener(details => {if (details.frameId === 0) void worker.wake(
 chrome.storage.onChanged.addListener((changes, area) => {
   if (!['local','session'].includes(area)) return;
   const pending = changes[LOGIN_PENDING_AUTH];
-  if (['paidApiBase','paidSessionToken','loginProvider','customApiUrl','apiUrlDefault'].some(key => changes[key]) ||
+  if (['paidApiBase','paidSessionToken','loginProvider','customApiUrl','apiUrlDefault','tpAccountGateV1'].some(key => changes[key]) ||
       pending && (pending.oldValue?.flow_id !== pending.newValue?.flow_id || pending.oldValue?.scope !== pending.newValue?.scope)) worker.invalidate();
   if (pending?.newValue) void worker.wake();
 });

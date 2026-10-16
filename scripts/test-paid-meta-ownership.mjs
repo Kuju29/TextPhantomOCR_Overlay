@@ -28,7 +28,7 @@ assert.deepEqual(availability.at(-1), [true, "https://new.example"]);
 const malformed = controller.refreshMeta(els.apiUrl.value);
 pending.get("https://new.example/meta")({ ok: false, paid: { available: true } });
 await malformed;
-assert.deepEqual(availability.at(-1), [null, "https://new.example"],
-  "An invalid meta response must suspend requests, not claim Paid was removed");
+assert.deepEqual(availability.at(-1), [null, "https://new.example", { reason: "metadata_unavailable" }],
+  "An invalid meta response must suspend requests (with its reason), not claim Paid was removed");
 controller.dispose();
 console.log("Paid availability belongs to the latest healthy API URL and valid meta response.");

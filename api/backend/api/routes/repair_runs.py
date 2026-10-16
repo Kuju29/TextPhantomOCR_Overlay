@@ -245,7 +245,7 @@ async def translate(run_id: str, task_id: str, request: Request):
             try:
                 await asyncio.to_thread(store.transact, run_id, run_token,
                     lambda run: state.fail(run, task_id, reason,
-                                          isinstance(error, (asyncio.CancelledError, ConnectionError))))
+                                          isinstance(error, (asyncio.CancelledError, ConnectionError))))  # noqa: F821 -- the lambda runs (awaited) inside this except block, while `error` is still bound
             except Exception:
                 pass  # retain running/unknown; never make it pending again
             raise

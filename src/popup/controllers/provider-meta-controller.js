@@ -215,7 +215,8 @@ export function createProviderMetaController({
       // Check availability live; the worker reuses a verified, still-loaded model.
       if(displayOnly){await local.restoreDisplay?.();return;}
       if (state.localConnectInFlight) return;
-      await local.connect({ automatic });
+      // Selection-driven discovery: Custom ownership is verified by the connection controller.
+      await local.connect({ automatic, implicit: true });
       return;
     }
     const base = normalizeUrl(els.apiUrl.value);

@@ -28,7 +28,7 @@ export async function activateSupport(client) {
       data = await client.request('/paid/support', { identity });
     }
   } catch (error) {
-    if (['SIGN_IN_REQUIRED', 'STALE_SUPPORT_RESPONSE'].includes(error.code) || error.status === 401) throw error;
+    if (['SIGN_IN_REQUIRED', 'STALE_SUPPORT_RESPONSE', 'DATA_CONSENT_REQUIRED'].includes(error.code) || error.status === 401) throw error;
     // Availability errors still allow the user to open the status/history surface.
   }
   await setStorage({ supportActivated: true, supportDockHidden: false, supportHideUntil: null, supportChatMuted: null,

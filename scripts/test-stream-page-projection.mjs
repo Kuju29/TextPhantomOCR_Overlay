@@ -117,7 +117,8 @@ for(const kind of ['normal','missing','duplicate','cancel','wrong-language','fai
   const i=calls++;p.onProgress({state:'translation_delta',text:`<<${rows[0].id}:แปลแล้ว>>`});started[i].resolve();await gates[i].promise;
   return {translations:[{id:rows[0].id,text:'แปลแล้ว'}],meta:{conversation:{commitStatus:'committed'}}};
  }});
- const pending=q.submit([{id:'a',text:'a'},{id:'b',text:'b'}],{payload,ai:payload.ai,imageId:'split',route:'direct-local',targetLang:'th',sourceFingerprint:'f'.repeat(64),onProvisionalResult:()=>projections++});
+ // Single characters are never sent to AI (intended: ตัวอักษรเดียว ไม่ส่งแปล), so use real lines.
+ const pending=q.submit([{id:'a',text:'Hello there'},{id:'b',text:'Good night'}],{payload,ai:payload.ai,imageId:'split',route:'direct-local',targetLang:'th',sourceFingerprint:'f'.repeat(64),onProvisionalResult:()=>projections++});
  await started[0].promise;await tick();assert.equal(projections,0);checks++;
  gates[0].resolve();await started[1].promise;await until(()=>projections===1);assert.equal(calls,2);checks++;
  gates[1].resolve();assert.equal((await pending).translations.length,2);checks++;q.close();finishConversationJob(payload);
@@ -131,7 +132,7 @@ for(const kind of ['normal','missing','duplicate','cancel','wrong-language','fai
   if(i===0){firstStarted.resolve();await firstGate.promise}else secondStarted.resolve();
   return {translations:[{id:rows[0].id,text:'แปลแล้ว'}],meta:{conversation:{commitStatus:'committed'}}};
  }});
- const a=q.submit([{id:'a',text:'a'}],ps[0]),b=q.submit([{id:'b',text:'b'}],ps[1]);
+ const a=q.submit([{id:'a',text:'Hello there'}],ps[0]),b=q.submit([{id:'b',text:'Good night'}],ps[1]);
  await firstStarted.promise;await tick();firstGate.resolve();await secondStarted.promise;assert.equal(calls,2);checks++;
  renderGate.resolve();await Promise.all([a,b]);q.close();ps.forEach(p=>finishConversationJob(p.payload));
 }

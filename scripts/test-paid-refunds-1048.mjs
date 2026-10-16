@@ -7,6 +7,7 @@ Object.defineProperty(globalThis, 'crypto', { value: webcrypto, configurable: tr
 let accepts = true;
 globalThis.confirm = () => accepts;
 const identity = {
+  tpDataConsentV1: { version: 1, granted: true, at: 1 }, // 10495: this customer allowed data use
   customApiUrl: 'http://localhost:8811',
   paidApiBase: 'http://localhost:8811',
   paidSessionToken: 'qa-customer-session',

@@ -12,6 +12,8 @@ import pytest
 
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/'api'))
+sys.path.insert(0,str(ROOT/'scripts'/'lib'))
+from paid_center_fake import HealthzClient, reset_protocol_cache
 from backend import diagnostic_retention as retention
 from backend.ai import wire_trace
 from backend.ai.transports.openai_chat import execute_chat_completion
@@ -109,10 +111,8 @@ def test_paid_receipt_survives_counter_storage_failure(monkeypatch,capture):
     monkeypatch.setattr(cloud_paid,'center_origin',lambda:'https://center.example')
     monkeypatch.setattr(cloud_paid.accounting,'mark_dispatched',lambda:dispatched.append(True))
     monkeypatch.setattr(retention,'store_usage',lambda *a,**kw:(_ for _ in ()).throw(windows_denial()))
-    class Client:
-        def __init__(self,**kwargs):pass
-        def __enter__(self):return self
-        def __exit__(self,*a):pass
+    reset_protocol_cache()
+    class Client(HealthzClient):  # also answers the Paid protocol health read
         def post(self,url,*,json,headers):
             posts.append(json)
             return httpx.Response(200,json={'id':'QA-generation','model':'QA-model',

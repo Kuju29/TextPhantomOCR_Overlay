@@ -118,9 +118,7 @@
     flashTimer = setTimeout(() => setActive(id, key, false), 1600);
   }
 
-  function tableOfContents() {
-    const toggle = document.getElementById("toc-toggle");
-    const toc = document.getElementById("toc");
+  function tableOfContents(toc = document.getElementById("toc"), toggle = document.getElementById("toc-toggle")) {
     if (!toc) return;
     const links = [...toc.querySelectorAll('a[href^="#"]')];
     const close = () => {
@@ -128,6 +126,8 @@
       toggle?.setAttribute("aria-expanded", "false");
     };
     toggle?.addEventListener("click", () => {
+      // One toggle in the top bar; it opens the contents of the visible tab.
+      if (toc.closest("[data-guide-panel]")?.hidden) return;
       const open = toc.classList.toggle("is-open");
       toggle.setAttribute("aria-expanded", String(open));
       if (open) links[0]?.focus();
@@ -136,7 +136,7 @@
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && toc.classList.contains("is-open")) { close(); toggle?.focus(); }
     });
-    const sections = links.map((link) => document.querySelector(link.getAttribute("href"))).filter(Boolean);
+    const sections = links.map((link) => document.getElementById(link.getAttribute("href").slice(1))).filter(Boolean);
     if (!("IntersectionObserver" in window) || !sections.length) return;
     const visible = new Set();
     const observer = new IntersectionObserver((entries) => {
@@ -152,9 +152,62 @@
     for (const section of sections) observer.observe(section);
   }
 
+  // ---------- top-level tabs (10495): "คู่มือการใช้งาน" | "Privacy & data" ----------
+  // guide.html#privacy (or #privacy-…, or ?tab=privacy) opens the Privacy tab.
+  // The tab is reflected in the URL: #privacy for Privacy, no hash for the guide.
+  const isPrivacyTarget = (hash) => /^#privacy(?:-|$)/.test(hash || "");
+  function currentTab() {
+    if (isPrivacyTarget(location.hash)) return "privacy";
+    if (new URLSearchParams(location.search).get("tab") === "privacy" && !location.hash) return "privacy";
+    return "guide";
+  }
+  function showTab(name, { updateUrl = false } = {}) {
+    for (const button of document.querySelectorAll("button[data-guide-tab]")) {
+      const on = button.dataset.guideTab === name;
+      button.setAttribute("aria-selected", String(on));
+      button.tabIndex = on ? 0 : -1;
+    }
+    for (const panel of document.querySelectorAll("[data-guide-panel]")) panel.hidden = panel.dataset.guidePanel !== name;
+    document.body.dataset.guideCurrent = name;
+    if (updateUrl) {
+      const url = new URL(location.href);
+      url.searchParams.delete("tab");
+      url.hash = name === "privacy" ? "privacy" : "";
+      history.replaceState(null, "", url.href.replace(/#$/, ""));
+    }
+    document.dispatchEvent(new CustomEvent("tp-guide-tab", { detail: { tab: name } }));
+  }
+  function tabs() {
+    const buttons = [...document.querySelectorAll("button[data-guide-tab]")];
+    for (const button of buttons) {
+      button.addEventListener("click", () => {
+        showTab(button.dataset.guideTab, { updateUrl: true });
+        window.scrollTo({ top: 0 });
+      });
+      button.addEventListener("keydown", (event) => {
+        if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+        event.preventDefault();
+        const index = buttons.indexOf(button);
+        const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1
+          : (index + (event.key === "ArrowRight" ? 1 : -1) + buttons.length) % buttons.length;
+        buttons[next].focus(); buttons[next].click();
+      });
+    }
+    window.addEventListener("hashchange", () => {
+      const name = isPrivacyTarget(location.hash) ? "privacy" : location.hash ? "guide" : document.body.dataset.guideCurrent;
+      if (name && name !== document.body.dataset.guideCurrent) showTab(name);
+      if (location.hash) document.getElementById(decodeURIComponent(location.hash.slice(1)))?.scrollIntoView();
+    });
+    showTab(currentTab());
+  }
+
+  // Shared with the Privacy tab (guide/privacy.js), which draws its own shots.
+  window.TPGuide = Object.freeze({ renderShot, tableOfContents, showTab });
+
   version();
-  for (const figure of document.querySelectorAll("figure.shot[data-shot]")) renderShot(figure);
+  for (const figure of document.querySelectorAll("#guide-panel figure.shot[data-shot]")) renderShot(figure);
   tableOfContents();
+  tabs();
   // Re-apply a deep link once the callout lists have their ids.
-  if (location.hash) document.getElementById(decodeURIComponent(location.hash.slice(1)))?.scrollIntoView();
+  if (location.hash && !isPrivacyTarget(location.hash)) document.getElementById(decodeURIComponent(location.hash.slice(1)))?.scrollIntoView();
 })();

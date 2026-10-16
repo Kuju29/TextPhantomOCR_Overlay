@@ -7,6 +7,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 import httpx
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'api'))
+sys.path.insert(0,str(Path(__file__).resolve().parent/'lib'))
+from paid_center_fake import reset_protocol_cache, with_healthz
 from backend.ai.providers.cloud_paid import ADAPTER
 from backend.ai.provider_contract import GenerationRequest
 from backend.ai.clients.provider_error import ProviderFailure
@@ -25,26 +27,32 @@ from fastapi import HTTPException
 
 
 class PaidQuotes(unittest.TestCase):
-    def run_adapter(self, status=200, malformed=False, count=1, anchor=True, replay=False, receipt=False, answer='คำแปล', charge=3, raw_text=None):
-        calls=[]; client_type=httpx.Client
-        self.last_calls=calls
+    def run_adapter(self, status=200, count=1, anchor=True, replay=False, receipt=False, answer='คำแปล', charge=3, raw_text=None):
+        # The Center chat route performs the owned replay itself (cloud_paid:
+        # "No separate receipt or price-quote round trip for every new
+        # operation"): a settled operation comes back from /chat/completions
+        # marked operation_replayed, with its original answer and charge.
+        calls=[]; fresh=[]; client_type=httpx.Client
+        reset_protocol_cache()
+        self.last_calls=calls; self.last_fresh=fresh
         def transport(req):
             body=json.loads(req.content);calls.append((req.url.path,body))
             content=f'<<I1_P0:{answer}>>' if raw_text is None else raw_text
             if req.url.path.endswith('/chat/receipt'):
-                if malformed: return httpx.Response(200,json={'found':'invalid'})
-                return httpx.Response(200,json={'found':True,'result':{'model':'qa/test',
-                    'choices':[{'message':{'content':content},'finish_reason':'stop'}],
-                    'charged_tp':charge,'balance_tp':997,'usage':{'cost':'0.0001','prompt_tokens':10,'completion_tokens':5}}} if replay else {'found':False})
+                raise AssertionError('Unexpected separate receipt lookup')
             if req.url.path.endswith('/price-quote'):
                 raise AssertionError('Unexpected separate price quote')
             if status != 200:
                 return httpx.Response(status,json={'error':{'code':'PAID_PRICE_REFRESHING','message':'Checking current route prices'}})
-            return httpx.Response(200,json={'model':'qa/test','choices':[{'message':{'content':content},'finish_reason':'stop'}],
-                'charged_tp':charge,'balance_tp':997,'usage':{'cost':'0.0001','prompt_tokens':10,'completion_tokens':5}})
+            result={'model':'qa/test','choices':[{'message':{'content':content},'finish_reason':'stop'}],
+                'charged_tp':charge,'balance_tp':997,'usage':{'cost':'0.0001','prompt_tokens':10,'completion_tokens':5}}
+            if replay:
+                return httpx.Response(200,json={**result,'operation_replayed':True},headers={'x-tp-operation-replayed':'true'})
+            fresh.append(req.url.path)
+            return httpx.Response(200,json=result)
         with patch('backend.ai.providers.cloud_paid.center_base_url',return_value='https://fixture.invalid'), \
              patch('backend.ai.providers.cloud_paid.center_origin',return_value='https://fixture.invalid'), \
-             patch('backend.ai.providers.cloud_paid.httpx.Client',side_effect=lambda **kw:client_type(**kw,transport=httpx.MockTransport(transport))):
+             patch('backend.ai.providers.cloud_paid.httpx.Client',side_effect=lambda **kw:client_type(**{**kw,'transport':httpx.MockTransport(with_healthz(transport))})):
             for index in range(count):
                 request=GenerationRequest(provider='paid',model='qa/test',api_key='synthetic-owner',system_text='Translate',
                     user_parts=('Owned source',),thinking='minimum',model_capabilities={'limits':{'maxOutputTokens':2048}},
@@ -55,32 +63,35 @@ class PaidQuotes(unittest.TestCase):
 
     def test_main_and_repair_each_use_own_atomic_admission(self):
         calls,result=self.run_adapter(count=2)
-        self.assertEqual([path.rsplit('/',1)[-1] for path,_ in calls],['receipt','completions']*2)
-        for index in [1,3]:
+        self.assertEqual([path.rsplit('/',1)[-1] for path,_ in calls],['completions']*2)
+        for index in [0,1]:
             self.assertNotIn('price_quote_token', calls[index][1])
-        self.assertNotEqual(calls[1][1]['operation_id'],calls[3][1]['operation_id'])
-        self.assertEqual(calls[1][1]['user_run_id'],calls[3][1]['user_run_id'])
+        self.assertNotEqual(calls[0][1]['operation_id'],calls[1][1]['operation_id'])
+        self.assertEqual(calls[0][1]['user_run_id'],calls[1][1]['user_run_id'])
         self.assertTrue(result.terminal_completed)
 
-    def test_admission_failure_and_malformed_receipt_are_zero_generation(self):
-        for status,malformed in [(503,False),(200,True)]:
-            with self.subTest(status=status):
-                with self.assertRaises(ProviderFailure) as failure:self.run_adapter(status,malformed)
-                self.assertTrue(failure.exception.centerAdmissionRejected)
-                self.assertFalse(failure.exception.requestDispatched)
-                self.assertEqual(failure.exception.generationAttempts,0)
-                self.assertEqual([path.rsplit('/',1)[-1] for path,_ in self.last_calls],['receipt'] if malformed else ['receipt','completions'])
+    def test_admission_failure_is_zero_generation(self):
+        # (The separate receipt lookup and its malformed-answer case were retired
+        # with the receipt round trip; replay now arrives from the chat route.)
+        with self.assertRaises(ProviderFailure) as failure:self.run_adapter(503)
+        self.assertTrue(failure.exception.centerAdmissionRejected)
+        self.assertFalse(failure.exception.requestDispatched)
+        self.assertEqual(failure.exception.generationAttempts,0)
+        self.assertEqual([path.rsplit('/',1)[-1] for path,_ in self.last_calls],['completions'])
+        self.assertEqual(self.last_fresh,[])
 
     def test_opaque_quote_is_redacted_in_normal_wire_log(self):
         self.assertEqual(redact({'price_quote_token':'owned-private-quote'})['price_quote_token'],'<redacted>')
 
     def test_current_quote_needs_no_click_anchor_and_owned_settled_receipt_remains_available(self):
         calls,result=self.run_adapter(anchor=False)
-        self.assertEqual([path.rsplit('/',1)[-1] for path,_ in calls],['receipt','completions'])
-        self.assertNotIn('price_quote_token',calls[1][1])
+        self.assertEqual([path.rsplit('/',1)[-1] for path,_ in calls],['completions'])
+        self.assertNotIn('price_quote_token',calls[0][1])
         self.assertTrue(result.terminal_completed)
         calls,result=self.run_adapter(anchor=False,replay=True)
-        self.assertEqual([path.rsplit('/',1)[-1] for path,_ in calls],['receipt'])
+        self.assertEqual([path.rsplit('/',1)[-1] for path,_ in calls],['completions'])
+        self.assertEqual(self.last_fresh,[])
+        self.assertTrue(result.usage_details['centerOperationReplayed'])
         self.assertTrue(result.terminal_completed)
 
     def test_public_price_admission_preserves_typed_actionable_status(self):
@@ -95,7 +106,8 @@ class PaidQuotes(unittest.TestCase):
             self.assertEqual(fresh.usage_details['chargedTp'],3)
         with accounting.receipt_scope('runsextension','replayed-owned-operation'):
             calls,replayed=self.run_adapter(anchor=False,replay=True,receipt=True)
-            self.assertEqual([path.rsplit('/',1)[-1] for path,_ in calls],['receipt'])
+            self.assertEqual([path.rsplit('/',1)[-1] for path,_ in calls],['completions'])
+            self.assertEqual(self.last_fresh,[])
             self.assertEqual(accounting._receipts.get(),[])
             self.assertEqual(replayed.text,fresh.text)
             self.assertEqual(replayed.usage_details['chargedTp'],fresh.usage_details['chargedTp'])
@@ -142,7 +154,7 @@ class PaidQuotes(unittest.TestCase):
                     index=len(phase)
                     decoded=self.decoded_owned_replay(replay=[main_replayed,repair_replayed][index],receipt=True,
                         answer='This is an incorrect English answer' if index==0 else 'คำแปลที่ถูกต้อง',charge=3+index)
-                    native_posts.extend(path for path,_ in self.last_calls if path.endswith('/completions'))
+                    native_posts.extend(self.last_fresh)  # completions that were not owned replays
                     phase.append(decoded)
                     return decoded
                 with accounting.receipt_scope('runsapi','owned-server-repair'):
@@ -200,7 +212,7 @@ class PaidQuotes(unittest.TestCase):
                 if mutate_meta: mutate_meta(decoded['meta'])
                 return decoded
             finally:
-                native_posts.extend(path for path,_ in self.last_calls if path.endswith('/completions'))
+                native_posts.extend(self.last_fresh)  # completions that were not owned replays
         with accounting.receipt_scope('runsapi','synthetic-disabled-repair'):
             with self.assertRaises(ModelOutputContractError) as failure:
                 translate_with_one_repair(markers.apply(['Synthetic source']),'th',

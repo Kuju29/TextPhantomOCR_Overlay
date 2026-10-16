@@ -7,6 +7,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'api'))
+sys.path.insert(0, str(Path(__file__).resolve().parent / 'lib'))
+from paid_center_fake import HealthzClient, reset_protocol_cache
 from backend.application.ai_translation.request_validation import build_config
 from backend.jobs.stages.config import build_ai_config
 from backend.ai.provider_contract import GenerationRequest
@@ -15,11 +17,8 @@ from backend.ai.translation.contracts import AiConfig
 from backend.ai.translation_paths.ready_registry import ReadyRegistry
 
 
-class Client:
+class Client(HealthzClient):  # also answers the Paid protocol health read
     calls=[]
-    def __init__(self, **kwargs): pass
-    def __enter__(self): return self
-    def __exit__(self, *args): pass
     def post(self, url, json, headers):
         if url.endswith('/chat/receipt'):
             class Receipt:
@@ -67,6 +66,7 @@ class TranslationRuns(unittest.TestCase):
 
     def test_real_adapter_hash_stable_across_session_refresh_and_distinct_generations(self):
         Client.calls=[]
+        reset_protocol_cache()
         with patch('backend.ai.providers.cloud_paid.center_base_url',return_value='https://fixture.invalid'), patch('backend.ai.providers.cloud_paid.center_origin',return_value='https://fixture.invalid'), patch('backend.ai.providers.cloud_paid.httpx.Client',Client):
             for credential, operation in [('session-before','main'),('session-before','repair'),('session-after','last')]:
                 ADAPTER.generate(GenerationRequest(provider='paid',model='qa/test',api_key=credential,system_text='Translate',user_parts=('Hello world',),cache_context={'operationId':operation,'userRunId':'user-click','paidPriceQuoteToken':'qa-click-preflight'}))

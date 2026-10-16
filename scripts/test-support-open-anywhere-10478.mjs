@@ -9,7 +9,7 @@ globalThis.crypto ??= webcrypto;
 const VERSION = '2026.10.4.78';
 const tabs = new Map(), calls = [], installed = [], started = [], runtimeListeners = [], removedWindow = [];
 let injecting = 0, maxInjecting = 0, windowsApi = true, nextWindow = 100, windows = new Map(), creates = 0;
-const session = {}, local = {};
+const session = {}, local = { tpDataConsentV1: { version: 1, granted: true, at: 1 } }; // 10495: this customer allowed data use (chat)
 const pick = (store, keys) => Object.fromEntries([].concat(keys).map(key => [key, store[key]]));
 const area = store => ({ get: (keys, cb) => queueMicrotask(() => cb(pick(store, keys))), set: (patch, cb) => queueMicrotask(() => { Object.assign(store, patch); cb?.(); }) });
 const fail = (cb, message) => { chrome.runtime.lastError = { message }; cb(); chrome.runtime.lastError = null; };
