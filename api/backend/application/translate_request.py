@@ -81,7 +81,9 @@ def prepare(payload: dict[str, Any], request: Any, *, trace_id_hint: str = "") -
     return TranslationRequest(payload, requested_route, route_identity, trace_id,
                               correlation, lane, mode, source, identity, time.perf_counter())
 
-def pipeline_callable(context: TranslationRequest, *, admission_unlimited: bool = False) -> Callable[[], dict[str, Any]]:
+def pipeline_callable(context: TranslationRequest, *, admission_unlimited: bool = False,
+                      prefetched: tuple[bytes, str] | None = None,
+                      lens_ticket: Any = None) -> Callable[[], dict[str, Any]]:
     def run() -> dict[str, Any]:
         with trace.scope(context.trace_id):
             from backend.jobs.pipeline import process_payload
@@ -95,6 +97,8 @@ def pipeline_callable(context: TranslationRequest, *, admission_unlimited: bool 
                     context.payload,
                     admission_identity=context.identity,
                     admission_unlimited=admission_unlimited,
+                    prefetched=prefetched,
+                    lens_ticket=lens_ticket,
                 )
                 wire_trace.terminal(state="succeeded", stage="runsapi_pipeline")
                 return result

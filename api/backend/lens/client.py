@@ -210,6 +210,31 @@ def _fetch_lens_once(img_bytes: bytes, lang: str, ck: dict) -> dict[str, Any]:
         body = body[5:]
     return json.loads(body)
 
+def shared_lens_data(image_path: str, lang: str) -> dict[str, Any] | None:
+    """The answer for this image+language WITHOUT a new Google upload, or None.
+
+    A cache hit, or the result of an upload already in flight for the same
+    bytes (waits for that leader). Used before taking a Lens slot, so a
+    duplicate/retried page never occupies a second slot for the same image.
+    A leader's failure is not shared: the caller then does its own upload.
+    """
+    with open(image_path, "rb") as f:
+        img_bytes = f.read()
+    cache_key = hashlib.sha256(img_bytes).hexdigest() + "|" + (lang or "")
+    cached = _lens_cache_get(cache_key)
+    if cached is not None:
+        _cache_trace("hit")
+        return cached
+    with _flights_lock:
+        flight = _flights.get(cache_key)
+    if flight is None:
+        return None
+    _cache_trace("singleflight_join_before_slot")
+    flight.done.wait()
+    if flight.error is not None or flight.data is None:
+        return None
+    return copy.deepcopy(flight.data)
+
 def fetch_lens_data(image_path: str, lang: str, firebase_url: str | None = None) -> dict[str, Any]:
     """Upload ``image_path`` to Lens and return the parsed translation JSON.
 

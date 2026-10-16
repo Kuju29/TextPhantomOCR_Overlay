@@ -21,6 +21,9 @@ from backend.ai.rategate import (
 from backend.api.local_client import wants_unlimited
 from backend.api.errors import payload as error_payload, failure_event, cancelled_payload
 from backend.jobs.admission import AdmissionGate
+from backend.jobs import stage_admission
+from backend.jobs.stages.payload_io import fetch_and_check, image_source_kind
+from backend.api.disconnect import ClientDisconnected, DisconnectWatch, request_body_bytes
 from backend.log import event
 
 API_VERSION = "2026-08"
@@ -186,6 +189,27 @@ async def execute(payload: dict[str, Any], request: Request) -> dict:
 
 
 async def _execute(payload: dict[str, Any], request: Request) -> dict:
+    """Run one translation; a client that leaves mid-way gets a logged 499.
+
+    The disconnect watch marks the payload cancelled the moment the client
+    goes away, so its waiters leave every queue and the pipeline stops at the
+    next stage boundary instead of spending Lens/AI on an answer nobody reads.
+    """
+    async with DisconnectWatch(request, payload) as watch:
+        try:
+            return await _execute_watched(payload, request, watch)
+        except ClientDisconnected:
+            raise
+        except BaseException as exc:
+            if watch.gone and not isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise ClientDisconnected(
+                    str(getattr(exc, "tp_stage", "") or "runsapi"),
+                    waited_ms=round((time.perf_counter() - watch.started) * 1000, 1),
+                ) from exc
+            raise
+
+
+async def _execute_watched(payload: dict[str, Any], request: Request, watch: DisconnectWatch) -> dict:
     """Run one translation and return its result."""
     raw_context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
     raw_metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
@@ -275,14 +299,15 @@ async def _execute(payload: dict[str, Any], request: Request) -> dict:
                                 .get("tp_tab_session") or trace_id),
                     job_id=str(payload.get("idempotency_key") or trace_id or f"v1-{time.time_ns()}"),
                     deadline_sec=settings.rate_max_wait_sec,
-                    max_waiters=settings.rate_max_waiters_per_bucket,
                     rpm_override=rate["rpm"] or None,
                     burst_override=rate["burst"] or None,
                     manual_local=rate.get("local", False),
-                    cancel_check=lambda: cancellation.is_cancelled(payload),
+                    cancel_check=watch.check,
                 )
             except RateGateCancelled as exc:
                 failure_stage = "ai_rate_gate_cancelled"
+                if watch.gone:
+                    raise ClientDisconnected("ai_rate_gate") from exc
                 detail = cancelled_payload(
                     trace_id=trace_id, stage="translate_cancel", correlation=correlation)
                 raise HTTPException(status_code=409, detail=detail) from exc
@@ -307,9 +332,6 @@ async def _execute(payload: dict[str, Any], request: Request) -> dict:
 
         wire_folder = wire_trace.active_folder()
         prepared = replace(prepared, wire_folder=wire_folder)
-        run_pipeline = diagnostics.bind_context(translate_request.pipeline_callable(
-            prepared, admission_unlimited=unlimited
-        ))
     except BaseException as exc:
         detail = exc.detail if isinstance(exc, HTTPException) and isinstance(exc.detail, dict) else {}
         stage = failure_stage
@@ -318,34 +340,71 @@ async def _execute(payload: dict[str, Any], request: Request) -> dict:
         close_ingress_failure(exc, stage)
         raise
 
+    admission: dict[str, Any] = {}
     try:
-        # A local caller is this server's only tenant; the fairness gate has
+        # A local caller is this server's only tenant; the fairness gates have
         # nobody to be fair to. Verified against the peer address, not the header.
-        # runs:API dispatch has its own fair transport gate. It is intentionally
-        # NOT Lens or AI capacity: the worker may move through all three stages.
-        # Stage ownership is enforced inside process_payload by the shared API
-        # Lens/Grouping/AI gates used by runs:Extension and legacy as well.
+        #
+        # Everyone else waits in fair queues WITHOUT holding a thread, in this
+        # order (each lane is its own pipe, see backend/jobs/admission.py):
+        #   1. image_fetch  -- only for pages sent as a URL; the download and a
+        #                      header check happen here, so a 403/HTML "image"
+        #                      fails fast and never waits for Lens;
+        #   2. pipeline     -- one token per pipeline thread, so a submitted
+        #                      run never queues in the executor's FIFO;
+        #   3. lens         -- the Lens slot is reserved here, on the event loop,
+        #                      and handed to the thread as a ticket.
+        # Grouping/AI slots are taken inside the pipeline by the same shared
+        # stage gates runs:Extension uses.
         executor = request.app.state.pipeline_executor
-        dispatch_gate = request.app.state.pipeline_admission_gate
         loop = asyncio.get_running_loop()
         admission_started = time.perf_counter()
         admission_wait_ms = 0.0
         if unlimited:
+            run_pipeline = diagnostics.bind_context(translate_request.pipeline_callable(
+                prepared, admission_unlimited=True))
             submitted = loop.run_in_executor(executor, run_pipeline)
             ingress_owned = False
             wire_trace.end(ingress_token)
             result = await submitted
         else:
-            async with dispatch_gate.slot(identity):
-                admission_wait_ms = round(
-                    (time.perf_counter() - admission_started) * 1000, 1
-                )
-                submitted = loop.run_in_executor(executor, run_pipeline)
-                ingress_owned = False
-                wire_trace.end(ingress_token)
-                result = await submitted
+            cancel = watch.check
+            nbytes = request_body_bytes(request, payload)
+            prefetched = None
+            if image_source_kind(payload) == "download":
+                fetch_gate = request.app.state.image_fetch_admission_gate
+                async with fetch_gate.slot(identity, cancel_check=cancel, nbytes=nbytes) as fetch_slot:
+                    _note_admission(admission, "fetch", fetch_slot.admission)
+                    prefetched = await loop.run_in_executor(
+                        request.app.state.image_fetch_executor,
+                        diagnostics.bind_context(fetch_and_check), payload)
+                nbytes += len(prefetched[0])
+            dispatch_gate = request.app.state.pipeline_admission_gate
+            async with dispatch_gate.slot(identity, cancel_check=cancel, nbytes=nbytes) as pipe_slot:
+                _note_admission(admission, "pipeline", pipe_slot.admission)
+                lens_ticket = await stage_admission.reserve(
+                    "lens", identity, cancel_check=cancel, nbytes=nbytes)
+                try:
+                    if lens_ticket is not None:
+                        _note_admission(admission, "lens", lens_ticket.admission)
+                    admission_wait_ms = round((time.perf_counter() - admission_started) * 1000, 1)
+                    run_pipeline = diagnostics.bind_context(translate_request.pipeline_callable(
+                        prepared, admission_unlimited=False, prefetched=prefetched,
+                        lens_ticket=lens_ticket))
+                    submitted = loop.run_in_executor(executor, run_pipeline)
+                    ingress_owned = False
+                    wire_trace.end(ingress_token)
+                    result = await submitted
+                finally:
+                    # The thread claims and releases the ticket at its Lens
+                    # stage; a run that never got there gives it back here.
+                    if lens_ticket is not None:
+                        lens_ticket.abandon()
     except BaseException as exc:
         close_ingress_failure(exc, "runsapi_dispatch")
+        if watch.gone:
+            raise ClientDisconnected(str(getattr(exc, "tp_stage", "") or "runsapi_dispatch"),
+                                     waited_ms=round((time.perf_counter() - watch.started) * 1000, 1)) from exc
         translate_failures.raise_mapped(
             exc, prepared=prepared, ai_cfg=ai_cfg, paced=paced,
             rate_provider=rate_provider, rate_model=rate_model, rate_key=rate_key,
@@ -363,5 +422,13 @@ async def _execute(payload: dict[str, Any], request: Request) -> dict:
         result, prepared=prepared, api_version=API_VERSION, rate=rate,
         paced=paced, rate_wait_ms=rate_wait_ms,
         admission_wait_ms=admission_wait_ms, rate_provider=rate_provider,
-        rate_model=rate_model, rate_key=rate_key,
+        rate_model=rate_model, rate_key=rate_key, admission=admission,
     )
+
+
+def _note_admission(out: dict[str, Any], lane: str, admission) -> None:
+    """Waiting evidence for the perf events: wait time and place in the queue."""
+    out[f"{lane}_wait_ms"] = admission.wait_ms
+    if admission.queue_position:
+        out[f"{lane}_queue_position"] = admission.queue_position
+        out[f"{lane}_identity_position"] = admission.identity_position

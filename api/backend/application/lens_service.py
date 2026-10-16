@@ -12,7 +12,8 @@ from backend import cancellation, trace
 from backend.application import lens_request
 from backend import diagnostics
 from backend.config import settings
-from backend.jobs.admission import AdmissionRejected
+from backend.jobs.admission import Admission, AdmissionCancelled, AdmissionRejected
+from backend.api.disconnect import ClientDisconnected, DisconnectWatch
 from backend.jobs.image_artifacts import image_artifacts
 from backend.lens import document as lens_document
 from backend.lens.languages import normalize as normalize_lang
@@ -216,6 +217,7 @@ async def lens_raw(
         raise HTTPException(status_code=409, detail=cancelled_payload(
             trace_id=tp_trace, stage="lens_cancel", correlation=correlation))
     identity = lens_request.lens_identity(tp_tab_session)
+    admission = Admission()
     try:
         # fetch_lens_data is synchronous network I/O. Calling it directly from
         # this async route made the event loop a one-image global mutex: the
@@ -229,11 +231,25 @@ async def lens_raw(
                 request.app.state.lens_executor, diagnostics.bind_context(_fetch_raw_sync), raw, target_lang, tp_trace
             )
         else:
-            async with request.app.state.admission_gate.slot(identity):
-                loop = asyncio.get_running_loop()
-                width, height, data = await loop.run_in_executor(
-                    request.app.state.lens_executor, diagnostics.bind_context(_fetch_raw_sync), raw, target_lang, tp_trace
-                )
+            # Fair queue, no count cap, no deadline: the waiter leaves when the
+            # client disconnects or the batch is cancelled.
+            async with DisconnectWatch(request, cancel_payload) as watch:
+                try:
+                    async with request.app.state.admission_gate.slot(
+                            identity, cancel_check=watch.check, nbytes=len(raw)) as slot:
+                        admission = slot.admission
+                        loop = asyncio.get_running_loop()
+                        width, height, data = await loop.run_in_executor(
+                            request.app.state.lens_executor, diagnostics.bind_context(_fetch_raw_sync), raw, target_lang, tp_trace
+                        )
+                except AdmissionCancelled as exc:
+                    if watch.gone:
+                        raise ClientDisconnected("lens_admission",
+                                                 waited_ms=round((time.perf_counter() - t0) * 1000, 1)) from exc
+                    raise HTTPException(status_code=409, detail=cancelled_payload(
+                        trace_id=tp_trace, stage="lens_cancel", correlation=correlation)) from exc
+    except (ClientDisconnected, HTTPException):
+        raise
     except AdmissionRejected as exc:
         detail = error_payload(
             code="server_busy", message=str(exc),
@@ -321,6 +337,10 @@ async def lens_raw(
             "paragraphs": paragraphs,
             "lang": target_lang,
             "dt_ms": round((time.perf_counter() - t0) * 1000, 1),
+            "admission_wait_ms": admission.wait_ms,
+            **({"lens_queue_position": admission.queue_position,
+                "lens_identity_position": admission.identity_position}
+               if admission.queue_position else {}),
             **route_meta,
             **activity_fields(
                 owner="unknown" if paragraphs == 0 else "textphantom",
@@ -404,11 +424,21 @@ async def lens_fallback(
             stage="lens_cancel", correlation=correlation))
     identity = lens_request.lens_identity(tp_tab_session)
     try:
-        async with request.app.state.admission_gate.slot(identity):
-            loop = asyncio.get_running_loop()
-            document, _, _ = await loop.run_in_executor(
-                request.app.state.lens_executor, diagnostics.bind_context(_fetch_fallback_sync), raw, target_lang
-            )
+        async with DisconnectWatch(request, cancel_payload) as watch:
+            try:
+                async with request.app.state.admission_gate.slot(
+                        identity, cancel_check=watch.check, nbytes=len(raw)):
+                    loop = asyncio.get_running_loop()
+                    document, _, _ = await loop.run_in_executor(
+                        request.app.state.lens_executor, diagnostics.bind_context(_fetch_fallback_sync), raw, target_lang
+                    )
+            except AdmissionCancelled as exc:
+                if watch.gone:
+                    raise ClientDisconnected("lens_admission") from exc
+                raise HTTPException(status_code=409, detail=cancelled_payload(
+                    stage="lens_cancel", correlation=correlation)) from exc
+    except (ClientDisconnected, HTTPException):
+        raise
     except AdmissionRejected as exc:
         detail = error_payload(
             code="server_busy", message=str(exc),

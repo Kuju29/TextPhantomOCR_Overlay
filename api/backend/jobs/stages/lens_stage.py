@@ -21,6 +21,14 @@ def fetch(image_path: str, target_lang: str, supplied: dict[str, Any] | None) ->
     raw = client.fetch_lens_data(image_path, target_lang, settings.firebase_url)
     return (raw if isinstance(raw, dict) else {}), round((time.perf_counter() - started) * 1000, 1)
 
+def shared(image_path: str, target_lang: str) -> tuple[dict[str, Any], float] | None:
+    """A Lens answer that needs no new upload (cache hit or joined single-flight)."""
+    started = time.perf_counter()
+    raw = client.shared_lens_data(image_path, target_lang)
+    if raw is None:
+        return None
+    return (raw if isinstance(raw, dict) else {}), round((time.perf_counter() - started) * 1000, 1)
+
 def decode(data: dict[str, Any], width: int, height: int) -> tuple[dict, dict]:
     original = decode_tree(
         data.get("originalParagraphs") or [], data.get("originalTextFull") or "", "original", width, height

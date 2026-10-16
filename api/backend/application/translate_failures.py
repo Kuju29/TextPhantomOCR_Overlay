@@ -14,7 +14,8 @@ from backend.ai.rategate import rate_gate
 from backend.api.errors import (ai_rate_feedback_allowed,
                                 payload as error_payload, failure_event, provider_status,
                                 stage_failure_semantics)
-from backend.jobs.admission import AdmissionRejected
+from backend.jobs.admission import AdmissionCancelled, AdmissionRejected
+from backend.jobs.stages.payload_io import InvalidImageInput
 from backend.log import event
 from backend.security import SecurityError
 
@@ -59,7 +60,7 @@ def raise_mapped(exc: BaseException, *, prepared, ai_cfg, paced, rate_provider,
                  rate_model, rate_key, lane, is_local_target) -> None:
     route, trace_id = prepared.requested_route, prepared.trace_id
     common = dict(mode=prepared.mode, source=prepared.source, **prepared.route_identity)
-    if isinstance(exc, (asyncio.CancelledError, ProviderGenerationCancelled)):
+    if isinstance(exc, (asyncio.CancelledError, ProviderGenerationCancelled, AdmissionCancelled)):
         event("v1.translate.cancelled", {"mode": prepared.mode, "source": prepared.source}, ok=True)
         trace.write("api", "api/routes/translate_v1.py", "translate_sync", "!!",
                     {"failureKind": "cancelled", "httpStatus": 409}, trace_id=trace_id)
@@ -85,6 +86,16 @@ def raise_mapped(exc: BaseException, *, prepared, ai_cfg, paced, rate_provider,
             trace_id=trace_id, extra={"structuralDetails": structural, **terminal, "automaticContentRetry": False}, correlation=prepared.correlation)
         failure_event(route, detail, **common)
         raise HTTPException(502, detail=detail) from exc
+    if isinstance(exc, InvalidImageInput):
+        # The request's own image bytes are empty / not base64 / not an image:
+        # a permanent input error, never "internal".
+        detail = error_payload(code="invalid_image", message=str(exc)[:200],
+            user_message="This image could not be read. It may be empty, damaged or in an unsupported format.",
+            origin="client", stage="image_decode", category="input", retryable=False, http_status=422,
+            trace_id=trace_id, extra={"generationAttempts": 0, "requestDispatched": False},
+            correlation=prepared.correlation)
+        failure_event(route, detail, **common)
+        raise HTTPException(422, detail=detail) from exc
     if isinstance(exc, ValueError) and not getattr(exc, "requestDispatched", False):
         raise HTTPException(400, detail=str(exc)) from exc
     if type(exc).__name__ == "LensSessionError" and type(exc).__module__ == "backend.lens.client":

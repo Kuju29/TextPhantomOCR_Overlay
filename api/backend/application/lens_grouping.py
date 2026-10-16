@@ -18,6 +18,7 @@ from starlette.concurrency import run_in_threadpool
 
 from backend import trace, diagnostics
 from backend.api.errors import (
+    cancelled_payload,
     failure_event,
     merged_request_correlation,
     payload as error_payload,
@@ -28,7 +29,8 @@ from backend.grouping.detector_free_service import (
     group_vertical_lens,
 )
 from backend.grouping.ai_source_tree import AiSourceTreeError, build_ai_source_tree
-from backend.jobs.admission import AdmissionRejected, identity_of
+from backend.jobs.admission import AdmissionCancelled, AdmissionRejected, identity_of
+from backend.api.disconnect import ClientDisconnected, DisconnectWatch
 from backend.api.local_client import wants_unlimited
 from backend.log import event
 
@@ -195,14 +197,26 @@ async def group_paragraphs(payload: dict[str, Any], request: Request) -> dict[st
             grouping_worker_ms = (time.perf_counter() - worker_started) * 1000
         else:
             admission_started = time.perf_counter()
-            async with request.app.state.grouping_admission_gate.slot(identity):
-                admission_ms = (time.perf_counter() - admission_started) * 1000
-                worker_started = time.perf_counter()
-                service_result = await loop.run_in_executor(
-                    request.app.state.grouping_executor,
-                    diagnostics.bind_context(_group_on_worker), tree, image, raw_to_document,
-                )
-                grouping_worker_ms = (time.perf_counter() - worker_started) * 1000
+            # Fair queue, no count cap, no deadline; leaves when the client does.
+            async with DisconnectWatch(request, payload) as watch:
+                try:
+                    async with request.app.state.grouping_admission_gate.slot(
+                            identity, cancel_check=watch.check, nbytes=len(raw)):
+                        admission_ms = (time.perf_counter() - admission_started) * 1000
+                        worker_started = time.perf_counter()
+                        service_result = await loop.run_in_executor(
+                            request.app.state.grouping_executor,
+                            diagnostics.bind_context(_group_on_worker), tree, image, raw_to_document,
+                        )
+                        grouping_worker_ms = (time.perf_counter() - worker_started) * 1000
+                except AdmissionCancelled as exc:
+                    if watch.gone:
+                        raise ClientDisconnected("grouping_admission",
+                                                 waited_ms=round((time.perf_counter() - admission_started) * 1000, 1)) from exc
+                    raise HTTPException(status_code=409, detail=cancelled_payload(
+                        trace_id=trace_id, stage="grouping_cancel", correlation=correlation)) from exc
+    except (ClientDisconnected, HTTPException):
+        raise
     except AdmissionRejected as exc:
         detail = error_payload(
             code="server_busy", message=str(exc),

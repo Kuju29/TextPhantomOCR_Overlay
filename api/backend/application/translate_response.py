@@ -12,7 +12,8 @@ from backend.log import event
 def finalize(result: dict[str, Any], *, prepared, api_version: str,
              rate: dict[str, Any], paced: bool, rate_wait_ms: float,
              admission_wait_ms: float, rate_provider: str,
-             rate_model: str, rate_key: str) -> dict[str, Any]:
+             rate_model: str, rate_key: str,
+             admission: dict[str, Any] | None = None) -> dict[str, Any]:
     result["apiVersion"] = api_version
     perf = result.get("perf") if isinstance(result.get("perf"), dict) else {}
     ai_meta = ((result.get("Ai") or {}).get("meta") or {})
@@ -52,5 +53,8 @@ def finalize(result: dict[str, Any], *, prepared, api_version: str,
         "rate_wait_ms": rate_wait_ms, "admission_wait_ms": admission_wait_ms,
         "provider_ms": perf.get("ai_ms", 0.0), "parse_ms": perf.get("ai_parse_ms", 0.0),
         "cache": perf.get("cache", ""), "background": result.get("backgroundMode", ""),
+        # Per-lane waiting (image_fetch / pipeline / lens): wait time and the
+        # place in that lane's queue at enqueue. Absent = admitted at once.
+        **(admission or {}),
     })
     return result

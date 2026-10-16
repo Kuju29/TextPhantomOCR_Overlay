@@ -106,6 +106,14 @@ def classify(exc: BaseException) -> str:
     upstream_status = upstream_http_status(exc)
     if upstream_status == 504:
         return "provider_timeout"
+    # Structured HTTP evidence first: 402 Payment Required is the provider's
+    # billing answer, 404 on a provider call means the model (or its route)
+    # does not exist for this account. Both have specific client messages
+    # (old and new extensions: billing_required / provider_model_not_found).
+    if upstream_status == 402:
+        return "billing_required"
+    if upstream_status == 404:
+        return "provider_model_not_found"
     message = str(exc).lower()
     if any(marker in message for marker in (
         "billing required", "billing_required", "billing is past due",
@@ -254,7 +262,8 @@ def provider_http_failure(exc: BaseException) -> ProviderHttpFailure:
     if reason == "provider_model_not_found":
         return ProviderHttpFailure(
             502, "provider_model_not_found",
-            "The configured AI model was not found by the provider.", False,
+            "The configured AI model was not found or is not available (model not found or not available).",
+            False,
         )
     if reason == "provider_model_access_denied":
         return ProviderHttpFailure(

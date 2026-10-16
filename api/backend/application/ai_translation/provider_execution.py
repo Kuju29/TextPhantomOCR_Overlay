@@ -39,10 +39,13 @@ def _cancelled(ctx: TranslationContext) -> bool:
     return bool(checker is not None and checker())
 
 @asynccontextmanager
-async def _admission_slot(gate, identity, cancel_check=None):
+async def _admission_slot(gate, identity, cancel_check=None, nbytes=0):
     """Cancel a queued acquire, never a running executor's slot ownership."""
+    from backend.jobs.admission import AdmissionGate
     cancel_event = content_stream.cancellation_event()
-    manager = gate.slot(identity)
+    # Real gates also count the waiting body against the memory guard; test
+    # doubles only promise ``slot(identity)``.
+    manager = gate.slot(identity, nbytes=nbytes) if isinstance(gate, AdmissionGate) else gate.slot(identity)
     if cancel_event is None and cancel_check is None:
         async with manager:
             yield
@@ -182,7 +185,9 @@ async def _run(ctx: TranslationContext, *, rate_wait_ms: float) -> ExecutionResu
             result = await await_provider(loop.run_in_executor(executor, threaded_invoke))
         else:
             admission_note("waiting", final=False)
-            async with _admission_slot(gate, ctx.identity, lambda: _cancelled(ctx)):
+            from backend.api.disconnect import request_body_bytes
+            async with _admission_slot(gate, ctx.identity, lambda: _cancelled(ctx),
+                                       request_body_bytes(ctx.request)):
                 admission_wait_ms = round((time.perf_counter() - admission_started) * 1000, 1)
                 admission_note("admitted", final=False, queue_wait_ms=admission_wait_ms)
                 result = await await_provider(loop.run_in_executor(executor, threaded_invoke))

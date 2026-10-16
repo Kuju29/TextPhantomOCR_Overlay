@@ -8,9 +8,11 @@ each ``(provider, model, key)`` gets a token bucket sized to its RPM: the first
 - Users sharing one key share its bucket fairly: waiters are dispatched
   round-robin across tab sessions.
 - A waiting request can be cancelled without consuming a token.
-- Waits are bounded: past ``deadline_sec`` a request is skipped
-  (``RateGateTimeout``); a bucket with ``max_waiters`` queued rejects new
-  requests immediately (``RateGateRejected``).
+- Waits are bounded in TIME only: past ``deadline_sec`` a request is skipped
+  (``RateGateTimeout``). There is no waiter-count cap: a bucket never rejects a
+  request because many others are already waiting (2026.10.16.3; the former
+  ``TP_RATE_MAX_WAITERS`` is gone). ``RateGateRejected`` is kept as a type for
+  callers that still catch it.
 
 The gate runs at the async worker level, so waiting does not pin a thread.
 """
@@ -201,7 +203,6 @@ class RateGate:
         session: str,
         job_id: str,
         deadline_sec: float,
-        max_waiters: int,
         rpm_override: float | None = None,
         burst_override: int | None = None,
         manual_local: bool = False,
@@ -210,8 +211,8 @@ class RateGate:
         """Block until this request may call the provider.
 
         Returns ``None`` on success. Raises :class:`RateGateTimeout` if the
-        deadline elapses first, :class:`RateGateRejected` if the bucket is
-        already saturated, or :class:`asyncio.CancelledError` if the waiter is
+        deadline elapses first, :class:`RateGateCancelled` when ``cancel_check``
+        turns true, or :class:`asyncio.CancelledError` if the waiter is
         cancelled (never consuming a token in any of those cases).
 
         ``rpm_override`` / ``burst_override`` come from the user's own rate
@@ -244,12 +245,6 @@ class RateGate:
         if not bucket.jobset and bucket.tokens >= 1.0:
             bucket.tokens -= 1.0
             return
-
-        # Anti-bloat: refuse to grow an already-saturated bucket.
-        if len(bucket.jobset) >= max(1, max_waiters):
-            raise RateGateRejected(
-                f"rate bucket saturated ({len(bucket.jobset)} waiting) for {provider}"
-            )
 
         loop = asyncio.get_event_loop()
         future: "asyncio.Future[bool]" = loop.create_future()

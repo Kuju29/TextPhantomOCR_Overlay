@@ -281,7 +281,8 @@ def run_ai_layer(
     else:
         from backend.ai.translation_paths.store import execution_scope
         with execution_scope(ai_cfg, target_lang, cancel_check):
-            with stage_slot("ai", admission_identity, unlimited=admission_unlimited):
+            with stage_slot("ai", admission_identity, unlimited=admission_unlimited,
+                            cancel_check=cancel_check):
                 result = ai_repair.translate_with_one_repair(
                     src_text, target_lang, ai_cfg, n_src,
                     capture_request=capture_request,

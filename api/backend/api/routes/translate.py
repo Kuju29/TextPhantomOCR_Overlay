@@ -71,9 +71,12 @@ async def translate(
         )) from exc
     except QueueFull as exc:
         # 503 + Retry-After so the client can back off instead of failing hard.
+        # Only the queued-bytes memory guard raises it (no count cap since
+        # 2026.10.16.3); server_busy is the code every client retries.
         raise HTTPException(
             status_code=503,
-            detail=str(exc),
+            detail={"code": "server_busy", "message": str(exc), "retryable": True,
+                    "retryAfterMs": 5000, "stage": "queue_memory_guard"},
             headers={"Retry-After": "5"},
         ) from exc
     return meta

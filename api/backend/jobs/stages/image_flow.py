@@ -166,6 +166,8 @@ def process_image(
     cancel_check=None,
     admission_identity: str = "anon",
     admission_unlimited: bool = False,
+    image_origin: str = "inline",
+    lens_ticket=None,
 ) -> dict[str, Any]:
     """Run the full pipeline on a local image file.
 
@@ -193,14 +195,36 @@ def process_image(
     stages: dict[str, Any] = {"pipeline_path": "lens_direct"}
 
     with _stage(stages, "image_decode"):
-        with Image.open(image_path) as src_img:
-            img = image_to_rgb(src_img)
+        try:
+            with Image.open(image_path) as src_img:
+                img = image_to_rgb(src_img)
+        except Exception as exc:  # noqa: BLE001 - any decode failure is classified below
+            # Not an internal error: either the site sent something that is
+            # not an image (502 image_fetch_failed -> the browser fetches it
+            # itself) or the request's own bytes are unusable (422).
+            from backend.jobs.stages.payload_io import ImageFetchFailed, InvalidImageInput
+            if image_origin == "download":
+                raise ImageFetchFailed(
+                    f"the downloaded image could not be decoded ({type(exc).__name__})") from exc
+            raise InvalidImageInput(
+                f"the image could not be decoded ({type(exc).__name__})") from exc
         W, H = img.size
     thai_font, latin_font = resolve_font_pair(target_lang)
 
     with _stage(stages, "lens_fetch"):
-        with stage_slot("lens", admission_identity, unlimited=admission_unlimited):
-            data, stages["lens_ms"] = lens_stage.fetch(image_path, target_lang, lens_data)
+        shared = None if lens_data is not None else lens_stage.shared(image_path, target_lang)
+        if shared is not None:
+            # Same image+language already answered (cache) or being answered
+            # right now (single-flight): no Lens upload, so no Lens slot. A
+            # reserved ticket is handed straight back to the next waiter.
+            if lens_ticket is not None and lens_ticket.claim():
+                lens_ticket.release()
+            data, stages["lens_ms"] = shared
+            stages["lens_shared"] = True
+        else:
+            with stage_slot("lens", admission_identity, unlimited=admission_unlimited,
+                            cancel_check=cancel_check, held=lens_ticket, stats=stages):
+                data, stages["lens_ms"] = lens_stage.fetch(image_path, target_lang, lens_data)
 
     image_url = data.get("imageUrl")
     out: dict[str, Any] = {
@@ -306,7 +330,8 @@ def process_image(
                 # Grouping evidence must use the same untouched page pixels as the
                 # Extension route.  The erased render canvas can remove strokes or
                 # create whitespace that changes graph boundaries.
-                with stage_slot("grouping", admission_identity, unlimited=admission_unlimited):
+                with stage_slot("grouping", admission_identity, unlimited=admission_unlimited,
+                                cancel_check=cancel_check, stats=stages):
                     grouped = group_vertical_lens(original_tree, W, H, image=img)
                 canonical = grouped["grouping_result"]
                 from backend.geometry_diagnostics import emit_group_diagnostics
@@ -355,10 +380,11 @@ def process_image(
             ai_original_tree = copy.deepcopy(original_tree)
             ai_translated_tree = copy.deepcopy(translated_tree)
             _ai_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-            invoke_ai = ai_stage.run_ai_layer
-            if getattr(ai_cfg, "translation_mode", "independent") == "conversation":
-                context = contextvars.copy_context()
-                invoke_ai = lambda *args, **kwargs: context.run(ai_stage.run_ai_layer, *args, **kwargs)
+            # Always carry the request context into the AI worker: the
+            # conversation lease needs it, and the fair-share owner of this
+            # request (install id / client IP) must be the same in every lane.
+            context = contextvars.copy_context()
+            invoke_ai = lambda *args, **kwargs: context.run(ai_stage.run_ai_layer, *args, **kwargs)
             _f_ai = _ai_executor.submit(
                 invoke_ai,
                 out, ai_original_tree, ai_translated_tree, ai_cfg, target_lang, W, H, thai_font, latin_font,

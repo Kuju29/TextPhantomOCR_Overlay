@@ -1,64 +1,95 @@
-"""Admission control for the synchronous translate endpoint.
+"""Fair, work-conserving admission for every shared API lane.
 
-A gate, not a queue: a deep queue hides load (an accepted job silently stalls
-behind thousands of others). A request either gets a slot within a short,
-bounded wait or is told to come back with a ``Retry-After``. There is no
-server-side backlog to lose on restart or poll for; the extension holds the
-work it has not submitted yet, because only it knows whether the user is still
-looking at that page.
+The owner's rule, verbatim in spirit:
 
-The two limits mean different things:
+    Each kind of work has its own pipe. If one user is alone, he gets the
+    full pipe. With two or more users, the pipe is split into sub-pipes so one
+    user cannot hold it all. The waiting queue is NOT limited by a count of
+    waiters -- bursts are short and the queue drains fast. Never drop work
+    because a queue is "full".
 
-``limit``       how much work may run at once. Capacity.
-``max_waiters`` how many requests may queue for a slot. This is small on
-                purpose — it absorbs jitter between two arrivals, not a batch.
-                Past it the answer is 503 immediately, which reaches the user
-                as "the server is busy" instead of a stalled bar.
+So a lane (Lens upload, grouping, AI, Login AI, the runs:API pipeline, image
+download) has exactly one capacity number, ``limit``: how much work may RUN at
+once. That number protects something real (the shared Google IP, the CPU, a
+provider account) and stays. Everything else is a queue:
 
-Capacity is shared between PEOPLE, not requests
------------------------------------------------
-One server-wide gate would let one person's chapter starve a single page
-from someone else, so slots are handed out per identity, max-min fair:
+* No waiter count cap and no wait deadline. A request waits until a slot is
+  free, its client goes away (``cancel_check``), or its task is cancelled.
+* Per identity the queue is FIFO: a user's pages run in the order they came.
+* A freed slot goes to the waiting identity that currently runs the FEWEST
+  slots; ties go to the identity served least recently (round-robin). One
+  identity alone therefore gets every slot (work-conserving), two identities
+  converge to half each, and a newcomer with one page gets the very next
+  freed slot even while somebody else's 78-page chapter is queued.
+* Nothing is preempted: running work always finishes.
+* Memory, not count, is the only safety bound on waiting. Waiting request
+  bodies are already in RAM; :data:`waiting_bytes` keeps their total under
+  ``TP_MAX_QUEUE_BYTES`` so the process cannot be OOM-killed (which would drop
+  everyone's work). Only that guard ever turns a waiter away, with a 503
+  ``server_busy`` + ``Retry-After`` that every client retries.
 
-* one identity active  -> it may use every slot;
-* a second one appears -> each may hold ``limit // 2``, and the first shrinks
-  to that as its own jobs finish. Nothing is preempted: work already running
-  always finishes, so nobody's page is thrown away to make room.
+Identity is resolved by :func:`fair_key`: the browser install id
+(``X-TP-Install``) when present, else the tab session, else the client IP, else
+an auth/key hash, else ``anon``. See ``backend/api/fairness.py``.
 
-Identity is the tab session when the request carries one, else the AI key.
-The session is the person/workflow identity shared by Lens, Grouping and AI;
-using the server-owned provider key first would collapse every user onto one
-identity.  The key remains a compatibility fallback for older clients that do
-not send a tab session.  Provider/model quotas remain the rate gate's job.
-
-Requests with no identity at all share a single bucket. They cannot be told
-apart, so they are not pretended to be different — and ``stats()`` reports how
-many are in it, because a server where everyone lands in the anonymous bucket
-is fair in name only.
+All gate state lives on the event loop thread. Worker threads reach it only
+through ``backend/jobs/stage_admission.py``.
 """
 
 from __future__ import annotations
 
-import hashlib, asyncio, time
-
+import asyncio
+import contextvars
+import hashlib
+import time
+from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
 
 ANONYMOUS = "anon"
 
+# Waiting coroutines re-check their owner (client still connected, batch not
+# cancelled) at this interval. It bounds how long a gone client's waiter lingers.
+CANCEL_POLL_SEC = 0.25
+
+
 class AdmissionRejected(RuntimeError):
-    """No capacity. Carries the delay the caller should honour."""
+    """No capacity. Carries the delay the caller should honour.
+
+    Since 2026.10.16.3 the only producer is the waiting-memory guard
+    (:class:`MemoryBudgetExceeded`); a waiter count never rejects.
+    """
 
     def __init__(self, message: str, retry_after_sec: int) -> None:
         super().__init__(message)
         self.retry_after_sec = max(1, int(retry_after_sec))
 
-def identity_of(payload: dict | None) -> str:
-    """Who this request belongs to, for the purpose of sharing capacity.
 
-    Prefer the tab session so all three API stages share the same user identity.
-    Older clients that do not send a session fall back to the AI key. Keys are
-    hashed — an identity used as a dict key and printed in ``stats()`` must not
-    be a secret.
+class MemoryBudgetExceeded(AdmissionRejected):
+    """Admitting one more WAITING body would exceed the waiting-memory budget."""
+
+    reason = "memory_guard"
+
+
+class AdmissionCancelled(RuntimeError):
+    """The waiter's owner went away (client disconnected / batch cancelled).
+
+    Nothing was dispatched; the waiter was removed from its queue and holds no
+    slot. ``requestDispatched`` keeps the existing provider-error contract.
+    """
+
+    requestDispatched = False
+
+    def __init__(self, message: str = "cancelled while waiting for a slot") -> None:
+        super().__init__(message)
+
+
+def identity_of(payload: dict | None) -> str:
+    """The request's own identity: tab session, else a hash of the AI key.
+
+    Used for cache scoping, conversations and idempotency, and as the
+    starting point of :func:`fair_key`. Keys are hashed — an identity printed
+    in ``stats()`` must not be a secret.
     """
     data = payload if isinstance(payload, dict) else {}
     ctx = data.get("context") if isinstance(data.get("context"), dict) else {}
@@ -71,15 +102,155 @@ def identity_of(payload: dict | None) -> str:
         return "k:" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]
     return ANONYMOUS
 
+
+# --- who is waiting: the fairness key -----------------------------------------
+
+@dataclass(frozen=True)
+class RequestOwner:
+    """Request-level evidence for fairness, captured by the ingress middleware.
+
+    Each field is already an opaque, non-secret key ("" when unknown).
+    """
+
+    install: str = ""
+    ip: str = ""
+    auth: str = ""
+
+
+_request_owner: contextvars.ContextVar[RequestOwner | None] = contextvars.ContextVar(
+    "tp_fair_request_owner", default=None)
+
+
+def bind_request_owner(owner: RequestOwner | None) -> contextvars.Token:
+    return _request_owner.set(owner)
+
+
+def reset_request_owner(token: contextvars.Token) -> None:
+    _request_owner.reset(token)
+
+
+def current_request_owner() -> RequestOwner | None:
+    return _request_owner.get()
+
+
+def fair_key(identity: str | None) -> str:
+    """Who a waiter belongs to, for sharing a lane.
+
+    Order: install id > tab session > client IP > key/auth hash > anonymous.
+    The install id groups every tab of one browser; the tab session keeps old
+    clients (no install id) apart from each other; the IP keeps clients that
+    send neither apart; an auth hash is the last distinguishing evidence.
+    Outside an HTTP request (CLI, legacy queue workers) the given identity is
+    used unchanged.
+    """
+    value = str(identity or ANONYMOUS)
+    owner = _request_owner.get()
+    if owner is None:
+        return value
+    if owner.install:
+        return owner.install
+    if value.startswith("s:"):
+        return value
+    if owner.ip:
+        return owner.ip
+    if value != ANONYMOUS:
+        return value
+    if owner.auth:
+        return owner.auth
+    return ANONYMOUS
+
+
+# --- memory guard ---------------------------------------------------------------
+
+class WaitingBytes:
+    """Bytes of request bodies that are WAITING for a slot, process-wide.
+
+    Rule (work-conserving, like the slots): a waiter is admitted while the
+    total stays within ``TP_MAX_QUEUE_BYTES``. One identity may exceed
+    ``TP_MAX_QUEUE_BYTES_PER_IDENTITY`` only while at least that much of the
+    global budget stays free, so a lone user can queue a big chapter (up to
+    384 MiB of waiting bodies with the defaults) yet one share always remains
+    for everyone else. Event-loop thread only.
+    """
+
+    def __init__(self) -> None:
+        self.total = 0
+        self.by: dict[str, int] = {}
+        self.rejections = 0
+
+    @staticmethod
+    def limits() -> tuple[int, int]:
+        from backend.config import settings
+        total = max(1, int(getattr(settings, "max_queue_bytes", 512 << 20)))
+        per = max(1, int(getattr(settings, "max_queue_bytes_per_identity", 128 << 20)))
+        return total, per
+
+    def reserve(self, key: str, nbytes: int, *, lane: str, retry_after_sec: int) -> int:
+        n = max(0, int(nbytes or 0))
+        if n == 0:
+            return 0
+        total_cap, per_cap = self.limits()
+        mine = self.by.get(key, 0)
+        over_total = self.total + n > total_cap
+        over_share = mine + n > per_cap and self.total + n > max(0, total_cap - per_cap)
+        if over_total or over_share:
+            self.rejections += 1
+            from backend.log import event
+            event("admission.memory_guard", {
+                "lane": lane, "requestBytes": n, "waitingBytes": self.total,
+                "identityWaitingBytes": mine, "maxQueueBytes": total_cap,
+                "maxQueueBytesPerIdentity": per_cap,
+                "rule": "total" if over_total else "identity_share",
+                "retryAfterSec": retry_after_sec, "code": "server_busy", "status": 503,
+                "rejectionsSinceStart": self.rejections,
+            }, ok=False)
+            raise MemoryBudgetExceeded(
+                f"waiting requests already hold {self.total} bytes "
+                f"(limit {total_cap}, this identity {mine} of {per_cap}); retry shortly",
+                retry_after_sec,
+            )
+        self.total += n
+        self.by[key] = mine + n
+        return n
+
+    def release(self, key: str, nbytes: int) -> None:
+        n = max(0, int(nbytes or 0))
+        if n == 0:
+            return
+        self.total = max(0, self.total - n)
+        left = self.by.get(key, 0) - n
+        if left > 0:
+            self.by[key] = left
+        else:
+            self.by.pop(key, None)
+
+
+waiting_bytes = WaitingBytes()
+
+
+# --- the gate ----------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Admission:
+    """How a slot was obtained, for the perf events."""
+
+    wait_ms: float = 0.0
+    # 1-based place in the whole lane queue / in this identity's own FIFO at
+    # enqueue time; 0 = admitted without waiting.
+    queue_position: int = 0
+    identity_position: int = 0
+
+
 @dataclass(frozen=True)
 class GateStats:
     limit: int
     running: int
     waiting: int
-    max_waiters: int
     identities: int = 1
     share: int = 0
     anonymous_running: int = 0
+    waiting_identities: int = 0
+    waiting_bytes: int = 0
 
     @property
     def free(self) -> int:
@@ -91,19 +262,30 @@ class GateStats:
             "running": self.running,
             "waiting": self.waiting,
             "free": self.free,
-            # How the capacity is currently divided. Without these, "the server
-            # is busy" and "your share is full while the server is half idle"
-            # are the same 503 with the same body.
             "identities": self.identities,
+            # Informational: the fair share each active identity converges to.
+            # It is not a cap -- a lone identity uses every slot.
             "share": self.share,
             "anonymousRunning": self.anonymous_running,
+            "waitingIdentities": self.waiting_identities,
+            "waitingBytes": self.waiting_bytes,
         }
 
+
+class _Waiter:
+    __slots__ = ("key", "future", "enqueued")
+
+    def __init__(self, key: str, future: asyncio.Future) -> None:
+        self.key = key
+        self.future = future
+        self.enqueued = time.perf_counter()
+
+
 class AdmissionGate:
-    """Bounded-concurrency gate with bounded waiting and no backlog."""
+    """Bounded concurrency, unbounded fair FIFO-per-identity waiting."""
 
     # Additive increase only under real demand, multiplicative decrease on a
-    # latency cliff. Growing a gate that nobody is queueing for proves nothing.
+    # latency cliff. Public lanes are built with adaptive=False.
     ADAPT_OK_STREAK = 6
     ADAPT_CLIFF_RATIO = 2.5
     ADAPT_BACKOFF = 0.5
@@ -113,14 +295,14 @@ class AdmissionGate:
         self,
         limit: int,
         *,
-        max_waiters: int,
-        max_wait_sec: float,
+        name: str = "lane",
         adaptive: bool = False,
         limit_min: int | None = None,
         limit_max: int | None = None,
     ) -> None:
         if limit < 1:
             raise ValueError("limit must be >= 1")
+        self.name = str(name or "lane")
         self._limit = int(limit)
         self._limit_start = int(limit)
         self._adaptive = bool(adaptive)
@@ -129,72 +311,57 @@ class AdmissionGate:
         self._ok_streak = 0
         self._samples = 0
         self._adapt_events = {"grew": 0, "shrank": 0}
-        self._max_waiters = max(0, int(max_waiters))
-        self._max_wait_sec = max(0.0, float(max_wait_sec))
-        # Waiting is a small fairness/jitter cushion, not a second server full
-        # of future work. `max_waiters` is therefore a literal GLOBAL queue cap.
-        # A waiter is cheap, but "cheap" queues are exactly how backlog grows.
         self._running = 0
-        self._waiting = 0
-        # identity -> how many of its jobs are running / queued right now.
         self._running_by: dict[str, int] = {}
-        self._waiting_by: dict[str, int] = {}
-        # Waiters, oldest first: (identity, future). A freed slot goes to the
-        # oldest waiter that its identity's share now allows.
-        self._waiters: list[tuple[str, asyncio.Future]] = []
-        # Rolling estimate of how long a job takes, used to answer "come back
-        # in N seconds" with a real number instead of a constant. Seeded
-        # optimistically; the first completions correct it within seconds.
+        # identity -> its own FIFO of waiters. Only non-empty queues are kept.
+        self._queues: dict[str, deque[_Waiter]] = {}
+        self._waiting = 0
+        # Round-robin tie-break: identity -> sequence number of its last grant.
+        self._served_seq = 0
+        self._last_served: dict[str, int] = {}
+        # Rolling run-time estimate, used only for Retry-After of the memory guard.
         self._avg_run_sec = 2.0
+        self._granted = 0
+        self._waited = 0
+        self._max_wait_ms = 0.0
 
     # --- introspection -----------------------------------------------------
 
-    @property
-    def _hard_waiting_cap(self) -> int:
-        return self._max_waiters
-
     def _active_identities(self) -> int:
-        """Distinct identities with work running or queued. At least one."""
-        return max(1, len(set(self._running_by) | set(self._waiting_by)))
+        return max(1, len(set(self._running_by) | set(self._queues)))
 
     def _share(self) -> int:
-        """How many slots one identity may hold right now.
-
-        Ceiling division keeps every physical slot usable. For example a
-        fifteen-slot lane shared by four identities may settle at 4/4/4/3
-        instead of wasting three slots at 3/3/3/3. The global limit still
-        prevents the temporary per-identity ceiling from over-admitting.
-        """
         identities = self._active_identities()
         return max(1, (self._limit + identities - 1) // identities)
-
-    def _waiting_share(self) -> int:
-        """How many of one identity's requests may queue for a slot.
-
-        Sharing the SLOTS is pointless if one person's batch can fill the
-        QUEUE: the second person would be turned away before the fairness
-        rule ever looks at them.
-        """
-        # Running capacity may be fully borrowed by one user when nobody else
-        # is active. Waiting capacity is different: deferred work adds no
-        # throughput, so letting one user fill every waiter would prevent a
-        # newly arriving user from entering the fairness hand-off at all. Keep
-        # at least half of the small cushion available for a second identity.
-        identities = max(2, self._active_identities())
-        return max(1, (self._max_waiters + identities - 1) // identities)
 
     def stats(self) -> GateStats:
         return GateStats(
             limit=self._limit,
             running=self._running,
             waiting=self._waiting,
-            max_waiters=self._max_waiters,
             identities=self._active_identities(),
             share=self._share(),
             anonymous_running=self._running_by.get(ANONYMOUS, 0),
+            waiting_identities=len(self._queues),
+            waiting_bytes=waiting_bytes.total,
         )
 
-    # Current capacity and how it got there, for /v1/capabilities and the logs.
+    def invariants(self) -> dict:
+        """Counters recomputed from the structures, for leak tests and /health."""
+        queued = sum(len(q) for q in self._queues.values())
+        return {
+            "running": self._running,
+            "runningBySum": sum(self._running_by.values()),
+            "waiting": self._waiting,
+            "queued": queued,
+            "emptyQueues": sum(1 for q in self._queues.values() if not q),
+            "staleServed": len(set(self._last_served) - set(self._running_by) - set(self._queues)),
+            "consistent": (self._running == sum(self._running_by.values())
+                           and self._waiting == queued
+                           and all(self._queues.values())
+                           and all(v > 0 for v in self._running_by.values())),
+        }
+
     def adaptive_state(self) -> dict:
         return {
             "adaptive": self._adaptive,
@@ -207,8 +374,6 @@ class AdmissionGate:
             "shrank": self._adapt_events["shrank"],
         }
 
-    # Moves capacity from one completed job's run time: grow while the gate is
-    # in demand and latency is stable, halve the moment latency cliffs.
     def _adapt(self, run_sec: float, saturated: bool) -> None:
         if not self._adaptive or run_sec <= 0:
             return
@@ -240,115 +405,132 @@ class AdmissionGate:
         per_slot = self._avg_run_sec / self._limit
         return max(1, min(30, int(round(ahead * per_slot))))
 
-    # --- gate --------------------------------------------------------------
+    # --- slot bookkeeping (event-loop thread only, never awaits) ------------
 
-    def _may_run(self, identity: str) -> bool:
-        """Pure check. Never awaits, so a caller can act on it atomically."""
-        if self._running >= self._limit:
-            return False
-        return self._running_by.get(identity, 0) < self._share()
-
-    def _take(self, identity: str) -> None:
+    def _take(self, key: str) -> None:
         self._running += 1
-        self._running_by[identity] = self._running_by.get(identity, 0) + 1
+        self._running_by[key] = self._running_by.get(key, 0) + 1
+        self._served_seq += 1
+        self._last_served[key] = self._served_seq
+        self._granted += 1
 
-    def _give_back(self, identity: str) -> None:
+    def _forget_if_idle(self, key: str) -> None:
+        if key not in self._running_by and key not in self._queues:
+            self._last_served.pop(key, None)
+
+    def _give_back(self, key: str) -> None:
         self._running = max(0, self._running - 1)
-        left = self._running_by.get(identity, 0) - 1
+        left = self._running_by.get(key, 0) - 1
         if left > 0:
-            self._running_by[identity] = left
+            self._running_by[key] = left
         else:
-            # Drop the entry, or `_active_identities` counts people who left
-            # and the share shrinks forever.
-            self._running_by.pop(identity, None)
+            self._running_by.pop(key, None)
+            self._forget_if_idle(key)
 
-    def _wake_next(self) -> None:
-        """Hand freed capacity to the oldest waiter its share now permits."""
-        for index, (identity, future) in enumerate(self._waiters):
-            if future.done():
-                continue
-            if not self._may_run(identity):
-                continue
-            self._waiters.pop(index)
-            # Reserve the slot HERE, in the same synchronous step as the
-            # decision. Waking the waiter and letting it take its own slot
-            # would leave a gap in which another arrival could take it, and
-            # the woken request would find the door shut again.
-            self._take(identity)
-            future.set_result(True)
-            return
+    def _pick(self) -> str:
+        best_key = ""
+        best_rank: tuple[int, int] | None = None
+        for key in self._queues:
+            rank = (self._running_by.get(key, 0), self._last_served.get(key, -1))
+            if best_rank is None or rank < best_rank:
+                best_key, best_rank = key, rank
+        return best_key
 
-    async def acquire(self, identity: str = ANONYMOUS) -> None:
-        """Take a slot for ``identity``, or raise :class:`AdmissionRejected`.
+    def _dispatch(self) -> None:
+        """Hand every free slot to the fairest waiter, reserving it right here.
 
-        The fast path decides and reserves with no ``await`` in between, which
-        is what makes it correct under a burst: ``asyncio.Semaphore.locked()``
-        is not updated until the acquiring coroutine runs, so a burst arriving
-        in one event-loop tick would all see a free slot and ``max_waiters``
-        would bound nothing.
+        Reserving in the same synchronous step as the decision means no other
+        arrival can slip into the slot between "you're next" and the waiter
+        actually running.
         """
-        identity = identity or ANONYMOUS
+        while self._running < self._limit and self._queues:
+            key = self._pick()
+            queue = self._queues[key]
+            waiter = queue.popleft()
+            if not queue:
+                del self._queues[key]
+            self._waiting -= 1
+            if waiter.future.done():
+                # Cancelled between its own cleanup steps; never grant it.
+                self._forget_if_idle(key)
+                continue
+            self._take(key)
+            waiter.future.set_result(True)
 
-        if self._may_run(identity):
-            self._take(identity)
+    def _remove(self, waiter: _Waiter) -> None:
+        queue = self._queues.get(waiter.key)
+        if queue is None:
             return
-
-        # Some lanes (notably public AI) deliberately keep ALL deferred work
-        # in the caller's browser. max_waiters=0 must therefore mean exactly
-        # zero, not "one per identity" through _waiting_share()'s floor.
-        if self._max_waiters <= 0:
-            raise AdmissionRejected(
-                f"server at capacity ({self._running}/{self._limit} running; no server wait queue)",
-                1,
-            )
-
-        # Two ceilings: the per-identity share is the fairness rule; the
-        # absolute cap is the safety rule, because identity comes from the
-        # request and a client minting a new tab session per image would
-        # otherwise get an unlimited waiting list.
-        mine_waiting = self._waiting_by.get(identity, 0)
-        if mine_waiting >= self._waiting_share() or self._waiting >= self._hard_waiting_cap:
-            raise AdmissionRejected(
-                f"server at capacity ({self._running}/{self._limit} running, "
-                f"{self._waiting} waiting, share {self._share()} running / "
-                f"{self._waiting_share()} waiting per identity)",
-                self.retry_after_sec(),
-            )
-
-        future: asyncio.Future = asyncio.get_running_loop().create_future()
-        entry = (identity, future)
-        self._waiters.append(entry)
-        self._waiting += 1
-        self._waiting_by[identity] = self._waiting_by.get(identity, 0) + 1
         try:
-            await asyncio.wait_for(future, timeout=self._max_wait_sec or None)
-        except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
-            # `wait_for` may have been cancelled after `_wake_next` already
-            # reserved a slot for this waiter. Handing that slot straight on
-            # keeps the count honest instead of leaking capacity.
-            if future.done() and not future.cancelled() and future.exception() is None:
-                self._give_back(identity)
-                self._wake_next()
-            if isinstance(exc, asyncio.CancelledError):
-                raise
-            raise AdmissionRejected(
-                f"waited {self._max_wait_sec:g}s for a slot "
-                f"({self._running}/{self._limit} running, "
-                f"share {self._share()} per identity)",
-                self.retry_after_sec(),
-            ) from exc
-        finally:
-            if entry in self._waiters:
-                self._waiters.remove(entry)
-            self._waiting = max(0, self._waiting - 1)
-            left = self._waiting_by.get(identity, 0) - 1
-            if left > 0:
-                self._waiting_by[identity] = left
+            queue.remove(waiter)
+        except ValueError:
+            return
+        self._waiting -= 1
+        if not queue:
+            del self._queues[waiter.key]
+            self._forget_if_idle(waiter.key)
+
+    # --- public API -----------------------------------------------------------
+
+    async def acquire(
+        self,
+        identity: str = ANONYMOUS,
+        *,
+        cancel_check: Callable[[], bool] | None = None,
+        nbytes: int = 0,
+    ) -> Admission:
+        """Take a slot for ``identity`` (already a fairness key), waiting fairly.
+
+        Raises :class:`AdmissionCancelled` when ``cancel_check()`` turns true
+        while waiting, :class:`MemoryBudgetExceeded` when the waiting-memory
+        guard refuses, or ``CancelledError`` when the task is cancelled. In
+        every case the waiter is gone and no slot is held afterwards.
+        """
+        key = str(identity or ANONYMOUS)
+        if self._running < self._limit and not self._queues:
+            self._take(key)
+            return Admission()
+
+        reserved = waiting_bytes.reserve(key, nbytes, lane=self.name,
+                                         retry_after_sec=self.retry_after_sec())
+        loop = asyncio.get_running_loop()
+        waiter = _Waiter(key, loop.create_future())
+        queue = self._queues.get(key)
+        if queue is None:
+            queue = self._queues[key] = deque()
+        queue.append(waiter)
+        self._waiting += 1
+        position, mine = self._waiting, len(queue)
+        started = waiter.enqueued
+        try:
+            self._dispatch()  # a slot may be free (e.g. adaptive growth)
+            future = waiter.future
+            while not future.done():
+                if cancel_check is not None and cancel_check():
+                    raise AdmissionCancelled(
+                        f"{self.name}: owner went away while waiting "
+                        f"(position {position}, waited {time.perf_counter() - started:.1f}s)")
+                # asyncio.wait never cancels the future itself, so a grant that
+                # lands while this task is being cancelled is still visible.
+                await asyncio.wait({future}, timeout=CANCEL_POLL_SEC if cancel_check else None)
+        except BaseException:
+            if waiter.future.done() and not waiter.future.cancelled():
+                # Granted in the same tick the owner left: hand the slot on.
+                self._give_back(key)
+                self._dispatch()
             else:
-                self._waiting_by.pop(identity, None)
+                waiter.future.cancel()
+                self._remove(waiter)
+            raise
+        finally:
+            waiting_bytes.release(key, reserved)
+        wait_ms = round((time.perf_counter() - started) * 1000, 1)
+        self._waited += 1
+        self._max_wait_ms = max(self._max_wait_ms, wait_ms)
+        return Admission(wait_ms, position, mine)
 
     def release(self, identity: str = ANONYMOUS, *, run_sec: float | None = None) -> None:
-        """Give the slot back and fold the run time into the estimate.
+        """Give the slot back and pass it to the next fair waiter.
 
         ``run_sec`` is keyword-only and a non-string identity is a TypeError, so
         a stale positional ``release(run_sec)`` call cannot bind a float as the
@@ -357,32 +539,42 @@ class AdmissionGate:
         if not isinstance(identity, str):
             raise TypeError(
                 f"identity must be a str, got {type(identity).__name__} — "
-                "release() now takes the identity first and run_sec by keyword"
+                "release() takes the identity first and run_sec by keyword"
             )
-        saturated = self._waiting > 0 or self._running >= self._limit
+        saturated = bool(self._queues) or self._running >= self._limit
         self._give_back(identity or ANONYMOUS)
         if run_sec is not None and run_sec > 0:
             self._adapt(float(run_sec), saturated)
-            # Exponential moving average — recent jobs describe current load
-            # better than the whole history does.
             self._avg_run_sec = (self._avg_run_sec * 0.8) + (float(run_sec) * 0.2)
-        self._wake_next()
+        self._dispatch()
 
     class _Slot:
-        def __init__(self, gate: "AdmissionGate", identity: str) -> None:
+        def __init__(self, gate: "AdmissionGate", identity: str,
+                     cancel_check: Callable[[], bool] | None, nbytes: int) -> None:
             self._gate = gate
             self._identity = identity or ANONYMOUS
+            self._cancel_check = cancel_check
+            self._nbytes = nbytes
+            self.key = ""
+            self.admission = Admission()
             self._t0 = 0.0
 
+        @property
+        def wait_ms(self) -> float:
+            return self.admission.wait_ms
+
         async def __aenter__(self) -> "AdmissionGate._Slot":
-            await self._gate.acquire(self._identity)
+            self.key = fair_key(self._identity)
+            self.admission = await self._gate.acquire(
+                self.key, cancel_check=self._cancel_check, nbytes=self._nbytes)
             self._t0 = time.perf_counter()
             return self
 
         async def __aexit__(self, *_exc) -> bool:
-            self._gate.release(self._identity, run_sec=time.perf_counter() - self._t0)
+            self._gate.release(self.key, run_sec=time.perf_counter() - self._t0)
             return False
 
-    def slot(self, identity: str = ANONYMOUS) -> "AdmissionGate._Slot":
-        """``async with gate.slot(identity):`` — acquire, run, always release."""
-        return AdmissionGate._Slot(self, identity)
+    def slot(self, identity: str = ANONYMOUS, *, cancel_check: Callable[[], bool] | None = None,
+             nbytes: int = 0) -> "AdmissionGate._Slot":
+        """``async with gate.slot(identity):`` — wait fairly, run, always release."""
+        return AdmissionGate._Slot(self, identity, cancel_check, nbytes)

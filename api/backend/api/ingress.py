@@ -423,6 +423,12 @@ class IdentityQuotaMiddleware:
         # The desktop launcher / a personal API on loopback is its only tenant:
         # no per-identity bucket or pool share, exactly as before.
         token = _identity.set(None if local else identity)
+        # Fair-share evidence for the admission lanes (install id / client IP /
+        # auth hash); see backend/api/fairness.py. Bound for the whole request,
+        # and copied into worker threads with the request's context.
+        from backend.api.fairness import request_owner
+        from backend.jobs.admission import bind_request_owner, reset_request_owner
+        owner_token = bind_request_owner(request_owner(scope))
         try:
             if scope.get("method") == "POST" and is_quota_route(scope.get("path") or ""):
                 policy = quota_policy()
@@ -448,4 +454,5 @@ class IdentityQuotaMiddleware:
                     lens_cookie.prefetch()
             return await self.app(scope, receive, send)
         finally:
+            reset_request_owner(owner_token)
             _identity.reset(token)

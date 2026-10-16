@@ -10,7 +10,9 @@ from backend import cancellation
 from backend.jobs import cache as cache_mod
 from backend.jobs.stages.config import build_ai_config, layout_options
 from backend.jobs.stages.image_flow import process_image
-from backend.jobs.stages.payload_io import extract_image_bytes, temporary_image_file
+from backend.jobs.stages.payload_io import (
+    ImageFetchFailed, InvalidImageInput, extract_image_bytes, image_source_kind, temporary_image_file,
+)
 from backend.jobs.stages.result import attach_ai_performance, result_worth_caching
 from backend.jobs.admission import identity_of
 from backend.log import event
@@ -19,8 +21,16 @@ from backend.utils.images import sha256_hex
 from backend.ai.accounting import api_pipeline_scope
 
 @api_pipeline_scope
-def process_payload(payload: dict, *, admission_identity: str | None = None, admission_unlimited: bool = False) -> dict[str, Any]:
-    """Process one queued job payload end to end (with result caching)."""
+def process_payload(payload: dict, *, admission_identity: str | None = None, admission_unlimited: bool = False,
+                    prefetched: tuple[bytes, str] | None = None, lens_ticket=None) -> dict[str, Any]:
+    """Process one queued job payload end to end (with result caching).
+
+    ``prefetched`` — image bytes the runs:API route already downloaded in the
+    image-fetch lane. ``lens_ticket`` — a Lens slot reserved on the event loop
+    before this thread started (see stage_admission.reserve); the Lens stage
+    uses it instead of waiting, and it is released when that stage ends. If
+    this run never reaches Lens the route abandons it.
+    """
     t_start = time.perf_counter()
     mode = payload.get("mode") or "lens_images"
     lang = payload.get("lang") or "en"
@@ -42,8 +52,12 @@ def process_payload(payload: dict, *, admission_identity: str | None = None, adm
 
         # Download errors still precede stage counters inside process_image;
         # credential validation above intentionally precedes image IO.
+        image_origin = image_source_kind(payload)
         try:
-            img_bytes, mime = extract_image_bytes(payload)
+            if prefetched is not None:
+                img_bytes, mime = prefetched
+            else:
+                img_bytes, mime = extract_image_bytes(payload)
         except BaseException as exc:
             if getattr(exc, "tp_stage", None) is None:
                 try:
@@ -53,7 +67,12 @@ def process_payload(payload: dict, *, admission_identity: str | None = None, adm
             raise
         t_img = time.perf_counter()
         if not img_bytes:
-            raise ValueError("No image data")
+            # An empty DOWNLOAD is the site's answer (hotlink block, expired
+            # URL): image_fetch, so the browser can fetch it itself. Empty
+            # INLINE bytes are the request's own data: 422 invalid_image.
+            if image_origin == "download":
+                raise ImageFetchFailed("the image URL returned an empty body")
+            raise InvalidImageInput("No image data")
         if cancel_check():
             raise RuntimeError("cancelled")
 
@@ -105,6 +124,8 @@ def process_payload(payload: dict, *, admission_identity: str | None = None, adm
                 layout_opts=layout, cancel_check=cancel_check,
                 admission_identity=stage_identity,
                 admission_unlimited=bool(admission_unlimited),
+                image_origin=image_origin,
+                lens_ticket=lens_ticket,
             )
             stages = out.pop("perfStages", {}) or {}
             out["perf"] = {

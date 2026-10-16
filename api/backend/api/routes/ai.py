@@ -3,6 +3,7 @@
 ``/ai/resolve``        — given an API key (and optional provider/model),
                          return the resolved provider + selectable models.
 ``/ai/prompt/default`` — return the default editable prompt for a language.
+``/ai/probe``          — compatibility stub (no provider call), see below.
 """
 
 from __future__ import annotations
@@ -47,6 +48,20 @@ def _refused_base_url(payload: dict[str, Any], exc: SecurityError) -> dict:
         "http_status": 0,
         "cached": False,
     }
+
+@router.post("/ai/probe")
+async def probe_compat() -> dict:
+    """Compatibility answer for extensions older than 2026.10.4.91.
+
+    The live model probe was removed in .91 (it spent the user's provider
+    quota on every popup open). The 2026.9.27.26 popup still calls it after
+    every model selection and showed "Provider could not be reached" for the
+    404. This answer makes NO provider call and reads nothing from the body
+    (the key is never parsed or logged): "not tested" is the truth, and the
+    old popup shows no error for it. Real failures still surface from the
+    actual translation request.
+    """
+    return {"ok": False, "status": "not_tested", "model_capabilities": {}}
 
 @router.post("/ai/resolve")
 async def resolve(payload: dict[str, Any]) -> dict:

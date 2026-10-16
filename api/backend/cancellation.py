@@ -46,7 +46,28 @@ def mark_batch(batch_id: str, scope: str = "") -> None:
         while len(_batches) > _MAX_BATCHES:
             _batches.pop(next(iter(_batches)))
 
+# Payloads whose HTTP client disconnected while the request was still being
+# served (tab closed, client timeout). Keyed by the payload object's id for the
+# lifetime of that request only (see backend/api/disconnect.py), so every
+# existing ``is_cancelled(payload)`` check also stops work nobody will read.
+_gone: set[int] = set()
+
+def mark_gone(payload: Any) -> None:
+    if isinstance(payload, dict):
+        with _lock:
+            _gone.add(id(payload))
+
+def forget_gone(payload: Any) -> None:
+    if isinstance(payload, dict):
+        with _lock:
+            _gone.discard(id(payload))
+
+def is_gone(payload: Any) -> bool:
+    return isinstance(payload, dict) and id(payload) in _gone
+
 def is_cancelled(payload: dict[str, Any]) -> bool:
+    if isinstance(payload, dict) and id(payload) in _gone:
+        return True
     value = batch_id_of(payload)
     if not value:
         return False

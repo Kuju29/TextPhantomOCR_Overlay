@@ -81,7 +81,7 @@ def dispatch(rows,estimate,reason,profile):
         emit(evidence)
         with receipt_scope('runsapi',batch_id):
             with execution_scope(ai,first.target,stopped):
-                with stage_slot('ai',first.options['admission_identity'],unlimited=first.options.get('admission_unlimited',False)):
+                with stage_slot('ai',first.options['admission_identity'],unlimited=first.options.get('admission_unlimited',False),cancel_check=stopped):
                     result=translate(markers.apply(texts),first.target,ai,cancel_check=stopped,capture_request=first.options.get('capture_request',False))
         parsed=markers.extract_paragraphs_exact(result.get('aiTextFull',''),len(rows))
         values=parsed[0] if parsed else ['']*len(rows)

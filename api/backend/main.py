@@ -14,7 +14,9 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, Response
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.requests import ClientDisconnect
 
 # Compose concrete providers before routes import services that resolve provider
 # names. This is the API process's composition root; declaration modules remain
@@ -24,8 +26,10 @@ from backend.ai.provider_bootstrap import ensure_provider_registry
 ensure_provider_registry()
 
 from backend.api.middleware import access_log_middleware, configure_uvicorn_access_log
+from backend.api.disconnect import ClientDisconnected
 from backend.api.errors import (
     ERROR_SCHEMA,
+    activity_fields,
     payload as error_payload,
     failure_event,
     request_correlation,
@@ -84,6 +88,9 @@ async def lifespan(app: FastAPI):
         lens=app.state.admission_gate,
         grouping=app.state.grouping_admission_gate,
         ai=app.state.ai_admission_gate,
+        login_ai=app.state.login_admission_gate,
+        pipeline=app.state.pipeline_admission_gate,
+        image_fetch=app.state.image_fetch_admission_gate,
     )
     queue = JobQueue(process_payload)
     queue.start()
@@ -93,12 +100,26 @@ async def lifespan(app: FastAPI):
         f"lens={app.state.admission_gate.stats().limit} "
         f"grouping={app.state.grouping_admission_gate.stats().limit} "
         f"ai={app.state.ai_admission_gate.stats().limit} "
+        f"login_ai={app.state.login_admission_gate.stats().limit} "
+        f"image_fetch={app.state.image_fetch_admission_gate.stats().limit} "
         f"pipeline_threads={getattr(app.state, 'pipeline_executor_workers', '?')} "
         f"legacy_direct_workers={getattr(queue, '_direct_workers', '?')} "
         f"legacy_ai_workers={getattr(queue, '_ai_workers', '?')} "
-        f"ai_http_threads={settings.ai_thread_workers}",
+        f"ai_http_threads={settings.ai_thread_workers} "
+        f"waiting=unbounded-by-count, waiting_bytes<={settings.max_queue_bytes}",
         flush=True,
     )
+    # Settings removed in 2026.10.16.3 (no waiter count caps, no wait
+    # deadlines). Say so instead of silently ignoring an operator's value.
+    _removed = [name for name in (
+        "TP_SYNC_MAX_WAITERS", "TP_SYNC_MAX_WAIT_SEC", "TP_SYNC_AI_MAX_WAITERS",
+        "TP_SYNC_AI_MAX_WAIT_SEC", "TP_SYNC_GROUP_MAX_WAITERS", "TP_SYNC_GROUP_MAX_WAIT_SEC",
+        "TP_RATE_MAX_WAITERS", "TP_MAX_QUEUE_SIZE", "TP_MAX_QUEUE_PER_CALLER",
+        "TP_MAX_QUEUE_PER_IDENTITY") if os.environ.get(name) not in (None, "")]
+    if _removed:
+        print("[TextPhantom][api] note: ignored removed settings " + ", ".join(_removed) +
+              " — waiting is never limited by a count or a deadline; only TP_MAX_QUEUE_BYTES "
+              "bounds waiting memory", flush=True)
     _cpu = cpu_runtime_info()
     print(
         "[TextPhantom][api] CPU runtime "
@@ -222,7 +243,7 @@ async def lifespan(app: FastAPI):
         # only futures that never started and do not hold ASGI shutdown open.
         for name in (
             "ai_executor", "login_executor", "lens_executor", "grouping_executor",
-            "pipeline_executor",
+            "pipeline_executor", "image_fetch_executor",
         ):
             executor = getattr(app.state, name, None)
             if executor is not None:
@@ -292,6 +313,53 @@ async def tp_http_exception_handler(request: Request, exc: HTTPException) -> JSO
     headers["X-TP-Error-Schema"] = ERROR_SCHEMA
     return JSONResponse(status_code=exc.status_code, content={"detail": detail}, headers=headers)
 
+def _client_disconnected(request: Request, stage: str, *, waited_ms: float | None = None) -> Response:
+    """A client that went away gets a logged 499, not a generic error line.
+
+    Nobody reads the response; the log line says the request ended because the
+    browser closed it (tab closed, extension timeout, run cancelled), which is
+    lifecycle, not a server or input failure.
+    """
+    event("request.client_disconnected", {
+        "method": request.method, "path": request.url.path, "status": 499,
+        "code": "client_disconnected",
+        **({"waitedMs": waited_ms} if waited_ms is not None else {}),
+        **activity_fields(
+            owner="client", outcome="cancelled", severity="info", stage=stage,
+            retryable=False, scope="request", correlation=request_correlation(request),
+            code="client_disconnected", final=True,
+        ),
+    })
+    # The schema marker keeps the access-log middleware from adding an
+    # unclassified "http.error" line for the same request.
+    return Response(status_code=499, headers={"X-TP-Error-Schema": ERROR_SCHEMA})
+
+
+@app.exception_handler(ClientDisconnected)
+async def tp_client_disconnected_handler(request: Request, exc: ClientDisconnected) -> Response:
+    return _client_disconnected(request, exc.stage, waited_ms=exc.waited_ms)
+
+
+@app.exception_handler(StarletteHTTPException)
+async def tp_starlette_http_exception_handler(request: Request, exc: StarletteHTTPException):
+    """HTTPExceptions raised by FastAPI/Starlette themselves (body parsing, 404/405).
+
+    A body upload cut off by the client surfaces here as FastAPI's generic
+    400 "There was an error parsing the body" with ``ClientDisconnect`` as its
+    cause: that is a 499 client disconnect. Any other unparsable body becomes
+    the canonical tp.error 400. Everything else keeps FastAPI's stock answer
+    (404 scanner probes stay aggregated by the access log).
+    """
+    if isinstance(exc.__cause__, ClientDisconnect):
+        return _client_disconnected(request, "request_body")
+    if exc.status_code == 400 and exc.detail == "There was an error parsing the body":
+        return await tp_http_exception_handler(request, HTTPException(status_code=400, detail={
+            "code": "invalid_request", "message": "The request body could not be parsed.",
+            "stage": "request_body"}))
+    from fastapi.exception_handlers import http_exception_handler
+    return await http_exception_handler(request, exc)
+
+
 @app.exception_handler(RequestValidationError)
 async def tp_validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     """Keep FastAPI's 422 body while adding one safe, searchable log event."""
@@ -330,7 +398,8 @@ app.state.ai_executor = ThreadPoolExecutor(
     thread_name_prefix="tp-ai-http",
 )
 
-# /v1/translate runs without a queue: a bounded gate, 503 when full. Built here,
+# Every lane is a fair queue with a fixed concurrency (backend/jobs/admission.py):
+# no waiter count cap, no wait deadline. Built here,
 # not in the lifespan, because /v1/capabilities reads it and may arrive before
 # startup (or under a runner that skips lifespan). Public Lens/AI admission is
 # pinned to executor capacity; TP_ADAPTIVE only affects legacy/internal gates.
@@ -346,8 +415,7 @@ app.state.lens_executor = ThreadPoolExecutor(
 app.state.lens_executor_workers = _LENS_LIMIT
 app.state.admission_gate = AdmissionGate(
     _LENS_LIMIT,
-    max_waiters=settings.sync_max_waiters,
-    max_wait_sec=settings.sync_max_wait_sec,
+    name="lens",
     adaptive=False,
     limit_min=_LENS_LIMIT,
     limit_max=_LENS_LIMIT,
@@ -364,8 +432,7 @@ app.state.grouping_executor = ThreadPoolExecutor(
 app.state.grouping_executor_workers = _GROUP_LIMIT
 app.state.grouping_admission_gate = AdmissionGate(
     _GROUP_LIMIT,
-    max_waiters=settings.sync_group_max_waiters,
-    max_wait_sec=settings.sync_group_max_wait_sec,
+    name="grouping",
     adaptive=False,
     limit_min=_GROUP_LIMIT,
     limit_max=_GROUP_LIMIT,
@@ -375,8 +442,7 @@ _AI_CONFIGURED = settings.sync_ai_max_concurrency or _AI_THREADS
 _AI_LIMIT = max(1, min(_AI_CONFIGURED, _AI_THREADS))
 app.state.ai_admission_gate = AdmissionGate(
     _AI_LIMIT,
-    max_waiters=settings.sync_ai_max_waiters,
-    max_wait_sec=settings.sync_ai_max_wait_sec,
+    name="ai",
     # Provider latency is not server overload, and provider 429/503 is handled
     # per key by the extension lane, so this gate stays at executor capacity.
     adaptive=False,
@@ -392,8 +458,7 @@ app.state.login_executor = ThreadPoolExecutor(
 )
 app.state.login_admission_gate = AdmissionGate(
     _LOGIN_THREADS,
-    max_waiters=settings.sync_ai_max_waiters,
-    max_wait_sec=settings.sync_ai_max_wait_sec,
+    name="login_ai",
     adaptive=False,
     limit_min=_LOGIN_THREADS,
     limit_max=_LOGIN_THREADS,
@@ -412,11 +477,27 @@ app.state.pipeline_executor = ThreadPoolExecutor(
 app.state.pipeline_executor_workers = _PIPELINE_LIMIT
 app.state.pipeline_admission_gate = AdmissionGate(
     _PIPELINE_LIMIT,
-    max_waiters=settings.sync_max_waiters,
-    max_wait_sec=settings.sync_max_wait_sec,
+    name="pipeline",
     adaptive=False,
     limit_min=_PIPELINE_LIMIT,
     limit_max=_PIPELINE_LIMIT,
+)
+# Server-side image downloads (a runs:API page sent as a URL) are their own
+# kind of work with their own pipe: they happen BEFORE a request waits for a
+# pipeline or Lens slot, so a slow comic CDN never holds a Lens slot, and an
+# unreachable image fails fast instead of after a Lens queue turn.
+_FETCH_LIMIT = max(1, int(settings.image_fetch_max_concurrency))
+app.state.image_fetch_executor = ThreadPoolExecutor(
+    max_workers=_FETCH_LIMIT,
+    thread_name_prefix="tp-image-fetch",
+)
+app.state.image_fetch_executor_workers = _FETCH_LIMIT
+app.state.image_fetch_admission_gate = AdmissionGate(
+    _FETCH_LIMIT,
+    name="image_fetch",
+    adaptive=False,
+    limit_min=_FETCH_LIMIT,
+    limit_max=_FETCH_LIMIT,
 )
 
 

@@ -222,11 +222,10 @@ def _trace_ai_terminal(
     trace.flush()
 
 class QueueFull(Exception):
-    """Raised by :meth:`JobQueue.enqueue` when the pending queue is saturated."""
+    """Raised by :meth:`JobQueue.enqueue` only by the queued-bytes memory guard.
 
-class CallerQueueFull(QueueFull):
-    """One caller (tab session / client) already holds its share of the queue."""
-    code = "queue_caller_limit"
+    There is no job-count cap (2026.10.16.3): see :class:`QueueBytesFull`.
+    """
 
 class QueueBytesFull(QueueFull):
     """Queued payloads (mostly page images) already use the queue's byte budget."""
@@ -307,7 +306,9 @@ class JobQueue:
         self._jobs: dict[str, Job] = {}
         self._idempotency: dict[str, str] = {}
         self._conditions: dict[str, asyncio.Condition] = {}
-        qmax = max(1, settings.max_queue_size)
+        # Unbounded by count (owner's rule): waiting work is bounded by the
+        # queued-bytes budget below, never by how many jobs are waiting.
+        qmax = 0
         self._queues: dict[str, FairIdentityQueue] = {
             self.DIRECT: FairIdentityQueue(maxsize=qmax),
             self.AI: FairIdentityQueue(maxsize=qmax),
@@ -358,7 +359,7 @@ class JobQueue:
                 "workers": settings.max_workers,
                 "direct_workers": self._direct_workers,
                 "ai_workers": self._ai_workers,
-                "max_queue_size": settings.max_queue_size,
+                "max_queue_bytes": settings.max_queue_bytes,
             },
         )
 
@@ -442,37 +443,22 @@ class JobQueue:
                 out["dedup"] = True
                 return out
 
-        if self._total_depth() >= max(1, settings.max_queue_size):
-            raise QueueFull("server busy: translation queue is full")
         from backend.api.ingress import current_identity
         identity = current_identity() or ""
-        per_identity = max(1, int(getattr(settings, "max_queue_per_identity", 200) or 200))
-        if identity and sum(1 for j in self._jobs.values()
-                            if j.get("status") == "queued" and j.get("identity") == identity) >= per_identity:
-            # One browser (install id / trusted IP) across all of its tabs.
-            raise CallerQueueFull(
-                f"server busy: this browser already has {per_identity} translations waiting; "
-                "new pages will be accepted as earlier ones finish")
         size = payload_bytes(payload)
         owner = identity or str(caller_scope or "") or "anonymous"
         total_bytes = sum(n for _, n in self._queued_bytes.values())
         owner_bytes = sum(n for o, n in self._queued_bytes.values() if o == owner)
-        if total_bytes + size > max(1, int(getattr(settings, "max_queue_bytes", 512 << 20))):
+        total_cap = max(1, int(getattr(settings, "max_queue_bytes", 512 << 20)))
+        if total_bytes + size > total_cap:
             raise QueueBytesFull("server busy: queued images use the server's memory budget")
-        if owner_bytes + size > max(1, int(getattr(settings, "max_queue_bytes_per_identity", 128 << 20))):
+        # Same work-conserving rule as the admission lanes: one browser may go
+        # past its share only while one more share of the budget stays free.
+        per_cap = max(1, int(getattr(settings, "max_queue_bytes_per_identity", 128 << 20)))
+        if owner_bytes + size > per_cap and total_bytes + size > max(0, total_cap - per_cap):
             raise QueueBytesFull(
                 "server busy: this browser's waiting images already use its memory share; "
                 "new pages will be accepted as earlier ones finish")
-        caller = str(caller_scope or "")
-        per_caller = max(1, int(getattr(settings, "max_queue_per_caller", 200) or 200))
-        if caller and sum(1 for j in self._jobs.values()
-                          if j.get("status") == "queued" and j.get("caller_scope") == caller) >= per_caller:
-            # One tab/client cannot take the whole shared queue from other
-            # users. Same 503 + Retry-After contract as QueueFull.
-            raise CallerQueueFull(
-                f"server busy: this tab already has {per_caller} translations waiting; "
-                "new pages will be accepted as earlier ones finish")
-
         job_id = str(uuid.uuid4())
         kind = self._queue_kind(payload)
         rec: Job = {
@@ -502,7 +488,7 @@ class JobQueue:
             fair_owner = _fair_stage_identity(payload, str(caller_scope or ""))
             self._queues[kind].put_nowait((job_id, payload, fair_owner))
             self._queued_bytes[job_id] = (owner, size)
-        except asyncio.QueueFull as exc:
+        except asyncio.QueueFull as exc:  # unbounded queue: defensive only
             self._jobs.pop(job_id, None)
             if idem:
                 self._idempotency.pop(idem, None)
@@ -605,7 +591,6 @@ class JobQueue:
                 session=session,
                 job_id=job_id,
                 deadline_sec=settings.rate_max_wait_sec,
-                max_waiters=settings.rate_max_waiters_per_bucket,
                 rpm_override=rate["rpm"] or None,
                 burst_override=rate["burst"] or None,
                 manual_local=rate.get("local") is True,

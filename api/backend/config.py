@@ -48,14 +48,12 @@ class Settings:
     cpu_concurrency: int = field(default_factory=lambda: max(1, _env_int("TP_CPU_CONCURRENCY", 2)))
     job_ttl_sec: int = field(default_factory=lambda: _env_int("JOB_TTL_SEC", 3600))
     http_timeout_sec: float = field(default_factory=lambda: _env_float("HTTP_TIMEOUT_SEC", 120.0))
-    # Bound pending work and execution time to protect shared deployments.
-    max_queue_size: int = field(default_factory=lambda: _env_int("TP_MAX_QUEUE_SIZE", 2000))
-    # Queued (not yet running) jobs one caller scope may hold.
-    max_queue_per_caller: int = field(default_factory=lambda: _env_int("TP_MAX_QUEUE_PER_CALLER", 200))
-    # Per caller identity (see api/ingress.py): queued jobs and queued payload
-    # bytes. Byte budgets bound memory pinned by queued page images (a data URI
-    # can be ~32 MiB); a job count alone cannot.
-    max_queue_per_identity: int = field(default_factory=lambda: max(1, _env_int("TP_MAX_QUEUE_PER_IDENTITY", 200)))
+    # Memory is the only bound on WAITING work (never a count of waiters): the
+    # bytes of request bodies that wait for a slot, process-wide, and the share
+    # one identity may hold while others are waiting too (see
+    # backend/jobs/admission.py WaitingBytes; the legacy job queue applies the
+    # same two budgets to its queued payloads). Exceeding them answers 503
+    # server_busy + Retry-After, which every client retries.
     max_queue_bytes: int = field(default_factory=lambda: max(1, _env_int("TP_MAX_QUEUE_BYTES", 512 * 1024 * 1024)))
     max_queue_bytes_per_identity: int = field(
         default_factory=lambda: max(1, _env_int("TP_MAX_QUEUE_BYTES_PER_IDENTITY", 128 * 1024 * 1024)))
@@ -83,32 +81,21 @@ class Settings:
     sync_ai_max_concurrency: int = field(
         default_factory=lambda: max(0, _env_int("TP_SYNC_AI_MAX_CONCURRENCY", 0))
     )
-    sync_max_waiters: int = field(
-        default_factory=lambda: max(0, _env_int("TP_SYNC_MAX_WAITERS", 8))
-    )
-    sync_max_wait_sec: float = field(
-        default_factory=lambda: max(0.0, _env_float("TP_SYNC_MAX_WAIT_SEC", 10.0))
-    )
-    # Keep only a small fair cushion on the API. The browser still owns the
-    # large backlog, while runs:API/legacy can wait for a shared AI stage slot
-    # without re-running Lens/Grouping merely because another user is active.
-    sync_ai_max_waiters: int = field(
-        default_factory=lambda: max(0, _env_int("TP_SYNC_AI_MAX_WAITERS", 8))
-    )
-    sync_ai_max_wait_sec: float = field(
-        default_factory=lambda: max(0.0, _env_float("TP_SYNC_AI_MAX_WAIT_SEC", 10.0))
-    )
     # Detector-free grouping is a separate API stage. Zero follows effective
     # Lens capacity so it never narrows the active Lens lane by default.
     sync_group_max_concurrency: int = field(
         default_factory=lambda: max(0, _env_int("TP_SYNC_GROUP_MAX_CONCURRENCY", 0))
     )
-    sync_group_max_waiters: int = field(
-        default_factory=lambda: max(0, _env_int("TP_SYNC_GROUP_MAX_WAITERS", 8))
+    # Server-side image downloads (runs:API pages sent as a URL) have their
+    # own fair lane, so a slow comic CDN never holds a Lens slot.
+    image_fetch_max_concurrency: int = field(
+        default_factory=lambda: max(1, _env_int("TP_IMAGE_FETCH_MAX_CONCURRENCY", 16))
     )
-    sync_group_max_wait_sec: float = field(
-        default_factory=lambda: max(0.0, _env_float("TP_SYNC_GROUP_MAX_WAIT_SEC", 10.0))
-    )
+    # Admission lanes have NO waiter count cap and NO wait deadline (owner's
+    # rule, 2026.10.16.3). Removed: TP_SYNC_MAX_WAITERS / TP_SYNC_MAX_WAIT_SEC,
+    # TP_SYNC_AI_MAX_WAITERS / TP_SYNC_AI_MAX_WAIT_SEC, TP_SYNC_GROUP_MAX_WAITERS /
+    # TP_SYNC_GROUP_MAX_WAIT_SEC, TP_RATE_MAX_WAITERS, TP_MAX_QUEUE_SIZE,
+    # TP_MAX_QUEUE_PER_CALLER and TP_MAX_QUEUE_PER_IDENTITY.
 
     # Split-lane concurrency for the legacy queued transport only. Stage-level
     # Lens/Grouping/AI gates remain authoritative across every engine.
@@ -122,7 +109,6 @@ class Settings:
     # Optional rate gate, isolated by (provider, model, key) with bounded waits.
     rate_gate_enabled: bool = field(default_factory=lambda: _env_bool("TP_RATE_GATE", True))
     rate_max_wait_sec: float = field(default_factory=lambda: max(1.0, _env_float("TP_RATE_MAX_WAIT_SEC", 75.0)))
-    rate_max_waiters_per_bucket: int = field(default_factory=lambda: max(1, _env_int("TP_RATE_MAX_WAITERS", 40)))
     # Fallback policy for providers not listed in RATE_POLICY_DEFAULTS.
     rate_default_rpm: float = field(default_factory=lambda: max(0.0, _env_float("TP_RATE_RPM_DEFAULT", 30.0)))
     rate_default_burst: int = field(default_factory=lambda: max(1, _env_int("TP_RATE_BURST_DEFAULT", 4)))
