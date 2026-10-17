@@ -35,7 +35,7 @@ CASES=[('PAID_PROVIDER_KEY_LIMIT','paid_provider_key_limit',503),
 @pytest.mark.parametrize('unlimited',[False,True])
 def test_independent_calls_use_center_admission_and_later_attempt_recovers(center_code,public_code,admission_status,unlimited):
     async def scenario():
-        shared=NS(ai_admission_gate=AdmissionGate(2,max_waiters=64,max_wait_sec=3),ai_executor=ThreadPoolExecutor(4))
+        shared=NS(ai_admission_gate=AdmissionGate(2),ai_executor=ThreadPoolExecutor(4))
         started_a,started_b,release,release_other=threading.Event(),threading.Event(),threading.Event(),threading.Event()
         mutex=threading.Lock();provider_dispatches=[];center_posts=[];receipts={};tasks=[]
         real_provider_error=center_code!='INSUFFICIENT_CREDITS'

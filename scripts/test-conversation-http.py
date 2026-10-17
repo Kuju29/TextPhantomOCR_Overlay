@@ -137,7 +137,7 @@ try:
   # Same-document waiting occurs BEFORE scarce admission; another document
   # and another user continue, while no warm-up call gets manufactured.
   async def admission():
-   gate=AdmissionGate(2,max_waiters=16,max_wait_sec=3);pool=ThreadPoolExecutor(4)
+   gate=AdmissionGate(2);pool=ThreadPoolExecutor(4)
    def ctx(name,config):return NS(trace_id='',payload={'operationId':name},marked=markers.apply([name]),target_lang='th',config=config,request=NS(app=NS(state=NS(ai_admission_gate=gate,ai_executor=pool))),identity=config.conversation['owner'],correlation={},resolved_provider='huggingface',rate={'enabled':False},unlimited=False)
    conf=replace(cfg,conversation=descriptor({'documentId':'serial'},context={'tp_tab_session':'serial-user'}))
    other=replace(conf,conversation=descriptor({'documentId':'another'},context={'tp_tab_session':'other-user'}))

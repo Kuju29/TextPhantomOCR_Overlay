@@ -31,9 +31,9 @@ LANG_STYLE: Final[dict[str, str]] = {
 
 
 PROMPT_POLICY_VERSION: Final[dict[str, str]] = {
-    "th": "th-system-style-wrapper-2026.9.14.6",
-    "en": "en-system-style-wrapper-2026.9.14.6",
-    "ja": "ja-system-style-wrapper-2026.9.14.6",
+    "th": "th-style-m2-2026.10.17.1",
+    "en": "en-style-m2-2026.10.17.1",
+    "ja": "ja-style-m2-2026.10.17.1",
 }
 
 CANONICAL_PROMPT_CONTRACT_VERSION: Final[str] = "translation-plan-2"

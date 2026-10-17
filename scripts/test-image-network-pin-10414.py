@@ -211,25 +211,54 @@ def test_download_preserves_streamed_image_and_ignores_environment_proxy(monkeyp
     assert blob == b'fixture-png' and mime == 'image/png'
     assert observed[0].headers['Host'] == 'images.test'
     assert observed[0].headers['Referer'] == 'https://reader.test/'
-    assert observed[0].headers['Accept-Encoding'] == 'identity'
+    # 2026.10.16.3: compressed transfers are accepted again (as before .91),
+    # decoded here with the size cap on the decoded bytes.
+    assert observed[0].headers['Accept-Encoding'] == images._ACCEPT_ENCODING
+    assert 'gzip' in images._ACCEPT_ENCODING and 'deflate' in images._ACCEPT_ENCODING
 
 
-@pytest.mark.parametrize('encoding', ['gzip', 'deflate', 'br', 'zstd', 'identity, gzip'])
-def test_compressed_http_body_is_refused_before_any_body_decode(monkeypatch, encoding):
-    consumed = []
-    class PoisonBody(httpx.SyncByteStream):
-        def __iter__(self):
-            consumed.append(True)
-            raise AssertionError('compressed untrusted body must not be consumed')
-            yield b''
+def _serve(monkeypatch, encoding, body):
     def reply(request):
-        return httpx.Response(200, headers={'Content-Type': 'image/png',
-            'Content-Encoding': encoding}, stream=PoisonBody())
+        return httpx.Response(200, headers={'Content-Type': 'image/png', 'Content-Encoding': encoding},
+                              stream=httpx.ByteStream(body))
     monkeypatch.setattr(images, 'assert_image_url_allowed', lambda url: None)
     monkeypatch.setattr(images, 'PinnedImageTransport', lambda: httpx.MockTransport(reply))
-    with pytest.raises(UnsafeImageUrl, match='compressed'):
-        images.download('https://images.test/compressed.png')
-    assert consumed == []
+
+
+@pytest.mark.parametrize('encoding', ['gzip', 'deflate', 'identity, gzip'])
+def test_compressed_http_body_is_decoded_with_the_cap_on_decoded_bytes(monkeypatch, encoding):
+    import gzip, zlib
+    payload = b'\x89PNG fixture ' * 100
+    body = zlib.compress(payload) if encoding == 'deflate' else gzip.compress(payload)
+    _serve(monkeypatch, encoding, body)
+    blob, mime = images.download('https://images.test/compressed.png')
+    assert blob == payload and mime == 'image/png'
+
+
+def test_compression_bomb_stops_at_the_decoded_size_cap(monkeypatch):
+    import dataclasses, gzip
+    bomb = gzip.compress(b'\0' * (8 * 1024 * 1024))
+    _serve(monkeypatch, 'gzip', bomb)
+    monkeypatch.setattr(images, 'settings', dataclasses.replace(images.settings, max_image_bytes=1024 * 1024))
+    decoded = []
+    real_emit = images._BoundedDecoder._emit
+    def emit(self, data):
+        decoded.append(len(data))
+        return real_emit(self, data)
+    monkeypatch.setattr(images._BoundedDecoder, '_emit', emit)
+    with pytest.raises(images.ImageTooLarge):
+        images.download('https://images.test/bomb.png')
+    assert sum(decoded) <= 1024 * 1024 + 1, 'never inflates past the cap'
+
+
+@pytest.mark.parametrize('encoding', ['zstd', 'compress', 'gzip, br'])
+def test_undecodable_transfer_is_an_image_fetch_failure(monkeypatch, encoding):
+    if encoding == 'br' and images._brotli is not None:
+        pytest.skip('brotli installed')
+    _serve(monkeypatch, encoding, b'\x00\x01')
+    with pytest.raises(images.ImageTransferError) as caught:
+        images.download('https://images.test/odd.png')
+    assert caught.value.tp_stage == 'image_fetch'  # the browser may fetch it instead
 
 
 def test_redirect_to_private_destination_is_refused(monkeypatch):

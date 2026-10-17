@@ -180,18 +180,20 @@ async function occupy(key, n) {
   const admission = await readFile(new URL("../api/backend/jobs/admission.py", import.meta.url), "utf8");
   assert.match(main, /_AI_LIMIT = max\(1, min\(_AI_CONFIGURED, _AI_THREADS\)\)/,
     "AI admission must never exceed the real dedicated executor size");
-  assert.match(main, /max_waiters=settings\.sync_ai_max_waiters,[\s\S]*max_wait_sec=settings\.sync_ai_max_wait_sec/,
-    "AI admission must have its own no-backlog waiter settings");
+  assert.match(main, /app\.state\.ai_admission_gate = AdmissionGate\(\s*_AI_LIMIT,\s*name="ai",/,
+    "AI admission is its own named lane");
   assert.match(main, /adaptive=False,[\s\S]*limit_min=_AI_LIMIT,[\s\S]*limit_max=_AI_LIMIT/,
     "AI admission must stay pinned to executor capacity; provider latency must not shrink it");
-  assert.match(config, /TP_SYNC_AI_MAX_WAITERS", 8/,
-    "AI stage must keep only a small bounded fairness cushion; the browser still owns the large backlog");
-  assert.match(config, /TP_SYNC_AI_MAX_WAIT_SEC", 10\.0/,
-    "AI waiter timeout is only relevant if an operator explicitly enables waiters");
-  assert.match(admission, /if self\._max_waiters <= 0:[\s\S]*no server wait queue/,
-    "max_waiters=0 must reject immediately instead of secretly queuing one request per identity");
-  assert.match(admission, /def _hard_waiting_cap\(self\)[\s\S]*return self\._max_waiters/,
-    "max_waiters must be a literal global waiter cap, not limit + max_waiters");
+  // 2026.10.16.3 owner's rule: a lane keeps its CONCURRENCY limit but its
+  // waiting queue has no count cap and no deadline (memory guard only).
+  assert.doesNotMatch(main, /max_waiters|max_wait_sec/,
+    "no admission lane may be built with a waiter count cap or wait deadline");
+  assert.doesNotMatch(config, /TP_SYNC_(?:AI_|GROUP_)?MAX_WAITERS"|TP_SYNC_(?:AI_|GROUP_)?MAX_WAIT_SEC"|TP_RATE_MAX_WAITERS"/,
+    "the removed waiter-count/deadline settings must not come back");
+  assert.match(admission, /class WaitingBytes[\s\S]*max_queue_bytes/,
+    "waiting work is bounded by memory (TP_MAX_QUEUE_BYTES), not by a count");
+  assert.match(admission, /def _pick\(self\)[\s\S]*self\._running_by\.get\(key, 0\), self\._last_served\.get\(key, -1\)/,
+    "a freed slot goes to the waiting identity with the fewest running slots, round-robin on ties");
 
   const transport = [
     await readFile(new URL("../src/background/transports/translate.js", import.meta.url), "utf8"),

@@ -24,8 +24,9 @@ const localAdapterSource = Object.values(BUNDLED_CANONICAL_PROMPT_PLANS.th.piece
 
 // Check the current TH-localized policy, not retired English wrapper phrases.
 for (const [route, source] of [["Cloud canonical", cloudPromptSource], ["direct-local", localAdapterSource]]) {
-  assert.match(source, /ใช้หน่วยข้อความข้างเคียงช่วยเข้าใจบทสนทนาและประโยคต่อ/, `${route}: use available neighboring context`);
-  assert.match(source, /แก้ OCR เฉพาะเมื่ออ่านได้ชัดว่าควรเป็นอะไร/, `${route}: OCR correction must be evidence-grounded`);
+  // 2026.10.17.1 M2 style: neighboring units are read as one scene; unresolved OCR stays uncertain (task pack).
+  assert.match(source, /อ่านทั้งชุดเป็นฉากเดียว/, `${route}: use available neighboring context`);
+  assert.match(source, /คงความไม่แน่นอนที่แก้จากข้อมูลที่มีไม่ได้/, `${route}: OCR correction must be evidence-grounded`);
   assert.match(source, /อักขระหลงจาก OCR ไม่ใช่หลักฐานให้เพิ่มคำหรือการกระทำ/, `${route}: stray glyphs do not license invented content`);
   assert.match(source, /รักษาชื่อที่ไม่คุ้นเคยตามหลักฐาน/, `${route}: preserve unfamiliar names using evidence`);
 }

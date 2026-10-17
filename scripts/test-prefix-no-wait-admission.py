@@ -10,7 +10,7 @@ from backend.application.ai_translation import provider_execution
 from backend.ai.cache_coordination import PrefixCoordinator
 
 async def main():
- gate=AdmissionGate(2,max_waiters=32,max_wait_sec=3);coordinator=PrefixCoordinator();started=threading.Event();release=threading.Event();calls=[]
+ gate=AdmissionGate(2);coordinator=PrefixCoordinator();started=threading.Event();release=threading.Event();calls=[]
  executor=ThreadPoolExecutor(3)
  def translate(text,lang,cfg,**kwargs):
   lease=coordinator.acquire(provider='huggingface',model='x',endpoint='https://router.huggingface.co/v1',account=cfg.api_key,prefix='a'*64,target='th',source='en')

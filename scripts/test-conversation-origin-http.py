@@ -74,7 +74,7 @@ try:
     }), patch.object(httpx,'Client',LoopbackClient), patch('backend.ai.provider_resolution.discovered_model_capabilities',return_value=(False,{})):
         trace.start_session()
         app = FastAPI();app.include_router(router)
-        app.state.ai_admission_gate=AdmissionGate(4,max_waiters=16,max_wait_sec=3)
+        app.state.ai_admission_gate=AdmissionGate(4)
         app.state.ai_executor=executor
         @app.get('/fixture/state')
         async def state():

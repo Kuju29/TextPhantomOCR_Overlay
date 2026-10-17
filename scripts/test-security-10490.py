@@ -184,8 +184,7 @@ class QueueBudget(unittest.TestCase):
         return asyncio.run(run())
 
     def test_byte_budget_global_and_per_identity(self):
-        mod, q = self.queue(max_queue_bytes=3 * MiB, max_queue_bytes_per_identity=2 * MiB,
-                            max_queue_per_identity=100)
+        mod, q = self.queue(max_queue_bytes=3 * MiB, max_queue_bytes_per_identity=2 * MiB)
         image = "data:image/png;base64," + "A" * MiB
         self.enqueue(q, {"imageDataUri": image}, identity="install:a")
         with self.assertRaises(mod.QueueBytesFull):
@@ -199,13 +198,16 @@ class QueueBudget(unittest.TestCase):
         q._queued_bytes.pop(job_id)
         self.enqueue(q, {"imageDataUri": image}, identity="install:c")
 
-    def test_per_identity_job_cap_spans_tab_scopes(self):
-        mod, q = self.queue(max_queue_per_identity=2, max_queue_per_caller=200)
-        self.enqueue(q, {"src": "https://a/1"}, identity="install:a", scope="o:tab1")
-        self.enqueue(q, {"src": "https://a/2"}, identity="install:a", scope="o:tab2")
-        with self.assertRaises(mod.CallerQueueFull):
-            self.enqueue(q, {"src": "https://a/3"}, identity="install:a", scope="o:tab3")
+    def test_no_job_count_cap_only_memory(self):
+        # 2026.10.16.3 (owner's rule): waiting work is never refused for its
+        # COUNT. 500 small jobs from one browser across tabs are all accepted;
+        # only the byte budget above can answer "busy".
+        mod, q = self.queue()
+        for i in range(500):
+            self.enqueue(q, {"src": f"https://a/{i}"}, identity="install:a", scope=f"o:tab{i % 3}")
         self.enqueue(q, {"src": "https://b/1"}, identity="install:b", scope="o:tab9")
+        self.assertEqual(q._total_depth(), 501)
+        self.assertFalse(hasattr(mod, "CallerQueueFull"))
         record = q.public_record(next(iter(q._jobs)))
         self.assertNotIn("identity", record)
 

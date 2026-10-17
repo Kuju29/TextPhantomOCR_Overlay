@@ -937,7 +937,9 @@ class NativeConversationTest(unittest.TestCase):
             body=json.loads(next(call.content for call in calls if call.url.path=="/api/chat"))
             self.assertNotIn("format",body)
             # Native /api/show proves this model can grow past the loaded 8K context.
-            self.assertEqual(body["options"]["num_ctx"],16384)
+            # 2026.10.17.1: the planned window follows the (shorter) prompt, up to the model limit.
+            self.assertGreater(body["options"]["num_ctx"],8192)
+            self.assertLessEqual(body["options"]["num_ctx"],16384)
             self.assertEqual(body["messages"][-1]["images"],["aGVsbG8="])
             actual=discovered_model_capabilities("ollama",base,"selected")[1]
             self.assertEqual(actual["vision"]["supported"],True)

@@ -65,7 +65,7 @@ assert.ok(conversationWithExamples > conversationAnchor, 'Conversation input est
 assert.ok(conversationAnchor >= independentNoExamples, 'Conversation record protocol must still reserve its input');
 const oneRecord = [{id:'I1_P0',text:'HELLO'}];
 const narrowConversation = estimateRequest(oneRecord,initialProfile(),{
-  contract:'compact_records',limits:{contextTokens:8192,maxOutputTokens:4096},reasoningActive:false,
+  contract:'compact_records',limits:{contextTokens:4096,maxOutputTokens:4096},reasoningActive:false,
   fixedInput:0,estimateFixedInput:createPromptInputEstimator({ai:{translation_mode:'conversation',style_examples:true},targetLang:'th'})});
 assert.equal(narrowConversation.fitsHard,false,'a verified narrow context must reject the full fixed anchor before provider dispatch');
 const tooSmall = estimateRequest(page, initialProfile(), { contract: 'compact_records',

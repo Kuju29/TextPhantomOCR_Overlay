@@ -260,7 +260,7 @@ await test("an inline data: image is sent once: src dropped only when identical 
     assert.equal(body.imageDataUri, DATA, r.url);
   }
   assert.equal(payload.src, DATA, "the caller's payload is not modified");
-  assert.match(read("api/backend/jobs/stages/payload_io.py"), /if payload\.get\("imageDataUri"\):\s*\n\s*return data_uri_to_bytes\(payload\["imageDataUri"\]\)/,
+  assert.match(read("api/backend/jobs/stages/payload_io.py"), /if payload\.get\("imageDataUri"\):\s*\n\s*return (?:data_uri_to_bytes|_inline_bytes)\(payload\["imageDataUri"\]\)/,
     "the API reads imageDataUri before src");
 });
 

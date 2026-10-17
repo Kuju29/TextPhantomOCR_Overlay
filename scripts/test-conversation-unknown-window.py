@@ -33,13 +33,17 @@ other=replace(ai,provider='groq',base_url='https://api.groq.com/openai/v1')
 assert plan(rows,other,{})[1]['target']==7372
 unknown=replace(other,model_capabilities={})
 assert plan(rows,unknown,{})[1]['target']==1536
+# 2026.10.17.1: the M2 built-in prompt fits an 8K window with a reduced output
+# target; a 4K window cannot hold it and must refuse before dispatch.
 low=replace(ai,model_capabilities={'limits':{'contextTokens':8192}})
+assert plan(rows,low,{})[1]['target'] < 7372, 'small context must not use the 8K application ceiling'
+tiny=replace(ai,model_capabilities={'limits':{'contextTokens':4096}})
 try:
-    plan(rows,low,{})
+    plan(rows,tiny,{})
 except WorkloadBudgetError:
     pass
 else:
-    raise AssertionError('small context must not use the 8K application ceiling')
+    raise AssertionError('a context that cannot hold the prompt must not dispatch')
 assert plan(rows,ai,{'outcomes':['length']})[1]['target']==6144
 assert plan(rows,ai,{'outcomes':['length','ok','ok','ok','ok']})[1]['target']==7372
 thinking_rows,thinking_estimate,_=plan(rows,ai,{'reasoningSeen':True,'reasoning':372})

@@ -60,7 +60,7 @@ class WebsiteThinking(unittest.IsolatedAsyncioTestCase):
         session = {'id': SESSION_ID, 'provider': provider, 'credential': 'fixture'}
         app = FastAPI()
         app.include_router(router)
-        app.state.ai_admission_gate = AdmissionGate(4, max_waiters=16, max_wait_sec=3)
+        app.state.ai_admission_gate = AdmissionGate(4)
         app.state.ai_executor = None
         runs.clear()
         cold = [] if fresh else [

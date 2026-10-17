@@ -37,7 +37,7 @@ class FakeRequest:
         }
         self.query_params = {}
         self.app = SimpleNamespace(state=SimpleNamespace(
-            grouping_admission_gate=AdmissionGate(8, max_waiters=2, max_wait_sec=1),
+            grouping_admission_gate=AdmissionGate(8),
             grouping_executor=ThreadPoolExecutor(max_workers=8),
         ))
 

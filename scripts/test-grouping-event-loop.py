@@ -24,7 +24,7 @@ class GroupingEventLoopTests(unittest.IsolatedAsyncioTestCase):
                 return original(*args,**kwargs)
             finally:finished.set()
         app=FastAPI();app.include_router(lens_groups.router)
-        app.state.grouping_admission_gate=AdmissionGate(15,max_waiters=8,max_wait_sec=1)
+        app.state.grouping_admission_gate=AdmissionGate(15)
         app.state.grouping_executor=ThreadPoolExecutor(max_workers=15,thread_name_prefix='test-group')
         @app.get('/diagnostic-probe')
         async def probe():return {'groupingStillActive':started.is_set() and not finished.is_set()}

@@ -30,7 +30,7 @@ from backend.jobs.admission import AdmissionGate
 
 
 async def scenario(*, conversation=False, unlimited=False):
-    gate = AdmissionGate(1, max_waiters=8, max_wait_sec=2)
+    gate = AdmissionGate(1)
     executor = ThreadPoolExecutor(2)
     entered_a, entered_b, release = (threading.Event() for _ in range(3))
     lock = threading.Lock()

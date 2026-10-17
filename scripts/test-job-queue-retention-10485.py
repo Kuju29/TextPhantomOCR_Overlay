@@ -1,4 +1,7 @@
-""".10485 API job queue: delivered results drop image bytes after a short grace; per-caller queue cap (503 busy)."""
+""".10485 API job queue: delivered results drop image bytes after a short grace.
+
+2026.10.16.3: the former per-caller COUNT cap (503 busy at 3/200 queued jobs) is
+gone by the owner's rule -- waiting is bounded by memory only (QueueBytesFull)."""
 import asyncio
 import sys
 from dataclasses import replace
@@ -8,7 +11,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'api'))
 from backend.config import settings
 from backend.jobs import queue as queue_module
-from backend.jobs.queue import JobQueue, QueueFull, CallerQueueFull, DELIVERED_IMAGE_GRACE_SEC
+from backend.jobs.queue import JobQueue, QueueBytesFull, QueueFull, DELIVERED_IMAGE_GRACE_SEC
 from backend.application import legacy_translation
 
 IMAGE = 'data:image/png;base64,' + 'A' * 200_000
@@ -18,18 +21,12 @@ async def main():
     q = JobQueue(lambda payload: {})
     payload = {'mode': 'lens_text', 'source': 'direct', 'src': 'https://x.invalid/a.png'}
 
-    # Per-caller cap: the caller's queued jobs are capped, other callers still get in.
-    with patch.object(queue_module, 'settings', replace(settings, max_queue_per_caller=3)):
-        for _ in range(3):
-            await q.enqueue(payload, caller_scope='o:tab-a')
-        try:
-            await q.enqueue(payload, caller_scope='o:tab-a')
-            raise AssertionError('caller cap not enforced')
-        except CallerQueueFull as exc:
-            assert isinstance(exc, QueueFull), 'same 503 + Retry-After route contract'
-            assert str(exc).startswith('server busy'), 'client maps it to SERVER_BUSY'
-            assert exc.code == 'queue_caller_limit'
-        await q.enqueue(payload, caller_scope='o:tab-b')
+    # No per-caller count cap: one tab may queue many jobs; others still get in.
+    for _ in range(250):
+        await q.enqueue(payload, caller_scope='o:tab-a')
+    await q.enqueue(payload, caller_scope='o:tab-b')
+    assert not hasattr(queue_module, 'CallerQueueFull')
+    assert issubclass(QueueBytesFull, QueueFull), 'memory guard keeps the 503 + Retry-After route contract'
 
     # Finished job: result kept intact until delivered, then image bytes released after the grace window.
     job = (await q.enqueue(payload, caller_scope='o:tab-c'))['id']
@@ -56,7 +53,7 @@ async def main():
     out = await legacy_translation.poll_jobs(q, [other, third], wait=0, caller_scope='o:tab-c', max_inline=1)
     assert out['jobs'][1].get('result_ready') is True
     assert 'delivered_at' in q._jobs[other] and 'delivered_at' not in q._jobs[third]
-    print('PASS .10485 job queue: per-caller cap (503 server busy) and delivered image bytes released after 120 s grace')
+    print('PASS .10485 job queue: no job-count cap (memory guard only) and delivered image bytes released after 120 s grace')
 
 
 asyncio.run(main())

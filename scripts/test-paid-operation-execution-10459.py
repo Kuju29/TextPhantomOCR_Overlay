@@ -28,7 +28,7 @@ def context(shared, name, unlimited=False):
 
 
 async def parallel_case(unlimited=False):
-    shared = NS(ai_admission_gate=AdmissionGate(2, max_waiters=64, max_wait_sec=3),
+    shared = NS(ai_admission_gate=AdmissionGate(2),
                 ai_executor=ThreadPoolExecutor(4))
     started, release = threading.Event(), threading.Event()
     sent = []
@@ -70,7 +70,7 @@ async def parallel_case(unlimited=False):
 
 
 async def queued_cancel_case():
-    shared = NS(ai_admission_gate=AdmissionGate(2, max_waiters=64, max_wait_sec=3),
+    shared = NS(ai_admission_gate=AdmissionGate(2),
                 ai_executor=ThreadPoolExecutor(4))
     started = {name: threading.Event() for name in ("A0", "B0")}
     release = threading.Event()

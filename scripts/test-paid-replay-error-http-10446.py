@@ -33,7 +33,7 @@ class PaidReplayErrors(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         idempotency.clear();conversations._stores.clear()
         self.app=FastAPI();self.app.include_router(router)
-        self.app.state.ai_admission_gate=AdmissionGate(2,max_waiters=4,max_wait_sec=2)
+        self.app.state.ai_admission_gate=AdmissionGate(2)
         self.app.state.ai_executor=None
         self.calls=[];self.replay=True;self.foreign=False;self.answer=''
         client_type=httpx.Client

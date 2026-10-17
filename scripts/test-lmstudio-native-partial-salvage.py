@@ -98,8 +98,7 @@ class NativePartialSalvageTest(unittest.TestCase):
             try:
                 app = FastAPI()
                 app.include_router(router)
-                app.state.ai_admission_gate = AdmissionGate(1, max_waiters=2,
-                                                            max_wait_sec=5)
+                app.state.ai_admission_gate = AdmissionGate(1)
                 app.state.ai_executor = executor
 
                 async def run() -> None:

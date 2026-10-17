@@ -88,7 +88,11 @@ await test("selecting a Manual model sends no generation request and does not wa
   }
   for (const path of ["src/popup/controllers/provider-meta-controller.js", "src/shared/constants.js", "src/popup/popup.js"])
     assert.doesNotMatch(read(path), /AI_PROBE|probeSelected|\/ai\/probe|Testing selected model/, path);
-  assert.doesNotMatch(read("api/backend/api/routes/ai.py"), /\/ai\/probe/);
+  // 2026.10.16.3: the API answers /ai/probe again ONLY as a no-cost stub for
+  // the 2026.9.27.26 popup: it reads no body and calls no provider.
+  const aiRoutes = read("api/backend/api/routes/ai.py");
+  assert.match(aiRoutes, /@router\.post\("\/ai\/probe"\)\nasync def probe_compat\(\) -> dict:[\s\S]*?return \{"ok": False, "status": "not_tested", "model_capabilities": \{\}\}/);
+  assert.doesNotMatch(aiRoutes, /import probe|ai_probe|probe\.probe\(/);
 });
 
 await test("a deterministic first-translation failure marks the model; the next one is not sent", async () => {

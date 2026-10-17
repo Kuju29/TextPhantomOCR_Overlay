@@ -48,8 +48,9 @@ for bounds in ({'contextTokens':65536,'maxOutputTokens':4096},
     assert len(selected) == (40 if bounds.get('maxOutputTokens') == 4096 else
         80 if bounds.get('contextTokens') else 10), bounds
 
+# 2026.10.17.1: the M2 built-in prompt fits 8K; 4K still cannot hold prompt + output.
 small_context = replace(ai,
-    model_capabilities={'limits':{'contextTokens':8192,'maxOutputTokens':8192}})
+    model_capabilities={'limits':{'contextTokens':4096,'maxOutputTokens':8192}})
 try:
     plan({'successes':1},small_context)
 except WorkloadBudgetError as error:

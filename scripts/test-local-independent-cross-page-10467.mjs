@@ -56,7 +56,7 @@ const units=(prefix,n=2)=>Array.from({length:n},(_,k)=>({id:`P${k}`,text:`${pref
   const c=createWorkloadController({read:async()=>({}),write:async()=>{},emit:()=>{}});
   const local={...ai,provider:'ollama',base_url:'http://127.0.0.1:11434',
     model_capabilities:{reasoning:{supported:false},structured_output:{supported:false},
-      limits:{contextTokens:12288,source:'runtime',scope:'runtime'}}};
+      limits:{contextTokens:7168,source:'runtime',scope:'runtime'}}}; // 2026.10.17.1: sized for the M2 built-in prompt
   const session=await c.open({route:'direct-local',ai:local,sourceLang:'en',targetLang:'th',wholePageFirst:true});
   const line=n=>'An ordinary line of dialogue for the fixture '.repeat(n);
   const p1=Array.from({length:10},(_,i)=>({id:`I1_P${i}`,text:line(3)}));
@@ -65,7 +65,7 @@ const units=(prefix,n=2)=>Array.from({length:n},(_,k)=>({id:`P${k}`,text:`${pref
   const plan=session.nextIndependentReady([...p1,...p2,...p3],[10,5,15]);
   assert.equal(plan.pageCount,2,'pages 1+2 fill the window; page 3 waits');
   assert.equal(plan.splitReason,'local_window_before_page');
-  const e=plan.estimate;assert.ok(e.estimatedInput+e.predictedOutput+e.reasoningReserve+128<=12288);
+  const e=plan.estimate;assert.ok(e.estimatedInput+e.predictedOutput+e.reasoningReserve+128<=7168);
   const all=session.nextIndependentReady([...p1,...p2],[10,5]);
   assert.equal(all.pageCount,2);assert.equal(all.splitReason,'ready_queue_drained');
   const huge=Array.from({length:300},(_,i)=>({id:`I9_P${i}`,text:line(2)}));

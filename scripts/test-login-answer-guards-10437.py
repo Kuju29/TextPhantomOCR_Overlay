@@ -74,7 +74,7 @@ class AnswerGuards(unittest.IsolatedAsyncioTestCase):
         module = SimpleNamespace(endpoint_generate=generate)
         from backend.jobs.admission import AdmissionGate
         app = FastAPI(); app.include_router(router)
-        app.state.ai_admission_gate = AdmissionGate(4, max_waiters=16, max_wait_sec=3)
+        app.state.ai_admission_gate = AdmissionGate(4)
         app.state.ai_executor = None
         runs.clear()
         with patch.object(adapter, 'authorize_model', return_value=('owner', session, 'web-default')), \

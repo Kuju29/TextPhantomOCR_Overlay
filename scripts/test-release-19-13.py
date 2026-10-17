@@ -39,7 +39,7 @@ class ReleaseHttp(unittest.IsolatedAsyncioTestCase):
   for p in [patch.object(provider_registry.require('huggingface').adapter,'generate',side_effect=generate),patch('backend.ai.provider_resolution.discovered_model_capabilities',side_effect=discovered),patch.object(repair_runs,'store',RepairStore(Path(self.temp.name)/'repair.sqlite'))]:p.start();self.addCleanup(p.stop)
   self.pool=ThreadPoolExecutor(max_workers=4);self.addCleanup(self.pool.shutdown)
   self.app=FastAPI();self.app.include_router(ai_router);self.app.include_router(repair_runs.router)
-  self.app.state.ai_admission_gate=AdmissionGate(4,max_waiters=16,max_wait_sec=3);self.app.state.ai_executor=self.pool
+  self.app.state.ai_admission_gate=AdmissionGate(4);self.app.state.ai_executor=self.pool
   self.client=httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app),base_url='http://test')
   self.headers={'X-TP-Run-Token':'a'*64,'X-TP-Tab-Session':'independent-release-test'}
   self.base='/v2/engine/runsextension/repair-runs'

@@ -25,8 +25,15 @@ class Probe1920(unittest.TestCase):
     def test_probe_route_and_service_are_removed(self):
         root = Path(__file__).resolve().parents[1] / 'api' / 'backend'
         self.assertFalse((root / 'ai' / 'probe.py').exists())
+        # 2026.10.16.3: the live probe service stays removed; /ai/probe is a
+        # no-cost compatibility stub for the 2026.9.27.26 popup (no provider call).
+        import asyncio, inspect
         from backend.api.routes import ai as routes
-        self.assertNotIn('/ai/probe', [getattr(route, 'path', '') for route in routes.router.routes])
+        stub = [route for route in routes.router.routes if getattr(route, 'path', '') == '/ai/probe']
+        self.assertEqual(len(stub), 1)
+        self.assertEqual(list(inspect.signature(stub[0].endpoint).parameters), [])  # never reads the key
+        self.assertEqual(asyncio.run(stub[0].endpoint()),
+                         {'ok': False, 'status': 'not_tested', 'model_capabilities': {}})
 
     def test_hf_lowest_success_never_calls_optional_low(self):
         efforts = []

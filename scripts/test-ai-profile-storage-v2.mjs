@@ -15,7 +15,7 @@ const knownDefaultMigration = await migrateKnownBuiltInPromptRecords(
   { historicalThaiHashes: [historicalFixtureHash] },
 );
 assert.equal(knownDefaultMigration.changed, true);
-assert.match(knownDefaultMigration.prompts[oldPromptKey].text, /สิ่งที่ต้องรักษาคือความหมาย/,
+assert.match(knownDefaultMigration.prompts[oldPromptKey].text, /ล็อกเสียงตัวละคร/,
   "a byte-identical known built-in advances to the current bundled Thai prompt");
 const customMigration = await migrateKnownBuiltInPromptRecords(
   { [oldPromptKey]: { text: `${historicalFixture}!`, mode: "replace" } },

@@ -166,7 +166,7 @@ try {
   assert.equal(rows.size,2);
   for(let page=1;page<=5;page++) await send(page,`History ${page}`,{owner:'context-budget'});
   const rolled=await send(6,'After context limit',{owner:'context-budget',
-    limits:{contextTokens:9400,maxInputTokens:9400,maxOutputTokens:4096}});
+    limits:{contextTokens:5200,maxInputTokens:5200,maxOutputTokens:4096}}); // 2026.10.17.1: sized for the M2 built-in prompt
   assert.equal(rolled.meta.conversation.providerThreadRollover,true);
   assert.equal(rolled.meta.conversation.continuationTransport,'native_response_cursor');
   assert.equal(rolled.meta.conversation.historyTurns,0);

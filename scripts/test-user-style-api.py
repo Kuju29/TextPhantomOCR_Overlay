@@ -22,7 +22,7 @@ from backend.ai.resolve import prompt_default
 from backend.ai.request_diagnostics import request_diagnostics
 from backend.diagnostic_schema import sanitize_prompt_layout
 
-assert hashlib.sha256((ROOT/'api/backend/ai/prompts/builtin_styles.py').read_bytes()).hexdigest() == 'afc53060d11779aadb89d91fdc9258c98465f0a56de6cb1a92e8e4d5d336c1ef', '13.1 built-in styles must remain unchanged'
+assert hashlib.sha256((ROOT/'api/backend/ai/prompts/builtin_styles.py').read_bytes()).hexdigest() == '67069b3bc8a656ace8a63a9cbab771936541c18569239a3561758b68a4f07d49', '2026.10.17.1 built-in styles (M2 form) must remain unchanged'
 checks = 0
 providers = list(invocation.provider_registry)
 with tempfile.TemporaryDirectory(prefix='tp-user-style-') as tmp, patch.dict(os.environ, {'TP_USAGE_STATE_FILE':str(Path(tmp)/'usage.sqlite')}):

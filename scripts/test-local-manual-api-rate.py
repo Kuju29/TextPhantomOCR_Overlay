@@ -18,7 +18,7 @@ assert rate_bucket_identity(on, base_url=identity["base_url"]) != rate_bucket_id
 
 async def check():
     args = ("lmstudio", "local-test-manual-rate", rate_bucket_identity(on, base_url=identity["base_url"]))
-    extras = dict(session="test", deadline_sec=2, max_waiters=3, rpm_override=600,
+    extras = dict(session="test", deadline_sec=2, rpm_override=600,
                   burst_override=1, manual_local=True)
     await rate_gate.acquire(*args, job_id="one", **extras)
     started = time.monotonic()

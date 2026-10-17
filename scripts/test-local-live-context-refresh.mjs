@@ -43,10 +43,11 @@ try{
   let plan=await choose();
   assert.equal(plan.session.ai.model_capabilities.limits.contextTokens,32768);
   assert.equal(plan.estimate.limits.contextTokens,32768);
-  context=4096;
+  // 2026.10.17.1: the M2 built-in prompt fits 4K; 2K still cannot hold it.
+  context=2048;
   await assert.rejects(choose(),error=>error.code==='ai_workload_budget_insufficient' &&
-    error.requestDispatched===false && error.diagnostics.contextLimit===4096,
-    'READY rejects the full prompt under the refreshed 4K window before provider dispatch');
+    error.requestDispatched===false && error.diagnostics.contextLimit===2048,
+    'READY rejects the full prompt under the refreshed 2K window before provider dispatch');
   context=32768;
   plan=await choose();
   assert.equal(plan.estimate.limits.contextTokens,32768,'same model ID can grow again');
@@ -67,9 +68,9 @@ try{
     {refresh:check,open:args=>controller.open(args)});
   let koboldPlan=await chooseKobold();
   assert.equal(koboldPlan.estimate.limits.contextTokens,32768);
-  context=4096;
+  context=2048;
   await assert.rejects(chooseKobold(),error=>error.code==='ai_workload_budget_insufficient' &&
-    error.requestDispatched===false && error.diagnostics.contextLimit===4096);
+    error.requestDispatched===false && error.diagnostics.contextLimit===2048);
   context=32768;
   koboldPlan=await chooseKobold();
   assert.equal(koboldPlan.estimate.limits.contextTokens,32768);

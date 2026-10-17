@@ -12,7 +12,8 @@ import {createHash} from 'node:crypto';
 const originalUrl=new URL('./test-popup-cache-failures-10450.mjs',import.meta.url);
 const original=await readFile(originalUrl,'utf8');
 const originalSha256=createHash('sha256').update(original).digest('hex');
-assert.equal(originalSha256,'aedfaf52fc519485dd31fb4f02ceb0a1dd578cb684c670bd1f76bffa310b166d',
+// 2026.10.16.2: the reviewed suite now seeds data-use consent in its own fixture (one storage key; no assertion changed).
+assert.equal(originalSha256,'fa27a5c913c829a9a29325cb943c4a310777adb220f9184d1ed6695c573684eb',
   'This runner must use the unchanged reviewed .50 suite');
 const fixtureImport="import {popupEntryFixture} from './lib/popup-entry-fixture.mjs';";
 assert.equal(original.split(fixtureImport).length,2,'Exactly one fixture import must be replaced');

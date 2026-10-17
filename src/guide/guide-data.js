@@ -2,7 +2,7 @@
 // Callout x/y and box values are percentages of the image size.
 window.TP_GUIDE_DATA = {
  "generatedBy": "scripts/guide/capture-guide.py",
- "version": "2026.10.16.2",
+ "version": "2026.10.17.2",
  "scale": 1.5,
  "shots": {
   "header": {

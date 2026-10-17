@@ -88,11 +88,11 @@ class MultiuserTests(unittest.TestCase):
             'context':{'tp_tab_session':owner or f'{self.prefix[:8]}-user-{user}'},
             'memory':{'mode':'off','styleExamples':False},'repair':{'owner':'extension'}}
 
-    def app(self,slots=4,wait=3):
+    def app(self,slots=4):
         app=FastAPI();app.include_router(ai_v1.router)
         pool=ThreadPoolExecutor(max_workers=slots)
         app.state.ai_executor=pool
-        app.state.ai_admission_gate=AdmissionGate(slots,max_waiters=64,max_wait_sec=wait)
+        app.state.ai_admission_gate=AdmissionGate(slots)
         return app,pool
 
     async def send(self,client,user,turn,**kw):
@@ -173,10 +173,13 @@ class MultiuserTests(unittest.TestCase):
             finally:pool.shutdown(wait=True)
         asyncio.run(run())
 
-    def test_saturated_shared_slots_reject_bounded_not_pretend_no_impact(self):
+    def test_saturated_shared_slots_queue_fairly_never_reject(self):
+        # 2026.10.16.3 (owner's rule): a full AI lane is a queue, not a 503.
+        # The other account waits (no count cap, no deadline), keeps every
+        # running owner untouched, and gets the very next freed slot.
         self.hold(300,0);self.hold(300,1)
         async def run():
-            app,pool=self.app(slots=2,wait=.12)
+            app,pool=self.app(slots=2)
             tasks=[]
             try:
                 async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://fixture') as c:
@@ -184,16 +187,24 @@ class MultiuserTests(unittest.TestCase):
                     for t in (0,1):
                         tasks.append(asyncio.create_task(self.send(c,300,t,document=f'doc-{t}')))
                         self.assertTrue(await asyncio.to_thread(self.entered[(300,t)].wait,3))
-                    start=time.monotonic();b=await self.send(c,301,0);elapsed=time.monotonic()-start
-                    self.assertEqual(b.status_code,503,b.text)
-                    self.assertLess(elapsed,1.5);self.assertFalse(any(x['user']==301 for x in self.calls))
+                    start=time.monotonic()
+                    other=asyncio.create_task(self.send(c,301,0))
+                    for _ in range(200):
+                        if app.state.ai_admission_gate.stats().waiting==1:break
+                        await asyncio.sleep(.01)
+                    await asyncio.sleep(.3)  # longer than the old 0.12 s deadline
+                    self.assertFalse(other.done());self.assertEqual(app.state.ai_admission_gate.stats().waiting,1)
+                    self.assertFalse(any(x['user']==301 for x in self.calls))
                     self.assertEqual(app.state.ai_admission_gate.stats().running,2)
-                    for t in (0,1):self.holds[(300,t)].set()
+                    self.holds[(300,0)].set()
+                    b=await other;elapsed=time.monotonic()-start
+                    self.assertEqual(b.status_code,200,b.text)
+                    self.holds[(300,1)].set()
                     for r in await asyncio.gather(*tasks):self.body(r)
                     self.assertEqual(app.state.ai_admission_gate.stats().running,0)
+                    self.assertEqual(app.state.ai_admission_gate.stats().waiting,0)
                     print(json.dumps({'scenario':'all_shared_slots_held','otherUserHttpStatus':b.status_code,
-                        'waitMs':round(elapsed*1000,1),'configuredFixtureWaitMs':120,
-                        'otherUserNativeRequests':0,'existingOwnersPreserved':True}))
+                        'waitMs':round(elapsed*1000,1),'rejected':0,'existingOwnersPreserved':True}))
             finally:
                 for x in self.holds.values():x.set()
                 await asyncio.gather(*tasks,return_exceptions=True);pool.shutdown(wait=True)

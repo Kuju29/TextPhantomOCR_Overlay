@@ -31,7 +31,8 @@ const py=spawnSync('python',['-c',`import json,sys;sys.path.insert(0,'api');from
 for row in json.load(sys.stdin):
  assert plan_ollama_context(row['limits'],row['estimate'])==row['expected'],row
 print('PASS 20 native context policy parity fixtures')`],{input:JSON.stringify(fixtures),encoding:'utf8'});assert.equal(py.status,0,py.stderr);console.log(py.stdout.trim());
-let requests=[],active=4096;
+// 2026.10.17.1: the M2 built-in Thai prompt fits 4K, so the loaded window is 2K here.
+let requests=[],active=2048;
 const model='fixture-local:9b';
 const server=http.createServer(async(req,res)=>{
  let body='';for await(const c of req)body+=c;
@@ -42,7 +43,7 @@ const server=http.createServer(async(req,res)=>{
  if(req.url==='/api/show')return res.end(JSON.stringify({capabilities:['completion','thinking'],thinking:{values:[false,true],default:false},model_info:{'general.architecture':'fixture','fixture.context_length':32768}}));
  if(req.url!=='/api/chat'){res.statusCode=404;return res.end('{}');}
  if(!data.messages.some(m=>m.role==='system'))return res.end(JSON.stringify({model,message:{role:'assistant',content:'OK'},done:true,done_reason:'stop'}));
- assert.ok(data.options.num_ctx>4096,'the planned Thai prompt needs a window above the loaded 4K, not just a healthy server');
+ assert.ok(data.options.num_ctx>2048,'the planned Thai prompt needs a window above the loaded 2K, not just a healthy server');
  active=data.options.num_ctx;
  const src=data.messages.at(-1).content.split('ข้อความต้นฉบับ\n').at(-1);
  const ids=[...src.matchAll(/(?:<<TP_)?(P\d+):/g)].map(m=>m[1]);assert.ok(ids.length);
@@ -54,8 +55,9 @@ try {
  const adapter=createOllamaAdapter({baseUrl:base});
  // Run real discovery transport against a local HTTP fixture; not fetch stubs.
  const discovered=await adapter.listModels({selectedModel:model,timeoutMs:1000});
- const caps=discovered.capability.models[model];assert.equal(caps.limits.modelContextTokens,32768);assert.equal(caps.limits.contextTokens,4096);
- const units=[{id:'balloon-a',text:'Hello.'},{id:'balloon-b',text:'Are you okay?'}];
+ const caps=discovered.capability.models[model];assert.equal(caps.limits.modelContextTokens,32768);assert.equal(caps.limits.contextTokens,2048);
+ // Longer balloons keep the planner and the sender clear of the 4K growth step.
+ const units=[{id:'balloon-a',text:'Hello. '.repeat(60).trim()},{id:'balloon-b',text:'Are you okay? '.repeat(40).trim()}];
  const ai={provider:'ollama',model,base_url:base,thinking:'off',memory_mode:'off',style_examples:true,local_adapter:{protocol:'ollama',baseUrl:base},model_capabilities:caps};
  const fixed=createPromptInputEstimator({ai,route:'direct-local',sourceLang:'en',targetLang:'th',contract:'schema_object'});
  assert.throws(()=>takeWorkloadBatch(units,0,initialProfile(),{contract:'schema_object',limits:caps.limits,fixedInput:0,estimateFixedInput:u=>fixed(u,units),reasoningActive:false,wholePageFirst:true}),e=>e.code==='ai_workload_budget_insufficient','old runtime-only planning reproduces pre-dispatch rejection');
@@ -66,7 +68,7 @@ try {
   while(offset<units.length){
    const chunk=session.next(units,offset);assert.ok(chunk.estimate.fitsHard);
    const clean=globalThis.TPAuditSchema.sanitize(budgetDiagnostic(chunk,{operationId:'ai:'+'a'.repeat(32),pageUnits:units.length}));
-   assert.equal(clean.planned.runtimeContext,4096);assert.equal(clean.planned.modelContext,32768);assert.equal(clean.planned.requestedContext,chunk.estimate.limits.contextTokens);
+   assert.equal(clean.planned.runtimeContext,2048);assert.equal(clean.planned.modelContext,32768);assert.equal(clean.planned.requestedContext,chunk.estimate.limits.contextTokens);
    const wire=[];const answer=await translateWithLocalOpenAi(chunk.units,{ai:{...session.ai,workload:{version:1,...chunk.estimate}},canonicalPrompt:plans.th,targetLang:'th',sourceLang:'en',wireTrace:async(stage,value)=>wire.push({stage,value})});
    const sent=requests.filter(r=>r.path==='/api/chat').at(-1).body;
    assert.equal(sent.think,false);assert.equal(sent.options.num_ctx,chunk.estimate.limits.contextTokens);
@@ -80,8 +82,8 @@ try {
  }
  const before=requests.length;
  const denied=createWorkloadController({read:async()=>({}),write:async()=>{},emit:()=>{}});
- const session=await denied.open({route:'direct-local',targetLang:'th',sourceLang:'en',ai:{...ai,model_capabilities:{...caps,limits:{...caps.limits,modelContextTokens:2048}}}});
- assert.throws(()=>session.next(units,0),e=>e.code==='ai_workload_budget_insufficient' && e.requestDispatched===false && e.diagnostics.contextLimit===2048 && e.diagnostics.modelContext===2048);
+ const session=await denied.open({route:'direct-local',targetLang:'th',sourceLang:'en',ai:{...ai,model_capabilities:{...caps,limits:{...caps.limits,modelContextTokens:1024}}}});
+ assert.throws(()=>session.next(units,0),e=>e.code==='ai_workload_budget_insufficient' && e.requestDispatched===false && e.diagnostics.contextLimit===1024 && e.diagnostics.modelContext===1024);
  assert.equal(requests.length,before,'known small model still rejected before HTTP');
  console.log('PASS native HTTP discovery → planner → full preserved Thai prompt → requested num_ctx → marker/JSON parse → usage/learning; no API translation proxy, IDs conserved, no silent truncation.');
 } finally {server.closeAllConnections();await new Promise(r=>server.close(r));}

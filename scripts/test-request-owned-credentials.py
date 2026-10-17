@@ -101,7 +101,9 @@ class Tests(unittest.TestCase):
     r=await c.get('/meta');self.assertFalse(r.json()['has_env_ai_key']);self.assertEqual(r.json()['credential_policy'],'user_required')
     r=await c.get('/v1/ai/schema');self.assertFalse(r.json()['hasServerKey'])
     r=await c.post('/ai/resolve',json={'provider':'huggingface','model':'fixture','lang':'th'});self.assertEqual(r.status_code,200);self.assertFalse(r.json()['ok'])
-    self.assertEqual((await c.post('/ai/probe',json={'provider':'huggingface','model':'fixture'})).status_code,404)
+    # 2026.10.16.3 compatibility stub: no provider call, nothing verified.
+    r=await c.post('/ai/probe',json={'provider':'huggingface','model':'fixture'});self.assertEqual(r.status_code,200)
+    self.assertEqual(r.json(),{'ok':False,'status':'not_tested','model_capabilities':{}})
     for path in ['/v1/ai/translate','/v2/engine/runsextension/ai/translate']:
      r=await c.post(path,json={'provider':{'id':'huggingface','model':'fixture'},'units':[{'id':'P0','text':'Hello'}],'targetLang':'th'})
      self.assertEqual(r.status_code,400);self.assertEqual(r.json()['detail']['code'],'missing_api_key')
